@@ -1,3 +1,4 @@
+import { chooseSelect } from "../helpers/select";
 import { test, expect, _electron as electron } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -42,7 +43,10 @@ test("local publication preserves the source on failure and retries without nati
     // the selected scope must also reach the app's actual theme consumer.
     await page.keyboard.press(process.platform === "darwin" ? "Meta+," : "Control+,");
     await page.getByRole("tab", { name: "Workspace", exact: true }).click();
-    await page.getByRole("group", { name: "Theme", exact: true }).getByRole("combobox").selectOption("light");
+    await chooseSelect(
+      page.getByRole("group", { name: "Theme", exact: true }).getByRole("combobox"),
+      "light",
+    );
     await expect(page.locator("html")).toHaveClass(/theme-light/);
     expect(JSON.parse(readFileSync(settingsFile, "utf8"))).toMatchObject({ marker: "PRESERVE_OTHER_SETTINGS", theme: expect.any(String) });
     expect(statSync(settingsFile).mode & 0o7777).toBe(0o640);
@@ -60,7 +64,10 @@ test("local publication preserves the source on failure and retries without nati
         return original(...args);
       };
     }, settingsFile);
-    await page.getByRole("group", { name: "Theme", exact: true }).getByRole("combobox").selectOption("dark");
+    await chooseSelect(
+      page.getByRole("group", { name: "Theme", exact: true }).getByRole("combobox"),
+      "dark",
+    );
     await expect.poll(() => application!.evaluate(() => (globalThis as typeof globalThis & { heldSettings: { hits: number } }).heldSettings.hits)).toBe(1);
     await page.getByRole("group", { name: "Font size", exact: true }).getByRole("spinbutton").fill("18");
     await application.evaluate(({ dialog, app }) => {
@@ -75,7 +82,10 @@ test("local publication preserves the source on failure and retries without nati
     await expect.poll(() => JSON.parse(readFileSync(settingsFile, "utf8"))).toMatchObject({ marker: "PRESERVE_OTHER_SETTINGS", theme: "dark", editorFontSize: 18 });
     await expect(page.locator("html")).toHaveClass(/theme-dark/);
     await page.getByRole("tab", { name: "User", exact: true }).click();
-    await page.getByRole("group", { name: "Theme", exact: true }).getByRole("combobox").selectOption("light");
+    await chooseSelect(
+      page.getByRole("group", { name: "Theme", exact: true }).getByRole("combobox"),
+      "light",
+    );
     await expect(page.locator("html")).toHaveClass(/theme-dark/);
     expect(JSON.parse(readFileSync(settingsFile, "utf8")).theme).toBe("dark");
     await page.getByRole("tab", { name: "Workspace", exact: true }).click();
@@ -165,7 +175,10 @@ test("local publication preserves the source on failure and retries without nati
     expect(readFileSync(path.join(offline, "index")).equals(index)).toBe(true);
     await page.keyboard.press(process.platform === "darwin" ? "Meta+," : "Control+,");
     await page.getByRole("tab", { name: "Workspace", exact: true }).click();
-    await page.getByRole("group", { name: "Theme", exact: true }).getByRole("combobox").selectOption("dark");
+    await chooseSelect(
+      page.getByRole("group", { name: "Theme", exact: true }).getByRole("combobox"),
+      "dark",
+    );
     await expect(page.locator("html")).toHaveClass(/theme-dark/);
     expect(JSON.parse(readFileSync(settingsFile, "utf8"))).toMatchObject({ marker: "PRESERVE_OTHER_SETTINGS", theme: "dark" });
     await expect(page.getByRole("button", { name: "Retry reopening repository", exact: true })).toBeVisible();

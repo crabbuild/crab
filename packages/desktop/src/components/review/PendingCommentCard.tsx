@@ -1,5 +1,11 @@
-import { useCallback, useRef, useState, useEffect, type KeyboardEvent } from "react";
-import { Pencil, Trash2, Save, X } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
+import { Pencil, Save, Trash2, X } from "lucide-react";
+import {
+  useCallback,
+  useEffect,
+  useRef, useState, type KeyboardEvent,
+} from "react";
 import type { PendingComment } from "../../review/types";
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -72,17 +78,17 @@ export function PendingCommentCard({ comment, onUpdate, onRemove }: PendingComme
 
   return (
     <div
-      className="my-1 rounded border border-gx-border border-l-amber-400 border-l-2 bg-gx-surface shadow-sm"
+      className="my-1 rounded border border-border border-l-amber-400 border-l-2 bg-card shadow-sm"
       aria-label={`Pending comment on ${comment.path} ${lineLabel}`}
     >
       {/* Header: badges + actions */}
-      <div className="flex items-center justify-between px-3 py-1.5 border-b border-gx-border/50">
+      <div className="flex items-center justify-between px-3 py-1.5 border-b border-border/50">
         <div className="flex items-center gap-1.5">
-          <span className="inline-flex items-center rounded bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-medium text-amber-400">
+          <span className="inline-flex items-center rounded bg-warning/15 px-1.5 py-0.5 text-[9px] font-medium text-warning">
             Pending
           </span>
           {comment.outdated && (
-            <span className="inline-flex items-center rounded bg-orange-500/15 px-1.5 py-0.5 text-[9px] font-medium text-orange-400">
+            <span className="inline-flex items-center rounded bg-warning/15 px-1.5 py-0.5 text-[9px] font-medium text-warning">
               Outdated
             </span>
           )}
@@ -90,24 +96,28 @@ export function PendingCommentCard({ comment, onUpdate, onRemove }: PendingComme
 
         {!editing && (
           <div className="flex items-center gap-1">
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
-              className="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] text-gx-muted hover:bg-gx-accent/10 hover:text-gx-accent"
+              className="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-primary/10 hover:text-primary"
               onClick={handleEdit}
               aria-label="Edit pending comment"
             >
               <Pencil size={10} />
               Edit
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
-              className="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] text-gx-muted hover:bg-red-500/10 hover:text-red-400"
+              className="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
               onClick={handleDelete}
               aria-label="Delete pending comment"
             >
               <Trash2 size={10} />
               Delete
-            </button>
+            </Button>
           </div>
         )}
       </div>
@@ -116,9 +126,9 @@ export function PendingCommentCard({ comment, onUpdate, onRemove }: PendingComme
       <div className="px-3 py-2">
         {editing ? (
           <>
-            <textarea
+            <Textarea
               ref={textareaRef}
-              className="w-full resize-y rounded border border-gx-border bg-gx-bg-sub p-2 text-[11px] leading-relaxed text-gx-text placeholder:text-gx-muted focus:border-gx-accent focus-visible:outline-none"
+              className="w-full resize-y rounded border border-border bg-background p-2 text-[11px] leading-relaxed text-foreground placeholder:text-muted-foreground focus:border-primary focus-visible:outline-none"
               rows={3}
               value={editBody}
               onChange={(e) => setEditBody(e.target.value)}
@@ -126,29 +136,33 @@ export function PendingCommentCard({ comment, onUpdate, onRemove }: PendingComme
               aria-label="Edit comment body"
             />
             <div className="mt-1.5 flex items-center justify-end gap-2">
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
-                className="inline-flex items-center gap-1 rounded px-2 py-1 text-[10px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+                className="inline-flex items-center gap-1 rounded px-2 py-1 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
                 onClick={handleCancel}
                 aria-label="Cancel editing"
               >
                 <X size={10} />
                 Cancel
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
-                className="inline-flex items-center gap-1 rounded bg-gx-accent/10 px-2 py-1 text-[10px] text-gx-accent hover:bg-gx-accent/20 disabled:cursor-not-allowed disabled:opacity-50"
+                className="inline-flex items-center gap-1 rounded bg-primary/10 px-2 py-1 text-[10px] text-primary hover:bg-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
                 disabled={!editBody.trim()}
                 onClick={handleSave}
                 aria-label="Save comment changes"
               >
                 <Save size={10} />
                 Save
-              </button>
+              </Button>
             </div>
           </>
         ) : (
-          <p className="whitespace-pre-wrap text-[11px] leading-relaxed text-gx-text">
+          <p className="whitespace-pre-wrap text-[11px] leading-relaxed text-foreground">
             {comment.body}
           </p>
         )}

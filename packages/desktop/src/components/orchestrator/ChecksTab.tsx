@@ -1,10 +1,10 @@
+import { Button } from "@/components/ui/button";
 /**
  * Checks Tab — Fifth workspace tab aggregating merge readiness signals.
  *
  * Sections: Git status, PR info, CI checks, comments, todos, merge button.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
 import clsx from "clsx";
 import {
   AlertTriangle,
@@ -22,6 +22,7 @@ import {
   Sparkles,
   XCircle,
 } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { OrchestratorTask } from "./TaskCard";
 import { TodoItem, TodoList } from "./TodoList";
 
@@ -177,7 +178,7 @@ export function ChecksTab({
             {checksData?.pr ? (
               <div className="space-y-2">
                 <div className="flex items-center gap-2">
-                  <span className="text-xs font-medium text-gx-text">
+                  <span className="text-xs font-medium text-foreground">
                     #{checksData.pr.number} {checksData.pr.title}
                   </span>
                   <a
@@ -186,7 +187,7 @@ export function ChecksTab({
                       e.preventDefault();
                       (window as any).crab?.openUrl(checksData.pr!.url);
                     }}
-                    className="text-gx-accent hover:underline"
+                    className="text-primary hover:underline"
                     aria-label="Open PR in browser"
                   >
                     <ExternalLink size={11} />
@@ -199,9 +200,9 @@ export function ChecksTab({
                         key={r.login}
                         className={clsx(
                           "rounded-full px-2 py-0.5 text-[10px]",
-                          r.state === "APPROVED" && "bg-gx-success/15 text-gx-success",
-                          r.state === "CHANGES_REQUESTED" && "bg-gx-error/15 text-gx-error",
-                          r.state !== "APPROVED" && r.state !== "CHANGES_REQUESTED" && "bg-gx-surface text-gx-muted",
+                          r.state === "APPROVED" && "bg-success/15 text-success",
+                          r.state === "CHANGES_REQUESTED" && "bg-destructive/15 text-destructive",
+                          r.state !== "APPROVED" && r.state !== "CHANGES_REQUESTED" && "bg-card text-muted-foreground",
                         )}
                       >
                         {r.login}: {r.state.toLowerCase().replace("_", " ")}
@@ -224,27 +225,33 @@ export function ChecksTab({
         <Section title="CI Checks" icon={<CheckCircle2 size={13} />}>
           {checksData ? (
             checksData.checks.length === 0 ? (
-              <p className="text-xs text-gx-muted">No CI checks configured</p>
+              <p className="text-xs text-muted-foreground">
+                No CI checks configured
+              </p>
             ) : (
               <div className="space-y-1.5">
                 {checksData.checks.map((check) => (
                   <div key={check.name} className="flex items-center gap-2">
                     <CheckStatusIcon status={check.status} />
-                    <span className="flex-1 truncate text-xs text-gx-text">{check.name}</span>
+                    <span className="flex-1 truncate text-xs text-foreground">
+                      {check.name}
+                    </span>
                     {check.durationMs != null && (
-                      <span className="text-[10px] text-gx-muted">
+                      <span className="text-[10px] text-muted-foreground">
                         {formatDuration(check.durationMs)}
                       </span>
                     )}
                     {check.status === "fail" && onFixWithAgent && (
-                      <button
+                      <Button
+                        variant="ghost"
+                        size="compact"
                         type="button"
                         onClick={() => onFixWithAgent(check.name, check.output ?? "")}
-                        className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-gx-accent hover:bg-gx-accent/10 transition"
+                        className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-primary hover:bg-primary/10 transition"
                         aria-label={`Fix ${check.name} with agent`}
                       >
                         <Sparkles size={10} /> Fix
-                      </button>
+                      </Button>
                     )}
                     {check.url && (
                       <a
@@ -253,7 +260,7 @@ export function ChecksTab({
                           e.preventDefault();
                           (window as any).crab?.openUrl(check.url!);
                         }}
-                        className="text-gx-muted hover:text-gx-accent"
+                        className="text-muted-foreground hover:text-primary"
                         aria-label={`View ${check.name} details`}
                       >
                         <ExternalLink size={10} />
@@ -271,23 +278,30 @@ export function ChecksTab({
         {/* Comments Section */}
         <Section title="Comments" icon={<MessageSquare size={13} />}>
           {unresolvedComments.length === 0 ? (
-            <p className="text-xs text-gx-muted">No unresolved comments</p>
+            <p className="text-xs text-muted-foreground">
+              No unresolved comments
+            </p>
           ) : (
             <div className="space-y-1.5">
-              <p className="text-xs text-gx-warn">
-                {unresolvedComments.length} unresolved comment{unresolvedComments.length !== 1 ? "s" : ""}
+              <p className="text-xs text-warning">
+                {unresolvedComments.length} unresolved comment
+                {unresolvedComments.length !== 1 ? "s" : ""}
               </p>
               {unresolvedComments.slice(0, 5).map((comment) => (
-                <div key={comment.id} className="rounded border border-gx-border/50 bg-gx-bg px-2 py-1.5">
-                  <div className="flex items-center gap-1.5 text-[10px] text-gx-muted">
-                    {comment.path && <span className="font-mono">{comment.path}</span>}
+                <div key={comment.id} className="rounded border border-border/50 bg-background px-2 py-1.5">
+                  <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                    {comment.path && (
+                      <span className="font-mono">{comment.path}</span>
+                    )}
                     {comment.line && <span>:{comment.line}</span>}
                   </div>
-                  <p className="mt-0.5 text-xs text-gx-text line-clamp-2">{comment.body}</p>
+                  <p className="mt-0.5 text-xs text-foreground line-clamp-2">
+                    {comment.body}
+                  </p>
                 </div>
               ))}
               {unresolvedComments.length > 5 && (
-                <p className="text-[10px] text-gx-muted">
+                <p className="text-[10px] text-muted-foreground">
                   +{unresolvedComments.length - 5} more
                 </p>
               )}
@@ -298,12 +312,13 @@ export function ChecksTab({
         {/* Todos Section */}
         <Section title="Todos" icon={<Check size={13} />}>
           {todos.length === 0 ? (
-            <p className="text-xs text-gx-muted">No todos</p>
+            <p className="text-xs text-muted-foreground">No todos</p>
           ) : (
             <div>
               {incompleteTodos.length > 0 && (
-                <p className="mb-2 text-xs text-gx-warn">
-                  {incompleteTodos.length} incomplete todo{incompleteTodos.length !== 1 ? "s" : ""}
+                <p className="mb-2 text-xs text-warning">
+                  {incompleteTodos.length} incomplete todo
+                  {incompleteTodos.length !== 1 ? "s" : ""}
                 </p>
               )}
               {onToggleTodo && onAddTodo && onRemoveTodo && (
@@ -322,17 +337,19 @@ export function ChecksTab({
       </div>
 
       {/* Merge button + refresh */}
-      <div className="shrink-0 border-t border-gx-border bg-gx-surface px-4 py-3">
+      <div className="shrink-0 border-t border-border bg-card px-4 py-3">
         <div className="flex items-center gap-2">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={handleMerge}
             disabled={!canMerge || merging}
             className={clsx(
               "flex flex-1 items-center justify-center gap-2 rounded-md px-4 py-2 text-xs font-medium transition",
               canMerge
-                ? "bg-green-600 text-white hover:bg-green-700"
-                : "bg-gx-surface border border-gx-border text-gx-muted cursor-not-allowed",
+                ? "bg-success text-success-foreground hover:bg-success"
+                : "bg-card border border-border text-muted-foreground cursor-not-allowed",
             )}
             aria-label="Merge pull request"
           >
@@ -342,24 +359,34 @@ export function ChecksTab({
               <GitMerge size={13} />
             )}
             {canMerge ? "Merge PR" : "Merge blocked"}
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={fetchChecks}
             disabled={loading}
-            className="flex items-center gap-1 rounded-md border border-gx-border px-3 py-2 text-xs text-gx-muted hover:text-gx-text transition"
+            className="flex items-center gap-1 rounded-md border border-border px-3 py-2 text-xs text-muted-foreground hover:text-foreground transition"
             aria-label="Refresh checks"
           >
             <RefreshCw size={12} className={loading ? "animate-spin" : ""} />
-          </button>
+          </Button>
         </div>
         {!canMerge && (
           <div className="mt-2 space-y-1">
             {hasConflicts && <BlockerLine text="Conflicts must be resolved" />}
-            {failingChecks.length > 0 && <BlockerLine text={`${failingChecks.length} CI check(s) failing`} />}
-            {pendingChecks.length > 0 && <BlockerLine text={`${pendingChecks.length} CI check(s) pending`} />}
-            {unresolvedComments.length > 0 && <BlockerLine text={`${unresolvedComments.length} unresolved comment(s)`} />}
-            {incompleteTodos.length > 0 && <BlockerLine text={`${incompleteTodos.length} incomplete todo(s)`} />}
+            {failingChecks.length > 0 && (
+              <BlockerLine text={`${failingChecks.length} CI check(s) failing`} />
+            )}
+            {pendingChecks.length > 0 && (
+              <BlockerLine text={`${pendingChecks.length} CI check(s) pending`} />
+            )}
+            {unresolvedComments.length > 0 && (
+              <BlockerLine text={`${unresolvedComments.length} unresolved comment(s)`} />
+            )}
+            {incompleteTodos.length > 0 && (
+              <BlockerLine text={`${incompleteTodos.length} incomplete todo(s)`} />
+            )}
             {!prMetadata && <BlockerLine text="No PR created yet" />}
           </div>
         )}
@@ -372,8 +399,8 @@ export function ChecksTab({
 
 function Section({ title, icon, children }: { title: string; icon: React.ReactNode; children: React.ReactNode }) {
   return (
-    <div className="rounded-lg border border-gx-border bg-gx-surface p-3">
-      <div className="mb-2 flex items-center gap-1.5 text-xs font-medium text-gx-text">
+    <div className="rounded-lg border border-border bg-card p-3">
+      <div className="mb-2 flex items-center gap-1.5 text-xs font-medium text-foreground">
         {icon}
         {title}
       </div>
@@ -386,13 +413,15 @@ function StatusRow({ ok, neutral, label }: { ok: boolean; neutral?: boolean; lab
   return (
     <div className="flex items-center gap-2 text-xs">
       {neutral ? (
-        <Circle size={11} className="text-gx-muted" />
+        <Circle size={11} className="text-muted-foreground" />
       ) : ok ? (
-        <CheckCircle2 size={11} className="text-gx-success" />
+        <CheckCircle2 size={11} className="text-success" />
       ) : (
-        <XCircle size={11} className="text-gx-error" />
+        <XCircle size={11} className="text-destructive" />
       )}
-      <span className={ok || neutral ? "text-gx-text" : "text-gx-error"}>{label}</span>
+      <span className={ok || neutral ? "text-foreground" : "text-destructive"}>
+        {label}
+      </span>
     </div>
   );
 }
@@ -400,19 +429,21 @@ function StatusRow({ ok, neutral, label }: { ok: boolean; neutral?: boolean; lab
 function CheckStatusIcon({ status }: { status: CICheck["status"] }) {
   switch (status) {
     case "pass":
-      return <CheckCircle2 size={12} className="text-gx-success shrink-0" />;
+      return <CheckCircle2 size={12} className="text-success shrink-0" />;
     case "fail":
-      return <XCircle size={12} className="text-gx-error shrink-0" />;
+      return <XCircle size={12} className="text-destructive shrink-0" />;
     case "pending":
-      return <Loader2 size={12} className="text-gx-warn animate-spin shrink-0" />;
+      return (
+        <Loader2 size={12} className="text-warning animate-spin shrink-0" />
+      );
     case "queued":
-      return <Clock size={12} className="text-gx-muted shrink-0" />;
+      return <Clock size={12} className="text-muted-foreground shrink-0" />;
   }
 }
 
 function BlockerLine({ text }: { text: string }) {
   return (
-    <div className="flex items-center gap-1.5 text-[10px] text-gx-warn">
+    <div className="flex items-center gap-1.5 text-[10px] text-warning">
       <AlertTriangle size={10} />
       {text}
     </div>
@@ -421,7 +452,7 @@ function BlockerLine({ text }: { text: string }) {
 
 function LoadingPlaceholder() {
   return (
-    <div className="flex items-center gap-2 text-xs text-gx-muted">
+    <div className="flex items-center gap-2 text-xs text-muted-foreground">
       <Loader2 size={11} className="animate-spin" />
       Loading…
     </div>

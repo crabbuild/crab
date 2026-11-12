@@ -1,4 +1,4 @@
-import { useEffect,useMemo,useState,useCallback } from "react";
+import { Button } from "@/components/ui/button";
 import {
 Activity,
 BarChart3,
@@ -10,13 +10,14 @@ Layers,
 Loader2,
 Users,
 } from "lucide-react";
-import { OpenRepo } from "../state";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { DashboardRemoteSection } from "../components/ssh/DashboardRemoteSection";
+import { useCachedMetric } from "../hooks/useCachedMetric";
+import { useHydrationStatus } from "../hooks/useHydrationStatus";
+import { useIsMobile } from "../hooks/useIsMobile";
 import { BranchHealthResult,CodeFrequencyResult,CommitFrequencyBucket,CommitFrequencyResult,CommitRow,DedupSavingsResult,HydrationSummary,PulseResult,RefEntry,ReleaseTimelineResult,RepoSummary,rpc } from "../ipc";
 import { formatBytes } from "../lib/format";
-import { useHydrationStatus } from "../hooks/useHydrationStatus";
-import { useCachedMetric } from "../hooks/useCachedMetric";
-import { useIsMobile } from "../hooks/useIsMobile";
-import { DashboardRemoteSection } from "../components/ssh/DashboardRemoteSection";
+import { OpenRepo } from "../state";
 
 interface Props {
   repo: OpenRepo;
@@ -45,7 +46,10 @@ export function DashboardView({ repo, onSelectCommit, onSelectBranch }: Props) {
   // An old summary must not enable metric reads against a replacement owner
   // before its own commit count and repository admission are known.
   const [summarySource, setSummarySource] = useState<{ session: OpenRepo["native_session_id"]; value: RepoSummary } | null>(null);
-  const summary = summarySource?.session === repo.native_session_id ? summarySource?.value ?? null : null;
+  const summary =
+    summarySource?.session === repo.native_session_id
+      ? (summarySource?.value ?? null)
+      : null;
   const [commits, setCommits] = useState<CommitRow[] | null>(null);
   const [activity, setActivity] = useState<ActivityDay[] | null>(null);
   const [contributors, setContributors] = useState<Contributor[] | null>(null);
@@ -198,120 +202,126 @@ export function DashboardView({ repo, onSelectCommit, onSelectBranch }: Props) {
   }, [repo.repo_id, repo.deferred, repo.native_session_id, commitFreqGranularity]);
 
   return (
-    <div className="h-full overflow-auto bg-gx-bg-sub p-6">
+    <div className="h-full overflow-auto bg-background p-6">
       <div className="mx-auto max-w-6xl space-y-6">
         {/* Header */}
         <div>
-          <div className="text-[10px] uppercase tracking-wider text-gx-muted">Repository</div>
+          <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+            Repository
+          </div>
           <h1 className="mt-1 text-xl font-semibold">{repo.label}</h1>
-          <div className="mt-0.5 truncate font-mono text-[11px] text-gx-muted">{repo.url || repo.path}</div>
+          <div className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">
+            {repo.url || repo.path}
+          </div>
         </div>
 
         {/* Deferred repo: show a gentle "connecting" state instead of
             attempting RPC calls that would fail. */}
         {repo.deferred ? (
           <div className="flex flex-col items-center justify-center gap-3 py-16 text-center">
-            <Loader2 size={20} className="animate-spin text-gx-muted" />
-            <div className="text-sm text-gx-muted">
+            <Loader2 size={20} className="animate-spin text-muted-foreground" />
+            <div className="text-sm text-muted-foreground">
               Opening repository…
             </div>
-            <div className="text-[11px] text-gx-muted/70">
+            <div className="text-[11px] text-muted-foreground/70">
               Click this repo in the sidebar to connect.
             </div>
           </div>
         ) : (
           <>
-        {err && (
-          <div className="flex items-center gap-2 rounded border border-gx-warn/30 bg-gx-warn/5 px-3 py-2 text-[11px] text-gx-muted">
-            <span className="min-w-0 flex-1 truncate">Unable to load some repository data</span>
-            <button
-              type="button"
-              onClick={() => setErr(null)}
-              className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text transition"
-              aria-label="Dismiss"
-            >
-              ✕
-            </button>
-          </div>
-        )}
+            {err && (
+              <div className="flex items-center gap-2 rounded border border-warning/30 bg-warning/5 px-3 py-2 text-[11px] text-muted-foreground">
+                <span className="min-w-0 flex-1 truncate">
+                  Unable to load some repository data
+                </span>
+                <Button
+                  variant="ghost"
+                  size="compact"
+                  type="button"
+                  onClick={() => setErr(null)}
+                  className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground transition"
+                  aria-label="Dismiss"
+                >
+                  ✕
+                </Button>
+              </div>
+            )}
 
-        {/* Key stats — no section header (they ARE the header) */}
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-          <StatCard icon={<Layers size={14} />} label="Files" value={summary ? summary.total_files.toLocaleString() : "…"} />
-          <StatCard icon={<HardDrive size={14} />} label="Logical size" value={summary ? formatBytes(Number(summary.total_bytes)) : "…"} />
-          <StatCard
+            {/* Key stats — no section header (they ARE the header) */}
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+              <StatCard icon={<Layers size={14} />} label="Files" value={summary ? summary.total_files.toLocaleString() : "…"} />
+              <StatCard icon={<HardDrive size={14} />} label="Logical size" value={summary ? formatBytes(Number(summary.total_bytes)) : "…"} />
+              <StatCard
             icon={<Database size={14} />}
             label="Pointer files"
             value={summary ? (summary.total_pointers + summary.total_lfs).toLocaleString() : "…"}
             hint={summary ? `${summary.total_pointers} crab · ${summary.total_lfs} lfs` : undefined}
           />
-          <StatCard
+              <StatCard
             icon={<BarChart3 size={14} />}
             label="Hydration"
             value={hydration.summary ? `${pctHydrated(hydration.summary)}%` : "–"}
             hint={hydration.summary ? `${hydration.summary.hydrated} / ${hydration.summary.total_tracked}` : undefined}
           />
-          <StatCard
+              <StatCard
             icon={<Activity size={14} />}
             label="This week"
             value={pulse ? `${pulse.commits} commits` : "…"}
             hint={pulse ? `${pulse.authors} authors · ${pulse.files_changed} files · +${pulse.insertions} -${pulse.deletions}` : undefined}
             muted={pulse != null && pulse.commits === 0 && pulse.authors === 0}
           />
-        </div>
+            </div>
 
-        {/* Activity section */}
-        <DashboardSection label="Activity" collapsible storageKey="crab.dashboard.section.activityExpanded">
-          <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[1fr_300px]">
-            <ActivityHeatmap days={activity} />
-            <ContributorsCard contributors={contributors} />
-          </div>
-          <div className="mt-4">
-            <CommitFrequencyChart
+            {/* Activity section */}
+            <DashboardSection label="Activity" collapsible storageKey="crab.dashboard.section.activityExpanded">
+              <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[1fr_300px]">
+                <ActivityHeatmap days={activity} />
+                <ContributorsCard contributors={contributors} />
+              </div>
+              <div className="mt-4">
+                <CommitFrequencyChart
               data={commitFreq}
               granularity={commitFreqGranularity}
               onGranularityChange={setCommitFreqGranularity}
               maxPoints={isMobile ? 60 : undefined}
             />
-          </div>
-          <div className="mt-4">
-            <CodeFrequencyChart data={cachedCodeFreq.data} maxPoints={isMobile ? 60 : undefined} />
-          </div>
-        </DashboardSection>
-
-        {/* Code section */}
-        <DashboardSection label="Code" collapsible storageKey="crab.dashboard.section.codeExpanded">
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-            <BranchesCard refs={refs} branchHealth={branchHealth} onSelectBranch={onSelectBranch} />
-            <ExtensionsCard summary={summary} />
-          </div>
-          <ReleaseTimeline data={releaseTimeline} onSelectTag={onSelectBranch} />
-        </DashboardSection>
-
-        {/* Storage section */}
-        {(hydration.summary || dedupSavings || summary) && (
-          <DashboardSection label="Storage" collapsible storageKey="crab.dashboard.section.storageExpanded">
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-              <DedupCard data={dedupSavings} />
-              <PointerBreakdownCard summary={summary} />
-            </div>
-            {hydration.summary && (
-              <div className="mt-4">
-                <HydrationCard summary={hydration.summary} />
               </div>
+              <div className="mt-4">
+                <CodeFrequencyChart data={cachedCodeFreq.data} maxPoints={isMobile ? 60 : undefined} />
+              </div>
+            </DashboardSection>
+
+            {/* Code section */}
+            <DashboardSection label="Code" collapsible storageKey="crab.dashboard.section.codeExpanded">
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <BranchesCard refs={refs} branchHealth={branchHealth} onSelectBranch={onSelectBranch} />
+                <ExtensionsCard summary={summary} />
+              </div>
+              <ReleaseTimeline data={releaseTimeline} onSelectTag={onSelectBranch} />
+            </DashboardSection>
+
+            {/* Storage section */}
+            {(hydration.summary || dedupSavings || summary) && (
+              <DashboardSection label="Storage" collapsible storageKey="crab.dashboard.section.storageExpanded">
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                  <DedupCard data={dedupSavings} />
+                  <PointerBreakdownCard summary={summary} />
+                </div>
+                {hydration.summary && (
+                  <div className="mt-4">
+                    <HydrationCard summary={hydration.summary} />
+                  </div>
+                )}
+              </DashboardSection>
             )}
-          </DashboardSection>
-        )}
 
-        {/* Remote Servers section — only visible when SSH connections exist */}
-        <DashboardRemoteSection />
+            {/* History section */}
+            <DashboardRemoteSection />
 
-        {/* History section */}
-        <DashboardSection label="History" collapsible storageKey="crab.dashboard.section.historyExpanded">
-          <RecentCommitsCard commits={commits} onSelect={onSelectCommit} />
-        </DashboardSection>
-
-
+            {/* History section */}
+            <DashboardSection label="History" collapsible storageKey="crab.dashboard.section.historyExpanded">
+              <RecentCommitsCard commits={commits} onSelect={onSelectCommit} />
+            </DashboardSection>
           </>
         )}
       </div>
@@ -369,10 +379,10 @@ function DashboardSection({
     return (
       <div className="pt-4 pb-2">
         <div className="flex items-center gap-2 mb-3">
-          <span className="text-[10px] uppercase tracking-wider text-gx-muted">
+          <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
             {label}
           </span>
-          <div className="h-px flex-1 bg-gx-border/50" />
+          <div className="h-px flex-1 bg-border/50" />
         </div>
         {children}
       </div>
@@ -381,21 +391,23 @@ function DashboardSection({
 
   return (
     <div className="pt-4 pb-2">
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={toggle}
         className="flex w-full items-center gap-2 mb-3 cursor-pointer group"
         aria-expanded={expanded}
         aria-controls={`section-${label.toLowerCase()}`}
       >
-        <span className="text-[10px] text-gx-muted transition-transform duration-200" style={{ display: "inline-block", transform: expanded ? "rotate(90deg)" : "rotate(0deg)" }}>
+        <span className="text-[10px] text-muted-foreground transition-transform duration-200" style={{ display: "inline-block", transform: expanded ? "rotate(90deg)" : "rotate(0deg)" }}>
           ▶
         </span>
-        <span className="text-[10px] uppercase tracking-wider text-gx-muted group-hover:text-gx-text transition-colors">
+        <span className="text-[10px] uppercase tracking-wider text-muted-foreground group-hover:text-foreground transition-colors">
           {label}
         </span>
-        <div className="h-px flex-1 bg-gx-border/50" />
-      </button>
+        <div className="h-px flex-1 bg-border/50" />
+      </Button>
       <div
         id={`section-${label.toLowerCase()}`}
         className="overflow-hidden transition-[max-height,opacity] duration-200 ease-in-out"
@@ -410,13 +422,17 @@ function DashboardSection({
   );
 }
 
-
 function StatCard({ icon, label, value, hint, muted }: { icon: React.ReactNode; label: string; value: string; hint?: string; muted?: boolean }) {
   return (
-    <div className={`rounded-lg border border-gx-border bg-gx-surface p-3${muted ? " opacity-50" : ""}`}>
-      <div className="flex items-center gap-1.5 text-[11px] text-gx-muted">{icon}{label}</div>
-      <div className="mt-1.5 font-mono text-xl text-gx-text">{value}</div>
-      {hint && <div className="mt-0.5 text-[10px] text-gx-muted">{hint}</div>}
+    <div className={`rounded-lg border border-border bg-card p-3${muted ? " opacity-50" : ""}`}>
+      <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+        {icon}
+        {label}
+      </div>
+      <div className="mt-1.5 font-mono text-xl text-foreground">{value}</div>
+      {hint && (
+        <div className="mt-0.5 text-[10px] text-muted-foreground">{hint}</div>
+      )}
     </div>
   );
 }
@@ -431,7 +447,7 @@ function BarChartSkeleton() {
       {heights.map((h, i) => (
         <div
           key={i}
-          className="flex-1 min-w-[3px] animate-pulse bg-gx-border/30 rounded"
+          className="flex-1 min-w-[3px] animate-pulse bg-border/30 rounded"
           style={{ height: `${h}%` }}
         />
       ))}
@@ -445,12 +461,12 @@ function AreaChartSkeleton() {
     <svg viewBox="0 0 800 128" className="w-full h-32 animate-pulse">
       <path
         d="M 0 90 C 80 70, 160 50, 240 60 C 320 70, 400 40, 480 55 C 560 70, 640 45, 720 50 L 800 55 L 800 128 L 0 128 Z"
-        className="fill-gx-border/30"
+        className="fill-border/30"
       />
       <path
         d="M 0 90 C 80 70, 160 50, 240 60 C 320 70, 400 40, 480 55 C 560 70, 640 45, 720 50 L 800 55"
         fill="none"
-        className="stroke-gx-border/50"
+        className="stroke-border/50"
         strokeWidth="2"
       />
     </svg>
@@ -462,11 +478,11 @@ function TimelineSkeleton() {
   const dots = [10, 25, 45, 60, 80, 95];
   return (
     <div className="relative h-8 flex items-center animate-pulse">
-      <div className="absolute inset-x-4 top-1/2 h-px bg-gx-border/30 rounded" />
+      <div className="absolute inset-x-4 top-1/2 h-px bg-border/30 rounded" />
       {dots.map((pos, i) => (
         <div
           key={i}
-          className="absolute w-3 h-3 rounded-full bg-gx-border/30"
+          className="absolute w-3 h-3 rounded-full bg-border/30"
           style={{ left: `${pos}%`, transform: "translateX(-50%)" }}
         />
       ))}
@@ -477,9 +493,9 @@ function TimelineSkeleton() {
 /** Pulsing rectangle — used as loading placeholder for stat tiles. */
 function StatTileSkeleton() {
   return (
-    <div className="rounded-lg border border-gx-border bg-gx-surface p-3">
-      <div className="h-3 w-16 animate-pulse bg-gx-border/30 rounded mb-2" />
-      <div className="h-6 w-20 animate-pulse bg-gx-border/30 rounded" />
+    <div className="rounded-lg border border-border bg-card p-3">
+      <div className="h-3 w-16 animate-pulse bg-border/30 rounded mb-2" />
+      <div className="h-6 w-20 animate-pulse bg-border/30 rounded" />
     </div>
   );
 }
@@ -554,12 +570,12 @@ function ActivityHeatmap({ days }: { days: ActivityDay[] | null }) {
   const [tooltip, setTooltip] = useState<{ x: number; y: number; text: string } | null>(null);
 
   return (
-    <div className="rounded-lg border border-gx-border bg-gx-surface p-3 overflow-hidden">
-      <div className="mb-2 text-[11px] font-medium text-gx-muted">
+    <div className="rounded-lg border border-border bg-card p-3 overflow-hidden">
+      <div className="mb-2 text-[11px] font-medium text-muted-foreground">
         {totalCommits.toLocaleString()} contributions in the last year
       </div>
       {!days ? (
-        <div className="flex items-center gap-2 text-xs text-gx-muted">
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <Loader2 size={12} className="animate-spin" /> Loading…
         </div>
       ) : (
@@ -570,7 +586,7 @@ function ActivityHeatmap({ days }: { days: ActivityDay[] | null }) {
               {DAY_LABELS.map((label, i) => (
                 <div
                   key={i}
-                  className="flex items-center text-[9px] text-gx-muted"
+                  className="flex items-center text-[9px] text-muted-foreground"
                   style={{ height: CELL }}
                 >
                   {label}
@@ -586,7 +602,7 @@ function ActivityHeatmap({ days }: { days: ActivityDay[] | null }) {
                   return (
                     <div
                       key={wi}
-                      className="text-[9px] text-gx-muted shrink-0"
+                      className="text-[9px] text-muted-foreground shrink-0"
                       style={{ width: CELL }}
                     >
                       {label ? label.label : ""}
@@ -609,11 +625,11 @@ function ActivityHeatmap({ days }: { days: ActivityDay[] | null }) {
                       }
                       const intensity = cell.count / maxCount;
                       let bg: string;
-                      if (cell.count === 0) bg = "bg-gx-border/30";
-                      else if (intensity < 0.25) bg = "bg-gx-success/30";
-                      else if (intensity < 0.5) bg = "bg-gx-success/55";
-                      else if (intensity < 0.75) bg = "bg-gx-success/80";
-                      else bg = "bg-gx-success";
+                      if (cell.count === 0) bg = "bg-border/30";
+                      else if (intensity < 0.25) bg = "bg-success/30";
+                      else if (intensity < 0.5) bg = "bg-success/55";
+                      else if (intensity < 0.75) bg = "bg-success/80";
+                      else bg = "bg-success";
                       return (
                         <div
                           key={di}
@@ -633,19 +649,19 @@ function ActivityHeatmap({ days }: { days: ActivityDay[] | null }) {
             </div>
           </div>
           {/* Legend */}
-          <div className="mt-2 flex items-center gap-1 text-[9px] text-gx-muted">
+          <div className="mt-2 flex items-center gap-1 text-[9px] text-muted-foreground">
             Less
-            <div className="h-[9px] w-[9px] rounded-[2px] bg-gx-border/30" />
-            <div className="h-[9px] w-[9px] rounded-[2px] bg-gx-success/30" />
-            <div className="h-[9px] w-[9px] rounded-[2px] bg-gx-success/55" />
-            <div className="h-[9px] w-[9px] rounded-[2px] bg-gx-success/80" />
-            <div className="h-[9px] w-[9px] rounded-[2px] bg-gx-success" />
+            <div className="h-[9px] w-[9px] rounded-[2px] bg-border/30" />
+            <div className="h-[9px] w-[9px] rounded-[2px] bg-success/30" />
+            <div className="h-[9px] w-[9px] rounded-[2px] bg-success/55" />
+            <div className="h-[9px] w-[9px] rounded-[2px] bg-success/80" />
+            <div className="h-[9px] w-[9px] rounded-[2px] bg-success" />
             More
           </div>
           {/* Custom tooltip */}
           {tooltip && (
             <div
-              className="pointer-events-none fixed z-50 -translate-x-1/2 -translate-y-full rounded border border-gx-border bg-gx-surface px-2 py-1 text-[10px] text-gx-text shadow-lg"
+              className="pointer-events-none fixed z-50 -translate-x-1/2 -translate-y-full rounded border border-border bg-card px-2 py-1 text-[10px] text-foreground shadow-lg"
               style={{ left: tooltip.x, top: tooltip.y }}
             >
               {tooltip.text}
@@ -659,32 +675,36 @@ function ActivityHeatmap({ days }: { days: ActivityDay[] | null }) {
 
 function ContributorsCard({ contributors }: { contributors: Contributor[] | null }) {
   return (
-    <div className="rounded-lg border border-gx-border bg-gx-surface p-4">
+    <div className="rounded-lg border border-border bg-card p-4">
       <div className="mb-2 flex items-center justify-between">
-        <div className="flex items-center gap-2 text-[11px] font-medium text-gx-muted">
+        <div className="flex items-center gap-2 text-[11px] font-medium text-muted-foreground">
           <Users size={12} /> Top 5 contributors
         </div>
         {contributors && (
-          <span className="text-[10px] text-gx-muted">{contributors.length} total</span>
+          <span className="text-[10px] text-muted-foreground">
+            {contributors.length} total
+          </span>
         )}
       </div>
       {!contributors ? (
-        <div className="flex items-center gap-2 text-xs text-gx-muted">
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <Loader2 size={12} className="animate-spin" /> Loading…
         </div>
       ) : contributors.length === 0 ? (
-        <div className="text-xs text-gx-muted">No contributor data.</div>
+        <div className="text-xs text-muted-foreground">
+          No contributor data.
+        </div>
       ) : (
         <ul className="space-y-1.5">
           {contributors.slice(0, 5).map((c, i) => (
             <li key={c.name} className="flex items-center gap-2 text-[12px]">
               <AuthorDot name={c.name} />
               <span className="min-w-0 flex-1 truncate">{c.name}</span>
-              <span className="shrink-0 font-mono text-[11px] text-gx-muted">
+              <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
                 {c.commits}
               </span>
               {i === 0 && (
-                <span className="shrink-0 rounded bg-gx-accent/20 px-1 py-[1px] text-[9px] text-gx-accent">
+                <span className="shrink-0 rounded bg-primary/20 px-1 py-[1px] text-[9px] text-primary">
                   top
                 </span>
               )}
@@ -814,26 +834,30 @@ function CommitFrequencyChart({
 
   return (
     <div
-      className="rounded-lg border border-gx-border bg-gx-surface p-4"
+      className="rounded-lg border border-border bg-card p-4"
       aria-label={`Commit frequency chart: ${totalCommits} commits over the displayed period`}
     >
       {/* Header with title and granularity toggle */}
       <div className="mb-3 flex items-center justify-between">
-        <div className="text-[11px] font-medium text-gx-muted">Commit frequency</div>
-        <div className="flex gap-0.5 rounded bg-gx-bg-sub p-0.5">
+        <div className="text-[11px] font-medium text-muted-foreground">
+          Commit frequency
+        </div>
+        <div className="flex gap-0.5 rounded bg-background p-0.5">
           {granularityOptions.map((g) => (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               key={g}
               type="button"
               onClick={() => onGranularityChange(g)}
               className={`rounded px-2 py-0.5 text-[10px] capitalize transition ${
                 granularity === g
-                  ? "bg-gx-surface text-gx-text shadow-sm"
-                  : "text-gx-muted hover:text-gx-text"
+                  ? "bg-card text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground"
               }`}
             >
               {g === "day" ? "Day" : g === "week" ? "Week" : "Month"}
-            </button>
+            </Button>
           ))}
         </div>
       </div>
@@ -842,7 +866,7 @@ function CommitFrequencyChart({
       {!data ? (
         <BarChartSkeleton />
       ) : buckets.length === 0 ? (
-        <div className="flex h-32 items-center justify-center text-xs text-gx-muted">
+        <div className="flex h-32 items-center justify-center text-xs text-muted-foreground">
           No commits found
         </div>
       ) : (
@@ -862,8 +886,8 @@ function CommitFrequencyChart({
                   tabIndex={0}
                   role="img"
                   aria-label={`${new Date(b.period_start).toLocaleDateString(undefined, { month: "short", day: "numeric" })}: ${b.count} commits`}
-                  className={`flex-1 min-w-[3px] rounded-t-sm transition-all focus:outline-none focus:ring-2 focus:ring-gx-accent focus:ring-offset-1 ${
-                    b.count > 0 ? "bg-gx-success/70" : "bg-gx-border/15"
+                  className={`flex-1 min-w-[3px] rounded-t-sm transition-all focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-1 ${
+                    b.count > 0 ? "bg-success/70" : "bg-border/15"
                   }`}
                   style={{ height: b.count > 0 ? `${(b.count / maxCount) * 100}%` : '2px' }}
                   onMouseEnter={(e) => handleBarHover(e, b)}
@@ -881,7 +905,7 @@ function CommitFrequencyChart({
             {monthLabels.map((m) => (
               <span
                 key={`${m.index}-${m.label}`}
-                className="absolute text-[9px] text-gx-muted"
+                className="absolute text-[9px] text-muted-foreground"
                 style={{ left: `${(m.index / buckets.length) * 100}%` }}
               >
                 {m.label}
@@ -891,7 +915,7 @@ function CommitFrequencyChart({
         </div>
       )}
 
-      {/* Visually-hidden data table for screen readers */}
+      {/* X-axis month labels */}
       {data && buckets.length > 0 && (
         <table className="sr-only">
           <caption>Commit frequency data</caption>
@@ -904,7 +928,10 @@ function CommitFrequencyChart({
           <tbody>
             {buckets.map((b) => (
               <tr key={b.period_start}>
-                <td>{new Date(b.period_start).toLocaleDateString()} – {new Date(b.period_end).toLocaleDateString()}</td>
+                <td>
+                  {new Date(b.period_start).toLocaleDateString()} –{' '}
+                  {new Date(b.period_end).toLocaleDateString()}
+                </td>
                 <td>{b.count}</td>
               </tr>
             ))}
@@ -918,7 +945,7 @@ function CommitFrequencyChart({
       </div>
       {tooltip && (
         <div
-          className="pointer-events-none fixed z-50 -translate-x-1/2 -translate-y-full rounded border border-gx-border bg-gx-surface px-2 py-1 text-[10px] text-gx-text shadow-lg"
+          className="pointer-events-none fixed z-50 -translate-x-1/2 -translate-y-full rounded border border-border bg-card px-2 py-1 text-[10px] text-foreground shadow-lg"
           style={{ left: tooltip.x, top: tooltip.y }}
         >
           {tooltip.text}
@@ -1066,15 +1093,17 @@ function CodeFrequencyChart({ data, maxPoints }: { data: CodeFrequencyResult | n
 
   return (
     <div
-      className="rounded-lg border border-gx-border bg-gx-surface p-4"
+      className="rounded-lg border border-border bg-card p-4"
       aria-label={`Code frequency: +${totalAdd} −${totalDel} over ${data?.weeks.length ?? 0} weeks`}
     >
-      <div className="mb-3 text-[11px] font-medium text-gx-muted">Code frequency</div>
+      <div className="mb-3 text-[11px] font-medium text-muted-foreground">
+        Code frequency
+      </div>
 
       {!data ? (
         <AreaChartSkeleton />
       ) : data.weeks.length === 0 ? (
-        <div className="flex h-32 items-center justify-center text-xs text-gx-muted">
+        <div className="flex h-32 items-center justify-center text-xs text-muted-foreground">
           No code frequency data
         </div>
       ) : (
@@ -1082,7 +1111,7 @@ function CodeFrequencyChart({ data, maxPoints }: { data: CodeFrequencyResult | n
           <svg
             ref={(el) => { svgRef.current = el; }}
             viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
-            className="w-full h-32 block focus:outline-none focus:ring-2 focus:ring-gx-accent rounded"
+            className="w-full h-32 block focus:outline-none focus:ring-2 focus:ring-primary rounded"
             preserveAspectRatio="none"
             tabIndex={0}
             role="img"
@@ -1123,15 +1152,15 @@ function CodeFrequencyChart({ data, maxPoints }: { data: CodeFrequencyResult | n
             {/* Additions: above center line */}
             <path
               d={additionsPath}
-              fill="rgba(74,222,128,0.25)"
-              stroke="rgba(74,222,128,0.6)"
+              fill="rgb(var(--success) / 0.25)"
+              stroke="rgb(var(--success) / 0.6)"
               strokeWidth="1"
             />
             {/* Deletions: below center line */}
             <path
               d={deletionsPath}
-              fill="rgba(248,113,113,0.2)"
-              stroke="rgba(248,113,113,0.5)"
+              fill="rgb(var(--destructive) / 0.2)"
+              stroke="rgb(var(--destructive) / 0.5)"
               strokeWidth="1"
             />
             {/* Center axis */}
@@ -1141,7 +1170,7 @@ function CodeFrequencyChart({ data, maxPoints }: { data: CodeFrequencyResult | n
               x2={WIDTH}
               y2={MID}
               stroke="currentColor"
-              className="text-gx-border"
+              className="text-border"
               strokeWidth="0.5"
             />
             {/* Hover indicator line */}
@@ -1152,20 +1181,22 @@ function CodeFrequencyChart({ data, maxPoints }: { data: CodeFrequencyResult | n
                 x2={(hoveredIndex / Math.max(limitedWeeks.length - 1, 1)) * WIDTH}
                 y2={HEIGHT}
                 stroke="currentColor"
-                className="text-gx-muted"
+                className="text-muted-foreground"
                 strokeWidth="0.5"
                 strokeDasharray="2 2"
               />
             )}
           </svg>
 
-          {/* X-axis month labels */}
+          {/* Hover indicator line */}
           <div className="relative mt-1 h-4">
             {monthLabels.map((m) => (
               <span
                 key={`${m.index}-${m.label}`}
-                className="absolute text-[9px] text-gx-muted"
-                style={{ left: `${(m.index / Math.max((limitedWeeks.length - 1), 1)) * 100}%` }}
+                className="absolute text-[9px] text-muted-foreground"
+                style={{
+                  left: `${(m.index / Math.max(limitedWeeks.length - 1, 1)) * 100}%`,
+                }}
               >
                 {m.label}
               </span>
@@ -1174,7 +1205,7 @@ function CodeFrequencyChart({ data, maxPoints }: { data: CodeFrequencyResult | n
         </div>
       )}
 
-      {/* Visually-hidden data table for screen readers */}
+      {/* X-axis month labels */}
       {data && data.weeks.length > 0 && (
         <table className="sr-only">
           <caption>Code frequency data</caption>
@@ -1197,13 +1228,13 @@ function CodeFrequencyChart({ data, maxPoints }: { data: CodeFrequencyResult | n
         </table>
       )}
 
-      {/* Tooltip (announced via aria-live) */}
+      {/* Visually-hidden data table for screen readers */}
       <div aria-live="polite" className="sr-only">
         {tooltip ? tooltip.text : ""}
       </div>
       {tooltip && (
         <div
-          className="pointer-events-none fixed z-50 -translate-x-1/2 -translate-y-full rounded border border-gx-border bg-gx-surface px-2 py-1 text-[10px] text-gx-text shadow-lg"
+          className="pointer-events-none fixed z-50 -translate-x-1/2 -translate-y-full rounded border border-border bg-card px-2 py-1 text-[10px] text-foreground shadow-lg"
           style={{ left: tooltip.x, top: tooltip.y }}
         >
           {tooltip.text}
@@ -1246,47 +1277,51 @@ function BranchesCard({ refs, branchHealth, onSelectBranch }: { refs: RefEntry[]
   const totalBranches = (refs ?? []).filter(r => r.kind === "branch").length;
 
   return (
-    <div className="rounded-lg border border-gx-border bg-gx-surface p-4">
-      <div className="mb-3 flex items-center gap-2 text-[11px] text-gx-muted">
+    <div className="rounded-lg border border-border bg-card p-4">
+      <div className="mb-3 flex items-center gap-2 text-[11px] text-muted-foreground">
         <GitBranch size={12} /> Branches & Tags
         {refs && (
           <span className="ml-auto text-[10px]">
             {totalBranches} branches
             {staleCount > 0 && (
-              <span className="text-amber-400"> · {staleCount} stale</span>
+              <span className="text-warning"> · {staleCount} stale</span>
             )}
           </span>
         )}
       </div>
       {!refs ? (
-        <div className="flex items-center gap-2 text-xs text-gx-muted">
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <Loader2 size={12} className="animate-spin" /> Loading…
         </div>
       ) : (
         <div className="space-y-2">
           {branches.length > 0 && (
             <div>
-              <div className="mb-1 text-[10px] uppercase tracking-wider text-gx-muted">
+              <div className="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground">
                 Branches ({totalBranches})
               </div>
               <div className="flex flex-wrap gap-1">
-                {branches.map(b => {
+                {branches.map((b) => {
                   const health = staleMap.get(b.name);
                   const isStale = health?.is_stale ?? false;
                   const days = health ? daysAgo(health.last_commit_date) : 0;
                   return (
-                    <button
+                    <Button
+                      variant="ghost"
+                      size="compact"
                       key={b.name}
                       type="button"
-                      className="relative inline-flex items-center max-w-[140px] truncate rounded-full border border-gx-success/40 bg-gx-bg-sub px-2 py-[2px] font-mono text-[10px] text-gx-success hover:bg-gx-success/10 hover:border-gx-success/70 transition-colors cursor-pointer"
+                      className="relative inline-flex items-center max-w-[140px] truncate rounded-full border border-success/40 bg-background px-2 py-[2px] font-mono text-[10px] text-success hover:bg-success/10 hover:border-success/70 transition-colors cursor-pointer"
                       title={isStale ? `Last commit: ${days} days ago` : b.name}
                       onClick={() => onSelectBranch?.(b.name)}
                     >
                       {isStale && (
-                        <span className="mr-1 inline-block h-[6px] w-[6px] rounded-full bg-amber-400 shrink-0" />
+                        <span className="mr-1 inline-block h-[6px] w-[6px] rounded-full bg-warning shrink-0" />
                       )}
-                      <span className="truncate">{b.name.replace(/^refs\/heads\//, "")}</span>
-                    </button>
+                      <span className="truncate">
+                        {b.name.replace(/^refs\/heads\//, "")}
+                      </span>
+                    </Button>
                   );
                 })}
               </div>
@@ -1294,20 +1329,22 @@ function BranchesCard({ refs, branchHealth, onSelectBranch }: { refs: RefEntry[]
           )}
           {tags.length > 0 && (
             <div>
-              <div className="mb-1 text-[10px] uppercase tracking-wider text-gx-muted">
+              <div className="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground">
                 Tags ({(refs ?? []).filter(r => r.kind === "tag").length})
               </div>
               <div className="flex flex-wrap gap-1">
-                {tags.map(t => (
-                  <button
+                {tags.map((t) => (
+                  <Button
+                    variant="ghost"
+                    size="compact"
                     key={t.name}
                     type="button"
-                    className="inline-block max-w-[140px] truncate rounded-full border border-gx-warn/40 bg-gx-bg-sub px-2 py-[2px] font-mono text-[10px] text-gx-warn hover:bg-gx-warn/10 hover:border-gx-warn/70 transition-colors cursor-pointer"
+                    className="inline-block max-w-[140px] truncate rounded-full border border-warning/40 bg-background px-2 py-[2px] font-mono text-[10px] text-warning hover:bg-warning/10 hover:border-warning/70 transition-colors cursor-pointer"
                     title={t.name}
                     onClick={() => onSelectBranch?.(t.name)}
                   >
                     🏷 {t.name.replace(/^refs\/tags\//, "")}
-                  </button>
+                  </Button>
                 ))}
               </div>
             </div>
@@ -1320,16 +1357,16 @@ function BranchesCard({ refs, branchHealth, onSelectBranch }: { refs: RefEntry[]
 
 function ExtensionsCard({ summary }: { summary: RepoSummary | null }) {
   return (
-    <div className="rounded-lg border border-gx-border bg-gx-surface p-4">
-      <div className="mb-3 flex items-center gap-2 text-[11px] text-gx-muted">
+    <div className="rounded-lg border border-border bg-card p-4">
+      <div className="mb-3 flex items-center gap-2 text-[11px] text-muted-foreground">
         <FileText size={12} /> File types
       </div>
       {!summary ? (
-        <div className="flex items-center gap-2 text-xs text-gx-muted">
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <Loader2 size={12} className="animate-spin" /> Loading…
         </div>
       ) : summary.top_extensions.length === 0 ? (
-        <div className="text-xs text-gx-muted">No files.</div>
+        <div className="text-xs text-muted-foreground">No files.</div>
       ) : (
         <ul className="space-y-1 text-[12px]">
           {summary.top_extensions.slice(0, 8).map((e) => {
@@ -1338,17 +1375,21 @@ function ExtensionsCard({ summary }: { summary: RepoSummary | null }) {
               : 0;
             return (
               <li key={e.ext} className="flex items-center gap-2">
-                <span className="w-12 shrink-0 font-mono text-gx-text">.{e.ext || "—"}</span>
+                <span className="w-12 shrink-0 font-mono text-foreground">
+                  .{e.ext || "—"}
+                </span>
                 <div className="min-w-0 flex-1">
-                  <div className="h-1.5 rounded-full bg-gx-border/40">
+                  <div className="h-1.5 rounded-full bg-border/40">
                     <div
-                      className="h-full rounded-full bg-gx-accent/70"
+                      className="h-full rounded-full bg-primary/70"
                       style={{ width: `${Math.max(pct, 2)}%` }}
                     />
                   </div>
                 </div>
-                <span className="w-8 shrink-0 text-right text-[10px] text-gx-muted">{pct}%</span>
-                <span className="w-14 shrink-0 text-right text-[10px] text-gx-muted">
+                <span className="w-8 shrink-0 text-right text-[10px] text-muted-foreground">
+                  {pct}%
+                </span>
+                <span className="w-14 shrink-0 text-right text-[10px] text-muted-foreground">
                   {formatBytes(Number(e.bytes))}
                 </span>
               </li>
@@ -1367,11 +1408,12 @@ function ExtensionsCard({ summary }: { summary: RepoSummary | null }) {
  * - No large files: green "all files under 1 MB" badge
  */
 function DedupCard({ data }: { data: DedupSavingsResult | null }) {
-
   if (!data) {
     return (
-      <div className="rounded-lg border border-gx-border bg-gx-surface p-4">
-        <div className="mb-2 text-[11px] font-medium text-gx-muted">Dedup savings</div>
+      <div className="rounded-lg border border-border bg-card p-4">
+        <div className="mb-2 text-[11px] font-medium text-muted-foreground">
+          Dedup savings
+        </div>
         <StatTileSkeleton />
       </div>
     );
@@ -1401,32 +1443,34 @@ function DedupSavingsCard({ data }: { data: DedupSavingsResult }) {
   const hasSavings = savingsPct > 0;
 
   return (
-    <div className={`rounded-lg border bg-gx-surface p-4 ${hasSavings ? "border-gx-success/40" : "border-gx-border"}`}>
-      <div className="mb-3 text-[11px] font-medium text-gx-muted">Dedup savings</div>
+    <div className={`rounded-lg border bg-card p-4 ${hasSavings ? "border-success/40" : "border-border"}`}>
+      <div className="mb-3 text-[11px] font-medium text-muted-foreground">
+        Dedup savings
+      </div>
 
       {/* Hero stat */}
       <div className="mb-3 text-center">
-        <span className="text-3xl font-bold text-gx-success">{savingsPct}%</span>
-        <span className="ml-1 text-sm text-gx-muted">saved</span>
+        <span className="text-3xl font-bold text-success">{savingsPct}%</span>
+        <span className="ml-1 text-sm text-muted-foreground">saved</span>
       </div>
 
-      {/* Progress bar: filled = stored/logical */}
+      {/* Hero stat */}
       <div className="mb-3">
-        <div className="flex h-2.5 overflow-hidden rounded-full bg-gx-bg-sub">
+        <div className="flex h-2.5 overflow-hidden rounded-full bg-background">
           <div
-            className="bg-gx-success rounded-full transition-all"
+            className="bg-success rounded-full transition-all"
             style={{ width: `${Math.min(storedRatio, 100)}%` }}
             title={`Stored: ${formatBytes(data.stored_bytes)} / Logical: ${formatBytes(data.logical_bytes)}`}
           />
         </div>
-        <div className="mt-1.5 flex justify-between text-[10px] text-gx-muted">
+        <div className="mt-1.5 flex justify-between text-[10px] text-muted-foreground">
           <span>Stored: {formatBytes(data.stored_bytes)}</span>
           <span>Logical: {formatBytes(data.logical_bytes)}</span>
         </div>
       </div>
 
-      {/* Secondary stats */}
-      <div className="flex gap-4 text-[11px] text-gx-muted">
+      {/* Progress bar: filled = stored/logical */}
+      <div className="flex gap-4 text-[11px] text-muted-foreground">
         <span>{data.chunk_reuse_count.toLocaleString()} chunks reused</span>
         <span>{data.compression_ratio.toFixed(1)}x compression</span>
       </div>
@@ -1449,8 +1493,8 @@ function DedupOnboardingCard({
   const suggestedRules = data.suggested_rules ?? [];
 
   return (
-    <div className="rounded-lg border border-gx-warn/40 bg-gx-surface p-4">
-      <div className="mb-2 flex items-center gap-2 text-[11px] font-medium text-gx-text">
+    <div className="rounded-lg border border-warning/40 bg-card p-4">
+      <div className="mb-2 flex items-center gap-2 text-[11px] font-medium text-foreground">
         <span>⚠</span> Large files detected
       </div>
 
@@ -1458,32 +1502,43 @@ function DedupOnboardingCard({
       <ul className="mb-3 space-y-1">
         {largeFiles.map((f) => (
           <li key={f.path} className="flex items-center gap-2 text-[11px]">
-            <span className="min-w-0 flex-1 truncate font-mono text-gx-muted">{f.path}</span>
-            <span className="shrink-0 text-gx-text">{formatBytes(f.size)}</span>
+            <span className="min-w-0 flex-1 truncate font-mono text-muted-foreground">
+              {f.path}
+            </span>
+            <span className="shrink-0 text-foreground">
+              {formatBytes(f.size)}
+            </span>
           </li>
         ))}
       </ul>
 
-      {/* Estimated savings */}
+      {/* File list */}
       {estimatedPct > 0 && (
-        <div className="mb-3 text-[11px] text-gx-muted">
-          Estimated savings: <span className="text-gx-success font-medium">{estimatedPct}%</span>
+        <div className="mb-3 text-[11px] text-muted-foreground">
+          Estimated savings:{' '}
+          <span className="text-success font-medium">{estimatedPct}%</span>
         </div>
       )}
 
-      {/* Suggested rules */}
+      {/* Estimated savings */}
       {suggestedRules.length > 0 && (
         <div className="mb-3">
-          <div className="text-[10px] text-gx-muted mb-1">Suggested rules:</div>
-          <pre className="rounded bg-gx-bg-sub px-2 py-1.5 text-[10px] font-mono text-gx-text overflow-x-auto">
+          <div className="text-[10px] text-muted-foreground mb-1">
+            Suggested rules:
+          </div>
+          <pre className="rounded bg-background px-2 py-1.5 text-[10px] font-mono text-foreground overflow-x-auto">
             {suggestedRules.join("\n")}
           </pre>
         </div>
       )}
 
-      {/* CTA — informational since crab init is required first */}
-      <div className="text-[10px] text-gx-muted">
-        Run <code className="rounded bg-gx-bg-sub px-1 py-0.5 font-mono text-gx-text">crab add</code> in the terminal to start tracking these files.
+      {/* Suggested rules */}
+      <div className="text-[10px] text-muted-foreground">
+        Run{' '}
+        <code className="rounded bg-background px-1 py-0.5 font-mono text-foreground">
+          crab add
+        </code>{' '}
+        in the terminal to start tracking these files.
       </div>
     </div>
   );
@@ -1494,10 +1549,12 @@ function DedupOnboardingCard({
  */
 function DedupNoLargeFilesCard() {
   return (
-    <div className="rounded-lg border border-gx-border bg-gx-surface p-4">
-      <div className="mb-2 text-[11px] font-medium text-gx-muted">Dedup savings</div>
+    <div className="rounded-lg border border-border bg-card p-4">
+      <div className="mb-2 text-[11px] font-medium text-muted-foreground">
+        Dedup savings
+      </div>
       <div className="flex items-center gap-2">
-        <span className="inline-flex items-center gap-1.5 rounded-full bg-gx-success/10 border border-gx-success/30 px-3 py-1 text-[11px] font-medium text-gx-success">
+        <span className="inline-flex items-center gap-1.5 rounded-full bg-success/10 border border-success/30 px-3 py-1 text-[11px] font-medium text-success">
           All files under 1 MB ✓
         </span>
       </div>
@@ -1514,9 +1571,11 @@ function DedupNoLargeFilesCard() {
 function PointerBreakdownCard({ summary }: { summary: RepoSummary | null }) {
   if (!summary) {
     return (
-      <div className="rounded-lg border border-gx-border bg-gx-surface p-4">
-        <div className="mb-2 text-[11px] font-medium text-gx-muted">Pointer breakdown</div>
-        <div className="flex items-center gap-2 text-xs text-gx-muted">
+      <div className="rounded-lg border border-border bg-card p-4">
+        <div className="mb-2 text-[11px] font-medium text-muted-foreground">
+          Pointer breakdown
+        </div>
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <Loader2 size={12} className="animate-spin" /> Loading…
         </div>
       </div>
@@ -1531,10 +1590,12 @@ function PointerBreakdownCard({ summary }: { summary: RepoSummary | null }) {
   // Edge case: all regular git (no pointers, no LFS)
   if (crabCount === 0 && lfsCount === 0) {
     return (
-      <div className="rounded-lg border border-gx-border bg-gx-surface p-4">
-        <div className="mb-2 text-[11px] font-medium text-gx-muted">Pointer breakdown</div>
+      <div className="rounded-lg border border-border bg-card p-4">
+        <div className="mb-2 text-[11px] font-medium text-muted-foreground">
+          Pointer breakdown
+        </div>
         <div className="flex items-center gap-2">
-          <span className="inline-flex items-center gap-1.5 rounded-full bg-gx-muted/10 border border-gx-border px-3 py-1 text-[11px] text-gx-muted">
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-muted-foreground/10 border border-border px-3 py-1 text-[11px] text-muted-foreground">
             All files tracked by git
           </span>
         </div>
@@ -1545,16 +1606,18 @@ function PointerBreakdownCard({ summary }: { summary: RepoSummary | null }) {
   // Edge case: only LFS (no crab pointers, no regular git)
   if (crabCount === 0 && gitCount === 0 && lfsCount > 0) {
     return (
-      <div className="rounded-lg border border-gx-border bg-gx-surface p-4">
-        <div className="mb-2 text-[11px] font-medium text-gx-muted">Pointer breakdown</div>
+      <div className="rounded-lg border border-border bg-card p-4">
+        <div className="mb-2 text-[11px] font-medium text-muted-foreground">
+          Pointer breakdown
+        </div>
         <div className="mb-3 flex items-center gap-2">
-          <span className="inline-flex items-center gap-1.5 rounded-full bg-purple-500/10 border border-purple-500/30 px-3 py-1 text-[11px] text-purple-400">
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-thinking/10 border border-thinking/30 px-3 py-1 text-[11px] text-thinking">
             {lfsCount} LFS file{lfsCount === 1 ? "" : "s"}
           </span>
         </div>
         <a
           href="#"
-          className="text-[11px] text-gx-accent hover:underline"
+          className="text-[11px] text-primary hover:underline"
           onClick={(e) => e.preventDefault()}
         >
           Migrate to Crab for dedup savings →
@@ -1569,56 +1632,64 @@ function PointerBreakdownCard({ summary }: { summary: RepoSummary | null }) {
   const lfsPct = total > 0 ? (lfsCount / total) * 100 : 0;
 
   return (
-    <div className="rounded-lg border border-gx-border bg-gx-surface p-4">
-      <div className="mb-3 text-[11px] font-medium text-gx-muted">Pointer breakdown</div>
+    <div className="rounded-lg border border-border bg-card p-4">
+      <div className="mb-3 text-[11px] font-medium text-muted-foreground">
+        Pointer breakdown
+      </div>
 
       {/* Stacked horizontal bar */}
-      <div className="mb-3 flex h-4 overflow-hidden rounded-full bg-gx-bg-sub">
+      <div className="mb-3 flex h-4 overflow-hidden rounded-full bg-background">
         {gitPct > 0 && (
           <div
-            className="bg-gx-muted/50 flex items-center justify-center transition-all"
+            className="bg-muted-foreground/50 flex items-center justify-center transition-all"
             style={{ width: `${gitPct}%` }}
             title={`Git: ${gitCount} files`}
           >
             {gitPct > 5 && (
-              <span className="text-[8px] font-medium text-gx-text/70">{Math.round(gitPct)}%</span>
+              <span className="text-[8px] font-medium text-foreground/70">
+                {Math.round(gitPct)}%
+              </span>
             )}
           </div>
         )}
         {crabPct > 0 && (
           <div
-            className="bg-gx-accent flex items-center justify-center transition-all"
+            className="bg-primary flex items-center justify-center transition-all"
             style={{ width: `${crabPct}%` }}
             title={`Crab: ${crabCount} files`}
           >
             {crabPct > 5 && (
-              <span className="text-[8px] font-medium text-white/90">{Math.round(crabPct)}%</span>
+              <span className="text-[8px] font-medium text-foreground/90">
+                {Math.round(crabPct)}%
+              </span>
             )}
           </div>
         )}
         {lfsPct > 0 && (
           <div
-            className="bg-purple-500 flex items-center justify-center transition-all"
+            className="bg-thinking flex items-center justify-center transition-all"
             style={{ width: `${lfsPct}%` }}
             title={`LFS: ${lfsCount} files`}
           >
             {lfsPct > 5 && (
-              <span className="text-[8px] font-medium text-white/90">{Math.round(lfsPct)}%</span>
+              <span className="text-[8px] font-medium text-foreground/90">
+                {Math.round(lfsPct)}%
+              </span>
             )}
           </div>
         )}
       </div>
 
       {/* Legend with counts */}
-      <div className="flex flex-wrap gap-3 text-[10px] text-gx-muted">
+      <div className="flex flex-wrap gap-3 text-[10px] text-muted-foreground">
         {gitCount > 0 && (
-          <Legend color="bg-gx-muted/50" label={`Git (${gitCount.toLocaleString()})`} />
+          <Legend color="bg-muted-foreground/50" label={`Git (${gitCount.toLocaleString()})`} />
         )}
         {crabCount > 0 && (
-          <Legend color="bg-gx-accent" label={`Crab (${crabCount.toLocaleString()})`} />
+          <Legend color="bg-primary" label={`Crab (${crabCount.toLocaleString()})`} />
         )}
         {lfsCount > 0 && (
-          <Legend color="bg-purple-500" label={`LFS (${lfsCount.toLocaleString()})`} />
+          <Legend color="bg-thinking" label={`LFS (${lfsCount.toLocaleString()})`} />
         )}
       </div>
     </div>
@@ -1629,22 +1700,26 @@ function HydrationCard({ summary }: { summary: HydrationSummary }) {
   const total = summary.total_tracked;
   const pct = (n: number) => (total ? (n / total) * 100 : 0);
   return (
-    <div className="rounded-lg border border-gx-border bg-gx-surface p-4">
-      <div className="mb-2 flex items-center justify-between text-[11px] text-gx-muted">
+    <div className="rounded-lg border border-border bg-card p-4">
+      <div className="mb-2 flex items-center justify-between text-[11px] text-muted-foreground">
         <span>Hydration progress</span>
         <span>{pctHydrated(summary)}% hydrated</span>
       </div>
-      <div className="flex h-2.5 overflow-hidden rounded-full bg-gx-bg-sub">
-        <div className="bg-gx-success" style={{ width: `${pct(summary.hydrated)}%` }} title={`${summary.hydrated} hydrated`} />
-        <div className="bg-gx-accent/50" style={{ width: `${pct(summary.pointer)}%` }} title={`${summary.pointer} pointer`} />
-        <div className="bg-gx-warn" style={{ width: `${pct(summary.partial)}%` }} title={`${summary.partial} partial`} />
-        <div className="bg-gx-error" style={{ width: `${pct(summary.missing)}%` }} title={`${summary.missing} missing`} />
+      <div className="flex h-2.5 overflow-hidden rounded-full bg-background">
+        <div className="bg-success" style={{ width: `${pct(summary.hydrated)}%` }} title={`${summary.hydrated} hydrated`} />
+        <div className="bg-primary/50" style={{ width: `${pct(summary.pointer)}%` }} title={`${summary.pointer} pointer`} />
+        <div className="bg-warning" style={{ width: `${pct(summary.partial)}%` }} title={`${summary.partial} partial`} />
+        <div className="bg-destructive" style={{ width: `${pct(summary.missing)}%` }} title={`${summary.missing} missing`} />
       </div>
-      <div className="mt-2 flex flex-wrap gap-3 text-[10px] text-gx-muted">
-        <Legend color="bg-gx-success" label={`Hydrated ${summary.hydrated}`} />
-        <Legend color="bg-gx-accent/50" label={`Pointer ${summary.pointer}`} />
-        {summary.partial > 0 && <Legend color="bg-gx-warn" label={`Partial ${summary.partial}`} />}
-        {summary.missing > 0 && <Legend color="bg-gx-error" label={`Missing ${summary.missing}`} />}
+      <div className="mt-2 flex flex-wrap gap-3 text-[10px] text-muted-foreground">
+        <Legend color="bg-success" label={`Hydrated ${summary.hydrated}`} />
+        <Legend color="bg-primary/50" label={`Pointer ${summary.pointer}`} />
+        {summary.partial > 0 && (
+          <Legend color="bg-warning" label={`Partial ${summary.partial}`} />
+        )}
+        {summary.missing > 0 && (
+          <Legend color="bg-destructive" label={`Missing ${summary.missing}`} />
+        )}
       </div>
     </div>
   );
@@ -1652,38 +1727,56 @@ function HydrationCard({ summary }: { summary: HydrationSummary }) {
 
 function RecentCommitsCard({ commits, onSelect }: { commits: CommitRow[] | null; onSelect?: (sha: string) => void }) {
   return (
-    <div className="rounded-lg border border-gx-border bg-gx-surface p-4">
-      <div className="mb-3 text-[11px] text-gx-muted">Recent commits</div>
+    <div className="rounded-lg border border-border bg-card p-4">
+      <div className="mb-3 text-[11px] text-muted-foreground">
+        Recent commits
+      </div>
       {commits == null ? (
-        <div className="flex items-center gap-2 text-xs text-gx-muted">
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <Loader2 size={12} className="animate-spin" /> Loading…
         </div>
       ) : commits.length === 0 ? (
-        <div className="text-xs text-gx-muted">No commit history available.</div>
+        <div className="text-xs text-muted-foreground">
+          No commit history available.
+        </div>
       ) : (
         <ul className="space-y-0.5 text-[12px]">
           {commits.slice(0, 10).map((c) => (
             <li key={c.sha}>
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 onClick={() => onSelect?.(c.sha)}
-                className="flex w-full items-center gap-3 rounded px-2 py-1.5 text-left transition hover:bg-gx-surface-hover"
+                className="justify-start flex w-full items-center gap-3 rounded px-2 py-1.5 text-left transition hover:bg-accent"
               >
                 <AuthorDot name={c.author} />
-                <code className="shrink-0 font-mono text-[11px] text-gx-muted">{c.sha.slice(0, 7)}</code>
+                <code className="shrink-0 font-mono text-[11px] text-muted-foreground">
+                  {c.sha.slice(0, 7)}
+                </code>
                 <span className="min-w-0 flex-1 truncate">{c.subject}</span>
                 {c.insertions != null && (
-                  <span className="shrink-0 font-mono text-[11px] text-gx-success">+{c.insertions}</span>
+                  <span className="shrink-0 font-mono text-[11px] text-success">
+                    +{c.insertions}
+                  </span>
                 )}
                 {c.deletions != null && (
-                  <span className="shrink-0 font-mono text-[11px] text-gx-error">−{c.deletions}</span>
+                  <span className="shrink-0 font-mono text-[11px] text-destructive">
+                    −{c.deletions}
+                  </span>
                 )}
                 {c.files_changed != null && (
-                  <span className="shrink-0 text-[11px] text-gx-muted">· {c.files_changed} file{c.files_changed === 1 ? "" : "s"}</span>
+                  <span className="shrink-0 text-[11px] text-muted-foreground">
+                    · {c.files_changed} file{c.files_changed === 1 ? "" : "s"}
+                  </span>
                 )}
-                <span className="shrink-0 text-[11px] text-gx-muted">{c.author}</span>
-                <span className="shrink-0 text-[11px] text-gx-muted">{formatRelDate(c.date)}</span>
-              </button>
+                <span className="shrink-0 text-[11px] text-muted-foreground">
+                  {c.author}
+                </span>
+                <span className="shrink-0 text-[11px] text-muted-foreground">
+                  {formatRelDate(c.date)}
+                </span>
+              </Button>
             </li>
           ))}
         </ul>
@@ -1710,8 +1803,10 @@ function ReleaseTimeline({ data, onSelectTag }: { data: ReleaseTimelineResult | 
   // Show skeleton while loading.
   if (!data) {
     return (
-      <div className="mt-4 rounded-lg border border-gx-border bg-gx-surface p-4">
-        <div className="mb-3 text-[11px] font-medium text-gx-muted">Release timeline</div>
+      <div className="mt-4 rounded-lg border border-border bg-card p-4">
+        <div className="mb-3 text-[11px] font-medium text-muted-foreground">
+          Release timeline
+        </div>
         <TimelineSkeleton />
       </div>
     );
@@ -1725,35 +1820,41 @@ function ReleaseTimeline({ data, onSelectTag }: { data: ReleaseTimelineResult | 
 
   return (
     <div
-      className="mt-4 rounded-lg border border-gx-border bg-gx-surface p-4"
+      className="mt-4 rounded-lg border border-border bg-card p-4"
       aria-label={`Release timeline: ${data.tags.length} releases`}
     >
       <div className="mb-3 flex items-center justify-between">
-        <div className="text-[11px] font-medium text-gx-muted">Release timeline</div>
-        <span className="text-[10px] text-gx-muted">{data.tags.length} releases</span>
+        <div className="text-[11px] font-medium text-muted-foreground">
+          Release timeline
+        </div>
+        <span className="text-[10px] text-muted-foreground">
+          {data.tags.length} releases
+        </span>
       </div>
       <div className="flex flex-wrap gap-2">
         {tags.map((t, i) => {
           const isLatest = i === 0;
           return (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               key={t.name}
               type="button"
               onClick={() => onSelectTag?.(t.name)}
-              className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-mono transition hover:bg-gx-surface-hover ${
+              className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-mono transition hover:bg-accent ${
                 isLatest
-                  ? "border-gx-accent/50 text-gx-accent bg-gx-accent/5"
-                  : "border-gx-border text-gx-text"
+                  ? "border-primary/50 text-primary bg-primary/5"
+                  : "border-border text-foreground"
               }`}
               title={formatTagDate(t.date)}
             >
-              <span className={`w-2 h-2 rounded-full ${isLatest ? "bg-gx-accent" : "bg-gx-muted/50"}`} />
+              <span className={`w-2 h-2 rounded-full ${isLatest ? "bg-primary" : "bg-muted-foreground/50"}`} />
               {t.name}
-            </button>
+            </Button>
           );
         })}
         {data.tags.length > 10 && (
-          <span className="inline-flex items-center text-[10px] text-gx-muted px-2">
+          <span className="inline-flex items-center text-[10px] text-muted-foreground px-2">
             +{data.tags.length - 10} more
           </span>
         )}
@@ -1763,7 +1864,6 @@ function ReleaseTimeline({ data, onSelectTag }: { data: ReleaseTimelineResult | 
 }
 
 // ---- Size History Chart ----
-
 
 /** Format a git ISO date string for display in tooltips. */
 function formatTagDate(dateStr: string): string {
@@ -1776,14 +1876,12 @@ function formatTagDate(dateStr: string): string {
   }
 }
 
-
-
 function AuthorDot({ name }: { name: string }) {
   const initial = (name.trim()[0] ?? "?").toUpperCase();
   const color = stringColor(name);
   return (
     <span
-      className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[9px] font-semibold text-white"
+      className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[9px] font-semibold text-foreground"
       style={{ background: color }}
     >
       {initial}

@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Turn header component.
  *
@@ -9,12 +10,13 @@
  * the user has clicked the header during the turn or prefers-reduced-motion is set.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
 import clsx from "clsx";
-import { ChevronRight, ChevronDown, Undo2, Eye, Check } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, Eye, Undo2 } from "lucide-react";
 
-import type { Turn } from "../../lib/turn-derivation";
+import { useCallback, useEffect, useRef, useState } from "react";
+
 import { useChatUIState } from "../../lib/chat-ui-state";
+import type { Turn } from "../../lib/turn-derivation";
 
 // ─── Props ───────────────────────────────────────────────────────────────────
 
@@ -154,11 +156,13 @@ export function TurnHeader({ turn, taskId, collapsed: isCollapsed, collapsible, 
       className={clsx(
         "turn-header-collapse",
         "group rounded-md border border-transparent",
-        "hover:border-gx-border/30 hover:bg-gx-surface-hover/40",
+        "hover:border-border/30 hover:bg-accent/40",
         "transition-colors",
       )}
     >
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={handleToggle}
         disabled={!collapsible}
@@ -170,28 +174,28 @@ export function TurnHeader({ turn, taskId, collapsed: isCollapsed, collapsible, 
       >
         {/* Chevron indicator */}
         {isCollapsed ? (
-          <ChevronRight size={12} className="shrink-0 text-gx-muted/70" />
+          <ChevronRight size={12} className="shrink-0 text-muted-foreground/70" />
         ) : (
-          <ChevronDown size={12} className="shrink-0 text-gx-muted/70" />
+          <ChevronDown size={12} className="shrink-0 text-muted-foreground/70" />
         )}
 
         {/* Summary or working indicator */}
         {turn.complete ? (
-          <span className="flex-1 text-gx-muted font-medium truncate">
+          <span className="flex-1 text-muted-foreground font-medium truncate">
             {summaryParts.join(" · ")}
           </span>
         ) : (
-          <span className="flex-1 flex items-center gap-2 text-gx-muted font-medium">
+          <span className="flex-1 flex items-center gap-2 text-muted-foreground font-medium">
             <span className="inline-flex items-center gap-1.5">
               <span className="relative flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-gx-info opacity-75" />
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-gx-info" />
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-info opacity-75" />
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-info" />
               </span>
               Working…
             </span>
-            <span className="text-gx-muted/70">{durationText}</span>
+            <span className="text-muted-foreground/70">{durationText}</span>
             {toolCallCount > 0 && (
-              <span className="text-gx-muted/60">
+              <span className="text-muted-foreground/60">
                 · {toolCallCount} tool call{toolCallCount !== 1 ? "s" : ""}
               </span>
             )}
@@ -205,53 +209,59 @@ export function TurnHeader({ turn, taskId, collapsed: isCollapsed, collapsible, 
             onClick={(e) => e.stopPropagation()}
           >
             {onApply && (
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 onClick={onApply}
                 className={clsx(
                   "inline-flex items-center gap-1 px-1.5 py-0.5 rounded",
-                  "text-[10px] font-medium text-gx-success",
-                  "hover:bg-gx-success/10 transition-colors",
+                  "text-[10px] font-medium text-success",
+                  "hover:bg-success/10 transition-colors",
                 )}
                 title="Apply all changes in this turn"
               >
                 <Check size={10} />
                 Apply
-              </button>
+              </Button>
             )}
             {onReview && (
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 onClick={onReview}
                 className={clsx(
                   "inline-flex items-center gap-1 px-1.5 py-0.5 rounded",
-                  "text-[10px] font-medium text-gx-info",
-                  "hover:bg-gx-info/10 transition-colors",
+                  "text-[10px] font-medium text-info",
+                  "hover:bg-info/10 transition-colors",
                 )}
                 title="Review changes in Diff tab"
               >
                 <Eye size={10} />
                 Review
-              </button>
+              </Button>
             )}
             {onUndo && (
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 onClick={onUndo}
                 className={clsx(
                   "inline-flex items-center gap-1 px-1.5 py-0.5 rounded",
-                  "text-[10px] font-medium text-gx-warn",
-                  "hover:bg-gx-warn/10 transition-colors",
+                  "text-[10px] font-medium text-warning",
+                  "hover:bg-warning/10 transition-colors",
                 )}
                 title="Undo all changes in this turn"
               >
                 <Undo2 size={10} />
                 Undo
-              </button>
+              </Button>
             )}
           </span>
         )}
-      </button>
+      </Button>
     </div>
   );
 }

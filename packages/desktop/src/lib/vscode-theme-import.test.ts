@@ -2,7 +2,7 @@
 //
 // Validates:
 //   1. hexToRgbTriple converts hex colors correctly.
-//   2. importVsCodeTheme maps VS Code workbench colors to GxTheme.
+//   2. importVsCodeTheme maps VS Code workbench colors to DesktopTheme.
 //   3. Color scheme detection (dark/light).
 //   4. Fallback key resolution.
 //   5. Invalid input handling.
@@ -103,15 +103,15 @@ console.log("hexToRgbTriple: OK");
   assertEq(result.id, "vscode-my-dark-theme", "ID slugified");
   assertEq(result.name, "My Dark Theme", "name preserved");
   assertEq(result.colorScheme, "dark", "dark scheme detected");
-  assertEq(result.colors["gx-bg"], "30 30 46", "editor.background → gx-bg");
-  assertEq(result.colors["gx-text"], "205 214 244", "editor.foreground → gx-text");
-  assertEq(result.colors["gx-surface"], "24 24 37", "sideBar.background → gx-surface");
-  assertEq(result.colors["gx-bg-sub"], "17 17 27", "activityBar.background → gx-bg-sub");
-  assertEq(result.colors["gx-accent"], "137 180 250", "focusBorder → gx-accent");
-  assertEq(result.colors["gx-error"], "243 139 168", "editorError.foreground → gx-error");
-  assertEq(result.colors["gx-warning"], "249 226 175", "editorWarning.foreground → gx-warning");
-  assertEq(result.colors["gx-border"], "49 50 68", "panel.border → gx-border");
-  assertEq(result.colors["gx-muted"], "166 173 200", "descriptionForeground → gx-muted");
+  assertEq(result.colors["background"], "30 30 46", "editor.background → background");
+  assertEq(result.colors["foreground"], "205 214 244", "editor.foreground → foreground");
+  assertEq(result.colors["card"], "24 24 37", "sideBar.background → card");
+  assertEq(result.colors["sidebar"], "17 17 27", "activityBar.background → sidebar");
+  assertEq(result.colors["primary"], "137 180 250", "focusBorder → primary");
+  assertEq(result.colors["destructive"], "243 139 168", "editorError.foreground → destructive");
+  assertEq(result.colors["warning"], "249 226 175", "editorWarning.foreground → warning");
+  assertEq(result.colors["border"], "49 50 68", "panel.border → border");
+  assertEq(result.colors["muted-foreground"], "166 173 200", "descriptionForeground → muted-foreground");
 }
 
 // ---------- importVsCodeTheme: light theme detection ----------
@@ -188,9 +188,9 @@ console.log("hexToRgbTriple: OK");
   };
   const result = importVsCodeTheme(theme);
   assertNotNull(result, "fallback keys produce valid theme");
-  assertEq(result.colors["gx-text"], "204 204 204", "foreground fallback for editor.foreground");
-  assertEq(result.colors["gx-surface"], "45 45 45", "tabsBackground fallback for sideBar.background");
-  assertEq(result.colors["gx-accent"], "0 122 204", "button.background fallback for focusBorder");
+  assertEq(result.colors["foreground"], "204 204 204", "foreground fallback for editor.foreground");
+  assertEq(result.colors["card"], "45 45 45", "tabsBackground fallback for sideBar.background");
+  assertEq(result.colors["primary"], "0 122 204", "button.background fallback for focusBorder");
 }
 
 // ---------- importVsCodeTheme: ID slugification ----------
@@ -228,25 +228,6 @@ console.log("hexToRgbTriple: OK");
   assertNotNull(result, "empty name still produces theme");
   assertEq(result.name, "Imported Theme", "empty name → default name");
   assertEq(result.id, "vscode-imported-theme", "empty name → default ID");
-}
-
-// ---------- importVsCodeTheme: warn/warning alias sync ----------
-
-{
-  const theme = {
-    name: "Alias Test",
-    type: "dark" as const,
-    colors: {
-      "editor.background": "#1e1e2e",
-      "editor.foreground": "#cdd6f4",
-      "sideBar.background": "#181825",
-      "focusBorder": "#89b4fa",
-      "editorWarning.foreground": "#f9e2af",
-    },
-  };
-  const result = importVsCodeTheme(theme);
-  assertNotNull(result, "theme with warning color");
-  assertEq(result.colors["gx-warn"], result.colors["gx-warning"], "warn and warning are synced");
 }
 
 console.log("importVsCodeTheme: OK");

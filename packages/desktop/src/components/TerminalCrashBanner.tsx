@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Terminal crash recovery banner.
  *
@@ -66,27 +67,27 @@ export function TerminalCrashBanner({
 
   return (
     <div
-      className="flex items-center gap-3 px-4 py-2 bg-red-500/10 border border-red-500/30 rounded mx-2 my-2"
+      className="flex items-center gap-3 px-4 py-2 bg-destructive/10 border border-destructive/30 rounded mx-2 my-2"
       role="alert"
       data-testid="terminal-crash-banner"
     >
-      <AlertTriangle className="w-4 h-4 text-red-500 shrink-0" />
+      <AlertTriangle className="w-4 h-4 text-destructive shrink-0" />
       <div className="flex-1 min-w-0">
-        <p className="text-sm text-red-400 font-medium">
+        <p className="text-sm text-destructive font-medium">
           Terminal session ended unexpectedly
         </p>
-        <p className="text-xs text-red-400/80 mt-0.5">
-          {message}
-        </p>
+        <p className="text-xs text-destructive/80 mt-0.5">{message}</p>
       </div>
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         onClick={onRestart}
         disabled={restarting}
-        className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded bg-red-500/20 text-red-400 hover:bg-red-500/30 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded bg-destructive/20 text-destructive hover:bg-destructive/30 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
       >
         <RotateCcw className={`w-3 h-3 ${restarting ? "animate-spin" : ""}`} />
         {restarting ? "Restarting..." : "Restart Session"}
-      </button>
+      </Button>
     </div>
   );
 }

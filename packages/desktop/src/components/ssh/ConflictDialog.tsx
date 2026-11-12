@@ -1,12 +1,15 @@
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 /**
  * ConflictDialog — modal dialog for handling duplicate file conflicts during
  * drag-and-drop uploads. Prompts the user to overwrite, skip, or rename
  * with an "apply to all" option for batch resolution.
  */
 
-import { useState, useCallback } from "react";
-import { AlertTriangle, FileWarning, X } from "lucide-react";
 import clsx from "clsx";
+import { AlertTriangle, FileWarning, X } from "lucide-react";
+import { useCallback, useState } from "react";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -63,67 +66,67 @@ export function ConflictDialog({
   if (!open || !conflict) return null;
 
   return (
-    <div
-      className="fixed inset-0 z-[100] flex items-center justify-center"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="conflict-dialog-title"
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) handleCancel();
+      }}
     >
       {/* Backdrop */}
-      <div
-        className="absolute inset-0 bg-black/40 dark:bg-black/60"
-        onClick={handleCancel}
-        aria-hidden="true"
-      />
 
       {/* Dialog panel */}
-      <div
-        className={clsx(
-          "relative z-10 w-full max-w-md mx-4",
-          "bg-white dark:bg-gray-800 rounded-xl shadow-xl",
-          "border border-gray-200 dark:border-gray-700",
-        )}
+      <DialogContent
+        aria-describedby={undefined}
+        showCloseButton={false}
+        className={
+          clsx(
+          "w-full max-w-md mx-4",
+          "bg-background bg-card rounded-xl shadow-xl",
+          "border border-border border-border",
+        ) + " p-0 gap-0"
+        }
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 dark:border-gray-700">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-border border-border">
           <div className="flex items-center gap-2">
-            <FileWarning className="w-5 h-5 text-yellow-500" />
-            <h2
-              id="conflict-dialog-title"
-              className="text-base font-semibold text-gray-800 dark:text-gray-100"
-            >
+            <FileWarning className="w-5 h-5 text-warning" />
+            <DialogTitle className="text-base font-semibold text-foreground text-foreground">
               File Already Exists
-            </h2>
+            </DialogTitle>
           </div>
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={handleCancel}
-            className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
+            className="p-1 rounded hover:bg-card hover:bg-card text-muted-foreground hover:text-muted-foreground hover:text-muted-foreground"
             aria-label="Close dialog"
           >
             <X size={16} />
-          </button>
+          </Button>
         </div>
 
         {/* Body */}
         <div className="px-5 py-4">
           <div className="flex items-start gap-3 mb-4">
-            <AlertTriangle className="w-5 h-5 text-yellow-500 shrink-0 mt-0.5" />
+            <AlertTriangle className="w-5 h-5 text-warning shrink-0 mt-0.5" />
             <div className="min-w-0">
-              <p className="text-sm text-gray-700 dark:text-gray-300">
+              <p className="text-sm text-foreground text-muted-foreground">
                 A file named{" "}
-                <span className="font-medium text-gray-900 dark:text-gray-100">
+                <span className="font-medium text-foreground text-foreground">
                   {conflict.fileName}
                 </span>{" "}
                 already exists in the target directory.
               </p>
-              <p className="text-xs text-gray-500 dark:text-gray-400 mt-1 truncate" title={conflict.remotePath}>
+              <p className="text-xs text-muted-foreground text-muted-foreground mt-1 truncate" title={conflict.remotePath}>
                 {conflict.remotePath}
               </p>
               {(conflict.existingSize !== undefined || conflict.newSize !== undefined) && (
-                <div className="flex gap-4 mt-2 text-xs text-gray-500 dark:text-gray-400">
+                <div className="flex gap-4 mt-2 text-xs text-muted-foreground text-muted-foreground">
                   {conflict.existingSize !== undefined && (
-                    <span>Existing: {formatFileSize(conflict.existingSize)}</span>
+                    <span>
+                      Existing: {formatFileSize(conflict.existingSize)}
+                    </span>
                   )}
                   {conflict.newSize !== undefined && (
                     <span>New: {formatFileSize(conflict.newSize)}</span>
@@ -136,13 +139,12 @@ export function ConflictDialog({
           {/* Apply to all checkbox */}
           {remainingCount > 1 && (
             <label className="flex items-center gap-2 mb-4 cursor-pointer">
-              <input
-                type="checkbox"
+              <Checkbox
                 checked={applyToAll}
-                onChange={(e) => setApplyToAll(e.target.checked)}
-                className="w-4 h-4 rounded border-gray-300 dark:border-gray-600 text-blue-600 focus:ring-blue-500"
+                onCheckedChange={(checked) => setApplyToAll(checked === true)}
+                className="w-4 h-4 rounded border-border border-border text-info focus:ring-info"
               />
-              <span className="text-sm text-gray-600 dark:text-gray-400">
+              <span className="text-sm text-muted-foreground text-muted-foreground">
                 Apply to all ({remainingCount} remaining conflicts)
               </span>
             </label>
@@ -150,45 +152,51 @@ export function ConflictDialog({
         </div>
 
         {/* Actions */}
-        <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-gray-100 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50 rounded-b-xl">
-          <button
+        <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-border border-border bg-background bg-card/50 rounded-b-xl">
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={() => handleResolve("skip")}
             className={clsx(
               "px-3 py-1.5 rounded-md text-sm font-medium transition-colors",
-              "text-gray-700 dark:text-gray-300",
-              "hover:bg-gray-100 dark:hover:bg-gray-700",
-              "border border-gray-200 dark:border-gray-600",
+              "text-foreground text-muted-foreground",
+              "hover:bg-card hover:bg-card",
+              "border border-border border-border",
             )}
           >
             Skip
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={() => handleResolve("rename")}
             className={clsx(
               "px-3 py-1.5 rounded-md text-sm font-medium transition-colors",
-              "text-blue-700 dark:text-blue-300",
-              "hover:bg-blue-50 dark:hover:bg-blue-900/30",
-              "border border-blue-200 dark:border-blue-700",
+              "text-info text-info",
+              "hover:bg-info/10 hover:bg-info/30",
+              "border border-info border-info",
             )}
           >
             Rename
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="destructive"
+            size="compact"
             type="button"
             onClick={() => handleResolve("overwrite")}
             className={clsx(
               "px-3 py-1.5 rounded-md text-sm font-medium transition-colors",
-              "text-white bg-red-600 hover:bg-red-700",
-              "dark:bg-red-700 dark:hover:bg-red-600",
+              "text-destructive-foreground bg-destructive hover:bg-destructive",
+              "bg-destructive hover:bg-destructive",
             )}
           >
             Overwrite
-          </button>
+          </Button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 

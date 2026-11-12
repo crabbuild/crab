@@ -1,5 +1,8 @@
-import { useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { AlertOctagon, Loader2 } from "lucide-react";
+import { useState } from "react";
 
 interface Props {
   open: boolean;
@@ -40,24 +43,32 @@ export function ForcePushConfirmDialog({
   const matches = typed.trim() === remoteName;
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
-      onClick={onCancel}
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) {onCancel();
+        }
+      }}
     >
-      <div
-        className="w-[min(540px,92vw)] rounded-lg border border-gx-error/40 bg-gx-surface p-5 shadow-2xl"
+      <DialogContent
+        showCloseButton={false}
+        aria-describedby={undefined}
+        className="block gap-0 p-0 w-[min(540px,92vw)] rounded-lg border border-destructive/40 bg-card p-5 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="mb-3 flex items-center gap-2 text-base font-semibold text-gx-error">
+        <DialogTitle className="sr-only">
+          {"Force Push Confirm Dialog"}
+        </DialogTitle>
+        <div className="mb-3 flex items-center gap-2 text-base font-semibold text-destructive">
           <AlertOctagon size={16} />
           Force push?
         </div>
-        <p className="mb-3 text-sm text-gx-muted">
-          Force pushing rewrites history on the remote. Anyone else with this branch
-          checked out will see their work diverge.
+        <p className="mb-3 text-sm text-muted-foreground">
+          Force pushing rewrites history on the remote. Anyone else with this
+          branch checked out will see their work diverge.
         </p>
 
-        <div className="mb-4 space-y-1.5 rounded border border-gx-border bg-gx-bg-sub p-3 text-sm">
+        <div className="mb-4 space-y-1.5 rounded border border-border bg-background p-3 text-sm">
           <Row label="From">
             <code className="font-mono">{branch}</code>
           </Row>
@@ -71,31 +82,32 @@ export function ForcePushConfirmDialog({
           </Row>
         </div>
 
-        <label className="mb-3 block text-xs text-gx-muted">
-          Type <code className="font-mono text-gx-text">{remoteName}</code> to confirm:
-          <input
+        <label className="mb-3 block text-xs text-muted-foreground">
+          Type <code className="font-mono text-foreground">{remoteName}</code>{" "}
+          to confirm:
+          <Input
             type="text"
             value={typed}
             onChange={(e) => setTyped(e.target.value)}
             spellCheck={false}
             autoFocus
-            className="mt-1 w-full rounded border border-gx-border bg-gx-bg px-2 py-1.5 font-mono text-sm focus-visible:outline-none focus:border-gx-error"
+            className="mt-1 w-full rounded border border-border bg-background px-2 py-1.5 font-mono text-sm focus-visible:outline-none focus:border-destructive"
             placeholder={remoteName}
           />
         </label>
 
         <div className="flex justify-end gap-2">
-          <button type="button" className="btn" onClick={onCancel} disabled={busy}>
+          <Button variant="outline" type="button" onClick={onCancel} disabled={busy}>
             Cancel
-          </button>
-          <button
+          </Button>
+          <Button variant="outline"
             type="button"
             className={
-              "btn " +
-              (matches
-                ? "border-gx-error/60 bg-gx-error/10 text-gx-error hover:bg-gx-error/20"
-                : "")
-            }
+ " " +
+ (matches
+ ? "border-destructive/60 bg-destructive/10 text-destructive hover:bg-destructive/20"
+ : "")
+ }
             disabled={!matches || busy}
             onClick={onConfirm}
           >
@@ -106,17 +118,17 @@ export function ForcePushConfirmDialog({
             ) : (
               <>Force push to {remoteName}</>
             )}
-          </button>
+          </Button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="flex items-baseline gap-3">
-      <span className="w-[88px] shrink-0 text-[11px] uppercase tracking-wider text-gx-muted">
+      <span className="w-[88px] shrink-0 text-[11px] uppercase tracking-wider text-muted-foreground">
         {label}
       </span>
       <span className="flex-1 text-sm">{children}</span>

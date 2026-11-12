@@ -1,3 +1,6 @@
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 /**
  * TransferHistory — paginated list of past transfers with search, sort,
  * detail view, and aggregate statistics.
@@ -6,22 +9,22 @@
  * date, size, duration, speed. Includes aggregate stats by day/week/month.
  */
 
-import { useState, useCallback, useEffect } from "react";
+import clsx from "clsx";
 import {
-  Search,
+  ArrowDownCircle,
+  ArrowUpCircle,
+  ArrowUpDown,
+  CheckCircle2,
   ChevronLeft,
   ChevronRight,
-  ArrowUpDown,
   HardDrive,
-  Zap,
-  CheckCircle2,
-  XCircle,
   Inbox,
-  ArrowUpCircle,
-  ArrowDownCircle,
+  Search,
   X,
+  XCircle,
+  Zap,
 } from "lucide-react";
-import clsx from "clsx";
+import { useCallback, useEffect, useState } from "react";
 import type { TransferRecord, TransferStats } from "../../../electron/ssh-types";
 import { formatBytes, formatSpeed } from "./TransferProgressBar";
 
@@ -131,8 +134,8 @@ export function TransferHistory({ profileId }: TransferHistoryProps) {
   if (!isLoading && entries.length === 0 && !search) {
     return (
       <div className="flex flex-col items-center justify-center h-full py-12 px-4" role="region" aria-label="Transfer history">
-        <Inbox className="w-10 h-10 text-gray-300 dark:text-gray-600 mb-3" />
-        <p className="text-sm text-gray-500 dark:text-gray-400 text-center">
+        <Inbox className="w-10 h-10 text-muted-foreground text-muted-foreground mb-3" />
+        <p className="text-sm text-muted-foreground text-muted-foreground text-center">
           No transfers have been recorded yet.
         </p>
       </div>
@@ -142,32 +145,36 @@ export function TransferHistory({ profileId }: TransferHistoryProps) {
   return (
     <div className="flex flex-col h-full overflow-hidden" role="region" aria-label="Transfer history">
       {/* Stats summary */}
-      {stats && <StatsBar stats={stats} period={statsPeriod} onPeriodChange={setStatsPeriod} />}
+      {stats && (
+        <StatsBar stats={stats} period={statsPeriod} onPeriodChange={setStatsPeriod} />
+      )}
 
       {/* Search and sort controls */}
-      <div className="flex items-center gap-2 px-3 py-2 border-b border-gray-100 dark:border-gray-700">
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-border border-border">
         <div className="relative flex-1">
-          <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
-          <input
+          <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
+          <Input
             type="text"
             value={search}
             onChange={handleSearch}
             placeholder="Search by file name or host…"
-            className="w-full pl-7 pr-2 py-1.5 text-xs rounded-md border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-900 focus:outline-none focus:ring-1 focus:ring-blue-500"
+            className="w-full pl-7 pr-2 py-1.5 text-xs rounded-md border border-border border-border bg-background bg-background focus:outline-none focus:ring-1 focus:ring-info"
             aria-label="Search transfer history"
           />
         </div>
         <div className="flex items-center gap-1">
           {(Object.keys(SORT_LABELS) as SortField[]).map((field) => (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               key={field}
               type="button"
               onClick={() => handleSort(field)}
               className={clsx(
                 "px-2 py-1 text-xs rounded transition-colors",
                 sortBy === field
-                  ? "bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 font-medium"
-                  : "text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700",
+                  ? "bg-info/10 bg-info/30 text-info text-info font-medium"
+                  : "text-muted-foreground text-muted-foreground hover:bg-card hover:bg-card",
               )}
               aria-label={`Sort by ${SORT_LABELS[field]}`}
               title={`Sort by ${SORT_LABELS[field]} ${sortBy === field ? (sortDir === "asc" ? "↑" : "↓") : ""}`}
@@ -176,7 +183,7 @@ export function TransferHistory({ profileId }: TransferHistoryProps) {
               {sortBy === field && (
                 <ArrowUpDown size={10} className="inline ml-0.5" />
               )}
-            </button>
+            </Button>
           ))}
         </div>
       </div>
@@ -185,16 +192,18 @@ export function TransferHistory({ profileId }: TransferHistoryProps) {
       <div className="flex-1 overflow-y-auto">
         {isLoading ? (
           <div className="flex items-center justify-center py-8">
-            <span className="text-xs text-gray-400 dark:text-gray-500">Loading…</span>
+            <span className="text-xs text-muted-foreground text-muted-foreground">
+              Loading…
+            </span>
           </div>
         ) : entries.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-8">
-            <p className="text-xs text-gray-400 dark:text-gray-500">
+            <p className="text-xs text-muted-foreground text-muted-foreground">
               No results for &ldquo;{search}&rdquo;
             </p>
           </div>
         ) : (
-          <ul role="list" className="divide-y divide-gray-100 dark:divide-gray-800">
+          <ul role="list" className="divide-y divide-border divide-border">
             {entries.map((entry) => (
               <HistoryRow
                 key={entry.id}
@@ -207,29 +216,33 @@ export function TransferHistory({ profileId }: TransferHistoryProps) {
       </div>
 
       {/* Pagination */}
-      <div className="flex items-center justify-between px-3 py-2 border-t border-gray-100 dark:border-gray-700">
-        <span className="text-xs text-gray-500 dark:text-gray-400">
+      <div className="flex items-center justify-between px-3 py-2 border-t border-border border-border">
+        <span className="text-xs text-muted-foreground text-muted-foreground">
           {total} total · Page {page} of {totalPages}
         </span>
         <div className="flex items-center gap-1">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             disabled={page <= 1}
             onClick={() => setPage((p) => Math.max(1, p - 1))}
-            className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-30 disabled:cursor-not-allowed"
+            className="p-1 rounded hover:bg-card hover:bg-card disabled:opacity-30 disabled:cursor-not-allowed"
             aria-label="Previous page"
           >
             <ChevronLeft size={14} />
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             disabled={page >= totalPages}
             onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-            className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-30 disabled:cursor-not-allowed"
+            className="p-1 rounded hover:bg-card hover:bg-card disabled:opacity-30 disabled:cursor-not-allowed"
             aria-label="Next page"
           >
             <ChevronRight size={14} />
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -255,24 +268,28 @@ function StatsBar({ stats, period, onPeriodChange }: StatsBarProps) {
     : "0.0";
 
   return (
-    <div className="px-3 py-2 border-b border-gray-100 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50">
+    <div className="px-3 py-2 border-b border-border border-border bg-background bg-card/50">
       <div className="flex items-center justify-between mb-1.5">
-        <span className="text-xs font-semibold text-gray-600 dark:text-gray-300">Statistics</span>
+        <span className="text-xs font-semibold text-muted-foreground text-muted-foreground">
+          Statistics
+        </span>
         <div className="flex items-center gap-1">
           {(["day", "week", "month"] as StatsPeriod[]).map((p) => (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               key={p}
               type="button"
               onClick={() => onPeriodChange(p)}
               className={clsx(
                 "px-1.5 py-0.5 text-[10px] rounded capitalize",
                 period === p
-                  ? "bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 font-medium"
-                  : "text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300",
+                  ? "bg-info/10 bg-info/30 text-info text-info font-medium"
+                  : "text-muted-foreground text-muted-foreground hover:text-muted-foreground hover:text-muted-foreground",
               )}
             >
               {p}
-            </button>
+            </Button>
           ))}
         </div>
       </div>
@@ -281,7 +298,13 @@ function StatsBar({ stats, period, onPeriodChange }: StatsBarProps) {
         <StatItem icon={<HardDrive size={12} />} label="Downloaded" value={formatBytes(stats.totalDownloaded)} />
         <StatItem icon={<Zap size={12} />} label="Avg Speed" value={formatSpeed(stats.averageSpeed)} />
         <StatItem
-          icon={stats.failureCount > 0 ? <XCircle size={12} /> : <CheckCircle2 size={12} />}
+          icon={
+            stats.failureCount > 0 ? (
+              <XCircle size={12} />
+            ) : (
+              <CheckCircle2 size={12} />
+            )
+          }
           label="Success/Fail"
           value={`${stats.successCount}/${stats.failureCount} (${failureRate}%)`}
         />
@@ -293,11 +316,13 @@ function StatsBar({ stats, period, onPeriodChange }: StatsBarProps) {
 function StatItem({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
   return (
     <div className="flex flex-col gap-0.5">
-      <div className="flex items-center gap-1 text-gray-400 dark:text-gray-500">
+      <div className="flex items-center gap-1 text-muted-foreground text-muted-foreground">
         {icon}
         <span className="text-[10px]">{label}</span>
       </div>
-      <span className="text-xs font-medium text-gray-700 dark:text-gray-200 truncate">{value}</span>
+      <span className="text-xs font-medium text-foreground text-foreground truncate">
+        {value}
+      </span>
     </div>
   );
 }
@@ -316,7 +341,7 @@ function HistoryRow({ entry, onClick }: HistoryRowProps) {
 
   return (
     <li
-      className="flex items-center gap-2 px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-800/50 cursor-pointer"
+      className="flex items-center gap-2 px-3 py-2 hover:bg-background hover:bg-card/50 cursor-pointer"
       onClick={onClick}
       role="button"
       tabIndex={0}
@@ -326,25 +351,28 @@ function HistoryRow({ entry, onClick }: HistoryRowProps) {
         className={clsx(
           "w-4 h-4 shrink-0",
           entry.direction === "upload"
-            ? "text-blue-500 dark:text-blue-400"
-            : "text-green-500 dark:text-green-400",
+            ? "text-info text-info"
+            : "text-success text-success",
         )}
       />
       <div className="flex-1 min-w-0">
-        <p className="text-sm text-gray-800 dark:text-gray-200 truncate">{fileName}</p>
-        <p className="text-xs text-gray-400 dark:text-gray-500">
-          {date.toLocaleDateString()} {date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+        <p className="text-sm text-foreground text-foreground truncate">
+          {fileName}
+        </p>
+        <p className="text-xs text-muted-foreground text-muted-foreground">
+          {date.toLocaleDateString()}{" "}
+          {date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
         </p>
       </div>
-      <div className="flex items-center gap-3 text-xs text-gray-500 dark:text-gray-400 shrink-0">
+      <div className="flex items-center gap-3 text-xs text-muted-foreground text-muted-foreground shrink-0">
         <span>{formatBytes(entry.fileSize)}</span>
         <span>{formatSpeed(entry.averageSpeed)}</span>
         <span
           className={clsx(
             "px-1.5 py-0.5 rounded-full text-[10px] font-medium",
             entry.status === "completed"
-              ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300"
-              : "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300",
+              ? "bg-success/10 text-success bg-success/30 text-success"
+              : "bg-destructive/10 text-destructive bg-destructive/30 text-destructive",
           )}
         >
           {entry.status}
@@ -366,20 +394,35 @@ function HistoryDetail({ entry, onClose }: HistoryDetailProps) {
   const endTime = new Date(entry.timestamp + entry.duration);
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center" role="dialog" aria-modal="true">
-      <div className="absolute inset-0 bg-black/40 dark:bg-black/60" onClick={onClose} aria-hidden="true" />
-      <div className="relative z-10 w-full max-w-md mx-4 bg-white dark:bg-gray-800 rounded-xl shadow-xl border border-gray-200 dark:border-gray-700">
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) onClose();
+      }}
+    >
+      <DialogContent
+        aria-describedby={undefined}
+        showCloseButton={false}
+        className={
+          "w-full max-w-md mx-4 bg-background bg-card rounded-xl shadow-xl border border-border border-border" +
+          " p-0 gap-0"
+        }
+      >
         {/* Header */}
-        <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100 dark:border-gray-700">
-          <h3 className="text-sm font-semibold text-gray-800 dark:text-gray-100">Transfer Details</h3>
-          <button
+        <div className="flex items-center justify-between px-5 py-3 border-b border-border border-border">
+          <DialogTitle className="text-sm font-semibold text-foreground text-foreground">
+            Transfer Details
+          </DialogTitle>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={onClose}
-            className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-400"
+            className="p-1 rounded hover:bg-card hover:bg-card text-muted-foreground"
             aria-label="Close"
           >
             <X size={16} />
-          </button>
+          </Button>
         </div>
 
         {/* Body */}
@@ -402,24 +445,24 @@ function HistoryDetail({ entry, onClose }: HistoryDetailProps) {
           {entry.deltaSavingsPercent !== undefined && (
             <DetailRow label="Delta Savings" value={`${entry.deltaSavingsPercent.toFixed(1)}%`} />
           )}
-          {entry.error && (
-            <DetailRow label="Error" value={entry.error} error />
-          )}
+          {entry.error && <DetailRow label="Error" value={entry.error} error />}
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
 function DetailRow({ label, value, mono, error }: { label: string; value: string; mono?: boolean; error?: boolean }) {
   return (
     <div className="flex items-start justify-between gap-4">
-      <span className="text-xs text-gray-500 dark:text-gray-400 shrink-0">{label}</span>
+      <span className="text-xs text-muted-foreground text-muted-foreground shrink-0">
+        {label}
+      </span>
       <span
         className={clsx(
           "text-xs text-right truncate max-w-[60%]",
           mono && "font-mono",
-          error ? "text-red-600 dark:text-red-400" : "text-gray-800 dark:text-gray-200",
+          error ? "text-destructive text-destructive" : "text-foreground text-foreground",
         )}
         title={value}
       >

@@ -1,3 +1,5 @@
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 /**
  * Enhanced terminal search bar with:
  * - Find and replace (Task 26.3)
@@ -5,20 +7,20 @@
  * - Semantic output filtering (Task 27.3)
  */
 
-import { useState } from "react";
+import clsx from "clsx";
 import {
-  Search,
-  ChevronUp,
-  ChevronDown,
-  X,
-  Replace,
-  Clock,
   AlertCircle,
   AlertTriangle,
+  ChevronDown,
+  ChevronUp,
+  Clock,
   FileText,
   Link,
+  Replace,
+  Search,
+  X,
 } from "lucide-react";
-import clsx from "clsx";
+import { useState } from "react";
 import type { SemanticFilter } from "../lib/terminal-ux-enhancements";
 
 interface Props {
@@ -74,11 +76,11 @@ export function TerminalSearchEnhanced({
   const [showTimeFilter, setShowTimeFilter] = useState(false);
 
   return (
-    <div className="shrink-0 border-b border-gx-border bg-gx-surface px-3 py-1.5">
+    <div className="shrink-0 border-b border-border bg-card px-3 py-1.5">
       {/* Main search row */}
       <div className="flex items-center gap-2">
-        <Search size={12} className="text-gx-muted shrink-0" />
-        <input
+        <Search size={12} className="text-muted-foreground shrink-0" />
+        <Input
           ref={inputRef}
           type="text"
           value={query}
@@ -88,81 +90,98 @@ export function TerminalSearchEnhanced({
             if (e.key === "Escape") onClose();
           }}
           placeholder="Search terminal…"
-          className="flex-1 bg-transparent text-[12px] text-gx-text placeholder:text-gx-muted outline-none"
+          className="flex-1 bg-transparent text-[12px] text-foreground placeholder:text-muted-foreground outline-none"
           autoFocus
         />
 
         {/* Toggle buttons */}
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={() => onCaseSensitiveChange(!caseSensitive)}
           className={clsx(
             "rounded px-1.5 py-0.5 text-[10px] font-medium",
-            caseSensitive ? "bg-gx-accent/20 text-gx-accent" : "text-gx-muted hover:text-gx-text",
+            caseSensitive ? "bg-primary/20 text-primary" : "text-muted-foreground hover:text-foreground",
           )}
           title="Match case"
         >
           Aa
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={() => onRegexChange(!regex)}
           className={clsx(
             "rounded px-1.5 py-0.5 text-[10px] font-medium",
-            regex ? "bg-gx-accent/20 text-gx-accent" : "text-gx-muted hover:text-gx-text",
+            regex ? "bg-primary/20 text-primary" : "text-muted-foreground hover:text-foreground",
           )}
           title="Use regex"
         >
           .*
-        </button>
+        </Button>
 
         {/* Replace toggle */}
         {onReplace && (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={() => setShowReplace(!showReplace)}
             className={clsx(
               "rounded px-1 py-0.5",
-              showReplace ? "text-gx-accent" : "text-gx-muted hover:text-gx-text",
+              showReplace ? "text-primary" : "text-muted-foreground hover:text-foreground",
             )}
             title="Find and Replace"
           >
             <Replace size={12} />
-          </button>
+          </Button>
         )}
 
         {/* Time filter toggle */}
         {onTimeFilter && (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={() => setShowTimeFilter(!showTimeFilter)}
             className={clsx(
               "rounded px-1 py-0.5",
-              showTimeFilter || activeTimeFilter ? "text-gx-accent" : "text-gx-muted hover:text-gx-text",
+              showTimeFilter || activeTimeFilter ? "text-primary" : "text-muted-foreground hover:text-foreground",
             )}
             title="Filter by time"
           >
             <Clock size={12} />
-          </button>
+          </Button>
         )}
 
         {/* Navigation */}
-        <button type="button" onClick={onPrev} className="text-gx-muted hover:text-gx-text" title="Previous (Shift+Enter)">
+        <Button
+          variant="ghost"
+          size="compact"
+          type="button" onClick={onPrev} className="text-muted-foreground hover:text-foreground" title="Previous (Shift+Enter)">
           <ChevronUp size={14} />
-        </button>
-        <button type="button" onClick={onNext} className="text-gx-muted hover:text-gx-text" title="Next (Enter)">
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
+          type="button" onClick={onNext} className="text-muted-foreground hover:text-foreground" title="Next (Enter)">
           <ChevronDown size={14} />
-        </button>
-        <button type="button" onClick={onClose} className="text-gx-muted hover:text-gx-text" title="Close (Esc)">
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
+          type="button" onClick={onClose} className="text-muted-foreground hover:text-foreground" title="Close (Esc)">
           <X size={14} />
-        </button>
+        </Button>
       </div>
 
       {/* Replace row (Task 26.3) */}
       {showReplace && onReplace && (
         <div className="mt-1.5 flex items-center gap-2 pl-5">
-          <Replace size={10} className="text-gx-muted shrink-0" />
-          <input
+          <Replace size={10} className="text-muted-foreground shrink-0" />
+          <Input
             type="text"
             value={replacement}
             onChange={(e) => setReplacement(e.target.value)}
@@ -171,25 +190,29 @@ export function TerminalSearchEnhanced({
               if (e.key === "Escape") setShowReplace(false);
             }}
             placeholder="Replace with…"
-            className="flex-1 bg-transparent text-[12px] text-gx-text placeholder:text-gx-muted outline-none"
+            className="flex-1 bg-transparent text-[12px] text-foreground placeholder:text-muted-foreground outline-none"
           />
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={() => onReplace(replacement)}
-            className="rounded px-2 py-0.5 text-[10px] text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover"
+            className="rounded px-2 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent"
             title="Replace next"
           >
             Replace
-          </button>
+          </Button>
           {onReplaceAll && (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={() => onReplaceAll(replacement)}
-              className="rounded px-2 py-0.5 text-[10px] text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover"
+              className="rounded px-2 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent"
               title="Replace all"
             >
               All
-            </button>
+            </Button>
           )}
         </div>
       )}
@@ -197,31 +220,35 @@ export function TerminalSearchEnhanced({
       {/* Time filter row (Task 26.6) */}
       {showTimeFilter && onTimeFilter && (
         <div className="mt-1.5 flex items-center gap-1.5 pl-5">
-          <span className="text-[10px] text-gx-muted">Show last:</span>
+          <span className="text-[10px] text-muted-foreground">Show last:</span>
           {TIME_PRESETS.map((preset) => (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               key={preset.minutes}
               type="button"
               onClick={() => onTimeFilter(activeTimeFilter === preset.minutes ? null : preset.minutes)}
               className={clsx(
                 "rounded px-1.5 py-0.5 text-[10px]",
                 activeTimeFilter === preset.minutes
-                  ? "bg-gx-accent/20 text-gx-accent"
-                  : "text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover",
+                  ? "bg-primary/20 text-primary"
+                  : "text-muted-foreground hover:text-foreground hover:bg-accent",
               )}
             >
               {preset.label}
-            </button>
+            </Button>
           ))}
           {activeTimeFilter && (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={() => onTimeFilter(null)}
-              className="rounded px-1.5 py-0.5 text-[9px] text-gx-muted hover:text-gx-error"
+              className="rounded px-1.5 py-0.5 text-[9px] text-muted-foreground hover:text-destructive"
               title="Clear time filter"
             >
               ✕
-            </button>
+            </Button>
           )}
         </div>
       )}
@@ -229,34 +256,34 @@ export function TerminalSearchEnhanced({
       {/* Semantic filter buttons (Task 27.3) */}
       {onSemanticFilter && (
         <div className="mt-1.5 flex items-center gap-1.5 pl-5">
-          <span className="text-[10px] text-gx-muted">Filter:</span>
+          <span className="text-[10px] text-muted-foreground">Filter:</span>
           <FilterButton
             active={activeSemanticFilter === "errors"}
             onClick={() => onSemanticFilter(activeSemanticFilter === "errors" ? "all" : "errors")}
             icon={<AlertCircle size={10} />}
             label="Errors"
-            color="text-red-400"
+            color="text-destructive"
           />
           <FilterButton
             active={activeSemanticFilter === "warnings"}
             onClick={() => onSemanticFilter(activeSemanticFilter === "warnings" ? "all" : "warnings")}
             icon={<AlertTriangle size={10} />}
             label="Warnings"
-            color="text-yellow-400"
+            color="text-warning"
           />
           <FilterButton
             active={activeSemanticFilter === "paths"}
             onClick={() => onSemanticFilter(activeSemanticFilter === "paths" ? "all" : "paths")}
             icon={<FileText size={10} />}
             label="Paths"
-            color="text-blue-400"
+            color="text-info"
           />
           <FilterButton
             active={activeSemanticFilter === "urls"}
             onClick={() => onSemanticFilter(activeSemanticFilter === "urls" ? "all" : "urls")}
             icon={<Link size={10} />}
             label="URLs"
-            color="text-cyan-400"
+            color="text-info"
           />
         </div>
       )}
@@ -278,19 +305,21 @@ function FilterButton({
   color: string;
 }) {
   return (
-    <button
+    <Button
+      variant="ghost"
+      size="compact"
       type="button"
       onClick={onClick}
       className={clsx(
         "flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] transition",
         active
-          ? `bg-gx-surface-hover ${color}`
-          : "text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover",
+          ? `bg-accent ${color}`
+          : "text-muted-foreground hover:text-foreground hover:bg-accent",
       )}
       title={label}
     >
       {icon}
       <span>{label}</span>
-    </button>
+    </Button>
   );
 }

@@ -1,22 +1,24 @@
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 /**
  * Process Manager Panel — displays remote processes with filtering,
  * signal controls, memory warning highlights, and connection error state.
  */
 
-import { useState, useMemo, useCallback } from "react";
+import clsx from "clsx";
 import {
   Activity,
+  AlertTriangle,
+  Clock,
   Cpu,
   MemoryStick,
-  User,
-  Clock,
-  AlertTriangle,
-  XCircle,
-  Skull,
-  WifiOff,
   Search,
+  Skull,
+  User,
+  WifiOff,
+  XCircle,
 } from "lucide-react";
-import clsx from "clsx";
+import { useCallback, useMemo, useState } from "react";
 import type { RemoteProcess } from "../../../electron/ssh-types";
 
 // ── Types ────────────────────────────────────────────────────────
@@ -111,11 +113,11 @@ export function ProcessManagerPanel({
         role="region"
         aria-label="Process Manager"
       >
-        <WifiOff className="w-10 h-10 text-red-300 dark:text-red-600 mb-3" />
-        <p className="text-sm text-red-600 dark:text-red-400 text-center font-medium">
+        <WifiOff className="w-10 h-10 text-destructive text-destructive mb-3" />
+        <p className="text-sm text-destructive text-destructive text-center font-medium">
           Connection Error
         </p>
-        <p className="text-xs text-gray-500 dark:text-gray-400 text-center mt-1">
+        <p className="text-xs text-muted-foreground text-muted-foreground text-center mt-1">
           {errorMessage || "Unable to reach the remote agent. Will retry on next refresh."}
         </p>
       </div>
@@ -125,60 +127,62 @@ export function ProcessManagerPanel({
   return (
     <div className="flex flex-col h-full overflow-hidden" role="region" aria-label="Process Manager">
       {/* Header */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-gray-100 dark:border-gray-700">
-        <h3 className="text-xs font-semibold text-gray-600 dark:text-gray-300 flex items-center gap-1.5">
+      <div className="flex items-center justify-between px-3 py-2 border-b border-border border-border">
+        <h3 className="text-xs font-semibold text-muted-foreground text-muted-foreground flex items-center gap-1.5">
           <Activity className="w-4 h-4" />
           Processes ({filteredProcesses.length})
         </h3>
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           onClick={() => setShowFilters(!showFilters)}
           className={clsx(
             "flex items-center gap-1 px-2 py-1 text-xs rounded",
             showFilters
-              ? "text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20"
-              : "text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700",
+              ? "text-info text-info bg-info/10 bg-info/20"
+              : "text-muted-foreground text-muted-foreground hover:bg-card hover:bg-card",
           )}
           aria-label="Toggle filters"
         >
           <Search className="w-3 h-3" />
           Filter
-        </button>
+        </Button>
       </div>
 
       {/* Filters */}
       {showFilters && (
-        <div className="px-3 py-2 border-b border-gray-100 dark:border-gray-700 grid grid-cols-2 gap-2">
+        <div className="px-3 py-2 border-b border-border border-border grid grid-cols-2 gap-2">
           <div>
-            <label htmlFor="proc-filter-name" className="text-[10px] text-gray-500 dark:text-gray-400">
+            <label htmlFor="proc-filter-name" className="text-[10px] text-muted-foreground text-muted-foreground">
               Name
             </label>
-            <input
+            <Input
               id="proc-filter-name"
               type="text"
               value={filters.name}
               onChange={(e) => updateFilter("name", e.target.value)}
               placeholder="Filter by name"
-              className="w-full px-2 py-0.5 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800"
+              className="w-full px-2 py-0.5 text-xs border border-border border-border rounded bg-background bg-card"
             />
           </div>
           <div>
-            <label htmlFor="proc-filter-user" className="text-[10px] text-gray-500 dark:text-gray-400">
+            <label htmlFor="proc-filter-user" className="text-[10px] text-muted-foreground text-muted-foreground">
               User
             </label>
-            <input
+            <Input
               id="proc-filter-user"
               type="text"
               value={filters.user}
               onChange={(e) => updateFilter("user", e.target.value)}
               placeholder="Filter by user"
-              className="w-full px-2 py-0.5 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800"
+              className="w-full px-2 py-0.5 text-xs border border-border border-border rounded bg-background bg-card"
             />
           </div>
           <div>
-            <label htmlFor="proc-filter-cpu" className="text-[10px] text-gray-500 dark:text-gray-400">
+            <label htmlFor="proc-filter-cpu" className="text-[10px] text-muted-foreground text-muted-foreground">
               Min CPU%
             </label>
-            <input
+            <Input
               id="proc-filter-cpu"
               type="number"
               min={0}
@@ -187,14 +191,14 @@ export function ProcessManagerPanel({
               value={filters.minCpu}
               onChange={(e) => updateFilter("minCpu", e.target.value)}
               placeholder="0"
-              className="w-full px-2 py-0.5 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800"
+              className="w-full px-2 py-0.5 text-xs border border-border border-border rounded bg-background bg-card"
             />
           </div>
           <div>
-            <label htmlFor="proc-filter-mem" className="text-[10px] text-gray-500 dark:text-gray-400">
+            <label htmlFor="proc-filter-mem" className="text-[10px] text-muted-foreground text-muted-foreground">
               Min Memory%
             </label>
-            <input
+            <Input
               id="proc-filter-mem"
               type="number"
               min={0}
@@ -203,7 +207,7 @@ export function ProcessManagerPanel({
               value={filters.minMemory}
               onChange={(e) => updateFilter("minMemory", e.target.value)}
               placeholder="0"
-              className="w-full px-2 py-0.5 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800"
+              className="w-full px-2 py-0.5 text-xs border border-border border-border rounded bg-background bg-card"
             />
           </div>
         </div>
@@ -212,11 +216,11 @@ export function ProcessManagerPanel({
       {/* Process list */}
       <div className="flex-1 overflow-y-auto">
         {filteredProcesses.length === 0 ? (
-          <p className="text-xs text-gray-500 dark:text-gray-400 italic text-center py-8">
+          <p className="text-xs text-muted-foreground text-muted-foreground italic text-center py-8">
             {processes.length === 0 ? "No processes found." : "No processes match the current filters."}
           </p>
         ) : (
-          <ul role="list" className="divide-y divide-gray-100 dark:divide-gray-800">
+          <ul role="list" className="divide-y divide-border divide-border">
             {filteredProcesses.map((proc) => (
               <ProcessRow key={proc.pid} process={proc} onSignal={onSignal} />
             ))}
@@ -242,22 +246,22 @@ function ProcessRow({
     <li
       className={clsx(
         "flex items-center justify-between px-3 py-2 group",
-        isHighMemory && "bg-red-50 dark:bg-red-900/10",
+        isHighMemory && "bg-destructive/10 bg-destructive/10",
       )}
     >
       <div className="flex-1 min-w-0 space-y-0.5">
         <div className="flex items-center gap-2">
           {isHighMemory && (
-            <AlertTriangle className="w-3.5 h-3.5 text-red-500 shrink-0" aria-label="High memory usage warning" />
+            <AlertTriangle className="w-3.5 h-3.5 text-destructive shrink-0" aria-label="High memory usage warning" />
           )}
-          <span className="text-sm font-medium text-gray-800 dark:text-gray-200 truncate">
+          <span className="text-sm font-medium text-foreground text-foreground truncate">
             {proc.name}
           </span>
-          <span className="text-[10px] text-gray-400 dark:text-gray-500">
+          <span className="text-[10px] text-muted-foreground text-muted-foreground">
             PID {proc.pid}
           </span>
         </div>
-        <div className="flex items-center gap-3 text-[10px] text-gray-500 dark:text-gray-400">
+        <div className="flex items-center gap-3 text-[10px] text-muted-foreground text-muted-foreground">
           <span className="flex items-center gap-0.5" title="CPU usage">
             <Cpu className="w-3 h-3" />
             {formatCpuPercent(proc.cpuPercent)}
@@ -265,7 +269,7 @@ function ProcessRow({
           <span
             className={clsx(
               "flex items-center gap-0.5",
-              isHighMemory && "text-red-600 dark:text-red-400 font-medium",
+              isHighMemory && "text-destructive text-destructive font-medium",
             )}
             title="Memory usage"
           >
@@ -285,22 +289,26 @@ function ProcessRow({
 
       {/* Signal buttons */}
       <div className="flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           onClick={() => onSignal(proc.pid, "SIGTERM")}
-          className="p-1 text-yellow-600 dark:text-yellow-400 hover:bg-yellow-50 dark:hover:bg-yellow-900/20 rounded"
+          className="p-1 text-warning text-warning hover:bg-warning/10 hover:bg-warning/20 rounded"
           aria-label={`Send SIGTERM to ${proc.name}`}
           title="SIGTERM (graceful)"
         >
           <XCircle className="w-3.5 h-3.5" />
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           onClick={() => onSignal(proc.pid, "SIGKILL")}
-          className="p-1 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 rounded"
+          className="p-1 text-destructive text-destructive hover:bg-destructive/10 hover:bg-destructive/20 rounded"
           aria-label={`Send SIGKILL to ${proc.name}`}
           title="SIGKILL (force)"
         >
           <Skull className="w-3.5 h-3.5" />
-        </button>
+        </Button>
       </div>
     </li>
   );

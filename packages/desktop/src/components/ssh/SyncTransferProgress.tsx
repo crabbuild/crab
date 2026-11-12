@@ -159,27 +159,27 @@ export function SyncTransferProgress() {
 
   return (
     <div
-      className="flex flex-col gap-1 rounded-md border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/50 px-3 py-2"
+      className="flex flex-col gap-1 rounded-md border border-border border-border bg-background bg-card/50 px-3 py-2"
       role="region"
       aria-label="Sync transfer progress"
     >
       {/* Header row */}
-      <div className="flex items-center gap-1.5 text-xs text-zinc-600 dark:text-zinc-300">
+      <div className="flex items-center gap-1.5 text-xs text-muted-foreground text-muted-foreground">
         <ArrowUpDown className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
         <span className="font-medium truncate" title={current.file}>
           {getFileName(current.file)}
         </span>
         {transfers.size > 1 && (
-          <span className="ml-auto shrink-0 text-[11px] text-zinc-500 dark:text-zinc-400">
+          <span className="ml-auto shrink-0 text-[11px] text-muted-foreground text-muted-foreground">
             +{transfers.size - 1} more
           </span>
         )}
       </div>
 
       {/* Progress bar */}
-      <div className="relative h-1.5 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
+      <div className="relative h-1.5 w-full overflow-hidden rounded-full bg-card bg-card">
         <div
-          className="absolute inset-y-0 left-0 rounded-full bg-blue-500 transition-[width] duration-300"
+          className="absolute inset-y-0 left-0 rounded-full bg-info transition-[width] duration-300"
           style={{ width: `${aggregatePercent}%` }}
           role="progressbar"
           aria-valuenow={aggregatePercent}
@@ -190,7 +190,7 @@ export function SyncTransferProgress() {
       </div>
 
       {/* Stats row */}
-      <div className="flex items-center gap-2 text-[11px] text-zinc-500 dark:text-zinc-400">
+      <div className="flex items-center gap-2 text-[11px] text-muted-foreground text-muted-foreground">
         <span>
           {formatBytes(totalBytesTransferred)} / {formatBytes(totalBytesAll)}
         </span>
@@ -199,7 +199,7 @@ export function SyncTransferProgress() {
         {avgDeltaSavings != null && avgDeltaSavings > 0 && (
           <>
             <span>·</span>
-            <span className="inline-flex items-center gap-0.5 text-green-600 dark:text-green-400">
+            <span className="inline-flex items-center gap-0.5 text-success text-success">
               <Zap className="h-3 w-3" aria-hidden="true" />
               {Math.round(avgDeltaSavings)}% saved
             </span>

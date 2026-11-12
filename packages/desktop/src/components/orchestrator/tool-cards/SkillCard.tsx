@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { useCardExpanded } from "./useCardExpanded";
 /**
  * Specialized renderer for Skill and ToolSearch tool calls.
@@ -6,11 +7,10 @@ import { useCardExpanded } from "./useCardExpanded";
  * with a distinctive "plugin" visual style.
  */
 
-
 import clsx from "clsx";
 import { ChevronDown, ChevronRight, Puzzle, SearchCode } from "lucide-react";
-import type { ToolCardRendererProps } from "./types";
 import { CollapsedCardLine } from "./CollapsedCardLine";
+import type { ToolCardRendererProps } from "./types";
 
 // ── Component ───────────────────────────────────────────────────────
 
@@ -34,9 +34,9 @@ export function SkillCard({ event, defaultExpanded = false, collapsed: collapsed
   if (collapsed) {
     const defaultSummary = (
       <>
-        <Icon size={11} className="shrink-0 text-gx-muted" />
-        <span className="font-medium text-gx-text/80">{label}</span>
-        <code className="rounded bg-gx-accent/10 px-1 py-0.5 text-[9px] text-gx-accent font-mono truncate">
+        <Icon size={11} className="shrink-0 text-muted-foreground" />
+        <span className="font-medium text-foreground/80">{label}</span>
+        <code className="rounded bg-primary/10 px-1 py-0.5 text-[9px] text-primary font-mono truncate">
           {skillName || "unnamed"}
         </code>
       </>
@@ -51,43 +51,52 @@ export function SkillCard({ event, defaultExpanded = false, collapsed: collapsed
   }
 
   return (
-    <div className="rounded-md border border-gx-border/40 overflow-hidden">
-      <button
+    <div className="rounded-md border border-border/40 overflow-hidden">
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={() => hasOutput && setExpanded(!expanded)}
         className={clsx(
           "flex w-full items-center gap-2 px-2.5 py-1.5 text-[10px] text-left transition",
-          hasOutput && "hover:bg-gx-surface-hover cursor-pointer",
+          hasOutput && "hover:bg-accent cursor-pointer",
           !hasOutput && "cursor-default",
         )}
       >
-        <Icon size={11} className="text-gx-muted shrink-0" />
-        <span className="shrink-0 font-medium text-gx-muted">{label}</span>
+        <Icon size={11} className="text-muted-foreground shrink-0" />
+        <span className="shrink-0 font-medium text-muted-foreground">
+          {label}
+        </span>
 
         {/* Skill name */}
         <span className="min-w-0 flex-1 flex items-center gap-1.5 truncate">
-          <code className="rounded bg-gx-accent/10 px-1 py-0.5 text-[9px] text-gx-accent font-mono truncate">
+          <code className="rounded bg-primary/10 px-1 py-0.5 text-[9px] text-primary font-mono truncate">
             {skillName || "unnamed"}
           </code>
           {description && description.length <= 60 && (
-            <span className="text-[9px] text-gx-muted/60 truncate">{description}</span>
+            <span className="text-[9px] text-muted-foreground/60 truncate">
+              {description}
+            </span>
           )}
         </span>
 
-        {hasOutput && (
-          expanded
-            ? <ChevronDown size={10} className="shrink-0 text-gx-muted/60" />
-            : <ChevronRight size={10} className="shrink-0 text-gx-muted/60" />
-        )}
-      </button>
+        {hasOutput &&
+          (expanded ? (
+            <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
+          ) : (
+            <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
+          ))}
+      </Button>
 
       {expanded && hasOutput && (
-        <div className="border-t border-gx-border/30 max-h-[200px] overflow-auto px-2.5 py-2">
+        <div className="border-t border-border/30 max-h-[200px] overflow-auto px-2.5 py-2">
           {description.length > 60 && (
-            <p className="text-[10px] text-gx-text/70 leading-relaxed mb-1.5">{description}</p>
+            <p className="text-[10px] text-foreground/70 leading-relaxed mb-1.5">
+              {description}
+            </p>
           )}
           {output && (
-            <pre className="font-mono text-[10px] leading-[1.5] text-gx-text/60 whitespace-pre-wrap">
+            <pre className="font-mono text-[10px] leading-[1.5] text-foreground/60 whitespace-pre-wrap">
               {output.length > 3000 ? output.slice(0, 3000) + "\n… (truncated)" : output}
             </pre>
           )}

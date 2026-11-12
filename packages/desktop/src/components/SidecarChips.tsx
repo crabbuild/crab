@@ -1,5 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { SIDECAR_DEFS, SidecarDef } from "@/lib/sidecar-defs";
+import { sidecar, SidecarId, SidecarState } from "@/lib/sidecar-ipc";
 import {
+  AlertCircle,
   Circle,
   Database,
   ExternalLink,
@@ -9,10 +12,8 @@ import {
   NotebookPen,
   Play,
   Square,
-  AlertCircle,
 } from "lucide-react";
-import { sidecar, SidecarState, SidecarId } from "@/lib/sidecar-ipc";
-import { SIDECAR_DEFS, SidecarDef } from "@/lib/sidecar-defs";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 // ── Icon lookup ──────────────────────────────────────────────────────
 
@@ -91,33 +92,37 @@ function SidecarChip({ state, onRefresh }: { state: SidecarState; onRefresh: () 
   };
 
   return (
-    <span className="inline-flex items-center gap-1.5 rounded-full border border-gx-border bg-gx-bg-sub px-2 py-[2px] text-[10px]">
+    <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-background px-2 py-[2px] text-[10px]">
       <StatusDot status={state.status} />
-      <span className="text-gx-text">{label}</span>
+      <span className="text-foreground">{label}</span>
       {state.status === "running" && (
         <>
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={handleOpen}
-            className="ml-0.5 text-gx-accent hover:text-gx-text"
+            className="ml-0.5 text-primary hover:text-foreground"
             title={`Open ${label}`}
             aria-label={`Open ${label} in browser`}
           >
             <ExternalLink size={10} />
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={handleStop}
-            className="text-gx-muted hover:text-gx-error"
+            className="text-muted-foreground hover:text-destructive"
             title={`Stop ${label}`}
             aria-label={`Stop ${label}`}
           >
             <Square size={9} />
-          </button>
+          </Button>
         </>
       )}
       {state.status === "error" && state.error && (
-        <span className="text-gx-error" title={state.error}>
+        <span className="text-destructive" title={state.error}>
           <AlertCircle size={10} />
         </span>
       )}
@@ -128,13 +133,15 @@ function SidecarChip({ state, onRefresh }: { state: SidecarState; onRefresh: () 
 function StatusDot({ status }: { status: SidecarState["status"] }) {
   switch (status) {
     case "running":
-      return <Circle size={6} className="fill-gx-success text-gx-success" />;
+      return <Circle size={6} className="fill-success text-success" />;
     case "starting":
-      return <Loader2 size={8} className="animate-spin text-gx-info" />;
+      return <Loader2 size={8} className="animate-spin text-info" />;
     case "error":
-      return <Circle size={6} className="fill-gx-error text-gx-error" />;
+      return <Circle size={6} className="fill-destructive text-destructive" />;
     default:
-      return <Circle size={6} className="fill-gx-muted/60 text-gx-muted/60" />;
+      return (
+        <Circle size={6} className="fill-muted-foreground/60 text-muted-foreground/60" />
+      );
   }
 }
 
@@ -230,17 +237,19 @@ function SidecarCard({
   };
 
   return (
-    <div className="rounded-lg border border-gx-border bg-gx-surface p-4">
+    <div className="rounded-lg border border-border bg-card p-4">
       <div className="flex items-start gap-3">
-        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-gx-bg-sub">
-          <SidecarIcon icon={def.icon} size={16} className="text-gx-accent" />
+        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-background">
+          <SidecarIcon icon={def.icon} size={16} className="text-primary" />
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <span className="text-sm font-medium text-gx-text">{def.label}</span>
+            <span className="text-sm font-medium text-foreground">
+              {def.label}
+            </span>
             <StatusBadge status={status} />
           </div>
-          <p className="mt-0.5 text-[11px] leading-relaxed text-gx-muted">
+          <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
             {def.description}
           </p>
         </div>
@@ -248,16 +257,16 @@ function SidecarCard({
 
       {/* URL display when running */}
       {status === "running" && state?.url && (
-        <div className="mt-3 truncate rounded bg-gx-bg-sub px-2 py-1 font-mono text-[10px] text-gx-muted">
+        <div className="mt-3 truncate rounded bg-background px-2 py-1 font-mono text-[10px] text-muted-foreground">
           {state.url}
         </div>
       )}
 
       {/* Error hint */}
       {status === "error" && (
-        <div className="mt-3 rounded border border-gx-error/30 bg-gx-error/5 px-2 py-1.5 text-[11px] text-gx-error">
+        <div className="mt-3 rounded border border-destructive/30 bg-destructive/5 px-2 py-1.5 text-[11px] text-destructive">
           {state?.error ?? "Failed to start."}
-          <span className="mt-1 block text-[10px] text-gx-muted">
+          <span className="mt-1 block text-[10px] text-muted-foreground">
             Install: <code className="font-mono">{def.installHint}</code>
           </span>
         </div>
@@ -266,11 +275,13 @@ function SidecarCard({
       {/* Actions */}
       <div className="mt-3 flex items-center gap-2">
         {status === "stopped" || status === "error" ? (
-          <button
+          <Button
+            variant="default"
+            size="compact"
             type="button"
             onClick={handleStart}
             disabled={starting}
-            className="inline-flex items-center gap-1.5 rounded-md bg-gx-accent px-3 py-1 text-[11px] font-medium text-white transition hover:bg-gx-accent/80 disabled:opacity-50"
+            className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1 text-[11px] font-medium text-primary-foreground transition hover:bg-primary/80 disabled:opacity-50"
             aria-label={`Start ${def.label}`}
           >
             {starting ? (
@@ -279,31 +290,35 @@ function SidecarCard({
               <Play size={11} />
             )}
             Start
-          </button>
+          </Button>
         ) : status === "starting" ? (
-          <span className="inline-flex items-center gap-1.5 text-[11px] text-gx-info">
+          <span className="inline-flex items-center gap-1.5 text-[11px] text-info">
             <Loader2 size={11} className="animate-spin" /> Starting…
           </span>
         ) : null}
 
         {status === "running" && (
           <>
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={handleOpen}
-              className="inline-flex items-center gap-1.5 rounded-md border border-gx-border px-3 py-1 text-[11px] text-gx-text transition hover:bg-gx-surface-hover"
+              className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1 text-[11px] text-foreground transition hover:bg-accent"
               aria-label={`Open ${def.label} in browser`}
             >
               <ExternalLink size={11} /> Open
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={handleStop}
-              className="inline-flex items-center gap-1.5 rounded-md border border-gx-error/40 px-3 py-1 text-[11px] text-gx-error transition hover:bg-gx-error/10"
+              className="inline-flex items-center gap-1.5 rounded-md border border-destructive/40 px-3 py-1 text-[11px] text-destructive transition hover:bg-destructive/10"
               aria-label={`Stop ${def.label}`}
             >
               <Square size={11} /> Stop
-            </button>
+            </Button>
           </>
         )}
       </div>
@@ -315,19 +330,19 @@ function StatusBadge({ status }: { status: SidecarState["status"] }) {
   switch (status) {
     case "running":
       return (
-        <span className="inline-flex items-center gap-1 rounded-full bg-gx-success/10 px-1.5 py-[1px] text-[9px] text-gx-success">
+        <span className="inline-flex items-center gap-1 rounded-full bg-success/10 px-1.5 py-[1px] text-[9px] text-success">
           <Circle size={5} className="fill-current" /> Running
         </span>
       );
     case "starting":
       return (
-        <span className="inline-flex items-center gap-1 rounded-full bg-gx-info/10 px-1.5 py-[1px] text-[9px] text-gx-info">
+        <span className="inline-flex items-center gap-1 rounded-full bg-info/10 px-1.5 py-[1px] text-[9px] text-info">
           Starting
         </span>
       );
     case "error":
       return (
-        <span className="inline-flex items-center gap-1 rounded-full bg-gx-error/10 px-1.5 py-[1px] text-[9px] text-gx-error">
+        <span className="inline-flex items-center gap-1 rounded-full bg-destructive/10 px-1.5 py-[1px] text-[9px] text-destructive">
           Error
         </span>
       );

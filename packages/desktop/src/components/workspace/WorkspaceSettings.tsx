@@ -1,5 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { Plus, RefreshCw, Trash2, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { Workspace, WorkspaceConfig } from "../../state";
 
 export interface WorkspaceSettingsProps {
@@ -101,42 +104,48 @@ export function WorkspaceSettings({ workspace, onClose }: WorkspaceSettingsProps
   }, [depth, excludePatterns, removedRepos]);
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center pt-[10vh]"
-      onClick={onClose}
-      role="dialog"
-      aria-modal="true"
-      aria-label="Workspace Settings"
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) onClose();
+      }}
     >
       {/* Backdrop */}
-      <div className="absolute inset-0 bg-black/40" />
 
       {/* Modal */}
-      <div
-        className="relative w-full max-w-lg rounded-lg border border-gx-border bg-gx-bg shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
+      <DialogContent
+        aria-describedby={undefined}
+        showCloseButton={false}
+        className={
+          "w-full max-w-lg rounded-lg border border-border bg-background shadow-2xl" +
+          " p-0 gap-0"
+        }
       >
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-gx-border px-4 py-3">
-          <h2 className="text-sm font-semibold text-gx-text">Workspace Settings</h2>
-          <button
+        <div className="flex items-center justify-between border-b border-border px-4 py-3">
+          <DialogTitle className="text-sm font-semibold text-foreground">
+            Workspace Settings
+          </DialogTitle>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
-            className="rounded p-1 text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover transition"
+            className="rounded p-1 text-muted-foreground hover:text-foreground hover:bg-accent transition"
             onClick={onClose}
             aria-label="Close settings"
           >
             <X size={14} />
-          </button>
+          </Button>
         </div>
 
         {/* Body */}
         <div className="max-h-[60vh] overflow-y-auto px-4 py-4 space-y-5">
           {/* Workspace root path (read-only) */}
           <div>
-            <label className="block text-xs font-medium text-gx-muted mb-1">
+            <label className="block text-xs font-medium text-muted-foreground mb-1">
               Workspace Root
             </label>
-            <div className="rounded border border-gx-border bg-gx-bg-sub px-3 py-2 text-xs text-gx-text/70 select-all">
+            <div className="rounded border border-border bg-background px-3 py-2 text-xs text-foreground/70 select-all">
               {workspace.rootPath}
             </div>
           </div>
@@ -145,11 +154,11 @@ export function WorkspaceSettings({ workspace, onClose }: WorkspaceSettingsProps
           <div>
             <label
               htmlFor="ws-depth"
-              className="block text-xs font-medium text-gx-muted mb-1"
+              className="block text-xs font-medium text-muted-foreground mb-1"
             >
               Discovery Depth
             </label>
-            <input
+            <Input
               ref={inputRef}
               id="ws-depth"
               type="number"
@@ -157,38 +166,42 @@ export function WorkspaceSettings({ workspace, onClose }: WorkspaceSettingsProps
               max={10}
               value={depth}
               onChange={(e) => setDepth(Math.max(1, Math.min(10, parseInt(e.target.value) || 1)))}
-              className="w-20 rounded border border-gx-border bg-gx-bg px-2 py-1.5 text-xs text-gx-text outline-none focus:border-gx-accent transition"
+              className="w-20 rounded border border-border bg-background px-2 py-1.5 text-xs text-foreground outline-none focus:border-primary transition"
             />
-            <p className="mt-1 text-[10px] text-gx-muted">
+            <p className="mt-1 text-[10px] text-muted-foreground">
               Maximum folder depth to scan for git repositories (1–10).
             </p>
           </div>
 
           {/* Exclude patterns */}
           <div>
-            <label className="block text-xs font-medium text-gx-muted mb-1">
+            <label className="block text-xs font-medium text-muted-foreground mb-1">
               Exclude Patterns
             </label>
             <div className="space-y-1">
               {excludePatterns.map((pattern) => (
                 <div
                   key={pattern}
-                  className="flex items-center gap-2 rounded border border-gx-border bg-gx-bg-sub px-2 py-1.5"
+                  className="flex items-center gap-2 rounded border border-border bg-background px-2 py-1.5"
                 >
-                  <code className="flex-1 text-xs text-gx-text">{pattern}</code>
-                  <button
+                  <code className="flex-1 text-xs text-foreground">
+                    {pattern}
+                  </code>
+                  <Button
+                    variant="ghost"
+                    size="compact"
                     type="button"
-                    className="shrink-0 rounded p-0.5 text-gx-muted hover:text-gx-error transition"
+                    className="shrink-0 rounded p-0.5 text-muted-foreground hover:text-destructive transition"
                     onClick={() => removePattern(pattern)}
                     aria-label={`Remove pattern ${pattern}`}
                   >
                     <Trash2 size={12} />
-                  </button>
+                  </Button>
                 </div>
               ))}
             </div>
             <div className="mt-2 flex items-center gap-2">
-              <input
+              <Input
                 type="text"
                 value={newPattern}
                 onChange={(e) => setNewPattern(e.target.value)}
@@ -199,46 +212,51 @@ export function WorkspaceSettings({ workspace, onClose }: WorkspaceSettingsProps
                   }
                 }}
                 placeholder="e.g. node_modules"
-                className="flex-1 rounded border border-gx-border bg-gx-bg px-2 py-1.5 text-xs text-gx-text placeholder:text-gx-muted outline-none focus:border-gx-accent transition"
+                className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground outline-none focus:border-primary transition"
                 aria-label="New exclude pattern"
               />
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
-                className="flex items-center gap-1 rounded border border-gx-border px-2 py-1.5 text-xs text-gx-text hover:bg-gx-surface-hover transition"
+                className="flex items-center gap-1 rounded border border-border px-2 py-1.5 text-xs text-foreground hover:bg-accent transition"
                 onClick={addPattern}
                 disabled={!newPattern.trim()}
               >
                 <Plus size={12} /> Add
-              </button>
+              </Button>
             </div>
           </div>
 
           {/* Manually removed repos */}
           {removedRepos.length > 0 && (
             <div>
-              <label className="block text-xs font-medium text-gx-muted mb-1">
+              <label className="block text-xs font-medium text-muted-foreground mb-1">
                 Excluded Repositories
               </label>
-              <p className="text-[10px] text-gx-muted mb-2">
-                These repos were manually removed from the workspace. Click to re-include.
+              <p className="text-[10px] text-muted-foreground mb-2">
+                These repos were manually removed from the workspace. Click to
+                re-include.
               </p>
               <div className="space-y-1">
                 {removedRepos.map((repoPath) => (
                   <div
                     key={repoPath}
-                    className="flex items-center gap-2 rounded border border-gx-border bg-gx-bg-sub px-2 py-1.5"
+                    className="flex items-center gap-2 rounded border border-border bg-background px-2 py-1.5"
                   >
-                    <code className="flex-1 text-xs text-gx-text truncate">
+                    <code className="flex-1 text-xs text-foreground truncate">
                       {repoPath}
                     </code>
-                    <button
+                    <Button
+                      variant="ghost"
+                      size="compact"
                       type="button"
-                      className="shrink-0 rounded px-2 py-0.5 text-[10px] font-medium text-gx-accent hover:bg-gx-accent/10 transition"
+                      className="shrink-0 rounded px-2 py-0.5 text-[10px] font-medium text-primary hover:bg-primary/10 transition"
                       onClick={() => reIncludeRepo(repoPath)}
                       aria-label={`Re-include ${repoPath}`}
                     >
                       Re-include
-                    </button>
+                    </Button>
                   </div>
                 ))}
               </div>
@@ -247,34 +265,40 @@ export function WorkspaceSettings({ workspace, onClose }: WorkspaceSettingsProps
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-between border-t border-gx-border px-4 py-3">
-          <button
+        <div className="flex items-center justify-between border-t border-border px-4 py-3">
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
-            className="flex items-center gap-1.5 rounded border border-gx-border px-3 py-1.5 text-xs text-gx-text hover:bg-gx-surface-hover transition"
+            className="flex items-center gap-1.5 rounded border border-border px-3 py-1.5 text-xs text-foreground hover:bg-accent transition"
             onClick={handleRescan}
             disabled={saving}
           >
             <RefreshCw size={12} /> Re-scan
-          </button>
+          </Button>
           <div className="flex items-center gap-2">
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
-              className="rounded px-3 py-1.5 text-xs text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover transition"
+              className="rounded px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-accent transition"
               onClick={onClose}
             >
               Cancel
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="default"
+              size="compact"
               type="button"
-              className="rounded bg-gx-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-gx-accent/90 transition disabled:opacity-50"
+              className="rounded bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 transition disabled:opacity-50"
               onClick={handleSave}
               disabled={saving}
             >
               {saving ? "Saving…" : "Save"}
-            </button>
+            </Button>
           </div>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

@@ -1,14 +1,17 @@
-import { useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import {
   AlertTriangle,
+  Check,
   ChevronDown,
   ChevronRight,
   Copy,
-  Check,
   GitBranch,
   GitCommit,
   GitPullRequest,
 } from "lucide-react";
+import { useState } from "react";
 import { PushRemote, PushTargetInfo } from "../../hooks/usePushTarget";
 
 interface Props {
@@ -57,29 +60,31 @@ export function PushTargetCard({
   // jump between states.
 
   return (
-    <div className="rounded border border-gx-border bg-gx-bg-sub">
+    <div className="rounded border border-border bg-background">
       {/* ── Branch row ───────────────────────────────────────────── */}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2.5 text-sm">
-        <div className="flex items-center gap-1.5 text-gx-text">
-          <GitBranch size={12} className="text-gx-muted" />
+        <div className="flex items-center gap-1.5 text-foreground">
+          <GitBranch size={12} className="text-muted-foreground" />
           <span className="font-mono">
             {target.detached ? "(detached HEAD)" : (target.branch ?? "…")}
           </span>
         </div>
 
-        <span className="text-gx-muted">→</span>
+        <span className="text-muted-foreground">→</span>
 
         <div className="flex items-center gap-1.5">
           {selected ? (
-            <span className="font-mono text-gx-text">
+            <span className="font-mono text-foreground">
               {selected.name}
-              <span className="text-gx-muted"> / </span>
+              <span className="text-muted-foreground"> / </span>
               {destinationBranch || target.branch || "?"}
             </span>
           ) : target.upstream.full ? (
-            <span className="font-mono text-gx-muted">{target.upstream.full}</span>
+            <span className="font-mono text-muted-foreground">
+              {target.upstream.full}
+            </span>
           ) : (
-            <span className="text-gx-muted">no destination</span>
+            <span className="text-muted-foreground">no destination</span>
           )}
         </div>
 
@@ -104,13 +109,15 @@ export function PushTargetCard({
 
       {/* ── URL row ──────────────────────────────────────────────── */}
       {selected && (
-        <div className="flex items-center gap-2 border-t border-gx-border/60 px-3 py-1.5 text-xs">
-          <code className="flex-1 truncate font-mono text-gx-muted" title={selected.url}>
+        <div className="flex items-center gap-2 border-t border-border/60 px-3 py-1.5 text-xs">
+          <code className="flex-1 truncate font-mono text-muted-foreground" title={selected.url}>
             {selected.url}
           </code>
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
-            className="text-gx-muted transition hover:text-gx-text"
+            className="text-muted-foreground transition hover:text-foreground"
             title="Copy URL"
             onClick={() => {
               void navigator.clipboard.writeText(selected.url).then(() => {
@@ -119,8 +126,12 @@ export function PushTargetCard({
               });
             }}
           >
-            {copied ? <Check size={12} className="text-gx-success" /> : <Copy size={12} />}
-          </button>
+            {copied ? (
+              <Check size={12} className="text-success" />
+            ) : (
+              <Copy size={12} />
+            )}
+          </Button>
         </div>
       )}
 
@@ -130,38 +141,46 @@ export function PushTargetCard({
           <AlertTriangle size={12} className="shrink-0" />
           <span className="flex-1">
             Remote has {target.upstream.behind} new commit
-            {target.upstream.behind === 1 ? "" : "s"}. Pulling first avoids a force-push.
+            {target.upstream.behind === 1 ? "" : "s"}. Pulling first avoids a
+            force-push.
           </span>
           {onPullFirst && (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
-              className="text-gx-warn underline-offset-2 hover:underline"
+              className="text-warning underline-offset-2 hover:underline"
               onClick={onPullFirst}
             >
               Pull
-            </button>
+            </Button>
           )}
         </Banner>
       )}
       {!target.upstream.full && !target.detached && target.branch && selected && (
-        <Banner tone="info">
-          <AlertTriangle size={12} className="shrink-0" />
-          <span className="flex-1">
-            <span className="font-mono">{target.branch}</span> has no upstream. The push will
-            set <span className="font-mono">{selected.name}/{destinationBranch}</span> as
-            the tracking branch.
-          </span>
-          {onSetUpstream && (
-            <button
-              type="button"
-              className="text-gx-accent underline-offset-2 hover:underline"
-              onClick={onSetUpstream}
-            >
-              Configure
-            </button>
-          )}
-        </Banner>
-      )}
+          <Banner tone="info">
+            <AlertTriangle size={12} className="shrink-0" />
+            <span className="flex-1">
+              <span className="font-mono">{target.branch}</span> has no
+              upstream. The push will set{" "}
+              <span className="font-mono">
+                {selected.name}/{destinationBranch}
+              </span>{" "}
+              as the tracking branch.
+            </span>
+            {onSetUpstream && (
+              <Button
+                variant="ghost"
+                size="compact"
+                type="button"
+                className="text-primary underline-offset-2 hover:underline"
+                onClick={onSetUpstream}
+              >
+                Configure
+              </Button>
+            )}
+          </Banner>
+        )}
       {target.upstream.full &&
         selected &&
         target.upstream.remote !== null &&
@@ -174,50 +193,55 @@ export function PushTargetCard({
                 {target.upstream.remote}/{target.upstream.branch}
               </span>{" "}
               but you're pushing to{" "}
-              <span className="font-mono">{selected.name}</span>. Double-check this is
-              intentional.
+              <span className="font-mono">{selected.name}</span>. Double-check
+              this is intentional.
             </span>
           </Banner>
         )}
 
       {/* ── Change destination disclosure ────────────────────────── */}
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
-        className="flex w-full items-center gap-1 border-t border-gx-border/60 px-3 py-1.5 text-[11px] text-gx-muted transition hover:text-gx-text"
+        className="flex w-full items-center gap-1 border-t border-border/60 px-3 py-1.5 text-[11px] text-muted-foreground transition hover:text-foreground"
         onClick={() => setExpanded(!expanded)}
         aria-expanded={expanded}
       >
         {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
         Change destination
-      </button>
+      </Button>
 
       {expanded && (
-        <div className="space-y-2 border-t border-gx-border/60 px-3 py-2 text-xs">
+        <div className="space-y-2 border-t border-border/60 px-3 py-2 text-xs">
           <RemotePicker
             remotes={target.crabRemotes}
             selected={selectedRemote}
             onSelect={onSelectRemote}
           />
           <div className="flex items-center gap-2">
-            <label htmlFor="push-dest-branch" className="text-gx-muted">
+            <label htmlFor="push-dest-branch" className="text-muted-foreground">
               Push as:
             </label>
-            <span className="font-mono text-gx-muted">{selectedRemote ?? "?"}/</span>
-            <input
+            <span className="font-mono text-muted-foreground">
+              {selectedRemote ?? "?"}/
+            </span>
+            <Input
               id="push-dest-branch"
               type="text"
               value={destinationBranch}
               onChange={(e) => onChangeDestinationBranch(e.target.value)}
               spellCheck={false}
-              className="flex-1 rounded border border-gx-border bg-gx-bg px-2 py-1 font-mono text-xs focus-visible:outline-none focus:border-gx-accent"
+              className="flex-1 rounded border border-border bg-background px-2 py-1 font-mono text-xs focus-visible:outline-none focus:border-primary"
               placeholder={target.branch ?? "branch"}
             />
           </div>
           {target.remotes.length > target.crabRemotes.length && (
-            <div className="text-[11px] text-gx-muted">
-              {target.remotes.length - target.crabRemotes.length} non-crab remote
-              {target.remotes.length - target.crabRemotes.length === 1 ? "" : "s"} hidden
-              (only crab:// URLs can stream pointer files).
+            <div className="text-[11px] text-muted-foreground">
+              {target.remotes.length - target.crabRemotes.length} non-crab
+              remote
+              {target.remotes.length - target.crabRemotes.length === 1 ? "" : "s"}{" "}
+              hidden (only crab:// URLs can stream pointer files).
             </div>
           )}
         </div>
@@ -239,42 +263,44 @@ function RemotePicker({
 }) {
   if (remotes.length === 0) {
     return (
-      <div className="rounded border border-gx-warn/40 bg-gx-warn/10 p-2 text-[11px] text-gx-warn">
-        No <code className="font-mono">crab://</code> remotes configured. Add one with{" "}
-        <code className="font-mono">git remote add crab crab://&lt;bucket&gt;/&lt;repo&gt;</code>.
+      <div className="rounded border border-warning/40 bg-warning/10 p-2 text-[11px] text-warning">
+        No <code className="font-mono">crab://</code> remotes configured. Add
+        one with{" "}
+        <code className="font-mono">
+          git remote add crab crab://&lt;bucket&gt;/&lt;repo&gt;
+        </code>
+        .
       </div>
     );
   }
   return (
-    <div className="space-y-1">
+    <RadioGroup
+      aria-label="Push remote"
+      value={selected ?? ""}
+      onValueChange={onSelect}
+      className="space-y-1"
+    >
       {remotes.map((r) => {
         const active = r.name === selected;
         return (
-          <button
+          <label
             key={r.name}
-            type="button"
-            onClick={() => onSelect(r.name)}
             className={
               "flex w-full items-center gap-2 rounded border px-2 py-1.5 text-left transition " +
               (active
-                ? "border-gx-accent bg-gx-accent/10 text-gx-text"
-                : "border-gx-border hover:border-gx-border/80 hover:bg-gx-bg")
+                ? "border-primary bg-primary/10 text-foreground"
+                : "border-border hover:border-border/80 hover:bg-background")
             }
           >
-            <input
-              type="radio"
-              className="accent-gx-accent"
-              checked={active}
-              readOnly
-            />
+            <RadioGroupItem value={r.name} />
             <span className="font-mono text-xs">{r.name}</span>
-            <span className="flex-1 truncate font-mono text-[11px] text-gx-muted">
+            <span className="flex-1 truncate font-mono text-[11px] text-muted-foreground">
               {r.url}
             </span>
-          </button>
+          </label>
         );
       })}
-    </div>
+    </RadioGroup>
   );
 }
 
@@ -291,10 +317,10 @@ function Chip({
 }) {
   const cls =
     tone === "info"
-      ? "border-gx-accent/40 bg-gx-accent/10 text-gx-text"
+      ? "border-primary/40 bg-primary/10 text-foreground"
       : tone === "warn"
-        ? "border-gx-warn/40 bg-gx-warn/10 text-gx-warn"
-        : "border-gx-border bg-gx-bg text-gx-muted";
+        ? "border-warning/40 bg-warning/10 text-warning"
+        : "border-border bg-background text-muted-foreground";
   return (
     <span
       className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-mono ${cls}`}
@@ -315,10 +341,10 @@ function Banner({
 }) {
   const cls =
     tone === "warn"
-      ? "border-gx-warn/40 bg-gx-warn/10 text-gx-warn"
+      ? "border-warning/40 bg-warning/10 text-warning"
       : tone === "error"
-        ? "border-gx-error/40 bg-gx-error/10 text-gx-error"
-        : "border-gx-accent/40 bg-gx-accent/5 text-gx-muted";
+        ? "border-destructive/40 bg-destructive/10 text-destructive"
+        : "border-primary/40 bg-primary/5 text-muted-foreground";
   return (
     <div className={`flex items-center gap-2 border-t border-x-0 px-3 py-1.5 text-[11px] ${cls}`}>
       {children}

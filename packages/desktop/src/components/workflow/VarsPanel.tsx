@@ -1,5 +1,7 @@
-import { useCallback, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Plus, Trash2 } from "lucide-react";
+import { useCallback, useState } from "react";
 
 interface Props {
   vars: Record<string, string>;
@@ -55,18 +57,18 @@ export function VarsPanel({ vars, onChange }: Props) {
   return (
     <div className="flex flex-col gap-2">
       <div className="flex items-center justify-between">
-        <span className="text-xs font-medium text-gx-text">Variables</span>
-        <button
+        <span className="text-xs font-medium text-foreground">Variables</span>
+        <Button variant="outline"
           type="button"
-          className="btn flex items-center gap-1 text-xs"
+          className="flex items-center gap-1 text-xs"
           onClick={handleAdd}
         >
           <Plus size={12} /> Add
-        </button>
+        </Button>
       </div>
 
       {entries.length === 0 && (
-        <div className="py-4 text-center text-xs text-gx-muted">
+        <div className="py-4 text-center text-xs text-muted-foreground">
           No variables declared. Click "Add" to create one.
         </div>
       )}
@@ -113,8 +115,8 @@ function VarRow({
 
   return (
     <div className="group flex items-center gap-1.5">
-      <input
-        className="input-field w-28 shrink-0 font-mono text-xs"
+      <Input
+        className="w-28 shrink-0 font-mono text-xs"
         value={editingKey}
         onChange={(e) => setEditingKey(e.target.value)}
         onBlur={commitKey}
@@ -123,21 +125,23 @@ function VarRow({
         }}
         placeholder="key"
       />
-      <span className="text-xs text-gx-muted">=</span>
-      <input
-        className="input-field min-w-0 flex-1 font-mono text-xs"
+      <span className="text-xs text-muted-foreground">=</span>
+      <Input
+        className="min-w-0 flex-1 font-mono text-xs"
         value={varValue}
         onChange={(e) => onValueChange(e.target.value)}
         placeholder="value"
       />
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
-        className="rounded p-0.5 text-gx-muted opacity-0 hover:text-gx-error group-hover:opacity-100"
+        className="rounded p-0.5 text-muted-foreground opacity-0 hover:text-destructive group-hover:opacity-100"
         onClick={onRemove}
         title="Remove variable"
       >
         <Trash2 size={12} />
-      </button>
+      </Button>
     </div>
   );
 }

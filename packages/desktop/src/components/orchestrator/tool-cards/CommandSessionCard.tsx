@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * CommandSessionCard — renders Codex `command/exec` session output.
  *
@@ -13,24 +14,24 @@
  * running spinner stops.
  */
 
-import { memo, useState, useEffect, useRef, useCallback } from "react";
 import clsx from "clsx";
 import {
-  Terminal,
+  Check,
   ChevronDown,
   ChevronRight,
   Copy,
-  Check,
   Loader2,
+  Terminal,
   XCircle,
 } from "lucide-react";
-import type { ToolCardRendererProps } from "./types";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import type { AgentEvent } from "../../../../electron/orchestrator-adapters";
+import { AnsiText } from "../../../lib/ansi-text";
+import { CollapsedCardLine } from "./CollapsedCardLine";
+import type { ToolCardRendererProps } from "./types";
+import { useCardExpanded } from "./useCardExpanded";
 
 type Props = Omit<ToolCardRendererProps, "event"> & { event: AgentEvent };
-import { CollapsedCardLine } from "./CollapsedCardLine";
-import { useCardExpanded } from "./useCardExpanded";
-import { AnsiText } from "../../../lib/ansi-text";
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -93,22 +94,22 @@ export function CommandSessionCard({
   if (collapsed) {
     const defaultSummary = (
       <>
-        <Terminal size={11} className="shrink-0 text-gx-muted" />
-        <span className="font-medium text-gx-text/80">
+        <Terminal size={11} className="shrink-0 text-muted-foreground" />
+        <span className="font-medium text-foreground/80">
           {isRunning ? "Running" : "Command"}
         </span>
         {exitCode !== null && (
           <span className={clsx(
             "rounded px-1 py-0.5 text-[8px] font-mono",
             exitCode === 0
-              ? "bg-gx-success/10 text-gx-success"
-              : "bg-gx-error/10 text-gx-error",
+              ? "bg-success/10 text-success"
+              : "bg-destructive/10 text-destructive",
           )}>
             {exitCode === 0 ? "✓ ok" : `exit ${exitCode}`}
           </span>
         )}
         {accumulated && (
-          <span className="truncate text-gx-text/50 text-[10px]">
+          <span className="truncate text-foreground/50 text-[10px]">
             {accumulated.slice(0, 80).replace(/\n/g, " ")}
           </span>
         )}
@@ -128,31 +129,33 @@ export function CommandSessionCard({
     <div className={clsx(
       "rounded-md border overflow-hidden",
       isRunning
-        ? "border-gx-info/30 bg-gx-surface/20"
+        ? "border-info/30 bg-card/20"
         : exitCode === 0
-          ? "border-gx-border/40 bg-gx-surface/30"
-          : "border-gx-error/30 bg-gx-error/5",
+          ? "border-border/40 bg-card/30"
+          : "border-destructive/30 bg-destructive/5",
     )}>
       {/* Header */}
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={hasOutput ? toggle : undefined}
         className={clsx(
           "w-full flex items-center gap-1.5 px-2.5 py-1.5 group",
-          hasOutput ? "cursor-pointer hover:bg-gx-surface-hover/50" : "cursor-default",
+          hasOutput ? "cursor-pointer hover:bg-accent/50" : "cursor-default",
         )}
         aria-expanded={expanded}
         aria-label={hasOutput ? "Toggle output" : "Command session"}
       >
         {isRunning ? (
-          <Loader2 size={11} className="shrink-0 text-gx-info animate-spin" />
+          <Loader2 size={11} className="shrink-0 text-info animate-spin" />
         ) : exitCode !== 0 ? (
-          <XCircle size={11} className="shrink-0 text-gx-error" />
+          <XCircle size={11} className="shrink-0 text-destructive" />
         ) : (
-          <Terminal size={11} className="shrink-0 text-gx-muted" />
+          <Terminal size={11} className="shrink-0 text-muted-foreground" />
         )}
 
-        <span className="text-[10px] font-medium text-gx-text/80">
+        <span className="text-[10px] font-medium text-foreground/80">
           {isRunning ? "Running" : "Command"}
         </span>
 
@@ -161,8 +164,8 @@ export function CommandSessionCard({
           <span className={clsx(
             "shrink-0 rounded px-1 py-0.5 text-[8px] font-mono font-medium border",
             exitCode === 0
-              ? "bg-gx-success/10 text-gx-success border-gx-success/30"
-              : "bg-gx-error/10 text-gx-error border-gx-error/30",
+              ? "bg-success/10 text-success border-success/30"
+              : "bg-destructive/10 text-destructive border-destructive/30",
           )}>
             {exitCode === 0 ? "✓" : `exit ${exitCode}`}
           </span>
@@ -170,7 +173,7 @@ export function CommandSessionCard({
 
         {/* Running indicator */}
         {isRunning && (
-          <span className="shrink-0 rounded px-1 py-0.5 text-[8px] font-medium text-gx-info border border-gx-info/30 bg-gx-info/10">
+          <span className="shrink-0 rounded px-1 py-0.5 text-[8px] font-medium text-info border border-info/30 bg-info/10">
             streaming
           </span>
         )}
@@ -179,32 +182,41 @@ export function CommandSessionCard({
 
         {/* Copy button (visible on hover) */}
         {hasOutput && (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={(e) => { e.stopPropagation(); handleCopy(); }}
-            className="shrink-0 opacity-0 group-hover:opacity-100 text-gx-muted hover:text-gx-text transition p-0.5"
+            className="shrink-0 opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground transition p-0.5"
             aria-label="Copy output"
           >
-            {copied ? <Check size={9} className="text-gx-success" /> : <Copy size={9} />}
-          </button>
+            {copied ? (
+              <Check size={9} className="text-success" />
+            ) : (
+              <Copy size={9} />
+            )}
+          </Button>
         )}
 
         {hasOutput && (
           expanded
-            ? <ChevronDown size={10} className="shrink-0 text-gx-muted/60" />
-            : <ChevronRight size={10} className="shrink-0 text-gx-muted/60" />
-        )}
-      </button>
+            ? (
+            <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
+          ) : (
+            <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
+        ))}
+      </Button>
 
       {/* Expanded: terminal output */}
       {expanded && hasOutput && (
-        <div className="border-t border-gx-border/30 max-h-[250px] overflow-auto px-2.5 py-2 bg-gx-surface/10">
-          <pre className="font-mono text-[10px] leading-[1.5] whitespace-pre-wrap break-all text-gx-text/70">
+        <div className="border-t border-border/30 max-h-[250px] overflow-auto px-2.5 py-2 bg-card/10">
+          <pre className="font-mono text-[10px] leading-[1.5] whitespace-pre-wrap break-all text-foreground/70">
             <AnsiText>{text}</AnsiText>
           </pre>
           {truncated && (
-            <div className="mt-1 text-[9px] text-gx-muted italic">
-              ... output truncated ({Math.round(accumulated.length / 1024)}KB total)
+            <div className="mt-1 text-[9px] text-muted-foreground italic">
+              ... output truncated ({Math.round(accumulated.length / 1024)}KB
+              total)
             </div>
           )}
         </div>
@@ -212,7 +224,7 @@ export function CommandSessionCard({
 
       {/* No output yet — spinner */}
       {!hasOutput && isRunning && (
-        <div className="border-t border-gx-border/30 px-2.5 py-2 flex items-center gap-2 text-[10px] text-gx-muted">
+        <div className="border-t border-border/30 px-2.5 py-2 flex items-center gap-2 text-[10px] text-muted-foreground">
           <Loader2 size={10} className="animate-spin" />
           Waiting for output...
         </div>

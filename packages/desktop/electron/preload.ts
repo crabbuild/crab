@@ -345,11 +345,6 @@ contextBridge.exposeInMainWorld("crab", {
       canExec: boolean;
       canTrash: boolean;
     }>,
-  // Dialogs (prompt/confirm replacements for sandboxed renderer)
-  dialogPrompt: (message: string, defaultValue?: string) =>
-    ipcRenderer.invoke("crab:dialog-prompt", message, defaultValue) as Promise<string | null>,
-  dialogConfirm: (message: string) =>
-    ipcRenderer.invoke("crab:dialog-confirm", message) as Promise<boolean>,
   // Terminal
   //
   // New object-based API:

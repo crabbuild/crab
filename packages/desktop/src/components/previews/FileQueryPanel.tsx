@@ -1,39 +1,56 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
+import { Toggle } from "@/components/ui/toggle";
 import clsx from "clsx";
 import {
+  AlertCircle,
   ChevronLeft,
   ChevronRight,
+  Columns3,
   Copy,
   Database,
   Download,
   Hash,
+  History,
   Key,
   Loader2,
   Play,
-  AlertCircle,
   Search,
   SortAsc,
   SortDesc,
   Table2,
   Terminal,
-  History,
-  Columns3,
 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { FileQueryResult } from "../../ipc";
 import type { FileQuery } from "../../lib/file-query";
 
 export function FileQueryMode({ query, mode }: { query: FileQuery; mode: "browse" | "sql" }) {
   return (
-    <div className="flex items-center rounded border border-gx-border bg-gx-bg-sub" role="group" aria-label="File view">
-      {(["browse", "sql"] as const).map(value => {
+    <div className="flex items-center rounded border border-border bg-background" role="group" aria-label="File view">
+      {(["browse", "sql"] as const).map((value) => {
         const Icon = value === "browse" ? Table2 : Terminal;
         return (
-          <button key={value} type="button" aria-pressed={mode === value}
+          <Toggle
+            size="sm"
+            key={value}
+            type="button"
+            pressed={mode === value}
             onClick={() => query.setMode(value)}
             className={clsx("flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium transition",
-              mode === value ? "bg-gx-accent/15 text-gx-accent" : "text-gx-muted hover:text-gx-text")}>
+              mode === value ? "bg-primary/15 text-primary" : "text-muted-foreground hover:text-foreground")}
+          >
             <Icon size={10} /> {value === "browse" ? "Browse" : "SQL"}
-          </button>
+          </Toggle>
         );
       })}
     </div>
@@ -42,10 +59,14 @@ export function FileQueryMode({ query, mode }: { query: FileQuery; mode: "browse
 
 export function FileBrowseState({ error, loading }: { error: string | null; loading: string }) {
   if (error) {
-    return <div role="alert" className="m-4 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">{error}</div>;
+    return (
+      <div role="alert" className="m-4 rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
+        {error}
+      </div>
+    );
   }
   return (
-    <div role="status" className="flex flex-1 items-center justify-center gap-2 text-sm text-gx-muted">
+    <div role="status" className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground">
       <Loader2 size={14} className="animate-spin" /> {loading}
     </div>
   );
@@ -266,11 +287,11 @@ export function FileQueryPanel({ query, nativeSessionId, tables }: Props) {
     <div className="flex h-full">
       {/* ─── Table Sidebar ─────────────────────────────────────── */}
       {hasSidebar && (
-        <aside className="flex w-[240px] shrink-0 flex-col border-r border-gx-border bg-gx-surface">
+        <aside className="flex w-[240px] shrink-0 flex-col border-r border-border bg-card">
           {/* Sidebar header */}
-          <div className="flex items-center gap-2 border-b border-gx-border px-3 py-2">
-            <Database size={12} className="text-gx-accent" />
-            <span className="text-[10px] font-semibold uppercase tracking-wider text-gx-muted">
+          <div className="flex items-center gap-2 border-b border-border px-3 py-2">
+            <Database size={12} className="text-primary" />
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
               Tables ({tables.length})
             </span>
           </div>
@@ -280,12 +301,14 @@ export function FileQueryPanel({ query, nativeSessionId, tables }: Props) {
             {tables.map((t) => (
               <div key={t.name} className="mb-0.5">
                 <div className="group flex items-center gap-0.5">
-                  <button
+                  <Button
+                    variant="ghost"
+                    size="compact"
                     type="button"
                     onClick={() =>
                       setExpandedTable(expandedTable === t.name ? null : t.name)
                     }
-                    className="shrink-0 rounded p-0.5 text-gx-muted hover:text-gx-text"
+                    className="shrink-0 rounded p-0.5 text-muted-foreground hover:text-foreground"
                   >
                     <ChevronRight
                       size={10}
@@ -294,85 +317,99 @@ export function FileQueryPanel({ query, nativeSessionId, tables }: Props) {
                         expandedTable === t.name && "rotate-90",
                       )}
                     />
-                  </button>
-                  <button
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="compact"
                     type="button"
                     onClick={() => handleTableSelect(t.name)}
                     className={clsx(
                       "flex min-w-0 flex-1 items-center gap-1.5 rounded px-1.5 py-1 text-left text-[11px] transition",
                       activeTable === t.name
-                        ? "bg-gx-accent/15 text-gx-text"
-                        : "hover:bg-gx-surface-hover text-gx-text",
+                        ? "bg-primary/15 text-foreground"
+                        : "hover:bg-accent text-foreground",
                     )}
                   >
-                    <Table2 size={10} className="shrink-0 text-gx-muted" />
+                    <Table2 size={10} className="shrink-0 text-muted-foreground" />
                     <span className="min-w-0 flex-1 truncate font-mono">
                       {t.name}
                     </span>
-                    <span className="shrink-0 text-[9px] text-gx-muted">
+                    <span className="shrink-0 text-[9px] text-muted-foreground">
                       {t.row_count.toLocaleString()}
                     </span>
-                  </button>
+                  </Button>
                   {/* Quick action buttons (visible on hover) */}
                   <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition group-hover:opacity-100">
-                    <button
+                    <Button
+                      variant="ghost"
+                      size="compact"
                       type="button"
                       onClick={() => handleCountTable(t.name)}
                       title="COUNT(*)"
-                      className="rounded p-0.5 text-gx-muted hover:bg-gx-bg-sub hover:text-gx-text"
+                      className="rounded p-0.5 text-muted-foreground hover:bg-background hover:text-foreground"
                     >
                       <Hash size={9} />
-                    </button>
-                    <button
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="compact"
                       type="button"
                       onClick={() => handleSchemaTable(t.name)}
                       title="Table schema"
-                      className="rounded p-0.5 text-gx-muted hover:bg-gx-bg-sub hover:text-gx-text"
+                      className="rounded p-0.5 text-muted-foreground hover:bg-background hover:text-foreground"
                     >
                       <Columns3 size={9} />
-                    </button>
+                    </Button>
                   </div>
                 </div>
 
                 {/* Expanded columns */}
                 {expandedTable === t.name && (
-                  <div className="ml-5 mt-0.5 mb-1 space-y-px border-l border-gx-border/60 pl-2">
+                  <div className="ml-5 mt-0.5 mb-1 space-y-px border-l border-border/60 pl-2">
                     {t.columns.map((col) => (
-                      <button
+                      <Button
+                        variant="ghost"
+                        size="compact"
                         key={col.name}
                         type="button"
                         onClick={() => insertColumnRef(col.name)}
                         title={`Insert "${col.name}" into query`}
-                        className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-[10px] transition hover:bg-gx-surface-hover"
+                        className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-[10px] transition hover:bg-accent"
                       >
                         {col.pk ? (
-                          <Key size={8} className="shrink-0 text-gx-warn" />
+                          <Key size={8} className="shrink-0 text-warning" />
                         ) : (
-                          <span className="w-2 shrink-0 text-center text-gx-muted">·</span>
+                          <span className="w-2 shrink-0 text-center text-muted-foreground">
+                            ·
+                          </span>
                         )}
-                        <span className="min-w-0 flex-1 truncate text-left font-mono text-gx-text">
+                        <span className="min-w-0 flex-1 truncate text-left font-mono text-foreground">
                           {col.name}
                         </span>
-                        <span className="shrink-0 font-mono text-gx-muted">
+                        <span className="shrink-0 font-mono text-muted-foreground">
                           {col.type || "ANY"}
                         </span>
                         {col.notnull && (
-                          <span className="shrink-0 rounded bg-gx-warn/10 px-1 text-[8px] text-gx-warn">
+                          <span className="shrink-0 rounded bg-warning/10 px-1 text-[8px] text-warning">
                             NN
                           </span>
                         )}
-                      </button>
+                      </Button>
                     ))}
                     {/* Quick schema actions */}
-                    <div className="mt-1 flex gap-1 pt-1 border-t border-gx-border/40">
-                      <button
+                    <div className="mt-1 flex gap-1 pt-1 border-t border-border/40">
+                      <Button
+                        variant="ghost"
+                        size="compact"
                         type="button"
                         onClick={() => handleIndexesTable(t.name)}
-                        className="rounded bg-gx-bg-sub px-1.5 py-0.5 text-[9px] text-gx-muted hover:text-gx-text"
+                        className="rounded bg-background px-1.5 py-0.5 text-[9px] text-muted-foreground hover:text-foreground"
                       >
                         Indexes
-                      </button>
-                      <button
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="compact"
                         type="button"
                         onClick={() => {
                           setIsBrowsingTable(false);
@@ -380,10 +417,10 @@ export function FileQueryPanel({ query, nativeSessionId, tables }: Props) {
                           setSql(q);
                           execute(q);
                         }}
-                        className="rounded bg-gx-bg-sub px-1.5 py-0.5 text-[9px] text-gx-muted hover:text-gx-text"
+                        className="rounded bg-background px-1.5 py-0.5 text-[9px] text-muted-foreground hover:text-foreground"
                       >
                         DDL
-                      </button>
+                      </Button>
                     </div>
                   </div>
                 )}
@@ -393,25 +430,27 @@ export function FileQueryPanel({ query, nativeSessionId, tables }: Props) {
 
           {/* Query history */}
           {history.length > 0 && (
-            <div className="border-t border-gx-border">
-              <div className="flex items-center gap-2 px-3 py-1.5 text-[10px] uppercase tracking-wider text-gx-muted">
+            <div className="border-t border-border">
+              <div className="flex items-center gap-2 px-3 py-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
                 <History size={10} />
                 Recent ({history.length})
               </div>
               <div className="max-h-[100px] overflow-auto px-1 pb-1">
                 {history.slice(0, 10).map((q, i) => (
-                  <button
+                  <Button
+                    variant="ghost"
+                    size="compact"
                     key={i}
                     type="button"
                     onClick={() => {
                       setSql(q);
                       execute(q);
                     }}
-                    className="mb-0.5 w-full truncate rounded px-2 py-0.5 text-left font-mono text-[9px] text-gx-muted transition hover:bg-gx-surface-hover hover:text-gx-text"
+                    className="justify-start mb-0.5 w-full truncate rounded px-2 py-0.5 text-left font-mono text-[9px] text-muted-foreground transition hover:bg-accent hover:text-foreground"
                     title={q}
                   >
                     {q}
-                  </button>
+                  </Button>
                 ))}
               </div>
             </div>
@@ -422,37 +461,39 @@ export function FileQueryPanel({ query, nativeSessionId, tables }: Props) {
       {/* ─── Main Area ─────────────────────────────────────────── */}
       <div className="flex min-w-0 flex-1 flex-col">
         {/* SQL Editor */}
-        <div className="shrink-0 border-b border-gx-border bg-gx-surface">
-          <div className="flex items-center gap-2 px-3 py-1.5 text-[11px] text-gx-muted">
-            <Database size={12} className="text-gx-accent" />
-            <span className="font-semibold text-gx-text">SQL</span>
+        <div className="shrink-0 border-b border-border bg-card">
+          <div className="flex items-center gap-2 px-3 py-1.5 text-[11px] text-muted-foreground">
+            <Database size={12} className="text-primary" />
+            <span className="font-semibold text-foreground">SQL</span>
             {activeTable && hasSidebar && (
-              <span className="rounded bg-gx-accent/10 px-1.5 py-0.5 font-mono text-[10px] text-gx-accent">
+              <span className="rounded bg-primary/10 px-1.5 py-0.5 font-mono text-[10px] text-primary">
                 {activeTable}
               </span>
             )}
             {filePath && !hasSidebar && (
-              <span className="rounded bg-gx-bg-sub px-1.5 py-0.5 font-mono text-[10px]">
+              <span className="rounded bg-background px-1.5 py-0.5 font-mono text-[10px]">
                 {filePath.split("/").pop()}
               </span>
             )}
             <div className="ml-auto flex items-center gap-2 text-[10px]">
               {result && (
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
                   onClick={handleExportCsv}
-                  className="flex items-center gap-1 rounded px-1.5 py-0.5 text-gx-muted hover:bg-gx-bg-sub hover:text-gx-text"
+                  className="flex items-center gap-1 rounded px-1.5 py-0.5 text-muted-foreground hover:bg-background hover:text-foreground"
                   title="Export results as CSV"
                 >
                   <Download size={10} />
                   CSV
-                </button>
+                </Button>
               )}
-              <span className="text-gx-muted">⌘+Enter</span>
+              <span className="text-muted-foreground">⌘+Enter</span>
             </div>
           </div>
           <div className="relative px-3 pb-2">
-            <textarea
+            <Textarea
               ref={textareaRef}
               value={sql}
               onChange={(e) => setSql(e.target.value)}
@@ -460,9 +501,9 @@ export function FileQueryPanel({ query, nativeSessionId, tables }: Props) {
               aria-label="SQL query"
               spellCheck={false}
               className={clsx(
-                "w-full resize-y rounded border border-gx-border bg-gx-bg-sub px-3 py-2",
-                "font-mono text-[12px] text-gx-text placeholder:text-gx-muted",
-                "focus:border-gx-accent focus-visible:outline-none",
+                "w-full resize-y rounded border border-border bg-background px-3 py-2",
+                "font-mono text-[12px] text-foreground placeholder:text-muted-foreground",
+                "focus:border-primary focus-visible:outline-none",
                 "min-h-[52px] max-h-[180px]",
               )}
               placeholder={
@@ -473,31 +514,33 @@ export function FileQueryPanel({ query, nativeSessionId, tables }: Props) {
               rows={2}
             />
             {loading ? (
-              <button type="button" className="btn absolute bottom-4 right-5" onClick={() => query.cancel()} disabled={status === "cancelling"}>
+              <Button variant="outline" type="button" className="absolute bottom-4 right-5" onClick={() => query.cancel()} disabled={status === "cancelling"}>
                 {status === "cancelling" ? "Cancelling…" : "Cancel query"}
-              </button>
+              </Button>
             ) : (
-            <button
-              type="button"
-              onClick={() => { setIsBrowsingTable(false); execute(); }}
-              disabled={!sql.trim()}
-              className={clsx(
+              <Button
+                variant="default"
+                size="compact"
+                type="button"
+                onClick={() => { setIsBrowsingTable(false); execute(); }}
+                disabled={!sql.trim()}
+                className={clsx(
                 "absolute bottom-4 right-5 flex items-center gap-1.5 rounded px-2.5 py-1",
                 "text-[11px] font-medium transition",
-                "bg-gx-accent text-white hover:bg-gx-accent/90",
+                "bg-primary text-primary-foreground hover:bg-primary/90",
               )}
-            >
-              <Play size={10} /> Run
-            </button>
+              >
+                <Play size={10} /> Run
+              </Button>
             )}
           </div>
         </div>
 
         {/* Filter bar (when viewing a table) */}
         {activeTable && hasSidebar && (
-          <div className="flex shrink-0 items-center gap-2 border-b border-gx-border bg-gx-surface px-3 py-1">
-            <Search size={11} className="text-gx-muted" />
-            <input
+          <div className="flex shrink-0 items-center gap-2 border-b border-border bg-card px-3 py-1">
+            <Search size={11} className="text-muted-foreground" />
+            <Input
               type="text"
               value={filterText}
               onChange={(e) => setFilterText(e.target.value)}
@@ -508,10 +551,12 @@ export function FileQueryPanel({ query, nativeSessionId, tables }: Props) {
                 }
               }}
               placeholder="WHERE clause filter — e.g. age > 25 AND name LIKE '%a%'"
-              className="min-w-0 flex-1 bg-transparent font-mono text-[11px] text-gx-text placeholder:text-gx-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-gx-accent"
+              className="min-w-0 flex-1 bg-transparent font-mono text-[11px] text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
             />
             {filterText && (
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 onClick={() => {
                   setFilterText("");
@@ -520,18 +565,18 @@ export function FileQueryPanel({ query, nativeSessionId, tables }: Props) {
                     queryTable(activeTable, sort, { offset: 0, limit: 100 }, "");
                   }
                 }}
-                className="text-gx-muted hover:text-gx-text"
+                className="text-muted-foreground hover:text-foreground"
               >
                 <span className="text-[10px]">Clear</span>
-              </button>
+              </Button>
             )}
           </div>
         )}
 
         {/* Results area */}
-        <div className="min-h-0 flex-1 overflow-hidden bg-gx-bg-sub">
+        <div className="min-h-0 flex-1 overflow-hidden bg-background">
           {err && (
-            <div role="alert" className="m-3 flex items-start gap-2 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">
+            <div role="alert" className="m-3 flex items-start gap-2 rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
               <AlertCircle size={14} className="mt-0.5 shrink-0" />
               <pre className="whitespace-pre-wrap break-all">{err}</pre>
             </div>
@@ -548,15 +593,19 @@ export function FileQueryPanel({ query, nativeSessionId, tables }: Props) {
             />
           )}
           {!result && !err && status === "idle" && (
-            <div className="flex h-full items-center justify-center text-sm text-gx-muted">
+            <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
               {hasSidebar
                 ? "Click a table or write a query to get started"
                 : "Write a SQL query and press ⌘+Enter"}
             </div>
           )}
-          {status === "cancelled" && <p role="status" className="p-3 text-xs text-gx-muted">Query cancelled</p>}
+          {status === "cancelled" && (
+            <p role="status" className="p-3 text-xs text-muted-foreground">
+              Query cancelled
+            </p>
+          )}
           {loading && (
-            <div role="status" className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted">
+            <div role="status" className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
               <Loader2 size={14} className="animate-spin" />
               {status === "cancelling" ? "Cancelling query…" : "Executing query…"}
             </div>
@@ -565,10 +614,11 @@ export function FileQueryPanel({ query, nativeSessionId, tables }: Props) {
 
         {/* Pagination footer */}
         {result && activeTable && hasSidebar && (
-          <div className="flex shrink-0 items-center gap-3 border-t border-gx-border bg-gx-surface px-3 py-1 text-[11px] text-gx-muted">
+          <div className="flex shrink-0 items-center gap-3 border-t border-border bg-card px-3 py-1 text-[11px] text-muted-foreground">
             <span>
-              Showing <strong className="text-gx-text">{page.offset + 1}</strong>–
-              <strong className="text-gx-text">
+              Showing{" "}
+              <strong className="text-foreground">{page.offset + 1}</strong>–
+              <strong className="text-foreground">
                 {Math.min(page.offset + result.row_count, page.offset + page.limit)}
               </strong>
               {currentTableMeta && (
@@ -576,25 +626,29 @@ export function FileQueryPanel({ query, nativeSessionId, tables }: Props) {
               )}
             </span>
             <div className="ml-auto flex items-center gap-1">
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 onClick={handlePrevPage}
                 disabled={page.offset === 0}
-                className="rounded p-1 hover:bg-gx-bg-sub disabled:opacity-30"
+                className="rounded p-1 hover:bg-background disabled:opacity-30"
               >
                 <ChevronLeft size={12} />
-              </button>
+              </Button>
               <span className="px-1 text-[10px]">
                 Page {Math.floor(page.offset / page.limit) + 1}
               </span>
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 onClick={handleNextPage}
                 disabled={result.row_count < page.limit}
-                className="rounded p-1 hover:bg-gx-bg-sub disabled:opacity-30"
+                className="rounded p-1 hover:bg-background disabled:opacity-30"
               >
                 <ChevronRight size={12} />
-              </button>
+              </Button>
             </div>
           </div>
         )}
@@ -751,17 +805,17 @@ function ResultGrid({ result, elapsed, sort, onSort, onCellCopy, copiedCell, sor
   return (
     <div className="flex h-full flex-col">
       {/* Toolbar */}
-      <div className="flex shrink-0 items-center gap-2 border-b border-gx-border bg-gx-surface px-3 py-1 text-[11px] text-gx-muted">
+      <div className="flex shrink-0 items-center gap-2 border-b border-border bg-card px-3 py-1 text-[11px] text-muted-foreground">
         <span>
-          <strong className="text-gx-text">
+          <strong className="text-foreground">
             {showFilters ? filteredRows.length : result.row_count}
           </strong>{" "}
           rows
           {result.truncated && (
-            <span className="ml-1 text-gx-warn">(result truncated)</span>
+            <span className="ml-1 text-warning">(result truncated)</span>
           )}
           {showFilters && filteredRows.length !== result.row_count && (
-            <span className="ml-1 text-gx-accent">
+            <span className="ml-1 text-primary">
               (filtered from {result.row_count})
             </span>
           )}
@@ -775,109 +829,145 @@ function ResultGrid({ result, elapsed, sort, onSort, onCellCopy, copiedCell, sor
 
         <div className="ml-auto flex items-center gap-1">
           {copiedCell !== null && (
-            <span className="flex items-center gap-1 text-gx-accent">
+            <span className="flex items-center gap-1 text-primary">
               <Copy size={9} /> Copied
             </span>
           )}
           {/* Filter toggle */}
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={() => setShowFilters(!showFilters)}
             className={clsx(
               "flex items-center gap-1 rounded px-1.5 py-0.5 transition",
               showFilters
-                ? "bg-gx-accent/15 text-gx-accent"
-                : "text-gx-muted hover:text-gx-text",
+                ? "bg-primary/15 text-primary"
+                : "text-muted-foreground hover:text-foreground",
             )}
             title="Toggle column filters"
           >
             <Search size={10} />
             Filter
-          </button>
-          {/* Mode toggle */}
-          <div className="flex items-center rounded border border-gx-border bg-gx-bg-sub">
-            <button
+          </Button>
+          {/* Filter toggle */}
+          <div className="flex items-center rounded border border-border bg-background">
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={() => setMode("table")}
               className={clsx(
                 "rounded-l px-1.5 py-0.5 text-[10px] transition",
                 mode === "table"
-                  ? "bg-gx-accent/15 text-gx-accent"
-                  : "text-gx-muted hover:text-gx-text",
+                  ? "bg-primary/15 text-primary"
+                  : "text-muted-foreground hover:text-foreground",
               )}
             >
               Table
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={() => setMode("pivot")}
               className={clsx(
                 "rounded-r px-1.5 py-0.5 text-[10px] transition",
                 mode === "pivot"
-                  ? "bg-gx-accent/15 text-gx-accent"
-                  : "text-gx-muted hover:text-gx-text",
+                  ? "bg-primary/15 text-primary"
+                  : "text-muted-foreground hover:text-foreground",
               )}
             >
               Pivot
-            </button>
+            </Button>
           </div>
         </div>
       </div>
 
       {/* Pivot config bar */}
       {mode === "pivot" && (
-        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-gx-border bg-gx-surface px-3 py-1.5 text-[10px]">
-          <label className="flex items-center gap-1 text-gx-muted">
+        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border bg-card px-3 py-1.5 text-[10px]">
+          <label className="flex items-center gap-1 text-muted-foreground">
             Group by:
-            <select
-              value={pivotCfg.groupBy[0] || ""}
-              onChange={(e) =>
-                setPivotCfg((p) => ({ ...p, groupBy: e.target.value ? [e.target.value] : [] }))
-              }
-              className="rounded border border-gx-border bg-gx-bg-sub px-1 py-0.5 font-mono text-gx-text"
+            <Select
+              value={":" + String(pivotCfg.groupBy[0] || "")}
+              onValueChange={(selectedValue) => {
+                const value = selectedValue.slice(1);
+                return setPivotCfg((p) => ({
+                  ...p,
+                  groupBy: value ? [value] : [],
+                }));
+              }}
             >
-              <option value="">—</option>
-              {cols.map((c) => (
-                <option key={c} value={c}>
-                  {c}
-                </option>
-              ))}
-            </select>
+              <SelectTrigger className="rounded border border-border bg-background px-1 py-0.5 font-mono text-foreground">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  <SelectItem value={":" + String("")}>—</SelectItem>
+                  {cols.map((c) => (
+                    <SelectItem key={c} value={":" + String(c)}>
+                      {c}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
           </label>
-          <label className="flex items-center gap-1 text-gx-muted">
+          <label className="flex items-center gap-1 text-muted-foreground">
             Value:
-            <select
-              value={pivotCfg.values[0] || ""}
-              onChange={(e) =>
-                setPivotCfg((p) => ({ ...p, values: e.target.value ? [e.target.value] : [] }))
-              }
-              className="rounded border border-gx-border bg-gx-bg-sub px-1 py-0.5 font-mono text-gx-text"
+            <Select
+              value={":" + String(pivotCfg.values[0] || "")}
+              onValueChange={(selectedValue) => {
+                const value = selectedValue.slice(1);
+                return setPivotCfg((p) => ({
+                  ...p,
+                  values: value ? [value] : [],
+                }));
+              }}
             >
-              <option value="">—</option>
-              {cols.map((c) => (
-                <option key={c} value={c}>
-                  {c}
-                </option>
-              ))}
-            </select>
+              <SelectTrigger className="rounded border border-border bg-background px-1 py-0.5 font-mono text-foreground">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  <SelectItem value={":" + String("")}>—</SelectItem>
+                  {cols.map((c) => (
+                    <SelectItem key={c} value={":" + String(c)}>
+                      {c}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
           </label>
-          <label className="flex items-center gap-1 text-gx-muted">
+          <label className="flex items-center gap-1 text-muted-foreground">
             Agg:
-            <select
-              value={pivotCfg.agg}
-              onChange={(e) =>
-                setPivotCfg((p) => ({ ...p, agg: e.target.value as PivotConfig["agg"] }))
-              }
-              className="rounded border border-gx-border bg-gx-bg-sub px-1 py-0.5 font-mono text-gx-text"
+            <Select
+              value={":" + String(pivotCfg.agg)}
+              onValueChange={(selectedValue) => {
+                const value = selectedValue.slice(1);
+                return setPivotCfg((p) => ({
+                  ...p,
+                  agg: value as PivotConfig["agg"],
+                }));
+              }}
             >
-              {(["COUNT", "SUM", "AVG", "MIN", "MAX"] as const).map((a) => (
-                <option key={a} value={a}>
-                  {a}
-                </option>
-              ))}
-            </select>
+              <SelectTrigger className="rounded border border-border bg-background px-1 py-0.5 font-mono text-foreground">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  {(["COUNT", "SUM", "AVG", "MIN", "MAX"] as const).map((a) => (
+                    <SelectItem key={a} value={":" + String(a)}>
+                      {a}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
           </label>
-          <span className="text-gx-muted">
+          <span className="text-muted-foreground">
             {pivotData ? `${pivotData.length} groups` : ""}
           </span>
         </div>
@@ -887,12 +977,14 @@ function ResultGrid({ result, elapsed, sort, onSort, onCellCopy, copiedCell, sor
       <div className="min-h-0 flex-1 overflow-auto">
         {mode === "table" ? (
           result.row_count === 0 ? (
-            <div className="p-4 text-center text-xs text-gx-muted">No rows returned.</div>
+            <div className="p-4 text-center text-xs text-muted-foreground">
+              No rows returned.
+            </div>
           ) : (
             <table className="border-collapse font-mono text-[11px]" style={{ minWidth: "100%" }}>
-              <thead className="sticky top-0 z-10 bg-gx-surface">
+              <thead className="sticky top-0 z-10 bg-card">
                 <tr>
-                  <th className="sticky left-0 z-20 w-[42px] min-w-[42px] border-b border-r border-gx-border bg-gx-surface px-2 py-1.5 text-right text-[10px] text-gx-muted whitespace-nowrap">
+                  <th className="sticky left-0 z-20 w-[42px] min-w-[42px] border-b border-r border-border bg-card px-2 py-1.5 text-right text-[10px] text-muted-foreground whitespace-nowrap">
                     #
                   </th>
                   {cols.map((c) => {
@@ -902,8 +994,8 @@ function ResultGrid({ result, elapsed, sort, onSort, onCellCopy, copiedCell, sor
                       <th
                         key={c}
                         className={clsx(
-                          "relative select-none border-b border-gx-border px-2 py-1.5 text-left font-semibold text-gx-text whitespace-nowrap",
-                          sortable && "cursor-pointer hover:bg-gx-surface-hover",
+                          "relative select-none border-b border-border px-2 py-1.5 text-left font-semibold text-foreground whitespace-nowrap",
+                          sortable && "cursor-pointer hover:bg-accent",
                         )}
                         style={w ? { width: w, minWidth: w, maxWidth: w } : { minWidth: 80 }}
                         onClick={() => sortable && onSort(c)}
@@ -913,14 +1005,14 @@ function ResultGrid({ result, elapsed, sort, onSort, onCellCopy, copiedCell, sor
                           <span className="truncate">{c}</span>
                           {isSorted && sortable &&
                             (sort.dir === "ASC" ? (
-                              <SortAsc size={10} className="shrink-0 text-gx-accent" />
+                              <SortAsc size={10} className="shrink-0 text-primary" />
                             ) : (
-                              <SortDesc size={10} className="shrink-0 text-gx-accent" />
+                              <SortDesc size={10} className="shrink-0 text-primary" />
                             ))}
                         </span>
                         {/* Resize handle */}
                         <div
-                          className="absolute right-0 top-0 h-full w-[5px] cursor-col-resize hover:bg-gx-accent/30"
+                          className="absolute right-0 top-0 h-full w-[5px] cursor-col-resize hover:bg-primary/30"
                           onMouseDown={(e) => handleResizeStart(e, c)}
                           onClick={(e) => e.stopPropagation()}
                         />
@@ -930,13 +1022,13 @@ function ResultGrid({ result, elapsed, sort, onSort, onCellCopy, copiedCell, sor
                 </tr>
                 {/* Column type row */}
                 <tr>
-                  <th className="sticky left-0 z-20 w-[42px] min-w-[42px] border-b border-r border-gx-border bg-gx-surface px-2 py-0.5" />
+                  <th className="sticky left-0 z-20 w-[42px] min-w-[42px] border-b border-r border-border bg-card px-2 py-0.5" />
                   {result.columns.map((c) => {
                     const w = colWidths[c.name];
                     return (
                       <th
                         key={c.name}
-                        className="border-b border-gx-border bg-gx-surface px-2 py-0.5 text-left text-[9px] font-normal text-gx-muted whitespace-nowrap overflow-hidden"
+                        className="border-b border-border bg-card px-2 py-0.5 text-left text-[9px] font-normal text-muted-foreground whitespace-nowrap overflow-hidden"
                         style={w ? { width: w, minWidth: w, maxWidth: w } : undefined}
                       >
                         {c.type}
@@ -947,25 +1039,25 @@ function ResultGrid({ result, elapsed, sort, onSort, onCellCopy, copiedCell, sor
                 {/* Per-column filter row */}
                 {showFilters && (
                   <tr>
-                    <th className="sticky left-0 z-20 w-[42px] min-w-[42px] border-b border-r border-gx-border bg-gx-surface px-1 py-0.5">
-                      <Search size={9} className="mx-auto text-gx-muted" />
+                    <th className="sticky left-0 z-20 w-[42px] min-w-[42px] border-b border-r border-border bg-card px-1 py-0.5">
+                      <Search size={9} className="mx-auto text-muted-foreground" />
                     </th>
                     {cols.map((c) => {
                       const w = colWidths[c];
                       return (
                         <th
                           key={c}
-                          className="border-b border-gx-border bg-gx-surface px-1 py-0.5"
+                          className="border-b border-border bg-card px-1 py-0.5"
                           style={w ? { width: w, minWidth: w, maxWidth: w } : undefined}
                         >
-                          <input
+                          <Input
                             type="text"
                             value={colFilters[c] || ""}
                             onChange={(e) =>
                               setColFilters((prev) => ({ ...prev, [c]: e.target.value }))
                             }
                             placeholder="filter…"
-                            className="w-full rounded border border-gx-border/50 bg-gx-bg-sub px-1 py-0.5 font-mono text-[9px] text-gx-text placeholder:text-gx-muted/50 focus:border-gx-accent focus-visible:outline-none"
+                            className="w-full rounded border border-border/50 bg-background px-1 py-0.5 font-mono text-[9px] text-foreground placeholder:text-muted-foreground/50 focus:border-primary focus-visible:outline-none"
                           />
                         </th>
                       );
@@ -975,8 +1067,8 @@ function ResultGrid({ result, elapsed, sort, onSort, onCellCopy, copiedCell, sor
               </thead>
               <tbody>
                 {filteredRows.map((row, ri) => (
-                  <tr key={ri} className="group odd:bg-gx-surface/30 hover:bg-gx-accent/5">
-                    <td className="sticky left-0 z-10 w-[42px] min-w-[42px] border-r border-gx-border/40 bg-inherit px-2 py-1 text-right text-[10px] text-gx-muted whitespace-nowrap">
+                  <tr key={ri} className="group odd:bg-card/30 hover:bg-primary/5">
+                    <td className="sticky left-0 z-10 w-[42px] min-w-[42px] border-r border-border/40 bg-inherit px-2 py-1 text-right text-[10px] text-muted-foreground whitespace-nowrap">
                       {ri + 1}
                     </td>
                     {cols.map((c) => {
@@ -984,7 +1076,7 @@ function ResultGrid({ result, elapsed, sort, onSort, onCellCopy, copiedCell, sor
                       return (
                         <td
                           key={c}
-                          className="cursor-pointer border-b border-gx-border/20 px-2 py-1 text-gx-text hover:bg-gx-accent/10 overflow-hidden text-ellipsis whitespace-nowrap"
+                          className="cursor-pointer border-b border-border/20 px-2 py-1 text-foreground hover:bg-primary/10 overflow-hidden text-ellipsis whitespace-nowrap"
                           style={w ? { width: w, minWidth: w, maxWidth: w } : { maxWidth: 300 }}
                           onClick={() => onCellCopy(renderCell(row[c]))}
                           title={renderCell(row[c])}
@@ -1018,7 +1110,7 @@ function PivotTable({
 }) {
   if (!data || data.length === 0) {
     return (
-      <div className="flex h-full items-center justify-center text-sm text-gx-muted">
+      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
         Configure Group By and Value columns above to see pivot results.
       </div>
     );
@@ -1028,18 +1120,18 @@ function PivotTable({
 
   return (
     <table className="w-full border-collapse font-mono text-[11px]">
-      <thead className="sticky top-0 z-10 bg-gx-surface">
+      <thead className="sticky top-0 z-10 bg-card">
         <tr>
-          <th className="border-b border-gx-border px-3 py-1.5 text-left font-semibold text-gx-text">
+          <th className="border-b border-border px-3 py-1.5 text-left font-semibold text-foreground">
             {config.groupBy.join(", ")}
           </th>
-          <th className="border-b border-gx-border px-3 py-1.5 text-right font-semibold text-gx-text">
+          <th className="border-b border-border px-3 py-1.5 text-right font-semibold text-foreground">
             Count
           </th>
           {pivotCols.map((c) => (
             <th
               key={c}
-              className="border-b border-gx-border px-3 py-1.5 text-right font-semibold text-gx-text"
+              className="border-b border-border px-3 py-1.5 text-right font-semibold text-foreground"
             >
               {c}
             </th>
@@ -1048,17 +1140,17 @@ function PivotTable({
       </thead>
       <tbody>
         {data.map((row, i) => (
-          <tr key={i} className="odd:bg-gx-surface/30 hover:bg-gx-accent/5">
-            <td className="border-b border-gx-border/20 px-3 py-1 text-gx-text">
+          <tr key={i} className="odd:bg-card/30 hover:bg-primary/5">
+            <td className="border-b border-border/20 px-3 py-1 text-foreground">
               {String(row.__group)}
             </td>
-            <td className="border-b border-gx-border/20 px-3 py-1 text-right text-gx-info">
+            <td className="border-b border-border/20 px-3 py-1 text-right text-info">
               {(row.__count as number).toLocaleString()}
             </td>
             {pivotCols.map((c) => (
               <td
                 key={c}
-                className="border-b border-gx-border/20 px-3 py-1 text-right text-gx-text"
+                className="border-b border-border/20 px-3 py-1 text-right text-foreground"
               >
                 <CellValue value={row[c]} />
               </td>
@@ -1074,14 +1166,14 @@ function PivotTable({
 
 function CellValue({ value }: { value: unknown }) {
   if (value === null || value === undefined) {
-    return <span className="italic text-gx-muted/60">NULL</span>;
+    return <span className="italic text-muted-foreground/60">NULL</span>;
   }
   if (typeof value === "number") {
-    return <span className="text-gx-info">{value.toLocaleString()}</span>;
+    return <span className="text-info">{value.toLocaleString()}</span>;
   }
   if (typeof value === "boolean") {
     return (
-      <span className={value ? "text-gx-success" : "text-gx-error"}>
+      <span className={value ? "text-success" : "text-destructive"}>
         {String(value)}
       </span>
     );
@@ -1089,15 +1181,15 @@ function CellValue({ value }: { value: unknown }) {
   if (typeof value === "string") {
     if (value.length > 120) {
       return (
-        <span className="text-gx-text" title={value}>
+        <span className="text-foreground" title={value}>
           {value.slice(0, 120)}
-          <span className="text-gx-muted">…</span>
+          <span className="text-muted-foreground">…</span>
         </span>
       );
     }
     return <span>{value}</span>;
   }
-  return <span className="text-gx-muted">{String(value)}</span>;
+  return <span className="text-muted-foreground">{String(value)}</span>;
 }
 
 function renderCell(v: unknown): string {

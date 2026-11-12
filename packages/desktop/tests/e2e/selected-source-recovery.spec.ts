@@ -1,3 +1,4 @@
+import { chooseSelect } from "../helpers/select";
 import { test, expect, _electron as electron } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -34,12 +35,13 @@ for (const target of ["text preview", "Markdown editor", "pending text", "pendin
     application = await electron.launch({ executablePath: packagedExecutable(), args: [`--user-data-dir=${path.join(root, "profile")}`], env: Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === "string")) });
     application.process().stderr?.on("data", bytes => { stderr = (stderr + bytes.toString()).slice(-32_000); });
     const page = await application.firstWindow();
-    // Electron owns the beforeunload decision. Playwright's automatic dialog
-    // dismissal races that native handler and obscures the actual test result.
-    page.on("dialog", dialog => { if (dialog.type() !== "beforeunload") void dialog.dismiss(); });
+      // Electron owns the beforeunload decision. Playwright's automatic dialog
+      // dismissal races that native handler and obscures the actual test result.
+      page.on("dialog", dialog => { if (dialog.type() !== "beforeunload") void dialog.dismiss(); });
     await page.getByRole("button", { name: "Skip", exact: true }).click();
     await page.getByRole("button", { name: "No thanks", exact: true }).click();
-    await page.exposeFunction("recordSelectedOwner", (event: typeof events[number]) => events.push(event));
+    await page.exposeFunction("recordSelectedOwner", (event: (typeof events)[number]) => events.push(event),
+      );
     await page.evaluate(() => {
       const receiver = window as typeof window & { recordSelectedOwner: (event: unknown) => Promise<void> };
       window.crab!.onEvent((event: AgentEvent) => { if (event.method === "repo:capabilities-changed") void receiver.recordSelectedOwner(event.params); });
@@ -67,7 +69,10 @@ for (const target of ["text preview", "Markdown editor", "pending text", "pendin
       }
       else {
         await page.getByRole("listbox", { name: "Changed files", exact: true }).getByRole("option").filter({ has: page.getByText(file, { exact: true }) }).dblclick();
-        await page.getByRole("combobox", { name: "Compare file versions", exact: true }).selectOption("unstaged");
+        await chooseSelect(
+            page.getByRole("combobox", { name: "Compare file versions", exact: true }),
+            "unstaged",
+          );
       }
     }
     const content = editor ? page.locator(".monaco-editor .view-lines") : target === "notebook preview" ? page.locator("pre code") : target === "Changes file" ? page.locator("pre")

@@ -1,5 +1,7 @@
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { ChevronDown, ChevronUp, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ChevronUp, ChevronDown, X } from "lucide-react";
 
 interface BrowserFindProps {
   isOpen: boolean;
@@ -119,55 +121,61 @@ export function BrowserFind({ isOpen, onClose, webviewRef }: BrowserFindProps) {
 
   return (
     <div
-      className="absolute top-3 right-3 z-50 flex items-center gap-1.5 rounded-lg border border-gx-border bg-gx-surface/95 px-2.5 py-1.5 shadow-lg backdrop-blur-sm"
+      className="absolute top-3 right-3 z-50 flex items-center gap-1.5 rounded-lg border border-border bg-card/95 px-2.5 py-1.5 shadow-lg backdrop-blur-sm"
       style={{ width: 320 }}
       onKeyDown={handleKeyDown}
     >
-      <input
+      <Input
         ref={inputRef}
         type="text"
         value={query}
         onChange={(e) => setQuery(e.target.value)}
         placeholder="Find in page..."
-        className="min-w-0 flex-1 border-none bg-transparent text-sm text-gx-text outline-none placeholder-gx-muted/60"
+        className="min-w-0 flex-1 border-none bg-transparent text-sm text-foreground outline-none placeholder-muted-foreground/60"
       />
 
       {query ? (
-        <span className="shrink-0 text-[11px] text-gx-muted">
+        <span className="shrink-0 text-[11px] text-muted-foreground">
           {totalMatches > 0 ? `${activeMatch} of ${totalMatches}` : "No matches"}
         </span>
       ) : null}
 
-      <div className="mx-0.5 h-4 w-px bg-gx-border" />
+      <div className="mx-0.5 h-4 w-px bg-border" />
 
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
-        className="flex size-6 shrink-0 items-center justify-center rounded text-gx-muted hover:text-gx-text transition"
+        className="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground transition"
         onClick={findPrevious}
         title="Previous match"
       >
         <ChevronUp size={14} />
-      </button>
+      </Button>
 
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
-        className="flex size-6 shrink-0 items-center justify-center rounded text-gx-muted hover:text-gx-text transition"
+        className="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground transition"
         onClick={findNext}
         title="Next match"
       >
         <ChevronDown size={14} />
-      </button>
+      </Button>
 
-      <div className="mx-0.5 h-4 w-px bg-gx-border" />
+      <div className="mx-0.5 h-4 w-px bg-border" />
 
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
-        className="flex size-6 shrink-0 items-center justify-center rounded text-gx-muted hover:text-gx-text transition"
+        className="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground transition"
         onClick={onClose}
         title="Close"
       >
         <X size={14} />
-      </button>
+      </Button>
     </div>
   );
 }

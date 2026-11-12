@@ -1,13 +1,19 @@
+import type { ButtonProps } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
 import {
-  forwardRef,
-  useCallback,
-  useEffect,
-  useImperativeHandle,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuPortal,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
+import { InputGroup, InputGroupAddon, InputGroupTextarea } from "@/components/ui/input-group";
+import { Toggle } from "@/components/ui/toggle";
 import clsx from "clsx";
 import {
   AtSign,
@@ -15,7 +21,6 @@ import {
   Bot,
   Brain,
   Check,
-  ChevronRight,
   ClipboardList,
   FileText,
   FolderOpen,
@@ -32,14 +37,28 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { SlashCommandDropdown, SlashCommand } from "./SlashCommandDropdown";
-import { ContextPicker, ContextKind, ContextPickerResult } from "./ContextPicker";
-import { AtContextDropdown, AtContextItem } from "./AtContextDropdown";
-import { FileMentionDropdown, FileMatch } from "./FileMentionDropdown";
-import { QuickAttachBar } from "./QuickAttachBar";
-import { intelligenceLabel } from "./model-catalog";
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { AgentWorkflowDefinition, DirEntry, rpc } from "../../ipc";
 import { AgentIcon, agentAccentColor } from "./AgentIcon";
-import { AgentWorkflowDefinition, rpc, DirEntry } from "../../ipc";
+import { AtContextDropdown, AtContextItem } from "./AtContextDropdown";
+import {
+  ContextKind,
+  ContextPicker,
+  ContextPickerResult,
+} from "./ContextPicker";
+import { FileMatch, FileMentionDropdown } from "./FileMentionDropdown";
+import { QuickAttachBar } from "./QuickAttachBar";
+import { SlashCommand, SlashCommandDropdown } from "./SlashCommandDropdown";
+import { intelligenceLabel } from "./model-catalog";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -249,16 +268,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
   }));
 
   // Close popover menus on outside click.
-  useEffect(() => {
-    if (!openMenu) return;
-    const handler = (e: MouseEvent) => {
-      if (!containerRef.current?.contains(e.target as Node)) {
-        setOpenMenu(null);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [openMenu]);
 
   // Auto-grow textarea up to ~8 rows.
   useEffect(() => {
@@ -594,8 +603,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
   const canSubmit = text.trim().length > 0 && !isStreaming;
 
   return (
-    <div
+    <InputGroup
       ref={containerRef}
+      aria-label="Message composer"
       onBlur={(event) => {
         if (event.currentTarget.contains(event.relatedTarget)) return;
         // These popovers listen on document; hidden chat must not consume Skills input.
@@ -605,10 +615,11 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
       }}
       onDrop={handleDrop}
       onDragOver={(e) => e.preventDefault()}
-      className="relative isolate rounded-lg border border-gx-border bg-gx-bg focus-within:border-gx-accent/70 transition"
+      className="isolate h-auto flex-col items-stretch rounded-lg"
     >
       {/* Slash command dropdown (positioned above the input group) */}
       <SlashCommandDropdown
+        anchorRef={textareaRef}
         commands={slashCommands}
         filter={slashFilter}
         onSelect={handleSlashSelectInner}
@@ -618,6 +629,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
 
       {/* Inline @ context dropdown (Cursor-style typeahead). */}
       <AtContextDropdown
+        anchorRef={textareaRef}
         filter={atFilter}
         visible={showAt}
         repoId={repoId}
@@ -639,6 +651,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
 
       {/* File mention dropdown (`#file.ts` typeahead). */}
       <FileMentionDropdown
+        anchorRef={textareaRef}
         matches={fileMatches}
         loading={repoEntriesLoading}
         onSelect={handleFileMentionSelect}
@@ -655,9 +668,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
       />
 
       {/* Textarea */}
-      <textarea
+      <InputGroupTextarea
         ref={textareaRef}
-        className="block w-full resize-none bg-transparent px-3 pt-2.5 pb-1 text-xs leading-5 text-gx-text placeholder:text-gx-muted/60 focus:outline-none"
+        className="block w-full px-3 pt-2.5 pb-2 leading-5"
         placeholder={placeholder ?? "Type a message, / for commands, @ to add context, # for files…"}
         rows={1}
         value={text}
@@ -677,16 +690,21 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
       )}
 
       {/* Toolbar */}
-      <div className="flex items-center gap-1 px-2 pb-2 pt-1">
-        {/* Left cluster: agent, @, + */}
-        <IconButton
-          ariaLabel="Select AI agent"
-          title={selectedAgent ? `Agent: ${selectedAgent.name}` : "Select agent"}
-          active={openMenu === "agent"}
-          onClick={() => setOpenMenu(openMenu === "agent" ? null : "agent")}
-          disabled={agents.length === 0}
+      <InputGroupAddon align="block-end" aria-label="Message actions" className="flex-wrap gap-x-2 gap-y-1 px-2 pt-1">
+        <div className="flex min-w-0 items-center gap-1">
+        {/* Toolbar */}
+        <DropdownMenu
+          open={openMenu === "agent"}
+          onOpenChange={(open) => setOpenMenu(open ? "agent" : null)}
         >
-          {selectedAgent ? (
+          <DropdownMenuTrigger asChild>
+            <IconButton
+              ariaLabel="Select AI agent"
+              title={selectedAgent ? `Agent: ${selectedAgent.name}` : "Select agent"}
+              active={openMenu === "agent"}
+              disabled={agents.length === 0}
+            >
+              {selectedAgent ? (
             <AgentIcon
               agentName={selectedAgent.type}
               size={13}
@@ -695,100 +713,17 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
           ) : (
             <Bot size={13} />
           )}
-          {selectedAgent && (
-            <span className="text-[10px] font-medium text-gx-text/90">{shortAgentLabel(selectedAgent.name)}</span>
-          )}
-        </IconButton>
-
-        <IconButton
-          ariaLabel="Add context"
-          title="Add context (files, URLs, commits, skills)"
-          active={openMenu === "context"}
-          onClick={() => setOpenMenu(openMenu === "context" ? null : "context")}
-        >
-          <AtSign size={13} />
-        </IconButton>
-
-        <IconButton
-          ariaLabel="Attach file"
-          title="Attach files, images, or documents"
-          active={openMenu === "attach"}
-          onClick={() => setOpenMenu(openMenu === "attach" ? null : "attach")}
-        >
-          <Plus size={13} />
-        </IconButton>
-
-        {/* Spacer */}
-        <div className="flex-1" />
-
-        {/* Right cluster: model, mode, send */}
-        {models.length > 0 && (
-          <IconButton
-            ariaLabel="Select model and intelligence"
-            title={selectedModel ? `Model: ${selectedModel.label}${intelligence ? ` · ${intelligence}` : ""}` : "Model"}
-            active={openMenu === "model"}
-            onClick={() => setOpenMenu(openMenu === "model" ? null : "model")}
-          >
-            <Sparkles size={12} className="text-gx-accent" />
-            <span className="text-[10px] font-medium">
-              {selectedModel ? selectedModel.label : "Default"}
-              {intelligence && <span className="ml-1 text-gx-muted">{intelligenceLabel(intelligence)}</span>}
-            </span>
-          </IconButton>
-        )}
-
-        <button
-          type="button"
-          onClick={() => onModeChange(mode === "plan" ? "instant" : "plan")}
-          aria-pressed={mode === "plan"}
-          title={
-            mode === "plan"
-              ? "Plan mode — agent proposes a plan before making changes"
-              : "Instant mode — agent acts immediately"
-          }
-          className={clsx(
-            "flex h-7 items-center gap-1 rounded-md border px-2 text-[10px] font-medium transition",
-            mode === "plan"
-              ? "border-gx-warn/50 bg-gx-warn/10 text-gx-warn hover:bg-gx-warn/15"
-              : "border-gx-border bg-gx-surface text-gx-muted hover:text-gx-text",
-          )}
-        >
-          {mode === "plan" ? <ClipboardList size={11} /> : <Zap size={11} />}
-          {mode === "plan" ? "Plan" : "Instant"}
-        </button>
-
-        {isStreaming ? (
-          <button
-            type="button"
-            onClick={onStop}
-            className="ml-1 flex h-7 w-7 items-center justify-center rounded-md bg-gx-error/20 text-gx-error hover:bg-gx-error/30 transition"
-            aria-label="Stop agent"
-          >
-            <Square size={13} />
-          </button>
-        ) : (
-          <button
-            type="button"
-            onClick={handleSubmit}
-            disabled={!canSubmit}
-            className={clsx(
-              "ml-1 flex h-7 w-7 items-center justify-center rounded-md transition",
-              canSubmit
-                ? "bg-gx-accent text-white hover:bg-gx-accent-hover"
-                : "bg-gx-surface text-gx-muted cursor-not-allowed",
-            )}
-            aria-label="Send message"
-          >
-            <Send size={13} />
-          </button>
-        )}
-      </div>
-
-      {/* Popovers ───────────────────────────────────────────────── */}
-      {openMenu === "agent" && (
-        <PopoverMenu anchor="left" onClose={() => setOpenMenu(null)}>
-          <MenuHeader label="Agent" />
-          {agents.filter((a) => a.available).map((a) => (
+              {selectedAgent && (
+                <span className="text-[10px] font-medium text-foreground/90">
+                  {shortAgentLabel(selectedAgent.name)}
+                </span>
+              )}
+            </IconButton>
+          </DropdownMenuTrigger>
+          {openMenu === "agent" && (
+            <PopoverMenu anchor="left" onClose={() => setOpenMenu(null)}>
+              <MenuHeader label="Agent" />
+              {agents.filter((a) => a.available).map((a) => (
             <MenuItem
               key={a.type}
               active={a.type === agentType}
@@ -800,74 +735,104 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
               label={a.name}
             />
           ))}
-          {agents.filter((a) => a.available).length === 0 && (
-            <div className="px-3 py-2 text-[10px] text-gx-muted">No agents installed.</div>
-          )}
-          {/* Divider + Add Agent shortcut */}
-          <div className="my-1 border-t border-gx-border/50" />
-          <MenuItem
-            icon={<Plus size={12} className="text-gx-muted" />}
+              {agents.filter((a) => a.available).length === 0 && (
+                <div className="px-3 py-2 text-[10px] text-muted-foreground">
+                  No agents installed.
+                </div>
+              )}
+              {/* Right cluster: model, mode, send */}
+              <div className="my-1 border-t border-border/50" />
+              <MenuItem
+            icon={<Plus size={12} className="text-muted-foreground" />}
             label="Add Agent…"
             onClick={() => {
               setOpenMenu(null);
               onOpenAgentManager?.();
             }}
           />
-        </PopoverMenu>
-      )}
+            </PopoverMenu>
+          )}
+        </DropdownMenu>
 
-      {openMenu === "context" && (
-        <PopoverMenu anchor="left" onClose={() => setOpenMenu(null)}>
-          <MenuHeader label="Add context" />
-          <MenuItem
+        <DropdownMenu
+          open={openMenu === "context"}
+          onOpenChange={(open) => setOpenMenu(open ? "context" : null)}
+        >
+          <DropdownMenuTrigger asChild>
+            <IconButton
+              ariaLabel="Add context"
+              title="Add context (files, URLs, commits, skills)"
+              active={openMenu === "context"}
+            >
+              <AtSign size={13} />
+            </IconButton>
+          </DropdownMenuTrigger>
+          {openMenu === "context" && (
+            <PopoverMenu anchor="left" onClose={() => setOpenMenu(null)}>
+              <MenuHeader label="Add context" />
+              <MenuItem
             icon={<Bookmark size={12} />}
             label="Instructions"
             hint="Saved prompts"
             onClick={() => { setOpenMenu(null); setPickerKind("instruction"); }}
           />
-          <MenuItem
+              <MenuItem
             icon={<FileText size={12} />}
             label="Files"
             hint="Search & select"
             onClick={() => { setOpenMenu(null); setPickerKind("file"); }}
           />
-          <MenuItem
+              <MenuItem
             icon={<FolderOpen size={12} />}
             label="Folders"
             hint="Search & select"
             onClick={() => { setOpenMenu(null); setPickerKind("folder"); }}
           />
-          <MenuItem
+              <MenuItem
             icon={<Link2 size={12} />}
             label="URL"
             hint="Paste link"
             onClick={() => { setOpenMenu(null); setPickerKind("url"); }}
           />
-          <MenuItem
+              <MenuItem
             icon={<GitCommit size={12} />}
             label="Commit"
             hint="Search history"
             onClick={() => { setOpenMenu(null); setPickerKind("commit"); }}
           />
-          <MenuItem
+              <MenuItem
             icon={<Terminal size={12} />}
             label="Terminal output"
             hint="From sessions"
             onClick={() => { setOpenMenu(null); setPickerKind("terminal"); }}
           />
-          <MenuItem
+              <MenuItem
             icon={<Brain size={12} />}
             label="Skills"
             hint="Install & manage"
             onClick={() => { setOpenMenu(null); setPickerKind("skill"); }}
           />
-        </PopoverMenu>
-      )}
+            </PopoverMenu>
+          )}
+        </DropdownMenu>
 
-      {openMenu === "attach" && (
-        <PopoverMenu anchor="left" onClose={() => setOpenMenu(null)}>
-          <MenuHeader label="Attach" />
-          <MenuItem
+        <DropdownMenu
+          open={openMenu === "attach"}
+          onOpenChange={(open) => setOpenMenu(open ? "attach" : null)}
+        >
+          <DropdownMenuTrigger asChild>
+            <IconButton
+              ariaLabel="Attach file"
+              title="Attach files, images, or documents"
+              active={openMenu === "attach"}
+            >
+              <Plus size={13} />
+            </IconButton>
+          </DropdownMenuTrigger>
+          {openMenu === "attach" && (
+            <PopoverMenu anchor="left" onClose={() => setOpenMenu(null)}>
+              <MenuHeader label="Attach" />
+              <MenuItem
             icon={<FolderOpen size={12} />}
             label="File"
             hint="From workspace"
@@ -876,7 +841,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
               addFilesFromPicker("file");
             }}
           />
-          <MenuItem
+              <MenuItem
             icon={<ImageIcon size={12} />}
             label="Image"
             hint="PNG, JPG, SVG"
@@ -885,7 +850,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
               imageInputRef.current?.click();
             }}
           />
-          <MenuItem
+              <MenuItem
             icon={<FileText size={12} />}
             label="Document"
             hint="PDF, DOCX, MD"
@@ -894,10 +859,37 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
               docInputRef.current?.click();
             }}
           />
-        </PopoverMenu>
-      )}
+            </PopoverMenu>
+          )}
+        </DropdownMenu>
 
-      {openMenu === "model" && models.length > 0 && (
+        </div>
+        <div className="ml-auto flex min-w-0 max-w-full items-center justify-end gap-1">
+        {/* Right cluster: model, mode, send */}
+        {models.length > 0 && (
+          <DropdownMenu
+            open={openMenu === "model"}
+            onOpenChange={(open) => setOpenMenu(open ? "model" : null)}
+          >
+            <DropdownMenuTrigger asChild>
+              <IconButton
+                ariaLabel="Select model and intelligence"
+                className="max-w-[240px]"
+                title={selectedModel ? `Model: ${selectedModel.label}${intelligence ? ` · ${intelligence}` : ""}` : "Model"}
+                active={openMenu === "model"}
+              >
+                <Sparkles size={12} className="text-primary" />
+                <span className="truncate text-[10px] font-medium">
+                  {selectedModel ? selectedModel.label : "Default"}
+                  {intelligence && (
+                    <span className="ml-1 text-muted-foreground">
+                      {intelligenceLabel(intelligence)}
+                    </span>
+                  )}
+                </span>
+              </IconButton>
+            </DropdownMenuTrigger>
+            {openMenu === "model" && models.length > 0 && (
         <ModelIntelligencePopover
           models={models}
           selectedModel={model}
@@ -908,16 +900,71 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
           onClose={() => setOpenMenu(null)}
         />
       )}
+          </DropdownMenu>
+        )}
+
+        <Toggle
+          size="sm"
+          type="button"
+          onClick={() => onModeChange(mode === "plan" ? "instant" : "plan")}
+          pressed={mode === "plan"}
+          title={
+            mode === "plan"
+              ? "Plan mode — agent proposes a plan before making changes"
+              : "Instant mode — agent acts immediately"
+          }
+          className={clsx(
+            "h-7 shrink-0 gap-1 px-2 text-[10px]",
+            mode === "plan" && "bg-warning/10 text-warning hover:bg-warning/15",
+          )}
+        >
+          {mode === "plan" ? <ClipboardList size={11} /> : <Zap size={11} />}
+          {mode === "plan" ? "Plan" : "Instant"}
+        </Toggle>
+
+        {isStreaming ? (
+          <Button
+            variant="ghost"
+            size="compact"
+            type="button"
+            onClick={onStop}
+            className="ml-1 flex size-7 shrink-0 items-center justify-center rounded-md bg-destructive/20 text-destructive hover:bg-destructive/30 transition"
+            aria-label="Stop agent"
+          >
+            <Square size={13} />
+          </Button>
+        ) : (
+          <Button
+            variant="default"
+            size="compact"
+            type="button"
+            onClick={handleSubmit}
+            disabled={!canSubmit}
+            className={clsx(
+              "ml-1 flex size-7 shrink-0 items-center justify-center rounded-md transition",
+              canSubmit
+                ? "bg-primary text-primary-foreground hover:bg-primary-hover"
+                : "bg-card text-muted-foreground cursor-not-allowed",
+            )}
+            aria-label="Send message"
+          >
+            <Send size={13} />
+          </Button>
+        )}
+        </div>
+      </InputGroupAddon>
+
+      {/* Popovers ───────────────────────────────────────────────── */}
 
       {/* Hidden native file inputs for image / document attachments */}
-      <input
+      <Input
         ref={attachInputRef}
         type="file"
         multiple
         hidden
         onChange={(e) => handleNativeFiles(e.target.files, addAttachment, "file")}
       />
-      <input
+      <Input
         ref={imageInputRef}
         type="file"
         multiple
@@ -925,7 +972,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
         hidden
         onChange={(e) => handleNativeFiles(e.target.files, addAttachment, "image")}
       />
-      <input
+      <Input
         ref={docInputRef}
         type="file"
         multiple
@@ -942,7 +989,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
         onClose={handlePickerClose}
         onPick={handlePickerResult}
       />
-    </div>
+    </InputGroup>
   );
 });
 
@@ -1026,43 +1073,27 @@ function shortAgentLabel(name: string): string {
 
 // ── Sub-components ──────────────────────────────────────────────────
 
-function IconButton({
-  children,
-  onClick,
-  ariaLabel,
-  title,
-  active,
-  disabled,
-}: {
-  children: React.ReactNode;
-  onClick: () => void;
-  ariaLabel: string;
-  title?: string;
-  active?: boolean;
-  disabled?: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-label={ariaLabel}
-      title={title}
-      disabled={disabled}
-      className={clsx(
-        "flex h-7 items-center gap-1 rounded-md border px-2 text-gx-muted transition",
-        active
-          ? "border-gx-accent/60 bg-gx-accent/10 text-gx-text"
-          : "border-transparent hover:border-gx-border hover:bg-gx-surface hover:text-gx-text",
-        disabled && "opacity-40 cursor-not-allowed hover:border-transparent hover:bg-transparent",
-      )}
-    >
-      {children}
-    </button>
-  );
-}
+const IconButton = forwardRef<
+  HTMLButtonElement,
+  ButtonProps & { ariaLabel: string; active?: boolean; }
+>(({ ariaLabel, active, className, ...props }, ref) => (
+  <Button
+    ref={ref}
+    variant="ghost"
+    size="compact"
+    aria-label={ariaLabel}
+    {...props}
+    className={clsx(
+      "h-7 min-w-0 gap-1 px-2 text-muted-foreground",
+      active && "bg-accent text-accent-foreground",
+      className,
+    )}
+  />
+));
+IconButton.displayName = "IconButton";
 
 function PopoverMenu({
-  anchor,
+  anchor: _anchor,
   onClose: _onClose,
   children,
 }: {
@@ -1071,21 +1102,15 @@ function PopoverMenu({
   children: React.ReactNode;
 }) {
   return (
-    <div
-      role="menu"
-      className={clsx(
-        "absolute bottom-full z-40 mb-2 max-h-[var(--composer-popup-height)] min-w-[200px] overflow-auto rounded-lg border border-gx-border bg-gx-bg shadow-xl",
-        anchor === "left" ? "left-2" : "right-2",
-      )}
-    >
-      {children}
-    </div>
+    <DropdownMenuContent side="top" align="start" className="min-w-[200px]">
+      <DropdownMenuGroup>{children}</DropdownMenuGroup>
+    </DropdownMenuContent>
   );
 }
 
 function MenuHeader({ label }: { label: string }) {
   return (
-    <div className="px-3 py-1.5 border-b border-gx-border text-[10px] font-semibold uppercase tracking-wider text-gx-muted">
+    <div className="px-3 py-1.5 border-b border-border text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
       {label}
     </div>
   );
@@ -1107,25 +1132,27 @@ function MenuItem({
   onClick: () => void;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
+    <DropdownMenuItem
+      onSelect={onClick}
       disabled={disabled}
-      role="menuitem"
       className={clsx(
         "flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition",
         disabled
-          ? "cursor-not-allowed text-gx-muted/60"
+          ? "cursor-not-allowed text-muted-foreground/60"
           : active
-            ? "bg-gx-accent/10 text-gx-text"
-            : "text-gx-text hover:bg-gx-surface-hover",
+            ? "bg-primary/10 text-foreground"
+            : "text-foreground hover:bg-accent",
       )}
     >
-      <span className="shrink-0 text-gx-accent">{icon}</span>
+      <span className="shrink-0 text-primary">{icon}</span>
       <span className="flex-1 truncate">{label}</span>
-      {hint && <span className="shrink-0 text-[10px] text-gx-muted">{hint}</span>}
-      {active && <Check size={11} className="shrink-0 text-gx-accent" />}
-    </button>
+      {hint && (
+        <span className="shrink-0 text-[10px] text-muted-foreground">
+          {hint}
+        </span>
+      )}
+      {active && <Check size={11} className="shrink-0 text-primary" />}
+    </DropdownMenuItem>
   );
 }
 
@@ -1138,17 +1165,19 @@ function AttachmentChip({
 }) {
   const Icon = iconForAttachment(attachment.kind);
   return (
-    <span className="inline-flex items-center gap-1 rounded border border-gx-border bg-gx-surface px-1.5 py-0.5 text-[10px] text-gx-text">
-      <Icon size={10} className="text-gx-accent" />
+    <span className="inline-flex max-w-full items-center gap-1 rounded-md bg-accent px-1.5 py-0.5 text-[10px] text-foreground">
+      <Icon size={10} className="text-primary" />
       <span className="max-w-[160px] truncate">{attachment.label}</span>
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={onRemove}
-        className="ml-0.5 text-gx-muted hover:text-gx-text"
+        className="ml-0.5 size-5 p-0 text-muted-foreground hover:text-foreground"
         aria-label={`Remove ${attachment.label}`}
       >
         <X size={10} />
-      </button>
+      </Button>
     </span>
   );
 }
@@ -1191,113 +1220,97 @@ function ModelIntelligencePopover({
   onIntelligenceChange?: (level: string | null) => void;
   onClose: () => void;
 }) {
-  const [showMore, setShowMore] = useState(false);
-
   const primaryModels = models.slice(0, MAX_PRIMARY_MODELS);
   const otherModels = models.slice(MAX_PRIMARY_MODELS);
 
   return (
-    <div
-      role="menu"
-      className="absolute bottom-full right-2 z-40 mb-2 min-w-[180px] rounded-lg border border-gx-border bg-gx-bg shadow-xl"
-    >
-      {/* Intelligence section */}
-      {intelligenceLevels.length > 0 && (
-        <>
-          <div className="px-3 py-1 text-[9px] font-semibold uppercase tracking-wider text-gx-muted">
-            Intelligence
-          </div>
-          <button type="button" onClick={() => onIntelligenceChange?.(null)} className="flex w-full items-center gap-2 px-3 py-1 text-left text-[11px] text-gx-text hover:bg-gx-surface-hover">
-            <span className="flex-1">Default effort</span>{!intelligence && <Check size={11} className="shrink-0" />}
-          </button>
-          {intelligenceLevels.map((level) => (
-            <button
-              key={level}
-              type="button"
-              onClick={() => onIntelligenceChange?.(level)}
-              className={clsx(
+    <DropdownMenuContent side="top" align="start" className="min-w-[180px]">
+      <DropdownMenuGroup>
+        {/* Intelligence section */}
+        {intelligenceLevels.length > 0 && (
+          <>
+            <div className="px-3 py-1 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground">
+              Intelligence
+            </div>
+            <DropdownMenuItem
+              onSelect={() => onIntelligenceChange?.(null)}
+              className="justify-start flex w-full items-center gap-2 px-3 py-1 text-left text-[11px] text-foreground hover:bg-accent"
+            >
+              <span className="flex-1">Default effort</span>
+              {!intelligence && <Check size={11} className="shrink-0" />}
+            </DropdownMenuItem>
+            {intelligenceLevels.map((level) => (
+              <DropdownMenuItem
+                key={level}
+                onSelect={() => onIntelligenceChange?.(level)}
+                className={clsx(
                 "flex w-full items-center gap-2 px-3 py-1 text-left text-[11px] transition",
                 intelligence === level
-                  ? "text-gx-accent"
-                  : "text-gx-text hover:bg-gx-surface-hover",
+                  ? "text-primary"
+                  : "text-foreground hover:bg-accent",
               )}
-            >
-              <span className="flex-1">{intelligenceLabel(level)}</span>
-              {intelligence === level && <Check size={11} className="shrink-0" />}
-            </button>
-          ))}
-          <div className="my-1 border-t border-gx-border/50" />
-        </>
-      )}
-
-      {/* Model section */}
-      <div className="px-3 py-1 text-[9px] font-semibold uppercase tracking-wider text-gx-muted">
-        Model
-      </div>
-      <button
-        type="button"
-        onClick={() => onModelChange("")}
-        className={clsx(
-          "flex w-full items-center gap-2 px-3 py-1 text-left text-[11px] transition",
-          !selectedModel ? "text-gx-accent" : "text-gx-text hover:bg-gx-surface-hover",
+              >
+                <span className="flex-1">{intelligenceLabel(level)}</span>
+                {intelligence === level && (
+                  <Check size={11} className="shrink-0" />
+                )}
+              </DropdownMenuItem>
+            ))}
+            <div className="my-1 border-t border-border/50" />
+          </>
         )}
-      >
-        <span className="flex-1">Agent default</span>
-        {!selectedModel && <Check size={11} className="shrink-0" />}
-      </button>
-      {primaryModels.map((m) => (
-        <button
-          key={m.value}
-          type="button"
-          onClick={() => onModelChange(m.value)}
-          className={clsx(
-            "flex w-full items-center gap-2 px-3 py-1 text-left text-[11px] transition",
-            selectedModel === m.value ? "text-gx-accent" : "text-gx-text hover:bg-gx-surface-hover",
-          )}
-        >
-          <span className="flex-1">{m.label}</span>
-          {selectedModel === m.value && <Check size={11} className="shrink-0" />}
-        </button>
-      ))}
 
-      {/* More models submenu */}
-      {otherModels.length > 0 && (
-        <div
-          className="relative"
-          onMouseEnter={() => setShowMore(true)}
-          onMouseLeave={() => setShowMore(false)}
-        >
-          <button
-            type="button"
-            onClick={() => setShowMore(!showMore)}
-            className="flex w-full items-center gap-2 px-3 py-1 text-left text-[11px] text-gx-text hover:bg-gx-surface-hover transition"
-          >
-            <span className="flex-1">More models</span>
-            <ChevronRight size={11} className="shrink-0 text-gx-muted" />
-          </button>
-
-          {showMore && (
-            <div className="absolute right-full top-0 z-50 mr-1 min-w-[150px] rounded-lg border border-gx-border bg-gx-bg shadow-lg">
-              <div className="py-1">
-                {otherModels.map((m) => (
-                  <button
-                    key={m.value}
-                    type="button"
-                    onClick={() => onModelChange(m.value)}
-                    className={clsx(
-                      "flex w-full items-center gap-2 px-3 py-1 text-left text-[11px] transition",
-                      selectedModel === m.value ? "text-gx-accent" : "text-gx-text hover:bg-gx-surface-hover",
-                    )}
-                  >
-                    <span className="flex-1">{m.label}</span>
-                    {selectedModel === m.value && <Check size={11} className="shrink-0" />}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
+        {/* More models submenu */}
+        <div className="px-3 py-1 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground">
+          Model
         </div>
-      )}
-    </div>
+        <DropdownMenuItem
+          onSelect={() => onModelChange("")}
+          className={clsx(
+          "flex w-full items-center gap-2 px-3 py-1 text-left text-[11px] transition",
+          !selectedModel ? "text-primary" : "text-foreground hover:bg-accent",
+        )}
+        >
+          <span className="flex-1">Agent default</span>
+          {!selectedModel && <Check size={11} className="shrink-0" />}
+        </DropdownMenuItem>
+        {primaryModels.map((m) => (
+          <DropdownMenuItem
+            key={m.value}
+            onSelect={() => onModelChange(m.value)}
+            className={clsx(
+            "flex w-full items-center gap-2 px-3 py-1 text-left text-[11px] transition",
+            selectedModel === m.value ? "text-primary" : "text-foreground hover:bg-accent",
+          )}
+          >
+            <span className="flex-1">{m.label}</span>
+            {selectedModel === m.value && (
+              <Check size={11} className="shrink-0" />
+            )}
+          </DropdownMenuItem>
+        ))}
+
+        {otherModels.length > 0 && (
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger>More models</DropdownMenuSubTrigger>
+            <DropdownMenuPortal>
+              <DropdownMenuSubContent>
+                <DropdownMenuGroup>
+                  {otherModels.map((model) => (
+                    <DropdownMenuItem
+                      key={model.value}
+                      onSelect={() => onModelChange(model.value)}
+                    >
+                      {model.label}
+                      {model.value === selectedModel && <Check size={11} />}
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuGroup>
+              </DropdownMenuSubContent>
+            </DropdownMenuPortal>
+          </DropdownMenuSub>
+        )}
+      </DropdownMenuGroup>
+    </DropdownMenuContent>
   );
 }

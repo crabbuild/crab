@@ -1,5 +1,7 @@
-import { useCallback, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
 import { MessageSquare, Plus, Send, X } from "lucide-react";
+import { useCallback, useState } from "react";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -57,7 +59,7 @@ export function CommentGutter({ commentsByLine, onAddComment }: CommentGutterPro
   if (!hasContent) return null;
 
   return (
-    <div className="border-t border-gx-border bg-gx-bg-sub">
+    <div className="border-t border-border bg-background">
       {/* Existing comment threads */}
       {lines.map((line) => (
         <CommentLineEntry
@@ -119,28 +121,34 @@ export function GutterIcons({
   return (
     <div className="flex flex-col gap-0.5">
       {lines.map((line) => (
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           key={`comment-${line}`}
           type="button"
-          className="group flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-gx-accent hover:bg-gx-accent/10"
+          className="group flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-primary hover:bg-primary/10"
           onClick={() => onToggleThread(line)}
           aria-label={`Toggle comment thread on line ${line}`}
         >
           <MessageSquare size={11} />
           <span className="font-mono">L{line}</span>
-          <span className="text-gx-muted">({commentsByLine[line].length})</span>
-        </button>
+          <span className="text-muted-foreground">
+            ({commentsByLine[line].length})
+          </span>
+        </Button>
       ))}
       {canAdd && hoveredLine != null && !commentsByLine[hoveredLine] && (
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
-          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-gx-muted hover:bg-gx-accent/10 hover:text-gx-accent"
+          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-primary/10 hover:text-primary"
           onClick={() => onStartCompose(hoveredLine)}
           aria-label={`Add comment on line ${hoveredLine}`}
         >
           <Plus size={11} />
           <span className="font-mono">L{hoveredLine}</span>
-        </button>
+        </Button>
       )}
     </div>
   );
@@ -168,26 +176,28 @@ function CommentLineEntry({
   onCancelCompose: () => void;
 }) {
   return (
-    <div className="border-b border-gx-border/50">
+    <div className="border-b border-border/50">
       {/* Collapsed header */}
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
-        className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] hover:bg-gx-surface-hover"
+        className="justify-start flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] hover:bg-accent"
         onClick={onToggle}
         aria-label={`${expanded ? "Collapse" : "Expand"} comment thread on line ${line}`}
       >
-        <MessageSquare size={12} className="shrink-0 text-gx-accent" />
-        <span className="font-mono text-gx-text">Line {line}</span>
-        <span className="text-gx-muted">
+        <MessageSquare size={12} className="shrink-0 text-primary" />
+        <span className="font-mono text-foreground">Line {line}</span>
+        <span className="text-muted-foreground">
           {comments.length} {comments.length === 1 ? "comment" : "comments"}
         </span>
         {!expanded && comments.length > 0 && (
-          <span className="ml-2 truncate text-gx-muted/70 italic">
+          <span className="ml-2 truncate text-muted-foreground/70 italic">
             {comments[0].author}: {comments[0].body.slice(0, 60)}
             {comments[0].body.length > 60 ? "…" : ""}
           </span>
         )}
-      </button>
+      </Button>
 
       {/* Expanded thread */}
       {expanded && (
@@ -206,14 +216,16 @@ function CommentLineEntry({
               onCancel={onCancelCompose}
             />
           ) : onAddComment ? (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
-              className="flex items-center gap-1.5 rounded px-2 py-1 text-[11px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+              className="flex items-center gap-1.5 rounded px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
               onClick={() => onStartCompose(line)}
             >
               <Plus size={10} />
               Reply
-            </button>
+            </Button>
           ) : null}
         </div>
       )}
@@ -225,12 +237,14 @@ function CommentLineEntry({
 
 function CommentBubble({ comment }: { comment: DiffComment }) {
   return (
-    <div className="rounded border border-gx-border bg-gx-surface p-2">
+    <div className="rounded border border-border bg-card p-2">
       <div className="flex items-center gap-2 text-[10px]">
-        <span className="font-medium text-gx-text">{comment.author}</span>
-        <span className="text-gx-muted">{formatTimestamp(comment.created_at)}</span>
+        <span className="font-medium text-foreground">{comment.author}</span>
+        <span className="text-muted-foreground">
+          {formatTimestamp(comment.created_at)}
+        </span>
       </div>
-      <div className="mt-1 whitespace-pre-wrap text-[11px] text-gx-text/80">
+      <div className="mt-1 whitespace-pre-wrap text-[11px] text-foreground/80">
         {comment.body}
       </div>
     </div>
@@ -249,9 +263,9 @@ function InlineComposer({
   const [body, setBody] = useState("");
 
   return (
-    <div className="rounded border border-gx-border bg-gx-surface p-2">
-      <textarea
-        className="w-full resize-none rounded border border-gx-border bg-gx-bg-sub p-1.5 text-[11px] text-gx-text placeholder:text-gx-muted focus:border-gx-accent focus-visible:outline-none"
+    <div className="rounded border border-border bg-card p-2">
+      <Textarea
+        className="w-full resize-none rounded border border-border bg-background p-1.5 text-[11px] text-foreground placeholder:text-muted-foreground focus:border-primary focus-visible:outline-none"
         rows={2}
         placeholder="Write a reply…"
         value={body}
@@ -259,23 +273,27 @@ function InlineComposer({
         autoFocus
       />
       <div className="mt-1.5 flex items-center justify-end gap-2">
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
-          className="rounded px-2 py-0.5 text-[10px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+          className="rounded px-2 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
           onClick={onCancel}
           aria-label="Cancel comment"
         >
           <X size={10} className="inline" /> Cancel
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
-          className="inline-flex items-center gap-1 rounded bg-gx-accent/10 px-2 py-0.5 text-[10px] text-gx-accent hover:bg-gx-accent/20 disabled:opacity-50"
+          className="inline-flex items-center gap-1 rounded bg-primary/10 px-2 py-0.5 text-[10px] text-primary hover:bg-primary/20 disabled:opacity-50"
           disabled={!body.trim()}
           onClick={() => onSubmit(body.trim())}
           aria-label="Submit comment"
         >
           <Send size={10} /> Reply
-        </button>
+        </Button>
       </div>
     </div>
   );
@@ -295,15 +313,15 @@ function NewLineComposer({
   const [body, setBody] = useState("");
 
   return (
-    <div className="border-b border-gx-border/50 px-3 py-2">
+    <div className="border-b border-border/50 px-3 py-2">
       <div className="mb-1.5 flex items-center gap-2 text-[11px]">
-        <Plus size={11} className="text-gx-accent" />
-        <span className="font-mono text-gx-text">Line {line}</span>
-        <span className="text-gx-muted">— new comment</span>
+        <Plus size={11} className="text-primary" />
+        <span className="font-mono text-foreground">Line {line}</span>
+        <span className="text-muted-foreground">— new comment</span>
       </div>
-      <div className="rounded border border-gx-border bg-gx-surface p-2">
-        <textarea
-          className="w-full resize-none rounded border border-gx-border bg-gx-bg-sub p-1.5 text-[11px] text-gx-text placeholder:text-gx-muted focus:border-gx-accent focus-visible:outline-none"
+      <div className="rounded border border-border bg-card p-2">
+        <Textarea
+          className="w-full resize-none rounded border border-border bg-background p-1.5 text-[11px] text-foreground placeholder:text-muted-foreground focus:border-primary focus-visible:outline-none"
           rows={2}
           placeholder="Write a comment…"
           value={body}
@@ -311,23 +329,27 @@ function NewLineComposer({
           autoFocus
         />
         <div className="mt-1.5 flex items-center justify-end gap-2">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
-            className="rounded px-2 py-0.5 text-[10px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+            className="rounded px-2 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
             onClick={onCancel}
             aria-label="Cancel comment"
           >
             <X size={10} className="inline" /> Cancel
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
-            className="inline-flex items-center gap-1 rounded bg-gx-accent/10 px-2 py-0.5 text-[10px] text-gx-accent hover:bg-gx-accent/20 disabled:opacity-50"
+            className="inline-flex items-center gap-1 rounded bg-primary/10 px-2 py-0.5 text-[10px] text-primary hover:bg-primary/20 disabled:opacity-50"
             disabled={!body.trim()}
             onClick={() => onSubmit(body.trim())}
             aria-label="Submit comment"
           >
             <Send size={10} /> Comment
-          </button>
+          </Button>
         </div>
       </div>
     </div>

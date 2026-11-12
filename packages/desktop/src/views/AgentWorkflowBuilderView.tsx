@@ -1,7 +1,19 @@
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
-import type { ReactNode } from "react";
-import clsx from "clsx";
-import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { requestConfirmation } from "@/lib/application-dialogs";
 import {
   addEdge,
   Background,
@@ -15,17 +27,19 @@ import {
   getBezierPath,
   Handle,
   MiniMap,
-  Node as ReactFlowNode,
   NodeProps,
   NodeTypes,
   Position,
   ReactFlow,
+  Node as ReactFlowNode,
   ReactFlowProvider,
   useEdgesState,
   useNodesState,
   useUpdateNodeInternals,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
+import clsx from "clsx";
+import type { LucideIcon } from "lucide-react";
 import {
   Asterisk,
   Award,
@@ -37,8 +51,8 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronUp,
-  CircleStop,
   CircleDot,
+  CircleStop,
   ClipboardPaste,
   Clock,
   Copy,
@@ -66,13 +80,14 @@ import {
   X,
   XCircle,
 } from "lucide-react";
-import type { LucideIcon } from "lucide-react";
+import type { ReactNode } from "react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 
-import { JsonSchemaBuilderDialog } from "../components/workflow/JsonSchemaBuilderDialog";
+import type { AgentModel } from "../../electron/orchestrator-adapters";
 import { intelligenceLabel, modelOptions, useAgentModels } from "../components/orchestrator/model-catalog";
 import { ModelDiscoveryStatus } from "../components/orchestrator/ModelDiscoveryStatus";
-import type { AgentModel } from "../../electron/orchestrator-adapters";
-import type { OpenRepo } from "../state";
+import { JsonSchemaBuilderDialog } from "../components/workflow/JsonSchemaBuilderDialog";
 import type {
   AgentWorkflowAgentType,
   AgentWorkflowDefinition,
@@ -94,6 +109,7 @@ import type {
   WorkflowOutputPredicate,
   WorkflowValueRef,
 } from "../ipc";
+import type { OpenRepo } from "../state";
 
 interface AgentWorkflowBuilderViewProps {
   repo: OpenRepo;
@@ -170,15 +186,15 @@ const STATUS_LABELS: Record<NodeRunStatus, string> = {
 };
 
 const STATUS_CLASSES: Record<NodeRunStatus, string> = {
-  blocked: "border-gx-border text-gx-muted",
-  ready: "border-gx-info/60 text-gx-info",
-  queued: "border-gx-info/40 text-gx-info",
-  running: "border-gx-accent/70 text-gx-accent",
-  needs_review: "border-gx-warn/70 text-gx-warn",
-  completed: "border-gx-success/70 text-gx-success",
-  failed: "border-gx-error/70 text-gx-error",
-  cancelled: "border-gx-muted/50 text-gx-muted",
-  skipped: "border-gx-muted/50 text-gx-muted",
+  blocked: "border-border text-muted-foreground",
+  ready: "border-info/60 text-info",
+  queued: "border-info/40 text-info",
+  running: "border-primary/70 text-primary",
+  needs_review: "border-warning/70 text-warning",
+  completed: "border-success/70 text-success",
+  failed: "border-destructive/70 text-destructive",
+  cancelled: "border-muted-foreground/50 text-muted-foreground",
+  skipped: "border-muted-foreground/50 text-muted-foreground",
 };
 
 const EDGE_SOURCE_STATUS_OPTIONS: Array<{
@@ -195,45 +211,45 @@ const EDGE_SOURCE_STATUS_OPTIONS: Array<{
     label: "Completed",
     description: "Route when the source node completes.",
     Icon: CheckCircle2,
-    className: "text-gx-success",
-    activeClassName: "border-gx-success/60 bg-gx-success/10 text-gx-success",
-    badgeClassName: "border-gx-success/40 bg-gx-success/10 text-gx-success",
+    className: "text-success",
+    activeClassName: "border-success/60 bg-success/10 text-success",
+    badgeClassName: "border-success/40 bg-success/10 text-success",
   },
   {
     value: "failed",
     label: "Failed",
     description: "Route when the source node fails.",
     Icon: XCircle,
-    className: "text-gx-error",
-    activeClassName: "border-gx-error/60 bg-gx-error/10 text-gx-error",
-    badgeClassName: "border-gx-error/40 bg-gx-error/10 text-gx-error",
+    className: "text-destructive",
+    activeClassName: "border-destructive/60 bg-destructive/10 text-destructive",
+    badgeClassName: "border-destructive/40 bg-destructive/10 text-destructive",
   },
   {
     value: "cancelled",
     label: "Cancelled",
     description: "Route when the source node is cancelled.",
     Icon: Ban,
-    className: "text-gx-muted",
-    activeClassName: "border-gx-muted/60 bg-gx-bg-sub text-gx-text",
-    badgeClassName: "border-gx-border bg-gx-bg-sub text-gx-muted",
+    className: "text-muted-foreground",
+    activeClassName: "border-muted-foreground/60 bg-background text-foreground",
+    badgeClassName: "border-border bg-background text-muted-foreground",
   },
   {
     value: "skipped",
     label: "Skipped",
     description: "Route when the source node is skipped.",
     Icon: SkipForward,
-    className: "text-gx-info",
-    activeClassName: "border-gx-info/60 bg-gx-info/10 text-gx-info",
-    badgeClassName: "border-gx-info/40 bg-gx-info/10 text-gx-info",
+    className: "text-info",
+    activeClassName: "border-info/60 bg-info/10 text-info",
+    badgeClassName: "border-info/40 bg-info/10 text-info",
   },
   {
     value: "always",
     label: "Always",
     description: "Route after the source node reaches any terminal state.",
     Icon: Asterisk,
-    className: "text-gx-accent",
-    activeClassName: "border-gx-accent/60 bg-gx-accent/10 text-gx-accent",
-    badgeClassName: "border-gx-accent/40 bg-gx-accent/10 text-gx-accent",
+    className: "text-primary",
+    activeClassName: "border-primary/60 bg-primary/10 text-primary",
+    badgeClassName: "border-primary/40 bg-primary/10 text-primary",
   },
 ];
 
@@ -639,9 +655,12 @@ function edgeBranchId(condition?: WorkflowEdgeCondition): string | undefined {
     : undefined;
 }
 
-function parseJsonObjectDraft(draft: string): { value: Record<string, unknown>; error?: undefined } | { value?: undefined; error: string } {
+function parseJsonObjectDraft(
+  draft: string,
+):
+  { value: Record<string, unknown>; error?: undefined } | { value?: undefined; error: string } {
   try {
-    const parsed = draft.trim() ? JSON.parse(draft) as unknown : {};
+    const parsed = draft.trim() ? (JSON.parse(draft) as unknown) : {};
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       return { error: "Input must be a JSON object." };
     }
@@ -699,14 +718,16 @@ function IconButton({
   children: ReactNode;
 }) {
   return (
-    <button
+    <Button
+      variant="default"
+      size="compact"
       type="button"
       className={clsx(
-        "inline-flex h-7 w-7 items-center justify-center rounded border text-xs transition disabled:pointer-events-none disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-gx-accent focus-visible:outline-offset-2",
-        variant === "primary" && "border-transparent bg-gx-accent text-white hover:bg-gx-accent-hover",
-        variant === "danger" && "border-transparent bg-gx-error text-white hover:bg-gx-error/90",
-        variant === "secondary" && "border-gx-border bg-gx-surface text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
-        variant === "ghost" && "border-transparent bg-transparent text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
+        "inline-flex h-7 w-7 items-center justify-center rounded border text-xs transition disabled:pointer-events-none disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary focus-visible:outline-offset-2",
+        variant === "primary" && "border-transparent bg-primary text-primary-foreground hover:bg-primary-hover",
+        variant === "danger" && "border-transparent bg-destructive text-destructive-foreground hover:bg-destructive/90",
+        variant === "secondary" && "border-border bg-card text-muted-foreground hover:bg-accent hover:text-foreground",
+        variant === "ghost" && "border-transparent bg-transparent text-muted-foreground hover:bg-accent hover:text-foreground",
         className,
       )}
       onClick={onClick}
@@ -715,7 +736,7 @@ function IconButton({
       aria-label={title}
     >
       {children}
-    </button>
+    </Button>
   );
 }
 
@@ -735,14 +756,16 @@ function CommandButton({
   children: ReactNode;
 }) {
   return (
-    <button
+    <Button
+      variant="default"
+      size="compact"
       type="button"
       className={clsx(
-        "inline-flex h-7 items-center gap-1.5 rounded border px-2 text-xs transition disabled:pointer-events-none disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-gx-accent focus-visible:outline-offset-2",
-        variant === "primary" && "border-transparent bg-gx-accent text-white hover:bg-gx-accent-hover",
-        variant === "danger" && "border-gx-error/30 bg-gx-error/10 text-gx-error hover:bg-gx-error/15",
-        variant === "secondary" && "border-gx-border bg-gx-surface text-gx-text hover:bg-gx-surface-hover",
-        variant === "ghost" && "border-transparent bg-transparent text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
+        "inline-flex h-7 items-center gap-1.5 rounded border px-2 text-xs transition disabled:pointer-events-none disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary focus-visible:outline-offset-2",
+        variant === "primary" && "border-transparent bg-primary text-primary-foreground hover:bg-primary-hover",
+        variant === "danger" && "border-destructive/30 bg-destructive/10 text-destructive hover:bg-destructive/15",
+        variant === "secondary" && "border-border bg-card text-foreground hover:bg-accent",
+        variant === "ghost" && "border-transparent bg-transparent text-muted-foreground hover:bg-accent hover:text-foreground",
       )}
       onClick={onClick}
       disabled={disabled}
@@ -751,7 +774,7 @@ function CommandButton({
     >
       {children}
       <span>{label}</span>
-    </button>
+    </Button>
   );
 }
 
@@ -759,7 +782,7 @@ function ResizeHandle({ direction = "horizontal" }: { direction?: "horizontal" |
   return (
     <PanelResizeHandle
       className={clsx(
-        "bg-transparent transition-colors hover:bg-gx-accent/50",
+        "bg-transparent transition-colors hover:bg-primary/50",
         direction === "horizontal" ? "w-[3px] cursor-col-resize" : "h-[3px] cursor-row-resize",
       )}
     />
@@ -779,9 +802,14 @@ function CollapsedPanelRail({
 }) {
   return (
     <Panel minSize={2.4} maxSize={2.4} defaultSize={2.4} className="min-h-0">
-      <div className="flex h-full items-start justify-center border-l border-gx-border bg-gx-surface/60 py-2">
+      <div className="flex h-full items-start justify-center border-l border-border bg-card/60 py-2">
         <IconButton title={title} onClick={onOpen} variant="ghost" className="h-7 w-7">
-          {icon ?? (side === "left" ? <ChevronRight size={14} /> : <ChevronLeft size={14} />)}
+          {icon ??
+            (side === "left" ? (
+              <ChevronRight size={14} />
+            ) : (
+              <ChevronLeft size={14} />
+            ))}
         </IconButton>
       </div>
     </Panel>
@@ -811,7 +839,9 @@ function buildGraphNodes(
 }
 
 function getEdgeSourceStatusMeta(status: EdgeSourceStatus = "completed") {
-  return EDGE_SOURCE_STATUS_OPTIONS.find((option) => option.value === status) ?? EDGE_SOURCE_STATUS_OPTIONS[0];
+  return (
+    EDGE_SOURCE_STATUS_OPTIONS.find((option) => option.value === status) ?? EDGE_SOURCE_STATUS_OPTIONS[0]
+  );
 }
 
 function edgePredicateLabel(predicate?: WorkflowOutputPredicate): string | null {
@@ -847,7 +877,7 @@ function EdgeConditionPill({
       className={clsx(
         "nodrag nopan inline-flex max-w-[190px] items-center gap-1 rounded border shadow-sm backdrop-blur-sm",
         compact ? "px-1.5 py-0.5 text-[10px]" : "px-2 py-1 text-[11px]",
-        selected ? "border-gx-accent bg-gx-accent/10 text-gx-accent" : meta.badgeClassName,
+        selected ? "border-primary bg-primary/10 text-primary" : meta.badgeClassName,
       )}
       title={predicate ? `${meta.label} if ${predicate}` : meta.description}
     >
@@ -855,8 +885,10 @@ function EdgeConditionPill({
       <span className="truncate font-medium">{meta.label}</span>
       {predicate && (
         <>
-          <span className="text-gx-muted/70">if</span>
-          <span className="truncate font-mono text-[10px] text-gx-muted">{predicate}</span>
+          <span className="text-muted-foreground/70">if</span>
+          <span className="truncate font-mono text-[10px] text-muted-foreground">
+            {predicate}
+          </span>
         </>
       )}
     </span>
@@ -882,12 +914,12 @@ function EdgeConditionLineBadge({
   return (
     <span
       className={clsx(
-        "nodrag nopan inline-flex h-6 items-center gap-1 rounded-full border bg-gx-bg/95 text-[10px] shadow-sm backdrop-blur-sm",
+        "nodrag nopan inline-flex h-6 items-center gap-1 rounded-full border bg-background/95 text-[10px] shadow-sm backdrop-blur-sm",
         showText ? "max-w-[180px] px-2" : "w-6 justify-center px-0",
         selected
-          ? "border-gx-accent bg-gx-accent/10 text-gx-accent ring-2 ring-gx-accent/10"
+          ? "border-primary bg-primary/10 text-primary ring-2 ring-primary/10"
           : activated
-            ? "border-gx-accent/50 bg-gx-accent/10 text-gx-accent"
+            ? "border-primary/50 bg-primary/10 text-primary"
             : meta.badgeClassName,
       )}
       title={branchLabel ?? (predicate ? `${meta.label} if ${predicate}` : meta.description)}
@@ -895,18 +927,20 @@ function EdgeConditionLineBadge({
     >
       <Icon size={13} className="shrink-0" />
       {showText && (
-        <span className="truncate font-medium">{branchLabel ?? (predicate ? `${meta.label} if ${predicate}` : meta.label)}</span>
+        <span className="truncate font-medium">
+          {branchLabel ?? (predicate ? `${meta.label} if ${predicate}` : meta.label)}
+        </span>
       )}
     </span>
   );
 }
 
 const BranchEdgeColors: Record<BranchKind, string> = {
-  if: "#22c55e",
-  elif: "#f59e0b",
-  else: "#ef4444",
-  approved: "#22c55e",
-  rejected: "#ef4444",
+  if: "rgb(var(--success))",
+  elif: "rgb(var(--warning))",
+  else: "rgb(var(--destructive))",
+  approved: "rgb(var(--success))",
+  rejected: "rgb(var(--destructive))",
 };
 
 const WorkflowEdge = memo(function WorkflowEdge({
@@ -943,7 +977,7 @@ const WorkflowEdge = memo(function WorkflowEdge({
         interactionWidth={26}
         className={clsx(
           "transition-colors",
-          !branchColor && (isSelected || isActivated ? "stroke-gx-accent" : "stroke-gx-border"),
+          !branchColor && (isSelected || isActivated ? "stroke-primary" : "stroke-border"),
         )}
         style={{
           ...style,
@@ -1028,18 +1062,22 @@ const WorkflowNode = memo(function WorkflowNode({ data }: NodeProps<WorkflowGrap
     return (
       <div
         className={clsx(
-          "w-[190px] rounded-[20px] border bg-gx-surface p-3 text-xs shadow-sm",
-          data.selected ? "border-gx-accent ring-2 ring-gx-accent/15" : "border-gx-border",
+          "w-[190px] rounded-[20px] border bg-card p-3 text-xs shadow-sm",
+          data.selected ? "border-primary ring-2 ring-primary/15" : "border-border",
         )}
       >
-        <Handle type="target" position={Position.Left} className="!bg-gx-border" />
+        <Handle type="target" position={Position.Left} className="!bg-border" />
         <div className="mb-3 flex items-center gap-2">
-          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gx-warn/20 text-gx-warn">
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-warning/20 text-warning">
             <Split size={15} />
           </div>
           <div className="min-w-0 flex-1">
-            <div className="truncate font-medium text-gx-text">{node.title || "If / Else"}</div>
-            <div className="truncate text-[10px] text-gx-muted">If / Else</div>
+            <div className="truncate font-medium text-foreground">
+              {node.title || "If / Else"}
+            </div>
+            <div className="truncate text-[10px] text-muted-foreground">
+              If / Else
+            </div>
           </div>
         </div>
         <div className="space-y-1.5">
@@ -1049,17 +1087,19 @@ const WorkflowNode = memo(function WorkflowNode({ data }: NodeProps<WorkflowGrap
               className={clsx(
                 "relative flex h-8 items-center rounded-lg border px-3 pr-5",
                 branch.kind === "else"
-                  ? "border-gx-border bg-gx-bg-sub text-gx-muted"
-                  : "border-gx-border/80 bg-gx-bg-sub text-gx-text",
+                  ? "border-border bg-background text-muted-foreground"
+                  : "border-border/80 bg-background text-foreground",
               )}
               title={branch.kind === "else" ? "Fallback branch" : branch.celExpression || "Legacy condition"}
             >
-              <span className="truncate text-[11px] font-medium">{branch.label || branch.kind.toUpperCase()}</span>
+              <span className="truncate text-[11px] font-medium">
+                {branch.label || branch.kind.toUpperCase()}
+              </span>
               <Handle
                 id={branch.id}
                 type="source"
                 position={Position.Right}
-                className="!right-[-7px] !h-3 !w-3 !border-2 !border-gx-surface !bg-gx-border"
+                className="!right-[-7px] !h-3 !w-3 !border-2 !border-card !bg-border"
               />
             </div>
           ))}
@@ -1068,17 +1108,17 @@ const WorkflowNode = memo(function WorkflowNode({ data }: NodeProps<WorkflowGrap
           <span
             className={clsx(
               "rounded border px-1.5 py-0 text-[10px]",
-              status ? STATUS_CLASSES[status] : "border-gx-border text-gx-muted",
+              status ? STATUS_CLASSES[status] : "border-border text-muted-foreground",
             )}
           >
             {status ? STATUS_LABELS[status] : "Draft"}
           </span>
         </div>
         {(status === "running" || status === "completed") && data.outputSummary && (
-          <div className="mt-2 max-w-full truncate text-[10px] leading-relaxed text-gx-muted">
-            {data.outputSummary.length > 120 ? `${data.outputSummary.slice(0, 120)}...` : data.outputSummary}
-          </div>
-        )}
+            <div className="mt-2 max-w-full truncate text-[10px] leading-relaxed text-muted-foreground">
+              {data.outputSummary.length > 120 ? `${data.outputSummary.slice(0, 120)}...` : data.outputSummary}
+            </div>
+          )}
       </div>
     );
   }
@@ -1089,45 +1129,53 @@ const WorkflowNode = memo(function WorkflowNode({ data }: NodeProps<WorkflowGrap
     return (
       <div
         className={clsx(
-          "w-[210px] rounded-[20px] border bg-gx-surface p-3 text-xs shadow-sm",
-          data.selected ? "border-gx-accent ring-2 ring-gx-accent/15" : "border-gx-border",
+          "w-[210px] rounded-[20px] border bg-card p-3 text-xs shadow-sm",
+          data.selected ? "border-primary ring-2 ring-primary/15" : "border-border",
         )}
       >
-        <Handle type="target" position={Position.Left} className="!bg-gx-border" />
+        <Handle type="target" position={Position.Left} className="!bg-border" />
         <div className="mb-3 flex items-center gap-2">
-          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gx-accent/20 text-gx-accent">
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/20 text-primary">
             <Award size={15} />
           </div>
           <div className="min-w-0 flex-1">
-            <div className="truncate font-medium text-gx-text">{node.title || "Approval Gate"}</div>
-            <div className="truncate text-[10px] text-gx-muted">Approval Gate</div>
+            <div className="truncate font-medium text-foreground">
+              {node.title || "Approval Gate"}
+            </div>
+            <div className="truncate text-[10px] text-muted-foreground">
+              Approval Gate
+            </div>
           </div>
         </div>
         <div className="space-y-1.5">
           <div
-            className="relative flex h-8 items-center rounded-lg border border-gx-success/30 bg-gx-success/5 px-3 pr-5"
+            className="relative flex h-8 items-center rounded-lg border border-success/30 bg-success/5 px-3 pr-5"
             title="Route when approved"
           >
-            <Check size={13} className="mr-2 shrink-0 text-gx-success" />
-            <span className="truncate text-[11px] font-medium text-gx-text">{approvedLabel}</span>
+            <Check size={13} className="mr-2 shrink-0 text-success" />
+            <span className="truncate text-[11px] font-medium text-foreground">
+              {approvedLabel}
+            </span>
             <Handle
               id="approved"
               type="source"
               position={Position.Right}
-              className="!right-[-7px] !h-3 !w-3 !border-2 !border-gx-surface !bg-gx-success"
+              className="!right-[-7px] !h-3 !w-3 !border-2 !border-card !bg-success"
             />
           </div>
           <div
-            className="relative flex h-8 items-center rounded-lg border border-gx-error/30 bg-gx-error/5 px-3 pr-5"
+            className="relative flex h-8 items-center rounded-lg border border-destructive/30 bg-destructive/5 px-3 pr-5"
             title="Route when rejected"
           >
-            <X size={13} className="mr-2 shrink-0 text-gx-error" />
-            <span className="truncate text-[11px] font-medium text-gx-text">{rejectedLabel}</span>
+            <X size={13} className="mr-2 shrink-0 text-destructive" />
+            <span className="truncate text-[11px] font-medium text-foreground">
+              {rejectedLabel}
+            </span>
             <Handle
               id="rejected"
               type="source"
               position={Position.Right}
-              className="!right-[-7px] !h-3 !w-3 !border-2 !border-gx-surface !bg-gx-error"
+              className="!right-[-7px] !h-3 !w-3 !border-2 !border-card !bg-destructive"
             />
           </div>
         </div>
@@ -1135,17 +1183,17 @@ const WorkflowNode = memo(function WorkflowNode({ data }: NodeProps<WorkflowGrap
           <span
             className={clsx(
               "rounded border px-1.5 py-0 text-[10px]",
-              status ? STATUS_CLASSES[status] : "border-gx-border text-gx-muted",
+              status ? STATUS_CLASSES[status] : "border-border text-muted-foreground",
             )}
           >
             {status ? STATUS_LABELS[status] : "Draft"}
           </span>
         </div>
         {(status === "running" || status === "completed") && data.outputSummary && (
-          <div className="mt-2 max-w-full truncate text-[10px] leading-relaxed text-gx-muted">
-            {data.outputSummary.length > 120 ? `${data.outputSummary.slice(0, 120)}...` : data.outputSummary}
-          </div>
-        )}
+            <div className="mt-2 max-w-full truncate text-[10px] leading-relaxed text-muted-foreground">
+              {data.outputSummary.length > 120 ? `${data.outputSummary.slice(0, 120)}...` : data.outputSummary}
+            </div>
+          )}
       </div>
     );
   }
@@ -1153,37 +1201,43 @@ const WorkflowNode = memo(function WorkflowNode({ data }: NodeProps<WorkflowGrap
   return (
     <div
       className={clsx(
-        "w-[210px] rounded border bg-gx-surface px-3 py-2 text-xs shadow-sm",
-        data.selected ? "border-gx-accent" : "border-gx-border",
+        "w-[210px] rounded border bg-card px-3 py-2 text-xs shadow-sm",
+        data.selected ? "border-primary" : "border-border",
       )}
     >
-      <Handle type="target" position={Position.Left} className="!bg-gx-border" />
+      <Handle type="target" position={Position.Left} className="!bg-border" />
       <div className="flex items-start gap-2">
-        <Icon size={15} className="mt-0.5 shrink-0 text-gx-accent" />
+        <Icon size={15} className="mt-0.5 shrink-0 text-primary" />
         <div className="min-w-0 flex-1">
-          <div className="truncate font-medium text-gx-text">{node.title || NODE_TYPE_LABELS[node.type]}</div>
-          <div className="mt-0.5 truncate text-[10px] text-gx-muted">{NODE_TYPE_LABELS[node.type]}</div>
+          <div className="truncate font-medium text-foreground">
+            {node.title || NODE_TYPE_LABELS[node.type]}
+          </div>
+          <div className="mt-0.5 truncate text-[10px] text-muted-foreground">
+            {NODE_TYPE_LABELS[node.type]}
+          </div>
         </div>
       </div>
       <div className="mt-2 flex items-center gap-1.5">
         <span
           className={clsx(
             "rounded border px-1.5 py-0 text-[10px]",
-            status ? STATUS_CLASSES[status] : "border-gx-border text-gx-muted",
+            status ? STATUS_CLASSES[status] : "border-border text-muted-foreground",
           )}
         >
           {status ? STATUS_LABELS[status] : "Draft"}
         </span>
         {node.agentType && (
-          <span className="truncate text-[10px] text-gx-muted">{node.agentType}</span>
+          <span className="truncate text-[10px] text-muted-foreground">
+            {node.agentType}
+          </span>
         )}
       </div>
-      <Handle type="source" position={Position.Right} className="!bg-gx-border" />
+      <Handle type="source" position={Position.Right} className="!bg-border" />
       {(status === "running" || status === "completed") && data.outputSummary && (
-        <div className="mt-2 max-w-full truncate text-[10px] leading-relaxed text-gx-muted">
-          {data.outputSummary.length > 120 ? `${data.outputSummary.slice(0, 120)}...` : data.outputSummary}
-        </div>
-      )}
+          <div className="mt-2 max-w-full truncate text-[10px] leading-relaxed text-muted-foreground">
+            {data.outputSummary.length > 120 ? `${data.outputSummary.slice(0, 120)}...` : data.outputSummary}
+          </div>
+        )}
     </div>
   );
 });
@@ -1364,7 +1418,10 @@ function AgentWorkflowBuilderInner({ repo }: AgentWorkflowBuilderViewProps) {
     return null;
   }, [selectedNodeIds]);
   const selectedNode = useMemo(
-    () => (firstSelectedNodeId ? definition?.nodes.find((node) => node.id === firstSelectedNodeId) ?? null : null),
+    () =>
+      firstSelectedNodeId
+        ? (definition?.nodes.find((node) => node.id === firstSelectedNodeId) ?? null)
+        : null,
     [definition, firstSelectedNodeId],
   );
   const selectedEdge = useMemo(
@@ -1372,12 +1429,14 @@ function AgentWorkflowBuilderInner({ repo }: AgentWorkflowBuilderViewProps) {
     [definition, selectedEdgeId],
   );
 
-  const ifElseHandleSignature = useMemo(() => (
-    definition?.nodes
+  const ifElseHandleSignature = useMemo(
+    () =>
+      definition?.nodes
       .filter((node) => node.type === "if_else")
       .map((node) => `${node.id}:${ensureIfElseBranches(node).map((branch) => branch.id).join(",")}`)
-      .join("|") ?? ""
-  ), [definition?.nodes]);
+      .join("|") ?? "",
+    [definition?.nodes],
+  );
 
   useEffect(() => {
     if (!definition) return;
@@ -1528,10 +1587,15 @@ function AgentWorkflowBuilderInner({ repo }: AgentWorkflowBuilderViewProps) {
     return () => window.removeEventListener("keydown", handler);
   }, [definition, selectedNodeIds, selectedEdgeId, undo, redo, clipboard]);
 
-  const updateDefinition = useCallback((updater: (current: AgentWorkflowDefinition) => AgentWorkflowDefinition) => {
-    setDefinition((current) => current ? updater(current) : current);
-    setValidation(null);
-  }, []);
+  const updateDefinition = useCallback(
+    (
+      updater: (current: AgentWorkflowDefinition) => AgentWorkflowDefinition,
+    ) => {
+      setDefinition((current) => (current ? updater(current) : current));
+      setValidation(null);
+    },
+    [],
+  );
 
   const withHistory = useCallback((label: string, mutation: () => void) => {
     if (definition) {
@@ -1614,7 +1678,12 @@ function AgentWorkflowBuilderInner({ repo }: AgentWorkflowBuilderViewProps) {
       setStatusMessage(`Cannot delete: referenced by ${referencing.map((item) => item.name).join(", ")}.`);
       return;
     }
-    if (!window.confirm(`Delete workflow "${definition.name}"? This cannot be undone.`)) return;
+    if (
+      !(await requestConfirmation(
+        `Delete workflow "${definition.name}"? This cannot be undone.`,
+      ))
+    )
+      return;
     const result = await window.crab.agentWorkflows.deleteDefinition(repo.path, definition.id);
     if (!result.success) {
       setStatusMessage(result.error ?? "Workflow delete failed.");
@@ -1854,21 +1923,23 @@ function AgentWorkflowBuilderInner({ repo }: AgentWorkflowBuilderViewProps) {
     });
   }, [selectedEdgeId, updateDefinition, withHistory]);
 
-  const onConnect = useCallback((connection: Connection) => {
-    if (!connection.source || !connection.target || connection.source === connection.target) return;
-    withHistory("Add edge", () => {
-      updateDefinition((current) => {
-        const sourceNode = current.nodes.find((node) => node.id === connection.source);
-        const sourceOutgoingCount = current.edges.filter((edge) => edge.sourceNodeId === connection.source).length;
-        const requestedBranchId = sourceNode?.type === "if_else"
-          ? connection.sourceHandle
+  const onConnect = useCallback(
+    (connection: Connection) => {
+      if (!connection.source || !connection.target || connection.source === connection.target) return;
+      withHistory("Add edge", () => {
+        updateDefinition((current) => {
+          const sourceNode = current.nodes.find((node) => node.id === connection.source);
+          const sourceOutgoingCount = current.edges.filter((edge) => edge.sourceNodeId === connection.source).length;
+          const requestedBranchId =
+            sourceNode?.type === "if_else"
+              ? (connection.sourceHandle
             ?? ensureIfElseBranches(sourceNode)[sourceOutgoingCount]?.id
             ?? ensureIfElseBranches(sourceNode).find((branch) => branch.kind === "else")?.id
-            ?? "else"
-          : sourceNode?.type === "approval_gate"
-            ? approvalGateBranchId(connection.sourceHandle) ?? (sourceOutgoingCount === 0 ? "approved" : "rejected")
-            : undefined;
-        const duplicate = current.edges.some((edge) =>
+            ?? "else")
+              : sourceNode?.type === "approval_gate"
+                ? (approvalGateBranchId(connection.sourceHandle) ?? (sourceOutgoingCount === 0 ? "approved" : "rejected"))
+                : undefined;
+          const duplicate = current.edges.some((edge) =>
           edge.sourceNodeId === connection.source
           && edge.targetNodeId === connection.target
           && (
@@ -1877,25 +1948,27 @@ function AgentWorkflowBuilderInner({ repo }: AgentWorkflowBuilderViewProps) {
               : true
           ),
         );
-        if (duplicate) return current;
-        const condition: WorkflowEdgeCondition = sourceNode?.type === "if_else"
+          if (duplicate) return current;
+          const condition: WorkflowEdgeCondition = sourceNode?.type === "if_else"
           ? branchEdgeCondition(requestedBranchId ?? "else")
           : sourceNode?.type === "approval_gate"
             ? branchEdgeCondition(requestedBranchId ?? "approved")
             : { sourceStatus: "completed" };
-        const nextEdge: AgentWorkflowEdge = {
+          const nextEdge: AgentWorkflowEdge = {
           id: createId("edge"),
           sourceNodeId: connection.source!,
           targetNodeId: connection.target!,
           condition,
         };
-        setSelectedEdgeId(nextEdge.id);
-        setSelectedNodeIds(new Set());
-        return { ...current, edges: [...current.edges, nextEdge], updatedAt: Date.now() };
+          setSelectedEdgeId(nextEdge.id);
+          setSelectedNodeIds(new Set());
+          return { ...current, edges: [...current.edges, nextEdge], updatedAt: Date.now() };
+        });
       });
-    });
-    setEdges((current) => addEdge(connection, current));
-  }, [setEdges, updateDefinition, withHistory]);
+      setEdges((current) => addEdge(connection, current));
+    },
+    [setEdges, updateDefinition, withHistory],
+  );
 
   const handleNodeDragStop = useCallback((_event: React.MouseEvent, node: WorkflowGraphNode) => {
     withHistory("Move node", () => {
@@ -2088,7 +2161,7 @@ function AgentWorkflowBuilderInner({ repo }: AgentWorkflowBuilderViewProps) {
 
   if (!repo.path) {
     return (
-      <div className="flex h-full items-center justify-center text-sm text-gx-muted">
+      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
         Agent Workflows require a local repository path.
       </div>
     );
@@ -2097,44 +2170,57 @@ function AgentWorkflowBuilderInner({ repo }: AgentWorkflowBuilderViewProps) {
   if (!definition) {
     return (
       <div className="flex h-full items-center justify-center">
-        <button type="button" className="btn-primary" onClick={handleNewWorkflow}>
+        <Button variant="default" type="button" onClick={handleNewWorkflow}>
           <Plus size={14} /> New Agent Workflow
-        </button>
+        </Button>
       </div>
     );
   }
 
   return (
-    <div className="flex h-full min-w-0 flex-col bg-gx-bg text-gx-text">
-      <div className="flex h-11 shrink-0 items-center gap-2 border-b border-gx-border px-3">
+    <div className="flex h-full min-w-0 flex-col bg-background text-foreground">
+      <div className="flex h-11 shrink-0 items-center gap-2 border-b border-border px-3">
         {navigationStack.length > 0 && (
           <IconButton title="Back to parent workflow" onClick={handleNavigateBack} variant="ghost">
             <ChevronLeft size={14} />
           </IconButton>
         )}
-        <div className="flex min-w-[360px] items-center overflow-hidden rounded border border-gx-border bg-gx-bg-sub">
-          <Search size={13} className="ml-2 shrink-0 text-gx-muted" />
-          <input
-            className="h-7 min-w-0 flex-1 bg-transparent px-2 text-xs text-gx-text placeholder:text-gx-muted focus:outline-none"
+        <div className="flex min-w-[360px] items-center overflow-hidden rounded border border-border bg-background">
+          <Search size={13} className="ml-2 shrink-0 text-muted-foreground" />
+          <Input
+            className="h-7 min-w-0 flex-1 bg-transparent px-2 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none"
             value={workflowQuery}
             onChange={(event) => setWorkflowQuery(event.target.value)}
             placeholder="Search workflows"
             aria-label="Search workflows"
           />
-          <select
-            className="h-7 max-w-[210px] border-l border-gx-border bg-gx-surface px-2 text-xs text-gx-text focus:outline-none"
-            value={rootSelectorValue}
-            onChange={(event) => handleSelectDefinition(event.target.value)}
-            title="Root workflows"
+          <Select
+            value={":" + String(rootSelectorValue)}
+            onValueChange={(selectedValue) => {
+              const value = selectedValue.slice(1);
+              return handleSelectDefinition(value);
+            }}
           >
-            {displayedRootDefinitions.length === 0 ? (
-              <option value="">No matches</option>
-            ) : (
-              displayedRootDefinitions.map((item) => (
-                <option key={item.id} value={item.id}>{item.name}</option>
-              ))
-            )}
-          </select>
+            <SelectTrigger
+              className="h-7 max-w-[210px] border-l border-border bg-card px-2 text-xs text-foreground focus:outline-none"
+              title="Root workflows"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                {displayedRootDefinitions.length === 0 ? (
+                  <SelectItem value={":" + String("")}>No matches</SelectItem>
+                ) : (
+                  displayedRootDefinitions.map((item) => (
+                    <SelectItem key={item.id} value={":" + String(item.id)}>
+                      {item.name}
+                    </SelectItem>
+                  ))
+                )}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
         </div>
         <CommandButton title="New workflow" label="New" onClick={handleNewWorkflow} variant="ghost">
           <Plus size={13} />
@@ -2201,16 +2287,17 @@ function AgentWorkflowBuilderInner({ repo }: AgentWorkflowBuilderViewProps) {
           </CommandButton>
         )}
         {latestRun && ["queued", "running", "paused"].includes(latestRun.status) && (
-          <CommandButton title="Stop active run" label="Stop" onClick={handleCancelRun} variant="danger">
-            <CircleStop size={13} />
-          </CommandButton>
-        )}
+            <CommandButton title="Stop active run" label="Stop" onClick={handleCancelRun} variant="danger">
+              <CircleStop size={13} />
+            </CommandButton>
+          )}
         {navigationStack.length > 0 && (
-          <div className="min-w-0 max-w-[260px] truncate text-[11px] text-gx-muted">
-            {navigationStack.map((item) => item.label).join(" / ")} / {definition.name}
+          <div className="min-w-0 max-w-[260px] truncate text-[11px] text-muted-foreground">
+            {navigationStack.map((item) => item.label).join(" / ")} /{" "}
+            {definition.name}
           </div>
         )}
-        <div className="min-w-0 flex-1 truncate text-xs text-gx-muted">
+        <div className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
           {statusMessage || "Define DAG nodes, connect dependencies, then run with optional review gates."}
         </div>
       </div>
@@ -2218,7 +2305,7 @@ function AgentWorkflowBuilderInner({ repo }: AgentWorkflowBuilderViewProps) {
       <PanelGroup direction="horizontal" className="min-h-0 flex-1">
         <Panel minSize={34} className="min-h-0 min-w-0">
           <div className="flex h-full min-w-0 flex-col">
-            <div className="flex h-9 shrink-0 items-center gap-2 border-b border-gx-border px-3">
+            <div className="flex h-9 shrink-0 items-center gap-2 border-b border-border px-3">
               <IconButton title="Add agent task" onClick={() => handleAddNode("agent_task")}>
                 <Bot size={13} />
               </IconButton>
@@ -2240,7 +2327,7 @@ function AgentWorkflowBuilderInner({ repo }: AgentWorkflowBuilderViewProps) {
               <IconButton title="Add loop" onClick={() => handleAddNode("loop")}>
                 <Repeat2 size={13} />
               </IconButton>
-              <div className="min-w-0 flex-1 truncate text-[11px] text-gx-muted">
+              <div className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground">
                 Add nodes, connect edges, then use the run panel for progress.
               </div>
               {!propertiesOpen && (
@@ -2298,7 +2385,7 @@ function AgentWorkflowBuilderInner({ repo }: AgentWorkflowBuilderViewProps) {
                 fitView
                 proOptions={{ hideAttribution: true }}
               >
-                <Background color="rgba(148, 163, 184, 0.18)" gap={18} />
+                <Background color="rgb(var(--border) / 0.5)" gap={18} />
                 <Controls />
                 <MiniMap pannable zoomable nodeStrokeWidth={2} />
               </ReactFlow>
@@ -2316,7 +2403,7 @@ function AgentWorkflowBuilderInner({ repo }: AgentWorkflowBuilderViewProps) {
               className="min-h-0"
               onResize={(size) => persistPanelSize(LS_PROPERTIES_SIZE_KEY, size)}
             >
-              <div className="flex h-full min-h-0 flex-col border-l border-gx-border">
+              <div className="flex h-full min-h-0 flex-col border-l border-border">
                 <PropertiesPanel
                   repoPath={repo.path}
                   definition={definition}
@@ -2350,7 +2437,7 @@ function AgentWorkflowBuilderInner({ repo }: AgentWorkflowBuilderViewProps) {
               className="min-h-0"
               onResize={(size) => persistPanelSize(LS_RUN_SIZE_KEY, size)}
             >
-              <div className="flex h-full min-h-0 flex-col border-l border-gx-border">
+              <div className="flex h-full min-h-0 flex-col border-l border-border">
                 {schedulesOpen ? (
                   <PanelGroup direction="vertical" className="min-h-0 flex-1">
                     <Panel
@@ -2400,38 +2487,40 @@ function AgentWorkflowBuilderInner({ repo }: AgentWorkflowBuilderViewProps) {
                   </PanelGroup>
                 ) : (
                   <>
-                    <div className="flex h-8 shrink-0 items-center gap-2 border-b border-gx-border px-3">
-                      <Clock size={13} className="text-gx-muted" />
-                      <span className="flex-1 text-xs font-medium">Schedules</span>
+                    <div className="flex h-8 shrink-0 items-center gap-2 border-b border-border px-3">
+                      <Clock size={13} className="text-muted-foreground" />
+                      <span className="flex-1 text-xs font-medium">
+                        Schedules
+                      </span>
                       <IconButton title="Show schedules" onClick={() => setSchedulesOpen(true)} variant="ghost" className="h-6 w-6">
                         <ChevronDown size={13} />
                       </IconButton>
                     </div>
                     <RunPanel
-                      run={latestRun}
-                      runs={runs.filter((run) => run.definitionId === definition.id)}
-                      definition={definition}
-                      events={events}
-                      activeRunId={latestRun?.id ?? null}
-                      onSelectRun={(run) => setActiveRun(run)}
-                      runInputDraft={runInputDraft}
-                      runInputError={runInputError}
-                      onRunInputDraftChange={setRunInputDraft}
-                      onRun={handleRun}
-                      reviewTextByNodeRun={reviewTextByNodeRun}
-                      onReviewTextChange={setReviewTextByNodeRun}
-                      onApproveNode={handleApproveNode}
-                      onRequestChanges={handleRequestChanges}
-                      onRejectNode={handleRejectNode}
-                      onRetryNode={handleRetryNode}
-                      onRequestHumanReviewChanges={handleRequestHumanReviewChanges}
-                      onClosePanel={() => setRunPaneOpen(false)}
-                      onToggleSchedules={() => setSchedulesOpen((open) => !open)}
-                      schedulesOpen={schedulesOpen}
-                      onOpenSubWorkflow={handleOpenSubWorkflow}
-                      onCreateSubWorkflow={handleCreateSubWorkflow}
-                      onOpenAgentSession={handleOpenAgentSession}
-                    />
+                        run={latestRun}
+                        runs={runs.filter((run) => run.definitionId === definition.id)}
+                        definition={definition}
+                        events={events}
+                        activeRunId={latestRun?.id ?? null}
+                        onSelectRun={(run) => setActiveRun(run)}
+                        runInputDraft={runInputDraft}
+                        runInputError={runInputError}
+                        onRunInputDraftChange={setRunInputDraft}
+                        onRun={handleRun}
+                        reviewTextByNodeRun={reviewTextByNodeRun}
+                        onReviewTextChange={setReviewTextByNodeRun}
+                        onApproveNode={handleApproveNode}
+                        onRequestChanges={handleRequestChanges}
+                        onRejectNode={handleRejectNode}
+                        onRetryNode={handleRetryNode}
+                        onRequestHumanReviewChanges={handleRequestHumanReviewChanges}
+                        onClosePanel={() => setRunPaneOpen(false)}
+                        onToggleSchedules={() => setSchedulesOpen((open) => !open)}
+                        schedulesOpen={schedulesOpen}
+                        onOpenSubWorkflow={handleOpenSubWorkflow}
+                        onCreateSubWorkflow={handleCreateSubWorkflow}
+                        onOpenAgentSession={handleOpenAgentSession}
+                      />
                   </>
                 )}
               </div>
@@ -2442,163 +2531,251 @@ function AgentWorkflowBuilderInner({ repo }: AgentWorkflowBuilderViewProps) {
         )}
       </PanelGroup>
       {showSimulation && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setShowSimulation(false)}>
-          <div className="w-full max-w-xl rounded-lg border border-gx-border bg-gx-bg p-4 shadow-xl" onClick={(event) => event.stopPropagation()}>
+        <Dialog
+          open
+          onOpenChange={(open) => {
+            if (!open) {
+              setShowSimulation(false);
+            }
+          }}
+        >
+          <DialogContent
+            showCloseButton={false}
+            aria-describedby={undefined}
+            className="block gap-0 p-0 w-full max-w-xl rounded-lg border border-border bg-background p-4 shadow-xl"
+            onClick={(event) => event.stopPropagation()}
+          >
             <div className="mb-3 flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-gx-text">Dry Run Simulation</h3>
+              <DialogTitle className="text-sm font-semibold text-foreground">
+                Dry Run Simulation
+              </DialogTitle>
               <IconButton title="Close" onClick={() => setShowSimulation(false)}>
                 <X size={14} />
               </IconButton>
             </div>
             {!simulationResult && !simulationError && (
               <>
-                <label className="mb-2 block space-y-1 text-[11px] text-gx-muted">
+                <label className="mb-2 block space-y-1 text-[11px] text-muted-foreground">
                   <span>Simulation input (JSON)</span>
-                  <textarea
-                    className="input-field w-full resize-none font-mono text-xs"
+                  <Textarea
+                    className="w-full resize-none font-mono text-xs"
                     rows={4}
                     value={simulationInput}
                     onChange={(event) => setSimulationInput(event.target.value)}
                     placeholder='{"prompt": "test"}'
                   />
                 </label>
-                <button type="button" className="btn-primary w-full text-xs" onClick={handleSimulate} disabled={simulating}>
+                <Button variant="default" type="button" className="w-full text-xs" onClick={handleSimulate} disabled={simulating}>
                   {simulating ? "Simulating..." : "Run Simulation"}
-                </button>
+                </Button>
               </>
             )}
             {simulating && (
-              <div className="py-8 text-center text-xs text-gx-muted">Simulating workflow...</div>
+              <div className="py-8 text-center text-xs text-muted-foreground">
+                Simulating workflow...
+              </div>
             )}
             {simulationError && (
               <div className="space-y-2">
-                <div className="rounded border border-gx-error/30 bg-gx-error/5 px-3 py-2 text-xs text-gx-error">{simulationError}</div>
-                <button type="button" className="btn-primary w-full text-xs" onClick={() => { setSimulationError(null); setSimulationResult(null); }}>
+                <div className="rounded border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                  {simulationError}
+                </div>
+                <Button variant="default" type="button" className="w-full text-xs" onClick={() => { setSimulationError(null); setSimulationResult(null); }}>
                   Try Again
-                </button>
+                </Button>
               </div>
             )}
             {simulationResult && !simulating && (
               <div className="space-y-3">
                 <div className="grid grid-cols-2 gap-2">
-                  <div className="rounded border border-gx-success/30 bg-gx-success/5 px-3 py-2 text-center">
-                    <div className="text-lg font-bold text-gx-success">{simulationResult.activatedNodes.length}</div>
-                    <div className="text-[10px] text-gx-muted">Activated</div>
+                  <div className="rounded border border-success/30 bg-success/5 px-3 py-2 text-center">
+                    <div className="text-lg font-bold text-success">
+                      {simulationResult.activatedNodes.length}
+                    </div>
+                    <div className="text-[10px] text-muted-foreground">
+                      Activated
+                    </div>
                   </div>
-                  <div className="rounded border border-gx-border bg-gx-bg-sub px-3 py-2 text-center">
-                    <div className="text-lg font-bold text-gx-text">{simulationResult.skippedNodes.length}</div>
-                    <div className="text-[10px] text-gx-muted">Skipped</div>
+                  <div className="rounded border border-border bg-background px-3 py-2 text-center">
+                    <div className="text-lg font-bold text-foreground">
+                      {simulationResult.skippedNodes.length}
+                    </div>
+                    <div className="text-[10px] text-muted-foreground">
+                      Skipped
+                    </div>
                   </div>
                 </div>
                 {simulationResult.blockedNodes.length > 0 && (
-                  <div className="rounded border border-gx-error/30 bg-gx-error/5 px-3 py-2 text-center">
-                    <div className="text-lg font-bold text-gx-error">{simulationResult.blockedNodes.length}</div>
-                    <div className="text-[10px] text-gx-muted">Blocked</div>
+                  <div className="rounded border border-destructive/30 bg-destructive/5 px-3 py-2 text-center">
+                    <div className="text-lg font-bold text-destructive">
+                      {simulationResult.blockedNodes.length}
+                    </div>
+                    <div className="text-[10px] text-muted-foreground">
+                      Blocked
+                    </div>
                   </div>
                 )}
-                <div className="max-h-60 space-y-1 overflow-auto rounded border border-gx-border p-2">
+                <div className="max-h-60 space-y-1 overflow-auto rounded border border-border p-2">
                   {simulationResult.trace.map((line, index) => (
-                    <div key={index} className="text-[10px] leading-relaxed text-gx-muted">{line}</div>
+                    <div key={index} className="text-[10px] leading-relaxed text-muted-foreground">
+                      {line}
+                    </div>
                   ))}
                 </div>
                 <div className="flex gap-2">
-                  <button type="button" className="btn-primary flex-1 text-xs" onClick={() => { setSimulationError(null); setSimulationResult(null); }}>
+                  <Button variant="default" type="button" className="flex-1 text-xs" onClick={() => { setSimulationError(null); setSimulationResult(null); }}>
                     Simulate Again
-                  </button>
-                  <button type="button" className="flex-1 rounded border border-gx-border px-3 py-2 text-xs text-gx-muted hover:bg-gx-bg-sub" onClick={() => setShowSimulation(false)}>
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="compact"
+                    type="button"
+                    className="flex-1 rounded border border-border px-3 py-2 text-xs text-muted-foreground hover:bg-background"
+                    onClick={() => setShowSimulation(false)}
+                  >
                     Close
-                  </button>
+                  </Button>
                 </div>
               </div>
             )}
-          </div>
-        </div>
+          </DialogContent>
+        </Dialog>
       )}
       {showTemplatePicker && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setShowTemplatePicker(false)}>
-          <div className="w-full max-w-lg rounded-lg border border-gx-border bg-gx-bg p-4 shadow-xl" onClick={(event) => event.stopPropagation()}>
+        <Dialog
+          open
+          onOpenChange={(open) => {
+            if (!open) {
+              setShowTemplatePicker(false);
+            }
+          }}
+        >
+          <DialogContent
+            showCloseButton={false}
+            aria-describedby={undefined}
+            className="block gap-0 p-0 w-full max-w-lg rounded-lg border border-border bg-background p-4 shadow-xl"
+            onClick={(event) => event.stopPropagation()}
+          >
             <div className="mb-3 flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-gx-text">New Workflow</h3>
+              <DialogTitle className="text-sm font-semibold text-foreground">
+                New Workflow
+              </DialogTitle>
               <IconButton title="Close" onClick={() => setShowTemplatePicker(false)}>
                 <X size={14} />
               </IconButton>
             </div>
             <div className="mb-3 grid gap-2">
               {templates.map((template) => (
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   key={template.id}
                   type="button"
-                  className="flex items-start gap-3 rounded border border-gx-border p-3 text-left hover:border-gx-accent/60 hover:bg-gx-accent/5"
+                  className="justify-start flex items-start gap-3 rounded border border-border p-3 text-left hover:border-primary/60 hover:bg-primary/5"
                   onClick={() => handleCreateFromTemplate(template)}
                 >
-                  <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gx-accent/10 text-gx-accent">
+                  <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
                     <Network size={15} />
                   </div>
                   <div className="min-w-0">
-                    <div className="text-xs font-medium text-gx-text">{template.name}</div>
-                    <div className="mt-0.5 text-[11px] text-gx-muted">{template.description}</div>
+                    <div className="text-xs font-medium text-foreground">
+                      {template.name}
+                    </div>
+                    <div className="mt-0.5 text-[11px] text-muted-foreground">
+                      {template.description}
+                    </div>
                   </div>
-                </button>
+                </Button>
               ))}
             </div>
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
-              className="w-full rounded border border-gx-border px-3 py-2 text-xs text-gx-muted hover:bg-gx-bg-sub"
+              className="w-full rounded border border-border px-3 py-2 text-xs text-muted-foreground hover:bg-background"
               onClick={() => handleCreateFromTemplate(null)}
             >
               Start from scratch
-            </button>
-          </div>
-        </div>
+            </Button>
+          </DialogContent>
+        </Dialog>
       )}
       {showVersionHistory && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setShowVersionHistory(false)}>
-          <div className="w-full max-w-md rounded-lg border border-gx-border bg-gx-bg p-4 shadow-xl" onClick={(event) => event.stopPropagation()}>
+        <Dialog
+          open
+          onOpenChange={(open) => {
+            if (!open) {
+              setShowVersionHistory(false);
+            }
+          }}
+        >
+          <DialogContent
+            showCloseButton={false}
+            aria-describedby={undefined}
+            className="block gap-0 p-0 w-full max-w-md rounded-lg border border-border bg-background p-4 shadow-xl"
+            onClick={(event) => event.stopPropagation()}
+          >
             <div className="mb-3 flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-gx-text">Version History</h3>
+              <DialogTitle className="text-sm font-semibold text-foreground">
+                Version History
+              </DialogTitle>
               <IconButton title="Close" onClick={() => setShowVersionHistory(false)}>
                 <X size={14} />
               </IconButton>
             </div>
             {versionHistoryLoading && (
-              <div className="py-8 text-center text-xs text-gx-muted">Loading versions...</div>
+              <div className="py-8 text-center text-xs text-muted-foreground">
+                Loading versions...
+              </div>
             )}
             {versionHistoryError && (
-              <div className="py-4 text-center text-xs text-gx-error">{versionHistoryError}</div>
+              <div className="py-4 text-center text-xs text-destructive">
+                {versionHistoryError}
+              </div>
             )}
             {!versionHistoryLoading && !versionHistoryError && versionHistory.length === 0 && (
-              <div className="py-8 text-center text-xs text-gx-muted">No version history yet. Save the workflow to create versions.</div>
-            )}
+                <div className="py-8 text-center text-xs text-muted-foreground">
+                  No version history yet. Save the workflow to create versions.
+                </div>
+              )}
             {!versionHistoryLoading && versionHistory.length > 0 && (
               <div className="max-h-80 space-y-1 overflow-auto">
                 {versionHistory.map((meta) => (
-                  <div key={meta.version} className="flex items-center justify-between rounded border border-gx-border px-3 py-2">
+                  <div key={meta.version} className="flex items-center justify-between rounded border border-border px-3 py-2">
                     <div className="min-w-0">
-                      <div className="truncate text-xs text-gx-text">v{meta.version} — {meta.name}</div>
-                      <div className="text-[10px] text-gx-muted">{new Date(meta.timestamp).toLocaleString()}</div>
+                      <div className="truncate text-xs text-foreground">
+                        v{meta.version} — {meta.name}
+                      </div>
+                      <div className="text-[10px] text-muted-foreground">
+                        {new Date(meta.timestamp).toLocaleString()}
+                      </div>
                     </div>
                     <div className="flex shrink-0 items-center gap-1">
-                      <button
+                      <Button
+                        variant="ghost"
+                        size="compact"
                         type="button"
-                        className="rounded px-2 py-1 text-[10px] text-gx-accent hover:bg-gx-accent/10"
+                        className="rounded px-2 py-1 text-[10px] text-primary hover:bg-primary/10"
                         onClick={() => handleViewVersion(meta.version)}
                       >
                         View
-                      </button>
-                      <button
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="compact"
                         type="button"
-                        className="rounded px-2 py-1 text-[10px] text-gx-warn hover:bg-gx-warn/10"
+                        className="rounded px-2 py-1 text-[10px] text-warning hover:bg-warning/10"
                         onClick={() => handleRevertToVersion(meta.version)}
                       >
                         Revert
-                      </button>
+                      </Button>
                     </div>
                   </div>
                 ))}
               </div>
             )}
-          </div>
-        </div>
+          </DialogContent>
+        </Dialog>
       )}
     </div>
   );
@@ -2644,9 +2821,10 @@ function PropertiesPanel({
     () => definitions.filter((item) => item.id !== definition.id),
     [definition.id, definitions],
   );
-  const activeAgentType = selectedNode?.type === "agent_task"
-    ? selectedNode.agentType ?? definition.defaultAgentType
-    : definition.defaultAgentType;
+  const activeAgentType =
+    selectedNode?.type === "agent_task"
+      ? (selectedNode.agentType ?? definition.defaultAgentType)
+      : definition.defaultAgentType;
   const modelDiscovery = useAgentModels(activeAgentType, selectedNode?.type === "agent_task" ? repoPath : undefined);
   const models = modelDiscovery.models;
   const availableModels = useMemo(() => modelOptions(models, selectedNode?.model), [models, selectedNode?.model]);
@@ -2663,7 +2841,7 @@ function PropertiesPanel({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex h-9 items-center gap-2 border-b border-gx-border px-3 text-xs font-medium">
+      <div className="flex h-9 items-center gap-2 border-b border-border px-3 text-xs font-medium">
         <span className="flex-1">Properties</span>
         <IconButton title="Hide properties" onClick={onClose} variant="ghost" className="h-6 w-6">
           <ChevronRight size={13} />
@@ -2671,27 +2849,33 @@ function PropertiesPanel({
       </div>
       <div className="min-h-0 flex-1 space-y-4 overflow-auto p-3">
         <section className="space-y-2">
-          <div className="flex items-center gap-2 text-xs font-medium text-gx-text">
-            <GitBranch size={13} className="text-gx-accent" />
+          <div className="flex items-center gap-2 text-xs font-medium text-foreground">
+            <GitBranch size={13} className="text-primary" />
             Workflow Metadata
           </div>
-          <label className="block text-[11px] text-gx-muted">Name</label>
-          <input
-            className="input-field w-full text-xs font-medium"
+          <label className="block text-[11px] text-muted-foreground">
+            Name
+          </label>
+          <Input
+            className="w-full text-xs font-medium"
             value={definition.name}
             onChange={(event) => onDefinitionChange((current) => ({ ...current, name: event.target.value, updatedAt: Date.now() }))}
           />
-          <label className="block text-[11px] text-gx-muted">Description</label>
-          <textarea
-            className="input-field min-h-16 w-full resize-none text-xs"
+          <label className="block text-[11px] text-muted-foreground">
+            Description
+          </label>
+          <Textarea
+            className="min-h-16 w-full resize-none text-xs"
             value={definition.description ?? ""}
             onChange={(event) => onDefinitionChange((current) => ({ ...current, description: event.target.value, updatedAt: Date.now() }))}
           />
-          <label className="block text-[11px] text-gx-muted">Tags</label>
+          <label className="block text-[11px] text-muted-foreground">
+            Tags
+          </label>
           <div className="flex items-center gap-1.5">
-            <Tag size={13} className="shrink-0 text-gx-muted" />
-            <input
-              className="input-field min-w-0 flex-1 text-xs"
+            <Tag size={13} className="shrink-0 text-muted-foreground" />
+            <Input
+              className="min-w-0 flex-1 text-xs"
               value={(definition.tags ?? []).join(", ")}
               placeholder="release, refactor, qa"
               onChange={(event) => onDefinitionChange((current) => ({
@@ -2702,12 +2886,12 @@ function PropertiesPanel({
             />
           </div>
           <div className="grid grid-cols-2 gap-2">
-            <label className="space-y-1 text-[11px] text-gx-muted">
+            <label className="space-y-1 text-[11px] text-muted-foreground">
               <span>Max parallel</span>
-              <input
+              <Input
                 type="number"
                 min={1}
-                className="input-field w-full text-xs"
+                className="w-full text-xs"
                 value={definition.maxParallelNodes}
                 onChange={(event) => onDefinitionChange((current) => ({
                   ...current,
@@ -2716,100 +2900,160 @@ function PropertiesPanel({
                 }))}
               />
             </label>
-            <label className="space-y-1 text-[11px] text-gx-muted">
+            <label className="space-y-1 text-[11px] text-muted-foreground">
               <span>Default agent</span>
-              <select
-                className="input-field w-full text-xs"
-                value={definition.defaultAgentType}
-                onChange={(event) => onDefinitionChange((current) => ({
-                  ...current,
-                  defaultAgentType: event.target.value as AgentWorkflowAgentType,
-                  updatedAt: Date.now(),
-                }))}
+              <Select
+                value={":" + String(definition.defaultAgentType)}
+                onValueChange={(selectedValue) => {
+                  const value = selectedValue.slice(1);
+                  return onDefinitionChange((current) => ({
+                    ...current,
+                    defaultAgentType: value as AgentWorkflowAgentType,
+                    updatedAt: Date.now(),
+                  }));
+                }}
               >
-                <option value="codex">Codex</option>
-                <option value="claude-code">Claude Code</option>
-                <option value="custom">Custom</option>
-              </select>
+                <SelectTrigger className="w-full text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    <SelectItem value={":" + String("codex")}>Codex</SelectItem>
+                    <SelectItem value={":" + String("claude-code")}>
+                      Claude Code
+                    </SelectItem>
+                    <SelectItem value={":" + String("custom")}>
+                      Custom
+                    </SelectItem>
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
             </label>
           </div>
         </section>
 
         {selectedNode && (
-          <section className="space-y-2 border-t border-gx-border pt-3">
+          <section className="space-y-2 border-t border-border pt-3">
             <div className="flex items-center gap-2">
               <div className="text-xs font-medium">Selected Node</div>
               <div className="flex-1" />
-              <button type="button" className="btn-icon h-6 w-6 text-gx-error" onClick={onDeleteNode} title="Delete node">
+              <Button size="icon" variant="ghost" type="button" className="h-6 w-6 text-destructive" onClick={onDeleteNode} title="Delete node">
                 <Trash2 size={13} />
-              </button>
+              </Button>
             </div>
-            <label className="block text-[11px] text-gx-muted">Title</label>
-            <input className="input-field w-full text-xs" value={selectedNode.title} onChange={(event) => onNodeChange({ title: event.target.value })} />
-            <label className="block text-[11px] text-gx-muted">Type</label>
-            <select
-              className="input-field w-full text-xs"
-              value={selectedNode.type}
-              onChange={(event) => {
-                const type = event.target.value as AgentWorkflowNodeType;
+            <label className="block text-[11px] text-muted-foreground">
+              Title
+            </label>
+            <Input className="w-full text-xs" value={selectedNode.title} onChange={(event) => onNodeChange({ title: event.target.value })} />
+            <label className="block text-[11px] text-muted-foreground">
+              Type
+            </label>
+            <Select
+              value={":" + String(selectedNode.type)}
+              onValueChange={(selectedValue) => {
+                const value = selectedValue.slice(1);
+                const type = value as AgentWorkflowNodeType;
                 onNodeChange({
                   type,
-                  ifElse: type === "if_else" ? selectedNode.ifElse ?? { branches: createDefaultIfElseBranches() } : selectedNode.ifElse,
-                  loop: type === "loop" ? selectedNode.loop ?? { maxIterations: 3 } : selectedNode.loop,
-                  inputMapping: type === "sub_workflow" || type === "loop"
-                    ? selectedNode.inputMapping ?? { input: { source: "runInput" } }
-                    : selectedNode.inputMapping,
+                  ifElse:
+                    type === "if_else"
+                      ? (selectedNode.ifElse ?? { branches: createDefaultIfElseBranches() })
+                      : selectedNode.ifElse,
+                  loop:
+                    type === "loop"
+                      ? (selectedNode.loop ?? { maxIterations: 3 })
+                      : selectedNode.loop,
+                  inputMapping:
+                    type === "sub_workflow" || type === "loop"
+                      ? (selectedNode.inputMapping ?? { input: { source: "runInput" } })
+                      : selectedNode.inputMapping,
                 });
               }}
             >
-              <option value="agent_task">Agent Task</option>
-              <option value="human_review">Human Review</option>
-              <option value="approval_gate">Approval Gate</option>
-              <option value="join">Join</option>
-              <option value="sub_workflow">Sub-Workflow</option>
-              <option value="if_else">If / Else</option>
-              <option value="loop">Loop</option>
-            </select>
-            <label className="block text-[11px] text-gx-muted">Instructions</label>
-            <textarea
-              className="input-field min-h-32 w-full resize-none text-xs"
+              <SelectTrigger className="w-full text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  <SelectItem value={":" + String("agent_task")}>
+                    Agent Task
+                  </SelectItem>
+                  <SelectItem value={":" + String("human_review")}>
+                    Human Review
+                  </SelectItem>
+                  <SelectItem value={":" + String("approval_gate")}>
+                    Approval Gate
+                  </SelectItem>
+                  <SelectItem value={":" + String("join")}>Join</SelectItem>
+                  <SelectItem value={":" + String("sub_workflow")}>
+                    Sub-Workflow
+                  </SelectItem>
+                  <SelectItem value={":" + String("if_else")}>
+                    If / Else
+                  </SelectItem>
+                  <SelectItem value={":" + String("loop")}>Loop</SelectItem>
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+            <label className="block text-[11px] text-muted-foreground">
+              Instructions
+            </label>
+            <Textarea
+              className="min-h-32 w-full resize-none text-xs"
               value={selectedNode.instructions}
               onChange={(event) => onNodeChange({ instructions: event.target.value })}
             />
             {selectedNode.type === "agent_task" && (
               <div className="space-y-2">
                 <div className="grid grid-cols-2 gap-2">
-                  <label className="space-y-1 text-[11px] text-gx-muted">
+                  <label className="space-y-1 text-[11px] text-muted-foreground">
                     <span>Agent</span>
-                    <select
-                      className="input-field w-full text-xs"
-                      value={selectedNode.agentType ?? ""}
-                      onChange={(event) => handleAgentTypeChange(event.target.value)}
+                    <Select
+                      value={":" + String(selectedNode.agentType ?? "")}
+                      onValueChange={(selectedValue) => {
+                        const value = selectedValue.slice(1);
+                        return handleAgentTypeChange(value);
+                      }}
                     >
-                      <option value="">Default</option>
-                      <option value="codex">Codex</option>
-                      <option value="claude-code">Claude Code</option>
-                      <option value="custom">Custom</option>
-                    </select>
+                      <SelectTrigger className="w-full text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectGroup>
+                          <SelectItem value={":" + String("")}>
+                            Default
+                          </SelectItem>
+                          <SelectItem value={":" + String("codex")}>
+                            Codex
+                          </SelectItem>
+                          <SelectItem value={":" + String("claude-code")}>
+                            Claude Code
+                          </SelectItem>
+                          <SelectItem value={":" + String("custom")}>
+                            Custom
+                          </SelectItem>
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
                   </label>
-                  <label className="space-y-1 text-[11px] text-gx-muted">
+                  <label className="space-y-1 text-[11px] text-muted-foreground">
                     <span>Retries</span>
-                    <input
+                    <Input
                       type="number"
                       min={1}
-                      className="input-field w-full text-xs"
+                      className="w-full text-xs"
                       value={selectedNode.retryPolicy?.maxAttempts ?? 1}
                       onChange={(event) => onNodeChange({ retryPolicy: { maxAttempts: Math.max(1, Number(event.target.value) || 1) } })}
                     />
                   </label>
                 </div>
                 <div className="grid grid-cols-2 gap-2">
-                  <label className="space-y-1 text-[11px] text-gx-muted">
+                  <label className="space-y-1 text-[11px] text-muted-foreground">
                     <span>Timeout (ms)</span>
-                    <input
+                    <Input
                       type="number"
                       min={0}
-                      className="input-field w-full text-xs"
+                      className="w-full text-xs"
                       value={selectedNode.timeoutMs ?? ""}
                       placeholder="No timeout"
                       onChange={(event) => {
@@ -2829,42 +3073,74 @@ function PropertiesPanel({
                 </div>
                 <ModelDiscoveryStatus discovery={modelDiscovery} />
                 <div className="grid grid-cols-2 gap-2">
-                  <label className="space-y-1 text-[11px] text-gx-muted">
+                  <label className="space-y-1 text-[11px] text-muted-foreground">
                     <span>Model</span>
-                    <select
-                      className="input-field w-full text-xs"
-                      value={selectedNode.model?.trim() ?? ""}
-                      onChange={(event) => handleModelChange(event.target.value)}
+                    <Select
+                      value={":" + String(selectedNode.model?.trim() ?? "")}
+                      onValueChange={(selectedValue) => {
+                        const value = selectedValue.slice(1);
+                        return handleModelChange(value);
+                      }}
                     >
-                      <option value="">Agent default</option>
-                      {availableModels.map((model) => (
-                        <option key={model.value} value={model.value} title={model.description}>
-                          {model.label}
-                        </option>
-                      ))}
-                    </select>
+                      <SelectTrigger className="w-full text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectGroup>
+                          <SelectItem value={":" + String("")}>
+                            Agent default
+                          </SelectItem>
+                          {availableModels.map((model) => (
+                            <SelectItem
+                              key={model.value}
+                              title={model.description}
+                              value={":" + String(model.value)}
+                            >
+                              {model.label}
+                            </SelectItem>
+                          ))}
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
                   </label>
-                  <label className="space-y-1 text-[11px] text-gx-muted">
+                  <label className="space-y-1 text-[11px] text-muted-foreground">
                     <span>Intelligence</span>
-                    <select
-                      className="input-field w-full text-xs"
-                      value={selectedNode.intelligence?.trim() ?? ""}
-                      onChange={(event) => onNodeChange({ intelligence: event.target.value || undefined })}
+                    <Select
+                      value={
+                        ":" + String(selectedNode.intelligence?.trim() ?? "")
+                      }
+                      onValueChange={(selectedValue) => {
+                        const value = selectedValue.slice(1);
+                        return onNodeChange({
+                          intelligence: value || undefined,
+                        });
+                      }}
                     >
-                      <option value="">Agent default</option>
-                      {intelligenceOptions.map((level) => (
-                        <option key={level} value={level}>
-                          {intelligenceLabel(level)}
-                        </option>
-                      ))}
-                    </select>
+                      <SelectTrigger className="w-full text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectGroup>
+                          <SelectItem value={":" + String("")}>
+                            Agent default
+                          </SelectItem>
+                          {intelligenceOptions.map((level) => (
+                            <SelectItem key={level} value={":" + String(level)}>
+                              {intelligenceLabel(level)}
+                            </SelectItem>
+                          ))}
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
                   </label>
                 </div>
               </div>
             )}
             {selectedNode.type === "if_else" && (
-              <div className="space-y-2 rounded border border-gx-border p-2">
-                <div className="text-[11px] font-medium text-gx-text">Branches</div>
+              <div className="space-y-2 rounded border border-border p-2">
+                <div className="text-[11px] font-medium text-foreground">
+                  Branches
+                </div>
                 <IfElseBranchEditor
                   branches={ensureIfElseBranches(selectedNode)}
                   inputSuggestions={ifElseInputSuggestions}
@@ -2885,30 +3161,47 @@ function PropertiesPanel({
               </div>
             )}
             {selectedNode.type === "join" && (
-              <div className="space-y-2 border-t border-gx-border pt-3">
-                <label className="block space-y-1 text-[11px] text-gx-muted">
+              <div className="space-y-2 border-t border-border pt-3">
+                <label className="block space-y-1 text-[11px] text-muted-foreground">
                   <span>Merge strategy</span>
-                  <select
-                    className="input-field w-full text-xs"
-                    value={selectedNode.joinConfig?.strategy ?? "all"}
-                    onChange={(event) => {
-                      const strategy = event.target.value as JoinStrategy | "all";
+                  <Select
+                    value={
+                      ":" + String(selectedNode.joinConfig?.strategy ?? "all")
+                    }
+                    onValueChange={(selectedValue) => {
+                      const value = selectedValue.slice(1);
+                      const strategy = value as JoinStrategy | "all";
                       onNodeChange({
                         joinConfig: { ...selectedNode.joinConfig, strategy: strategy === "all" ? undefined : strategy },
                       });
                     }}
                   >
-                    <option value="all">All (collect outputs)</option>
-                    <option value="first">First (first activated input)</option>
-                    <option value="last">Last (last activated input)</option>
-                    <option value="concat">Concat (merge with template)</option>
-                  </select>
+                    <SelectTrigger className="w-full text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        <SelectItem value={":" + String("all")}>
+                          All (collect outputs)
+                        </SelectItem>
+                        <SelectItem value={":" + String("first")}>
+                          First (first activated input)
+                        </SelectItem>
+                        <SelectItem value={":" + String("last")}>
+                          Last (last activated input)
+                        </SelectItem>
+                        <SelectItem value={":" + String("concat")}>
+                          Concat (merge with template)
+                        </SelectItem>
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
                 </label>
-                {(selectedNode.joinConfig?.strategy === "concat") && (
-                  <label className="block space-y-1 text-[11px] text-gx-muted">
+                {selectedNode.joinConfig?.strategy === "concat" && (
+                  <label className="block space-y-1 text-[11px] text-muted-foreground">
                     <span>Merge template</span>
-                    <textarea
-                      className="input-field w-full resize-none text-xs"
+                    <Textarea
+                      className="w-full resize-none text-xs"
                       rows={3}
                       value={selectedNode.joinConfig?.customTemplate ?? "{{summaries}}"}
                       placeholder="{{summaries}}"
@@ -2925,29 +3218,57 @@ function PropertiesPanel({
             )}
             {(selectedNode.type === "sub_workflow" || selectedNode.type === "loop") && (
               <div className="space-y-2">
-                <label className="block space-y-1 text-[11px] text-gx-muted">
+                <label className="block space-y-1 text-[11px] text-muted-foreground">
                   <span>Reusable workflow</span>
-                  <select
-                    className="input-field w-full text-xs"
-                    value={selectedNode.subWorkflowDefinitionId ?? ""}
-                    onChange={(event) => onNodeChange({ subWorkflowDefinitionId: event.target.value || undefined })}
+                  <Select
+                    value={
+                      ":" + String(selectedNode.subWorkflowDefinitionId ?? "")
+                    }
+                    onValueChange={(selectedValue) => {
+                      const value = selectedValue.slice(1);
+                      return onNodeChange({
+                        subWorkflowDefinitionId: value || undefined,
+                      });
+                    }}
                   >
-                    <option value="">Select or create a reusable workflow</option>
-                    {selectedNode.subWorkflowDefinitionId && !childWorkflowOptions.some((item) => item.id === selectedNode.subWorkflowDefinitionId) && (
-                      <option value={selectedNode.subWorkflowDefinitionId}>Unknown workflow ({selectedNode.subWorkflowDefinitionId})</option>
-                    )}
-                    {childWorkflowOptions.map((item) => (
-                      <option key={item.id} value={item.id}>{item.name}</option>
-                    ))}
-                  </select>
+                    <SelectTrigger className="w-full text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        <SelectItem value={":" + String("")}>
+                          Select or create a reusable workflow
+                        </SelectItem>
+                        {selectedNode.subWorkflowDefinitionId && !childWorkflowOptions.some((item) => item.id === selectedNode.subWorkflowDefinitionId) && (
+                            <SelectItem
+                              value={
+                                ":" +
+                                String(selectedNode.subWorkflowDefinitionId)
+                              }
+                            >
+                              Unknown workflow (
+                              {selectedNode.subWorkflowDefinitionId})
+                            </SelectItem>
+                          )}
+                        {childWorkflowOptions.map((item) => (
+                          <SelectItem
+                            key={item.id}
+                            value={":" + String(item.id)}
+                          >
+                            {item.name}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
                 </label>
-                <div className="flex items-center gap-1.5 rounded border border-gx-border bg-gx-bg-sub px-2 py-1.5">
+                <div className="flex items-center gap-1.5 rounded border border-border bg-background px-2 py-1.5">
                   <div className="min-w-0 flex-1">
-                    <div className="truncate text-[11px] text-gx-text">
+                    <div className="truncate text-[11px] text-foreground">
                       {childWorkflowOptions.find((item) => item.id === selectedNode.subWorkflowDefinitionId)?.name
                         ?? (selectedNode.subWorkflowDefinitionId ? "Linked reusable workflow" : "No reusable workflow selected")}
                     </div>
-                    <div className="truncate font-mono text-[10px] text-gx-muted">
+                    <div className="truncate font-mono text-[10px] text-muted-foreground">
                       {selectedNode.subWorkflowDefinitionId || "Select an existing workflow or create one for nested steps."}
                     </div>
                   </div>
@@ -2962,7 +3283,7 @@ function PropertiesPanel({
                   )}
                 </div>
                 {selectedNode.type === "loop" && (
-                  <div className="space-y-2 rounded border border-gx-border p-2">
+                  <div className="space-y-2 rounded border border-border p-2">
                     <LoopConfigEditor
                       loop={selectedNode.loop ?? { maxIterations: 3 }}
                       onChange={(loop) => onNodeChange({ loop })}
@@ -2986,22 +3307,22 @@ function PropertiesPanel({
               </div>
             )}
             {selectedNode.type === "approval_gate" && (
-              <div className="space-y-2 border-t border-gx-border pt-3">
+              <div className="space-y-2 border-t border-border pt-3">
                 <div className="grid grid-cols-2 gap-2">
-                  <label className="space-y-1 text-[11px] text-gx-muted">
+                  <label className="space-y-1 text-[11px] text-muted-foreground">
                     <span>Approved label</span>
-                    <input
-                      className="input-field w-full text-xs"
+                    <Input
+                      className="w-full text-xs"
                       value={selectedNode.approvalGate?.approvedLabel ?? "Approved"}
                       onChange={(event) => onNodeChange({
                         approvalGate: { ...selectedNode.approvalGate, approvedLabel: event.target.value },
                       })}
                     />
                   </label>
-                  <label className="space-y-1 text-[11px] text-gx-muted">
+                  <label className="space-y-1 text-[11px] text-muted-foreground">
                     <span>Rejected label</span>
-                    <input
-                      className="input-field w-full text-xs"
+                    <Input
+                      className="w-full text-xs"
                       value={selectedNode.approvalGate?.rejectedLabel ?? "Rejected"}
                       onChange={(event) => onNodeChange({
                         approvalGate: { ...selectedNode.approvalGate, rejectedLabel: event.target.value },
@@ -3010,12 +3331,12 @@ function PropertiesPanel({
                   </label>
                 </div>
                 <div className="grid grid-cols-2 gap-2">
-                  <label className="space-y-1 text-[11px] text-gx-muted">
+                  <label className="space-y-1 text-[11px] text-muted-foreground">
                     <span>Review timeout (ms)</span>
-                    <input
+                    <Input
                       type="number"
                       min={0}
-                      className="input-field w-full text-xs"
+                      className="w-full text-xs"
                       value={selectedNode.approvalGate?.reviewTimeoutMs ?? ""}
                       placeholder="No timeout"
                       onChange={(event) => {
@@ -3027,52 +3348,89 @@ function PropertiesPanel({
                       }}
                     />
                   </label>
-                  <label className="space-y-1 text-[11px] text-gx-muted">
+                  <label className="space-y-1 text-[11px] text-muted-foreground">
                     <span>On timeout</span>
-                    <select
-                      className="input-field w-full text-xs"
-                      value={selectedNode.approvalGate?.onReviewTimeout ?? "fail"}
-                      onChange={(event) => {
-                        const val = event.target.value || undefined;
+                    <Select
+                      value={
+                        ":" +
+                        String(
+                          selectedNode.approvalGate?.onReviewTimeout ?? "fail",
+                        )
+                      }
+                      onValueChange={(selectedValue) => {
+                        const value = selectedValue.slice(1);
+                        const val = value || undefined;
                         onNodeChange({
                           approvalGate: { ...selectedNode.approvalGate, onReviewTimeout: val as "approve" | "reject" | "fail" | undefined },
                         });
                       }}
                     >
-                      <option value="approve">Auto-approve</option>
-                      <option value="reject">Auto-reject</option>
-                      <option value="fail">Fail</option>
-                    </select>
+                      <SelectTrigger className="w-full text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectGroup>
+                          <SelectItem value={":" + String("approve")}>
+                            Auto-approve
+                          </SelectItem>
+                          <SelectItem value={":" + String("reject")}>
+                            Auto-reject
+                          </SelectItem>
+                          <SelectItem value={":" + String("fail")}>
+                            Fail
+                          </SelectItem>
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
                   </label>
                 </div>
               </div>
             )}
             {selectedNode.type === "human_review" && (
-              <div className="space-y-2 border-t border-gx-border pt-3">
-                <label className="block space-y-1 text-[11px] text-gx-muted">
+              <div className="space-y-2 border-t border-border pt-3">
+                <label className="block space-y-1 text-[11px] text-muted-foreground">
                   <span>Review target agent</span>
-                  <select
-                    className="input-field w-full text-xs"
-                    value={selectedNode.humanReview?.reviewTargetNodeId ?? ""}
-                    onChange={(event) => onNodeChange({
-                      humanReview: { ...selectedNode.humanReview, reviewTargetNodeId: event.target.value || undefined },
-                    })}
+                  <Select
+                    value={
+                      ":" +
+                      String(selectedNode.humanReview?.reviewTargetNodeId ?? "")
+                    }
+                    onValueChange={(selectedValue) => {
+                      const value = selectedValue.slice(1);
+                      return onNodeChange({
+                        humanReview: {
+                          ...selectedNode.humanReview,
+                          reviewTargetNodeId: value || undefined,
+                        },
+                      });
+                    }}
                   >
-                    <option value="">Auto-detect upstream agent</option>
-                    {definition?.nodes
+                    <SelectTrigger className="w-full text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        <SelectItem value={":" + String("")}>
+                          Auto-detect upstream agent
+                        </SelectItem>
+                        {definition?.nodes
                       .filter((n) => n.type === "agent_task" && n.id !== selectedNode.id)
                       .map((n) => (
-                        <option key={n.id} value={n.id}>{n.title}</option>
-                      ))}
-                  </select>
+                            <SelectItem key={n.id} value={":" + String(n.id)}>
+                              {n.title}
+                            </SelectItem>
+                          ))}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
                 </label>
                 <div className="grid grid-cols-2 gap-2">
-                  <label className="space-y-1 text-[11px] text-gx-muted">
+                  <label className="space-y-1 text-[11px] text-muted-foreground">
                     <span>Review timeout (ms)</span>
-                    <input
+                    <Input
                       type="number"
                       min={0}
-                      className="input-field w-full text-xs"
+                      className="w-full text-xs"
                       value={selectedNode.humanReview?.reviewTimeoutMs ?? ""}
                       placeholder="No timeout"
                       onChange={(event) => {
@@ -3084,27 +3442,45 @@ function PropertiesPanel({
                       }}
                     />
                   </label>
-                  <label className="space-y-1 text-[11px] text-gx-muted">
+                  <label className="space-y-1 text-[11px] text-muted-foreground">
                     <span>On timeout</span>
-                    <select
-                      className="input-field w-full text-xs"
-                      value={selectedNode.humanReview?.onReviewTimeout ?? "fail"}
-                      onChange={(event) => {
-                        const val = event.target.value || undefined;
+                    <Select
+                      value={
+                        ":" +
+                        String(
+                          selectedNode.humanReview?.onReviewTimeout ?? "fail",
+                        )
+                      }
+                      onValueChange={(selectedValue) => {
+                        const value = selectedValue.slice(1);
+                        const val = value || undefined;
                         onNodeChange({
                           humanReview: { ...selectedNode.humanReview, onReviewTimeout: val as "approve" | "reject" | "fail" | undefined },
                         });
                       }}
                     >
-                      <option value="approve">Auto-approve</option>
-                      <option value="reject">Auto-reject</option>
-                      <option value="fail">Fail</option>
-                    </select>
+                      <SelectTrigger className="w-full text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectGroup>
+                          <SelectItem value={":" + String("approve")}>
+                            Auto-approve
+                          </SelectItem>
+                          <SelectItem value={":" + String("reject")}>
+                            Auto-reject
+                          </SelectItem>
+                          <SelectItem value={":" + String("fail")}>
+                            Fail
+                          </SelectItem>
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
                   </label>
                 </div>
               </div>
             )}
-            <div className="space-y-2 border-t border-gx-border pt-3">
+            <div className="space-y-2 border-t border-border pt-3">
               <ValueRefMapEditor
                 label="State updates"
                 value={selectedNode.stateUpdates ?? {}}
@@ -3113,27 +3489,32 @@ function PropertiesPanel({
                 onChange={(stateUpdates) => onNodeChange({ stateUpdates })}
               />
             </div>
-            <div className="space-y-2 border-t border-gx-border pt-3">
-              <label className="flex items-center gap-2 text-xs text-gx-text">
-                <input
-                  type="checkbox"
+            <div className="space-y-2 border-t border-border pt-3">
+              <label className="flex items-center gap-2 text-xs text-foreground">
+                <Checkbox
                   checked={selectedNode.requireStructuredOutput ?? false}
-                  onChange={(event) => onNodeChange({ requireStructuredOutput: event.target.checked })}
+                  onCheckedChange={(checked) =>
+                    onNodeChange({ requireStructuredOutput: checked === true })
+                  }
                 />
                 Require structured output
               </label>
-              <div className="space-y-1 text-[11px] text-gx-muted">
+              <div className="space-y-1 text-[11px] text-muted-foreground">
                 <span>Output schema</span>
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
-                  className="flex w-full items-center justify-between rounded border border-gx-border bg-gx-bg-sub px-2 py-2 text-left text-xs text-gx-text hover:border-gx-accent/60"
+                  className="flex w-full items-center justify-between rounded border border-border bg-background px-2 py-2 text-left text-xs text-foreground hover:border-primary/60"
                   onClick={() => setSchemaBuilderOpen(true)}
                 >
-                  <span className="truncate">{selectedNode.outputSchemaName || schemaTitle(selectedNode.outputSchema) || "schema"}</span>
-                  <span className="font-mono text-[10px] text-gx-muted">
+                  <span className="truncate">
+                    {selectedNode.outputSchemaName || schemaTitle(selectedNode.outputSchema) || "schema"}
+                  </span>
+                  <span className="font-mono text-[10px] text-muted-foreground">
                     {selectedNode.outputSchema ? `${Object.keys((selectedNode.outputSchema.properties as Record<string, unknown> | undefined) ?? {}).length} fields` : "{}"}
                   </span>
-                </button>
+                </Button>
               </div>
               <JsonSchemaBuilderDialog
                 open={schemaBuilderOpen}
@@ -3147,13 +3528,13 @@ function PropertiesPanel({
         )}
 
         {selectedEdge && (
-          <section className="space-y-2 border-t border-gx-border pt-3">
+          <section className="space-y-2 border-t border-border pt-3">
             <div className="flex items-center gap-2">
               <div className="text-xs font-medium">Selected Edge</div>
               <div className="flex-1" />
-              <button type="button" className="btn-icon h-6 w-6 text-gx-error" onClick={onDeleteEdge} title="Delete edge">
+              <Button size="icon" variant="ghost" type="button" className="h-6 w-6 text-destructive" onClick={onDeleteEdge} title="Delete edge">
                 <Trash2 size={13} />
-              </button>
+              </Button>
             </div>
             <EdgeConditionEditor
               edge={selectedEdge}
@@ -3163,15 +3544,19 @@ function PropertiesPanel({
         )}
 
         {validation && (
-          <section className="space-y-2 border-t border-gx-border pt-3 text-xs">
-            <div className={validation.valid ? "text-gx-success" : "text-gx-error"}>
+          <section className="space-y-2 border-t border-border pt-3 text-xs">
+            <div className={validation.valid ? "text-success" : "text-destructive"}>
               {validation.valid ? "Valid DAG" : "Validation errors"}
             </div>
             {validation.errors.map((error) => (
-              <div key={error} className="text-gx-error">{error}</div>
+              <div key={error} className="text-destructive">
+                {error}
+              </div>
             ))}
             {validation.warnings.map((warning) => (
-              <div key={warning} className="text-gx-warn">{warning}</div>
+              <div key={warning} className="text-warning">
+                {warning}
+              </div>
             ))}
           </section>
         )}
@@ -3192,36 +3577,19 @@ function ToggleCard({
   onChange: (checked: boolean) => void;
 }) {
   return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      className={clsx(
-        "min-h-[58px] rounded border px-2 py-2 text-left transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-gx-accent focus-visible:outline-offset-1",
-        checked
-          ? "border-gx-accent/60 bg-gx-accent/10 text-gx-text"
-          : "border-gx-border bg-gx-bg-sub text-gx-muted hover:border-gx-accent/50 hover:text-gx-text",
-      )}
-      onClick={() => onChange(!checked)}
-    >
+    <label className="flex min-h-[58px] cursor-pointer flex-col gap-1 rounded-md border border-border bg-card p-2">
       <span className="flex items-center justify-between gap-2 text-xs font-medium">
-        <span className="truncate">{label}</span>
-        <span
-          className={clsx(
-            "h-3 w-6 rounded-full border transition",
-            checked ? "border-gx-accent bg-gx-accent/60" : "border-gx-border bg-gx-surface",
-          )}
-        >
-          <span
-            className={clsx(
-              "block h-2.5 w-2.5 rounded-full bg-gx-text transition-transform",
-              checked && "translate-x-3",
-            )}
-          />
-        </span>
+        <span>{label}</span>
+        <Switch
+          aria-label={label}
+          checked={checked}
+          onCheckedChange={onChange}
+        />
       </span>
-      <span className="mt-1 block text-[10px] leading-4 text-gx-muted">{description}</span>
-    </button>
+      <span className="text-[10px] leading-4 text-muted-foreground">
+        {description}
+      </span>
+    </label>
   );
 }
 
@@ -3323,11 +3691,13 @@ function isSchemaObject(value: unknown): value is Record<string, unknown> {
 }
 
 function celPath(root: string, segments: string[]): string {
-  return segments.reduce((path, segment) => (
-    /^[A-Za-z_][A-Za-z0-9_]*$/.test(segment)
+  return segments.reduce(
+    (path, segment) =>
+      /^[A-Za-z_][A-Za-z0-9_]*$/.test(segment)
       ? `${path}.${segment}`
-      : `${path}[${JSON.stringify(segment)}]`
-  ), root);
+      : `${path}[${JSON.stringify(segment)}]`,
+    root,
+  );
 }
 
 function IfElseBranchEditor({
@@ -3362,16 +3732,16 @@ function IfElseBranchEditor({
   return (
     <div className="space-y-2">
       {branches.map((branch) => (
-        <div key={branch.id} className="space-y-2 rounded border border-gx-border bg-gx-bg-sub/40 p-2">
+        <div key={branch.id} className="space-y-2 rounded border border-border bg-background/40 p-2">
           <div className="flex items-center gap-2">
             <span className={clsx(
               "rounded border px-1.5 py-0 text-[10px] font-medium",
-              branch.kind === "else" ? "border-gx-muted/40 text-gx-muted" : "border-gx-accent/40 text-gx-accent",
+              branch.kind === "else" ? "border-muted-foreground/40 text-muted-foreground" : "border-primary/40 text-primary",
             )}>
               {branch.kind.toUpperCase()}
             </span>
-            <input
-              className="input-field h-6 min-w-0 flex-1 text-[11px]"
+            <Input
+              className="h-6 min-w-0 flex-1 text-[11px]"
               value={branch.label}
               onChange={(event) => onChange(branches.map((item) => item.id === branch.id ? { ...item, label: event.target.value } : item))}
             />
@@ -3379,7 +3749,7 @@ function IfElseBranchEditor({
               <IconButton
                 title="Delete branch"
                 variant="ghost"
-                className="h-6 w-6 text-gx-error"
+                className="h-6 w-6 text-destructive"
                 onClick={() => onChange(branches.filter((item) => item.id !== branch.id))}
               >
                 <Trash2 size={12} />
@@ -3394,10 +3764,10 @@ function IfElseBranchEditor({
                 branchLabel={branch.label}
                 onExpressionChange={(celExpression) => updateBranchExpression(branch.id, celExpression)}
               />
-              <label className="block space-y-1 text-[11px] text-gx-muted">
+              <label className="block space-y-1 text-[11px] text-muted-foreground">
                 <span>CEL expression</span>
-                <textarea
-                  className="input-field min-h-16 w-full resize-y font-mono text-[11px]"
+                <Textarea
+                  className="min-h-16 w-full resize-y font-mono text-[11px]"
                   value={branch.celExpression ?? legacyConditionExpression(branch.condition)}
                   onChange={(event) => updateBranchExpression(branch.id, event.target.value)}
                   placeholder="input.score >= 0.8"
@@ -3405,14 +3775,24 @@ function IfElseBranchEditor({
               </label>
             </>
           ) : (
-            <div className="text-[10px] text-gx-muted">Fallback branch when no earlier branch matches.</div>
+            <div className="text-[10px] text-muted-foreground">
+              Fallback branch when no earlier branch matches.
+            </div>
           )}
-          <div className="font-mono text-[10px] text-gx-muted">route handle: {branch.id}</div>
+          <div className="font-mono text-[10px] text-muted-foreground">
+            route handle: {branch.id}
+          </div>
         </div>
       ))}
-      <button type="button" className="text-xs text-gx-accent hover:underline" onClick={addElif}>
+      <Button
+        variant="ghost"
+        size="compact"
+        type="button"
+        className="text-xs text-primary hover:underline"
+        onClick={addElif}
+      >
         + Add branch
-      </button>
+      </Button>
     </div>
   );
 }
@@ -3462,8 +3842,9 @@ function CelConditionAssistant({
 
   if (suggestions.length === 0) {
     return (
-      <div className="border-t border-gx-border/70 pt-2 text-[10px] text-gx-muted">
-        Connect an upstream node with an output schema to build this condition visually, or write CEL directly below.
+      <div className="border-t border-border/70 pt-2 text-[10px] text-muted-foreground">
+        Connect an upstream node with an output schema to build this condition
+        visually, or write CEL directly below.
       </div>
     );
   }
@@ -3482,70 +3863,102 @@ function CelConditionAssistant({
   };
 
   return (
-    <div className="space-y-2 border-t border-gx-border/70 pt-2">
+    <div className="space-y-2 border-t border-border/70 pt-2">
       <div className="flex items-center justify-between gap-2">
-        <span className="text-[11px] text-gx-muted">Condition builder</span>
-        <span className="truncate text-[10px] text-gx-muted">{selectedSuggestion.sourceTitle}</span>
+        <span className="text-[11px] text-muted-foreground">
+          Condition builder
+        </span>
+        <span className="truncate text-[10px] text-muted-foreground">
+          {selectedSuggestion.sourceTitle}
+        </span>
       </div>
       <div className="flex flex-wrap gap-1">
         {suggestions.slice(0, 8).map((suggestion) => (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             key={suggestion.id}
             type="button"
             title={suggestion.description || suggestion.path}
             className={clsx(
               "max-w-full rounded border px-1.5 py-0.5 text-[10px] transition",
               selectedSuggestion.id === suggestion.id
-                ? "border-gx-accent/60 bg-gx-accent/10 text-gx-accent"
-                : "border-gx-border bg-gx-bg-sub text-gx-muted hover:border-gx-accent/50 hover:text-gx-text",
+                ? "border-primary/60 bg-primary/10 text-primary"
+                : "border-border bg-background text-muted-foreground hover:border-primary/50 hover:text-foreground",
             )}
             onClick={() => chooseSuggestion(suggestion, true)}
           >
             <span className="font-mono">{suggestion.displayPath}</span>
             <span className="ml-1 uppercase opacity-70">{suggestion.type}</span>
-          </button>
+          </Button>
         ))}
       </div>
       <div className="space-y-1.5">
-        <select
-          className="input-field h-7 w-full font-mono text-[11px]"
-          value={selectedSuggestion.id}
-          onChange={(event) => {
-            const suggestion = suggestions.find((item) => item.id === event.target.value);
+        <Select
+          value={":" + String(selectedSuggestion.id)}
+          onValueChange={(selectedValue) => {
+            const value = selectedValue.slice(1);
+            const suggestion = suggestions.find((item) => item.id === value);
             if (suggestion) chooseSuggestion(suggestion);
           }}
         >
-          {suggestions.map((suggestion) => (
-            <option key={suggestion.id} value={suggestion.id}>
-              {suggestion.displayPath} ({suggestion.type})
-            </option>
-          ))}
-        </select>
+          <SelectTrigger className="h-7 w-full font-mono text-[11px]">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              {suggestions.map((suggestion) => (
+                <SelectItem
+                  key={suggestion.id}
+                  value={":" + String(suggestion.id)}
+                >
+                  {suggestion.displayPath} ({suggestion.type})
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          </SelectContent>
+        </Select>
         <div className="grid grid-cols-[92px_1fr_52px] gap-1.5">
-          <select
-            className="input-field h-7 min-w-0 text-[11px]"
-            value={operator}
-            onChange={(event) => setOperator(event.target.value as CelAssistantOperator)}
+          <Select
+            value={":" + String(operator)}
+            onValueChange={(selectedValue) => {
+              const value = selectedValue.slice(1);
+              return setOperator(value as CelAssistantOperator);
+            }}
           >
-            {operatorOptions.map((option) => (
-              <option key={option.value} value={option.value}>{option.label}</option>
-            ))}
-          </select>
+            <SelectTrigger className="h-7 min-w-0 text-[11px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                {operatorOptions.map((option) => (
+                  <SelectItem
+                    key={option.value}
+                    value={":" + String(option.value)}
+                  >
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
           <CelConditionValueInput
             suggestion={selectedSuggestion}
             operator={operator}
             value={valueDraft}
             onChange={setValueDraft}
           />
-          <button
+          <Button variant="outline"
             type="button"
-            className="btn h-7 px-2 text-[11px]"
+            className="h-7 px-2 text-[11px]"
             onClick={() => onExpressionChange(nextExpression)}
           >
             Apply
-          </button>
+          </Button>
         </div>
-        <div className="truncate font-mono text-[10px] text-gx-muted" title={nextExpression}>{nextExpression}</div>
+        <div className="truncate font-mono text-[10px] text-muted-foreground" title={nextExpression}>
+          {nextExpression}
+        </div>
       </div>
     </div>
   );
@@ -3563,21 +3976,40 @@ function CelConditionValueInput({
   onChange: (value: string) => void;
 }) {
   if (!operatorNeedsValue(operator)) {
-    return <div className="h-7 rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-[11px] text-gx-muted">-</div>;
+    return (
+      <div className="h-7 rounded border border-border bg-background px-2 py-1 text-[11px] text-muted-foreground">
+        -
+      </div>
+    );
   }
   if (suggestion.type === "enum" && suggestion.enumValues?.length) {
     return (
-      <select className="input-field h-7 min-w-0 text-[11px]" value={value} onChange={(event) => onChange(event.target.value)}>
-        {suggestion.enumValues.map((item) => (
-          <option key={item} value={item}>{item}</option>
-        ))}
-      </select>
+      <Select
+        value={":" + String(value)}
+        onValueChange={(selectedValue) => {
+          const value = selectedValue.slice(1);
+          return onChange(value);
+        }}
+      >
+        <SelectTrigger className="h-7 min-w-0 text-[11px]">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectGroup>
+            {suggestion.enumValues.map((item) => (
+              <SelectItem key={item} value={":" + String(item)}>
+                {item}
+              </SelectItem>
+            ))}
+          </SelectGroup>
+        </SelectContent>
+      </Select>
     );
   }
   if (suggestion.type === "number") {
     return (
-      <input
-        className="input-field h-7 min-w-0 font-mono text-[11px]"
+      <Input
+        className="h-7 min-w-0 font-mono text-[11px]"
         inputMode="decimal"
         value={value}
         onChange={(event) => onChange(event.target.value)}
@@ -3585,8 +4017,8 @@ function CelConditionValueInput({
     );
   }
   return (
-    <input
-      className="input-field h-7 min-w-0 text-[11px]"
+    <Input
+      className="h-7 min-w-0 text-[11px]"
       value={value}
       onChange={(event) => onChange(event.target.value)}
     />
@@ -3609,10 +4041,12 @@ function selectDefaultCelSuggestion(
     );
     if (nameMatch) return nameMatch;
   }
-  return suggestions.find((suggestion) => suggestion.type === "enum")
+  return (
+    suggestions.find((suggestion) => suggestion.type === "enum")
     ?? suggestions.find((suggestion) => suggestion.type === "boolean")
     ?? suggestions.find((suggestion) => suggestion.type === "number")
-    ?? suggestions[0];
+    ?? suggestions[0]
+  );
 }
 
 function defaultCelExpression(suggestions: CelInputSuggestion[], branchLabel: string): string {
@@ -3632,10 +4066,15 @@ function defaultOperatorForSuggestion(suggestion: CelInputSuggestion, branchLabe
   return "equals";
 }
 
-function defaultValueForSuggestion(suggestion: CelInputSuggestion, branchLabel: string): string {
+function defaultValueForSuggestion(
+  suggestion: CelInputSuggestion,
+  branchLabel: string,
+): string {
   const token = branchToken(branchLabel);
   if (suggestion.type === "enum" && suggestion.enumValues?.length) {
-    return suggestion.enumValues.find((value) => normalizedText(value) === token) ?? suggestion.enumValues[0];
+    return (
+      suggestion.enumValues.find((value) => normalizedText(value) === token) ?? suggestion.enumValues[0]
+    );
   }
   if (suggestion.type === "number") {
     return /score|confidence|probability|rating/i.test(suggestion.fieldName) ? "0.8" : "1";
@@ -3766,13 +4205,13 @@ function LoopConfigEditor({
 }) {
   return (
     <div className="space-y-3">
-      <label className="space-y-1 text-[11px] text-gx-muted">
+      <label className="space-y-1 text-[11px] text-muted-foreground">
         <span>Maximum loop count</span>
-        <input
+        <Input
           type="number"
           min={1}
           max={50}
-          className="input-field w-full text-xs"
+          className="w-full text-xs"
           value={loop.maxIterations ?? 3}
           onChange={(event) => onChange({
             ...loop,
@@ -3781,14 +4220,16 @@ function LoopConfigEditor({
         />
       </label>
       <div className="space-y-2">
-        <label className="flex items-center gap-2 text-xs text-gx-text">
-          <input
-            type="checkbox"
+        <label className="flex items-center gap-2 text-xs text-foreground">
+          <Checkbox
             checked={Boolean(loop.terminateCondition)}
-            onChange={(event) => onChange({
-              ...loop,
-              terminateCondition: event.target.checked ? createDefaultConditionGroup() : undefined,
-            })}
+            onCheckedChange={(checked) =>
+              onChange({
+                ...loop,
+                terminateCondition:
+                  checked === true ? createDefaultConditionGroup() : undefined,
+              })
+            }
           />
           Terminate when a condition matches
         </label>
@@ -3859,14 +4300,23 @@ function ValueRefMapEditor({
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between gap-2">
-        <span className="text-[11px] text-gx-muted">{label}</span>
-        <button type="button" className="text-[11px] text-gx-accent hover:underline" onClick={addValue}>
+        <span className="text-[11px] text-muted-foreground">{label}</span>
+        <Button
+          variant="ghost"
+          size="compact"
+          type="button"
+          className="text-[11px] text-primary hover:underline"
+          onClick={addValue}
+        >
           + Add
-        </button>
+        </Button>
       </div>
       {entries.length === 0 ? (
-        <div className="rounded border border-dashed border-gx-border p-2 text-[10px] text-gx-muted">{emptyLabel}</div>
-      ) : entries.map(([key, ref]) => (
+        <div className="rounded border border-dashed border-border p-2 text-[10px] text-muted-foreground">
+          {emptyLabel}
+        </div>
+      ) : (
+        entries.map(([key, ref]) => (
         <ValueRefMapRow
           key={key}
           name={key}
@@ -3879,7 +4329,8 @@ function ValueRefMapEditor({
             commit(next);
           }}
         />
-      ))}
+      ))
+      )}
     </div>
   );
 }
@@ -3905,8 +4356,8 @@ function ValueRefMapRow({
 
   return (
     <div className="grid grid-cols-[82px_1fr_auto] items-start gap-1.5">
-      <input
-        className="input-field h-7 min-w-0 font-mono text-[11px]"
+      <Input
+        className="h-7 min-w-0 font-mono text-[11px]"
         value={nameDraft}
         onChange={(event) => setNameDraft(event.target.value)}
         onBlur={() => onRename(name, nameDraft)}
@@ -3915,7 +4366,7 @@ function ValueRefMapRow({
       <IconButton
         title="Remove state variable"
         variant="ghost"
-        className="h-7 w-7 text-gx-error"
+        className="h-7 w-7 text-destructive"
         onClick={onDelete}
       >
         <Trash2 size={12} />
@@ -3942,19 +4393,21 @@ function ConditionGroupEditor({
 
   return (
     <div className="space-y-2">
-      <div className="flex overflow-hidden rounded border border-gx-border">
+      <div className="flex overflow-hidden rounded border border-border">
         {(["and", "or"] as const).map((logic) => (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             key={logic}
             type="button"
             className={clsx(
               "flex-1 px-2 py-1 text-[11px] uppercase transition",
-              group.logic === logic ? "bg-gx-accent/15 text-gx-accent" : "bg-gx-bg-sub text-gx-muted hover:text-gx-text",
+              group.logic === logic ? "bg-primary/15 text-primary" : "bg-background text-muted-foreground hover:text-foreground",
             )}
             onClick={() => onChange({ ...group, logic })}
           >
             {logic}
-          </button>
+          </Button>
         ))}
       </div>
       {(group.conditions.length > 0 ? group.conditions : [createDefaultCondition()]).map((condition, index) => (
@@ -3965,13 +4418,15 @@ function ConditionGroupEditor({
           onDelete={group.conditions.length > 1 ? () => onChange({ ...group, conditions: group.conditions.filter((_, itemIndex) => itemIndex !== index) }) : undefined}
         />
       ))}
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
-        className="text-[11px] text-gx-accent hover:underline"
+        className="text-[11px] text-primary hover:underline"
         onClick={() => onChange({ ...group, conditions: [...group.conditions, createDefaultCondition()] })}
       >
         + Add condition
-      </button>
+      </Button>
     </div>
   );
 }
@@ -3994,34 +4449,52 @@ function ConditionRowEditor({
   const option = CONDITION_OPERATOR_OPTIONS.find((item) => item.value === condition.operator) ?? CONDITION_OPERATOR_OPTIONS[0];
 
   return (
-    <div className="space-y-1.5 rounded border border-gx-border/70 bg-gx-surface/50 p-2">
+    <div className="space-y-1.5 rounded border border-border/70 bg-card/50 p-2">
       <div className="flex items-center gap-1.5">
         <ValueRefPicker value={condition.left} onChange={(left) => onChange({ ...condition, left })} />
         {onDelete && (
-          <IconButton title="Delete condition" onClick={onDelete} variant="ghost" className="h-6 w-6 text-gx-error">
+          <IconButton title="Delete condition" onClick={onDelete} variant="ghost" className="h-6 w-6 text-destructive">
             <Trash2 size={12} />
           </IconButton>
         )}
       </div>
-      <select
-        className="input-field w-full text-xs"
-        value={condition.operator}
-        onChange={(event) => onChange({ ...condition, operator: event.target.value as WorkflowOutputPredicate["operator"] })}
+      <Select
+        value={":" + String(condition.operator)}
+        onValueChange={(selectedValue) => {
+          const value = selectedValue.slice(1);
+          return onChange({
+            ...condition,
+            operator: value as WorkflowOutputPredicate["operator"],
+          });
+        }}
       >
-        {CONDITION_OPERATOR_OPTIONS.map((item) => (
-          <option key={item.value} value={item.value}>{item.label}</option>
-        ))}
-      </select>
+        <SelectTrigger className="w-full text-xs">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectGroup>
+            {CONDITION_OPERATOR_OPTIONS.map((item) => (
+              <SelectItem key={item.value} value={":" + String(item.value)}>
+                {item.label}
+              </SelectItem>
+            ))}
+          </SelectGroup>
+        </SelectContent>
+      </Select>
       {option.needsValue && (
-        <input
-          className="input-field w-full font-mono text-[11px]"
+        <Input
+          className="w-full font-mono text-[11px]"
           value={valueDraft}
           placeholder={condition.operator === "in" ? "[\"open\", \"ready\"]" : "\"ready\""}
           onChange={(event) => {
             const next = event.target.value;
             setValueDraft(next);
             try {
-              onChange({ ...condition, value: next.trim() ? JSON.parse(next) as unknown : undefined, right: undefined });
+              onChange({
+                ...condition,
+                value: next.trim() ? (JSON.parse(next) as unknown) : undefined,
+                right: undefined,
+              });
             } catch {
               onChange({ ...condition, value: next, right: undefined });
             }
@@ -4041,36 +4514,54 @@ function ValueRefPicker({
 }) {
   return (
     <div className="grid min-w-0 flex-1 grid-cols-[110px_1fr] gap-1.5">
-      <select
-        className="input-field h-7 text-xs"
-        value={value.source}
-        onChange={(event) => onChange({ source: event.target.value as WorkflowValueRef["source"] })}
+      <Select
+        value={":" + String(value.source)}
+        onValueChange={(selectedValue) => {
+          const value = selectedValue.slice(1);
+          return onChange({ source: value as WorkflowValueRef["source"] });
+        }}
       >
-        <option value="runInput">Run input</option>
-        <option value="nodeOutput">Node output</option>
-        <option value="nodeSummary">Node summary</option>
-        <option value="literal">Literal</option>
-      </select>
+        <SelectTrigger className="h-7 text-xs">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectGroup>
+            <SelectItem value={":" + String("runInput")}>Run input</SelectItem>
+            <SelectItem value={":" + String("nodeOutput")}>
+              Node output
+            </SelectItem>
+            <SelectItem value={":" + String("nodeSummary")}>
+              Node summary
+            </SelectItem>
+            <SelectItem value={":" + String("literal")}>Literal</SelectItem>
+          </SelectGroup>
+        </SelectContent>
+      </Select>
       {value.source === "literal" ? (
-        <input
-          className="input-field h-7 font-mono text-[11px]"
+        <Input
+          className="h-7 font-mono text-[11px]"
           value={value.value === undefined ? "" : JSON.stringify(value.value)}
           placeholder="JSON value"
           onChange={(event) => {
             const next = event.target.value;
             try {
-              onChange({ source: "literal", value: next.trim() ? JSON.parse(next) as unknown : undefined });
+              onChange({
+                source: "literal",
+                value: next.trim() ? (JSON.parse(next) as unknown) : undefined,
+              });
             } catch {
               onChange({ source: "literal", value: next });
             }
           }}
         />
       ) : (
-        <input
-          className="input-field h-7 font-mono text-[11px]"
-          value={value.source === "nodeOutput" || value.source === "nodeSummary"
-            ? [value.nodeId, value.path].filter(Boolean).join(".")
-            : value.path ?? ""}
+        <Input
+          className="h-7 font-mono text-[11px]"
+          value={
+            value.source === "nodeOutput" || value.source === "nodeSummary"
+              ? [value.nodeId, value.path].filter(Boolean).join(".")
+              : (value.path ?? "")
+          }
           placeholder={value.source === "runInput" ? "payload.status" : "nodeId.output.path"}
           onChange={(event) => {
             const raw = event.target.value.trim();
@@ -4120,81 +4611,118 @@ function EdgeConditionEditor({
   return (
     <div className="space-y-2 text-xs">
       <div className="space-y-1.5">
-        <div className="flex items-center justify-between gap-2 text-[11px] text-gx-muted">
+        <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
           <span>Source status</span>
           <EdgeConditionPill condition={condition} compact />
         </div>
-        <div className="grid grid-cols-2 gap-1" role="radiogroup" aria-label="Source status">
-          {EDGE_SOURCE_STATUS_OPTIONS.map(({ value, label, description, Icon, className, activeClassName }) => {
-            const active = selectedStatus === value;
-            return (
-              <button
-                key={value}
-                type="button"
-                role="radio"
-                aria-checked={active}
-                title={description}
-                className={clsx(
-                  "flex h-8 min-w-0 items-center gap-1.5 rounded border px-2 text-left text-[11px] transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-gx-accent focus-visible:outline-offset-1",
+        <ToggleGroup
+          type="single"
+          value={selectedStatus}
+          onValueChange={(value) => {
+            if (value)
+              onChange({
+                ...condition,
+                sourceStatus: value as typeof selectedStatus,
+              });
+          }}
+          aria-label="Source status"
+          className="grid grid-cols-2 gap-1"
+        >
+          {EDGE_SOURCE_STATUS_OPTIONS.map(
+            ({ value, label, description, Icon, className, activeClassName }) => {
+              const active = selectedStatus === value;
+              return (
+                <ToggleGroupItem
+                  value={value}
+                  key={value}
+                  title={description}
+                  className={clsx(
+                  "flex h-8 min-w-0 items-center gap-1.5 rounded border px-2 text-left text-[11px] transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary focus-visible:outline-offset-1",
                   active
                     ? activeClassName
-                    : "border-gx-border bg-gx-bg-sub text-gx-muted hover:border-gx-accent/50 hover:bg-gx-surface-hover hover:text-gx-text",
+                    : "border-border bg-background text-muted-foreground hover:border-primary/50 hover:bg-accent hover:text-foreground",
                 )}
-                onClick={() => onChange({ ...condition, sourceStatus: value })}
-              >
-                <Icon size={13} className={clsx("shrink-0", active ? undefined : className)} />
-                <span className="truncate font-medium">{label}</span>
-              </button>
-            );
-          })}
-        </div>
+                >
+                  <Icon size={13} className={clsx("shrink-0", active ? undefined : className)} />
+                  <span className="truncate font-medium">{label}</span>
+                </ToggleGroupItem>
+              );
+            },
+          )}
+        </ToggleGroup>
       </div>
       {condition.branchId && (
-        <label className="space-y-1 text-[11px] text-gx-muted">
+        <label className="space-y-1 text-[11px] text-muted-foreground">
           <span>Branch route</span>
-          <input
-            className="input-field w-full font-mono text-[11px]"
+          <Input
+            className="w-full font-mono text-[11px]"
             value={condition.branchId}
             onChange={(event) => onChange({ ...condition, branchId: event.target.value || undefined })}
           />
         </label>
       )}
-      <label className="flex items-center gap-2 text-xs text-gx-text">
-        <input
-          type="checkbox"
+      <label className="flex items-center gap-2 text-xs text-foreground">
+        <Checkbox
           checked={Boolean(predicate)}
-          onChange={(event) => onChange({
-            ...condition,
-            outputPredicate: event.target.checked ? { path: "", operator: "exists" } : undefined,
-          })}
+          onCheckedChange={(checked) =>
+            onChange({
+              ...condition,
+              outputPredicate:
+                checked === true ? { path: "", operator: "exists" } : undefined,
+            })
+          }
         />
         Add structured-output predicate
       </label>
       {predicate && (
-        <div className="space-y-2 rounded border border-gx-border p-2">
-          <label className="space-y-1 text-[11px] text-gx-muted">
+        <div className="space-y-2 rounded border border-border p-2">
+          <label className="space-y-1 text-[11px] text-muted-foreground">
             <span>Output path</span>
-            <input className="input-field w-full text-xs" value={predicate.path} onChange={(event) => updatePredicate({ path: event.target.value })} />
+            <Input className="w-full text-xs" value={predicate.path} onChange={(event) => updatePredicate({ path: event.target.value })} />
           </label>
-          <label className="space-y-1 text-[11px] text-gx-muted">
+          <label className="space-y-1 text-[11px] text-muted-foreground">
             <span>Operator</span>
-            <select className="input-field w-full text-xs" value={predicate.operator} onChange={(event) => updatePredicate({ operator: event.target.value as WorkflowOutputPredicate["operator"] })}>
-              {CONDITION_OPERATOR_OPTIONS.map((item) => (
-                <option key={item.value} value={item.value}>{item.label}</option>
-              ))}
-            </select>
+            <Select
+              value={":" + String(predicate.operator)}
+              onValueChange={(selectedValue) => {
+                const value = selectedValue.slice(1);
+                return updatePredicate({
+                  operator: value as WorkflowOutputPredicate["operator"],
+                });
+              }}
+            >
+              <SelectTrigger className="w-full text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  {CONDITION_OPERATOR_OPTIONS.map((item) => (
+                    <SelectItem
+                      key={item.value}
+                      value={":" + String(item.value)}
+                    >
+                      {item.label}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
           </label>
           {(CONDITION_OPERATOR_OPTIONS.find((item) => item.value === predicate.operator)?.needsValue ?? true) && (
-            <label className="space-y-1 text-[11px] text-gx-muted">
+            <label className="space-y-1 text-[11px] text-muted-foreground">
               <span>Value JSON</span>
-              <input
-                className="input-field w-full font-mono text-[11px]"
+              <Input
+                className="w-full font-mono text-[11px]"
                 value={predicateValueDraft}
                 onChange={(event) => {
                   const next = event.target.value;
                   setPredicateValueDraft(next);
                   try {
-                    updatePredicate({ value: next.trim() ? JSON.parse(next) as unknown : undefined });
+                    updatePredicate({
+                      value: next.trim()
+                        ? (JSON.parse(next) as unknown)
+                        : undefined,
+                    });
                   } catch {
                     updatePredicate({ value: next });
                   }
@@ -4248,7 +4776,7 @@ function TriggerPanel({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex h-9 items-center gap-2 border-b border-gx-border px-3 text-xs font-medium">
+      <div className="flex h-9 items-center gap-2 border-b border-border px-3 text-xs font-medium">
         <Clock size={13} />
         <span className="flex-1">Triggers</span>
         <IconButton title="Hide triggers" onClick={onClose} variant="ghost" className="h-6 w-6">
@@ -4257,27 +4785,33 @@ function TriggerPanel({
       </div>
       <div className="min-h-0 flex-1 space-y-2 overflow-auto p-3">
         <div className="flex gap-1">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
-            className={clsx("flex-1 rounded px-2 py-1 text-[11px]", kind === "schedule" ? "bg-gx-accent/20 text-gx-accent" : "text-gx-muted hover:bg-gx-bg-sub")}
+            className={clsx("flex-1 rounded px-2 py-1 text-[11px]", kind === "schedule" ? "bg-primary/20 text-primary" : "text-muted-foreground hover:bg-background")}
             onClick={() => setKind("schedule")}
           >
             Schedule
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
-            className={clsx("flex-1 rounded px-2 py-1 text-[11px]", kind === "webhook" ? "bg-gx-accent/20 text-gx-accent" : "text-gx-muted hover:bg-gx-bg-sub")}
+            className={clsx("flex-1 rounded px-2 py-1 text-[11px]", kind === "webhook" ? "bg-primary/20 text-primary" : "text-muted-foreground hover:bg-background")}
             onClick={() => setKind("webhook")}
           >
             Webhook
-          </button>
+          </Button>
         </div>
         <div className="grid grid-cols-[1fr_1fr_auto] gap-2">
-          <input className="input-field h-7 text-xs" value={name} onChange={(event) => setName(event.target.value)} placeholder="Trigger name" />
+          <Input className="h-7 text-xs" value={name} onChange={(event) => setName(event.target.value)} placeholder="Trigger name" />
           {kind === "schedule" ? (
-            <input className="input-field h-7 font-mono text-[11px]" value={rrule} onChange={(event) => setRrule(event.target.value)} placeholder="RRULE" />
+            <Input className="h-7 font-mono text-[11px]" value={rrule} onChange={(event) => setRrule(event.target.value)} placeholder="RRULE" />
           ) : (
-            <div className="flex h-7 items-center text-[10px] text-gx-muted">Token auto-generated</div>
+            <div className="flex h-7 items-center text-[10px] text-muted-foreground">
+              Token auto-generated
+            </div>
           )}
           <IconButton title="Add trigger" onClick={handleAdd}>
             <Plus size={13} />
@@ -4285,46 +4819,55 @@ function TriggerPanel({
         </div>
         <div className="max-h-36 space-y-1 overflow-auto">
           {triggers.length === 0 ? (
-            <div className="text-[11px] text-gx-muted">No triggers for this workflow.</div>
-          ) : triggers.map((trigger) => (
-            <div key={trigger.id} className="flex items-center gap-2 rounded border border-gx-border px-2 py-1 text-[11px]">
-              <input
-                type="checkbox"
-                checked={trigger.enabled}
-                onChange={(event) => onSetTriggerEnabled(trigger.id, event.target.checked)}
-                title="Enable trigger"
-              />
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-gx-text">
-                  {trigger.name}
-                  <span className={clsx("ml-1 rounded px-1 text-[9px]", trigger.kind === "webhook" ? "bg-gx-accent/10 text-gx-accent" : "bg-gx-bg-sub text-gx-muted")}>
-                    {trigger.kind}
-                  </span>
-                </div>
-                <div className="truncate font-mono text-[10px] text-gx-muted">
-                  {trigger.kind === "webhook" && trigger.webhookToken
+            <div className="text-[11px] text-muted-foreground">
+              No triggers for this workflow.
+            </div>
+          ) : (
+            triggers.map((trigger) => (
+              <div key={trigger.id} className="flex items-center gap-2 rounded border border-border px-2 py-1 text-[11px]">
+                <Checkbox
+                  checked={trigger.enabled}
+                  onCheckedChange={(checked) =>
+                    onSetTriggerEnabled(trigger.id, checked === true)
+                  }
+                  title="Enable trigger"
+                />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-foreground">
+                    {trigger.name}
+                    <span className={clsx("ml-1 rounded px-1 text-[9px]", trigger.kind === "webhook" ? "bg-primary/10 text-primary" : "bg-background text-muted-foreground")}>
+                      {trigger.kind}
+                    </span>
+                  </div>
+                  <div className="truncate font-mono text-[10px] text-muted-foreground">
+                    {trigger.kind === "webhook" && trigger.webhookToken
                     ? `POST http://127.0.0.1:17789/${trigger.webhookToken}`
                     : trigger.rrule}
+                  </div>
                 </div>
-              </div>
-              {trigger.lastRunId && <span className="font-mono text-[10px] text-gx-muted">{trigger.lastRunId.slice(0, 8)}</span>}
-              {trigger.kind === "webhook" && trigger.webhookToken && (
-                <button
+                {trigger.lastRunId && (
+                  <span className="font-mono text-[10px] text-muted-foreground">
+                    {trigger.lastRunId.slice(0, 8)}
+                  </span>
+                )}
+                {trigger.kind === "webhook" && trigger.webhookToken && (
+                  <Button size="icon" variant="ghost"
                   type="button"
-                  className="btn-icon h-5 w-5 text-gx-accent"
+                  className="h-5 w-5 text-primary"
                   title="Copy webhook URL"
                   onClick={() => {
                     navigator.clipboard.writeText(`http://127.0.0.1:17789/${trigger.webhookToken}`).catch(() => {});
                   }}
                 >
-                  <Copy size={11} />
-                </button>
-              )}
-              <button type="button" className="btn-icon h-5 w-5 text-gx-error" title="Delete trigger" onClick={() => onDeleteTrigger(trigger.id)}>
-                <Trash2 size={12} />
-              </button>
-            </div>
-          ))}
+                    <Copy size={11} />
+                  </Button>
+                )}
+                <Button size="icon" variant="ghost" type="button" className="h-5 w-5 text-destructive" title="Delete trigger" onClick={() => onDeleteTrigger(trigger.id)}>
+                  <Trash2 size={12} />
+                </Button>
+              </div>
+            ))
+          )}
         </div>
       </div>
     </div>
@@ -4382,10 +4925,14 @@ function RunPanel({
 }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex h-9 shrink-0 items-center gap-2 border-b border-gx-border px-3 text-xs font-medium">
+      <div className="flex h-9 shrink-0 items-center gap-2 border-b border-border px-3 text-xs font-medium">
         <History size={13} />
         Execution
-        {run && <span className="ml-auto rounded border border-gx-border px-1.5 py-0 text-[10px] text-gx-muted">{run.status}</span>}
+        {run && (
+          <span className="ml-auto rounded border border-border px-1.5 py-0 text-[10px] text-muted-foreground">
+            {run.status}
+          </span>
+        )}
         <IconButton title={schedulesOpen ? "Hide schedules" : "Show schedules"} onClick={onToggleSchedules} variant="ghost" className="h-6 w-6">
           {schedulesOpen ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
         </IconButton>
@@ -4393,59 +4940,72 @@ function RunPanel({
           <ChevronRight size={13} />
         </IconButton>
       </div>
-      <div className="border-b border-gx-border p-3">
+      <div className="border-b border-border p-3">
         <div className="mb-1.5 flex items-center justify-between gap-2">
-          <div className="text-[11px] font-medium text-gx-text">Run input</div>
+          <div className="text-[11px] font-medium text-foreground">
+            Run input
+          </div>
           <CommandButton title="Run workflow with this input" label="Run" onClick={onRun} variant="primary">
             <Play size={12} />
           </CommandButton>
         </div>
-        <textarea
-          className={clsx("input-field min-h-20 w-full resize-y font-mono text-[11px]", runInputError && "border-gx-error")}
+        <Textarea
+          className={clsx(" min-h-20 w-full resize-y font-mono text-[11px]", runInputError && "border-destructive")}
           value={runInputDraft}
           onChange={(event) => onRunInputDraftChange(event.target.value)}
         />
-        {runInputError && <div className="mt-1 text-[10px] text-gx-error">{runInputError}</div>}
+        {runInputError && (
+          <div className="mt-1 text-[10px] text-destructive">
+            {runInputError}
+          </div>
+        )}
       </div>
       {runs.length > 0 && (
-        <div className="max-h-36 space-y-1 overflow-auto border-b border-gx-border p-2">
+        <div className="max-h-36 space-y-1 overflow-auto border-b border-border p-2">
           {runs.map((candidate) => (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               key={candidate.id}
               type="button"
               className={clsx(
                 "grid w-full grid-cols-[1fr_auto] gap-2 rounded border px-2 py-1.5 text-left text-[11px] transition",
                 activeRunId === candidate.id
-                  ? "border-gx-accent/60 bg-gx-accent/10"
-                  : "border-gx-border bg-gx-surface hover:bg-gx-surface-hover",
+                  ? "border-primary/60 bg-primary/10"
+                  : "border-border bg-card hover:bg-accent",
               )}
               onClick={() => onSelectRun(candidate)}
             >
               <span className="min-w-0">
-                <span className="block truncate text-gx-text">
-                  {new Date(candidate.startedAt).toLocaleString()} · {candidate.trigger?.type ?? "builder"}
+                <span className="block truncate text-foreground">
+                  {new Date(candidate.startedAt).toLocaleString()} ·{" "}
+                  {candidate.trigger?.type ?? "builder"}
                 </span>
-                <span className="block truncate font-mono text-[10px] text-gx-muted">
-                  {candidate.id.slice(0, 8)} · rev {candidate.definitionSnapshot.definitionVersion} · {formatDurationMs(candidate.startedAt, candidate.finishedAt)}
+                <span className="block truncate font-mono text-[10px] text-muted-foreground">
+                  {candidate.id.slice(0, 8)} · rev{" "}
+                  {candidate.definitionSnapshot.definitionVersion} ·{" "}
+                  {formatDurationMs(candidate.startedAt, candidate.finishedAt)}
                 </span>
-                <span className="block truncate font-mono text-[10px] text-gx-muted">
+                <span className="block truncate font-mono text-[10px] text-muted-foreground">
                   {formatInputSummary(candidate.input)}
                 </span>
               </span>
               <span className={clsx(
                 "rounded border px-1.5 py-0 text-[10px]",
-                candidate.status === "completed" ? "border-gx-success/50 text-gx-success"
-                  : candidate.status === "failed" ? "border-gx-error/50 text-gx-error"
-                    : "border-gx-border text-gx-muted",
+                candidate.status === "completed" ? "border-success/50 text-success"
+                  : candidate.status === "failed" ? "border-destructive/50 text-destructive"
+                    : "border-border text-muted-foreground",
               )}>
                 {candidate.status}
               </span>
-            </button>
+            </Button>
           ))}
         </div>
       )}
       {!run ? (
-        <div className="p-3 text-xs text-gx-muted">No run selected.</div>
+        <div className="p-3 text-xs text-muted-foreground">
+          No run selected.
+        </div>
       ) : (
         <div className="min-h-0 flex-1 overflow-auto">
           <div className="space-y-2 p-3">
@@ -4453,17 +5013,29 @@ function RunPanel({
               const node = definition.nodes.find((candidate) => candidate.id === nodeRun.nodeId);
               if (!node) return null;
               return (
-                <div key={nodeRun.id} className="rounded border border-gx-border bg-gx-surface px-3 py-2">
+                <div key={nodeRun.id} className="rounded border border-border bg-card px-3 py-2">
                   <div className="flex items-start gap-2">
                     <RunStatusIcon status={nodeRun.status} />
                     <div className="min-w-0 flex-1">
-                      <div className="truncate text-xs font-medium">{node.title}</div>
-                      <div className="mt-0.5 flex items-center gap-2 text-[10px] text-gx-muted">
+                      <div className="truncate text-xs font-medium">
+                        {node.title}
+                      </div>
+                      <div className="mt-0.5 flex items-center gap-2 text-[10px] text-muted-foreground">
                         <span>{NODE_TYPE_LABELS[node.type]}</span>
                         <span>Attempt {nodeRun.attempt}</span>
-                        {nodeRun.taskId && <span className="font-mono">task {nodeRun.taskId.slice(0, 8)}</span>}
-                        {nodeRun.childRunId && <span className="font-mono">child {nodeRun.childRunId.slice(0, 8)}</span>}
-                        {node.type === "loop" && nodeRun.childRunIds && <span>{nodeRun.childRunIds.length} iterations</span>}
+                        {nodeRun.taskId && (
+                          <span className="font-mono">
+                            task {nodeRun.taskId.slice(0, 8)}
+                          </span>
+                        )}
+                        {nodeRun.childRunId && (
+                          <span className="font-mono">
+                            child {nodeRun.childRunId.slice(0, 8)}
+                          </span>
+                        )}
+                        {node.type === "loop" && nodeRun.childRunIds && (
+                          <span>{nodeRun.childRunIds.length} iterations</span>
+                        )}
                       </div>
                     </div>
                     <span className={clsx("rounded border px-1.5 py-0 text-[10px]", STATUS_CLASSES[nodeRun.status])}>
@@ -4487,55 +5059,63 @@ function RunPanel({
                     )}
                   </div>
                   {nodeRun.outputSummary && (
-                    <div className="mt-2 whitespace-pre-wrap text-[11px] leading-relaxed text-gx-muted">
+                    <div className="mt-2 whitespace-pre-wrap text-[11px] leading-relaxed text-muted-foreground">
                       {nodeRun.outputSummary}
                     </div>
                   )}
                   {nodeRun.outputJson !== undefined && (
-                    <pre className="mt-2 max-h-32 overflow-auto rounded border border-gx-border bg-gx-bg-sub/60 p-2 font-mono text-[10px] leading-relaxed text-gx-muted">
+                    <pre className="mt-2 max-h-32 overflow-auto rounded border border-border bg-background/60 p-2 font-mono text-[10px] leading-relaxed text-muted-foreground">
                       {JSON.stringify(nodeRun.outputJson, null, 2)}
                     </pre>
                   )}
                   {node.type === "loop" && Array.isArray((nodeRun.outputJson as { iterations?: unknown[] } | undefined)?.iterations) && (
-                    <div className="mt-2 grid grid-cols-2 gap-1.5">
-                      {((nodeRun.outputJson as { iterations: Array<Record<string, unknown>> }).iterations).map((iteration) => (
-                        <div key={String(iteration.childRunId ?? iteration.index)} className="rounded border border-gx-border px-2 py-1 text-[10px]">
-                          <div className="truncate text-gx-text">Iteration {String(iteration.index ?? "?")}</div>
-                          <div className="truncate text-gx-muted">{String(iteration.childRunId ?? "")}</div>
-                        </div>
-                      ))}
+                      <div className="mt-2 grid grid-cols-2 gap-1.5">
+                        {(nodeRun.outputJson as { iterations: Array<Record<string, unknown>> }).iterations.map((iteration) => (
+                          <div key={String(iteration.childRunId ?? iteration.index)} className="rounded border border-border px-2 py-1 text-[10px]">
+                            <div className="truncate text-foreground">
+                              Iteration {String(iteration.index ?? "?")}
+                            </div>
+                            <div className="truncate text-muted-foreground">
+                              {String(iteration.childRunId ?? "")}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  {nodeRun.outputJsonError && (
+                    <div className="mt-2 text-[11px] text-warning">
+                      {nodeRun.outputJsonError}
                     </div>
                   )}
-                  {nodeRun.outputJsonError && (
-                    <div className="mt-2 text-[11px] text-gx-warn">{nodeRun.outputJsonError}</div>
-                  )}
                   {nodeRun.error && (
-                    <div className="mt-2 text-[11px] text-gx-error">{nodeRun.error}</div>
+                    <div className="mt-2 text-[11px] text-destructive">
+                      {nodeRun.error}
+                    </div>
                   )}
                   {nodeRun.status === "needs_review" && (
                     <div className="mt-2 space-y-2">
-                      <textarea
-                        className="input-field min-h-16 w-full resize-none text-xs"
+                      <Textarea
+                        className="min-h-16 w-full resize-none text-xs"
                         placeholder={node.type === "approval_gate" ? "Approval reason" : node.type === "human_review" ? "Review feedback" : "Approval summary or feedback"}
                         value={reviewTextByNodeRun[nodeRun.id] ?? ""}
                         onChange={(event) => onReviewTextChange((current) => ({ ...current, [nodeRun.id]: event.target.value }))}
                       />
                       <div className="flex items-center gap-1.5">
-                        <IconButton title="Approve node" onClick={() => onApproveNode(nodeRun.id)} variant="ghost" className="text-gx-success">
+                        <IconButton title="Approve node" onClick={() => onApproveNode(nodeRun.id)} variant="ghost" className="text-success">
                           <Check size={13} />
                         </IconButton>
                         {node.type === "human_review" && (
-                          <IconButton title="Request changes" onClick={() => onRequestHumanReviewChanges(nodeRun.id)} variant="ghost" className="text-gx-warn">
+                          <IconButton title="Request changes" onClick={() => onRequestHumanReviewChanges(nodeRun.id)} variant="ghost" className="text-warning">
                             <RotateCcw size={13} />
                           </IconButton>
                         )}
                         {node.type === "agent_task" && (
-                          <IconButton title="Request changes" onClick={() => onRequestChanges(nodeRun.id)} variant="ghost" className="text-gx-warn">
+                          <IconButton title="Request changes" onClick={() => onRequestChanges(nodeRun.id)} variant="ghost" className="text-warning">
                             <RotateCcw size={13} />
                           </IconButton>
                         )}
                         {node.type !== "human_review" && (
-                          <IconButton title="Reject node" onClick={() => onRejectNode(nodeRun.id)} variant="ghost" className="text-gx-error">
+                          <IconButton title="Reject node" onClick={() => onRejectNode(nodeRun.id)} variant="ghost" className="text-destructive">
                             <X size={13} />
                           </IconButton>
                         )}
@@ -4552,7 +5132,7 @@ function RunPanel({
             })}
           </div>
 
-          <div className="border-t border-gx-border p-3">
+          <div className="border-t border-border p-3">
             {run.edgeRuns.length > 0 && (
               <div className="mb-3">
                 <div className="mb-2 text-xs font-medium">Edges</div>
@@ -4560,9 +5140,14 @@ function RunPanel({
                   {run.edgeRuns.map((edgeRun) => {
                     const edge = run.definitionSnapshot.edges.find((candidate) => candidate.id === edgeRun.edgeId);
                     return (
-                      <div key={edgeRun.edgeId} className="rounded border border-gx-border px-2 py-1 text-[10px]">
-                        <div className="truncate text-gx-text">{edge?.sourceNodeId} → {edge?.targetNodeId}</div>
-                        <div className="truncate text-gx-muted">{edgeRun.status}{edgeRun.reason ? ` · ${edgeRun.reason}` : ""}</div>
+                      <div key={edgeRun.edgeId} className="rounded border border-border px-2 py-1 text-[10px]">
+                        <div className="truncate text-foreground">
+                          {edge?.sourceNodeId} → {edge?.targetNodeId}
+                        </div>
+                        <div className="truncate text-muted-foreground">
+                          {edgeRun.status}
+                          {edgeRun.reason ? ` · ${edgeRun.reason}` : ""}
+                        </div>
                       </div>
                     );
                   })}
@@ -4572,16 +5157,24 @@ function RunPanel({
             <div className="mb-2 text-xs font-medium">Event Timeline</div>
             <div className="space-y-1.5">
               {events.length === 0 ? (
-                <div className="text-xs text-gx-muted">No events yet.</div>
-              ) : events.map((event) => (
-                <div key={event.id} className="flex gap-2 text-[11px]">
-                  <Clock size={12} className="mt-0.5 shrink-0 text-gx-muted" />
-                  <div className="min-w-0">
-                    <div className="truncate text-gx-text">{event.message}</div>
-                    <div className="text-[10px] text-gx-muted">{new Date(event.timestamp).toLocaleTimeString()}</div>
-                  </div>
+                <div className="text-xs text-muted-foreground">
+                  No events yet.
                 </div>
-              ))}
+              ) : (
+                events.map((event) => (
+                  <div key={event.id} className="flex gap-2 text-[11px]">
+                    <Clock size={12} className="mt-0.5 shrink-0 text-muted-foreground" />
+                    <div className="min-w-0">
+                      <div className="truncate text-foreground">
+                        {event.message}
+                      </div>
+                      <div className="text-[10px] text-muted-foreground">
+                        {new Date(event.timestamp).toLocaleTimeString()}
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
             </div>
           </div>
         </div>
@@ -4591,9 +5184,11 @@ function RunPanel({
 }
 
 function RunStatusIcon({ status }: { status: NodeRunStatus }) {
-  if (status === "completed") return <Check size={14} className="mt-0.5 shrink-0 text-gx-success" />;
-  if (status === "failed") return <X size={14} className="mt-0.5 shrink-0 text-gx-error" />;
-  if (status === "needs_review") return <Pause size={14} className="mt-0.5 shrink-0 text-gx-warn" />;
-  if (status === "running" || status === "queued" || status === "ready") return <Play size={14} className="mt-0.5 shrink-0 text-gx-accent" />;
-  return <CircleDot size={14} className="mt-0.5 shrink-0 text-gx-muted" />;
+  if (status === "completed") return <Check size={14} className="mt-0.5 shrink-0 text-success" />;
+  if (status === "failed") return <X size={14} className="mt-0.5 shrink-0 text-destructive" />;
+  if (status === "needs_review") return <Pause size={14} className="mt-0.5 shrink-0 text-warning" />;
+  if (status === "running" || status === "queued" || status === "ready") return <Play size={14} className="mt-0.5 shrink-0 text-primary" />;
+  return (
+    <CircleDot size={14} className="mt-0.5 shrink-0 text-muted-foreground" />
+  );
 }

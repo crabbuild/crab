@@ -101,14 +101,14 @@ function ChildWithHandle({
       {!isFirst && (
         <PanelResizeHandle
           className={clsx(
-            "bg-gx-border hover:bg-gx-accent active:bg-gx-accent transition-colors relative group",
+            "bg-border hover:bg-primary active:bg-primary transition-colors relative group",
             direction === "horizontal" ? "w-1 hover:w-1.5" : "h-1 hover:h-1.5",
           )}
         >
           {/* Drag affordance dot */}
           <div
             className={clsx(
-              "absolute opacity-0 group-hover:opacity-100 transition-opacity bg-gx-accent rounded-full",
+              "absolute opacity-0 group-hover:opacity-100 transition-opacity bg-primary rounded-full",
               direction === "horizontal"
                 ? "top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-1 h-8"
                 : "top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 h-1 w-8",

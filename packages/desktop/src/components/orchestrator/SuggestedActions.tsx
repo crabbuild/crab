@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import {
   Archive,
   Ban,
@@ -169,12 +170,14 @@ export function SuggestedActions(props: SuggestedActionsProps) {
 
   return (
     <div
-      className="flex shrink-0 flex-wrap items-center gap-2 border-t border-gx-border bg-gx-surface px-4 py-2.5"
+      className="flex shrink-0 flex-wrap items-center gap-2 border-t border-border bg-card px-4 py-2.5"
       role="toolbar"
       aria-label="Suggested actions"
     >
       {actions.map((action) => (
-        <button
+        <Button
+          variant="default"
+          size="compact"
           key={action.action + action.label}
           type="button"
           disabled={action.disabled}
@@ -182,13 +185,13 @@ export function SuggestedActions(props: SuggestedActionsProps) {
           aria-label={action.label}
           className={
             action.primary
-              ? "flex items-center gap-1.5 rounded-md bg-gx-accent px-3 py-1.5 text-xs font-medium text-white transition hover:bg-gx-accent/80 disabled:cursor-not-allowed disabled:opacity-50"
-              : "flex items-center gap-1.5 rounded-md border border-gx-border px-3 py-1.5 text-xs font-medium text-gx-text transition hover:bg-gx-surface-hover disabled:cursor-not-allowed disabled:opacity-50"
+              ? "flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition hover:bg-primary/80 disabled:cursor-not-allowed disabled:opacity-50"
+              : "flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-foreground transition hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
           }
         >
           {action.icon}
           {action.label}
-        </button>
+        </Button>
       ))}
     </div>
   );

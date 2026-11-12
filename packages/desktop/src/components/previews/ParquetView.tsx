@@ -44,14 +44,14 @@ export function ParquetView({ repoId, path, rev, nativeSessionId }: Props) {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex shrink-0 items-center gap-4 border-b border-gx-border bg-gx-surface px-3 py-1.5 text-[11px] text-gx-muted">
-        <Table2 size={13} className="text-gx-accent" />
+      <div className="flex shrink-0 items-center gap-4 border-b border-border bg-card px-3 py-1.5 text-[11px] text-muted-foreground">
+        <Table2 size={13} className="text-primary" />
         <FileQueryMode query={query} mode={mode} />
         {data && (
           <>
-            <span><strong className="text-gx-text">{data.num_rows.toLocaleString()}</strong> rows</span>
-            <span><strong className="text-gx-text">{data.num_columns}</strong> columns</span>
-            <span><strong className="text-gx-text">{data.num_row_groups}</strong> row groups</span>
+            <span><strong className="text-foreground">{data.num_rows.toLocaleString()}</strong> rows</span>
+            <span><strong className="text-foreground">{data.num_columns}</strong> columns</span>
+            <span><strong className="text-foreground">{data.num_row_groups}</strong> row groups</span>
             {data.created_by && <span className="truncate">· {data.created_by}</span>}
           </>
         )}
@@ -74,24 +74,24 @@ export function ParquetView({ repoId, path, rev, nativeSessionId }: Props) {
 
 function SchemaPanel({ data }: { data: ParquetPreview }) {
   return (
-    <aside className="min-h-0 overflow-auto border-r border-gx-border bg-gx-surface p-3 text-[12px]">
-      <div className="mb-2 text-[10px] uppercase tracking-wider text-gx-muted">Columns</div>
+    <aside className="min-h-0 overflow-auto border-r border-border bg-card p-3 text-[12px]">
+      <div className="mb-2 text-[10px] uppercase tracking-wider text-muted-foreground">Columns</div>
       <ul className="space-y-1">
         {data.columns.map((col, i) => {
           const stats = data.row_group_stats[i];
           return (
-            <li key={col.name} className="rounded border border-gx-border bg-gx-bg-sub p-2">
+            <li key={col.name} className="rounded border border-border bg-background p-2">
               <div className="flex items-center justify-between gap-2">
-                <span className="truncate font-mono text-[12.5px] text-gx-text">{col.name}</span>
+                <span className="truncate font-mono text-[12.5px] text-foreground">{col.name}</span>
                 {col.nullable && (
-                  <span className="chip text-[10px] text-gx-muted">nullable</span>
+                  <span className="chip text-[10px] text-muted-foreground">nullable</span>
                 )}
               </div>
-              <div className="mt-0.5 truncate font-mono text-[11px] text-gx-accent">
+              <div className="mt-0.5 truncate font-mono text-[11px] text-primary">
                 {col.type}
               </div>
               {stats && (
-                <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-gx-muted">
+                <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground">
                   <span>{stats.compression}</span>
                   <span>
                     {formatBytes(stats.compressed_size)} →{" "}
@@ -117,20 +117,20 @@ function RowsGrid({
 }) {
   if (rows.length === 0) {
     return (
-      <div className="flex items-center justify-center text-sm text-gx-muted">No rows preview available.</div>
+      <div className="flex items-center justify-center text-sm text-muted-foreground">No rows preview available.</div>
     );
   }
   const cols = data.columns.map((c) => c.name);
   return (
-    <div className="min-h-0 overflow-auto bg-gx-bg-sub">
+    <div className="min-h-0 overflow-auto bg-background">
       <table className="w-full border-collapse font-mono text-[12px]">
-        <thead className="sticky top-0 bg-gx-surface">
+        <thead className="sticky top-0 bg-card">
           <tr>
-            <th className="sticky left-0 border-b border-gx-border bg-gx-surface px-2 py-1 text-right text-gx-muted">#</th>
+            <th className="sticky left-0 border-b border-border bg-card px-2 py-1 text-right text-muted-foreground">#</th>
             {cols.map((c) => (
               <th
                 key={c}
-                className="border-b border-gx-border px-2 py-1 text-left font-semibold text-gx-text"
+                className="border-b border-border px-2 py-1 text-left font-semibold text-foreground"
                 title={c}
               >
                 {c}
@@ -140,10 +140,10 @@ function RowsGrid({
         </thead>
         <tbody>
           {rows.map((row, ri) => (
-            <tr key={ri} className="odd:bg-gx-surface">
-              <td className="sticky left-0 bg-inherit px-2 py-1 text-right text-gx-muted">{ri + 1}</td>
+            <tr key={ri} className="odd:bg-card">
+              <td className="sticky left-0 bg-inherit px-2 py-1 text-right text-muted-foreground">{ri + 1}</td>
               {cols.map((c) => (
-                <td key={c} className="border-b border-gx-border/40 px-2 py-1 align-top text-gx-text">
+                <td key={c} className="border-b border-border/40 px-2 py-1 align-top text-foreground">
                   {renderCell(row[c])}
                 </td>
               ))}

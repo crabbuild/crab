@@ -1,3 +1,4 @@
+import { chooseSelect } from "../helpers/select";
 import { test, expect, _electron as electron, type Page } from "@playwright/test";
 import { readFileSync, writeFileSync, mkdtempSync, rmSync, cpSync, mkdirSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -30,12 +31,13 @@ function isolatedEnvironment(root: string): NodeJS.ProcessEnv {
 
 const countParquetRows = "SELECT count(*) AS selected_rows FROM data";
 
-async function queryColdParquet(page: Page, connection: S3Profile, cache: string, expectedRows: number) {
+async function queryColdParquet(page: Page, connection: S3Profile, cache: string, expectedRows: number,
+) {
   const snapshot = path.join(cache, "desktop-content", "database-query", "crab-query-snapshot");
   const transport = async (action: "pause_lfs" | "release" | "stats") => {
     const response = await fetch(`${connection.endpoint}/__fixture_${action}`);
     expect(response.ok).toBe(true);
-    return await response.json() as { get: number; blocked: number; paused: boolean; writes: number };
+    return (await response.json()) as { get: number; blocked: number; paused: boolean; writes: number };
   };
   const before = await transport("pause_lfs");
   try {
@@ -89,7 +91,8 @@ test("device storage identities reach SSH cold reads, replacement and saved rest
   const events: Runtime[] = [];
   const epoch = (repo: string) => events.filter(event => event.repo_id === repo).at(-1)?.native_session_id;
   const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
-  const stats = async (index: number) => await (await fetch(source.profiles[index].endpoint + "/__fixture_stats")).json() as { get: number; head: number; writes: number };
+  const stats = async (index: number) =>
+    (await (await fetch(source.profiles[index].endpoint + "/__fixture_stats")).json()) as { get: number; head: number; writes: number };
   let application: Awaited<ReturnType<typeof electron.launch>> | undefined;
   let stderr = "";
   async function launch() {
@@ -120,7 +123,7 @@ test("device storage identities reach SSH cold reads, replacement and saved rest
   }
   async function showFile(page: Page, file: string, marker: string) {
     const row = page.locator(`[role="treeitem"][data-item-path="${file}"]`);
-    if (!await row.isVisible()) {
+    if (!(await row.isVisible())) {
       const nav = page.getByRole("navigation", { name: "Primary", exact: true });
       await nav.getByRole("button", { name: "Settings", exact: true }).click();
       await nav.getByRole("button", { name: "Files", exact: true }).click();
@@ -134,7 +137,8 @@ test("device storage identities reach SSH cold reads, replacement and saved rest
     await page.getByRole("button", { name: "No thanks", exact: true }).click();
     const label = "Cloud-backed SSH";
     const saved = await page.evaluate(value => window.crab.ssh.saveProfile(value), { label, host: "127.0.0.1", port: remote.port, username: "fixture", remotePath: directories[0], authMethod: { type: "key" as const, keyPath: remote.keyPath }, autoDeployAgent: false, autoReconnect: false });
-    const [alphaId, betaId] = directories.map(directory => `ssh://${saved.id}${directory}`);
+    const [alphaId, betaId] = directories.map(directory => `ssh://${saved.id}${directory}`,
+    );
     await page.getByRole("button", { name: "SSH Connections", exact: true }).click();
     await prepareFixtureSsh(application!, remote);
     await page.getByRole("button", { name: `Connect to ${label}`, exact: true }).click();
@@ -266,7 +270,7 @@ test("device storage identities reach SSH cold reads, replacement and saved rest
     // Per-file output precedes the terminal receipt. Join the owner before
     // the fixture itself mutates the index to invalidate its stat shortcuts.
     await expect.poll(async () => {
-      const activity = await call(page, "activity_file_transfers", {}) as unknown as FileTransferActivity;
+      const activity = (await call(page, "activity_file_transfers", {})) as unknown as FileTransferActivity;
       return activity.jobs.some(job => job.status === "done" && nested.every(file => job.intent.paths.includes(file)));
     }).toBe(true);
     for (const file of nested) expect(sha(readFileSync(path.join(directories[0], file)))).toBe(source.payloads[0].sha256);
@@ -375,16 +379,21 @@ test("device storage identities reach SSH cold reads, replacement and saved rest
       if (index === 0) {
         const pointer = git(directories[index], ["show", ":cold.safetensors"]);
         const indexBefore = git(directories[index], ["ls-files", "--stage", "-z"]);
-        const history = async () => await call(page, "activity_file_transfers", {}) as unknown as FileTransferActivity;
+        const history = async () =>
+          (await call(page, "activity_file_transfers", {})) as unknown as FileTransferActivity;
         await fetch(source.profiles[index].endpoint + "/__fixture_pause_lfs");
         try {
           await paletteFile("Crab: Hydrate File", "cold.safetensors");
-          await expect.poll(async () => (await (await fetch(source.profiles[index].endpoint + "/__fixture_stats")).json() as { blocked: number }).blocked).toBeGreaterThan(0);
+          await expect.poll(async () => (
+                  (await (await fetch(source.profiles[index].endpoint + "/__fixture_stats")).json()) as { blocked: number }).blocked,
+            ).toBeGreaterThan(0);
           await page.getByTitle("Toggle Activity (background jobs)", { exact: true }).click();
           await expect(page.getByRole("button", { name: "Cancel materialization", exact: true })).toBeInViewport();
           await page.getByRole("button", { name: "Cancel materialization", exact: true }).click();
           await expect.poll(async () => (await history()).jobs.find(job => job.intent.paths.includes("cold.safetensors"))?.status).toBe("cancelled");
-          await expect.poll(async () => (await (await fetch(source.profiles[index].endpoint + "/__fixture_stats")).json() as { blocked: number }).blocked).toBe(0);
+          await expect.poll(async () => (
+                  (await (await fetch(source.profiles[index].endpoint + "/__fixture_stats")).json()) as { blocked: number }).blocked,
+            ).toBe(0);
           expect(readFileSync(path.join(directories[index], "cold.safetensors"))).toEqual(pointer);
           expect(git(directories[index], ["ls-files", "--stage", "-z"])).toEqual(indexBefore);
           await page.screenshot({ path: test.info().outputPath("ssh-activity-cold-cancellation.png") });
@@ -454,14 +463,15 @@ test("storage settings replace local and SDK reader identities across distinct r
   }
   async function files(page: Page, file: string) {
     const row = page.locator(`[role="treeitem"][data-item-path="${file}"]`);
-    if (!await row.isVisible()) {
+    if (!(await row.isVisible())) {
       const navigation = page.getByRole("navigation", { name: "Primary", exact: true });
       await navigation.getByRole("button", { name: "Settings", exact: true }).click();
       await navigation.getByRole("button", { name: "Files", exact: true }).click();
     }
     await row.click();
   }
-  const stats = async (profile: S3Profile) => await (await fetch(profile.endpoint + "/__fixture_stats")).json() as { get: number; head: number; writes: number };
+  const stats = async (profile: S3Profile) =>
+    (await (await fetch(profile.endpoint + "/__fixture_stats")).json()) as { get: number; head: number; writes: number };
   try {
     application = await electron.launch({ executablePath: packagedExecutable(), args: [`--user-data-dir=${path.join(root, "profile")}`], env: Object.fromEntries(Object.entries(env).filter((value): value is [string, string] => typeof value[1] === "string")) });
     application.process().stderr?.on("data", bytes => { stderr = (stderr + bytes.toString()).slice(-32_000); });
@@ -572,7 +582,8 @@ test("saved local storage identity survives a cold app restart without ambient c
   const pointer = execFileSync("git", ["show", ":cold.safetensors"], { cwd: fixture.repositories[0], env });
   writeFileSync(path.join(fixture.repositories[0], "cold.safetensors"), pointer);
   const launch = () => electron.launch({ executablePath: packagedExecutable(), args: [`--user-data-dir=${profile}`], env: Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === "string")) });
-  const stats = async () => await (await fetch(fixture.profiles[0].endpoint + "/__fixture_stats")).json() as { get: number; head: number; writes: number };
+  const stats = async () =>
+    (await (await fetch(fixture.profiles[0].endpoint + "/__fixture_stats")).json()) as { get: number; head: number; writes: number };
   let application: Awaited<ReturnType<typeof electron.launch>> | undefined;
   let stderr = "";
   const recordErrors = (app: Awaited<ReturnType<typeof electron.launch>>) => app.process().stderr?.on("data", bytes => { stderr = (stderr + bytes.toString()).slice(-32_000); });
@@ -631,10 +642,13 @@ test("GUI snapshots at the same URL restore separate saved identities and cold c
     return application.firstWindow();
   }
   const recent = (page: Page) => page.evaluate(() => JSON.parse(localStorage.getItem("crab.recentRepos.v1") ?? "[]") as Array<{ repo_id: string; path: string; label: string }>);
-  const stats = async () => Promise.all(fixture.profiles.map(async connection => await (await fetch(connection.endpoint + "/__fixture_stats")).json() as { get: number; head: number; writes: number }));
+  const stats = async () => Promise.all(fixture.profiles.map(async (connection) =>
+          (await (await fetch(connection.endpoint + "/__fixture_stats")).json()) as { get: number; head: number; writes: number },
+      ),
+    );
   async function view(page: Page, file: string, marker: string) {
     const row = page.locator(`[role="treeitem"][data-item-path="${file}"]`);
-    if (!await row.isVisible()) {
+    if (!(await row.isVisible())) {
       const nav = page.getByRole("navigation", { name: "Primary", exact: true });
       await nav.getByRole("button", { name: "Settings", exact: true }).click();
       await nav.getByRole("button", { name: "Files", exact: true }).click();
@@ -657,10 +671,14 @@ test("GUI snapshots at the same URL restore separate saved identities and cold c
         await pending.getByLabel("Repository URL", { exact: true }).fill(fixture.url);
         await pending.getByRole("button", { name: "Edit Alpha", exact: true }).locator("..").getByRole("button", { name: "Use connection", exact: true }).click();
         await pending.getByRole("button", { name: "Open snapshot", exact: true }).click();
-        await expect.poll(async () => (await (await fetch(connection.endpoint + "/__fixture_stats")).json() as { blocked: number }).blocked).toBeGreaterThan(0);
+        await expect.poll(async () => (
+                (await (await fetch(connection.endpoint + "/__fixture_stats")).json()) as { blocked: number }).blocked,
+          ).toBeGreaterThan(0);
         await pending.getByRole("button", { name: "Cancel", exact: true }).click();
         await expect(pending).toHaveCount(0, { timeout: 10_000 });
-        expect((await (await fetch(connection.endpoint + "/__fixture_stats")).json() as { paused: boolean }).paused).toBe(true);
+        expect(
+          ((await (await fetch(connection.endpoint + "/__fixture_stats")).json()) as { paused: boolean }).paused,
+        ).toBe(true);
         expect(await recent(page)).toHaveLength(0);
         await fetch(connection.endpoint + "/__fixture_release");
       }
@@ -680,7 +698,10 @@ test("GUI snapshots at the same URL restore separate saved identities and cold c
       await expect(tasks.getByRole("textbox", { name: "New task title", exact: true })).toBeDisabled();
       await expect(tasks.getByRole("button", { name: "Add task", exact: true })).toBeDisabled();
       await tasks.getByRole("button", { name: "Close task list", exact: true }).click();
-      await page.getByRole("group", { name: "Theme", exact: true }).getByRole("combobox").selectOption("light");
+      await chooseSelect(
+        page.getByRole("group", { name: "Theme", exact: true }).getByRole("combobox"),
+        "light",
+      );
       await expect(page.locator("html")).toHaveClass(/theme-light/);
       await view(page, "weights.safetensors", fixture.payloads[index].marker);
     }

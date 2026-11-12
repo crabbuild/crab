@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * ReferencesPanel — bottom drawer component listing LSP reference results.
  *
@@ -5,8 +6,8 @@
  * Clicking a reference navigates to that file and line.
  */
 
-import { useCallback, useMemo } from "react";
 import { FileText, X } from "lucide-react";
+import { useCallback, useMemo } from "react";
 
 export interface ReferenceItem {
   uri: string;
@@ -52,18 +53,22 @@ export function ReferencesPanel({ references, onNavigate, onClose, title }: Prop
   const displayTitle = title ?? `${references.length} reference${references.length !== 1 ? "s" : ""}`;
 
   return (
-    <div className="flex flex-col border-t border-gx-border bg-gx-surface max-h-[240px]">
+    <div className="flex flex-col border-t border-border bg-card max-h-[240px]">
       {/* Header */}
-      <div className="flex shrink-0 items-center justify-between border-b border-gx-border px-3 py-1.5">
-        <span className="text-[11px] font-medium text-gx-text">{displayTitle}</span>
-        <button
+      <div className="flex shrink-0 items-center justify-between border-b border-border px-3 py-1.5">
+        <span className="text-[11px] font-medium text-foreground">
+          {displayTitle}
+        </span>
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={onClose}
-          className="rounded p-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text transition"
+          className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground transition"
           aria-label="Close references panel"
         >
           <X size={12} />
-        </button>
+        </Button>
       </div>
 
       {/* Results list */}
@@ -73,31 +78,33 @@ export function ReferencesPanel({ references, onNavigate, onClose, title }: Prop
           return (
             <div key={uri}>
               {/* File header */}
-              <div className="flex items-center gap-1.5 px-3 py-1 bg-gx-bg-sub sticky top-0">
-                <FileText size={11} className="shrink-0 text-gx-muted" />
-                <span className="text-[11px] text-gx-muted truncate" title={displayPath}>
+              <div className="flex items-center gap-1.5 px-3 py-1 bg-background sticky top-0">
+                <FileText size={11} className="shrink-0 text-muted-foreground" />
+                <span className="text-[11px] text-muted-foreground truncate" title={displayPath}>
                   {displayPath}
                 </span>
-                <span className="text-[10px] text-gx-muted/60 ml-auto shrink-0">
+                <span className="text-[10px] text-muted-foreground/60 ml-auto shrink-0">
                   {refs.length}
                 </span>
               </div>
 
               {/* References in this file */}
               {refs.map((ref, idx) => (
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   key={`${ref.line}-${ref.character}-${idx}`}
                   type="button"
                   onClick={() => handleClick(ref.uri, ref.line)}
-                  className="flex w-full items-baseline gap-2 px-3 py-0.5 text-left hover:bg-gx-surface-hover transition text-[11px]"
+                  className="justify-start flex w-full items-baseline gap-2 px-3 py-0.5 text-left hover:bg-accent transition text-[11px]"
                 >
-                  <span className="shrink-0 text-gx-accent tabular-nums w-8 text-right">
+                  <span className="shrink-0 text-primary tabular-nums w-8 text-right">
                     {ref.line}
                   </span>
-                  <span className="text-gx-text truncate font-mono text-[10.5px]">
+                  <span className="text-foreground truncate font-mono text-[10.5px]">
                     {ref.preview ?? `Line ${ref.line}`}
                   </span>
-                </button>
+                </Button>
               ))}
             </div>
           );

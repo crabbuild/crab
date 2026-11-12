@@ -1,47 +1,86 @@
-import { createContext,useContext,useEffect,useState,useCallback } from "react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import clsx from "clsx";
 import {
-Bot,
-Check,
-Cloud,Copy,
-Eye,
-EyeOff,Folder,
-GitCompareArrows,GitPullRequest,
-Import,
-Info,Loader2,
-type LucideIcon,
-Monitor,
-Play,RotateCcw,
-Settings as SettingsIcon,
-Sparkles,
-Terminal,
-Trash2,
-User,
-X
+  Bot,
+  Check,
+  Cloud,
+  Copy,
+  Eye,
+  EyeOff,
+  Folder,
+  GitCompareArrows,
+  GitPullRequest,
+  Import,
+  Info,
+  Loader2,
+  type LucideIcon,
+  Monitor,
+  Play,
+  RotateCcw,
+  Settings as SettingsIcon,
+  Sparkles,
+  Terminal,
+  Trash2,
+  User,
+  X,
 } from "lucide-react";
-import { DEFAULT_SETTINGS,Settings,useUserSettings } from "../settings";
-import { isWorkspaceSetting } from "../lib/workspace-settings-store";
-import { repositoryWorktree } from "../lib/repository-worktree";
-import { call,dialogs,mainProcess,rpc } from "../ipc";
-import { usePrefetchProfiles } from "../lib/prefetch-profiles";
-import { useActiveRepo } from "../state";
-import { telemetry } from "../lib/telemetry";
-import { DARK_THEMES,LIGHT_THEMES } from "../lib/editor-themes";
-import { StorageConfigSection } from "./StorageConfigSection";
-import { importVsCodeTheme } from "../lib/vscode-theme-import";
-import { useWorkspaceSettings } from "../hooks/useWorkspaceSettings";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useState,
+} from "react";
+import { CacheSettings } from "../components/CacheSettings";
 import { ScopeChip } from "../components/ScopeChip";
+import { useFileTransfers } from "../hooks/useFileTransfers";
+import { useWorkspaceSettings } from "../hooks/useWorkspaceSettings";
+import { call, dialogs, mainProcess, rpc } from "../ipc";
+import { DARK_THEMES, LIGHT_THEMES } from "../lib/editor-themes";
+import { usePrefetchProfiles } from "../lib/prefetch-profiles";
+import { repositoryWorktree } from "../lib/repository-worktree";
+import { useSession } from "../lib/session-context";
+import { telemetry } from "../lib/telemetry";
+import { importVsCodeTheme } from "../lib/vscode-theme-import";
+import { isWorkspaceSetting } from "../lib/workspace-settings-store";
+import { DEFAULT_SETTINGS, Settings, useUserSettings } from "../settings";
+import { useActiveRepo } from "../state";
 import { AgentManagerView } from "./AgentManagerView";
 import { DiagnosticsView } from "./DiagnosticsView";
 import { HealthView } from "./HealthView";
-import { CacheSettings } from "../components/CacheSettings";
-import { useSession } from "../lib/session-context";
-import { useFileTransfers } from "../hooks/useFileTransfers";
+import { StorageConfigSection } from "./StorageConfigSection";
 
-const DARK_THEME_OPTIONS = DARK_THEMES.map((t) => ({ value: t.id, label: t.label }));
-const LIGHT_THEME_OPTIONS = LIGHT_THEMES.map((t) => ({ value: t.id, label: t.label }));
+const DARK_THEME_OPTIONS = DARK_THEMES.map((t) => ({
+  value: t.id,
+  label: t.label,
+}));
+const LIGHT_THEME_OPTIONS = LIGHT_THEMES.map((t) => ({
+  value: t.id,
+  label: t.label,
+}));
 
-type SectionId = "appearance" | "workspace" | "git" | "storage" | "integrations" | "agents" | "ssh" | "diagnostics" | "general";
+type SectionId =
+  | "appearance"
+  | "workspace"
+  | "git"
+  | "storage"
+  | "integrations"
+  | "agents"
+  | "ssh"
+  | "diagnostics"
+  | "general";
 
 interface SectionDef {
   id: SectionId;
@@ -79,7 +118,10 @@ export function SettingsView() {
 
   // Reset to "user" scope when no repo is open
   useEffect(() => {
-    if ((!activeRepo || !repositoryWorktree(activeRepo)) && scope === "workspace") {
+    if (
+      (!activeRepo || !repositoryWorktree(activeRepo)) &&
+      scope === "workspace"
+    ) {
       setScope("user");
     }
   }, [activeRepo, scope]);
@@ -117,81 +159,129 @@ export function SettingsView() {
       git: "git",
     };
     function handleNavigate(e: Event) {
-      const detail = (e as CustomEvent).detail as { section?: string } | undefined;
+      const detail = (e as CustomEvent).detail as
+        | { section?: string }
+        | undefined;
       if (detail?.section) {
-        const mapped = LEGACY_MAP[detail.section] ?? (SECTIONS.some((s) => s.id === detail.section) ? detail.section as SectionId : null);
+        const mapped =
+          LEGACY_MAP[detail.section] ??
+          (SECTIONS.some((s) => s.id === detail.section)
+            ? (detail.section as SectionId)
+            : null);
         if (mapped) setSection(mapped);
       }
     }
     window.addEventListener("crab:settings-navigate", handleNavigate);
-    return () => window.removeEventListener("crab:settings-navigate", handleNavigate);
+    return () =>
+      window.removeEventListener("crab:settings-navigate", handleNavigate);
   }, []);
 
   return (
     <SettingsEditorContext.Provider value={scope}>
-    <div className="flex h-full min-h-0 w-full bg-gx-bg-sub">
-      <nav className="w-56 shrink-0 overflow-auto border-r border-gx-border bg-gx-surface py-2">
-        <div className="flex items-center gap-2 px-4 py-2 text-sm font-semibold text-gx-text">
-          <SettingsIcon size={14} />
-          Settings
-        </div>
-        <ul className="mt-2">
-          {SECTIONS.map((s) => (
-            <li key={s.id}>
-              <button
-                type="button"
-                onClick={() => setSection(s.id)}
-                className={clsx(
-                  "flex w-full items-center gap-2 px-4 py-1.5 text-left text-[13px] transition",
-                  section === s.id
-                    ? "bg-gx-accent/15 text-gx-text"
-                    : "text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
-                )}
+      <div className="flex h-full min-h-0 w-full bg-background">
+        <nav className="w-56 shrink-0 overflow-auto border-r border-border bg-card py-2">
+          <div className="flex items-center gap-2 px-4 py-2 text-sm font-semibold text-foreground">
+            <SettingsIcon size={14} />
+            Settings
+          </div>
+          <ul className="mt-2">
+            {SECTIONS.map((s) => (
+              <li key={s.id}>
+                <Button
+                  variant="ghost"
+                  size="compact"
+                  type="button"
+                  onClick={() => setSection(s.id)}
+                  className={clsx(
+                    "flex w-full items-center gap-2 px-4 py-1.5 text-left text-[13px] transition",
+                    section === s.id
+                      ? "bg-primary/15 text-foreground"
+                      : "text-muted-foreground hover:bg-accent hover:text-foreground",
+                  )}
+                >
+                  <s.icon size={13} />
+                  {s.label}
+                </Button>
+              </li>
+            ))}
+          </ul>
+        </nav>
+        <div className="min-h-0 flex-1 overflow-auto">
+          <div className="mx-auto max-w-2xl p-8">
+            <SettingsScopeToggle
+              scope={scope}
+              onScopeChange={setScope}
+              hasRepo={hasRepo}
+              repoName={activeRepo?.label ?? null}
+            />
+            {workspace.error && (
+              <div
+                role="alert"
+                className="mb-4 rounded border border-destructive/40 p-3 text-xs text-destructive"
               >
-                <s.icon size={13} />
-                {s.label}
-              </button>
-            </li>
-          ))}
-        </ul>
-      </nav>
-      <div className="min-h-0 flex-1 overflow-auto">
-        <div className="mx-auto max-w-2xl p-8">
-          <SettingsScopeToggle
-            scope={scope}
-            onScopeChange={setScope}
-            hasRepo={hasRepo}
-            repoName={activeRepo?.label ?? null}
-          />
-          {workspace.error && <div role="alert" className="mb-4 rounded border border-gx-error/40 p-3 text-xs text-gx-error">Workspace settings: {workspace.error} <button type="button" className="underline" onClick={workspace.reload}>Retry loading workspace settings</button></div>}
-          {scope === "workspace" && !["appearance", "git"].includes(section) && <p className="mb-4 text-xs text-gx-muted">These controls manage this device. Choose User to change them.</p>}
-          <fieldset disabled={scope === "workspace" && (!hasRepo || workspace.loading || !["appearance", "git"].includes(section))}>
-          {section === "appearance" && <AppearanceAndEditor />}
-          {section === "workspace" && <WorkspaceSection />}
-          {section === "git" && <GitAndDiff />}
-          {section === "storage" && <StorageAndCache />}
-          {section === "integrations" && <ForgeAuthentication />}
-          {section === "agents" && <AgentsAndAI />}
-          {section === "ssh" && <SshSettings />}
-          {section === "diagnostics" && <DiagnosticsSection />}
-          {section === "general" && <GeneralSection />}
-          </fieldset>
+                Workspace settings: {workspace.error}{" "}
+                <Button
+                  variant="ghost"
+                  size="compact"
+                  type="button"
+                  className="underline"
+                  onClick={workspace.reload}
+                >
+                  Retry loading workspace settings
+                </Button>
+              </div>
+            )}
+            {scope === "workspace" &&
+              !["appearance", "git"].includes(section) && (
+                <p className="mb-4 text-xs text-muted-foreground">
+                  These controls manage this device. Choose User to change them.
+                </p>
+              )}
+            <fieldset
+              disabled={
+                scope === "workspace" &&
+                (!hasRepo ||
+                  workspace.loading ||
+                  !["appearance", "git"].includes(section))
+              }
+            >
+              {section === "appearance" && <AppearanceAndEditor />}
+              {section === "workspace" && <WorkspaceSection />}
+              {section === "git" && <GitAndDiff />}
+              {section === "storage" && <StorageAndCache />}
+              {section === "integrations" && <ForgeAuthentication />}
+              {section === "agents" && <AgentsAndAI />}
+              {section === "ssh" && <SshSettings />}
+              {section === "diagnostics" && <DiagnosticsSection />}
+              {section === "general" && <GeneralSection />}
+            </fieldset>
+          </div>
         </div>
       </div>
-    </div>
     </SettingsEditorContext.Provider>
   );
 }
 
 const SettingsEditorContext = createContext<SettingsScope>("user");
 function useSettingsEditor() {
-  const user = useUserSettings(), workspace = useWorkspaceSettings();
+  const user = useUserSettings(),
+    workspace = useWorkspaceSettings();
   const scope = useContext(SettingsEditorContext);
-  const update = useCallback(<K extends keyof Settings>(key: K, value: Settings[K]) => {
-    if (scope === "workspace") void workspace.setWorkspaceSetting(key, value);
-    else user.update(key, value);
-  }, [scope, workspace.setWorkspaceSetting, user.update]);
-  return { ...user, settings: scope === "workspace" ? { ...user.settings, ...workspace.workspaceSettings } : user.settings, update };
+  const update = useCallback(
+    <K extends keyof Settings>(key: K, value: Settings[K]) => {
+      if (scope === "workspace") void workspace.setWorkspaceSetting(key, value);
+      else user.update(key, value);
+    },
+    [scope, workspace.setWorkspaceSetting, user.update],
+  );
+  return {
+    ...user,
+    settings:
+      scope === "workspace"
+        ? { ...user.settings, ...workspace.workspaceSettings }
+        : user.settings,
+    update,
+  };
 }
 
 // ---- Settings Scope Toggle -------------------------------------------
@@ -209,50 +299,53 @@ function SettingsScopeToggle({
 }) {
   return (
     <div className="mb-6">
-      <div
-        className="inline-flex items-center rounded-md border border-gx-border bg-gx-surface p-0.5"
-        role="tablist"
+      <ToggleGroup
+        type="single"
+        value={scope}
+        onValueChange={(value) => {
+          if (value) onScopeChange(value as SettingsScope);
+        }}
         aria-label="Settings scope"
+        className="inline-flex items-center rounded-md border border-border bg-card p-0.5"
       >
-        <button
-          type="button"
-          role="tab"
-          aria-selected={scope === "user"}
-          onClick={() => onScopeChange("user")}
+        <ToggleGroupItem
+          value={"user"}
           className={clsx(
             "flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium transition",
             scope === "user"
-              ? "bg-gx-accent/15 text-gx-text shadow-sm"
-              : "text-gx-muted hover:text-gx-text",
+              ? "bg-primary/15 text-foreground shadow-sm"
+              : "text-muted-foreground hover:text-foreground",
           )}
         >
           <User size={12} />
           User
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={scope === "workspace"}
-          aria-disabled={!hasRepo}
-          onClick={() => hasRepo && onScopeChange("workspace")}
-          title={hasRepo ? "Edit workspace settings" : "Open a repository to edit workspace settings"}
+        </ToggleGroupItem>
+        <ToggleGroupItem
+          value={"workspace"}
+          disabled={!hasRepo}
+          title={
+            hasRepo
+              ? "Edit workspace settings"
+              : "Open a repository to edit workspace settings"
+          }
           className={clsx(
             "flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium transition",
             !hasRepo && "cursor-not-allowed opacity-50",
             scope === "workspace"
-              ? "bg-gx-accent/15 text-gx-text shadow-sm"
-              : "text-gx-muted hover:text-gx-text",
+              ? "bg-primary/15 text-foreground shadow-sm"
+              : "text-muted-foreground hover:text-foreground",
           )}
         >
           <Folder size={12} />
           Workspace
-        </button>
-      </div>
+        </ToggleGroupItem>
+      </ToggleGroup>
       {scope === "workspace" && repoName && (
-        <div className="mt-2 flex items-center gap-2 rounded border border-gx-accent/30 bg-gx-accent/5 px-3 py-2 text-xs text-gx-accent">
+        <div className="mt-2 flex items-center gap-2 rounded border border-primary/30 bg-primary/5 px-3 py-2 text-xs text-primary">
           <Folder size={12} className="shrink-0" />
           <span>
-            Editing workspace settings for <span className="font-semibold">{repoName}</span>
+            Editing workspace settings for{" "}
+            <span className="font-semibold">{repoName}</span>
           </span>
         </div>
       )}
@@ -264,7 +357,10 @@ function SettingsScopeToggle({
 
 function AppearanceAndEditor() {
   const { settings, update } = useSettingsEditor();
-  const [importStatus, setImportStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [importStatus, setImportStatus] = useState<{
+    type: "success" | "error";
+    message: string;
+  } | null>(null);
 
   async function handleImportVsCodeTheme() {
     setImportStatus(null);
@@ -275,7 +371,10 @@ function AppearanceAndEditor() {
     try {
       parsed = JSON.parse(result.content);
     } catch {
-      setImportStatus({ type: "error", message: "Failed to parse the selected file as JSON." });
+      setImportStatus({
+        type: "error",
+        message: "Failed to parse the selected file as JSON.",
+      });
       return;
     }
 
@@ -283,28 +382,40 @@ function AppearanceAndEditor() {
     if (!theme) {
       setImportStatus({
         type: "error",
-        message: "Not a valid VS Code theme, or too few colors could be mapped. Ensure the file has a \"colors\" object with workbench color entries.",
+        message:
+          'Not a valid VS Code theme, or too few colors could be mapped. Ensure the file has a "colors" object with workbench color entries.',
       });
       return;
     }
 
     try {
       await rpc.saveImportedTheme(theme);
-      setImportStatus({ type: "success", message: `Imported "${theme.name}" (${theme.colorScheme}).` });
+      setImportStatus({
+        type: "success",
+        message: `Imported "${theme.name}" (${theme.colorScheme}).`,
+      });
     } catch (e) {
       setImportStatus({
         type: "error",
-        message: e instanceof Error ? e.message : "Failed to save the imported theme.",
+        message:
+          e instanceof Error ? e.message : "Failed to save the imported theme.",
       });
     }
   }
 
   return (
-    <Section title="Appearance & Editor" subtitle="Theme, layout, and code editor preferences.">
+    <Section
+      title="Appearance & Editor"
+      subtitle="Theme, layout, and code editor preferences."
+    >
       {/* Theme */}
       <SubSection title="Theme">
-        <Row label="Theme" hint="Light, Dark, or follow the OS setting." setting="theme">
-          <Select
+        <Row
+          label="Theme"
+          hint="Light, Dark, or follow the OS setting."
+          setting="theme"
+        >
+          <SettingsSelect
             value={settings.theme}
             onChange={(v) => update("theme", v as Settings["theme"])}
             options={[
@@ -316,7 +427,11 @@ function AppearanceAndEditor() {
             ]}
           />
         </Row>
-        <Row label="Show activity bar" hint="The 48 px icon column with Explorer / Search / Changes." setting="showActivityBar">
+        <Row
+          label="Show activity bar"
+          hint="The 48 px icon column with Explorer / Search / Changes."
+          setting="showActivityBar"
+        >
           <Toggle
             checked={settings.showActivityBar}
             onChange={(v) => update("showActivityBar", v)}
@@ -326,22 +441,23 @@ function AppearanceAndEditor() {
           label="Import VS Code theme"
           hint="Import a VS Code theme JSON file. Maps workbench colors to Crab Desktop's palette."
         >
-          <button
+          <Button
+            variant="outline"
             type="button"
-            className="btn text-xs"
+            className="text-xs"
             onClick={handleImportVsCodeTheme}
             aria-label="Import VS Code theme"
           >
             <Import size={12} /> Import .json
-          </button>
+          </Button>
         </Row>
         {importStatus && (
           <div
             className={clsx(
               "rounded border p-2 text-xs",
               importStatus.type === "success"
-                ? "border-gx-success/40 bg-gx-success/10 text-gx-success"
-                : "border-gx-error/40 bg-gx-error/10 text-gx-error",
+                ? "border-success/40 bg-success/10 text-success"
+                : "border-destructive/40 bg-destructive/10 text-destructive",
             )}
           >
             {importStatus.message}
@@ -351,21 +467,33 @@ function AppearanceAndEditor() {
 
       {/* Editor */}
       <SubSection title="Code Editor">
-        <Row label="Syntax theme (dark)" hint="Color scheme for code highlighting in dark mode." setting="editorThemeDark">
-          <Select
+        <Row
+          label="Syntax theme (dark)"
+          hint="Color scheme for code highlighting in dark mode."
+          setting="editorThemeDark"
+        >
+          <SettingsSelect
             value={settings.editorThemeDark}
             onChange={(v) => update("editorThemeDark", v)}
             options={DARK_THEME_OPTIONS}
           />
         </Row>
-        <Row label="Syntax theme (light)" hint="Color scheme for code highlighting in light mode." setting="editorThemeLight">
-          <Select
+        <Row
+          label="Syntax theme (light)"
+          hint="Color scheme for code highlighting in light mode."
+          setting="editorThemeLight"
+        >
+          <SettingsSelect
             value={settings.editorThemeLight}
             onChange={(v) => update("editorThemeLight", v)}
             options={LIGHT_THEME_OPTIONS}
           />
         </Row>
-        <Row label="Font size" hint="Monaco editor font size." setting="editorFontSize">
+        <Row
+          label="Font size"
+          hint="Monaco editor font size."
+          setting="editorFontSize"
+        >
           <NumberInput
             value={settings.editorFontSize}
             onChange={(v) => update("editorFontSize", clamp(v, 10, 20))}
@@ -381,7 +509,11 @@ function AppearanceAndEditor() {
             onChange={(v) => update("editorWordWrap", v)}
           />
         </Row>
-        <Row label="Show minimap" hint="The scrollable code thumbnail on the right edge." setting="editorMinimap">
+        <Row
+          label="Show minimap"
+          hint="The scrollable code thumbnail on the right edge."
+          setting="editorMinimap"
+        >
           <Toggle
             checked={settings.editorMinimap}
             onChange={(v) => update("editorMinimap", v)}
@@ -405,11 +537,18 @@ function AppearanceAndEditor() {
             suffix="KiB"
           />
         </Row>
-        <Row label="Parquet preview rows" hint="Rows fetched for the data grid." setting="parquetPreviewRows">
-          <Select
+        <Row
+          label="Parquet preview rows"
+          hint="Rows fetched for the data grid."
+          setting="parquetPreviewRows"
+        >
+          <SettingsSelect
             value={String(settings.parquetPreviewRows)}
             onChange={(v) =>
-              update("parquetPreviewRows", Number(v) as Settings["parquetPreviewRows"])
+              update(
+                "parquetPreviewRows",
+                Number(v) as Settings["parquetPreviewRows"],
+              )
             }
             options={[
               { value: "50", label: "50" },
@@ -450,7 +589,10 @@ function WorkspaceSection() {
   }
 
   return (
-    <Section title="Workspace" subtitle="Repository behavior, startup preferences, and session persistence.">
+    <Section
+      title="Workspace"
+      subtitle="Repository behavior, startup preferences, and session persistence."
+    >
       {/* Repos & Startup */}
       <SubSection title="Repositories">
         <Row label="Reopen repositories on startup">
@@ -459,25 +601,34 @@ function WorkspaceSection() {
             onChange={(v) => update("reopenReposOnStartup", v)}
           />
         </Row>
-        <Row label="Default clone destination" hint="Pre-filled in the Clone dialog.">
+        <Row
+          label="Default clone destination"
+          hint="Pre-filled in the Clone dialog."
+        >
           <div className="flex w-full items-center gap-2">
-            <input
-              className="flex-1 rounded border border-gx-border bg-gx-bg-sub px-2 py-1 font-mono text-xs"
+            <Input
+              className="flex-1 rounded border border-border bg-background px-2 py-1 font-mono text-xs"
               placeholder="(prompt every time)"
               value={settings.defaultCloneDir ?? ""}
               readOnly
             />
-            <button type="button" className="btn text-xs" onClick={pickClone}>
+            <Button
+              variant="outline"
+              type="button"
+              className="text-xs"
+              onClick={pickClone}
+            >
               Browse
-            </button>
+            </Button>
             {settings.defaultCloneDir && (
-              <button
+              <Button
+                variant="outline"
                 type="button"
-                className="btn text-xs"
+                className="text-xs"
                 onClick={() => update("defaultCloneDir", null)}
               >
                 Clear
-              </button>
+              </Button>
             )}
           </div>
         </Row>
@@ -518,7 +669,9 @@ function WorkspaceSection() {
         >
           <NumberInput
             value={sp.terminalKeepAliveLimit}
-            onChange={(v) => updateSp("terminalKeepAliveLimit", clamp(v, 1, 10))}
+            onChange={(v) =>
+              updateSp("terminalKeepAliveLimit", clamp(v, 1, 10))
+            }
             min={1}
             max={10}
             step={1}
@@ -529,13 +682,14 @@ function WorkspaceSection() {
           label="Clear all saved sessions"
           hint="Purge all persisted session data from localStorage. Does not affect terminal processes or open repos."
         >
-          <button
+          <Button
+            variant="outline"
             type="button"
-            className="btn text-xs"
+            className="text-xs"
             onClick={clearAllSessions}
           >
             <Trash2 size={12} /> Clear All Saved Sessions
-          </button>
+          </Button>
         </Row>
       </SubSection>
     </Section>
@@ -547,7 +701,10 @@ function WorkspaceSection() {
 function GitAndDiff() {
   const { settings, update } = useSettingsEditor();
   return (
-    <Section title="Git & Diff" subtitle="Diff display, commit helpers, and file staging behavior.">
+    <Section
+      title="Git & Diff"
+      subtitle="Diff display, commit helpers, and file staging behavior."
+    >
       {/* Diff */}
       <SubSection title="Diff">
         <Row
@@ -567,7 +724,9 @@ function GitAndDiff() {
         >
           <NumberInput
             value={settings.discardConfirmThreshold}
-            onChange={(v) => update("discardConfirmThreshold", clamp(v, 0, 10000))}
+            onChange={(v) =>
+              update("discardConfirmThreshold", clamp(v, 0, 10000))
+            }
             min={0}
             max={10000}
             step={1}
@@ -603,7 +762,7 @@ function GitAndDiff() {
           hint="Warn when staging non-pointer files larger than this threshold. Set to 0 to disable."
           setting="largeFileThresholdMb"
         >
-          <Select
+          <SettingsSelect
             value={String(settings.largeFileThresholdMb)}
             onChange={(v) => update("largeFileThresholdMb", Number(v))}
             options={[
@@ -669,7 +828,10 @@ function ExperimentTracking() {
   const [showToken, setShowToken] = useState(false);
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [feedback, setFeedback] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [feedback, setFeedback] = useState<{
+    type: "success" | "error";
+    message: string;
+  } | null>(null);
 
   function handleProviderChange(id: string) {
     const newProvider = id as ProviderId;
@@ -691,10 +853,21 @@ function ExperimentTracking() {
     setTesting(true);
     setFeedback(null);
     try {
-      const res = await rpc.experimentsConfigure(activeRepo.repo_id, provider, baseUrl, token);
-      setFeedback({ type: "success", message: res.message ?? "Connection successful" });
+      const res = await rpc.experimentsConfigure(
+        activeRepo.repo_id,
+        provider,
+        baseUrl,
+        token,
+      );
+      setFeedback({
+        type: "success",
+        message: res.message ?? "Connection successful",
+      });
     } catch (e) {
-      setFeedback({ type: "error", message: e instanceof Error ? e.message : String(e) });
+      setFeedback({
+        type: "error",
+        message: e instanceof Error ? e.message : String(e),
+      });
     } finally {
       setTesting(false);
     }
@@ -705,10 +878,21 @@ function ExperimentTracking() {
     setSaving(true);
     setFeedback(null);
     try {
-      const res = await rpc.experimentsConfigure(activeRepo.repo_id, provider, baseUrl, token);
-      setFeedback({ type: "success", message: res.message ?? "Credentials saved" });
+      const res = await rpc.experimentsConfigure(
+        activeRepo.repo_id,
+        provider,
+        baseUrl,
+        token,
+      );
+      setFeedback({
+        type: "success",
+        message: res.message ?? "Credentials saved",
+      });
     } catch (e) {
-      setFeedback({ type: "error", message: e instanceof Error ? e.message : String(e) });
+      setFeedback({
+        type: "error",
+        message: e instanceof Error ? e.message : String(e),
+      });
     } finally {
       setSaving(false);
     }
@@ -718,9 +902,12 @@ function ExperimentTracking() {
 
   return (
     <SubSection title="Experiment Tracking">
-      <div className="mb-2 text-[11px] text-gx-muted">Connect to an experiment tracking provider to view runs alongside commits.</div>
+      <div className="mb-2 text-[11px] text-muted-foreground">
+        Connect to an experiment tracking provider to view runs alongside
+        commits.
+      </div>
       <Row label="Provider" hint="Select your experiment tracking service.">
-        <Select
+        <SettingsSelect
           value={provider}
           onChange={handleProviderChange}
           options={[
@@ -734,40 +921,49 @@ function ExperimentTracking() {
       {config && (
         <>
           <Row label="Base URL" hint={config.helpText}>
-            <input
+            <Input
               type="text"
-              className="w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 font-mono text-xs focus-visible:outline-none focus:border-gx-accent"
+              className="w-full rounded border border-border bg-background px-2 py-1 font-mono text-xs focus-visible:outline-none focus:border-primary"
               placeholder={config.urlPlaceholder}
               value={baseUrl}
               onChange={(e) => setBaseUrl(e.target.value)}
             />
           </Row>
 
-          <Row label={config.tokenLabel} hint={provider === "wandb" ? "Find your key at wandb.ai/authorize" : "Token for authenticating with the tracking server."}>
+          <Row
+            label={config.tokenLabel}
+            hint={
+              provider === "wandb"
+                ? "Find your key at wandb.ai/authorize"
+                : "Token for authenticating with the tracking server."
+            }
+          >
             <div className="flex w-full items-center gap-2">
-              <input
+              <Input
                 type={showToken ? "text" : "password"}
-                className="flex-1 rounded border border-gx-border bg-gx-bg-sub px-2 py-1 font-mono text-xs focus-visible:outline-none focus:border-gx-accent"
+                className="flex-1 rounded border border-border bg-background px-2 py-1 font-mono text-xs focus-visible:outline-none focus:border-primary"
                 placeholder={provider === "wandb" ? "W&B API key" : "API token"}
                 value={token}
                 onChange={(e) => setToken(e.target.value)}
               />
-              <button
+              <Button
+                variant="outline"
                 type="button"
-                className="btn text-xs"
+                className="text-xs"
                 onClick={() => setShowToken((v) => !v)}
                 title={showToken ? "Hide token" : "Show token"}
                 aria-label={showToken ? "Hide token" : "Show token"}
               >
                 {showToken ? <EyeOff size={13} /> : <Eye size={13} />}
-              </button>
+              </Button>
             </div>
           </Row>
 
           <div className="flex items-center gap-2">
-            <button
+            <Button
+              variant="outline"
               type="button"
-              className="btn text-xs"
+              className="text-xs"
               onClick={testConnection}
               disabled={testing || !activeRepo || !baseUrl.trim()}
             >
@@ -778,12 +974,15 @@ function ExperimentTracking() {
               ) : (
                 "Test Connection"
               )}
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="default"
               type="button"
-              className="btn btn-primary text-xs"
+              className="text-xs"
               onClick={saveCredentials}
-              disabled={saving || !activeRepo || !baseUrl.trim() || !token.trim()}
+              disabled={
+                saving || !activeRepo || !baseUrl.trim() || !token.trim()
+              }
             >
               {saving ? (
                 <>
@@ -792,11 +991,11 @@ function ExperimentTracking() {
               ) : (
                 "Save"
               )}
-            </button>
+            </Button>
           </div>
 
           {!activeRepo && (
-            <div className="text-[11px] text-gx-muted">
+            <div className="text-[11px] text-muted-foreground">
               Open a repository to configure experiment tracking.
             </div>
           )}
@@ -806,8 +1005,8 @@ function ExperimentTracking() {
               className={clsx(
                 "rounded border p-2 text-xs",
                 feedback.type === "success"
-                  ? "border-gx-success/40 bg-gx-success/10 text-gx-success"
-                  : "border-gx-error/40 bg-gx-error/10 text-gx-error",
+                  ? "border-success/40 bg-success/10 text-success"
+                  : "border-destructive/40 bg-destructive/10 text-destructive",
               )}
             >
               {feedback.message}
@@ -821,7 +1020,10 @@ function ExperimentTracking() {
 
 function AgentsAndAI() {
   return (
-    <Section title="Agents & AI" subtitle="Manage AI agents and experiment tracking integrations.">
+    <Section
+      title="Agents & AI"
+      subtitle="Manage AI agents and experiment tracking integrations."
+    >
       <SubSection title="Agent Configuration">
         <AgentManagerView />
       </SubSection>
@@ -855,7 +1057,7 @@ const FORGE_PROVIDERS: ForgeProviderInfo[] = [
     defaultScopes: "repo read:org",
     tokenHelpUrl: "https://github.com/settings/tokens/new",
     tokenHelpText:
-      "Go to GitHub → Settings → Developer settings → Personal access tokens → Generate new token. Select the \"repo\" scope.",
+      'Go to GitHub → Settings → Developer settings → Personal access tokens → Generate new token. Select the "repo" scope.',
   },
   {
     id: "gitlab",
@@ -866,7 +1068,7 @@ const FORGE_PROVIDERS: ForgeProviderInfo[] = [
     defaultScopes: "read_api read_repository",
     tokenHelpUrl: "https://gitlab.com/-/user_settings/personal_access_tokens",
     tokenHelpText:
-      "Go to GitLab → Preferences → Access Tokens → Add new token. Select the \"read_api\" and \"read_repository\" scopes.",
+      'Go to GitLab → Preferences → Access Tokens → Add new token. Select the "read_api" and "read_repository" scopes.',
   },
   {
     id: "bitbucket",
@@ -875,10 +1077,9 @@ const FORGE_PROVIDERS: ForgeProviderInfo[] = [
     supportsDeviceFlow: false,
     defaultClientId: "",
     defaultScopes: "",
-    tokenHelpUrl:
-      "https://bitbucket.org/account/settings/app-passwords/new",
+    tokenHelpUrl: "https://bitbucket.org/account/settings/app-passwords/new",
     tokenHelpText:
-      "Go to Bitbucket → Personal settings → App passwords → Create app password. Grant \"Repositories: Read/Write\" permission.",
+      'Go to Bitbucket → Personal settings → App passwords → Create app password. Grant "Repositories: Read/Write" permission.',
   },
   {
     id: "gitea",
@@ -914,18 +1115,25 @@ interface DeviceFlowState {
 }
 
 function ForgeAuthentication() {
-  const [statuses, setStatuses] = useState<Record<ForgeProvider, ProviderStatus>>({
+  const [statuses, setStatuses] = useState<
+    Record<ForgeProvider, ProviderStatus>
+  >({
     github: { hasPat: false, hasOAuth: false, loading: true },
     gitlab: { hasPat: false, hasOAuth: false, loading: true },
     bitbucket: { hasPat: false, hasOAuth: false, loading: true },
     gitea: { hasPat: false, hasOAuth: false, loading: true },
   });
-  const [editingProvider, setEditingProvider] = useState<ForgeProvider | null>(null);
+  const [editingProvider, setEditingProvider] = useState<ForgeProvider | null>(
+    null,
+  );
   const [tokenInput, setTokenInput] = useState("");
   const [showToken, setShowToken] = useState(false);
   const [saving, setSaving] = useState(false);
   const [removing, setRemoving] = useState<ForgeProvider | null>(null);
-  const [feedback, setFeedback] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [feedback, setFeedback] = useState<{
+    type: "success" | "error";
+    message: string;
+  } | null>(null);
   const [deviceFlow, setDeviceFlow] = useState<DeviceFlowState | null>(null);
   const [copied, setCopied] = useState(false);
 
@@ -941,7 +1149,11 @@ function ForgeAuthentication() {
           forgeKeychainService(p.id),
           OAUTH_ACCOUNT,
         );
-        results[p.id] = { hasPat: pat !== null, hasOAuth: oauth !== null, loading: false };
+        results[p.id] = {
+          hasPat: pat !== null,
+          hasOAuth: oauth !== null,
+          loading: false,
+        };
       } catch {
         results[p.id] = { hasPat: false, hasOAuth: false, loading: false };
       }
@@ -956,7 +1168,9 @@ function ForgeAuthentication() {
   // Listen for the crab:open-settings event from CloneDialog
   useEffect(() => {
     const handler = (e: Event) => {
-      const detail = (e as CustomEvent).detail as { section?: string } | undefined;
+      const detail = (e as CustomEvent).detail as
+        | { section?: string }
+        | undefined;
       if (detail?.section === "integrations") {
         // The SettingsView already navigates to "forge" section via
         // the parent — this handler is a no-op placeholder for future
@@ -974,11 +1188,18 @@ function ForgeAuthentication() {
         // Token was stored by the main process — refresh statuses
         setDeviceFlow(null);
         loadStatuses();
-        setFeedback({ type: "success", message: "OAuth authentication successful." });
+        setFeedback({
+          type: "success",
+          message: "OAuth authentication successful.",
+        });
       } else if (evt.method === "auth/failed") {
         // Device flow expired or was denied
         setDeviceFlow(null);
-        setFeedback({ type: "error", message: "Authorization was denied or the code expired. Please try again." });
+        setFeedback({
+          type: "error",
+          message:
+            "Authorization was denied or the code expired. Please try again.",
+        });
       }
     });
     return unsub;
@@ -997,14 +1218,19 @@ function ForgeAuthentication() {
     }
 
     setFeedback(null);
-    setDeviceFlow({ provider, userCode: "", verificationUri: "", polling: true });
+    setDeviceFlow({
+      provider,
+      userCode: "",
+      verificationUri: "",
+      polling: true,
+    });
 
     try {
-      const result = await call("forge_auth_start", {
+      const result = (await call("forge_auth_start", {
         provider,
         client_id: providerInfo.defaultClientId,
         scopes: providerInfo.defaultScopes,
-      }) as { user_code: string; verification_uri: string };
+      })) as { user_code: string; verification_uri: string };
 
       setDeviceFlow({
         provider,
@@ -1045,13 +1271,19 @@ function ForgeAuthentication() {
         PAT_ACCOUNT,
         tokenInput.trim(),
       );
-      setFeedback({ type: "success", message: `Token saved for ${FORGE_PROVIDERS.find((p) => p.id === provider)?.label}.` });
+      setFeedback({
+        type: "success",
+        message: `Token saved for ${FORGE_PROVIDERS.find((p) => p.id === provider)?.label}.`,
+      });
       setTokenInput("");
       setShowToken(false);
       setEditingProvider(null);
       await loadStatuses();
     } catch (e) {
-      setFeedback({ type: "error", message: e instanceof Error ? e.message : String(e) });
+      setFeedback({
+        type: "error",
+        message: e instanceof Error ? e.message : String(e),
+      });
     } finally {
       setSaving(false);
     }
@@ -1065,10 +1297,16 @@ function ForgeAuthentication() {
         forgeKeychainService(provider),
         account,
       );
-      setFeedback({ type: "success", message: `Credential removed for ${FORGE_PROVIDERS.find((p) => p.id === provider)?.label}.` });
+      setFeedback({
+        type: "success",
+        message: `Credential removed for ${FORGE_PROVIDERS.find((p) => p.id === provider)?.label}.`,
+      });
       await loadStatuses();
     } catch (e) {
-      setFeedback({ type: "error", message: e instanceof Error ? e.message : String(e) });
+      setFeedback({
+        type: "error",
+        message: e instanceof Error ? e.message : String(e),
+      });
     } finally {
       setRemoving(null);
     }
@@ -1084,8 +1322,8 @@ function ForgeAuthentication() {
           className={clsx(
             "rounded border p-2 text-xs",
             feedback.type === "success"
-              ? "border-gx-success/40 bg-gx-success/10 text-gx-success"
-              : "border-gx-error/40 bg-gx-error/10 text-gx-error",
+              ? "border-success/40 bg-success/10 text-success"
+              : "border-destructive/40 bg-destructive/10 text-destructive",
           )}
         >
           {feedback.message}
@@ -1094,32 +1332,40 @@ function ForgeAuthentication() {
 
       {/* Device flow modal overlay */}
       {deviceFlow && deviceFlow.userCode && (
-        <div className="rounded-lg border border-gx-accent/40 bg-gx-accent/5 p-4">
+        <div className="rounded-lg border border-primary/40 bg-primary/5 p-4">
           <div className="flex items-start justify-between gap-3">
             <div>
-              <div className="text-sm font-semibold text-gx-text">
-                Authorize {FORGE_PROVIDERS.find((p) => p.id === deviceFlow.provider)?.label}
+              <div className="text-sm font-semibold text-foreground">
+                Authorize{" "}
+                {
+                  FORGE_PROVIDERS.find((p) => p.id === deviceFlow.provider)
+                    ?.label
+                }
               </div>
-              <p className="mt-1 text-xs text-gx-muted">
-                A browser window has opened. Enter the code below to authorize Crab Desktop:
+              <p className="mt-1 text-xs text-muted-foreground">
+                A browser window has opened. Enter the code below to authorize
+                Crab Desktop:
               </p>
             </div>
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
-              className="rounded p-1 text-gx-muted hover:text-gx-text"
+              className="rounded p-1 text-muted-foreground hover:text-foreground"
               onClick={cancelDeviceFlow}
               aria-label="Cancel"
             >
               <X size={14} />
-            </button>
+            </Button>
           </div>
           <div className="mt-3 flex items-center gap-3">
-            <code className="rounded-md border border-gx-border bg-gx-bg px-4 py-2 font-mono text-lg font-bold tracking-widest text-gx-accent">
+            <code className="rounded-md border border-border bg-background px-4 py-2 font-mono text-lg font-bold tracking-widest text-primary">
               {deviceFlow.userCode}
             </code>
-            <button
+            <Button
+              variant="outline"
               type="button"
-              className="btn text-xs"
+              className="text-xs"
               onClick={() => copyUserCode(deviceFlow.userCode)}
             >
               {copied ? (
@@ -1131,9 +1377,9 @@ function ForgeAuthentication() {
                   <Copy size={11} /> Copy
                 </>
               )}
-            </button>
+            </Button>
           </div>
-          <div className="mt-2 flex items-center gap-2 text-[11px] text-gx-muted">
+          <div className="mt-2 flex items-center gap-2 text-[11px] text-muted-foreground">
             <Loader2 size={11} className="animate-spin" />
             Waiting for authorization…
           </div>
@@ -1142,9 +1388,10 @@ function ForgeAuthentication() {
 
       {/* Device flow initiating state (before user code is received) */}
       {deviceFlow && !deviceFlow.userCode && (
-        <div className="flex items-center gap-2 rounded-lg border border-gx-border bg-gx-surface p-3 text-xs text-gx-muted">
+        <div className="flex items-center gap-2 rounded-lg border border-border bg-card p-3 text-xs text-muted-foreground">
           <Loader2 size={12} className="animate-spin" />
-          Starting OAuth device flow for {FORGE_PROVIDERS.find((p) => p.id === deviceFlow.provider)?.label}…
+          Starting OAuth device flow for{" "}
+          {FORGE_PROVIDERS.find((p) => p.id === deviceFlow.provider)?.label}…
         </div>
       )}
 
@@ -1157,20 +1404,20 @@ function ForgeAuthentication() {
           return (
             <div
               key={provider.id}
-              className="rounded border border-gx-border bg-gx-surface p-4"
+              className="rounded border border-border bg-card p-4"
             >
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
-                    <span className="text-sm font-semibold text-gx-text">
+                    <span className="text-sm font-semibold text-foreground">
                       {provider.label}
                     </span>
                     {status.loading ? (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-gx-bg-sub px-2 py-0.5 text-[10px] text-gx-muted">
+                      <span className="inline-flex items-center gap-1 rounded-full bg-background px-2 py-0.5 text-[10px] text-muted-foreground">
                         <Loader2 size={10} className="animate-spin" /> Checking…
                       </span>
                     ) : isConnected ? (
-                      <span className="inline-flex items-center rounded-full bg-gx-success/15 px-2 py-0.5 text-[10px] font-medium text-gx-success">
+                      <span className="inline-flex items-center rounded-full bg-success/15 px-2 py-0.5 text-[10px] font-medium text-success">
                         Connected
                         {status.hasOAuth && status.hasPat
                           ? " (OAuth + Token)"
@@ -1179,32 +1426,36 @@ function ForgeAuthentication() {
                             : " (Token)"}
                       </span>
                     ) : (
-                      <span className="inline-flex items-center rounded-full bg-gx-bg-sub px-2 py-0.5 text-[10px] text-gx-muted">
+                      <span className="inline-flex items-center rounded-full bg-background px-2 py-0.5 text-[10px] text-muted-foreground">
                         Not configured
                       </span>
                     )}
                   </div>
-                  <div className="mt-0.5 text-[11px] text-gx-muted">
+                  <div className="mt-0.5 text-[11px] text-muted-foreground">
                     {provider.hint}
                   </div>
                 </div>
                 <div className="flex items-center gap-1.5">
                   {/* OAuth device flow button */}
-                  {provider.supportsDeviceFlow && !isConnected && !isEditing && (
-                    <button
-                      type="button"
-                      className="btn btn-primary text-xs"
-                      onClick={() => startDeviceFlow(provider.id)}
-                      disabled={deviceFlow !== null}
-                    >
-                      Sign in
-                    </button>
-                  )}
+                  {provider.supportsDeviceFlow &&
+                    !isConnected &&
+                    !isEditing && (
+                      <Button
+                        variant="default"
+                        type="button"
+                        className="text-xs"
+                        onClick={() => startDeviceFlow(provider.id)}
+                        disabled={deviceFlow !== null}
+                      >
+                        Sign in
+                      </Button>
+                    )}
                   {/* PAT entry button */}
                   {!isEditing && (
-                    <button
+                    <Button
+                      variant="outline"
                       type="button"
-                      className="btn text-xs"
+                      className="text-xs"
                       onClick={() => {
                         setEditingProvider(provider.id);
                         setTokenInput("");
@@ -1213,13 +1464,14 @@ function ForgeAuthentication() {
                       }}
                     >
                       {isConnected ? "Update token" : "Use access token"}
-                    </button>
+                    </Button>
                   )}
                   {/* Remove buttons */}
                   {status.hasOAuth && !isEditing && (
-                    <button
+                    <Button
+                      variant="outline"
                       type="button"
-                      className="btn text-xs text-gx-error hover:bg-gx-error/10"
+                      className="text-xs text-destructive hover:bg-destructive/10"
                       onClick={() => removeToken(provider.id, OAUTH_ACCOUNT)}
                       disabled={removing === provider.id}
                       aria-label={`Remove OAuth token for ${provider.label}`}
@@ -1230,12 +1482,13 @@ function ForgeAuthentication() {
                       ) : (
                         <Trash2 size={11} />
                       )}
-                    </button>
+                    </Button>
                   )}
                   {status.hasPat && !isEditing && (
-                    <button
+                    <Button
+                      variant="outline"
                       type="button"
-                      className="btn text-xs text-gx-error hover:bg-gx-error/10"
+                      className="text-xs text-destructive hover:bg-destructive/10"
                       onClick={() => removeToken(provider.id, PAT_ACCOUNT)}
                       disabled={removing === provider.id}
                       aria-label={`Remove access token for ${provider.label}`}
@@ -1246,18 +1499,18 @@ function ForgeAuthentication() {
                       ) : (
                         <Trash2 size={11} />
                       )}
-                    </button>
+                    </Button>
                   )}
                 </div>
               </div>
 
               {/* Token editing form */}
               {isEditing && (
-                <div className="mt-3 space-y-2 border-t border-gx-border/60 pt-3">
-                  <label className="block text-[11px] font-medium text-gx-text">
+                <div className="mt-3 space-y-2 border-t border-border/60 pt-3">
+                  <label className="block text-[11px] font-medium text-foreground">
                     Access Token
                   </label>
-                  <p className="text-[11px] text-gx-muted">
+                  <p className="text-[11px] text-muted-foreground">
                     {provider.tokenHelpText}
                     {provider.tokenHelpUrl && (
                       <>
@@ -1266,7 +1519,7 @@ function ForgeAuthentication() {
                           href={provider.tokenHelpUrl}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="text-gx-accent underline hover:text-gx-accent/80"
+                          className="text-primary underline hover:text-primary/80"
                         >
                           Open token settings ↗
                         </a>
@@ -1274,28 +1527,30 @@ function ForgeAuthentication() {
                     )}
                   </p>
                   <div className="flex items-center gap-2">
-                    <input
+                    <Input
                       type={showToken ? "text" : "password"}
-                      className="flex-1 rounded border border-gx-border bg-gx-bg-sub px-2 py-1.5 font-mono text-xs focus-visible:outline-none focus:border-gx-accent"
+                      className="flex-1 rounded border border-border bg-background px-2 py-1.5 font-mono text-xs focus-visible:outline-none focus:border-primary"
                       placeholder="Paste your token here"
                       value={tokenInput}
                       onChange={(e) => setTokenInput(e.target.value)}
                       autoFocus
                     />
-                    <button
+                    <Button
+                      variant="outline"
                       type="button"
-                      className="btn text-xs"
+                      className="text-xs"
                       onClick={() => setShowToken((v) => !v)}
                       title={showToken ? "Hide token" : "Show token"}
                       aria-label={showToken ? "Hide token" : "Show token"}
                     >
                       {showToken ? <EyeOff size={13} /> : <Eye size={13} />}
-                    </button>
+                    </Button>
                   </div>
                   <div className="flex items-center gap-2">
-                    <button
+                    <Button
+                      variant="default"
                       type="button"
-                      className="btn btn-primary text-xs"
+                      className="text-xs"
                       onClick={() => saveToken(provider.id)}
                       disabled={saving || !tokenInput.trim()}
                     >
@@ -1306,10 +1561,11 @@ function ForgeAuthentication() {
                       ) : (
                         "Save"
                       )}
-                    </button>
-                    <button
+                    </Button>
+                    <Button
+                      variant="outline"
                       type="button"
-                      className="btn text-xs"
+                      className="text-xs"
                       onClick={() => {
                         setEditingProvider(null);
                         setTokenInput("");
@@ -1317,7 +1573,7 @@ function ForgeAuthentication() {
                       }}
                     >
                       Cancel
-                    </button>
+                    </Button>
                   </div>
                 </div>
               )}
@@ -1344,7 +1600,9 @@ function StorageAndCache() {
 
   async function runProfile(profileId: string, patterns: string[]) {
     if (!transfers.hydrate) {
-      setPrefetchErr("Open a working repository with verified file transfers to run a prefetch profile.");
+      setPrefetchErr(
+        "Open a working repository with verified file transfers to run a prefetch profile.",
+      );
       return;
     }
     setRunningId(profileId);
@@ -1352,7 +1610,12 @@ function StorageAndCache() {
     setPrefetchResult(null);
     try {
       const count = await transfers.hydrate({ kind: "patterns", patterns });
-      if (count !== null) setPrefetchResult(count === 0 ? "No matching files need hydration." : `Hydrated ${count} ${count === 1 ? "file" : "files"}.`);
+      if (count !== null)
+        setPrefetchResult(
+          count === 0
+            ? "No matching files need hydration."
+            : `Hydrated ${count} ${count === 1 ? "file" : "files"}.`,
+        );
     } catch (e) {
       setPrefetchErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -1372,7 +1635,10 @@ function StorageAndCache() {
   }
 
   return (
-    <Section title="Storage & Cache" subtitle="Remote object storage, local cache, memory limits, and prefetch profiles.">
+    <Section
+      title="Storage & Cache"
+      subtitle="Remote object storage, local cache, memory limits, and prefetch profiles."
+    >
       {/* Remote Storage */}
       <SubSection title="Remote Storage">
         <StorageConfigSection />
@@ -1380,7 +1646,11 @@ function StorageAndCache() {
 
       {/* Local Cache */}
       <SubSection title="Local Cache">
-        <CacheSettings key={activeRepo?.repo_id ?? "local"} repoId={activeRepo?.repo_id} label={activeRepo?.label} />
+        <CacheSettings
+          key={activeRepo?.repo_id ?? "local"}
+          repoId={activeRepo?.repo_id}
+          label={activeRepo?.label}
+        />
       </SubSection>
 
       {/* Memory */}
@@ -1402,57 +1672,74 @@ function StorageAndCache() {
 
       {/* Prefetch Profiles */}
       <SubSection title="Prefetch Profiles">
-        <div className="mb-2 text-[11px] text-gx-muted">
-          Named hydrate patterns you can run with one click. Great for &ldquo;training set&rdquo;, &ldquo;eval split&rdquo;, or &ldquo;reviewer-subset&rdquo; workflows.
+        <div className="mb-2 text-[11px] text-muted-foreground">
+          Named hydrate patterns you can run with one click. Great for
+          &ldquo;training set&rdquo;, &ldquo;eval split&rdquo;, or
+          &ldquo;reviewer-subset&rdquo; workflows.
         </div>
-        <div className="space-y-3 rounded border border-gx-border bg-gx-surface p-4">
-          <div className="text-xs text-gx-muted">Create a new profile</div>
-          <input
-            className="w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-sm focus-visible:outline-none focus:border-gx-accent"
+        <div className="space-y-3 rounded border border-border bg-card p-4">
+          <div className="text-xs text-muted-foreground">
+            Create a new profile
+          </div>
+          <Input
+            className="w-full rounded border border-border bg-background px-2 py-1 text-sm focus-visible:outline-none focus:border-primary"
             placeholder="Name (e.g. training-subset)"
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
           />
-          <textarea
-            className="h-20 w-full rounded border border-gx-border bg-gx-bg-sub p-2 font-mono text-xs focus-visible:outline-none focus:border-gx-accent"
+          <Textarea
+            className="h-20 w-full rounded border border-border bg-background p-2 font-mono text-xs focus-visible:outline-none focus:border-primary"
             placeholder={`data/train/**/*.parquet\nmodels/llama-7b/*.safetensors`}
             value={newPatterns}
             onChange={(e) => setNewPatterns(e.target.value)}
           />
-          <button
+          <Button
+            variant="default"
             type="button"
-            className="btn btn-primary text-xs"
+            className="text-xs"
             onClick={saveNew}
             disabled={!newName.trim() || !newPatterns.trim()}
           >
             Save profile
-          </button>
+          </Button>
         </div>
 
         {prefetchErr && (
-          <div className="rounded border border-gx-error/40 bg-gx-error/10 p-2 text-xs text-gx-error">
+          <div className="rounded border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">
             {prefetchErr}
           </div>
         )}
-        {prefetchResult && <div role="status" className="text-xs text-gx-muted">{prefetchResult}</div>}
+        {prefetchResult && (
+          <div role="status" className="text-xs text-muted-foreground">
+            {prefetchResult}
+          </div>
+        )}
 
         {profiles.length === 0 ? (
-          <div className="text-xs text-gx-muted">No profiles saved yet.</div>
+          <div className="text-xs text-muted-foreground">
+            No profiles saved yet.
+          </div>
         ) : (
           <ul className="space-y-2">
             {profiles.map((p) => (
-              <li key={p.id} className="rounded border border-gx-border bg-gx-surface p-3">
+              <li
+                key={p.id}
+                className="rounded border border-border bg-card p-3"
+              >
                 <div className="flex items-center justify-between gap-2">
                   <div className="min-w-0">
-                    <div className="truncate text-sm font-semibold">{p.name}</div>
-                    <div className="truncate font-mono text-[11px] text-gx-muted">
+                    <div className="truncate text-sm font-semibold">
+                      {p.name}
+                    </div>
+                    <div className="truncate font-mono text-[11px] text-muted-foreground">
                       {p.patterns.join(", ")}
                     </div>
                   </div>
                   <div className="flex items-center gap-1">
-                    <button
+                    <Button
+                      variant="outline"
                       type="button"
-                      className="btn text-xs"
+                      className="text-xs"
                       onClick={() => runProfile(p.id, p.patterns)}
                       disabled={runningId !== null || !transfers.hydrate}
                       title={
@@ -1470,15 +1757,16 @@ function StorageAndCache() {
                           <Play size={11} /> Run
                         </>
                       )}
-                    </button>
-                    <button
+                    </Button>
+                    <Button
+                      variant="outline"
                       type="button"
-                      className="btn text-xs"
+                      className="text-xs"
                       onClick={() => remove(p.id)}
                       title="Delete profile"
                     >
                       <Trash2 size={11} />
-                    </button>
+                    </Button>
                   </div>
                 </div>
               </li>
@@ -1498,25 +1786,44 @@ function DiagnosticsSection() {
   const [showPreview, setShowPreview] = useState(false);
   const [noTelemetryFlag, setNoTelemetryFlag] = useState(false);
 
-  function updateNotif<K extends keyof typeof notif>(key: K, value: (typeof notif)[K]) {
+  function updateNotif<K extends keyof typeof notif>(
+    key: K,
+    value: (typeof notif)[K],
+  ) {
     update("notifications", { ...notif, [key]: value });
   }
 
   function handleDndToggle(enabled: boolean) {
     if (enabled) {
-      update("notifications", { ...notif, doNotDisturb: true, doNotDisturbUntil: null });
+      update("notifications", {
+        ...notif,
+        doNotDisturb: true,
+        doNotDisturbUntil: null,
+      });
     } else {
-      update("notifications", { ...notif, doNotDisturb: false, doNotDisturbUntil: null });
+      update("notifications", {
+        ...notif,
+        doNotDisturb: false,
+        doNotDisturbUntil: null,
+      });
     }
   }
 
   function handleDndDuration(value: string) {
     if (value === "indefinite") {
-      update("notifications", { ...notif, doNotDisturb: true, doNotDisturbUntil: null });
+      update("notifications", {
+        ...notif,
+        doNotDisturb: true,
+        doNotDisturbUntil: null,
+      });
     } else {
       const minutes = Number(value);
       const until = Date.now() + minutes * 60 * 1000;
-      update("notifications", { ...notif, doNotDisturb: true, doNotDisturbUntil: until });
+      update("notifications", {
+        ...notif,
+        doNotDisturb: true,
+        doNotDisturbUntil: until,
+      });
     }
   }
 
@@ -1534,7 +1841,10 @@ function DiagnosticsSection() {
 
   useEffect(() => {
     if (typeof window !== "undefined" && window.crab?.getNoTelemetryFlag) {
-      window.crab.getNoTelemetryFlag().then(setNoTelemetryFlag).catch(() => undefined);
+      window.crab
+        .getNoTelemetryFlag()
+        .then(setNoTelemetryFlag)
+        .catch(() => undefined);
     }
   }, []);
 
@@ -1546,7 +1856,10 @@ function DiagnosticsSection() {
   const bufferContents = showPreview ? telemetry.getBuffer() : [];
 
   return (
-    <Section title="Diagnostics" subtitle="Logging, notifications, telemetry, and system health.">
+    <Section
+      title="Diagnostics"
+      subtitle="Logging, notifications, telemetry, and system health."
+    >
       <HealthView />
       {/* Notifications */}
       <SubSection title="Notifications">
@@ -1585,20 +1898,20 @@ function DiagnosticsSection() {
           hint="Silence all notifications. When enabled, no toasts will appear regardless of per-type settings."
           setting="notifications"
         >
-          <Toggle
-            checked={notif.doNotDisturb}
-            onChange={handleDndToggle}
-          />
+          <Toggle checked={notif.doNotDisturb} onChange={handleDndToggle} />
         </Row>
         {notif.doNotDisturb && (
           <Row
             label="DND duration"
             hint="How long to keep Do Not Disturb active. After the duration expires, notifications resume automatically."
           >
-            <Select
+            <SettingsSelect
               value={currentDndValue()}
               onChange={handleDndDuration}
-              options={DND_DURATIONS.map((d) => ({ value: d.value, label: d.label }))}
+              options={DND_DURATIONS.map((d) => ({
+                value: d.value,
+                label: d.label,
+              }))}
             />
           </Row>
         )}
@@ -1606,10 +1919,15 @@ function DiagnosticsSection() {
 
       {/* Logs */}
       <SubSection title="Logs">
-        <Row label="Activity buffer size" hint="How many progress lines to keep in the Activity drawer.">
-          <Select
+        <Row
+          label="Activity buffer size"
+          hint="How many progress lines to keep in the Activity drawer."
+        >
+          <SettingsSelect
             value={String(settings.maxLogLines)}
-            onChange={(v) => update("maxLogLines", Number(v) as Settings["maxLogLines"])}
+            onChange={(v) =>
+              update("maxLogLines", Number(v) as Settings["maxLogLines"])
+            }
             options={[
               { value: "1000", label: "1,000" },
               { value: "2000", label: "2,000 (default)" },
@@ -1622,9 +1940,11 @@ function DiagnosticsSection() {
           label="Agent log level"
           hint="Applies after restarting Crab Desktop. Logs go to the launcher terminal."
         >
-          <Select
+          <SettingsSelect
             value={settings.agentLogLevel}
-            onChange={(v) => update("agentLogLevel", v as Settings["agentLogLevel"])}
+            onChange={(v) =>
+              update("agentLogLevel", v as Settings["agentLogLevel"])
+            }
             options={[
               { value: "off", label: "Off" },
               { value: "info", label: "Info (default)" },
@@ -1633,7 +1953,10 @@ function DiagnosticsSection() {
             ]}
           />
         </Row>
-        <Row label="Open DevTools on launch" hint="Useful for debugging; leaves a DevTools window open every launch.">
+        <Row
+          label="Open DevTools on launch"
+          hint="Useful for debugging; leaves a DevTools window open every launch."
+        >
           <Toggle
             checked={settings.openDevtoolsOnLaunch}
             onChange={(v) => update("openDevtoolsOnLaunch", v)}
@@ -1648,13 +1971,16 @@ function DiagnosticsSection() {
 
       {/* Telemetry */}
       <SubSection title="Telemetry">
-        <div className="mb-2 text-[11px] text-gx-muted">
-          Anonymous usage data helps improve Crab Desktop. No personally identifiable information is collected. Repo URLs are hashed to a non-reversible token.
+        <div className="mb-2 text-[11px] text-muted-foreground">
+          Anonymous usage data helps improve Crab Desktop. No personally
+          identifiable information is collected. Repo URLs are hashed to a
+          non-reversible token.
         </div>
         {noTelemetryFlag && (
-          <div className="rounded border border-gx-warning/40 bg-gx-warning/10 p-3 text-xs text-gx-warning">
-            Telemetry is disabled by the <code className="font-mono">--no-telemetry</code> launch flag.
-            This overrides the setting below.
+          <div className="rounded border border-warning/40 bg-warning/10 p-3 text-xs text-warning">
+            Telemetry is disabled by the{" "}
+            <code className="font-mono">--no-telemetry</code> launch flag. This
+            overrides the setting below.
           </div>
         )}
         <Row
@@ -1670,23 +1996,27 @@ function DiagnosticsSection() {
           label="Preview telemetry payload"
           hint="See exactly what would be sent. The buffer shows events collected since the last flush."
         >
-          <button
+          <Button
+            variant="outline"
             type="button"
-            className="btn text-xs"
+            className="text-xs"
             onClick={() => setShowPreview((v) => !v)}
           >
             {showPreview ? "Hide preview" : "Show preview"}
-          </button>
+          </Button>
         </Row>
         {showPreview && (
-          <div className="rounded border border-gx-border bg-gx-bg-sub p-3">
+          <div className="rounded border border-border bg-background p-3">
             {bufferContents.length === 0 ? (
-              <div className="text-xs text-gx-muted">
-                No events in the buffer. Events are collected when telemetry is enabled and you use the app.
+              <div className="text-xs text-muted-foreground">
+                No events in the buffer. Events are collected when telemetry is
+                enabled and you use the app.
               </div>
             ) : (
-              <pre className="max-h-64 overflow-auto whitespace-pre-wrap font-mono text-[11px] text-gx-text">
-                {bufferContents.map((e) => JSON.stringify(e, null, 2)).join("\n")}
+              <pre className="max-h-64 overflow-auto whitespace-pre-wrap font-mono text-[11px] text-foreground">
+                {bufferContents
+                  .map((e) => JSON.stringify(e, null, 2))
+                  .join("\n")}
               </pre>
             )}
           </div>
@@ -1720,7 +2050,9 @@ function GeneralSection() {
   const desktopVersion = "0.1.0";
 
   async function resetAll() {
-    const ok = await mainProcess.dialogConfirm("Reset all Crab Desktop settings to defaults? Open repositories won't be affected.");
+    const ok = await mainProcess.dialogConfirm(
+      "Reset all Crab Desktop settings to defaults? Open repositories won't be affected.",
+    );
     if (ok) {
       reset();
     }
@@ -1737,50 +2069,67 @@ function GeneralSection() {
     <Section title="General" subtitle="About, keyboard shortcuts, and reset.">
       {/* About */}
       <SubSection title="About Crab Desktop">
-        <div className="rounded border border-gx-border bg-gx-surface p-5">
+        <div className="rounded border border-border bg-card p-5">
           <div className="mb-3 text-lg font-semibold">Crab Desktop</div>
           <div className="grid grid-cols-2 gap-3 text-sm">
             <KV label="Desktop version" value={desktopVersion} />
             <KV label="Agent version" value={data?.agent_version ?? "…"} />
             <KV
               label="Crab CLI"
-              value={data?.crab_cli_version ?? (aboutErr ? "unavailable" : data ? "not installed" : "…")}
+              value={
+                data?.crab_cli_version ??
+                (aboutErr ? "unavailable" : data ? "not installed" : "…")
+              }
             />
-            <KV label="Platform" value={data ? `${data.os}/${data.arch}` : "…"} />
+            <KV
+              label="Platform"
+              value={data ? `${data.os}/${data.arch}` : "…"}
+            />
           </div>
           {aboutErr && (
-            <div className="mt-3 rounded border border-gx-error/40 bg-gx-error/10 p-2 text-xs text-gx-error">
+            <div className="mt-3 rounded border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">
               {aboutErr}
             </div>
           )}
         </div>
-        <Row label="Show welcome tour" hint="Reopen the first-run welcome tour.">
-          <button
+        <Row
+          label="Show welcome tour"
+          hint="Reopen the first-run welcome tour."
+        >
+          <Button
+            variant="outline"
             type="button"
-            className="btn text-xs"
+            className="text-xs"
             onClick={() => update("welcomeSeen", false)}
             aria-label="Show welcome tour"
           >
             <Play size={12} /> Reopen tour
-          </button>
+          </Button>
         </Row>
-        <div className="mt-2 text-xs text-gx-muted">
-          Crab stores large files in cloud object storage and works alongside standard git.
+        <div className="mt-2 text-xs text-muted-foreground">
+          Crab stores large files in cloud object storage and works alongside
+          standard git.
         </div>
       </SubSection>
 
       {/* Keyboard Shortcuts */}
       <SubSection title="Keyboard Shortcuts">
-        <div className="mb-2 text-[11px] text-gx-muted">Shortcuts are not yet customizable.</div>
-        <div className="overflow-hidden rounded border border-gx-border">
+        <div className="mb-2 text-[11px] text-muted-foreground">
+          Shortcuts are not yet customizable.
+        </div>
+        <div className="overflow-hidden rounded border border-border">
           <table className="w-full text-sm">
             <tbody>
               {shortcutRows.map(([action, keys], i) => (
                 <tr
                   key={action}
-                  className={i < shortcutRows.length - 1 ? "border-b border-gx-border/60" : undefined}
+                  className={
+                    i < shortcutRows.length - 1
+                      ? "border-b border-border/60"
+                      : undefined
+                  }
                 >
-                  <td className="px-3 py-2 text-gx-text">{action}</td>
+                  <td className="px-3 py-2 text-foreground">{action}</td>
                   <td className="px-3 py-2 text-right">
                     <span className="kbd">{keys}</span>
                   </td>
@@ -1793,10 +2142,18 @@ function GeneralSection() {
 
       {/* Reset */}
       <SubSection title="Reset">
-        <Row label="Reset all settings" hint="Returns every toggle on this page to its default.">
-          <button type="button" className="btn text-xs" onClick={resetAll}>
+        <Row
+          label="Reset all settings"
+          hint="Returns every toggle on this page to its default."
+        >
+          <Button
+            variant="outline"
+            type="button"
+            className="text-xs"
+            onClick={resetAll}
+          >
             <RotateCcw size={12} /> Reset
-          </button>
+          </Button>
         </Row>
       </SubSection>
     </Section>
@@ -1808,9 +2165,21 @@ function GeneralSection() {
 function SshSettings() {
   const { settings, update } = useSettingsEditor();
   const features = settings.features;
-  const [knownHosts, setKnownHosts] = useState<Array<{ hostname: string; port: number; fingerprint: string; keyType: string; addedAt: number }>>([]);
+  const [knownHosts, setKnownHosts] = useState<
+    Array<{
+      hostname: string;
+      port: number;
+      fingerprint: string;
+      keyType: string;
+      addedAt: number;
+    }>
+  >([]);
   const [hostError, setHostError] = useState<string | null>(null);
-  const [stats, setStats] = useState<{ successRate: number; avgLatencyMs: number; reconnections: number } | null>(null);
+  const [stats, setStats] = useState<{
+    successRate: number;
+    avgLatencyMs: number;
+    reconnections: number;
+  } | null>(null);
 
   useEffect(() => {
     // Load known hosts
@@ -1837,7 +2206,11 @@ function SshSettings() {
     update("features", { ...features, [key]: value });
   }
 
-  async function removeKnownHost(hostname: string, port: number, keyType: string) {
+  async function removeKnownHost(
+    hostname: string,
+    port: number,
+    keyType: string,
+  ) {
     try {
       await window.crab.ssh.removeKnownHost(hostname, port, keyType);
       setKnownHosts(await window.crab.ssh.listKnownHosts());
@@ -1866,9 +2239,14 @@ function SshSettings() {
       {features.sshRemoteEnabled && (
         <>
           {/* Global defaults */}
-          <div className="mt-4 border-t border-gx-border pt-4">
-            <h3 className="mb-3 text-xs font-semibold text-gx-text">Global Defaults</h3>
-            <Row label="Keep-alive interval" hint="Seconds between SSH keep-alive packets.">
+          <div className="mt-4 border-t border-border pt-4">
+            <h3 className="mb-3 text-xs font-semibold text-foreground">
+              Global Defaults
+            </h3>
+            <Row
+              label="Keep-alive interval"
+              hint="Seconds between SSH keep-alive packets."
+            >
               <NumberInput
                 value={15}
                 onChange={() => {}}
@@ -1878,16 +2256,28 @@ function SshSettings() {
                 suffix="sec"
               />
             </Row>
-            <Row label="Auto-reconnect" hint="Automatically reconnect on connection loss.">
+            <Row
+              label="Auto-reconnect"
+              hint="Automatically reconnect on connection loss."
+            >
               <Toggle checked={true} onChange={() => {}} />
             </Row>
-            <Row label="Auto-deploy agent" hint="Automatically deploy the remote agent on first connection.">
+            <Row
+              label="Auto-deploy agent"
+              hint="Automatically deploy the remote agent on first connection."
+            >
               <Toggle checked={true} onChange={() => {}} />
             </Row>
-            <Row label="Enable compression" hint="Use zlib compression for SSH connections.">
+            <Row
+              label="Enable compression"
+              hint="Use zlib compression for SSH connections."
+            >
               <Toggle checked={false} onChange={() => {}} />
             </Row>
-            <Row label="Idle timeout" hint="Disconnect after this many minutes of inactivity. 0 = never.">
+            <Row
+              label="Idle timeout"
+              hint="Disconnect after this many minutes of inactivity. 0 = never."
+            >
               <NumberInput
                 value={0}
                 onChange={() => {}}
@@ -1900,38 +2290,52 @@ function SshSettings() {
           </div>
 
           {/* Known Hosts */}
-          <div className="mt-4 border-t border-gx-border pt-4">
-            <h3 className="mb-3 text-xs font-semibold text-gx-text">Saved host keys</h3>
-            <p className="mb-2 text-xs text-gx-muted">Keys approved in Crab. OpenSSH user and system trust records are also checked when connecting.</p>
-            {hostError && <p role="alert" className="mb-2 text-xs text-red-500">{hostError}</p>}
+          <div className="mt-4 border-t border-border pt-4">
+            <h3 className="mb-3 text-xs font-semibold text-foreground">
+              Saved host keys
+            </h3>
+            <p className="mb-2 text-xs text-muted-foreground">
+              Keys approved in Crab. OpenSSH user and system trust records are
+              also checked when connecting.
+            </p>
+            {hostError && (
+              <p role="alert" className="mb-2 text-xs text-destructive">
+                {hostError}
+              </p>
+            )}
             {knownHosts.length === 0 ? (
-              <p className="text-xs text-gx-muted">No host keys approved in Crab yet.</p>
+              <p className="text-xs text-muted-foreground">
+                No host keys approved in Crab yet.
+              </p>
             ) : (
               <ul className="space-y-2">
                 {knownHosts.map((host) => (
                   <li
                     key={`${host.hostname}:${host.port}:${host.keyType}`}
-                    className="flex items-center justify-between rounded border border-gx-border bg-gx-surface p-2"
+                    className="flex items-center justify-between rounded border border-border bg-card p-2"
                   >
                     <div className="min-w-0">
-                      <div className="truncate text-xs font-medium text-gx-text">
+                      <div className="truncate text-xs font-medium text-foreground">
                         {host.hostname}:{host.port}
                       </div>
-                      <div className="truncate font-mono text-[10px] text-gx-muted">
+                      <div className="truncate font-mono text-[10px] text-muted-foreground">
                         {host.keyType} {host.fingerprint.slice(0, 32)}...
                       </div>
-                      <div className="text-[10px] text-gx-muted">
+                      <div className="text-[10px] text-muted-foreground">
                         Added {new Date(host.addedAt).toLocaleDateString()}
                       </div>
                     </div>
-                    <button
+                    <Button
+                      variant="outline"
                       type="button"
-                      className="btn text-xs text-red-500 hover:text-red-600"
-                      onClick={() => removeKnownHost(host.hostname, host.port, host.keyType)}
+                      className="text-xs text-destructive hover:text-destructive"
+                      onClick={() =>
+                        removeKnownHost(host.hostname, host.port, host.keyType)
+                      }
                       aria-label={`Remove ${host.hostname} from known hosts`}
                     >
                       <Trash2 size={12} />
-                    </button>
+                    </Button>
                   </li>
                 ))}
               </ul>
@@ -1939,25 +2343,42 @@ function SshSettings() {
           </div>
 
           {/* Diagnostics */}
-          <div className="mt-4 border-t border-gx-border pt-4">
-            <h3 className="mb-3 text-xs font-semibold text-gx-text">Diagnostics</h3>
+          <div className="mt-4 border-t border-border pt-4">
+            <h3 className="mb-3 text-xs font-semibold text-foreground">
+              Diagnostics
+            </h3>
             {stats ? (
               <div className="grid grid-cols-3 gap-4">
-                <div className="rounded border border-gx-border bg-gx-surface p-3 text-center">
-                  <div className="text-lg font-bold text-gx-text">{stats.successRate}%</div>
-                  <div className="text-[10px] text-gx-muted">Success Rate</div>
+                <div className="rounded border border-border bg-card p-3 text-center">
+                  <div className="text-lg font-bold text-foreground">
+                    {stats.successRate}%
+                  </div>
+                  <div className="text-[10px] text-muted-foreground">
+                    Success Rate
+                  </div>
                 </div>
-                <div className="rounded border border-gx-border bg-gx-surface p-3 text-center">
-                  <div className="text-lg font-bold text-gx-text">{stats.avgLatencyMs}ms</div>
-                  <div className="text-[10px] text-gx-muted">Avg Latency</div>
+                <div className="rounded border border-border bg-card p-3 text-center">
+                  <div className="text-lg font-bold text-foreground">
+                    {stats.avgLatencyMs}ms
+                  </div>
+                  <div className="text-[10px] text-muted-foreground">
+                    Avg Latency
+                  </div>
                 </div>
-                <div className="rounded border border-gx-border bg-gx-surface p-3 text-center">
-                  <div className="text-lg font-bold text-gx-text">{stats.reconnections}</div>
-                  <div className="text-[10px] text-gx-muted">Reconnections</div>
+                <div className="rounded border border-border bg-card p-3 text-center">
+                  <div className="text-lg font-bold text-foreground">
+                    {stats.reconnections}
+                  </div>
+                  <div className="text-[10px] text-muted-foreground">
+                    Reconnections
+                  </div>
                 </div>
               </div>
             ) : (
-              <p className="text-xs text-gx-muted">No connection statistics available yet. Stats are collected after your first SSH connection.</p>
+              <p className="text-xs text-muted-foreground">
+                No connection statistics available yet. Stats are collected
+                after your first SSH connection.
+              </p>
             )}
           </div>
         </>
@@ -1979,8 +2400,10 @@ function Section({
 }) {
   return (
     <section>
-      <h2 className="mb-1 text-lg font-semibold text-gx-text">{title}</h2>
-      {subtitle && <div className="mb-4 text-xs text-gx-muted">{subtitle}</div>}
+      <h2 className="mb-1 text-lg font-semibold text-foreground">{title}</h2>
+      {subtitle && (
+        <div className="mb-4 text-xs text-muted-foreground">{subtitle}</div>
+      )}
       <div className="space-y-5">{children}</div>
     </section>
   );
@@ -1994,12 +2417,14 @@ function SubSection({
   children: React.ReactNode;
 }) {
   return (
-    <div className="mt-6 border-t border-gx-border pt-5 first:mt-0 first:border-t-0 first:pt-0">
-      <h3 className="mb-3 text-sm font-semibold text-gx-text">{title}</h3>
+    <div className="mt-6 border-t border-border pt-5 first:mt-0 first:border-t-0 first:pt-0">
+      <h3 className="mb-3 text-sm font-semibold text-foreground">{title}</h3>
       <div className="space-y-4">{children}</div>
     </div>
   );
 }
+
+const SettingsControlLabel = createContext<string | undefined>(undefined);
 
 function Row({
   label,
@@ -2012,48 +2437,60 @@ function Row({
   setting?: keyof Settings;
   children: React.ReactNode;
 }) {
-  const scope = useContext(SettingsEditorContext), workspace = useWorkspaceSettings();
-  const overridden = setting && workspace.workspaceSettings && Object.hasOwn(workspace.workspaceSettings, setting);
+  const scope = useContext(SettingsEditorContext),
+    workspace = useWorkspaceSettings();
+  const overridden =
+    setting &&
+    workspace.workspaceSettings &&
+    Object.hasOwn(workspace.workspaceSettings, setting);
   return (
-    <fieldset aria-label={label} disabled={scope === "workspace" && (!setting || !isWorkspaceSetting(setting))} className="grid grid-cols-[1fr_auto] items-start gap-6 border-b border-gx-border/60 pb-4 last:border-b-0">
+    <fieldset
+      aria-label={label}
+      disabled={
+        scope === "workspace" && (!setting || !isWorkspaceSetting(setting))
+      }
+      className="grid grid-cols-[1fr_auto] items-start gap-6 border-b border-border/60 pb-4 last:border-b-0"
+    >
       <div>
-        <div className="flex items-center text-sm text-gx-text">
+        <div className="flex items-center text-sm text-foreground">
           {label}
           {overridden && <ScopeChip />}
-          {scope === "workspace" && setting && overridden && <button type="button" className="ml-2 text-xs text-gx-accent" aria-label={`Use User value for ${label}`} onClick={() => void workspace.clearWorkspaceSetting(setting)}>Use User value</button>}
+          {scope === "workspace" && setting && overridden && (
+            <Button
+              variant="ghost"
+              size="compact"
+              type="button"
+              className="ml-2 text-xs text-primary"
+              aria-label={`Use User value for ${label}`}
+              onClick={() => void workspace.clearWorkspaceSetting(setting)}
+            >
+              Use User value
+            </Button>
+          )}
         </div>
-        {hint && <div className="mt-1 max-w-md text-[11.5px] text-gx-muted">{hint}</div>}
+        {hint && (
+          <div className="mt-1 max-w-md text-[11.5px] text-muted-foreground">
+            {hint}
+          </div>
+        )}
       </div>
-      <div className="min-w-[200px]">{children}</div>
+      <div className="min-w-[200px]"><SettingsControlLabel.Provider value={label}>{children}</SettingsControlLabel.Provider></div>
     </fieldset>
   );
 }
 
-function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      onClick={() => onChange(!checked)}
-      className={clsx(
-        "relative inline-flex h-5 w-9 items-center rounded-full border transition",
-        checked
-          ? "border-gx-accent bg-gx-accent/70"
-          : "border-gx-border bg-gx-bg-sub",
-      )}
-    >
-      <span
-        className={clsx(
-          "inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition",
-          checked ? "translate-x-[18px]" : "translate-x-[2px]",
-        )}
-      />
-    </button>
-  );
+function Toggle({
+  checked,
+  onChange,
+}: {
+  checked: boolean;
+  onChange: (value: boolean) => void;
+}) {
+  const controlLabel = useContext(SettingsControlLabel);
+  return <Switch aria-label={controlLabel} checked={checked} onCheckedChange={onChange} />;
 }
 
-function Select({
+function SettingsSelect({
   value,
   onChange,
   options,
@@ -2062,18 +2499,32 @@ function Select({
   onChange: (v: string) => void;
   options: Array<{ value: string; label: string; disabled?: boolean }>;
 }) {
+  const controlLabel = useContext(SettingsControlLabel);
   return (
-    <select
-      className="rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-sm focus-visible:outline-none focus:border-gx-accent"
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
+    <Select
+      value={":" + String(value)}
+      onValueChange={(selectedValue) => {
+        const value = selectedValue.slice(1);
+        return onChange(value);
+      }}
     >
-      {options.map((o) => (
-        <option key={o.value} value={o.value} disabled={o.disabled}>
-          {o.label}
-        </option>
-      ))}
-    </select>
+      <SelectTrigger aria-label={controlLabel} className="rounded border border-border bg-background px-2 py-1 text-sm focus-visible:outline-none focus:border-primary">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectGroup>
+          {options.map((o) => (
+            <SelectItem
+              key={o.value}
+              disabled={o.disabled}
+              value={":" + String(o.value)}
+            >
+              {o.label}
+            </SelectItem>
+          ))}
+        </SelectGroup>
+      </SelectContent>
+    </Select>
   );
 }
 
@@ -2092,9 +2543,10 @@ function NumberInput({
   step?: number;
   suffix?: string;
 }) {
+  const controlLabel = useContext(SettingsControlLabel);
   return (
     <div className="flex items-center gap-2">
-      <input
+      <Input aria-label={controlLabel}
         type="number"
         value={value}
         min={min}
@@ -2105,9 +2557,11 @@ function NumberInput({
           if (!Number.isFinite(n)) return;
           onChange(n);
         }}
-        className="w-24 rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-sm font-mono focus-visible:outline-none focus:border-gx-accent"
+        className="w-24 rounded border border-border bg-background px-2 py-1 text-sm font-mono focus-visible:outline-none focus:border-primary"
       />
-      {suffix && <span className="text-xs text-gx-muted">{suffix}</span>}
+      {suffix && (
+        <span className="text-xs text-muted-foreground">{suffix}</span>
+      )}
     </div>
   );
 }
@@ -2115,8 +2569,10 @@ function NumberInput({
 function KV({ label, value }: { label: string; value: string }) {
   return (
     <div>
-      <div className="text-[10px] uppercase tracking-wider text-gx-muted">{label}</div>
-      <div className="mt-0.5 font-mono text-sm text-gx-text">{value}</div>
+      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+        {label}
+      </div>
+      <div className="mt-0.5 font-mono text-sm text-foreground">{value}</div>
     </div>
   );
 }

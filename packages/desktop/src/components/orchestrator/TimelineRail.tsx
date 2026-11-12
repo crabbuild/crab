@@ -1,3 +1,10 @@
+import { Button } from "@/components/ui/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 /**
  * TimelineRail — vertical mini-rail rendered along the left side of the
  * chat column showing dots for each user message and tool call, coloured
@@ -8,8 +15,8 @@
  * visible dots plus a buffer of 50 above/below.
  */
 
-import { useCallback, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { useCallback, useMemo, useRef, useState } from "react";
 import type { AgentEvent } from "../../../electron/orchestrator-adapters";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -162,10 +169,10 @@ function deriveDots(events: AgentEvent[], feedback: string[]): DotEntry[] {
 // ─── Colour mapping ──────────────────────────────────────────────────────────
 
 const colorClasses: Record<DotEntry["color"], string> = {
-  info: "bg-gx-info",
-  success: "bg-gx-success",
-  error: "bg-gx-error",
-  warning: "bg-gx-warn",
+  info: "bg-info",
+  success: "bg-success",
+  error: "bg-destructive",
+  warning: "bg-warning",
 };
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -282,29 +289,43 @@ function DotItem({
   const size = dot.kind === "user" ? 8 : 5;
 
   return (
-    <div className="relative flex items-center justify-center" style={{ height: DOT_HEIGHT }}>
-      <button
-        type="button"
-        className={`rounded-full transition-transform hover:scale-125 ${colorClasses[dot.color]}`}
-        style={{ width: size, height: size }}
-        onClick={onClick}
-        onMouseEnter={onHover}
-        onMouseLeave={onLeave}
-        aria-label={`${dot.label}: ${dot.summary || "no details"}`}
-        title=""
-      />
-      {isHovered && (
-        <div
-          className="absolute left-5 z-50 whitespace-nowrap rounded border border-gx-border bg-gx-surface px-2 py-1 text-[10px] text-gx-text shadow-lg"
-          role="tooltip"
+    <div
+      className="flex items-center justify-center"
+      style={{ height: DOT_HEIGHT }}
+    >
+      <TooltipProvider>
+        <Tooltip
+          open={isHovered}
+          onOpenChange={(open) => {
+            if (open) onHover();
+            else onLeave();
+          }}
         >
-          <div className="font-medium">{dot.label}</div>
-          {dot.summary && (
-            <div className="max-w-[200px] truncate text-gx-muted">{dot.summary}</div>
-          )}
-          <div className="text-gx-muted">{dot.time}</div>
-        </div>
-      )}
+          <TooltipTrigger asChild>
+            <Button
+              variant="ghost"
+              size="compact"
+              type="button"
+              className={`rounded-full p-0 transition-transform hover:scale-125 ${colorClasses[dot.color]}`}
+              style={{ width: size, height: size }}
+              onClick={onClick}
+              aria-label={`${dot.label}: ${dot.summary || "no details"}`}
+            />
+          </TooltipTrigger>
+          <TooltipContent
+            side="right"
+            className="whitespace-nowrap px-2 py-1 text-[10px]"
+          >
+            <div className="font-medium">{dot.label}</div>
+            {dot.summary && (
+              <div className="max-w-[200px] truncate opacity-75">
+                {dot.summary}
+              </div>
+            )}
+            <div className="opacity-75">{dot.time}</div>
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
     </div>
   );
 }

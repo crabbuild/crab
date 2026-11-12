@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Keybinding editor UI component.
  *
@@ -6,16 +7,17 @@
  * open sessions, and provides a "Reset to Defaults" action.
  */
 
-import { useCallback,useEffect,useRef,useState } from "react";
-import { RotateCcw,AlertTriangle,Keyboard } from "lucide-react";
 import clsx from "clsx";
+import { AlertTriangle, Keyboard, RotateCcw } from "lucide-react";
+import { useCallback,useEffect,useRef,useState } from "react";
 import {
-createKeybindingRegistry,
-detectConflicts,ACTION_LABELS,
-DEFAULT_BINDINGS,
+  ACTION_LABELS,
+  createKeybindingRegistry,
+  DEFAULT_BINDINGS,
+  detectConflicts,
+  type KeybindingConflict,
 type TerminalAction,
 type TerminalKeybinding,
-type KeybindingConflict
 } from "../lib/terminal-keybindings";
 
 // --- Types ---
@@ -146,19 +148,21 @@ export function KeybindingEditor({
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <Keyboard className="w-4 h-4 text-[var(--color-text-secondary)]" />
-          <h3 className="text-sm font-medium text-[var(--color-text-primary)]">
+          <Keyboard className="w-4 h-4 text-muted-foreground" />
+          <h3 className="text-sm font-medium text-foreground">
             Terminal Keybindings
           </h3>
         </div>
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           onClick={resetAll}
-          className="flex items-center gap-1 px-2 py-1 text-xs rounded hover:bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]"
+          className="flex items-center gap-1 px-2 py-1 text-xs rounded hover:bg-accent text-muted-foreground"
           title="Reset all keybindings to defaults"
         >
           <RotateCcw className="w-3 h-3" />
           Reset to Defaults
-        </button>
+        </Button>
       </div>
 
       {/* Binding list */}
@@ -169,12 +173,12 @@ export function KeybindingEditor({
             className={clsx(
               "flex items-center justify-between px-3 py-2 rounded",
               editingAction === binding.action
-                ? "bg-[var(--color-bg-accent)] ring-1 ring-[var(--color-border-accent)]"
-                : "hover:bg-[var(--color-bg-secondary)]",
+                ? "bg-accent ring-1 ring-ring"
+                : "hover:bg-card",
             )}
           >
             {/* Action label */}
-            <span className="text-sm text-[var(--color-text-primary)] min-w-[180px]">
+            <span className="text-sm text-foreground min-w-[180px]">
               {ACTION_LABELS[binding.action]}
             </span>
 
@@ -182,42 +186,50 @@ export function KeybindingEditor({
             <div className="flex items-center gap-2">
               {editingAction === binding.action ? (
                 <div className="flex items-center gap-2" ref={captureRef}>
-                  <kbd className="px-2 py-1 text-xs font-mono bg-[var(--color-bg-tertiary)] border border-[var(--color-border)] rounded min-w-[120px] text-center">
+                  <kbd className="px-2 py-1 text-xs font-mono bg-accent border border-border rounded min-w-[120px] text-center">
                     {pendingKeys || "Press keys..."}
                   </kbd>
                   {pendingKeys && (
                     <>
-                      <button
+                      <Button
+                        variant="ghost"
+                        size="compact"
                         onClick={confirmBinding}
-                        className="px-2 py-1 text-xs bg-[var(--color-bg-accent)] text-[var(--color-text-accent)] rounded hover:opacity-80"
+                        className="px-2 py-1 text-xs bg-accent text-foreground rounded hover:opacity-80"
                       >
                         Save
-                      </button>
-                      <button
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="compact"
                         onClick={cancelEditing}
-                        className="px-2 py-1 text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]"
+                        className="px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
                       >
                         Cancel
-                      </button>
+                      </Button>
                     </>
                   )}
                 </div>
               ) : (
                 <>
-                  <button
+                  <Button
+                    variant="ghost"
+                    size="compact"
                     onClick={() => startEditing(binding.action)}
-                    className="px-2 py-1 text-xs font-mono bg-[var(--color-bg-tertiary)] border border-[var(--color-border)] rounded hover:border-[var(--color-border-accent)] min-w-[120px] text-center"
+                    className="px-2 py-1 text-xs font-mono bg-accent border border-border rounded hover:border-ring min-w-[120px] text-center"
                   >
                     {binding.keys}
-                  </button>
+                  </Button>
                   {!binding.isDefault && (
-                    <button
+                    <Button
+                      variant="ghost"
+                      size="compact"
                       onClick={() => resetAction(binding.action)}
-                      className="p-1 text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)]"
+                      className="p-1 text-muted-foreground hover:text-muted-foreground"
                       title={`Reset to default (${DEFAULT_BINDINGS[binding.action]})`}
                     >
                       <RotateCcw className="w-3 h-3" />
-                    </button>
+                    </Button>
                   )}
                 </>
               )}
@@ -228,13 +240,13 @@ export function KeybindingEditor({
 
       {/* Conflict warnings */}
       {conflicts.length > 0 && (
-        <div className="flex flex-col gap-1 p-2 rounded bg-yellow-500/10 border border-yellow-500/30">
-          <div className="flex items-center gap-1 text-xs font-medium text-yellow-600 dark:text-yellow-400">
+        <div className="flex flex-col gap-1 p-2 rounded bg-warning/10 border border-warning/30">
+          <div className="flex items-center gap-1 text-xs font-medium text-warning text-warning">
             <AlertTriangle className="w-3 h-3" />
             Conflicts detected
           </div>
           {conflicts.map((conflict, i) => (
-            <span key={i} className="text-xs text-yellow-600 dark:text-yellow-400 pl-4">
+            <span key={i} className="text-xs text-warning text-warning pl-4">
               {conflict.conflictsWith}
             </span>
           ))}

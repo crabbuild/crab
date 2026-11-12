@@ -1,3 +1,4 @@
+import { chooseSelect } from "../helpers/select";
 import { test, expect, _electron as electron } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -53,7 +54,10 @@ test("SSH editor retains failed edits across tabs and writes the latest buffer a
     expect(existsSync(settingsFile)).toBe(false);
     await page.keyboard.press(process.platform === "darwin" ? "Meta+," : "Control+,");
     await page.getByRole("tab", { name: "Workspace", exact: true }).click();
-    await page.getByRole("group", { name: "Theme", exact: true }).getByRole("combobox").selectOption("light");
+    await chooseSelect(
+      page.getByRole("group", { name: "Theme", exact: true }).getByRole("combobox"),
+      "light",
+    );
     await expect(page.locator("html")).toHaveClass(/theme-light/);
     await expect.poll(() => JSON.parse(readFileSync(settingsFile, "utf8")).theme).toBe("light");
     const initialSettings = JSON.parse(readFileSync(settingsFile, "utf8"));

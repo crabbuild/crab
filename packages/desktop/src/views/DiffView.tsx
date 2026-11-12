@@ -1,21 +1,35 @@
-import { useEffect, useRef, useState, useCallback } from "react";
-import { SafePatchDiff } from "../components/SafePatchDiff";
-import { LargeFileDiffView } from "../components/LargeFileDiffView";
+import { Button } from "@/components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { FileMinus, GitCompareArrows, Loader2 } from "lucide-react";
-import { OpenRepo } from "../state";
-import { fileDiffCancellable, isCancelledError, type FileComparison, type DiffVersion } from "../ipc";
-import { useSetting } from "../settings";
-import { useEffectiveTheme } from "../hooks/useEffectiveTheme";
-import { diffOptions } from "../lib/diffTheme";
-import { NotebookDiffView } from "../components/NotebookDiffView";
-import { PatchMinimap } from "../components/PatchMinimap";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   CommentGutter,
   type CommentsByLine,
   type DiffComment,
 } from "../components/CommentGutter";
+import { LargeFileDiffView } from "../components/LargeFileDiffView";
+import { NotebookDiffView } from "../components/NotebookDiffView";
+import { PatchMinimap } from "../components/PatchMinimap";
+import { SafePatchDiff } from "../components/SafePatchDiff";
+import { useEffectiveTheme } from "../hooks/useEffectiveTheme";
+import {
+  fileDiffCancellable,
+  isCancelledError,
+  type DiffVersion,
+  type FileComparison,
+} from "../ipc";
+import { diffOptions } from "../lib/diffTheme";
+import { useSetting } from "../settings";
+import { OpenRepo } from "../state";
 
-export type { DiffComment, CommentsByLine };
+export type { CommentsByLine, DiffComment };
 
 type Comparison = "working" | "unstaged" | "staged";
 
@@ -47,20 +61,45 @@ function DiffHeader({
   head?: string | null;
 }) {
   return (
-    <div className="flex shrink-0 items-center gap-3 border-b border-gx-border bg-gx-surface px-3 py-1.5 text-[11px] text-gx-muted">
-      <GitCompareArrows size={13} className="text-gx-accent" />
-      <span className="min-w-0 truncate font-mono text-gx-text" title={path}>{path}</span>
+    <div className="flex shrink-0 items-center gap-3 border-b border-border bg-card px-3 py-1.5 text-[11px] text-muted-foreground">
+      <GitCompareArrows size={13} className="text-primary" />
+      <span className="min-w-0 truncate font-mono text-foreground" title={path}>
+        {path}
+      </span>
       <span className="chip text-[9px]">{badge}</span>
       <span className="ml-auto">
         {onComparisonChange && comparison ? (
-          <select aria-label="Compare file versions" className="rounded border border-gx-border bg-gx-surface px-2 py-1 text-gx-text" value={comparison} onChange={(event) => onComparisonChange(event.target.value as Comparison)}>
-            <option value="working">HEAD → Working tree</option>
-            <option value="unstaged">Index → Working tree</option>
-            <option value="staged">HEAD → Index</option>
-          </select>
+          <Select
+            value={":" + String(comparison)}
+            onValueChange={(selectedValue) => {
+              const value = selectedValue.slice(1);
+              return onComparisonChange(value as Comparison);
+            }}
+          >
+            <SelectTrigger
+              aria-label="Compare file versions"
+              className="rounded border border-border bg-card px-2 py-1 text-foreground"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                <SelectItem value={":" + String("working")}>
+                  HEAD → Working tree
+                </SelectItem>
+                <SelectItem value={":" + String("unstaged")}>
+                  Index → Working tree
+                </SelectItem>
+                <SelectItem value={":" + String("staged")}>
+                  HEAD → Index
+                </SelectItem>
+              </SelectGroup>
+            </SelectContent>
+          </Select>
         ) : base || head ? (
           <>
-            {base ?? (head ? "Empty tree" : "HEAD")} … {head ?? "(working tree)"}
+            {base ?? (head ? "Empty tree" : "HEAD")} …{" "}
+            {head ?? "(working tree)"}
           </>
         ) : (
           "Working tree vs HEAD"
@@ -128,32 +167,64 @@ export function DiffView({ repo, path, base, head, commentsByLine, onAddComment 
     commentsByLine != null && Object.keys(commentsByLine).length > 0;
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-gx-bg-sub">
-      <DiffHeader path={path} badge={result?.kind === "large_file" ? "large file" : result?.kind ?? "diff"} base={base} head={head} comparison={comparison} onComparisonChange={!base && !head ? setComparison : undefined} />
+    <div className="flex h-full min-h-0 flex-col bg-background">
+      <DiffHeader
+        path={path}
+        badge={
+          result?.kind === "large_file"
+            ? "large file"
+            : (result?.kind ?? "diff")
+        }
+        base={base}
+        head={head}
+        comparison={comparison}
+        onComparisonChange={!base && !head ? setComparison : undefined}
+      />
       <div className="flex min-h-0 flex-1">
         <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto">
           {err && (
-            <div role="alert" className="m-4 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">
+            <div role="alert" className="m-4 rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
               {err}
-              <button className="btn ml-2" onClick={handleRefresh}>Retry comparison</button>
+              <Button variant="outline" className="ml-2" onClick={handleRefresh}>
+                Retry comparison
+              </Button>
             </div>
           )}
-          {!repo.native_session_id && <p role="status" className="p-4 text-sm text-gx-muted">Waiting for repository recovery…</p>}
+          {!repo.native_session_id && (
+            <p role="status" className="p-4 text-sm text-muted-foreground">
+              Waiting for repository recovery…
+            </p>
+          )}
           {repo.native_session_id && !err && result == null && (
-            <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted">
-              {stopped ? <>Comparison cancelled. <button className="btn" onClick={handleRefresh}>Retry comparison</button></>
-                : <><Loader2 size={14} className="animate-spin" /> Running diff… <button className="btn" onClick={() => cancelRef.current?.()}>Cancel comparison</button></>}
+            <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
+              {stopped ? (
+                <>
+                  Comparison cancelled.{" "}
+                  <Button variant="outline" onClick={handleRefresh}>
+                    Retry comparison
+                  </Button>
+                </>
+              ) : (
+                <>
+                  <Loader2 size={14} className="animate-spin" /> Running diff…{" "}
+                  <Button variant="outline" onClick={() => cancelRef.current?.()}>
+                    Cancel comparison
+                  </Button>
+                </>
+              )}
             </div>
           )}
           {!err && largeFileDiff && (
             <LargeFileDiffView data={largeFileDiff} repoId={head ? undefined : repo.repo_id} onRefresh={handleRefresh} />
           )}
-          {!err && notebook && <NotebookDiffView data={notebook} onRefresh={handleRefresh} />}
-          {!err && !largeFileDiff && patch != null && patch.trim().length === 0 && (
-            <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted">
-              <FileMinus size={14} /> No changes for this file.
-            </div>
+          {!err && notebook && (
+            <NotebookDiffView data={notebook} onRefresh={handleRefresh} />
           )}
+          {!err && !largeFileDiff && patch != null && patch.trim().length === 0 && (
+              <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
+                <FileMinus size={14} /> No changes for this file.
+              </div>
+            )}
           {!err && !largeFileDiff && patch != null && patch.trim().length > 0 && (
             <SafePatchDiff
               patch={patch}

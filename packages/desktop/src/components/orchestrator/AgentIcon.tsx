@@ -65,7 +65,7 @@ export function agentAccentColor(agentName: string | undefined | null): string {
       return "text-[#527fff]";
     case "custom":
     default:
-      return "text-gx-accent";
+      return "text-primary";
   }
 }
 
@@ -90,7 +90,7 @@ export function agentAccentBg(agentName: string | undefined | null): string {
       return "bg-[#527fff]/15";
     case "custom":
     default:
-      return "bg-gx-accent/15";
+      return "bg-primary/15";
   }
 }
 

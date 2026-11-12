@@ -6,57 +6,67 @@ high-contrast modes.
 
 ## Theme System
 
+Desktop controls follow [shadcn/ui's semantic roles](https://ui.shadcn.com/docs/theming)
+and [Geist's neutral palette structure](https://vercel.com/geist/colors).
+Primary actions use black/white; success, warning, destructive, info, and
+thinking colors communicate state. Navigation and selection use neutral
+surfaces. See [`../../DESIGN.md`](../../DESIGN.md) for component guidance.
+
 ### Theme Variants
 
-| Theme | Description |
-|-------|-------------|
-| Dark | Default dark theme with blue accents |
-| Light | Light background with dark text |
-| High Contrast Dark | Maximum contrast for low-vision users |
-| High Contrast Light | Maximum contrast on light background |
-| System | Follows OS dark/light preference |
+| Theme               | Description                                              |
+| ------------------- | -------------------------------------------------------- |
+| Dark                | Black background, light text and primary actions         |
+| Light               | White background, dark text and primary actions          |
+| High Contrast Dark  | Stronger text, input borders and focus indicators        |
+| High Contrast Light | Stronger text, input borders and focus indicators        |
+| System              | Follows OS dark/light preference, including live changes |
 
-### CSS Custom Properties
+### Canonical Tokens
 
-All colors are defined as CSS custom properties on `:root`, enabling
-instant theme switching without re-rendering:
+`theme-tokens.json` owns all four palettes as RGB channel triples. The
+Tailwind plugin generates `:root` defaults and `.theme-*` variables;
+`index.html` applies the saved theme before React mounts. SettingsProvider
+keeps the theme synchronized with user/workspace settings and OS changes.
+There is no parallel palette in `index.css` or theme asset JSON files.
 
-```css
-:root[data-theme="dark"] {
-  --gx-bg: #0f1115;
-  --gx-bg-sub: #13161b;
-  --gx-surface: #1a1d24;
-  --gx-surface-hover: #242832;
-  --gx-border: #2a2e38;
-  --gx-text: #e7eaf1;
-  --gx-muted: #8b919e;
-  --gx-accent: #4f8cff;
-  --gx-success: #34d399;
-  --gx-warn: #fbbf24;
-  --gx-error: #f87171;
-  --gx-info: #60a5fa;
-  --gx-thinking: #a78bfa;
-}
-```
+Use `bg-background`, `bg-card`, `text-foreground`, `text-muted-foreground`,
+`border-border`, and paired `bg-primary text-primary-foreground` utilities.
+The RGB representation supports Tailwind v3 opacity modifiers such as
+`bg-success/10`. `accent` denotes a neutral hover/selection surface;
+`primary` denotes an action, with its own foreground pair.
 
-### Tailwind Integration
+Application controls live in `src/components/ui/`: shadcn Button, Input,
+Textarea, InputGroup, Select, Combobox, DropdownMenu, Popover, Checkbox, Switch, RadioGroup,
+ToggleGroup, Slider, Calendar, Command, Collapsible, Tabs, Dialog, AlertDialog,
+Tooltip, Resizable, and Sonner notifications. Their source follows shadcn's
+Radix composition adapted to React 18, Tailwind v3 and desktop density.
+Use these primitives instead of native selects, checkboxes, browser prompts,
+or hand-positioned menus. System file pickers and terminal/editor engine
+internals remain platform integrations.
 
-Theme tokens are mapped to Tailwind utilities:
+Input groups own the shared border/focus indicator around a field and its addons.
+Compose `InputGroupInput` or `InputGroupTextarea` with `InputGroupAddon` to avoid
+nested input borders. Chat composers use the same group around quick attachments,
+the auto-growing editor and toolbar; the group retains the measurement ref.
+Inputs keep their native change events and forwarded refs. Selection controls
+use value callbacks. Existing application selects namespace Radix item values
+with a leading colon, then remove it at the call site; this preserves selectable
+empty/“None” values and arbitrary IDs without a sentinel collision. Named selects
+still submit normal form values when used directly with shadcn Select.
 
-```typescript
-// tailwind.config.ts
-colors: {
-  "gx-bg": "var(--gx-bg)",
-  "gx-surface": "var(--gx-surface)",
-  "gx-border": "var(--gx-border)",
-  "gx-text": "var(--gx-text)",
-  "gx-muted": "var(--gx-muted)",
-  // ...
-}
-```
+Radix owns popup portals, collision handling, dismissal and keyboard navigation.
+Keep forms in Popover or Dialog; use DropdownMenu items and submenus for actions.
+Completion popovers retain editor typing focus. Portalled controls stop keyboard
+propagation at their root so menu typeahead cannot trigger workspace shortcuts.
+Dialogs own focus trapping and restoration; queued prompts keep the original
+calling control until the final request closes.
 
-Components use semantic tokens (`text-gx-text`, `bg-gx-surface`)
-rather than raw color values, ensuring automatic theme adaptation.
+Geist and Geist Mono are bundled WOFF2 fonts, requiring no network access.
+Terminals and editors retain their own font settings and syntax/ANSI
+palettes. Default terminal chrome and application prompt dialogs read the
+same canonical palette; repository trees inherit live CSS variables even
+inside their shadow roots.
 
 ### Editor Themes
 
@@ -74,6 +84,7 @@ after first use.
 ### Workspace Themes
 
 Each repository can override the global theme:
+
 - Useful for distinguishing multiple open repos at a glance
 - Stored in `.crab/desktop/settings.json` within the repo
 - A colored accent bar appears in the TopBar when active
@@ -81,10 +92,10 @@ Each repository can override the global theme:
 ### Custom Theme Import
 
 Users can import VS Code themes:
+
 1. Settings → Appearance → Import Theme
 2. Select a `.json` theme file
 3. The theme is converted to Crab Desktop's token format
-4. Available in the theme dropdown
 
 ## Accessibility
 
@@ -136,6 +147,7 @@ expansion.
 ### Color Independence
 
 Information is never conveyed by color alone:
+
 - Git status uses icons + text labels alongside color
 - Diff additions/deletions use `+`/`-` prefixes
 - Error states include icon indicators
@@ -144,6 +156,7 @@ Information is never conveyed by color alone:
 ### High Contrast Mode
 
 High contrast themes provide:
+
 - Borders on all interactive elements (not just color changes)
 - Increased font weight for better readability
 - Underlines on links and interactive text
@@ -157,11 +170,20 @@ High contrast themes provide:
 npm run test:a11y  # Playwright + axe-core
 ```
 
-The a11y test suite:
-1. Launches the full Electron app
-2. Navigates to each major view
-3. Runs axe-core accessibility analysis
-4. Fails on any Level A or AA violations
+Theme qualification runs with:
+
+```bash
+npm test -- tests/theme-tokens.spec.ts tests/application-dialogs.spec.ts tests/control-composition.spec.ts tests/terminal-presets.spec.ts
+npx playwright test --project=theme-system
+```
+
+Token tests check readable foreground/background pairs. Browser tests use
+the production settings provider and controls to exercise four themes,
+form submission, empty selections, submenu navigation, forwarded refs,
+keyboard controls, queued modal focus, custom command persistence,
+OS theme changes, bundled fonts, and axe-core AA checks. The browser fixture
+stubs the main-process settings mirror and activity history only. Native
+application smoke testing complements this isolated component proof.
 
 ### What's Tested
 
@@ -176,6 +198,7 @@ The a11y test suite:
 
 Automated testing catches ~30-40% of accessibility issues. Full
 validation requires:
+
 - Manual testing with VoiceOver (macOS) / NVDA (Windows)
 - Keyboard-only navigation testing
 - User testing with assistive technology users

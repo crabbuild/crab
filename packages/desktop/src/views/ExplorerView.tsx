@@ -1,14 +1,25 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectLabel,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import clsx from "clsx";
 import { ChevronsDownUp, FilePlus, Filter, FolderPlus, Loader2, RefreshCw, Search } from "lucide-react";
-import { OpenRepo } from "../state";
-import { DirEntry, HydrationEntry, mainProcess, RefEntry, rpc } from "../ipc";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FileTree } from "../components/FileTree";
 import { TransferDropZone } from "../components/ssh/TransferDropZone";
-import { useFileWatcher, getWatchPath } from "../hooks/useFileWatcher";
-import { useSession, useActiveRepoKey } from "../lib/session-context";
-import { useRepoCapabilities } from "../hooks/useRepoCapabilities";
 import { useFileTransfers } from "../hooks/useFileTransfers";
+import { getWatchPath, useFileWatcher } from "../hooks/useFileWatcher";
+import { useRepoCapabilities } from "../hooks/useRepoCapabilities";
+import { DirEntry, HydrationEntry, mainProcess, RefEntry, rpc } from "../ipc";
+import { useActiveRepoKey, useSession } from "../lib/session-context";
+import { OpenRepo } from "../state";
 
 interface Props {
   repo: OpenRepo;
@@ -296,42 +307,56 @@ export const ExplorerView = memo(function ExplorerView({
 
   return (
     <>
-      <div className="shrink-0 border-b border-gx-border px-3 py-2">
-        <div className="mb-2 flex items-center justify-between text-[10px] uppercase tracking-wider text-gx-muted">
+      <div className="shrink-0 border-b border-border px-3 py-2">
+        <div className="mb-2 flex items-center justify-between text-[10px] uppercase tracking-wider text-muted-foreground">
           <span>Revision</span>
-          <button type="button" className="text-gx-muted hover:text-gx-text" onClick={refresh} title="Refresh" aria-label="Refresh file tree">
+          <Button
+            variant="ghost"
+            size="compact"
+            type="button" className="text-muted-foreground hover:text-foreground" onClick={refresh} title="Refresh" aria-label="Refresh file tree">
             <RefreshCw size={11} />
-          </button>
+          </Button>
         </div>
-        <select
-          className="mb-2 w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-xs focus-visible:outline-none focus:border-gx-accent"
-          value={rev ?? ""}
-          onChange={(e) => onChangeRev(e.target.value || null)}
+        <Select
+          value={":" + String(rev ?? "")}
+          onValueChange={(selectedValue) => {
+            const value = selectedValue.slice(1);
+            return onChangeRev(value || null);
+          }}
         >
-          <option value="">HEAD (default)</option>
+          <SelectTrigger className="mb-2 w-full rounded border border-border bg-background px-2 py-1 text-xs focus-visible:outline-none focus:border-primary">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              <SelectItem value={":" + String("")}>HEAD (default)</SelectItem>
           {branches.length > 0 && (
-            <optgroup label="Branches">
+            <SelectGroup>
+                  <SelectLabel>{"Branches"}</SelectLabel>
               {branches.map((r) => (
-                <option key={r.name} value={r.name}>
+                <SelectItem key={r.name} value={":" + String(r.name)}>
                   {r.name.replace(/^refs\/heads\//, "")}
-                </option>
-              ))}
-            </optgroup>
+                </SelectItem>
+                  ))}
+                </SelectGroup>
           )}
           {tags.length > 0 && (
-            <optgroup label="Tags">
+            <SelectGroup>
+                  <SelectLabel>{"Tags"}</SelectLabel>
               {tags.map((r) => (
-                <option key={r.name} value={r.name}>
+                <SelectItem key={r.name} value={":" + String(r.name)}>
                   {r.name.replace(/^refs\/tags\//, "")}
-                </option>
-              ))}
-            </optgroup>
-          )}
-        </select>
+                </SelectItem>
+                  ))}
+                </SelectGroup>
+              )}
+            </SelectGroup>
+          </SelectContent>
+        </Select>
         <div className="relative mt-2">
-          <Search size={12} className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-gx-muted" />
-          <input
-            className="w-full rounded border border-gx-border bg-gx-bg-sub pl-7 pr-2 py-1 text-xs focus-visible:outline-none focus:border-gx-accent"
+          <Search size={12} className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            className="w-full rounded border border-border bg-background pl-7 pr-2 py-1 text-xs focus-visible:outline-none focus:border-primary"
             placeholder="Filter files…"
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
@@ -339,27 +364,31 @@ export const ExplorerView = memo(function ExplorerView({
         </div>
         {/* Tracked / Untracked filter + action icons */}
         <div className="mt-2 flex items-center gap-1">
-          <Filter size={10} className="shrink-0 text-gx-muted" />
+          <Filter size={10} className="shrink-0 text-muted-foreground" />
           {(["all", "tracked", "untracked"] as const).map((v) => (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               key={v}
               type="button"
               onClick={() => setTrackFilter(v)}
               className={clsx(
                 "rounded px-1.5 py-0.5 text-[10px] transition",
                 trackFilter === v
-                  ? "bg-gx-accent/20 text-gx-accent"
-                  : "text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover",
+                  ? "bg-primary/20 text-primary"
+                  : "text-muted-foreground hover:text-foreground hover:bg-accent",
               )}
             >
               {v === "all" ? "All" : v === "tracked" ? "Tracked" : "Untracked"}
-            </button>
+            </Button>
           ))}
           {/* Right-aligned action icons */}
           <div className="ml-auto flex items-center gap-0.5">
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
-              className="rounded p-1 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text disabled:opacity-40 disabled:pointer-events-none"
+              className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40 disabled:pointer-events-none"
               title="New File"
               aria-label="New File"
               disabled={!canEdit}
@@ -369,10 +398,12 @@ export const ExplorerView = memo(function ExplorerView({
               }}
             >
               <FilePlus size={13} />
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
-              className="rounded p-1 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text disabled:opacity-40 disabled:pointer-events-none"
+              className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40 disabled:pointer-events-none"
               title="New Folder"
               aria-label="New Folder"
               disabled={!canEdit}
@@ -382,24 +413,26 @@ export const ExplorerView = memo(function ExplorerView({
               }}
             >
               <FolderPlus size={13} />
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
-              className="rounded p-1 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+              className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
               title="Collapse All"
               aria-label="Collapse All"
               onClick={() => setCollapseKey((k) => k + 1)}
             >
               <ChevronsDownUp size={13} />
-            </button>
+            </Button>
           </div>
         </div>
       </div>
       <div className="flex min-h-0 flex-1 flex-col">
         {/* Inline new file/folder input */}
         {newItemMode && canEdit && (
-          <div className="shrink-0 border-b border-gx-border px-3 py-2">
-            <div className="text-[10px] text-gx-muted mb-1">
+          <div className="shrink-0 border-b border-border px-3 py-2">
+            <div className="text-[10px] text-muted-foreground mb-1">
               {newItemMode === "file" ? "New File" : "New Folder"}
             </div>
             <form
@@ -429,8 +462,8 @@ export const ExplorerView = memo(function ExplorerView({
               }}
               className="flex gap-1"
             >
-              <input
-                className="flex-1 rounded border border-gx-border bg-gx-bg-sub px-2 py-0.5 text-xs focus-visible:outline-none focus:border-gx-accent"
+              <Input
+                className="flex-1 rounded border border-border bg-background px-2 py-0.5 text-xs focus-visible:outline-none focus:border-primary"
                 placeholder={newItemMode === "file" ? "filename.txt" : "folder-name"}
                 value={newItemName}
                 onChange={(e) => setNewItemName(e.target.value)}
@@ -442,22 +475,22 @@ export const ExplorerView = memo(function ExplorerView({
                   }
                 }}
               />
-              <button type="submit" className="btn btn-primary text-[10px] px-2 py-0.5" disabled={!newItemName.trim()}>
+              <Button variant="default" type="submit" className="text-[10px] px-2 py-0.5" disabled={!newItemName.trim()}>
                 Create
-              </button>
-              <button type="button" className="btn text-[10px] px-2 py-0.5" onClick={() => { setNewItemMode(null); setNewItemName(""); }}>
+              </Button>
+              <Button variant="outline" type="button" className="text-[10px] px-2 py-0.5" onClick={() => { setNewItemMode(null); setNewItemName(""); }}>
                 Cancel
-              </button>
+              </Button>
             </form>
           </div>
         )}
         {loading && (
-          <div className="flex items-center gap-2 p-3 text-xs text-gx-muted">
+          <div className="flex items-center gap-2 p-3 text-xs text-muted-foreground">
             <Loader2 size={12} className="animate-spin" /> Loading tree…
           </div>
         )}
         {error && (
-          <div className="m-3 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">
+          <div className="m-3 rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
             {error}
           </div>
         )}

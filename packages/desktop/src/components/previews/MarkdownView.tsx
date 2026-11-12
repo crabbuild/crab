@@ -39,12 +39,12 @@ export function MarkdownView({ repoId, path, rev }: Props) {
   }, [repoId, path, rev, maxKib]);
 
   return (
-    <div className="h-full min-h-0 overflow-hidden bg-gx-bg-sub">
+    <div className="h-full min-h-0 overflow-hidden bg-background">
       {err && (
-        <div className="m-4 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">{err}</div>
+        <div className="m-4 rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">{err}</div>
       )}
       {text == null && !err && (
-        <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted">
+        <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
           <Loader2 size={14} className="animate-spin" /> Loading…
         </div>
       )}

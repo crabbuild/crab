@@ -1,5 +1,12 @@
+import { Button } from "@/components/ui/button";
+import {
+  AlertCircle,
+  CheckCircle2,
+  Circle,
+  Clock,
+  Loader2,
+} from "lucide-react";
 import { useMemo } from "react";
-import { Circle, CheckCircle2, Loader2, AlertCircle, Clock } from "lucide-react";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -32,16 +39,16 @@ interface Props {
 function statusIcon(status: TaskNode["status"]) {
   switch (status) {
     case "applied":
-      return <CheckCircle2 size={14} className="text-gx-success" />;
+      return <CheckCircle2 size={14} className="text-success" />;
     case "running":
-      return <Loader2 size={14} className="animate-spin text-gx-accent" />;
+      return <Loader2 size={14} className="animate-spin text-primary" />;
     case "reviewing":
-      return <Circle size={14} className="fill-gx-info text-gx-info" />;
+      return <Circle size={14} className="fill-info text-info" />;
     case "failed":
-      return <AlertCircle size={14} className="text-gx-error" />;
+      return <AlertCircle size={14} className="text-destructive" />;
     case "queued":
     default:
-      return <Clock size={14} className="text-gx-muted/60" />;
+      return <Clock size={14} className="text-muted-foreground/60" />;
   }
 }
 
@@ -137,20 +144,18 @@ export function TaskGraph({ graph, onNodeClick }: Props) {
 
   return (
     <div
-      className="rounded border border-gx-border bg-gx-bg-sub p-4"
+      className="rounded border border-border bg-background p-4"
       role="figure"
       aria-label={`Task graph: ${graph.rootPrompt}`}
     >
       {/* Progress summary */}
-      <div className="mb-3 flex items-center gap-3 text-[11px] text-gx-muted">
+      <div className="mb-3 flex items-center gap-3 text-[11px] text-muted-foreground">
         <span>
           {done}/{total} complete
         </span>
-        {running > 0 && (
-          <span className="text-gx-accent">{running} running</span>
-        )}
+        {running > 0 && <span className="text-primary">{running} running</span>}
         {failed > 0 && (
-          <span className="text-gx-error">{failed} failed</span>
+          <span className="text-destructive">{failed} failed</span>
         )}
       </div>
 
@@ -166,26 +171,28 @@ export function TaskGraph({ graph, onNodeClick }: Props) {
               <div key={node.id} className="flex items-center gap-2">
                 {/* Dependency arrow (CSS line) */}
                 {colIdx > 0 && (
-                  <div className="h-px w-4 bg-gx-border" aria-hidden="true" />
+                  <div className="h-px w-4 bg-border" aria-hidden="true" />
                 )}
 
                 {/* Node card */}
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
                   onClick={() => onNodeClick?.(node.id)}
-                  className="flex items-center gap-2 rounded border border-gx-border/60 bg-gx-bg px-2.5 py-1.5 text-left transition hover:border-gx-accent/60 hover:bg-gx-surface-hover focus-visible:outline focus-visible:outline-1 focus-visible:outline-gx-accent"
+                  className="justify-start flex items-center gap-2 rounded border border-border/60 bg-background px-2.5 py-1.5 text-left transition hover:border-primary/60 hover:bg-accent focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary"
                   aria-label={`${node.title} — ${statusLabel(node.status)}`}
                   role="listitem"
                 >
                   {statusIcon(node.status)}
-                  <span className="max-w-[140px] truncate text-xs text-gx-text">
+                  <span className="max-w-[140px] truncate text-xs text-foreground">
                     {node.title}
                   </span>
-                </button>
+                </Button>
 
                 {/* Outgoing arrow */}
                 {colIdx < maxCol && (
-                  <div className="h-px w-4 bg-gx-border" aria-hidden="true" />
+                  <div className="h-px w-4 bg-border" aria-hidden="true" />
                 )}
               </div>
             ))}

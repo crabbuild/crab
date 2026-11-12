@@ -1,4 +1,5 @@
-import { app,BrowserWindow,dialog,ipcMain,Notification,shell,safeStorage,protocol,webContents } from "electron";
+import palettes from "../theme-tokens.json";
+import { app,nativeTheme,BrowserWindow,dialog,ipcMain,Notification,shell,safeStorage,protocol,webContents } from "electron";
 import * as path from "node:path";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -278,7 +279,7 @@ async function createWindow() {
     height: 820,
     minWidth: 880,
     minHeight: 560,
-    backgroundColor: "#0f1115",
+    backgroundColor: `rgb(${palettes[nativeTheme.shouldUseDarkColors ? "dark" : "light"].background})`,
     titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
@@ -651,109 +652,6 @@ function registerIpc(skillManager: SkillManager, storageConnections: StorageConn
     await shell.openPath(logsDir);
     return { opened: logsDir };
   });
-
-  // ---- Dialogs (prompt / confirm replacements for sandboxed renderer) ----
-
-  ipcMain.handle(
-    "crab:dialog-prompt",
-    async (_evt, message: string, defaultValue?: string) => {
-      if (!mainWindow) return null;
-      // Use a simple input dialog via Electron's showMessageBox + a
-      // workaround: Electron doesn't have a native prompt, so we use
-      // a BrowserWindow-based approach. For simplicity, we'll use the
-      // main window's webContents to evaluate a prompt-like dialog.
-      // Actually, the cleanest approach is to use dialog.showMessageBox
-      // for confirm and a small child window for prompt. But the
-      // simplest cross-platform solution is to just disable sandbox
-      // for prompt or use a custom HTML dialog.
-      //
-      // Simplest fix: use a synchronous approach via a modal child window.
-      const { BrowserWindow: BW } = require("electron") as typeof import("electron");
-      return new Promise<string | null>((resolve) => {
-        const promptWin = new BW({
-          parent: mainWindow!,
-          modal: true,
-          width: 400,
-          height: 180,
-          resizable: false,
-          minimizable: false,
-          maximizable: false,
-          show: false,
-          frame: true,
-          title: "Crab Desktop",
-          webPreferences: {
-            nodeIntegration: false,
-            contextIsolation: true,
-            sandbox: false,
-          },
-        });
-        const escaped = (s: string) => s.replace(/'/g, "\\'").replace(/\n/g, "\\n");
-        const html = `<!DOCTYPE html>
-<html><head><style>
-  body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; padding: 20px; margin: 0; background: #1a1d23; color: #e7eaf1; display: flex; flex-direction: column; height: 100vh; box-sizing: border-box; }
-  label { font-size: 13px; margin-bottom: 8px; display: block; }
-  input { width: 100%; padding: 6px 10px; border: 1px solid #3a3f4b; border-radius: 4px; background: #0f1115; color: #e7eaf1; font-size: 13px; outline: none; box-sizing: border-box; }
-  input:focus { border-color: #4f8cff; }
-  .buttons { margin-top: auto; display: flex; justify-content: flex-end; gap: 8px; }
-  button { padding: 5px 14px; border-radius: 4px; border: none; font-size: 12px; cursor: pointer; }
-  .ok { background: #4f8cff; color: #fff; }
-  .ok:hover { background: #3b7af0; }
-  .cancel { background: #2a2e38; color: #aab; }
-  .cancel:hover { background: #3a3f4b; }
-</style></head><body>
-  <label>${escaped(message)}</label>
-  <input id="inp" value="${escaped(defaultValue ?? "")}" autofocus />
-  <div class="buttons">
-    <button class="cancel" id="cancelBtn">Cancel</button>
-    <button class="ok" id="okBtn">OK</button>
-  </div>
-  <script>
-    const inp = document.getElementById('inp');
-    inp.select();
-    document.getElementById('okBtn').onclick = () => {
-      require = undefined; // safety
-      const val = inp.value;
-      document.title = 'RESULT:' + val;
-    };
-    document.getElementById('cancelBtn').onclick = () => {
-      document.title = 'CANCEL';
-    };
-    inp.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') document.getElementById('okBtn').click();
-      if (e.key === 'Escape') document.getElementById('cancelBtn').click();
-    });
-  </script>
-</body></html>`;
-        promptWin.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
-        promptWin.once("ready-to-show", () => promptWin.show());
-        promptWin.webContents.on("page-title-updated", (_e, title) => {
-          if (title.startsWith("RESULT:")) {
-            resolve(title.slice(7));
-            promptWin.close();
-          } else if (title === "CANCEL") {
-            resolve(null);
-            promptWin.close();
-          }
-        });
-        promptWin.on("closed", () => resolve(null));
-      });
-    },
-  );
-
-  ipcMain.handle(
-    "crab:dialog-confirm",
-    async (_evt, message: string) => {
-      if (!mainWindow) return false;
-      const res = await dialog.showMessageBox(mainWindow, {
-        type: "question",
-        buttons: ["Cancel", "OK"],
-        defaultId: 1,
-        cancelId: 0,
-        message,
-      });
-      return res.response === 1;
-    },
-  );
 
   // ---- Repo capabilities ----
 

@@ -54,11 +54,11 @@ export function PdfView({ repoId, path, rev }: Props) {
   }, [repoId, path, rev]);
 
   if (err) {
-    return <div className="m-4 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">{err}</div>;
+    return <div className="m-4 rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">{err}</div>;
   }
   if (!src) {
     return (
-      <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted">
+      <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
         <Loader2 size={14} className="animate-spin" /> Loading PDF…
       </div>
     );
@@ -66,10 +66,10 @@ export function PdfView({ repoId, path, rev }: Props) {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex shrink-0 items-center gap-2 border-b border-gx-border bg-gx-surface px-3 py-1.5 text-[11px] text-gx-muted">
+      <div className="flex shrink-0 items-center gap-2 border-b border-border bg-card px-3 py-1.5 text-[11px] text-muted-foreground">
         <span>PDF · {size != null ? formatBytes(size) : ""}</span>
       </div>
-      <iframe title={path} src={src} className="min-h-0 flex-1 bg-white" />
+      <iframe title={path} src={src} className="min-h-0 flex-1 bg-background" />
     </div>
   );
 }

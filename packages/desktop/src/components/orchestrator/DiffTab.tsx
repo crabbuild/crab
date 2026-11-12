@@ -1,3 +1,22 @@
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { repositoryTreeTheme } from "@/lib/repository-tree-theme";
+import type { GitStatus, GitStatusEntry } from "@pierre/trees";
+import {
+  FileTree as PierreFileTree,
+  useFileTree,
+  useFileTreeSelection,
+} from "@pierre/trees/react";
+import clsx from "clsx";
 import {
   forwardRef,
   useCallback,
@@ -7,15 +26,8 @@ import {
   useRef,
   useState,
 } from "react";
-import clsx from "clsx";
 import { call } from "../../ipc";
-import {
-  FileTree as PierreFileTree,
-  useFileTree,
-  useFileTreeSelection,
-} from "@pierre/trees/react";
-import type { GitStatus, GitStatusEntry } from "@pierre/trees";
-import { themeToTreeStyles } from "@pierre/trees";
+
 import {
   Check,
   Cherry,
@@ -37,11 +49,11 @@ import {
   X,
 } from "lucide-react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
-import { SafePatchDiff } from "../SafePatchDiff";
-import { CommentGutter } from "../CommentGutter";
-import type { CommentsByLine, DiffComment } from "../CommentGutter";
 import { useEffectiveTheme } from "../../hooks/useEffectiveTheme";
 import { diffOptions } from "../../lib/diffTheme";
+import type { CommentsByLine, DiffComment } from "../CommentGutter";
+import { CommentGutter } from "../CommentGutter";
+import { SafePatchDiff } from "../SafePatchDiff";
 import { OrchestratorTask } from "./TaskCard";
 
 // ── Types ───────────────────────────────────────────────────────────
@@ -158,7 +170,9 @@ export function DiffTab({ task, workspaceRevision, repo: _repo, active, initialA
       if (onAppliedFilesChange) {
         onAppliedFilesChange(updater);
       } else {
-        setLocalAppliedFiles((prev) => (typeof updater === "function" ? updater(prev) : updater));
+        setLocalAppliedFiles((prev) =>
+          typeof updater === "function" ? updater(prev) : updater,
+        );
       }
     },
     [onAppliedFilesChange],
@@ -412,7 +426,7 @@ export function DiffTab({ task, workspaceRevision, repo: _repo, active, initialA
   if (loading) {
     return (
       <div className="flex h-full items-center justify-center">
-        <Loader2 size={20} className="animate-spin text-gx-muted" />
+        <Loader2 size={20} className="animate-spin text-muted-foreground" />
       </div>
     );
   }
@@ -420,16 +434,28 @@ export function DiffTab({ task, workspaceRevision, repo: _repo, active, initialA
   if (diffError) {
     return (
       <div role="alert" className="flex h-full flex-col items-center justify-center gap-2 p-4 text-xs">
-        <span className="font-medium text-gx-error">Could not load changes</span>
-        <span className="max-w-lg break-words text-gx-muted">{diffError}</span>
-        <button type="button" onClick={() => setDiffRequest(request => request + 1)} className="rounded border border-gx-border px-3 py-1.5 hover:bg-gx-hover">Reload changes</button>
+        <span className="font-medium text-destructive">
+          Could not load changes
+        </span>
+        <span className="max-w-lg break-words text-muted-foreground">
+          {diffError}
+        </span>
+        <Button
+          variant="ghost"
+          size="compact"
+          type="button"
+          onClick={() => setDiffRequest(request => request + 1)}
+          className="rounded border border-border px-3 py-1.5 hover:bg-accent"
+        >
+          Reload changes
+        </Button>
       </div>
     );
   }
 
   if (files.length === 0) {
     return (
-      <div className="flex h-full items-center justify-center text-xs text-gx-muted">
+      <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
         {shouldDeferDiffFetch(task.status)
           ? "Diff will be available after the agent finishes."
           : "No changes to display."}
@@ -438,11 +464,16 @@ export function DiffTab({ task, workspaceRevision, repo: _repo, active, initialA
   }
 
   // Count unresolved comments
-  const unresolvedCount = Object.values(fileComments).reduce((total, fileMap) => {
-    return total + Object.values(fileMap).reduce((sum, comments) => {
+  const unresolvedCount = Object.values(fileComments).reduce(
+    (total, fileMap) => {
+      return (
+        total + Object.values(fileMap).reduce((sum, comments) => {
       return sum + comments.filter((c) => !c.resolved).length;
-    }, 0);
-  }, 0);
+    }, 0)
+      );
+    },
+    0,
+  );
 
   return (
     <div className="flex h-full flex-col">
@@ -472,7 +503,11 @@ export function DiffTab({ task, workspaceRevision, repo: _repo, active, initialA
         }}
       />
 
-      {revertError && <div role="alert" className="break-words border-b border-gx-border px-3 py-2 text-xs text-gx-error">{revertError}</div>}
+      {revertError && (
+        <div role="alert" className="break-words border-b border-border px-3 py-2 text-xs text-destructive">
+          {revertError}
+        </div>
+      )}
 
       {/* Conflict banner */}
       {conflicts && (
@@ -527,7 +562,7 @@ export function DiffTab({ task, workspaceRevision, repo: _repo, active, initialA
           )}
         </Panel>
 
-        <PanelResizeHandle className="w-[3px] cursor-col-resize bg-transparent transition-colors hover:bg-gx-accent/50" />
+        <PanelResizeHandle className="w-[3px] cursor-col-resize bg-transparent transition-colors hover:bg-primary/50" />
 
         {/* Right panel: diff content */}
         <Panel minSize={30}>
@@ -562,7 +597,7 @@ export function DiffTab({ task, workspaceRevision, repo: _repo, active, initialA
                 />
               </div>
             ) : (
-              <div className="flex h-full items-center justify-center text-xs text-gx-muted">
+              <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
                 Select a file to view its diff.
               </div>
             )}
@@ -571,62 +606,71 @@ export function DiffTab({ task, workspaceRevision, repo: _repo, active, initialA
       </PanelGroup>
 
       {inPrimaryWorkspace && (
-        <p role="status" className="border-t border-gx-border px-4 py-2 text-xs text-gx-muted">
+        <p role="status" className="border-t border-border px-4 py-2 text-xs text-muted-foreground">
           These edits are already in this workspace. Commit them in Git Changes.
         </p>
       )}
 
       {/* Action buttons (bottom bar) */}
-      <div className="flex shrink-0 items-center gap-2 border-t border-gx-border px-4 py-2">
-        <button
+      <div className="flex shrink-0 items-center gap-2 border-t border-border px-4 py-2">
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={handleApplyAll}
           disabled={inPrimaryWorkspace}
-          className="flex items-center gap-1.5 rounded-md bg-gx-success px-3 py-1.5 text-xs font-medium text-white hover:bg-gx-success/85 transition disabled:opacity-50 disabled:cursor-not-allowed"
+          className="flex items-center gap-1.5 rounded-md bg-success px-3 py-1.5 text-xs font-medium text-success-foreground hover:bg-success/85 transition disabled:opacity-50 disabled:cursor-not-allowed"
         >
           <Check size={12} /> Apply all
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={handleCherryPick}
           disabled={inPrimaryWorkspace || selectedFiles.size === 0}
-          className="flex items-center gap-1.5 rounded-md border border-gx-border px-3 py-1.5 text-xs text-gx-text hover:bg-gx-surface-hover transition disabled:opacity-50 disabled:cursor-not-allowed"
+          className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs text-foreground hover:bg-accent transition disabled:opacity-50 disabled:cursor-not-allowed"
         >
           <Cherry size={12} /> Apply selected ({selectedFiles.size})
-        </button>
+        </Button>
 
         <div className="flex-1" />
 
         {onReviewWithAi && (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={onReviewWithAi}
-            className="flex items-center gap-1.5 rounded-md border border-gx-border px-3 py-1.5 text-xs text-gx-text hover:bg-gx-surface-hover transition"
+            className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs text-foreground hover:bg-accent transition"
           >
             <Sparkles size={12} /> Review with AI
-          </button>
+          </Button>
         )}
         {onCreatePr && (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={onCreatePr}
-            className="flex items-center gap-1.5 rounded-md border border-gx-border px-3 py-1.5 text-xs text-gx-text hover:bg-gx-surface-hover transition"
+            className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs text-foreground hover:bg-accent transition"
           >
             <GitPullRequest size={12} /> Create PR
-          </button>
+          </Button>
         )}
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={onDiscard}
-          className="flex items-center gap-1.5 rounded-md border border-gx-error/40 px-3 py-1.5 text-xs text-gx-error hover:bg-gx-error/10 transition"
+          className="flex items-center gap-1.5 rounded-md border border-destructive/40 px-3 py-1.5 text-xs text-destructive hover:bg-destructive/10 transition"
         >
           <Trash2 size={12} /> Discard
-        </button>
+        </Button>
       </div>
     </div>
   );
 }
-
 
 // ── Toolbar ─────────────────────────────────────────────────────────
 
@@ -666,152 +710,149 @@ function DiffToolbar({
   const selectableCount = totalCount - appliedCount;
 
   return (
-    <div className="flex shrink-0 items-center gap-3 border-b border-gx-border px-4 py-2 text-[11px] text-gx-muted">
+    <div className="flex shrink-0 items-center gap-3 border-b border-border px-4 py-2 text-[11px] text-muted-foreground">
       {/* Select all checkbox */}
       {selectableCount > 0 && (
-        <input
-          type="checkbox"
-          checked={selectedCount > 0 && selectedCount >= selectableCount}
-          ref={(el) => {
-            if (el) el.indeterminate = selectedCount > 0 && selectedCount < selectableCount;
-          }}
-          onChange={onToggleSelectAll}
-          className="h-3 w-3 rounded border-gx-border accent-gx-accent"
+        <Checkbox
+          checked={
+            selectedCount > 0 && selectedCount < selectableCount
+              ? "indeterminate"
+              : selectedCount > 0
+          }
+          onCheckedChange={onToggleSelectAll}
+          className="h-3 w-3 rounded border-border accent-primary"
           aria-label={selectedCount >= selectableCount ? "Deselect all files" : "Select all files"}
           title={selectedCount >= selectableCount ? "Deselect all" : "Select all"}
         />
       )}
       {/* File count + stats */}
       <span className="flex items-center gap-1.5">
-        <span className="font-medium text-gx-text">{files.length}</span> file{files.length !== 1 ? "s" : ""} changed
+        <span className="font-medium text-foreground">{files.length}</span> file
+        {files.length !== 1 ? "s" : ""} changed
       </span>
       <span>
-        <span className="font-semibold text-gx-success">
+        <span className="font-semibold text-success">
           +{files.reduce((s, f) => s + f.additions, 0)}
-        </span>
-        {" "}
-        <span className="font-semibold text-gx-error">
+        </span>{" "}
+        <span className="font-semibold text-destructive">
           −{files.reduce((s, f) => s + f.deletions, 0)}
         </span>
       </span>
 
       {/* Applied progress indicator */}
       {appliedCount > 0 && (
-        <span className="flex items-center gap-1 text-gx-success">
+        <span className="flex items-center gap-1 text-success">
           <GitMerge size={10} />
-          <span>{appliedCount}/{totalCount} applied</span>
+          <span>
+            {appliedCount}/{totalCount} applied
+          </span>
         </span>
       )}
 
       {/* Unresolved comment count */}
       {unresolvedCount > 0 && (
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={onToggleResolved}
-          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-gx-accent hover:bg-gx-accent/10"
+          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-primary hover:bg-primary/10"
           aria-label={showResolved ? "Hide resolved comments" : "Show resolved comments"}
         >
           <MessageSquare size={10} />
           <span>{unresolvedCount} unresolved</span>
-        </button>
+        </Button>
       )}
 
       <div className="flex-1" />
 
       {/* Commit filter dropdown */}
       {commits.length > 1 && (
-        <select
-          value={selectedCommit}
-          onChange={(e) => onSelectCommit(e.target.value)}
-          className="rounded border border-gx-border bg-gx-surface px-2 py-0.5 text-[11px] text-gx-text focus:border-gx-accent focus-visible:outline-none"
-          aria-label="Filter by commit"
+        <Select
+          value={":" + String(selectedCommit)}
+          onValueChange={(selectedValue) => {
+            const value = selectedValue.slice(1);
+            return onSelectCommit(value);
+          }}
         >
-          <option value="all">All commits</option>
-          {commits.map((c) => (
-            <option key={c.sha} value={c.sha}>
-              {c.sha.slice(0, 7)} {c.message.slice(0, 40)}
-            </option>
-          ))}
-        </select>
+          <SelectTrigger
+            className="rounded border border-border bg-card px-2 py-0.5 text-[11px] text-foreground focus:border-primary focus-visible:outline-none"
+            aria-label="Filter by commit"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              <SelectItem value={":" + String("all")}>All commits</SelectItem>
+              {commits.map((c) => (
+                <SelectItem key={c.sha} value={":" + String(c.sha)}>
+                  {c.sha.slice(0, 7)} {c.message.slice(0, 40)}
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          </SelectContent>
+        </Select>
       )}
-
-      {/* File view mode toggle (list / tree / unified) — matches commit page */}
-      <div
-        role="radiogroup"
-        aria-label="Files view"
-        className="flex overflow-hidden rounded border border-gx-border"
-      >
-        <ModeButton
-          active={fileViewMode === "list"}
-          icon={<List size={11} />}
-          label="List"
-          onClick={() => onSetFileViewMode("list")}
-        />
-        <ModeButton
-          active={fileViewMode === "tree"}
-          icon={<FolderTree size={11} />}
-          label="Tree"
-          onClick={() => onSetFileViewMode("tree")}
-        />
-        <ModeButton
-          active={fileViewMode === "unified"}
-          icon={<ScrollText size={11} />}
-          label="Unified"
-          onClick={() => onSetFileViewMode("unified")}
-        />
-      </div>
 
       {/* Diff render mode toggle (inline / side-by-side) */}
-      <div
-        role="radiogroup"
-        aria-label="Diff render mode"
-        className="flex overflow-hidden rounded border border-gx-border"
+      <ToggleGroup
+        type="single"
+        value={fileViewMode}
+        onValueChange={(value) => {
+          if (value) onSetFileViewMode(value as typeof fileViewMode);
+        }}
+        aria-label="Files view"
+        className="gap-0 overflow-hidden rounded border border-border"
       >
-        <ModeButton
-          active={diffRenderMode === "inline"}
-          icon={<SplitSquareHorizontal size={11} />}
-          label="Inline"
-          onClick={() => onSetDiffRenderMode("inline")}
-        />
-        <ModeButton
-          active={diffRenderMode === "side-by-side"}
-          icon={<Columns2 size={11} />}
-          label="Side-by-side"
-          onClick={() => onSetDiffRenderMode("side-by-side")}
-        />
-      </div>
-    </div>
-  );
-}
+        <ToggleGroupItem
+          value={"list"}
+          className="h-6 min-w-0 gap-1 rounded-none px-2 text-[11px]"
+          aria-label={"List" + " view"}
+        >
+          {<List size={11} />}List
+        </ToggleGroupItem>
+        <ToggleGroupItem
+          value={"tree"}
+          className="h-6 min-w-0 gap-1 rounded-none px-2 text-[11px]"
+          aria-label={"Tree" + " view"}
+        >
+          {<FolderTree size={11} />}Tree
+        </ToggleGroupItem>
+        <ToggleGroupItem
+          value={"unified"}
+          className="h-6 min-w-0 gap-1 rounded-none px-2 text-[11px]"
+          aria-label={"Unified" + " view"}
+        >
+          {<ScrollText size={11} />}Unified
+        </ToggleGroupItem>
+      </ToggleGroup>
 
-function ModeButton({
-  active,
-  icon,
-  label,
-  onClick,
-}: {
-  active: boolean;
-  icon: React.ReactNode;
-  label: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      role="radio"
-      aria-checked={active}
-      onClick={onClick}
-      className={clsx(
-        "flex items-center gap-1 px-2 py-0.5 text-[11px] transition",
-        active
-          ? "bg-gx-accent/20 text-gx-text"
-          : "text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
-      )}
-      title={`${label} view`}
-    >
-      {icon}
-      {label}
-    </button>
+      {/* Diff render mode toggle (inline / side-by-side) */}
+      <ToggleGroup
+        type="single"
+        value={diffRenderMode}
+        onValueChange={(value) => {
+          if (value) onSetDiffRenderMode(value as typeof diffRenderMode);
+        }}
+        aria-label="Diff render mode"
+        className="gap-0 overflow-hidden rounded border border-border"
+      >
+        <ToggleGroupItem
+          value={"inline"}
+          className="h-6 min-w-0 gap-1 rounded-none px-2 text-[11px]"
+          aria-label={"Inline" + " view"}
+        >
+          {<SplitSquareHorizontal size={11} />}Inline
+        </ToggleGroupItem>
+        <ToggleGroupItem
+          value={"side-by-side"}
+          className="h-6 min-w-0 gap-1 rounded-none px-2 text-[11px]"
+          aria-label={"Side-by-side" + " view"}
+        >
+          {<Columns2 size={11} />}Side-by-side
+        </ToggleGroupItem>
+      </ToggleGroup>
+    </div>
   );
 }
 
@@ -839,7 +880,7 @@ function DiffFileList({
   fileComments: FileComments;
 }) {
   return (
-    <aside className="h-full w-full overflow-auto border-r border-gx-border bg-gx-surface">
+    <aside className="h-full w-full overflow-auto border-r border-border bg-card">
       <ul>
         {files.map((f) => {
           const isApplied = appliedFiles.has(f.path);
@@ -853,27 +894,26 @@ function DiffFileList({
             <li key={f.path}>
               <div
                 className={clsx(
-                  "group flex items-center gap-2 border-b border-gx-border/40 px-3 py-1.5 cursor-pointer transition",
+                  "group flex items-center gap-2 border-b border-border/40 px-3 py-1.5 cursor-pointer transition",
                   isActive
-                    ? "bg-gx-accent/15 text-gx-text"
+                    ? "bg-primary/15 text-foreground"
                     : isApplied
-                      ? "bg-gx-success/5 text-gx-muted"
-                      : "text-gx-text hover:bg-gx-surface-hover",
+                      ? "bg-success/5 text-muted-foreground"
+                      : "text-foreground hover:bg-accent",
                 )}
                 onClick={() => onSelectFile(f.path)}
               >
-                {/* Checkbox for cherry-pick selection */}
-                <input
-                  type="checkbox"
+                {/* Status indicator */}
+                <Checkbox
                   checked={selectedFiles.has(f.path)}
-                  onChange={() => onToggleFile(f.path)}
+                  onCheckedChange={() => onToggleFile(f.path)}
                   onClick={(e) => e.stopPropagation()}
                   disabled={isApplied}
-                  className="h-3 w-3 shrink-0 rounded border-gx-border accent-gx-accent"
+                  className="h-3 w-3 shrink-0 rounded border-border accent-primary"
                   aria-label={`Select ${f.path}`}
                 />
 
-                {/* Status indicator */}
+                {/* File info */}
                 <FileStatusIcon status={f.status} isApplied={isApplied} />
 
                 {/* File info */}
@@ -885,29 +925,29 @@ function DiffFileList({
                     {f.path.split("/").pop()}
                   </div>
                   {f.oldPath && (
-                    <div className="truncate font-mono text-[10px] text-gx-muted">
+                    <div className="truncate font-mono text-[10px] text-muted-foreground">
                       ← {f.oldPath}
                     </div>
                   )}
                   {f.path.includes("/") && (
-                    <div className="truncate text-[10px] text-gx-muted">
+                    <div className="truncate text-[10px] text-muted-foreground">
                       {f.path.slice(0, f.path.lastIndexOf("/"))}
                     </div>
                   )}
                 </div>
 
-                {/* Right side: stats + indicators */}
+                {/* Applied badge */}
                 <div className="flex shrink-0 items-center gap-1.5">
-                  {/* Applied badge */}
+                  {/* Comment indicator */}
                   {isApplied && (
-                    <span className="flex items-center gap-0.5 rounded bg-gx-success/10 px-1 py-0.5 text-[9px] font-medium text-gx-success">
+                    <span className="flex items-center gap-0.5 rounded bg-success/10 px-1 py-0.5 text-[9px] font-medium text-success">
                       <Check size={8} /> Applied
                     </span>
                   )}
 
-                  {/* Comment indicator */}
+                  {/* +/- stats */}
                   {commentCount > 0 && (
-                    <span className="flex items-center gap-0.5 text-[9px] text-gx-accent">
+                    <span className="flex items-center gap-0.5 text-[9px] text-primary">
                       <MessageSquare size={9} />
                       {commentCount}
                     </span>
@@ -916,17 +956,19 @@ function DiffFileList({
                   {/* +/- stats */}
                   <span className="text-[10px]">
                     {f.additions > 0 && (
-                      <span className="text-gx-success">+{f.additions}</span>
+                      <span className="text-success">+{f.additions}</span>
                     )}
                     {f.additions > 0 && f.deletions > 0 && " "}
                     {f.deletions > 0 && (
-                      <span className="text-gx-error">−{f.deletions}</span>
+                      <span className="text-destructive">−{f.deletions}</span>
                     )}
                   </span>
 
                   {/* Revert button (visible on hover) */}
                   {!isApplied && onRevertFile && (
-                    <button
+                    <Button
+                      variant="ghost"
+                      size="compact"
                       type="button"
                       disabled={revertingFile !== undefined}
                       aria-busy={revertingFile === f.path}
@@ -934,12 +976,12 @@ function DiffFileList({
                         e.stopPropagation();
                         onRevertFile(f.path);
                       }}
-                      className="hidden shrink-0 rounded p-0.5 text-gx-muted hover:bg-gx-error/10 hover:text-gx-error group-hover:block"
+                      className="hidden shrink-0 rounded p-0.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive group-hover:block"
                       aria-label={`Revert ${f.path}`}
                       title="Revert file"
                     >
                       <RotateCcw size={10} />
-                    </button>
+                    </Button>
                   )}
                 </div>
               </div>
@@ -1038,14 +1080,14 @@ function DiffFileTree({
     }
   }, [model, activeFile]);
 
-  const themeStyles = useMemo(() => buildTreeTheme(theme), [theme]);
+  const themeStyles = useMemo(() => repositoryTreeTheme(theme), [theme]);
 
   return (
-    <aside className="h-full w-full flex flex-col overflow-hidden border-r border-gx-border bg-gx-surface">
+    <aside className="h-full w-full flex flex-col overflow-hidden border-r border-border bg-card">
       {/* Selection info bar for tree mode */}
       {selectedFiles.size > 0 && (
-        <div className="flex shrink-0 items-center gap-2 border-b border-gx-border/50 px-3 py-1 text-[10px] text-gx-muted">
-          <Check size={9} className="text-gx-accent" />
+        <div className="flex shrink-0 items-center gap-2 border-b border-border/50 px-3 py-1 text-[10px] text-muted-foreground">
+          <Check size={9} className="text-primary" />
           <span>{selectedFiles.size} selected for apply</span>
         </div>
       )}
@@ -1087,7 +1129,7 @@ function UnifiedFileNav({
   fileComments: FileComments;
 }) {
   return (
-    <aside className="h-full w-full overflow-auto border-r border-gx-border bg-gx-surface">
+    <aside className="h-full w-full overflow-auto border-r border-border bg-card">
       <ul className="py-1">
         {files.map((f) => {
           const isActive = f.path === activeFile;
@@ -1099,27 +1141,28 @@ function UnifiedFileNav({
 
           return (
             <li key={f.path}>
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 onClick={() => onSelectFile(f.path)}
                 className={clsx(
                   "flex w-full items-center gap-2 px-3 py-1 text-left text-[11px] transition",
                   isActive
-                    ? "bg-gx-accent/15 text-gx-text"
+                    ? "bg-primary/15 text-foreground"
                     : isApplied
-                      ? "bg-gx-success/5 text-gx-muted"
-                      : "text-gx-text hover:bg-gx-surface-hover",
+                      ? "bg-success/5 text-muted-foreground"
+                      : "text-foreground hover:bg-accent",
                 )}
                 title={f.path}
               >
                 {/* Checkbox */}
-                <input
-                  type="checkbox"
+                <Checkbox
                   checked={selectedFiles.has(f.path)}
-                  onChange={() => onToggleFile(f.path)}
+                  onCheckedChange={() => onToggleFile(f.path)}
                   onClick={(e) => e.stopPropagation()}
                   disabled={isApplied}
-                  className="h-3 w-3 shrink-0 rounded border-gx-border accent-gx-accent"
+                  className="h-3 w-3 shrink-0 rounded border-border accent-primary"
                   aria-label={`Select ${f.path}`}
                 />
 
@@ -1134,19 +1177,21 @@ function UnifiedFileNav({
 
                 <span className="shrink-0 flex items-center gap-1 text-[10px]">
                   {isApplied && (
-                    <span className="text-gx-success"><Check size={9} /></span>
+                    <span className="text-success">
+                      <Check size={9} />
+                    </span>
                   )}
                   {commentCount > 0 && (
-                    <span className="text-gx-accent">{commentCount}</span>
+                    <span className="text-primary">{commentCount}</span>
                   )}
                   {f.additions > 0 && (
-                    <span className="text-gx-success">+{f.additions}</span>
+                    <span className="text-success">+{f.additions}</span>
                   )}
                   {f.deletions > 0 && (
-                    <span className="text-gx-error">−{f.deletions}</span>
+                    <span className="text-destructive">−{f.deletions}</span>
                   )}
                 </span>
-              </button>
+              </Button>
             </li>
           );
         })}
@@ -1160,19 +1205,19 @@ function UnifiedFileNav({
 function FileStatusIcon({ status, isApplied }: { status?: string; isApplied: boolean }) {
   if (isApplied) {
     return (
-      <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-gx-success/20">
-        <Check size={9} className="text-gx-success" />
+      <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-success/20">
+        <Check size={9} className="text-success" />
       </span>
     );
   }
 
   const color = status === "added"
-    ? "text-gx-success"
+    ? "text-success"
     : status === "deleted"
-      ? "text-gx-error"
+      ? "text-destructive"
       : status === "renamed"
-        ? "text-gx-accent"
-        : "text-gx-warn";
+        ? "text-primary"
+        : "text-warning";
 
   const letter = status === "added"
     ? "A"
@@ -1197,12 +1242,12 @@ function FileStatusBadge({ status }: { status?: string }) {
   if (!status) return null;
 
   const tone = status === "added"
-    ? "border-gx-success/30 bg-gx-success/10 text-gx-success"
+    ? "border-success/30 bg-success/10 text-success"
     : status === "deleted"
-      ? "border-gx-error/30 bg-gx-error/10 text-gx-error"
+      ? "border-destructive/30 bg-destructive/10 text-destructive"
       : status === "renamed"
-        ? "border-gx-accent/30 bg-gx-accent/10 text-gx-accent"
-        : "border-gx-warn/30 bg-gx-warn/10 text-gx-warn";
+        ? "border-primary/30 bg-primary/10 text-primary"
+        : "border-warning/30 bg-warning/10 text-warning";
 
   const label = status === "added"
     ? "Added"
@@ -1221,7 +1266,6 @@ function FileStatusBadge({ status }: { status?: string }) {
     </span>
   );
 }
-
 
 // ── All Diffs Pane (unified mode — all files rendered sequentially) ──
 
@@ -1266,7 +1310,7 @@ const AllDiffsPane = forwardRef<
   }, []);
 
   return (
-    <div ref={scrollRef} className="h-full overflow-auto bg-gx-bg-sub">
+    <div ref={scrollRef} className="h-full overflow-auto bg-background">
       {files.map((file) => {
         const isApplied = appliedFiles.has(file.path);
         const patch = file.patch ?? "";
@@ -1276,53 +1320,61 @@ const AllDiffsPane = forwardRef<
           <div
             key={file.path}
             ref={(el) => setFileRef(file.path, el)}
-            className="border-b border-gx-border"
+            className="border-b border-border"
           >
             {/* Sticky file header */}
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={() => onSelectFile(file.path)}
               className={clsx(
-                "sticky top-0 z-10 flex w-full items-center gap-2 border-b border-gx-border/60 px-4 py-2 text-left backdrop-blur-sm transition",
+                "sticky top-0 z-10 flex w-full items-center gap-2 border-b border-border/60 px-4 py-2 text-left backdrop-blur-sm transition",
                 isActiveFile
-                  ? "bg-gx-accent/10"
-                  : "bg-gx-surface/95 hover:bg-gx-surface-hover/95",
+                  ? "bg-primary/10"
+                  : "bg-card/95 hover:bg-accent/95",
               )}
             >
               <FileStatusIcon status={file.status} isApplied={isApplied} />
               <span className={clsx(
-                "min-w-0 flex-1 truncate font-mono text-[12px] font-medium text-gx-text",
+                "min-w-0 flex-1 truncate font-mono text-[12px] font-medium text-foreground",
                 isApplied && "line-through opacity-60",
               )}>
                 {file.path}
               </span>
-              <span className="flex items-center gap-2 text-[10px] text-gx-muted">
+              <span className="flex items-center gap-2 text-[10px] text-muted-foreground">
                 <FileStatusBadge status={file.status} />
                 {isApplied && (
-                  <span className="rounded bg-gx-success/10 px-1.5 py-0.5 text-[9px] font-medium text-gx-success">
+                  <span className="rounded bg-success/10 px-1.5 py-0.5 text-[9px] font-medium text-success">
                     Applied
                   </span>
                 )}
                 {file.additions > 0 && (
-                  <span className="font-semibold text-gx-success">+{file.additions}</span>
+                  <span className="font-semibold text-success">
+                    +{file.additions}
+                  </span>
                 )}
                 {file.deletions > 0 && (
-                  <span className="font-semibold text-gx-error">−{file.deletions}</span>
+                  <span className="font-semibold text-destructive">
+                    −{file.deletions}
+                  </span>
                 )}
                 {file.status === "renamed" && file.oldPath && (
-                  <span className="rounded border border-gx-border px-1 py-0.5 text-[9px]">← {file.oldPath}</span>
+                  <span className="rounded border border-border px-1 py-0.5 text-[9px]">
+                    ← {file.oldPath}
+                  </span>
                 )}
               </span>
-            </button>
+            </Button>
 
             {/* Diff content */}
             {isApplied ? (
-              <div className="flex items-center justify-center gap-2 py-6 text-[11px] text-gx-muted">
-                <Check size={12} className="text-gx-success" />
+              <div className="flex items-center justify-center gap-2 py-6 text-[11px] text-muted-foreground">
+                <Check size={12} className="text-success" />
                 This file has been applied to the main branch.
               </div>
             ) : !patch.trim() ? (
-              <div className="flex items-center justify-center gap-2 py-6 text-[11px] text-gx-muted">
+              <div className="flex items-center justify-center gap-2 py-6 text-[11px] text-muted-foreground">
                 <Package size={12} /> No diff content available.
               </div>
             ) : (
@@ -1368,7 +1420,7 @@ function SingleFileDiffContent({
 
   if (!file) {
     return (
-      <div className="flex h-full items-center justify-center text-xs text-gx-muted">
+      <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
         Select a file to view its diff.
       </div>
     );
@@ -1381,24 +1433,26 @@ function SingleFileDiffContent({
     return (
       <div className="flex h-full flex-col">
         {/* File header */}
-        <div className="flex shrink-0 items-center gap-2 border-b border-gx-border bg-gx-surface px-4 py-2">
+        <div className="flex shrink-0 items-center gap-2 border-b border-border bg-card px-4 py-2">
           <FileStatusIcon status={file.status} isApplied={true} />
-          <span className="font-mono text-[12px] text-gx-text line-through opacity-60">{file.path}</span>
+          <span className="font-mono text-[12px] text-foreground line-through opacity-60">
+            {file.path}
+          </span>
           <FileStatusBadge status={file.status} />
-          <span className="rounded bg-gx-success/10 px-1.5 py-0.5 text-[9px] font-medium text-gx-success">
+          <span className="rounded bg-success/10 px-1.5 py-0.5 text-[9px] font-medium text-success">
             Applied
           </span>
-          <span className="ml-auto flex items-center gap-2 text-[10px] text-gx-muted">
+          <span className="ml-auto flex items-center gap-2 text-[10px] text-muted-foreground">
             {file.additions > 0 && (
-              <span className="text-gx-success">+{file.additions}</span>
+              <span className="text-success">+{file.additions}</span>
             )}
             {file.deletions > 0 && (
-              <span className="text-gx-error">−{file.deletions}</span>
+              <span className="text-destructive">−{file.deletions}</span>
             )}
           </span>
         </div>
-        <div className="flex flex-1 items-center justify-center gap-2 text-sm text-gx-muted">
-          <Check size={14} className="text-gx-success" />
+        <div className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground">
+          <Check size={14} className="text-success" />
           This file has been applied to the main branch.
         </div>
       </div>
@@ -1408,12 +1462,14 @@ function SingleFileDiffContent({
   if (!patch.trim()) {
     return (
       <div className="flex h-full flex-col">
-        <div className="flex shrink-0 items-center gap-2 border-b border-gx-border bg-gx-surface px-4 py-2">
+        <div className="flex shrink-0 items-center gap-2 border-b border-border bg-card px-4 py-2">
           <FileStatusIcon status={file.status} isApplied={false} />
-          <span className="font-mono text-[12px] text-gx-text">{file.path}</span>
+          <span className="font-mono text-[12px] text-foreground">
+            {file.path}
+          </span>
           <FileStatusBadge status={file.status} />
         </div>
-        <div className="flex flex-1 items-center justify-center gap-2 text-xs text-gx-muted">
+        <div className="flex flex-1 items-center justify-center gap-2 text-xs text-muted-foreground">
           No diff content available for this file.
         </div>
       </div>
@@ -1423,16 +1479,22 @@ function SingleFileDiffContent({
   return (
     <div className="flex h-full min-h-0 flex-col">
       {/* File header */}
-      <div className="flex shrink-0 items-center gap-2 border-b border-gx-border bg-gx-surface px-4 py-2">
+      <div className="flex shrink-0 items-center gap-2 border-b border-border bg-card px-4 py-2">
         <FileStatusIcon status={file.status} isApplied={false} />
-        <span className="font-mono text-[12px] text-gx-text">{file.path}</span>
+        <span className="font-mono text-[12px] text-foreground">
+          {file.path}
+        </span>
         <FileStatusBadge status={file.status} />
-        <span className="ml-auto flex items-center gap-2 text-[10px] text-gx-muted">
+        <span className="ml-auto flex items-center gap-2 text-[10px] text-muted-foreground">
           {file.additions > 0 && (
-            <span className="font-semibold text-gx-success">+{file.additions}</span>
+            <span className="font-semibold text-success">
+              +{file.additions}
+            </span>
           )}
           {file.deletions > 0 && (
-            <span className="font-semibold text-gx-error">−{file.deletions}</span>
+            <span className="font-semibold text-destructive">
+              −{file.deletions}
+            </span>
           )}
         </span>
       </div>
@@ -1490,33 +1552,33 @@ function SideBySideDiff({ patch }: { patch: string; theme: "dark" | "light" }) {
   return (
     <div className="flex min-w-0 overflow-x-auto font-mono text-[11px] leading-[18px]">
       {/* Left (old) */}
-      <div className="min-w-0 flex-1 border-r border-gx-border/50">
+      <div className="min-w-0 flex-1 border-r border-border/50">
         {leftLines.map((line, i) => (
           <div
             key={i}
             className={clsx(
               "flex min-h-[18px] px-2",
-              line.type === "removed" && "bg-gx-error/10",
+              line.type === "removed" && "bg-destructive/10",
               line.type === "context" && "bg-transparent",
-              line.type === "empty" && "bg-gx-bg-sub",
-              line.type === "hunk" && "bg-gx-accent/5 text-gx-accent",
+              line.type === "empty" && "bg-background",
+              line.type === "hunk" && "bg-primary/5 text-primary",
             )}
           >
-            <span className="w-10 shrink-0 select-none pr-2 text-right text-gx-muted/60">
+            <span className="w-10 shrink-0 select-none pr-2 text-right text-muted-foreground/60">
               {line.lineNo ?? ""}
             </span>
             <span className="w-4 shrink-0 select-none text-center">
               {line.type === "removed" ? (
-                <span className="text-gx-error">−</span>
+                <span className="text-destructive">−</span>
               ) : line.type === "hunk" ? (
-                <span className="text-gx-accent">@@</span>
+                <span className="text-primary">@@</span>
               ) : null}
             </span>
             <span className={clsx(
               "flex-1 whitespace-pre",
-              line.type === "removed" && "text-gx-text",
-              line.type === "context" && "text-gx-muted",
-              line.type === "hunk" && "text-gx-accent",
+              line.type === "removed" && "text-foreground",
+              line.type === "context" && "text-muted-foreground",
+              line.type === "hunk" && "text-primary",
             )}>
               {line.content}
             </span>
@@ -1531,27 +1593,27 @@ function SideBySideDiff({ patch }: { patch: string; theme: "dark" | "light" }) {
             key={i}
             className={clsx(
               "flex min-h-[18px] px-2",
-              line.type === "added" && "bg-gx-success/10",
+              line.type === "added" && "bg-success/10",
               line.type === "context" && "bg-transparent",
-              line.type === "empty" && "bg-gx-bg-sub",
-              line.type === "hunk" && "bg-gx-accent/5 text-gx-accent",
+              line.type === "empty" && "bg-background",
+              line.type === "hunk" && "bg-primary/5 text-primary",
             )}
           >
-            <span className="w-10 shrink-0 select-none pr-2 text-right text-gx-muted/60">
+            <span className="w-10 shrink-0 select-none pr-2 text-right text-muted-foreground/60">
               {line.lineNo ?? ""}
             </span>
             <span className="w-4 shrink-0 select-none text-center">
               {line.type === "added" ? (
-                <span className="text-gx-success">+</span>
+                <span className="text-success">+</span>
               ) : line.type === "hunk" ? (
-                <span className="text-gx-accent">@@</span>
+                <span className="text-primary">@@</span>
               ) : null}
             </span>
             <span className={clsx(
               "flex-1 whitespace-pre",
-              line.type === "added" && "text-gx-text",
-              line.type === "context" && "text-gx-muted",
-              line.type === "hunk" && "text-gx-accent",
+              line.type === "added" && "text-foreground",
+              line.type === "context" && "text-muted-foreground",
+              line.type === "hunk" && "text-primary",
             )}>
               {line.content}
             </span>
@@ -1660,7 +1722,6 @@ function parseSideBySide(patch: string): { leftLines: SideBySideLine[]; rightLin
   return { leftLines, rightLines };
 }
 
-
 // ── Conflict Banner ─────────────────────────────────────────────────
 
 function ConflictBanner({
@@ -1671,11 +1732,12 @@ function ConflictBanner({
   onDismiss: () => void;
 }) {
   return (
-    <div className="flex items-center gap-2 border-b border-gx-error/30 bg-gx-error/5 px-4 py-2 text-[11px]">
-      <span className="font-medium text-gx-error">
-        Conflicts in {conflicts.files.length} file{conflicts.files.length !== 1 ? "s" : ""}:
+    <div className="flex items-center gap-2 border-b border-destructive/30 bg-destructive/5 px-4 py-2 text-[11px]">
+      <span className="font-medium text-destructive">
+        Conflicts in {conflicts.files.length} file
+        {conflicts.files.length !== 1 ? "s" : ""}:
       </span>
-      <span className="min-w-0 flex-1 truncate font-mono text-gx-error">
+      <span className="min-w-0 flex-1 truncate font-mono text-destructive">
         {conflicts.files.join(", ")}
       </span>
       <a
@@ -1684,18 +1746,20 @@ function ConflictBanner({
           e.preventDefault();
           call("conflict_list", {});
         }}
-        className="shrink-0 text-gx-accent hover:underline"
+        className="shrink-0 text-primary hover:underline"
       >
         Resolve in Conflicts View
       </a>
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={onDismiss}
-        className="shrink-0 rounded p-0.5 text-gx-muted hover:text-gx-text"
+        className="shrink-0 rounded p-0.5 text-muted-foreground hover:text-foreground"
         aria-label="Dismiss conflict banner"
       >
         <X size={12} />
-      </button>
+      </Button>
     </div>
   );
 }
@@ -1712,23 +1776,25 @@ function PartialApplyBanner({
   onApplyRemaining: () => void;
 }) {
   return (
-    <div className="flex items-center gap-2 border-b border-gx-accent/30 bg-gx-accent/5 px-4 py-2 text-[11px]">
-      <Check size={12} className="text-gx-success" />
-      <span className="text-gx-text">
+    <div className="flex items-center gap-2 border-b border-primary/30 bg-primary/5 px-4 py-2 text-[11px]">
+      <Check size={12} className="text-success" />
+      <span className="text-foreground">
         {appliedCount} file{appliedCount !== 1 ? "s" : ""} applied
       </span>
-      <span className="text-gx-muted">·</span>
-      <span className="text-gx-muted">
+      <span className="text-muted-foreground">·</span>
+      <span className="text-muted-foreground">
         {remainingCount} file{remainingCount !== 1 ? "s" : ""} remaining
       </span>
       <div className="flex-1" />
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={onApplyRemaining}
-        className="flex items-center gap-1 rounded-md bg-gx-accent/10 px-2 py-1 text-[11px] text-gx-accent hover:bg-gx-accent/20 transition"
+        className="flex items-center gap-1 rounded-md bg-primary/10 px-2 py-1 text-[11px] text-primary hover:bg-primary/20 transition"
       >
         <Check size={10} /> Apply remaining
-      </button>
+      </Button>
     </div>
   );
 }
@@ -1757,7 +1823,7 @@ function DiffCommentPanel({
   if (!hasVisibleComments) return null;
 
   return (
-    <div className="shrink-0 border-t border-gx-border bg-gx-bg-sub overflow-auto max-h-[200px]">
+    <div className="shrink-0 border-t border-border bg-background overflow-auto max-h-[200px]">
       {lines.map((line) => {
         const lineComments = comments[line].filter(
           (c) => showResolved || !c.resolved,
@@ -1765,9 +1831,9 @@ function DiffCommentPanel({
         if (lineComments.length === 0) return null;
 
         return (
-          <div key={line} className="border-b border-gx-border/50 px-3 py-2">
-            <div className="mb-1 flex items-center gap-2 text-[10px] text-gx-muted">
-              <MessageSquare size={10} className="text-gx-accent" />
+          <div key={line} className="border-b border-border/50 px-3 py-2">
+            <div className="mb-1 flex items-center gap-2 text-[10px] text-muted-foreground">
+              <MessageSquare size={10} className="text-primary" />
               <span className="font-mono">Line {line}</span>
             </div>
             {lineComments.map((comment) => (
@@ -1802,81 +1868,51 @@ function CommentEntry({
   if (comment.resolved) {
     return (
       <div
-        className="flex items-center gap-2 rounded px-2 py-1 text-[10px] text-gx-muted/60 cursor-pointer hover:bg-gx-surface-hover"
+        className="flex items-center gap-2 rounded px-2 py-1 text-[10px] text-muted-foreground/60 cursor-pointer hover:bg-accent"
         onClick={() => setCollapsed(!collapsed)}
       >
         <ChevronRight size={10} className={collapsed ? "" : "rotate-90 transition"} />
         <span className="line-through">{comment.body.slice(0, 60)}</span>
-        <span className="ml-auto text-gx-success">✓ Resolved</span>
+        <span className="ml-auto text-success">✓ Resolved</span>
       </div>
     );
   }
 
   return (
-    <div className="mb-1.5 rounded border border-gx-border bg-gx-surface p-2">
+    <div className="mb-1.5 rounded border border-border bg-card p-2">
       <div className="flex items-center gap-2 text-[10px]">
-        <span className="font-medium text-gx-text">{comment.author}</span>
-        <span className="text-gx-muted">{formatTimestamp(comment.created_at)}</span>
+        <span className="font-medium text-foreground">{comment.author}</span>
+        <span className="text-muted-foreground">
+          {formatTimestamp(comment.created_at)}
+        </span>
       </div>
-      <div className="mt-1 whitespace-pre-wrap text-[11px] text-gx-text/80">
+      <div className="mt-1 whitespace-pre-wrap text-[11px] text-foreground/80">
         {comment.body}
       </div>
       <div className="mt-1.5 flex items-center gap-2">
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={() => onSendToAgent(comment)}
-          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-gx-accent hover:bg-gx-accent/10"
+          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-primary hover:bg-primary/10"
           aria-label="Send comment to agent as feedback"
         >
           <Send size={9} /> Send to agent
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={() => onResolve(comment.id, line)}
-          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-success"
+          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-success"
           aria-label="Resolve comment"
         >
           <Check size={9} /> Resolve
-        </button>
+        </Button>
       </div>
     </div>
   );
-}
-
-// ── Tree Theme Builder ──────────────────────────────────────────────
-
-function buildTreeTheme(mode: "dark" | "light"): React.CSSProperties {
-  const cs =
-    typeof window !== "undefined" ? getComputedStyle(document.documentElement) : null;
-  const rgb = (name: string, fallback: string): string => {
-    const raw = cs?.getPropertyValue(name).trim();
-    if (!raw) return fallback;
-    return `rgb(${raw})`;
-  };
-  const colors: Record<string, string> = {
-    "sideBar.background": rgb("--gx-surface", mode === "dark" ? "#171a21" : "#f4f5f9"),
-    "editor.background": rgb("--gx-bg-sub", mode === "dark" ? "#0b0d12" : "#ffffff"),
-    "sideBar.foreground": rgb("--gx-text", mode === "dark" ? "#e7eaf1" : "#171b23"),
-    "sideBarSectionHeader.foreground": rgb("--gx-muted", "#8a93a5"),
-    "sideBar.border": rgb("--gx-border", mode === "dark" ? "#242832" : "#dde0e8"),
-    "list.hoverBackground": rgb("--gx-surface-hover", mode === "dark" ? "#1e222b" : "#e9ecf3"),
-    "list.activeSelectionBackground": rgb("--gx-accent", mode === "dark" ? "#4f8cff" : "#2c6def"),
-    "list.activeSelectionForeground": "#ffffff",
-    focusBorder: rgb("--gx-accent", mode === "dark" ? "#4f8cff" : "#2c6def"),
-    "input.background": rgb("--gx-bg-sub", mode === "dark" ? "#0b0d12" : "#ffffff"),
-    "input.border": rgb("--gx-border", mode === "dark" ? "#242832" : "#dde0e8"),
-    "scrollbarSlider.background": rgb("--gx-border", mode === "dark" ? "#242832" : "#dde0e8"),
-    "gitDecoration.addedResourceForeground": rgb("--gx-success", mode === "dark" ? "#4ade80" : "#16a34a"),
-    "gitDecoration.modifiedResourceForeground": rgb("--gx-warn", mode === "dark" ? "#facc15" : "#b48700"),
-    "gitDecoration.deletedResourceForeground": rgb("--gx-error", mode === "dark" ? "#f87171" : "#dc2626"),
-  };
-  const styles = themeToTreeStyles({
-    type: mode,
-    bg: colors["sideBar.background"],
-    fg: colors["sideBar.foreground"],
-    colors,
-  });
-  return styles as unknown as React.CSSProperties;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────

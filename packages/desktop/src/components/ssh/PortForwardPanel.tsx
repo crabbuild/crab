@@ -1,3 +1,5 @@
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 /**
  * Port forwarding management panel.
  *
@@ -5,8 +7,8 @@
  * add/remove controls, and "Open in Browser" actions.
  */
 
-import React, { useState, useCallback } from "react";
-import { Globe, Plus, Trash2, ArrowRightLeft, AlertCircle } from "lucide-react";
+import { AlertCircle, ArrowRightLeft, Globe, Plus, Trash2 } from "lucide-react";
+import React, { useCallback, useState } from "react";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -40,9 +42,9 @@ interface PortForwardPanelProps {
 
 function StatusDot({ status }: { status: "active" | "stopped" | "error" }) {
   const colors: Record<string, string> = {
-    active: "bg-green-500",
-    stopped: "bg-gray-400",
-    error: "bg-red-500",
+    active: "bg-success",
+    stopped: "bg-accent",
+    error: "bg-destructive",
   };
 
   return (
@@ -95,17 +97,17 @@ function AddForwardForm({
   return (
     <form
       onSubmit={handleSubmit}
-      className="border border-gray-200 dark:border-gray-700 rounded-md p-3 space-y-2"
+      className="border border-border border-border rounded-md p-3 space-y-2"
     >
       <div className="grid grid-cols-2 gap-2">
         <div>
           <label
             htmlFor="pf-local-port"
-            className="text-xs text-gray-500 dark:text-gray-400"
+            className="text-xs text-muted-foreground text-muted-foreground"
           >
             Local Port
           </label>
-          <input
+          <Input
             id="pf-local-port"
             type="number"
             min={1}
@@ -113,18 +115,18 @@ function AddForwardForm({
             value={localPort}
             onChange={(e) => setLocalPort(e.target.value)}
             placeholder="8888"
-            className="w-full rounded border border-gx-border bg-gx-bg px-2 py-1.5 text-xs text-gx-text outline-none focus:border-gx-accent transition"
+            className="w-full rounded border border-border bg-background px-2 py-1.5 text-xs text-foreground outline-none focus:border-primary transition"
             required
           />
         </div>
         <div>
           <label
             htmlFor="pf-remote-port"
-            className="text-xs text-gray-500 dark:text-gray-400"
+            className="text-xs text-muted-foreground text-muted-foreground"
           >
             Remote Port
           </label>
-          <input
+          <Input
             id="pf-remote-port"
             type="number"
             min={1}
@@ -132,7 +134,7 @@ function AddForwardForm({
             value={remotePort}
             onChange={(e) => setRemotePort(e.target.value)}
             placeholder="8888"
-            className="w-full rounded border border-gx-border bg-gx-bg px-2 py-1.5 text-xs text-gx-text outline-none focus:border-gx-accent transition"
+            className="w-full rounded border border-border bg-background px-2 py-1.5 text-xs text-foreground outline-none focus:border-primary transition"
             required
           />
         </div>
@@ -140,50 +142,54 @@ function AddForwardForm({
       <div>
         <label
           htmlFor="pf-remote-host"
-          className="text-xs text-gray-500 dark:text-gray-400"
+          className="text-xs text-muted-foreground text-muted-foreground"
         >
           Remote Host
         </label>
-        <input
+        <Input
           id="pf-remote-host"
           type="text"
           value={remoteHost}
           onChange={(e) => setRemoteHost(e.target.value)}
           placeholder="127.0.0.1"
-          className="w-full rounded border border-gx-border bg-gx-bg px-2 py-1.5 text-xs text-gx-text outline-none focus:border-gx-accent transition"
+          className="w-full rounded border border-border bg-background px-2 py-1.5 text-xs text-foreground outline-none focus:border-primary transition"
           required
         />
       </div>
       <div>
         <label
           htmlFor="pf-label"
-          className="text-xs text-gray-500 dark:text-gray-400"
+          className="text-xs text-muted-foreground text-muted-foreground"
         >
           Label (optional)
         </label>
-        <input
+        <Input
           id="pf-label"
           type="text"
           value={label}
           onChange={(e) => setLabel(e.target.value)}
           placeholder="Jupyter, TensorBoard..."
-          className="w-full rounded border border-gx-border bg-gx-bg px-2 py-1.5 text-xs text-gx-text outline-none focus:border-gx-accent transition"
+          className="w-full rounded border border-border bg-background px-2 py-1.5 text-xs text-foreground outline-none focus:border-primary transition"
         />
       </div>
       <div className="flex justify-end gap-2 pt-1">
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={onCancel}
-          className="px-3 py-1 text-xs text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 rounded"
+          className="px-3 py-1 text-xs text-muted-foreground text-muted-foreground hover:bg-card hover:bg-card rounded"
         >
           Cancel
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           type="submit"
-          className="px-3 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700"
+          className="px-3 py-1 text-xs bg-info text-info-foreground rounded hover:bg-info"
         >
           Add Forward
-        </button>
+        </Button>
       </div>
     </form>
   );
@@ -222,19 +228,21 @@ export function PortForwardPanel({
       aria-label="Port Forwards"
     >
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-medium text-gray-700 dark:text-gray-300 flex items-center gap-1.5">
+        <h3 className="text-sm font-medium text-foreground text-muted-foreground flex items-center gap-1.5">
           <ArrowRightLeft className="w-4 h-4" />
           Port Forwards
         </h3>
         {!showForm && (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             onClick={() => setShowForm(true)}
-            className="flex items-center gap-1 px-2 py-1 text-xs text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded"
+            className="flex items-center gap-1 px-2 py-1 text-xs text-info text-info hover:bg-info/10 hover:bg-info/20 rounded"
             aria-label="Add port forward"
           >
             <Plus className="w-3 h-3" />
             Add
-          </button>
+          </Button>
         )}
       </div>
 
@@ -243,7 +251,7 @@ export function PortForwardPanel({
       )}
 
       {profileForwards.length === 0 && !showForm && (
-        <p className="text-xs text-gray-500 dark:text-gray-400 italic">
+        <p className="text-xs text-muted-foreground text-muted-foreground italic">
           No port forwards configured.
         </p>
       )}
@@ -252,29 +260,29 @@ export function PortForwardPanel({
         {profileForwards.map((fwd) => (
           <li
             key={fwd.id}
-            className="flex items-center justify-between px-2 py-1.5 rounded hover:bg-gray-50 dark:hover:bg-gray-800 group"
+            className="flex items-center justify-between px-2 py-1.5 rounded hover:bg-background hover:bg-card group"
           >
             <div className="flex items-center gap-2 min-w-0">
               <StatusDot status={fwd.status} />
               <span className="text-sm truncate">
                 {fwd.label && (
-                  <span className="font-medium text-gray-700 dark:text-gray-300">
+                  <span className="font-medium text-foreground text-muted-foreground">
                     {fwd.label}
                     {" — "}
                   </span>
                 )}
-                <span className="text-gray-600 dark:text-gray-400">
+                <span className="text-muted-foreground text-muted-foreground">
                   :{fwd.actualLocalPort} → {fwd.remoteHost}:{fwd.remotePort}
                 </span>
                 {fwd.actualLocalPort !== fwd.localPort && (
-                  <span className="ml-1 text-xs text-amber-600 dark:text-amber-400">
+                  <span className="ml-1 text-xs text-warning text-warning">
                     (requested :{fwd.localPort})
                   </span>
                 )}
               </span>
               {fwd.status === "error" && fwd.error && (
                 <span
-                  className="text-xs text-red-500 flex items-center gap-0.5"
+                  className="text-xs text-destructive flex items-center gap-0.5"
                   title={fwd.error}
                 >
                   <AlertCircle className="w-3 h-3" />
@@ -283,23 +291,27 @@ export function PortForwardPanel({
             </div>
             <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
               {fwd.status === "active" && (
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   onClick={() => onOpenBrowser(fwd.id)}
-                  className="p-1 text-gray-500 hover:text-blue-600 dark:hover:text-blue-400 rounded"
+                  className="p-1 text-muted-foreground hover:text-info hover:text-info rounded"
                   aria-label={`Open ${fwd.label ?? "forward"} in browser`}
                   title="Open in Browser"
                 >
                   <Globe className="w-3.5 h-3.5" />
-                </button>
+                </Button>
               )}
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 onClick={() => onRemove(fwd.id)}
-                className="p-1 text-gray-500 hover:text-red-600 dark:hover:text-red-400 rounded"
+                className="p-1 text-muted-foreground hover:text-destructive hover:text-destructive rounded"
                 aria-label={`Remove ${fwd.label ?? "forward"}`}
                 title="Remove"
               >
                 <Trash2 className="w-3.5 h-3.5" />
-              </button>
+              </Button>
             </div>
           </li>
         ))}

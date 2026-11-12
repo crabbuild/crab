@@ -230,7 +230,7 @@ export function QuickTerminal({
       ref={containerRef}
       className={clsx(
         "fixed top-0 left-0 right-0 z-50",
-        "bg-[var(--color-bg-primary)] border-b border-[var(--color-border)]",
+        "bg-background border-b border-border",
         "shadow-lg transition-transform",
       )}
       style={{
@@ -241,11 +241,11 @@ export function QuickTerminal({
       data-testid="quick-terminal-overlay"
     >
       {/* Header bar */}
-      <div className="flex items-center justify-between px-3 py-1 border-b border-[var(--color-border)] bg-[var(--color-bg-secondary)]">
-        <span className="text-xs text-[var(--color-text-secondary)] font-medium">
+      <div className="flex items-center justify-between px-3 py-1 border-b border-border bg-card">
+        <span className="text-xs text-muted-foreground font-medium">
           Quick Terminal
         </span>
-        <span className="text-xs text-[var(--color-text-tertiary)]">
+        <span className="text-xs text-muted-foreground">
           {config.hotkey} to dismiss
         </span>
       </div>
@@ -255,7 +255,7 @@ export function QuickTerminal({
         {sessionId ? (
           <div className="w-full h-full" data-terminal-id={sessionId} />
         ) : (
-          <div className="flex items-center justify-center h-full text-[var(--color-text-tertiary)] text-sm">
+          <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
             Starting terminal session...
           </div>
         )}

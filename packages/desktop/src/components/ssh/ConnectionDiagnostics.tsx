@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Connection Diagnostics Panel — displays diagnostics results with
  * colour-coded indicators and actionable recommendations.
@@ -57,9 +58,9 @@ interface ConnectionDiagnosticsProps {
 // ── Helpers ──────────────────────────────────────────────────────
 
 function getLatencyColor(ms: number): string {
-  if (ms < 50) return "var(--color-success)";
-  if (ms < 200) return "var(--color-warning)";
-  return "var(--color-error)";
+  if (ms < 50) return "rgb(var(--success))";
+  if (ms < 200) return "rgb(var(--warning))";
+  return "rgb(var(--destructive))";
 }
 
 function getSeverityIcon(severity: string): string {
@@ -98,14 +99,14 @@ export function ConnectionDiagnostics({
     <div className="ssh-diagnostics" role="region" aria-label={`Diagnostics for ${profileLabel}`}>
       <header className="ssh-diagnostics__header">
         <h3>Connection Diagnostics</h3>
-        <button
-          className="ssh-diagnostics__run-btn"
+        <Button variant="outline"
+          className="ssh-diagnostics__run-"
           onClick={handleRun}
           disabled={running}
           aria-label="Run diagnostics"
         >
           {running ? "Running..." : "Run Diagnostics"}
-        </button>
+        </Button>
       </header>
 
       {error && (

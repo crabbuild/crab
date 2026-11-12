@@ -1,7 +1,15 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import Fuse from "fuse.js";
+import {
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+  Command as CommandRoot,
+} from "@/components/ui/command";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import clsx from "clsx";
-import { GitBranch, Search } from "lucide-react";
+import Fuse from "fuse.js";
+import { GitBranch } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { WorkspaceRepoEntry } from "../../state";
 
 export interface FuzzySwitcherProps {
@@ -30,7 +38,7 @@ function HighlightedText({
       parts.push(<span key={`t-${lastEnd}`}>{text.slice(lastEnd, start)}</span>);
     }
     parts.push(
-      <span key={`m-${start}`} className="font-bold text-gx-accent">
+      <span key={`m-${start}`} className="font-bold text-primary">
         {text.slice(start, end + 1)}
       </span>,
     );
@@ -129,133 +137,114 @@ export function FuzzySwitcher({ repos, onSelect, onClose }: FuzzySwitcherProps) 
     [onSelect],
   );
 
-  const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent) => {
-      switch (e.key) {
-        case "ArrowDown":
-          e.preventDefault();
-          setSelectedIndex((i) => Math.min(i + 1, results.length - 1));
-          break;
-        case "ArrowUp":
-          e.preventDefault();
-          setSelectedIndex((i) => Math.max(i - 1, 0));
-          break;
-        case "Enter":
-          e.preventDefault();
-          if (results[selectedIndex]) {
-            handleSelect(results[selectedIndex].entry.relativePath);
-          }
-          break;
-        case "Escape":
-          e.preventDefault();
-          onClose();
-          break;
-      }
-    },
-    [results, selectedIndex, handleSelect, onClose],
-  );
-
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center pt-[15vh]"
-      onClick={onClose}
-      role="dialog"
-      aria-modal="true"
-      aria-label="Fuzzy repo switcher"
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) onClose();
+      }}
     >
       {/* Backdrop */}
-      <div className="absolute inset-0 bg-black/40" />
 
-      {/* Modal */}
-      <div
-        className="relative w-full max-w-md rounded-lg border border-gx-border bg-gx-bg shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-        onKeyDown={handleKeyDown}
+      {/* Backdrop */}
+      <DialogContent
+        showCloseButton={false}
+        aria-describedby={undefined}
+        className={
+          "w-full max-w-md rounded-lg border border-border bg-background shadow-2xl" +
+          " p-0 gap-0"
+        }
       >
-        {/* Search input */}
-        <div className="flex items-center gap-2 border-b border-gx-border px-3 py-2.5">
-          <Search size={14} className="shrink-0 text-gx-muted" />
-          <input
-            ref={inputRef}
-            type="text"
-            className="flex-1 bg-transparent text-sm text-gx-text placeholder:text-gx-muted outline-none"
-            placeholder="Search repositories…"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            aria-label="Search repositories"
-            autoComplete="off"
-            spellCheck={false}
-          />
-          <kbd className="shrink-0 rounded border border-gx-border bg-gx-bg-sub px-1.5 py-0.5 text-[10px] text-gx-muted">
-            esc
-          </kbd>
-        </div>
-
-        {/* Results list */}
-        <div
-          ref={listRef}
-          className="max-h-[320px] overflow-y-auto py-1"
-          role="listbox"
-          aria-label="Repository results"
+        <DialogTitle className="sr-only">Switch repository</DialogTitle>
+        <CommandRoot
+          shouldFilter={false}
+          value={String(selectedIndex)}
+          onValueChange={(value) => setSelectedIndex(Number(value))}
         >
-          {results.length === 0 ? (
-            <div className="px-3 py-4 text-center text-xs text-gx-muted">
-              No matching repositories
-            </div>
-          ) : (
-            results.map((result, index) => (
-              <div
-                key={result.entry.relativePath}
-                role="option"
-                aria-selected={index === selectedIndex}
-                className={clsx(
+          {/* Backdrop */}
+          <div className="flex items-center gap-2 border-b border-border px-3 py-2.5">
+            <CommandInput
+              ref={inputRef}
+              className="flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground outline-none"
+              placeholder="Search repositories…"
+              value={query}
+              onValueChange={(value) => setQuery(value)}
+              aria-label="Search repositories"
+              autoComplete="off"
+              spellCheck={false}
+            />
+            <kbd className="shrink-0 rounded border border-border bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
+              esc
+            </kbd>
+          </div>
+
+          {/* Results list */}
+          <CommandList
+            ref={listRef}
+            className="max-h-[320px] overflow-y-auto py-1"
+            aria-label="Repository results"
+          >
+            <CommandGroup>
+              {results.length === 0 ? (
+                <div className="px-3 py-4 text-center text-xs text-muted-foreground">
+                  No matching repositories
+                </div>
+              ) : (
+                results.map((result, index) => (
+                  <CommandItem
+                    value={String(index)}
+                    key={result.entry.relativePath}
+                    className={clsx(
                   "flex cursor-pointer items-center gap-2 px-3 py-2 mx-1 rounded transition",
                   index === selectedIndex
-                    ? "bg-gx-accent/15 text-gx-text"
-                    : "text-gx-text hover:bg-gx-surface-hover",
+                    ? "bg-primary/15 text-foreground"
+                    : "text-foreground hover:bg-accent",
                 )}
-                onClick={() => handleSelect(result.entry.relativePath)}
-                onMouseEnter={() => setSelectedIndex(index)}
-              >
-                {/* Name and path */}
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-sm">
-                    <HighlightedText
+                    onSelect={() => handleSelect(result.entry.relativePath)}
+                  >
+                    {/* Name and path */}
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-sm">
+                        <HighlightedText
                       text={result.entry.name}
                       indices={result.nameIndices}
                     />
-                  </div>
-                  <div className="truncate text-xs text-gx-muted">
-                    <HighlightedText
+                      </div>
+                      <div className="truncate text-xs text-muted-foreground">
+                        <HighlightedText
                       text={result.entry.relativePath}
                       indices={result.pathIndices}
                     />
-                  </div>
-                </div>
+                      </div>
+                    </div>
 
-                {/* Status badge: branch + dirty count (Level ≥ 1) */}
-                {result.entry.level >= 1 && result.entry.branch && (
-                  <div className="flex shrink-0 items-center gap-1 text-[10px] text-gx-muted">
-                    <GitBranch size={10} />
-                    <span className="max-w-[80px] truncate">{result.entry.branch}</span>
-                    {result.entry.dirtyCount !== null && result.entry.dirtyCount > 0 && (
-                      <span className="rounded bg-gx-warn/20 px-1 py-0.5 text-[9px] font-medium text-gx-warn">
-                        {result.entry.dirtyCount}
-                      </span>
+                    {/* Status badge: branch + dirty count (Level ≥ 1) */}
+                    {result.entry.level >= 1 && result.entry.branch && (
+                      <div className="flex shrink-0 items-center gap-1 text-[10px] text-muted-foreground">
+                        <GitBranch size={10} />
+                        <span className="max-w-[80px] truncate">
+                          {result.entry.branch}
+                        </span>
+                        {result.entry.dirtyCount !== null && result.entry.dirtyCount > 0 && (
+                            <span className="rounded bg-warning/20 px-1 py-0.5 text-[9px] font-medium text-warning">
+                              {result.entry.dirtyCount}
+                            </span>
+                          )}
+                      </div>
                     )}
-                  </div>
-                )}
-              </div>
-            ))
-          )}
-        </div>
+                  </CommandItem>
+                ))
+              )}
+            </CommandGroup>
+          </CommandList>
 
-        {/* Footer hint */}
-        <div className="flex items-center justify-between border-t border-gx-border px-3 py-1.5 text-[10px] text-gx-muted">
-          <span>↑↓ navigate · ↵ select · esc close</span>
-          <span>⌘K</span>
-        </div>
-      </div>
-    </div>
+          {/* Footer hint */}
+          <div className="flex items-center justify-between border-t border-border px-3 py-1.5 text-[10px] text-muted-foreground">
+            <span>↑↓ navigate · ↵ select · esc close</span>
+            <span>⌘K</span>
+          </div>
+        </CommandRoot>
+      </DialogContent>
+    </Dialog>
   );
 }

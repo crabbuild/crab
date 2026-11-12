@@ -1,3 +1,4 @@
+import { chooseSelect } from "../helpers/select";
 import { test, expect, _electron as electron } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -35,10 +36,22 @@ test("complex workflows preserve templates, execute dependencies, cache, retry, 
     ...Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`survivor_${i}`, { cmd: cmd(`setTimeout(()=>require('fs').writeFileSync('survivor_${i}.txt','done'),150)`), outs: [`survivor_${i}.txt`] }])),
     blocked: { cmd: cmd("require('fs').writeFileSync('must-not-exist.txt','bad')"), deps: ["missing.txt"], outs: ["must-not-exist.txt"] },
   } }));
-  const largeStages = Object.fromEntries(Array.from({ length: 64 }, (_, i) => [`stage_${i}`, {
-    cmd: cmd(`require('fs').writeFileSync('large_${i}.txt','${i}')`), outs: [`large_${i}.txt`],
-    deps: i < 8 ? [] : [0, 1, 3].map(offset => `large_${(Math.floor(i / 8) - 1) * 8 + (i + offset) % 8}.txt`),
-  }]));
+  const largeStages = Object.fromEntries(
+    Array.from({ length: 64 }, (_, i) => [
+      `stage_${i}`,
+      {
+        cmd: cmd(`require('fs').writeFileSync('large_${i}.txt','${i}')`),
+        outs: [`large_${i}.txt`],
+        deps:
+          i < 8
+            ? []
+            : [0, 1, 3].map(
+                (offset) =>
+                  `large_${(Math.floor(i / 8) - 1) * 8 + ((i + offset) % 8)}.txt`,
+              ),
+      },
+    ]),
+  );
   writeFileSync(path.join(repo, "large.workflow.yaml"), JSON.stringify({ stages: largeStages }));
   const application = await electron.launch({ executablePath: packagedExecutable(), args: [`--user-data-dir=${path.join(root, "profile")}`],
     env: { ...process.env, HOME: home, USERPROFILE: home, CRAB_CACHE_DIR: path.join(root, "cache") } });
@@ -60,7 +73,10 @@ test("complex workflows preserve templates, execute dependencies, cache, retry, 
     await select("crab.yaml");
     await expect(page.locator(".react-flow__node")).toHaveCount(6);
     await expect(page.getByRole("status").filter({ hasText: "6 stages" })).toContainText("10 executions");
-    await page.getByRole("combobox", { name: "Find stage", exact: true }).selectOption("prepare");
+    await chooseSelect(
+      page.getByRole("combobox", { name: "Find stage", exact: true }),
+      "prepare",
+    );
     const inspector = page.getByRole("complementary", { name: "Stage properties", exact: true });
     await expect(inspector).toContainText("Changes apply to every execution");
     const edited = [...workflow.stages.prepare.do.cmd.argv];
@@ -102,7 +118,10 @@ test("complex workflows preserve templates, execute dependencies, cache, retry, 
     }
     await expect(page.locator(".react-flow__minimap")).toBeVisible();
     await page.screenshot({ path: test.info().outputPath("complex-workflow-64-stage-overview.png") });
-    await page.getByRole("combobox", { name: "Find stage", exact: true }).selectOption("stage_63");
+    await chooseSelect(
+      page.getByRole("combobox", { name: "Find stage", exact: true }),
+      "stage_63",
+    );
     await expect(inspector.getByRole("textbox", { name: "Stage name", exact: true })).toHaveValue("stage_63");
     await expect.poll(async () => (await page.locator('.react-flow__node[data-id="stage_63"]').boundingBox())?.width ?? 0).toBeGreaterThan(150);
     await expect(page.locator('.react-flow__node[data-id="stage_63"]')).toBeInViewport({ ratio: 1 });
@@ -188,7 +207,6 @@ test("workflow cancellation stops the stage process and releases the execution l
   }
 });
 
-
 test("workflow studio resizes, retains a dismissible output dock, and runs locally with an unavailable S3 remote", async () => {
   test.setTimeout(90_000);
   const root = mkdtempSync(path.join(process.env.CARGO_TARGET_DIR ?? tmpdir(), "desktop-workflow-studio-"));
@@ -215,11 +233,23 @@ test("workflow studio resizes, retains a dismissible output dock, and runs local
   if (!address || typeof address === "string") throw new Error("Missing S3 fixture listener");
   let application: Awaited<ReturnType<typeof electron.launch>> | undefined;
   try {
-    application = await electron.launch({ executablePath: packagedExecutable(), args: [`--user-data-dir=${path.join(root, "profile")}`], env: {
-      ...process.env, HOME: home, USERPROFILE: home, CRAB_CACHE_DIR: path.join(root, "cache"),
-      AWS_ACCESS_KEY_ID: "fixture", AWS_SECRET_ACCESS_KEY: "fixture", AWS_REGION: "us-east-1", AWS_EC2_METADATA_DISABLED: "true",
-      AWS_ENDPOINT_URL_S3: `http://127.0.0.1:${address.port}`, AWS_ALLOW_HTTP: "true", AWS_VIRTUAL_HOSTED_STYLE_REQUEST: "false",
-    } });
+    application = await electron.launch({
+      executablePath: packagedExecutable(),
+      args: [`--user-data-dir=${path.join(root, "profile")}`],
+      env: {
+        ...process.env,
+        HOME: home,
+        USERPROFILE: home,
+        CRAB_CACHE_DIR: path.join(root, "cache"),
+        AWS_ACCESS_KEY_ID: "fixture",
+        AWS_SECRET_ACCESS_KEY: "fixture",
+        AWS_REGION: "us-east-1",
+        AWS_EC2_METADATA_DISABLED: "true",
+        AWS_ENDPOINT_URL_S3: `http://127.0.0.1:${address.port}`,
+        AWS_ALLOW_HTTP: "true",
+        AWS_VIRTUAL_HOSTED_STYLE_REQUEST: "false",
+      },
+    });
     const page = await application.firstWindow();
     await page.getByRole("button", { name: "Skip", exact: true }).click();
     await page.getByRole("button", { name: "No thanks", exact: true }).click();
@@ -283,7 +313,9 @@ test("workflow studio resizes, retains a dismissible output dock, and runs local
     expect(requests).toEqual([]);
   } finally {
     if (application) { await application.close(); await closeFixtureDaemon(home); }
-    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
     rmSync(root, { recursive: true, force: true });
   }
 });

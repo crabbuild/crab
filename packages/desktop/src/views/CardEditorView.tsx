@@ -1,16 +1,27 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
 import clsx from "clsx";
-import { marked } from "marked";
 import {
   AlertTriangle,
   FileText,
   Loader2,
   Save,
 } from "lucide-react";
+import { marked } from "marked";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
-import { OpenRepo } from "../state";
 import { rpc } from "../ipc";
 import { inferCardType, lintCard, LintWarning } from "../lib/card-lint";
+import { OpenRepo } from "../state";
 
 interface Props {
   repo: OpenRepo;
@@ -238,7 +249,7 @@ export function CardEditorView({ repo, path }: Props) {
 
   if (loading) {
     return (
-      <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted">
+      <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
         <Loader2 size={16} className="animate-spin" /> Loading card…
       </div>
     );
@@ -247,7 +258,7 @@ export function CardEditorView({ repo, path }: Props) {
   if (error && !fields) {
     return (
       <div className="flex h-full items-center justify-center p-6">
-        <div className="rounded border border-gx-error/40 bg-gx-error/10 p-4 text-sm text-gx-error">
+        <div className="rounded border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive">
           {error}
         </div>
       </div>
@@ -257,50 +268,56 @@ export function CardEditorView({ repo, path }: Props) {
   return (
     <div className="flex h-full flex-col">
       {/* Toolbar */}
-      <div className="flex shrink-0 items-center justify-between border-b border-gx-border px-3 py-1.5">
-        <div className="flex items-center gap-2 text-xs text-gx-muted">
+      <div className="flex shrink-0 items-center justify-between border-b border-border px-3 py-1.5">
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <FileText size={12} />
-          <span className="font-medium text-gx-text">{fileName(path)}</span>
+          <span className="font-medium text-foreground">{fileName(path)}</span>
           {dirty && (
-            <span className="rounded bg-gx-warn/20 px-1.5 py-[1px] text-[10px] text-gx-warn">
+            <span className="rounded bg-warning/20 px-1.5 py-[1px] text-[10px] text-warning">
               unsaved
             </span>
           )}
           {lintWarnings.length > 0 && (
-            <span className="flex items-center gap-1 rounded bg-gx-warn/20 px-1.5 py-[1px] text-[10px] text-gx-warn">
+            <span className="flex items-center gap-1 rounded bg-warning/20 px-1.5 py-[1px] text-[10px] text-warning">
               <AlertTriangle size={10} />
               {lintWarnings.length}
             </span>
           )}
         </div>
-        <button
+        <Button
+          variant="default"
+          size="compact"
           type="button"
           disabled={!dirty || saving}
           onClick={handleSave}
           className={clsx(
             "flex items-center gap-1.5 rounded px-2.5 py-1 text-xs transition",
             dirty
-              ? "bg-gx-accent text-white hover:bg-gx-accent/80"
-              : "bg-gx-border/50 text-gx-muted cursor-not-allowed",
+              ? "bg-primary text-primary-foreground hover:bg-primary/80"
+              : "bg-border/50 text-muted-foreground cursor-not-allowed",
           )}
           aria-label="Save card"
         >
-          {saving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
+          {saving ? (
+            <Loader2 size={12} className="animate-spin" />
+          ) : (
+            <Save size={12} />
+          )}
           Save
-        </button>
+        </Button>
       </div>
 
       {/* Error banner */}
       {error && (
-        <div className="shrink-0 border-b border-gx-error/30 bg-gx-error/10 px-3 py-1.5 text-xs text-gx-error">
+        <div className="shrink-0 border-b border-destructive/30 bg-destructive/10 px-3 py-1.5 text-xs text-destructive">
           <AlertTriangle size={11} className="mr-1 inline" />
           {error}
         </div>
       )}
 
-      {/* Lint warnings panel */}
+      {/* Error banner */}
       {lintWarnings.length > 0 && (
-        <div className="shrink-0 border-b border-gx-warn/30 bg-gx-warn/5 px-3 py-1.5">
+        <div className="shrink-0 border-b border-warning/30 bg-warning/5 px-3 py-1.5">
           <div className="flex flex-wrap gap-x-4 gap-y-1">
             {lintWarnings.map((w) => (
               <LintWarningChip key={w.ruleId} warning={w} />
@@ -309,12 +326,12 @@ export function CardEditorView({ repo, path }: Props) {
         </div>
       )}
 
-      {/* Split pane */}
+      {/* Lint warnings panel */}
       <PanelGroup direction="horizontal" className="min-h-0 flex-1">
-        {/* Left: YAML form */}
+        {/* Split pane */}
         <Panel defaultSize={45} minSize={25}>
           <div className="h-full overflow-auto p-4">
-            <div className="mb-3 text-[10px] uppercase tracking-wider text-gx-muted">
+            <div className="mb-3 text-[10px] uppercase tracking-wider text-muted-foreground">
               Frontmatter
             </div>
             <div className="space-y-3">
@@ -328,15 +345,17 @@ export function CardEditorView({ repo, path }: Props) {
               ))}
               {extraKeys.length > 0 && (
                 <>
-                  <div className="mt-4 border-t border-gx-border pt-3 text-[10px] uppercase tracking-wider text-gx-muted">
+                  <div className="mt-4 border-t border-border pt-3 text-[10px] uppercase tracking-wider text-muted-foreground">
                     Additional Fields
                   </div>
                   {extraKeys.map((key) => (
                     <div key={key}>
-                      <label className="mb-0.5 block text-[11px] text-gx-muted">{key}</label>
-                      <input
+                      <label className="mb-0.5 block text-[11px] text-muted-foreground">
+                        {key}
+                      </label>
+                      <Input
                         type="text"
-                        className="w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-xs text-gx-text focus-visible:outline-none focus:border-gx-accent"
+                        className="w-full rounded border border-border bg-background px-2 py-1 text-xs text-foreground focus-visible:outline-none focus:border-primary"
                         value={fields[key] ?? ""}
                         onChange={(e) => updateField(key, e.target.value)}
                       />
@@ -347,12 +366,12 @@ export function CardEditorView({ repo, path }: Props) {
             </div>
 
             {/* Markdown body editor */}
-            <div className="mt-6 border-t border-gx-border pt-4">
-              <div className="mb-2 text-[10px] uppercase tracking-wider text-gx-muted">
+            <div className="mt-6 border-t border-border pt-4">
+              <div className="mb-2 text-[10px] uppercase tracking-wider text-muted-foreground">
                 Body (Markdown)
               </div>
-              <textarea
-                className="min-h-[200px] w-full resize-y rounded border border-gx-border bg-gx-bg-sub p-2 font-mono text-xs text-gx-text focus-visible:outline-none focus:border-gx-accent"
+              <Textarea
+                className="min-h-[200px] w-full resize-y rounded border border-border bg-background p-2 font-mono text-xs text-foreground focus-visible:outline-none focus:border-primary"
                 value={body}
                 onChange={(e) => updateBody(e.target.value)}
                 spellCheck={false}
@@ -361,12 +380,12 @@ export function CardEditorView({ repo, path }: Props) {
           </div>
         </Panel>
 
-        <PanelResizeHandle className="w-1 bg-gx-border/50 hover:bg-gx-accent/50 transition" />
+        <PanelResizeHandle className="w-1 bg-border/50 hover:bg-primary/50 transition" />
 
         {/* Right: Markdown preview */}
         <Panel defaultSize={55} minSize={25}>
-          <div className="h-full overflow-auto bg-gx-bg-sub">
-            <div className="border-b border-gx-border px-4 py-1.5 text-[10px] uppercase tracking-wider text-gx-muted">
+          <div className="h-full overflow-auto bg-background">
+            <div className="border-b border-border px-4 py-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
               Preview
             </div>
             <div
@@ -393,27 +412,38 @@ function FormField({
 }) {
   return (
     <div>
-      <label className="mb-0.5 block text-[11px] text-gx-muted">{field.label}</label>
+      <label className="mb-0.5 block text-[11px] text-muted-foreground">
+        {field.label}
+      </label>
       {field.type === "dropdown" && field.options ? (
-        <select
-          className="w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-xs text-gx-text focus-visible:outline-none focus:border-gx-accent"
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
+        <Select
+          value={":" + String(value)}
+          onValueChange={(selectedValue) => {
+            const value = selectedValue.slice(1);
+            return onChange(value);
+          }}
         >
-          {field.options.map((opt) => (
-            <option key={opt} value={opt}>
-              {opt || "(none)"}
-            </option>
-          ))}
-          {/* If the current value isn't in the options list, show it */}
-          {value && !field.options.includes(value) && (
-            <option value={value}>{value}</option>
-          )}
-        </select>
+          <SelectTrigger className="w-full rounded border border-border bg-background px-2 py-1 text-xs text-foreground focus-visible:outline-none focus:border-primary">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              {field.options.map((opt) => (
+                <SelectItem key={opt} value={":" + String(opt)}>
+                  {opt || "(none)"}
+                </SelectItem>
+              ))}
+              {/* If the current value isn't in the options list, show it */}
+              {value && !field.options.includes(value) && (
+                <SelectItem value={":" + String(value)}>{value}</SelectItem>
+              )}
+            </SelectGroup>
+          </SelectContent>
+        </Select>
       ) : (
-        <input
+        <Input
           type="text"
-          className="w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-xs text-gx-text focus-visible:outline-none focus:border-gx-accent"
+          className="w-full rounded border border-border bg-background px-2 py-1 text-xs text-foreground focus-visible:outline-none focus:border-primary"
           value={value}
           onChange={(e) => onChange(e.target.value)}
           placeholder={field.type === "comma-list" ? "comma-separated values" : ""}
@@ -427,7 +457,7 @@ function FormField({
 
 function LintWarningChip({ warning }: { warning: LintWarning }) {
   return (
-    <span className="flex items-center gap-1 text-[11px] text-gx-warn">
+    <span className="flex items-center gap-1 text-[11px] text-warning">
       <AlertTriangle size={10} className="shrink-0" />
       {warning.message}
     </span>

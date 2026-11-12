@@ -26,13 +26,13 @@ const statusConfig: Record<
   StageRunStatus,
   { icon: typeof Circle; color: string }
 > = {
-  pending: { icon: Circle, color: "text-gx-muted" },
-  queued: { icon: Circle, color: "text-gx-warn" },
-  running: { icon: Loader2, color: "text-gx-info" },
-  cached: { icon: Zap, color: "text-gx-thinking" },
-  done: { icon: CheckCircle2, color: "text-gx-success" },
-  failed: { icon: XCircle, color: "text-gx-error" },
-  skipped: { icon: SkipForward, color: "text-gx-muted" },
+  pending: { icon: Circle, color: "text-muted-foreground" },
+  queued: { icon: Circle, color: "text-warning" },
+  running: { icon: Loader2, color: "text-info" },
+  cached: { icon: Zap, color: "text-thinking" },
+  done: { icon: CheckCircle2, color: "text-success" },
+  failed: { icon: XCircle, color: "text-destructive" },
+  skipped: { icon: SkipForward, color: "text-muted-foreground" },
 };
 
 function commandLabel(stage: WorkflowStage): string {
@@ -54,10 +54,10 @@ export const StageNode = memo(function StageNode({ data }: NodeProps) {
   return (
     <div
       className={clsx(
-        "rounded-lg border bg-gx-surface px-4 py-3 transition-colors",
-        "border-gx-border hover:border-gx-muted/50",
-        selected && "!border-gx-accent ring-1 ring-gx-accent/40",
-        hasCycle && !selected && "!border-gx-error",
+        "rounded-lg border bg-card px-4 py-3 transition-colors",
+        "border-border hover:border-muted-foreground/50",
+        selected && "!border-primary ring-1 ring-primary/40",
+        hasCycle && !selected && "!border-destructive",
       )}
       style={{ width: STAGE_WIDTH, height: STAGE_HEIGHT }}
       title={`${stage.name}\n${stage.cmd.value}${stage.foreach || stage.matrix ? "\nTemplate: edit the shared body here; edit iterations in YAML." : ""}`}
@@ -65,7 +65,7 @@ export const StageNode = memo(function StageNode({ data }: NodeProps) {
       <Handle
         type="target"
         position={Position.Top}
-        className="!h-3 !w-3 !border !border-gx-border !bg-gx-surface"
+        className="!h-3 !w-3 !border !border-border !bg-card"
       />
 
       <div className="flex items-center gap-2">
@@ -73,19 +73,19 @@ export const StageNode = memo(function StageNode({ data }: NodeProps) {
           size={14}
           className={clsx("shrink-0", config.color, status === "running" && "animate-spin")}
         />
-        <span className="flex-1 truncate text-sm font-medium text-gx-text">
+        <span className="flex-1 truncate text-sm font-medium text-foreground">
           {stage.name}
         </span>
         {hasCycle && (
-          <AlertTriangle size={14} className="shrink-0 text-gx-error" aria-label="Dependency cycle" />
+          <AlertTriangle size={14} className="shrink-0 text-destructive" aria-label="Dependency cycle" />
         )}
       </div>
 
-      <div className="mt-2 line-clamp-2 h-8 break-all font-mono text-xs leading-4 text-gx-muted">
+      <div className="mt-2 line-clamp-2 h-8 break-all font-mono text-xs leading-4 text-muted-foreground">
         {commandLabel(stage)}
       </div>
 
-      <div className="mt-2 flex items-center justify-between text-[11px] leading-4 text-gx-muted">
+      <div className="mt-2 flex items-center justify-between text-[11px] leading-4 text-muted-foreground">
         <span>{stage.foreach || stage.matrix ? `${executions ?? "…"} executions` : <>{stage.deps.length} {stage.deps.length === 1 ? "input" : "inputs"} · {stage.outs.length} {stage.outs.length === 1 ? "output" : "outputs"}</>}</span>
         <span className={clsx("capitalize", config.color)}>{stage.frozen ? "Frozen" : status}</span>
       </div>
@@ -93,7 +93,7 @@ export const StageNode = memo(function StageNode({ data }: NodeProps) {
       <Handle
         type="source"
         position={Position.Bottom}
-        className="!h-3 !w-3 !border !border-gx-border !bg-gx-surface"
+        className="!h-3 !w-3 !border !border-border !bg-card"
       />
     </div>
   );

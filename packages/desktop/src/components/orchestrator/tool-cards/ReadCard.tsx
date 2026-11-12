@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { useCardExpanded } from "./useCardExpanded";
 /**
  * Specialized renderer for Read tool calls.
@@ -10,12 +11,11 @@ import { useCardExpanded } from "./useCardExpanded";
  *   - detail (file content from tool_result)
  */
 
-
 import clsx from "clsx";
 import { ChevronDown, ChevronRight, FileText, FolderOpen } from "lucide-react";
-import type { ToolCardRendererProps } from "./types";
 import { CollapsedCardLine } from "./CollapsedCardLine";
 import { ShikiPreview } from "./ShikiPreview";
+import type { ToolCardRendererProps } from "./types";
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -48,7 +48,7 @@ function getLanguageHint(path: string): string | null {
     sh: "Shell",
     bash: "Shell",
   };
-  return ext ? map[ext] ?? null : null;
+  return ext ? (map[ext] ?? null) : null;
 }
 
 const CONTENT_TRUNCATION_LIMIT = 5000;
@@ -75,15 +75,21 @@ export function ReadCard({ event, defaultExpanded = false, collapsed: collapsedP
   // Collapsed one-liner branch.
   const collapsed = collapsedProp ?? false;
   if (collapsed) {
-    const icon = isDirectory
-      ? <FolderOpen size={11} className="shrink-0 text-gx-muted" />
-      : <FileText size={11} className="shrink-0 text-gx-muted" />;
+    const icon = isDirectory ? (
+      <FolderOpen size={11} className="shrink-0 text-muted-foreground" />
+    ) : (
+      <FileText size={11} className="shrink-0 text-muted-foreground" />
+    );
     const defaultSummary = (
       <>
         {icon}
-        <span className="font-medium text-gx-text/80 truncate">{shortPath || "Read"}</span>
+        <span className="font-medium text-foreground/80 truncate">
+          {shortPath || "Read"}
+        </span>
         {lineCount !== null && lineCount > 0 && (
-          <span className="shrink-0 text-[9px] text-gx-muted tabular-nums">{lineCount}L</span>
+          <span className="shrink-0 text-[9px] text-muted-foreground tabular-nums">
+            {lineCount}L
+          </span>
         )}
       </>
     );
@@ -97,53 +103,61 @@ export function ReadCard({ event, defaultExpanded = false, collapsed: collapsedP
   }
 
   return (
-    <div className="rounded-md border border-gx-border/40 overflow-hidden">
+    <div className="rounded-md border border-border/40 overflow-hidden">
       {/* Header */}
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={() => hasContent && setExpanded(!expanded)}
         className={clsx(
           "flex w-full items-center gap-2 px-2.5 py-1.5 text-[10px] text-left transition",
-          hasContent && "hover:bg-gx-surface-hover cursor-pointer",
+          hasContent && "hover:bg-accent cursor-pointer",
           !hasContent && "cursor-default",
         )}
       >
-        {isDirectory
-          ? <FolderOpen size={11} className="text-gx-muted shrink-0" />
-          : <FileText size={11} className="text-gx-muted shrink-0" />
-        }
-        <span className="shrink-0 font-medium text-gx-muted">Read</span>
+        {isDirectory ? (
+          <FolderOpen size={11} className="text-muted-foreground shrink-0" />
+        ) : (
+          <FileText size={11} className="text-muted-foreground shrink-0" />
+        )}
+        <span className="shrink-0 font-medium text-muted-foreground">Read</span>
 
         {/* File path */}
         <span className="min-w-0 flex-1 flex items-baseline gap-1 truncate">
-          <span className="text-gx-text/90 font-medium truncate">{shortPath}</span>
+          <span className="text-foreground/90 font-medium truncate">
+            {shortPath}
+          </span>
           {dirPath && (
-            <span className="text-[9px] text-gx-muted/60 truncate">{dirPath}</span>
+            <span className="text-[9px] text-muted-foreground/60 truncate">
+              {dirPath}
+            </span>
           )}
         </span>
 
         {/* Metadata badges */}
         {langHint && (
-          <span className="shrink-0 rounded bg-gx-surface-hover px-1 py-0.5 text-[8px] text-gx-muted border border-gx-border/50">
+          <span className="shrink-0 rounded bg-accent px-1 py-0.5 text-[8px] text-muted-foreground border border-border/50">
             {langHint}
           </span>
         )}
         {lineCount !== null && lineCount > 0 && (
-          <span className="shrink-0 text-[9px] text-gx-muted tabular-nums">
+          <span className="shrink-0 text-[9px] text-muted-foreground tabular-nums">
             {lineCount}L
           </span>
         )}
 
-        {hasContent && (
-          expanded
-            ? <ChevronDown size={10} className="shrink-0 text-gx-muted/60" />
-            : <ChevronRight size={10} className="shrink-0 text-gx-muted/60" />
-        )}
-      </button>
+        {hasContent &&
+          (expanded ? (
+            <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
+          ) : (
+            <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
+          ))}
+      </Button>
 
       {/* Expanded: file content */}
       {expanded && hasContent && (
-        <div className="border-t border-gx-border/30 max-h-[320px] overflow-auto">
+        <div className="border-t border-border/30 max-h-[320px] overflow-auto">
           <ShikiPreview
             code={content.length > CONTENT_TRUNCATION_LIMIT
               ? content.slice(0, CONTENT_TRUNCATION_LIMIT) + "\n… (truncated)"

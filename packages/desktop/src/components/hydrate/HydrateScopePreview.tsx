@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { Button } from "@/components/ui/button";
 import { ChevronDown, ChevronRight, Download, Upload } from "lucide-react";
-import { formatBytes } from "../../lib/format";
+import { useState } from "react";
 import { HydrationEntry } from "../../ipc";
+import { formatBytes } from "../../lib/format";
 import { ResolvedScope } from "../../lib/hydrateScope";
 
 interface Props {
@@ -21,8 +22,8 @@ export function HydrateScopePreview({ hydrate, dehydrate }: Props) {
   const total = hydrate.matched.length + dehydrate.matched.length;
 
   return (
-    <div className="rounded border border-gx-border bg-gx-bg-sub">
-      <div className="grid grid-cols-2 divide-x divide-gx-border">
+    <div className="rounded border border-border bg-background">
+      <div className="grid grid-cols-2 divide-x divide-border">
         <PreviewCell
           icon={<Download size={12} />}
           label="Will hydrate"
@@ -39,13 +40,15 @@ export function HydrateScopePreview({ hydrate, dehydrate }: Props) {
         />
       </div>
 
-      {expanded === "hydrate" && <FileList entries={hydrate.matched} skipped={hydrate.skipped} />}
+      {expanded === "hydrate" && (
+        <FileList entries={hydrate.matched} skipped={hydrate.skipped} />
+      )}
       {expanded === "dehydrate" && (
         <FileList entries={dehydrate.matched} skipped={dehydrate.skipped} />
       )}
 
       {total === 0 && (
-        <div className="border-t border-gx-border px-3 py-1.5 text-[11px] text-gx-muted">
+        <div className="border-t border-border px-3 py-1.5 text-[11px] text-muted-foreground">
           Nothing in the current scope is eligible. Adjust the scope above.
         </div>
       )}
@@ -68,32 +71,40 @@ function PreviewCell({
 }) {
   const isEmpty = resolved.matched.length === 0;
   return (
-    <button
+    <Button
+      variant="ghost"
+      size="compact"
       type="button"
       onClick={onToggle}
       disabled={isEmpty && resolved.skipped.length === 0}
-      className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-xs transition hover:bg-gx-bg/50 disabled:cursor-default disabled:hover:bg-transparent"
+      className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-xs transition hover:bg-background/50 disabled:cursor-default disabled:hover:bg-transparent"
     >
-      <span className="flex items-center gap-2 text-gx-muted">
+      <span className="flex items-center gap-2 text-muted-foreground">
         {icon}
         <span>{label}</span>
       </span>
       <span className="flex items-center gap-2">
-        <span className={isEmpty ? "text-gx-muted" : "font-mono text-gx-text"}>
+        <span className={isEmpty ? "text-muted-foreground" : "font-mono text-foreground"}>
           {resolved.matched.length.toLocaleString()}{" "}
           {resolved.matched.length === 1 ? "file" : "files"}
         </span>
-        <span className="font-mono text-gx-muted">{formatBytes(resolved.bytes)}</span>
+        <span className="font-mono text-muted-foreground">
+          {formatBytes(resolved.bytes)}
+        </span>
         {resolved.skipped.length > 0 && (
-          <span className="text-[10px] text-gx-muted">
+          <span className="text-[10px] text-muted-foreground">
             ({resolved.skipped.length} skipped)
           </span>
         )}
         {!isEmpty || resolved.skipped.length > 0 ? (
-          expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />
+          expanded ? (
+            <ChevronDown size={12} />
+          ) : (
+            <ChevronRight size={12} />
+          )
         ) : null}
       </span>
-    </button>
+    </Button>
   );
 }
 
@@ -109,25 +120,28 @@ function FileList({
   const shown = truncated ? entries.slice(0, MAX) : entries;
 
   return (
-    <div className="max-h-48 overflow-auto border-t border-gx-border bg-gx-bg px-3 py-2 font-mono text-[11px]">
+    <div className="max-h-48 overflow-auto border-t border-border bg-background px-3 py-2 font-mono text-[11px]">
       {shown.length === 0 && skipped.length === 0 ? (
-        <div className="text-gx-muted">No files matched.</div>
+        <div className="text-muted-foreground">No files matched.</div>
       ) : (
         <>
           {shown.map((e) => (
             <div key={e.path} className="flex items-center justify-between gap-3 py-px">
-              <span className="truncate text-gx-text">{e.path}</span>
-              <span className="shrink-0 text-gx-muted">{formatBytes(e.logical)}</span>
+              <span className="truncate text-foreground">{e.path}</span>
+              <span className="shrink-0 text-muted-foreground">
+                {formatBytes(e.logical)}
+              </span>
             </div>
           ))}
           {truncated && (
-            <div className="pt-1 text-gx-muted">
+            <div className="pt-1 text-muted-foreground">
               … and {(entries.length - MAX).toLocaleString()} more
             </div>
           )}
           {skipped.length > 0 && (
-            <div className="mt-2 border-t border-gx-border pt-1.5 text-[10px] text-gx-muted">
-              {skipped.length.toLocaleString()} outside the eligible file states.
+            <div className="mt-2 border-t border-border pt-1.5 text-[10px] text-muted-foreground">
+              {skipped.length.toLocaleString()} outside the eligible file
+              states.
             </div>
           )}
         </>

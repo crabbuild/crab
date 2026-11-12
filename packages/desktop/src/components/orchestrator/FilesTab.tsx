@@ -1,3 +1,5 @@
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 /**
  * Files Tab — Full file explorer for the agent's isolated worktree.
  *
@@ -8,14 +10,14 @@
  *   3. Monaco editor below — shows the active tab's file content
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { ChevronsDownUp, Loader2, Search, X } from "lucide-react";
 import clsx from "clsx";
+import { ChevronsDownUp, Loader2, Search, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
-import { FileTree } from "../FileTree";
-import { FileIcon } from "../FileIcon";
-import { CodeEditor } from "../CodeEditor";
 import { DirEntry, mainProcess } from "../../ipc";
+import { CodeEditor } from "../CodeEditor";
+import { FileIcon } from "../FileIcon";
+import { FileTree } from "../FileTree";
 import { OrchestratorTask } from "./TaskCard";
 
 // ── Types ───────────────────────────────────────────────────────────
@@ -171,43 +173,48 @@ export function FilesTab({ task, selectedFile, onSelectFile }: Props) {
     <PanelGroup direction="horizontal" className="h-full">
       {/* Left: File tree with toolbar */}
       <Panel defaultSize={22} minSize={12} maxSize={45}>
-        <div className="flex h-full flex-col overflow-hidden border-r border-gx-border">
+        <div className="flex h-full flex-col overflow-hidden border-r border-border">
           {/* Toolbar: filter + collapse */}
-          <div className="shrink-0 border-b border-gx-border px-2 py-2">
-            {/* Filter input */}
+          <div className="shrink-0 border-b border-border px-2 py-2">
+            {/* Toolbar: filter + collapse */}
             <div className="relative">
-              <Search size={11} className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-gx-muted" />
-              <input
-                className="w-full rounded border border-gx-border bg-gx-bg-sub pl-6 pr-2 py-1 text-[11px] focus-visible:outline-none focus:border-gx-accent placeholder:text-gx-muted/60"
+              <Search size={11} className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                className="w-full rounded border border-border bg-background pl-6 pr-2 py-1 text-[11px] focus-visible:outline-none focus:border-primary placeholder:text-muted-foreground/60"
                 placeholder="Filter files…"
                 value={filter}
                 onChange={(e) => setFilter(e.target.value)}
               />
               {filter && (
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
                   onClick={() => setFilter("")}
-                  className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-gx-muted hover:text-gx-text"
+                  className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground hover:text-foreground"
                   aria-label="Clear filter"
                 >
                   <X size={10} />
-                </button>
+                </Button>
               )}
             </div>
             {/* Action bar */}
             <div className="mt-1.5 flex items-center justify-between">
-              <span className="text-[10px] text-gx-muted">
-                {filteredEntries.length} file{filteredEntries.length !== 1 ? "s" : ""}
+              <span className="text-[10px] text-muted-foreground">
+                {filteredEntries.length} file
+                {filteredEntries.length !== 1 ? "s" : ""}
               </span>
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
-                className="rounded p-1 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text transition"
+                className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground transition"
                 title="Collapse All"
                 aria-label="Collapse All"
                 onClick={() => setCollapseKey((k) => k + 1)}
               >
                 <ChevronsDownUp size={12} />
-              </button>
+              </Button>
             </div>
           </div>
 
@@ -215,10 +222,10 @@ export function FilesTab({ task, selectedFile, onSelectFile }: Props) {
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
             {treeLoading ? (
               <div className="flex h-full items-center justify-center">
-                <Loader2 size={16} className="animate-spin text-gx-muted" />
+                <Loader2 size={16} className="animate-spin text-muted-foreground" />
               </div>
             ) : filteredEntries.length === 0 ? (
-              <div className="flex h-full items-center justify-center text-[11px] text-gx-muted">
+              <div className="flex h-full items-center justify-center text-[11px] text-muted-foreground">
                 {filter ? "No matching files." : "No files in worktree."}
               </div>
             ) : (
@@ -235,14 +242,14 @@ export function FilesTab({ task, selectedFile, onSelectFile }: Props) {
         </div>
       </Panel>
 
-      <PanelResizeHandle className="w-[3px] cursor-col-resize bg-transparent transition-colors hover:bg-gx-accent/50" />
+      <PanelResizeHandle className="w-[3px] cursor-col-resize bg-transparent transition-colors hover:bg-primary/50" />
 
       {/* Right: Tab strip + Editor */}
       <Panel minSize={30}>
         <div className="flex h-full flex-col overflow-hidden">
           {/* Tab strip */}
           {openTabs.length > 0 && (
-            <div className="flex shrink-0 items-center overflow-x-auto scrollbar-none border-b border-gx-border bg-gx-surface">
+            <div className="flex shrink-0 items-center overflow-x-auto scrollbar-none border-b border-border bg-card">
               {openTabs.map((tab) => (
                 <EditorTabPill
                   key={tab.key}
@@ -258,17 +265,17 @@ export function FilesTab({ task, selectedFile, onSelectFile }: Props) {
           {/* Editor content */}
           <div className="min-h-0 flex-1">
             {openTabs.length === 0 && (
-              <div className="flex h-full items-center justify-center text-xs text-gx-muted">
+              <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
                 Select a file to view its contents.
               </div>
             )}
             {activeKey && activeContent?.loading && (
               <div className="flex h-full items-center justify-center">
-                <Loader2 size={16} className="animate-spin text-gx-muted" />
+                <Loader2 size={16} className="animate-spin text-muted-foreground" />
               </div>
             )}
             {activeKey && activeContent && !activeContent.loading && activeContent.error && (
-              <div className="flex h-full items-center justify-center text-xs text-gx-muted">
+              <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
                 {activeContent.error}
               </div>
             )}
@@ -304,17 +311,19 @@ function EditorTabPill({
   return (
     <div
       className={clsx(
-        "group flex shrink-0 items-center gap-1.5 border-r border-gx-border/50 px-3 py-1.5 text-[11px] cursor-pointer transition select-none",
+        "group flex shrink-0 items-center gap-1.5 border-r border-border/50 px-3 py-1.5 text-[11px] cursor-pointer transition select-none",
         active
-          ? "bg-gx-bg-sub text-gx-text"
-          : "bg-gx-surface text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover",
+          ? "bg-background text-foreground"
+          : "bg-card text-muted-foreground hover:text-foreground hover:bg-accent",
       )}
       onClick={onActivate}
       title={tab.path}
     >
       <FileIcon path={tab.path} kind="file" />
       <span className="max-w-[120px] truncate">{tab.label}</span>
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={(e) => {
           e.stopPropagation();
@@ -323,13 +332,13 @@ function EditorTabPill({
         className={clsx(
           "ml-1 shrink-0 rounded p-0.5 transition",
           active
-            ? "text-gx-muted hover:bg-gx-border/50 hover:text-gx-text"
-            : "text-transparent group-hover:text-gx-muted group-hover:hover:bg-gx-border/50 group-hover:hover:text-gx-text",
+            ? "text-muted-foreground hover:bg-border/50 hover:text-foreground"
+            : "text-transparent group-hover:text-muted-foreground group-hover:hover:bg-border/50 group-hover:hover:text-foreground",
         )}
         aria-label={`Close ${tab.label}`}
       >
         <X size={10} />
-      </button>
+      </Button>
     </div>
   );
 }

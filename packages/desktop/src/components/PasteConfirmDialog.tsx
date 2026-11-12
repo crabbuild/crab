@@ -1,6 +1,9 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import clsx from "clsx";
-import { AlertTriangle, ShieldAlert, Clipboard } from "lucide-react";
+import { AlertTriangle, Clipboard, ShieldAlert } from "lucide-react";
+import { useId, useRef, useState } from "react";
 import type { PasteAnalysis } from "../lib/terminal-paste-guard";
 
 /**
@@ -33,10 +36,8 @@ export function PasteConfirmDialog({
   onConfirm,
   onCancel,
 }: PasteConfirmDialogProps) {
-  const headingId = useId();
   const bodyId = useId();
   const cancelRef = useRef<HTMLButtonElement | null>(null);
-  const previousActive = useRef<HTMLElement | null>(null);
   const [riskAcknowledged, setRiskAcknowledged] = useState(false);
 
   const hasDangerousPatterns = analysis.reasons.includes("dangerous-pattern");
@@ -47,49 +48,32 @@ export function PasteConfirmDialog({
   // and the user hasn't acknowledged the risk.
   const pasteDisabled = hasDangerousPatterns && !riskAcknowledged;
 
-  // Focus management: grab focus on mount, restore on unmount.
-  useEffect(() => {
-    previousActive.current =
-      (document.activeElement as HTMLElement | null) ?? null;
-    cancelRef.current?.focus();
-    return () => {
-      previousActive.current?.focus?.();
-    };
-  }, []);
-
-  // Esc cancels.
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        onCancel();
-      }
-    };
-    window.addEventListener("keydown", handler, true);
-    return () => window.removeEventListener("keydown", handler, true);
-  }, [onCancel]);
-
   // Determine the severity icon and color.
   const isDangerous = hasDangerousPatterns;
-  const iconColor = isDangerous ? "text-gx-error" : "text-gx-warn";
-  const iconBg = isDangerous ? "bg-gx-error/15" : "bg-gx-warn/15";
+  const iconColor = isDangerous ? "text-destructive" : "text-warning";
+  const iconBg = isDangerous ? "bg-destructive/15" : "bg-warning/15";
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onCancel();
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) {
+          onCancel();
+        }
       }}
     >
-      <div
+      <DialogContent
         role="alertdialog"
-        aria-modal="true"
-        aria-labelledby={headingId}
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+    cancelRef.current?.focus();
+        }}
+        showCloseButton={false}
         aria-describedby={bodyId}
-        className="w-[32rem] max-w-[calc(100vw-2rem)] rounded-lg border border-gx-border bg-gx-surface shadow-2xl"
+        className="block gap-0 p-0 w-[32rem] max-w-[calc(100vw-2rem)] rounded-lg border border-border bg-card shadow-2xl"
       >
         {/* Header */}
-        <div className="flex items-start gap-3 border-b border-gx-border p-4">
+        <div className="flex items-start gap-3 border-b border-border p-4">
           <div
             className={clsx(
               "mt-0.5 shrink-0 rounded p-2",
@@ -104,17 +88,15 @@ export function PasteConfirmDialog({
             )}
           </div>
           <div className="min-w-0 flex-1">
-            <h2
-              id={headingId}
-              className="text-[14px] font-semibold text-gx-text"
+            <DialogTitle className="text-[14px] font-semibold text-foreground"
             >
               {isDangerous
                 ? "Dangerous paste detected"
                 : "Review paste content"}
-            </h2>
+            </DialogTitle>
             <p
               id={bodyId}
-              className="mt-1 text-[12px] leading-relaxed text-gx-muted"
+              className="mt-1 text-[12px] leading-relaxed text-muted-foreground"
             >
               {buildDescription(analysis)}
             </p>
@@ -122,15 +104,15 @@ export function PasteConfirmDialog({
         </div>
 
         {/* Preview section */}
-        <div className="border-b border-gx-border bg-gx-bg-sub px-4 py-3">
+        <div className="border-b border-border bg-background px-4 py-3">
           {hasMultiLine && (
-            <div className="mb-2 flex items-center gap-1.5 text-[11px] text-gx-muted">
+            <div className="mb-2 flex items-center gap-1.5 text-[11px] text-muted-foreground">
               <Clipboard size={12} aria-hidden="true" />
               <span>{analysis.lineCount} lines</span>
             </div>
           )}
           <pre
-            className="max-h-48 overflow-auto rounded border border-gx-border/50 bg-gx-bg p-3 font-mono text-[11px] leading-relaxed text-gx-text scrollbar-thin"
+            className="max-h-48 overflow-auto rounded border border-border/50 bg-background p-3 font-mono text-[11px] leading-relaxed text-foreground scrollbar-thin"
             aria-label="Paste preview"
           >
             {renderPreview(analysis.preview, hasControlChars)}
@@ -140,7 +122,7 @@ export function PasteConfirmDialog({
               {analysis.controlChars.map((ch) => (
                 <span
                   key={ch}
-                  className="inline-block rounded bg-gx-warn/20 px-1.5 py-0.5 font-mono text-[10px] text-gx-warn"
+                  className="inline-block rounded bg-warning/20 px-1.5 py-0.5 font-mono text-[10px] text-warning"
                 >
                   {ch}
                 </span>
@@ -148,7 +130,7 @@ export function PasteConfirmDialog({
             </div>
           )}
           {hasDangerousPatterns && (
-            <div className="mt-2 text-[11px] text-gx-error">
+            <div className="mt-2 text-[11px] text-destructive">
               Matched dangerous pattern
               {analysis.dangerousPatterns.length > 1 ? "s" : ""}:{" "}
               {analysis.dangerousPatterns
@@ -160,15 +142,14 @@ export function PasteConfirmDialog({
 
         {/* Risk acknowledgment checkbox (dangerous patterns only) */}
         {hasDangerousPatterns && (
-          <div className="border-b border-gx-border px-4 py-3">
+          <div className="border-b border-border px-4 py-3">
             <label className="flex cursor-pointer items-center gap-2.5">
-              <input
-                type="checkbox"
+              <Checkbox
                 checked={riskAcknowledged}
-                onChange={(e) => setRiskAcknowledged(e.target.checked)}
-                className="h-4 w-4 rounded border-gx-border text-gx-error accent-gx-error focus:ring-gx-error"
+                onCheckedChange={(checked) => setRiskAcknowledged(checked === true)}
+                className="h-4 w-4 rounded border-border text-destructive accent-destructive focus:ring-destructive"
               />
-              <span className="text-[12px] font-medium text-gx-text">
+              <span className="text-[12px] font-medium text-foreground">
                 I understand the risk and want to paste this content
               </span>
             </label>
@@ -177,18 +158,22 @@ export function PasteConfirmDialog({
 
         {/* Footer buttons */}
         <div className="flex items-center justify-end gap-2 p-3">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             ref={cancelRef}
             type="button"
             onClick={onCancel}
             className={clsx(
-              "rounded border border-gx-border bg-gx-surface px-3 py-1.5 text-[12px] text-gx-text transition",
-              "hover:bg-gx-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gx-accent",
+              "rounded border border-border bg-card px-3 py-1.5 text-[12px] text-foreground transition",
+              "hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
             )}
           >
             Cancel
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={onConfirm}
             disabled={pasteDisabled}
@@ -196,17 +181,17 @@ export function PasteConfirmDialog({
               "rounded border px-3 py-1.5 text-[12px] font-medium transition",
               "focus-visible:outline-none focus-visible:ring-2",
               pasteDisabled
-                ? "cursor-not-allowed border-gx-border bg-gx-surface text-gx-muted opacity-50"
+                ? "cursor-not-allowed border-border bg-card text-muted-foreground opacity-50"
                 : isDangerous
-                  ? "border-gx-error/60 bg-gx-error/15 text-gx-error hover:bg-gx-error/25 focus-visible:ring-gx-error"
-                  : "border-gx-accent/60 bg-gx-accent/15 text-gx-accent hover:bg-gx-accent/25 focus-visible:ring-gx-accent",
+                  ? "border-destructive/60 bg-destructive/15 text-destructive hover:bg-destructive/25 focus-visible:ring-destructive"
+                  : "border-primary/60 bg-primary/15 text-primary hover:bg-primary/25 focus-visible:ring-primary",
             )}
           >
             Paste
-          </button>
+          </Button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -267,7 +252,7 @@ function renderPreview(
     parts.push(
       <span
         key={match.index}
-        className="rounded bg-gx-warn/25 px-0.5 text-gx-warn"
+        className="rounded bg-warning/25 px-0.5 text-warning"
         title={`Control character: ${match[0]}`}
       >
         {match[0]}

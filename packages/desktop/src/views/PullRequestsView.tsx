@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { useSessionScroll } from "../hooks/useSessionScroll";
+import { Button } from "@/components/ui/button";
+import { requestPrompt } from "@/lib/application-dialogs";
 import clsx from "clsx";
 import {
   Check,
@@ -14,11 +14,13 @@ import {
   RefreshCw,
   Settings,
 } from "lucide-react";
-import { OpenRepo } from "../state";
-import { PullRequestEntry, PullRequestStatus, rpc } from "../ipc";
-import { ViewToolbar, ToolbarAction } from "../components/ViewToolbar";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ContextMenu, MenuItemDef } from "../components/ContextMenu";
-import { executeCommand, CommandContext } from "../lib/command-registry";
+import { ToolbarAction, ViewToolbar } from "../components/ViewToolbar";
+import { useSessionScroll } from "../hooks/useSessionScroll";
+import { PullRequestEntry, PullRequestStatus, rpc } from "../ipc";
+import { CommandContext, executeCommand } from "../lib/command-registry";
+import { OpenRepo } from "../state";
 
 interface Props {
   repo: OpenRepo;
@@ -29,11 +31,11 @@ interface Props {
 // ---- Status chip styles ----
 
 const STATUS_STYLES: Record<PullRequestStatus, { bg: string; text: string; label: string; icon?: boolean }> = {
-  draft: { bg: "bg-gray-500/20", text: "text-gray-400", label: "Draft" },
-  open: { bg: "bg-gx-success/20", text: "text-gx-success", label: "Open" },
-  approved: { bg: "bg-gx-success/20", text: "text-gx-success", label: "Approved", icon: true },
-  changes_requested: { bg: "bg-gx-warn/20", text: "text-gx-warn", label: "Changes Requested" },
-  merged: { bg: "bg-gx-thinking/20", text: "text-gx-thinking", label: "Merged" },
+  draft: { bg: "bg-accent/20", text: "text-muted-foreground", label: "Draft" },
+  open: { bg: "bg-success/20", text: "text-success", label: "Open" },
+  approved: { bg: "bg-success/20", text: "text-success", label: "Approved", icon: true },
+  changes_requested: { bg: "bg-warning/20", text: "text-warning", label: "Changes Requested" },
+  merged: { bg: "bg-thinking/20", text: "text-thinking", label: "Merged" },
 };
 
 function PrStatusChip({ status }: { status: PullRequestStatus }) {
@@ -100,20 +102,22 @@ function PrSection({ title, prs, defaultOpen = true, onSelectPr, onContextMenu }
 
   return (
     <div className="mb-1">
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center gap-1 px-3 py-1.5 text-left text-[11px] font-medium uppercase tracking-wider text-gx-muted hover:text-gx-text"
+        className="justify-start flex w-full items-center gap-1 px-3 py-1.5 text-left text-[11px] font-medium uppercase tracking-wider text-muted-foreground hover:text-foreground"
         aria-expanded={open}
       >
         {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
         {title}
         <span className="ml-auto text-[10px] tabular-nums">{prs.length}</span>
-      </button>
+      </Button>
       {open && (
         <ul role="listbox" aria-label={title} className="space-y-0.5 px-2">
           {prs.length === 0 && (
-            <li className="px-2 py-2 text-center text-[11px] text-gx-muted">
+            <li className="px-2 py-2 text-center text-[11px] text-muted-foreground">
               No pull requests
             </li>
           )}
@@ -131,7 +135,7 @@ function PrSection({ title, prs, defaultOpen = true, onSelectPr, onContextMenu }
 function PrRow({ pr, onSelect, onContextMenu }: { pr: PullRequestEntry; onSelect?: (prNumber: number) => void; onContextMenu?: (e: React.MouseEvent, pr: PullRequestEntry) => void }) {
   return (
     <li
-      className="group cursor-pointer rounded px-2 py-1.5 hover:bg-gx-surface-hover"
+      className="group cursor-pointer rounded px-2 py-1.5 hover:bg-accent"
       onClick={() => onSelect?.(pr.number)}
       onContextMenu={(e) => {
         e.preventDefault();
@@ -142,23 +146,23 @@ function PrRow({ pr, onSelect, onContextMenu }: { pr: PullRequestEntry; onSelect
       onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") onSelect?.(pr.number); }}
     >
       <div className="flex items-start gap-2">
-        <GitPullRequest size={14} className="mt-0.5 shrink-0 text-gx-muted" />
+        <GitPullRequest size={14} className="mt-0.5 shrink-0 text-muted-foreground" />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
-            <span className="truncate text-sm text-gx-text">{pr.title}</span>
+            <span className="truncate text-sm text-foreground">{pr.title}</span>
             <PrStatusChip status={pr.status} />
           </div>
-          <div className="mt-0.5 flex items-center gap-2 text-[11px] text-gx-muted">
+          <div className="mt-0.5 flex items-center gap-2 text-[11px] text-muted-foreground">
             <span className="font-mono">#{pr.number}</span>
             <span>{pr.author}</span>
             <span className="ml-auto">{formatTime(pr.updated_at)}</span>
           </div>
-          <div className="mt-0.5 flex items-center gap-1 text-[10px] text-gx-muted">
-            <span className="truncate rounded bg-gx-surface px-1 py-[1px] font-mono">
+          <div className="mt-0.5 flex items-center gap-1 text-[10px] text-muted-foreground">
+            <span className="truncate rounded bg-card px-1 py-[1px] font-mono">
               {pr.source_branch}
             </span>
             <span>→</span>
-            <span className="truncate rounded bg-gx-surface px-1 py-[1px] font-mono">
+            <span className="truncate rounded bg-card px-1 py-[1px] font-mono">
               {pr.target_branch}
             </span>
           </div>
@@ -239,9 +243,9 @@ export function PullRequestsView({ repo, onNavigateToSettings, onSelectPr }: Pro
   );
 
   const handleToolbarAction = useCallback(
-    (actionId: string) => {
+    async (actionId: string) => {
       if (actionId === "pr.create") {
-        const title = window.prompt("Pull request title:");
+        const title = await requestPrompt("Pull request title:");
         if (!title?.trim()) return;
         void executeCommand(actionId, commandContext, title.trim());
       } else {
@@ -287,7 +291,7 @@ export function PullRequestsView({ repo, onNavigateToSettings, onSelectPr }: Pro
   // Loading state
   if (loading && prs.length === 0) {
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-2 text-gx-muted">
+      <div className="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground">
         <Loader2 size={20} className="animate-spin" />
         <span className="text-xs">Loading pull requests…</span>
       </div>
@@ -304,33 +308,33 @@ export function PullRequestsView({ repo, onNavigateToSettings, onSelectPr }: Pro
 
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 px-4 text-center">
-        <GitPullRequest size={32} className="text-gx-muted" />
-        <div className="text-sm text-gx-text">
+        <GitPullRequest size={32} className="text-muted-foreground" />
+        <div className="text-sm text-foreground">
           {isAuthError ? "Forge authentication required" : "Unable to load pull requests"}
         </div>
-        <div className="max-w-[240px] text-[11px] text-gx-muted">
+        <div className="max-w-[240px] text-[11px] text-muted-foreground">
           {isAuthError
             ? "Connect your forge account in Settings to view pull requests."
             : error}
         </div>
         {isAuthError && onNavigateToSettings && (
-          <button
+          <Button variant="outline"
             type="button"
             onClick={onNavigateToSettings}
-            className="btn mt-1 inline-flex items-center gap-1.5 text-xs"
+            className="mt-1 inline-flex items-center gap-1.5 text-xs"
           >
             <Settings size={12} />
             Open Settings
-          </button>
+          </Button>
         )}
-        <button
+        <Button variant="outline"
           type="button"
           onClick={() => void fetchPrs()}
-          className="btn mt-1 inline-flex items-center gap-1.5 text-xs"
+          className="mt-1 inline-flex items-center gap-1.5 text-xs"
         >
           <RefreshCw size={12} />
           Retry
-        </button>
+        </Button>
       </div>
     );
   }
@@ -346,19 +350,19 @@ export function PullRequestsView({ repo, onNavigateToSettings, onSelectPr }: Pro
           onAction={handleToolbarAction}
         />
         <div className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center">
-          <GitPullRequest size={32} className="text-gx-muted" />
-          <div className="text-sm text-gx-text">No open pull requests</div>
-          <div className="text-[11px] text-gx-muted">
+          <GitPullRequest size={32} className="text-muted-foreground" />
+          <div className="text-sm text-foreground">No open pull requests</div>
+          <div className="text-[11px] text-muted-foreground">
             Pull requests from your forge will appear here.
           </div>
-          <button
+          <Button variant="outline"
             type="button"
             onClick={() => void fetchPrs()}
-            className="btn mt-2 inline-flex items-center gap-1.5 text-xs"
+            className="mt-2 inline-flex items-center gap-1.5 text-xs"
           >
             <RefreshCw size={12} />
             Refresh
-          </button>
+          </Button>
         </div>
       </div>
     );
@@ -375,15 +379,17 @@ export function PullRequestsView({ repo, onNavigateToSettings, onSelectPr }: Pro
         actions={toolbarActions}
         onAction={handleToolbarAction}
         trailing={
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={() => void fetchPrs()}
-            className="flex h-6 w-6 items-center justify-center rounded text-gx-secondary hover:bg-gx-accent/20 hover:text-gx-primary"
+            className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-primary/20 hover:text-foreground"
             aria-label="Refresh pull requests"
             disabled={loading}
           >
             <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
-          </button>
+          </Button>
         }
       />
       <div ref={scrollRef} className="flex-1 overflow-auto py-1">

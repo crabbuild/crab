@@ -1,3 +1,6 @@
+import { useRef } from "react";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
 import { Download, FileX, HardDrive, Loader2 } from "lucide-react";
 import { formatBytes } from "../lib/format";
 
@@ -34,7 +37,8 @@ export function ConfirmHydrateDialog({
   onConfirm,
   onCancel,
 }: Props) {
-  if (!open) return null;
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const triggerRef = useRef<HTMLElement | null>(null);
 
   const isHydrate = verb === "hydrate";
   const Icon = isHydrate ? Download : FileX;
@@ -46,24 +50,23 @@ export function ConfirmHydrateDialog({
     isHydrate && freeBytes != null && freeBytes < totalBytes;
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
-      onClick={onCancel}
-    >
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label={title}
-        className="w-[min(520px,92vw)] rounded-lg border border-gx-border bg-gx-surface p-5 shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="mb-3 flex items-center gap-2 text-base font-semibold">
-          <Icon size={16} className="text-gx-accent" />
+    <Dialog open={open} onOpenChange={(next) => { if (!next) onCancel(); }}>
+      <DialogContent className="w-[min(520px,92vw)] gap-0 bg-card p-5" showCloseButton={false}
+        onOpenAutoFocus={(event) => {
+          // The trigger belongs to the calling view, outside this controlled
+          // Dialog root. Radix can only restore its own DialogTrigger ref.
+          triggerRef.current = document.activeElement as HTMLElement | null;
+          event.preventDefault();
+          cancelRef.current?.focus();
+        }}
+        onCloseAutoFocus={(event) => { event.preventDefault(); triggerRef.current?.focus(); }}>
+        <DialogTitle className="mb-3 flex items-center gap-2 text-base font-semibold">
+          <Icon size={16} className="text-primary" />
           {title}
-        </div>
-        <p className="mb-4 text-sm text-gx-muted">{body}</p>
+        </DialogTitle>
+        <DialogDescription className="mb-4 text-sm text-muted-foreground">{body}</DialogDescription>
 
-        <div className="mb-4 space-y-2 rounded border border-gx-border bg-gx-bg-sub p-3 text-sm">
+        <div className="mb-4 space-y-2 rounded border border-border bg-background p-3 text-sm">
           <Row label="Files affected" value={fileCount.toLocaleString()} />
           <Row label="Logical size" value={formatBytes(totalBytes)} />
           {freeBytes != null && (
@@ -76,7 +79,7 @@ export function ConfirmHydrateDialog({
         </div>
 
         {wouldUseMoreThanFree && (
-          <div className="mb-3 rounded border border-gx-warn/40 bg-gx-warn/10 p-3 text-xs text-gx-warn">
+          <div className="mb-3 rounded border border-warning/40 bg-warning/10 p-3 text-xs text-warning">
             <HardDrive size={12} className="mr-1 inline" />
             The files to hydrate are larger than the free space on this disk.
             Proceeding may cause writes to fail mid-operation.
@@ -84,18 +87,18 @@ export function ConfirmHydrateDialog({
         )}
 
         {error && (
-          <div className="mb-3 rounded border border-gx-error/40 bg-gx-error/10 p-2 text-xs text-gx-error">
+          <div className="mb-3 rounded border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">
             {error}
           </div>
         )}
 
         <div className="flex justify-end gap-2">
-          <button type="button" className="btn" onClick={onCancel} disabled={busy}>
+          <Button ref={cancelRef} variant="outline" type="button" onClick={onCancel} disabled={busy}>
             Cancel
-          </button>
-          <button
+          </Button>
+          <Button variant="default"
             type="button"
-            className="btn btn-primary"
+
             onClick={onConfirm}
             disabled={busy}
           >
@@ -106,10 +109,10 @@ export function ConfirmHydrateDialog({
             ) : (
               <>{isHydrate ? "Hydrate" : "Dehydrate"}</>
             )}
-          </button>
+          </Button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -124,8 +127,8 @@ function Row({
 }) {
   return (
     <div className="flex items-center justify-between text-[13px]">
-      <span className="text-gx-muted">{label}</span>
-      <span className={warn ? "font-mono text-gx-warn" : "font-mono text-gx-text"}>
+      <span className="text-muted-foreground">{label}</span>
+      <span className={warn ? "font-mono text-warning" : "font-mono text-foreground"}>
         {value}
       </span>
     </div>

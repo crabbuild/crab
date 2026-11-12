@@ -1,3 +1,4 @@
+import { chooseSelect } from "../helpers/select";
 import { test, expect } from "@playwright/test";
 
 // Dedicated component qualification against an owned Vite server. Chrome uses
@@ -362,7 +363,7 @@ test("sends typed MCP form values and preserves input after a failed submission"
   const form = page.getByRole("region", { name: "MCP form" });
   await expect(form.getByLabel("Count *", { exact: true })).toHaveValue("0");
   await expect(form.getByLabel("Include reports (optional)", { exact: true })).toHaveValue("false");
-  await form.getByLabel("Review mode *", { exact: true }).selectOption({ label: "Thorough review" });
+  await chooseSelect(form.getByLabel("Review mode *", { exact: true }), { label: "Thorough review" });
   await form.getByRole("checkbox", { name: "Build project" }).check();
   await page.getByRole("button", { name: "Fail next response" }).click();
   await form.getByRole("button", { name: "Send form" }).click();

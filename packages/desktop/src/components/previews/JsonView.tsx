@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { Button } from "@/components/ui/button";
 import clsx from "clsx";
 import { ChevronDown, ChevronRight, Code2 } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 import { rpc } from "../../ipc";
-import { CodeEditor } from "../CodeEditor";
 import { useSetting } from "../../settings";
+import { CodeEditor } from "../CodeEditor";
 
 interface Props {
   repoId: string;
@@ -59,26 +60,28 @@ export function JsonView({ repoId, path, rev, jsonl }: Props) {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex shrink-0 items-center justify-between border-b border-gx-border bg-gx-surface px-3 py-1.5 text-[11px] text-gx-muted">
+      <div className="flex shrink-0 items-center justify-between border-b border-border bg-card px-3 py-1.5 text-[11px] text-muted-foreground">
         <span>{jsonl ? "JSONL (first 500 lines)" : "JSON"}</span>
         <div className="flex gap-1">
-          <button type="button" className="btn text-xs" onClick={() => setMode("tree")}>
+          <Button variant="outline" type="button" className="text-xs" onClick={() => setMode("tree")}>
             Tree
-          </button>
-          <button type="button" className="btn text-xs" onClick={() => setMode("source")}>
+          </Button>
+          <Button variant="outline" type="button" className="text-xs" onClick={() => setMode("source")}>
             <Code2 size={12} /> Source
-          </button>
+          </Button>
         </div>
       </div>
-      <div className="min-h-0 flex-1 overflow-auto bg-gx-bg-sub">
+      <div className="min-h-0 flex-1 overflow-auto bg-background">
         {err && (
-          <div className="m-4 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">
+          <div className="m-4 rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
             {err}
           </div>
         )}
-        {text != null && mode === "source" && <CodeEditor path={path} value={text} />}
+        {text != null && mode === "source" && (
+          <CodeEditor path={path} value={text} />
+        )}
         {text != null && mode === "tree" && parsed.err && (
-          <div className="m-4 rounded border border-gx-warn/40 bg-gx-warn/10 p-3 text-xs text-gx-warn">
+          <div className="m-4 rounded border border-warning/40 bg-warning/10 p-3 text-xs text-warning">
             Could not parse JSON: {parsed.err}
           </div>
         )}
@@ -102,24 +105,26 @@ function JsonNode({ value, label, depth }: { value: unknown; label: string | nul
   if (typeof value === "string")
     return (
       <Leaf label={label}>
-        <span className="text-[#9ece6a]">"{value}"</span>
+        <span className="text-success">"{value}"</span>
       </Leaf>
     );
   if (Array.isArray(value)) {
     return (
       <div>
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={() => setOpen((o) => !o)}
-          className="flex items-center gap-1 text-gx-text hover:text-gx-accent"
+          className="flex items-center gap-1 text-foreground hover:text-primary"
         >
           {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-          {label != null && <span className="text-[#7aa2f7]">"{label}"</span>}
-          {label != null && <span className="text-gx-muted">:</span>}
-          <span className="text-gx-muted">[{value.length}]</span>
-        </button>
+          {label != null && <span className="text-info">"{label}"</span>}
+          {label != null && <span className="text-muted-foreground">:</span>}
+          <span className="text-muted-foreground">[{value.length}]</span>
+        </Button>
         {open && (
-          <div className="ml-4 border-l border-gx-border/60 pl-2">
+          <div className="ml-4 border-l border-border/60 pl-2">
             {value.map((v, i) => (
               <JsonNode key={i} value={v} label={String(i)} depth={depth + 1} />
             ))}
@@ -132,18 +137,20 @@ function JsonNode({ value, label, depth }: { value: unknown; label: string | nul
     const entries = Object.entries(value as Record<string, unknown>);
     return (
       <div>
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={() => setOpen((o) => !o)}
-          className="flex items-center gap-1 text-gx-text hover:text-gx-accent"
+          className="flex items-center gap-1 text-foreground hover:text-primary"
         >
           {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-          {label != null && <span className="text-[#7aa2f7]">"{label}"</span>}
-          {label != null && <span className="text-gx-muted">:</span>}
-          <span className="text-gx-muted">{`{${entries.length}}`}</span>
-        </button>
+          {label != null && <span className="text-info">"{label}"</span>}
+          {label != null && <span className="text-muted-foreground">:</span>}
+          <span className="text-muted-foreground">{`{${entries.length}}`}</span>
+        </Button>
         {open && (
-          <div className="ml-4 border-l border-gx-border/60 pl-2">
+          <div className="ml-4 border-l border-border/60 pl-2">
             {entries.map(([k, v]) => (
               <JsonNode key={k} value={v} label={k} depth={depth + 1} />
             ))}
@@ -158,8 +165,8 @@ function JsonNode({ value, label, depth }: { value: unknown; label: string | nul
 function Leaf({ label, children }: { label: string | null; children: React.ReactNode }) {
   return (
     <div className={clsx("flex items-baseline gap-1 py-[1px]")}>
-      {label != null && <span className="text-[#7aa2f7]">"{label}"</span>}
-      {label != null && <span className="text-gx-muted">:</span>}
+      {label != null && <span className="text-info">"{label}"</span>}
+      {label != null && <span className="text-muted-foreground">:</span>}
       <span>{children}</span>
     </div>
   );

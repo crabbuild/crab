@@ -1,12 +1,18 @@
-import { Fragment, useMemo } from "react";
+import { Button } from "@/components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import { PatchDiff } from "@pierre/diffs/react";
 import { Trash2 } from "lucide-react";
+import { Fragment, useMemo } from "react";
+import { useEffectiveTheme } from "../hooks/useEffectiveTheme";
+import { diffOptions } from "../lib/diffTheme";
+import { ParsedFile, ParsedHunk, parsePatch } from "../lib/parse-patch";
+import { isPointerPatch, PointerPatchKind } from "../lib/pointer-detection";
 import { HunkToolbar } from "./HunkToolbar";
 import { PointerFileCard } from "./PointerFileCard";
-import { diffOptions } from "../lib/diffTheme";
-import { useEffectiveTheme } from "../hooks/useEffectiveTheme";
-import { parsePatch, ParsedFile, ParsedHunk } from "../lib/parse-patch";
-import { isPointerPatch, PointerPatchKind } from "../lib/pointer-detection";
 
 export interface InlinePatchDiffAction {
   hunk: ParsedHunk;
@@ -96,7 +102,7 @@ export function InlinePatchDiff({
 
   if (parsed.files.length === 0) {
     return (
-      <div className="p-6 text-center text-sm text-gx-muted">
+      <div className="p-6 text-center text-sm text-muted-foreground">
         {emptyState ?? "No hunks in this patch."}
       </div>
     );
@@ -112,14 +118,14 @@ export function InlinePatchDiff({
         const pointer = isPointerPatch(fileSubPatch);
         return (
           <Fragment key={f.path}>
-            <div className="sticky top-0 z-10 flex items-center gap-2 border-b border-gx-border bg-gx-surface px-3 py-1.5 text-[11px]">
-              <span className="font-mono text-gx-text">{f.path}</span>
+            <div className="sticky top-0 z-10 flex items-center gap-2 border-b border-border bg-card px-3 py-1.5 text-[11px]">
+              <span className="font-mono text-foreground">{f.path}</span>
               {f.oldPath !== f.path && (
-                <span className="text-gx-muted">
+                <span className="text-muted-foreground">
                   (renamed from {f.oldPath})
                 </span>
               )}
-              <span className="ml-auto text-gx-muted">
+              <span className="ml-auto text-muted-foreground">
                 {pointer.isPointer
                   ? "pointer file"
                   : `${f.hunks.length} hunk${f.hunks.length === 1 ? "" : "s"}`}
@@ -210,7 +216,7 @@ function PointerFileBlock({
   onDiscardFile,
 }: PointerFileBlockProps) {
   return (
-    <div className="border-b border-gx-border">
+    <div className="border-b border-border">
       <PointerFileCard
         path={file.path}
         kind={kind}
@@ -219,7 +225,7 @@ function PointerFileBlock({
         onUnstageFile={onUnstageFile}
         onDiscardFile={onDiscardFile}
       />
-      <div className="bg-gx-bg-sub">
+      <div className="bg-background">
         {file.hunks.map((hunk) => (
           <PatchDiff
             key={`${hunk.oldStart}-${hunk.newStart}-${hunk.indexInFile}`}
@@ -299,7 +305,7 @@ function HunkBlock({
   const header = hunkHeader(hunk);
 
   return (
-    <div className="border-b border-gx-border">
+    <div className="border-b border-border">
       <HunkToolbar
         hunkNumber={hunkNumber}
         hunkCount={hunkCount}
@@ -309,14 +315,16 @@ function HunkBlock({
         onUnstage={onUnstage}
         onDiscard={onDiscard}
       />
-      <div className="bg-gx-bg-sub">
+      <div className="bg-background">
         <PatchDiff
           patch={subPatch}
           options={options}
           className="gx-patch-diff"
         />
       </div>
-      {onDiscardLine && <LineDiscardStrip hunk={hunk} onDiscardLine={onDiscardLine} />}
+      {onDiscardLine && (
+        <LineDiscardStrip hunk={hunk} onDiscardLine={onDiscardLine} />
+      )}
     </div>
   );
 }
@@ -367,30 +375,33 @@ function LineDiscardStrip({
   if (lines.length === 0) return null;
 
   return (
-    <details className="group border-t border-gx-border/50 bg-gx-bg text-[11px]">
-      <summary className="cursor-pointer px-3 py-1 text-gx-muted hover:text-gx-text">
+    <Collapsible className="group border-t border-border/50 bg-background text-[11px]">
+      <CollapsibleTrigger className="cursor-pointer px-3 py-1 text-muted-foreground hover:text-foreground">
         Discard individual line{lines.length === 1 ? "" : "s"} ({lines.length})
-      </summary>
-      <ul className="divide-y divide-gx-border/30">
+      </CollapsibleTrigger>
+      <CollapsibleContent>
+      <ul className="divide-y divide-border/30">
         {lines.map((l, i) => (
           <li
             key={`${l.side}-${l.absoluteLine}-${i}`}
-            className="group/row flex items-center gap-2 px-3 py-0.5 font-mono text-[11px] hover:bg-gx-surface-hover"
+            className="group/row flex items-center gap-2 px-3 py-0.5 font-mono text-[11px] hover:bg-accent"
           >
             <span
               className={
                 l.side === "add"
-                  ? "w-10 shrink-0 text-right text-gx-success"
-                  : "w-10 shrink-0 text-right text-gx-error"
+                  ? "w-10 shrink-0 text-right text-success"
+                  : "w-10 shrink-0 text-right text-destructive"
               }
             >
               {l.side === "add" ? `+${l.absoluteLine}` : `-${l.absoluteLine}`}
             </span>
-            <span className="min-w-0 flex-1 truncate text-gx-text">
+            <span className="min-w-0 flex-1 truncate text-foreground">
               {l.raw}
             </span>
-            <button
-              type="button"
+            <Button
+                variant="ghost"
+                size="compact"
+                type="button"
               aria-label={`Discard line ${l.absoluteLine}`}
               title={`Discard this ${l.side === "add" ? "added" : "deleted"} line`}
               onClick={() =>
@@ -401,14 +412,15 @@ function LineDiscardStrip({
                   rawLine: l.raw,
                 })
               }
-              className="opacity-0 transition group-hover/row:opacity-100 hover:text-gx-error"
+              className="opacity-0 transition group-hover/row:opacity-100 hover:text-destructive"
             >
               <Trash2 size={11} />
-            </button>
+            </Button>
           </li>
         ))}
       </ul>
-    </details>
+    </CollapsibleContent>
+    </Collapsible>
   );
 }
 

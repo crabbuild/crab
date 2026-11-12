@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Task Progress Panel — fixed bottom panel for Claude Code's
  * TaskCreate/TaskUpdate protocol.
@@ -12,7 +13,6 @@
  * bar and individual task items with status icons.
  */
 
-import { useState } from "react";
 import clsx from "clsx";
 import {
   Check,
@@ -22,6 +22,7 @@ import {
   ClipboardList,
   Loader2,
 } from "lucide-react";
+import { useState } from "react";
 import type { ToolEvent } from "../../../electron/agent-chat-messages";
 
 // ── Types ───────────────────────────────────────────────────────────
@@ -145,19 +146,19 @@ function StatusIcon({ status }: { status: TaskItem["status"] }) {
   switch (status) {
     case "completed":
       return (
-        <div className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-gx-success/20 text-gx-success">
+        <div className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-success/20 text-success">
           <Check size={10} strokeWidth={3} />
         </div>
       );
     case "in_progress":
       return (
-        <div className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-gx-accent/20 text-gx-accent">
+        <div className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-primary/20 text-primary">
           <Loader2 size={10} className="animate-spin" />
         </div>
       );
     default:
       return (
-        <div className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-gx-border text-gx-muted">
+        <div className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-border text-muted-foreground">
           <Circle size={8} />
         </div>
       );
@@ -166,9 +167,9 @@ function StatusIcon({ status }: { status: TaskItem["status"] }) {
 
 function StatusBadge({ status }: { status: TaskItem["status"] }) {
   const styles = {
-    completed: "bg-gx-success/15 text-gx-success border-gx-success/30",
-    in_progress: "bg-gx-accent/15 text-gx-accent border-gx-accent/30",
-    pending: "bg-gx-surface text-gx-muted border-gx-border",
+    completed: "bg-success/15 text-success border-success/30",
+    in_progress: "bg-primary/15 text-primary border-primary/30",
+    pending: "bg-card text-muted-foreground border-border",
   };
   const labels = {
     completed: "done",
@@ -188,13 +189,13 @@ function ProgressBar({ completed, total }: { completed: number; total: number })
   const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
   return (
     <div className="flex items-center gap-2">
-      <div className="flex-1 h-1.5 rounded-full bg-gx-surface overflow-hidden">
+      <div className="flex-1 h-1.5 rounded-full bg-card overflow-hidden">
         <div
-          className="h-full rounded-full bg-gx-success/70 transition-all duration-300"
+          className="h-full rounded-full bg-success/70 transition-all duration-300"
           style={{ width: `${pct}%` }}
         />
       </div>
-      <span className="text-[9px] text-gx-muted font-mono tabular-nums">
+      <span className="text-[9px] text-muted-foreground font-mono tabular-nums">
         {completed}/{total}
       </span>
     </div>
@@ -220,90 +221,94 @@ export function TaskProgressPanel({ taskEvents }: TaskProgressPanelProps) {
       : "Pending";
 
   return (
-    <div className="shrink-0 border-t border-gx-border bg-gx-bg-sub">
+    <div className="shrink-0 border-t border-border bg-background">
       <div className="mx-auto max-w-4xl">
-      {/* Header — always visible */}
-      <button
-        type="button"
-        onClick={() => setExpanded(!expanded)}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-gx-surface-hover transition cursor-pointer"
-      >
-        <ClipboardList size={12} className="text-blue-400 shrink-0" />
-        <span className="text-[11px] font-medium text-gx-text">Tasks</span>
+        {/* Header — always visible */}
+        <Button
+          variant="ghost"
+          size="compact"
+          type="button"
+          onClick={() => setExpanded(!expanded)}
+          className="justify-start flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-accent transition cursor-pointer"
+        >
+          <ClipboardList size={12} className="text-info shrink-0" />
+          <span className="text-[11px] font-medium text-foreground">Tasks</span>
 
-        {/* Compact progress summary */}
-        <span className="flex items-center gap-1.5 text-[10px] text-gx-text/80">
-          {completed > 0 && (
-            <span className="flex items-center gap-0.5 text-gx-success">
-              <Check size={9} strokeWidth={3} />
-              {completed}
-            </span>
-          )}
-          {inProgress > 0 && (
-            <span className="flex items-center gap-0.5 text-gx-accent">
-              <Loader2 size={9} />
-              {inProgress}
-            </span>
-          )}
-        </span>
+          {/* Compact progress summary */}
+          <span className="flex items-center gap-1.5 text-[10px] text-foreground/80">
+            {completed > 0 && (
+              <span className="flex items-center gap-0.5 text-success">
+                <Check size={9} strokeWidth={3} />
+                {completed}
+              </span>
+            )}
+            {inProgress > 0 && (
+              <span className="flex items-center gap-0.5 text-primary">
+                <Loader2 size={9} />
+                {inProgress}
+              </span>
+            )}
+          </span>
 
-        {/* Status label */}
-        <span className={clsx(
+          {/* Status label */}
+          <span className={clsx(
           "rounded px-1.5 py-0.5 text-[9px] font-medium border",
           completed === total
-            ? "bg-gx-success/15 text-gx-success border-gx-success/30"
-            : "bg-gx-accent/15 text-gx-accent border-gx-accent/30",
+            ? "bg-success/15 text-success border-success/30"
+            : "bg-primary/15 text-primary border-primary/30",
         )}>
-          {statusLabel}
-        </span>
+            {statusLabel}
+          </span>
 
-        {/* Progress fraction */}
-        <span className="text-[10px] text-gx-muted font-mono tabular-nums ml-auto mr-1">
-          {completed}/{total}
-        </span>
+          {/* Progress fraction */}
+          <span className="text-[10px] text-muted-foreground font-mono tabular-nums ml-auto mr-1">
+            {completed}/{total}
+          </span>
 
-        {expanded
-          ? <ChevronDown size={11} className="shrink-0 text-gx-muted/60" />
-          : <ChevronUp size={11} className="shrink-0 text-gx-muted/60" />
-        }
-      </button>
+          {expanded ? (
+            <ChevronDown size={11} className="shrink-0 text-muted-foreground/60" />
+          ) : (
+            <ChevronUp size={11} className="shrink-0 text-muted-foreground/60" />
+          )}
+        </Button>
 
-      {/* Expanded content */}
-      {expanded && (
-        <div className="border-t border-gx-border/30 px-3 py-2 space-y-2 max-h-[240px] overflow-auto">
-          {/* Progress bar */}
-          <ProgressBar completed={completed} total={total} />
+        {/* Expanded content */}
+        {expanded && (
+          <div className="border-t border-border/30 px-3 py-2 space-y-2 max-h-[240px] overflow-auto">
+            {/* Progress bar */}
+            <ProgressBar completed={completed} total={total} />
 
-          {/* Task checklist */}
-          <div className="space-y-0.5">
-            {tasks.map((task) => (
-              <div
+            {/* Task checklist */}
+            <div className="space-y-0.5">
+              {tasks.map((task) => (
+                <div
                 key={task.id}
                 className={clsx(
                   "flex items-center gap-2 rounded px-1.5 py-1 transition",
-                  task.status === "in_progress" && "bg-gx-accent/5 border-l-2 border-gx-accent/40",
-                  task.status === "completed" && "border-l-2 border-gx-success/30",
+                  task.status === "in_progress" && "bg-primary/5 border-l-2 border-primary/40",
+                  task.status === "completed" && "border-l-2 border-success/30",
                   task.status === "pending" && "border-l-2 border-transparent",
                 )}
               >
-                <StatusIcon status={task.status} />
-                <span
+                  <StatusIcon status={task.status} />
+                  <span
                   className={clsx(
                     "flex-1 text-[10px] leading-tight",
-                    task.status === "completed" && "text-gx-muted line-through",
-                    task.status === "in_progress" && "text-gx-text font-medium",
-                    task.status === "pending" && "text-gx-text/80",
+                    task.status === "completed" && "text-muted-foreground line-through",
+                    task.status === "in_progress" && "text-foreground font-medium",
+                    task.status === "pending" && "text-foreground/80",
                   )}
                 >
-                  {task.title}
-                </span>
-                <StatusBadge status={task.status} />
-              </div>
-            ))}
+                    {task.title}
+                  </span>
+                  <StatusBadge status={task.status} />
+                </div>
+              ))}
+            </div>
           </div>
-        </div>
-      )}
-      </div>{/* close max-w-4xl */}
+        )}
+      </div>
+      {/* close max-w-4xl */}
     </div>
   );
 }

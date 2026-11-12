@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   CheckCircle2,
   ChevronDown,
@@ -10,6 +11,7 @@ import {
   Upload,
   XCircle,
 } from "lucide-react";
+import { useState } from "react";
 import { StagedFileEntry, StagingStats } from "../../ipc";
 import { formatBytes } from "../../lib/format";
 
@@ -72,7 +74,7 @@ export function StagedSection({
   // no cached files — avoids a flash of "empty" before the first fetch.
   if (!stats && loading) {
     return (
-      <div className="border-b border-gx-border px-4 py-2.5 text-[11px] text-gx-muted">
+      <div className="border-b border-border px-4 py-2.5 text-[11px] text-muted-foreground">
         <Loader2 size={11} className="mr-1 inline animate-spin" />
         Checking staging area…
       </div>
@@ -99,28 +101,30 @@ export function StagedSection({
   }
 
   return (
-    <div className="border-b border-gx-border">
-      <button
+    <div className="border-b border-border">
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={() => setExpanded(!expanded)}
-        className="flex w-full items-center gap-2 px-4 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-gx-muted hover:bg-gx-surface-hover"
+        className="justify-start flex w-full items-center gap-2 px-4 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-muted-foreground hover:bg-accent"
       >
         {expanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
-        <HardDrive size={11} className="text-gx-accent" />
+        <HardDrive size={11} className="text-primary" />
         Staged in Crab ({files.length})
         {totalBytes > 0 && (
-          <span className="ml-1 text-[10px] normal-case tracking-normal text-gx-muted">
+          <span className="ml-1 text-[10px] normal-case tracking-normal text-muted-foreground">
             · {formatBytes(totalBytes)}
             {totalChunks > 0 && ` · ${totalChunks.toLocaleString()} chunks`}
           </span>
         )}
-      </button>
+      </Button>
 
       {expanded && (
         <>
           {/* Per-file rows */}
           {files.length > 0 && (
-            <div className="ml-6 border-l border-gx-border/30">
+            <div className="ml-6 border-l border-border/30">
               {files.map((f) => (
                 <StagedFileRow
                   key={f.file_hash}
@@ -149,9 +153,10 @@ export function StagedSection({
                 onShowPush={onShowPush}
               />
             )}
-            <p className="text-[10px] text-gx-muted">
-              Staged chunks live in <code className="font-mono">.crab/staging/</code>{" "}
-              until pushed. Already-pushed files appear in Storage Map.
+            <p className="text-[10px] text-muted-foreground">
+              Staged chunks live in{" "}
+              <code className="font-mono">.crab/staging/</code> until pushed.
+              Already-pushed files appear in Storage Map.
             </p>
           </div>
         </>
@@ -176,16 +181,16 @@ function CommitPrompt({
   onCommit: () => void;
 }) {
   return (
-    <div className="space-y-2 rounded border border-gx-warn/40 bg-gx-warn/10 p-2.5 text-xs">
-      <div className="flex items-center gap-2 font-medium text-gx-warn">
+    <div className="space-y-2 rounded border border-warning/40 bg-warning/10 p-2.5 text-xs">
+      <div className="flex items-center gap-2 font-medium text-warning">
         <GitCommit size={12} />
         <span>Crab-tracked changes are not committed yet</span>
       </div>
-      <p className="text-[11px] text-gx-muted">
+      <p className="text-[11px] text-muted-foreground">
         Commit them so the push can include the new pointer blobs.
       </p>
       <div className="flex gap-2">
-        <input
+        <Input
           type="text"
           value={message}
           onChange={(e) => onChange(e.target.value)}
@@ -196,12 +201,12 @@ function CommitPrompt({
             }
           }}
           placeholder="Commit message"
-          className="flex-1 rounded border border-gx-border bg-gx-bg px-2 py-1 text-xs focus-visible:outline-none focus:border-gx-accent"
+          className="flex-1 rounded border border-border bg-background px-2 py-1 text-xs focus-visible:outline-none focus:border-primary"
           disabled={committing}
         />
-        <button
+        <Button variant="default"
           type="button"
-          className="btn btn-primary text-xs"
+          className="text-xs"
           onClick={onCommit}
           disabled={!message.trim() || committing}
         >
@@ -214,10 +219,10 @@ function CommitPrompt({
               <GitCommit size={11} /> Commit
             </>
           )}
-        </button>
+        </Button>
       </div>
       {error && (
-        <div className="text-[11px] text-gx-error">
+        <div className="text-[11px] text-destructive">
           <XCircle size={10} className="mr-1 inline" />
           {error}
         </div>
@@ -235,12 +240,12 @@ function PushPrompt({
 }) {
   return (
     <div className="flex items-center gap-2">
-      <button type="button" className="btn btn-primary text-xs" onClick={onShowPush}>
+      <Button variant="default" type="button" className="text-xs" onClick={onShowPush}>
         <Upload size={11} /> Push to Remote
-      </button>
+      </Button>
       {hasUnpushedCommits && (
-        <span className="text-[11px] text-gx-muted">
-          <CheckCircle2 size={10} className="mr-1 inline text-gx-success" />
+        <span className="text-[11px] text-muted-foreground">
+          <CheckCircle2 size={10} className="mr-1 inline text-success" />
           Commits are local — push to share.
         </span>
       )}
@@ -263,42 +268,50 @@ function StagedFileRow({
   // metadata wasn't captured (older crab versions).
   const label = file.file_path ?? `${file.file_hash.slice(0, 12)}…`;
   return (
-    <div className="group flex items-center gap-2 px-4 py-1.5 text-xs hover:bg-gx-surface-hover">
-      <FileCog size={13} className="shrink-0 text-orange-400" />
+    <div className="group flex items-center gap-2 px-4 py-1.5 text-xs hover:bg-accent">
+      <FileCog size={13} className="shrink-0 text-warning" />
       <span
-        className="min-w-0 flex-1 truncate font-mono text-gx-text"
+        className="min-w-0 flex-1 truncate font-mono text-foreground"
         title={file.file_path ? `${file.file_path}\n${file.file_hash}` : file.file_hash}
       >
         {label}
       </span>
       <StatusBadge status={status} />
-      <span className="shrink-0 tabular-nums text-gx-muted">{formatBytes(file.total_bytes)}</span>
-      <span className="shrink-0 rounded bg-gx-accent/10 px-1.5 py-0.5 text-[10px] text-gx-accent">
+      <span className="shrink-0 tabular-nums text-muted-foreground">
+        {formatBytes(file.total_bytes)}
+      </span>
+      <span className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary">
         {file.total_chunks} chunks
       </span>
       {file.pending_chunks > 0 && (
-        <span className="shrink-0 rounded bg-gx-warn/10 px-1.5 py-0.5 text-[10px] text-gx-warn">
+        <span className="shrink-0 rounded bg-warning/10 px-1.5 py-0.5 text-[10px] text-warning">
           {file.pending_chunks} pending
         </span>
       )}
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
-        className="shrink-0 rounded p-0.5 text-gx-muted transition hover:bg-gx-error/10 hover:text-gx-error"
+        className="shrink-0 rounded p-0.5 text-muted-foreground transition hover:bg-destructive/10 hover:text-destructive"
         onClick={onRemove}
         disabled={removing}
         title="Remove from staging area"
       >
-        {removing ? <Loader2 size={11} className="animate-spin" /> : <XCircle size={11} />}
-      </button>
+        {removing ? (
+          <Loader2 size={11} className="animate-spin" />
+        ) : (
+          <XCircle size={11} />
+        )}
+      </Button>
     </div>
   );
 }
 
 function StatusBadge({ status }: { status: StagedStatus }) {
   const cfg = {
-    uncommitted: { label: "uncommitted", cls: "border-gx-warn/40 bg-gx-warn/10 text-gx-warn" },
-    "git-staged": { label: "to commit", cls: "border-gx-accent/40 bg-gx-accent/10 text-gx-accent" },
-    committed: { label: "committed", cls: "border-gx-success/40 bg-gx-success/10 text-gx-success" },
+    uncommitted: { label: "uncommitted", cls: "border-warning/40 bg-warning/10 text-warning" },
+    "git-staged": { label: "to commit", cls: "border-primary/40 bg-primary/10 text-primary" },
+    committed: { label: "committed", cls: "border-success/40 bg-success/10 text-success" },
   }[status];
   return (
     <span

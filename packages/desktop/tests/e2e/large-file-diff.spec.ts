@@ -1,3 +1,4 @@
+import { chooseSelect } from "../helpers/select";
 import { test, expect, _electron as electron } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -70,7 +71,7 @@ test("packaged desktop compares actual Crab chunks and LFS identities across ver
     };
     await openDiff("dataset.bin");
     const selector = page.getByRole("combobox", { name: "Compare file versions", exact: true });
-    await selector.selectOption("staged");
+    await chooseSelect(selector, "staged");
     const comparison = page.getByTestId("large-file-diff");
     await expect(comparison.getByText("modified", { exact: true })).toBeVisible();
     await expect(comparison.getByText("0 B", { exact: true })).toBeVisible();
@@ -81,7 +82,7 @@ test("packaged desktop compares actual Crab chunks and LFS identities across ver
     await ranges.getByRole("button", { name: "Next ranges", exact: true }).click();
     await expect(ranges.locator("tbody tr").first().getByRole("cell").first()).not.toHaveText(firstOffset);
     await page.screenshot({ path: test.info().outputPath("crab-staged-chunk-diff.png") });
-    await selector.selectOption("unstaged");
+    await chooseSelect(selector, "unstaged");
     await expect(comparison.getByText(/staged.*worktree/)).toBeVisible();
     await openDiff("lfs.bin");
     await expect(comparison.getByText("modified", { exact: true })).toBeVisible();

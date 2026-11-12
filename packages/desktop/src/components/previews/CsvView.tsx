@@ -1,5 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Download, Loader2 } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 import { rpc } from "../../ipc";
 import { useSetting } from "../../settings";
 
@@ -113,14 +115,14 @@ export function CsvView({ repoId, path, rev, sep }: Props) {
 
   if (err) {
     return (
-      <div className="m-4 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">
+      <div className="m-4 rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
         {err}
       </div>
     );
   }
   if (text == null) {
     return (
-      <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted">
+      <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
         <Loader2 size={14} className="animate-spin" /> Parsing {path}…
       </div>
     );
@@ -128,42 +130,43 @@ export function CsvView({ repoId, path, rev, sep }: Props) {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex shrink-0 items-center justify-between gap-3 border-b border-gx-border bg-gx-surface px-3 py-1.5 text-[11px] text-gx-muted">
+      <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border bg-card px-3 py-1.5 text-[11px] text-muted-foreground">
         <div className="flex items-center gap-3">
           <span>{sep === "," ? "CSV" : "TSV"}</span>
-          <span>· {body.length.toLocaleString()} rows · {headers.length} cols</span>
+          <span>
+            · {body.length.toLocaleString()} rows · {headers.length} cols
+          </span>
           <label className="flex items-center gap-1">
-            <input
-              type="checkbox"
+            <Checkbox
               checked={hasHeader}
-              onChange={(e) => setHasHeader(e.target.checked)}
+              onCheckedChange={(checked) => setHasHeader(checked === true)}
             />
             Header row
           </label>
         </div>
         <div className="flex items-center gap-2">
-          <button
+          <Button variant="outline"
             type="button"
-            className="btn text-xs"
+            className="text-xs"
             disabled={page === 0}
             onClick={() => setPage((p) => Math.max(0, p - 1))}
           >
             Prev
-          </button>
+          </Button>
           <span>
             Page {page + 1} / {totalPages}
           </span>
-          <button
+          <Button variant="outline"
             type="button"
-            className="btn text-xs"
+            className="text-xs"
             disabled={page + 1 >= totalPages}
             onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
           >
             Next
-          </button>
-          <button
+          </Button>
+          <Button variant="outline"
             type="button"
-            className="btn text-xs"
+            className="text-xs"
             onClick={() => {
               const blob = new Blob([text], {
                 type: sep === "," ? "text/csv" : "text/tab-separated-values",
@@ -177,18 +180,20 @@ export function CsvView({ repoId, path, rev, sep }: Props) {
             title="Save a copy of the preview to disk"
           >
             <Download size={12} /> Export
-          </button>
+          </Button>
         </div>
       </div>
-      <div className="min-h-0 flex-1 overflow-auto bg-gx-bg-sub">
+      <div className="min-h-0 flex-1 overflow-auto bg-background">
         <table className="w-full border-collapse font-mono text-[12px]">
-          <thead className="sticky top-0 bg-gx-surface">
+          <thead className="sticky top-0 bg-card">
             <tr>
-              <th className="sticky left-0 border-b border-gx-border bg-gx-surface px-2 py-1 text-right text-gx-muted">#</th>
+              <th className="sticky left-0 border-b border-border bg-card px-2 py-1 text-right text-muted-foreground">
+                #
+              </th>
               {headers.map((h, i) => (
                 <th
                   key={i}
-                  className="border-b border-gx-border px-2 py-1 text-left font-semibold text-gx-text"
+                  className="border-b border-border px-2 py-1 text-left font-semibold text-foreground"
                   title={h}
                 >
                   {h || `col${i + 1}`}
@@ -198,12 +203,12 @@ export function CsvView({ repoId, path, rev, sep }: Props) {
           </thead>
           <tbody>
             {pageRows.map((row, ri) => (
-              <tr key={ri} className="odd:bg-gx-surface">
-                <td className="sticky left-0 bg-inherit px-2 py-1 text-right text-gx-muted">
+              <tr key={ri} className="odd:bg-card">
+                <td className="sticky left-0 bg-inherit px-2 py-1 text-right text-muted-foreground">
                   {page * ROWS_PER_PAGE + ri + 1}
                 </td>
                 {headers.map((_, ci) => (
-                  <td key={ci} className="border-b border-gx-border/40 px-2 py-1 align-top text-gx-text">
+                  <td key={ci} className="border-b border-border/40 px-2 py-1 align-top text-foreground">
                     {row[ci] ?? ""}
                   </td>
                 ))}

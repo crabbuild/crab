@@ -1,11 +1,27 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { FileTree as PierreFileTree, useFileTree, useFileTreeSelection } from "@pierre/trees/react";
+import { Button } from "@/components/ui/button";
+import { repositoryTreeTheme } from "@/lib/repository-tree-theme";
 import type { GitStatus, GitStatusEntry } from "@pierre/trees";
-import { themeToTreeStyles, prepareFileTreeInput } from "@pierre/trees";
+import { prepareFileTreeInput } from "@pierre/trees";
+import { FileTree as PierreFileTree, useFileTree, useFileTreeSelection } from "@pierre/trees/react";
 import clsx from "clsx";
-import { Clipboard, ClipboardPaste, Clock, Copy, Download, Edit3, ExternalLink, FileX, FilePlus, FolderOpen, FolderPlus, Scissors, Trash2 } from "lucide-react";
-import { DirEntry, HydrationEntry, mainProcess } from "../ipc";
+import {
+  Clipboard,
+  ClipboardPaste,
+  Clock,
+  Copy,
+  Download,
+  Edit3,
+  ExternalLink,
+  FilePlus,
+  FileX,
+  FolderOpen,
+  FolderPlus,
+  Scissors,
+  Trash2,
+} from "lucide-react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useEffectiveTheme } from "../hooks/useEffectiveTheme";
+import { DirEntry, HydrationEntry, mainProcess } from "../ipc";
 import { isEligible, type HydrateVerb } from "../lib/hydrateScope";
 
 // Module-level clipboard for cut/copy operations within the tree.
@@ -268,7 +284,7 @@ export const FileTree = memo(function FileTree({
   // Cache the styles at module level to avoid calling getComputedStyle
   // (which forces layout) on every render.
   const effective = useEffectiveTheme();
-  const themeStyles = useMemo(() => getCachedTreeThemeStyles(effective), [effective]);
+  const themeStyles = useMemo(() => repositoryTreeTheme(effective), [effective]);
 
   const runHydrate = useCallback(
     async (paths: string[], verb: HydrateVerb) => {
@@ -520,22 +536,26 @@ export const FileTree = memo(function FileTree({
           {(hydratePaths.length > 0 || dehydratePaths.length > 0) && (
             <>
               <Divider />
-              {hydratePaths.length > 0 && <MenuItem
+              {hydratePaths.length > 0 && (
+                <MenuItem
                 icon={<Download size={12} />}
                 label={isDir ? "Hydrate Subtree" : "Hydrate File"}
                 onClick={() => {
                   context.close();
                   void runHydrate(hydratePaths, "hydrate");
                 }}
-              />}
-              {dehydratePaths.length > 0 && <MenuItem
+              />
+              )}
+              {dehydratePaths.length > 0 && (
+                <MenuItem
                 icon={<FileX size={12} />}
                 label={isDir ? "Dehydrate Subtree" : "Dehydrate File"}
                 onClick={() => {
                   context.close();
                   void runHydrate(dehydratePaths, "dehydrate");
                 }}
-              />}
+              />
+              )}
             </>
           )}
 
@@ -561,7 +581,11 @@ export const FileTree = memo(function FileTree({
 
   return (
     <div className="relative min-h-0 flex-1 overflow-hidden">
-      {transferError && <div role="alert" className="px-3 py-2 text-xs text-gx-error">{transferError}</div>}
+      {transferError && (
+        <div role="alert" className="px-3 py-2 text-xs text-destructive">
+          {transferError}
+        </div>
+      )}
       <SelectionHandler model={model} entryByPath={entryByPath} onOpenFile={onOpenFile} />
       <PierreFileTree
         model={model}
@@ -578,7 +602,7 @@ export const FileTree = memo(function FileTree({
         }
       />
       {hydrationByPath && hydrationByPath.size > 0 && (
-        <div className="absolute bottom-0 left-0 right-0 bg-gx-surface/80 px-3 py-1 text-[10px] text-gx-muted">
+        <div className="absolute bottom-0 left-0 right-0 bg-card/80 px-3 py-1 text-[10px] text-muted-foreground">
           <HydrationLegend byPath={hydrationByPath} />
         </div>
       )}
@@ -616,87 +640,10 @@ function SelectionHandler({
   return null;
 }
 
-// Module-level cache for tree theme styles. Avoids calling
-// getComputedStyle (which forces synchronous layout) on every render.
-let _cachedThemeMode: "dark" | "light" | null = null;
-let _cachedThemeStyles: React.CSSProperties | null = null;
-let _cacheVersion = 0;
-const CURRENT_CACHE_VERSION = 2; // Bump to invalidate after code changes
-
-function getCachedTreeThemeStyles(mode: "dark" | "light"): React.CSSProperties {
-  if (_cachedThemeMode === mode && _cachedThemeStyles && _cacheVersion === CURRENT_CACHE_VERSION) {
-    return _cachedThemeStyles;
-  }
-  _cachedThemeStyles = buildTreeThemeStyles(mode);
-  _cachedThemeMode = mode;
-  _cacheVersion = CURRENT_CACHE_VERSION;
-  return _cachedThemeStyles;
-}
-
-/**
- * Build Shiki-shaped theme input for `themeToTreeStyles`, using the
- * same colour values the rest of the app reads from CSS variables.
- * We rely on `getComputedStyle(document.documentElement)` to read
- * the active `--gx-*` tokens so the tree stays visually aligned
- * with sidebars, buttons, etc.
- */
-function buildTreeThemeStyles(mode: "dark" | "light"): React.CSSProperties {
-  const cs =
-    typeof window !== "undefined"
-      ? getComputedStyle(document.documentElement)
-      : null;
-  const rgb = (name: string, fallback: string): string => {
-    const raw = cs?.getPropertyValue(name).trim();
-    if (!raw) return fallback;
-    return `rgb(${raw})`;
-  };
-  const colors: Record<string, string> = {
-    "sideBar.background": rgb("--gx-bg-sub", mode === "dark" ? "#0b0d12" : "#ffffff"),
-    "editor.background": rgb("--gx-bg-sub", mode === "dark" ? "#0b0d12" : "#ffffff"),
-    "sideBar.foreground": rgb("--gx-text", mode === "dark" ? "#e7eaf1" : "#171b23"),
-    "sideBarSectionHeader.foreground": rgb("--gx-muted", "#8a93a5"),
-    "sideBar.border": rgb("--gx-border", mode === "dark" ? "#242832" : "#dde0e8"),
-    "list.hoverBackground": rgb(
-      "--gx-surface-hover",
-      mode === "dark" ? "#1e222b" : "#e9ecf3",
-    ),
-    "list.activeSelectionBackground":
-      mode === "dark" ? "#4f8cff26" : "#2c6def1f",
-    "list.activeSelectionForeground":
-      mode === "dark" ? "#e7eaf1" : "#171b23",
-    "focusBorder": rgb("--gx-accent", mode === "dark" ? "#4f8cff" : "#2c6def"),
-    "input.background": rgb("--gx-bg-sub", mode === "dark" ? "#0b0d12" : "#ffffff"),
-    "input.border": rgb("--gx-border", mode === "dark" ? "#242832" : "#dde0e8"),
-    "scrollbarSlider.background": rgb(
-      "--gx-border",
-      mode === "dark" ? "#242832" : "#dde0e8",
-    ),
-    "gitDecoration.addedResourceForeground": rgb(
-      "--gx-success",
-      mode === "dark" ? "#4ade80" : "#16a34a",
-    ),
-    "gitDecoration.modifiedResourceForeground": rgb(
-      "--gx-accent",
-      mode === "dark" ? "#4f8cff" : "#2c6def",
-    ),
-    "gitDecoration.deletedResourceForeground": rgb(
-      "--gx-error",
-      mode === "dark" ? "#f87171" : "#dc2626",
-    ),
-  };
-  const styles = themeToTreeStyles({
-    type: mode,
-    bg: colors["sideBar.background"],
-    fg: colors["sideBar.foreground"],
-    colors,
-  });
-  return styles as unknown as React.CSSProperties;
-}
-
 function ContextMenuBody({ children }: { children: React.ReactNode }) {
   return (
     <div
-      className="min-w-[240px] overflow-hidden rounded-md border border-gx-border bg-gx-surface p-1 shadow-2xl"
+      className="min-w-[240px] overflow-hidden rounded-md border border-border bg-card p-1 shadow-2xl"
       data-file-tree-context-menu-root="true"
     >
       {children}
@@ -716,23 +663,27 @@ function MenuItem({
   onClick: () => void;
 }) {
   return (
-    <button
+    <Button
+      variant="ghost"
+      size="compact"
       type="button"
       onClick={onClick}
       className={clsx(
-        "flex w-full items-center gap-2 whitespace-nowrap rounded px-2 py-1.5 text-left text-[12.5px] text-gx-text transition",
-        "hover:bg-gx-surface-hover",
+        "flex w-full items-center gap-2 whitespace-nowrap rounded px-2 py-1.5 text-left text-[12.5px] text-foreground transition",
+        "hover:bg-accent",
       )}
     >
-      <span className="shrink-0 text-gx-muted">{icon}</span>
+      <span className="shrink-0 text-muted-foreground">{icon}</span>
       <span className="flex-1">{label}</span>
-      {hint && <span className="ml-3 text-[10px] text-gx-muted">{hint}</span>}
-    </button>
+      {hint && (
+        <span className="ml-3 text-[10px] text-muted-foreground">{hint}</span>
+      )}
+    </Button>
   );
 }
 
 function Divider() {
-  return <div className="my-1 border-t border-gx-border/60" />;
+  return <div className="my-1 border-t border-border/60" />;
 }
 
 function HydrationLegend({ byPath }: { byPath: Map<string, HydrationEntry> }) {
@@ -747,14 +698,17 @@ function HydrationLegend({ byPath }: { byPath: Map<string, HydrationEntry> }) {
   return (
     <div className="flex items-center gap-3">
       <span className="flex items-center gap-1">
-        <span className="inline-block h-2 w-2 rounded-full bg-gx-success" /> {hydrated} hydrated
+        <span className="inline-block h-2 w-2 rounded-full bg-success" />{" "}
+        {hydrated} hydrated
       </span>
       <span className="flex items-center gap-1">
-        <span className="inline-block h-2 w-2 rounded-full bg-gx-accent/60" /> {pointer} pointer
+        <span className="inline-block h-2 w-2 rounded-full bg-primary/60" />{" "}
+        {pointer} pointer
       </span>
       {partial > 0 && (
         <span className="flex items-center gap-1">
-          <span className="inline-block h-2 w-2 rounded-full bg-gx-warn" /> {partial} partial
+          <span className="inline-block h-2 w-2 rounded-full bg-warning" />{" "}
+          {partial} partial
         </span>
       )}
     </div>

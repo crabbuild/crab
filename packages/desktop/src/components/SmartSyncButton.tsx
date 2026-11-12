@@ -1,5 +1,6 @@
-import { useState, useCallback, useMemo } from "react";
+import { Button } from "@/components/ui/button";
 import { ArrowDown, ArrowUp, Loader2, RefreshCw, Upload } from "lucide-react";
+import { useCallback, useMemo, useState } from "react";
 import { executeCommand, type CommandContext } from "../lib/command-registry";
 
 export interface SmartSyncButtonProps {
@@ -78,11 +79,13 @@ export function SmartSyncButton({
   }, [loading, config.commandId, buildContext]);
 
   return (
-    <button
+    <Button
+      variant="ghost"
+      size="compact"
       type="button"
       onClick={handleClick}
       disabled={loading}
-      className="flex items-center gap-1.5 rounded px-2 py-0.5 text-[11px] text-gx-text hover:bg-gx-bg-hover disabled:opacity-50 disabled:cursor-not-allowed"
+      className="flex items-center gap-1.5 rounded px-2 py-0.5 text-[11px] text-foreground hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed"
       title={config.label}
     >
       {loading ? (
@@ -91,6 +94,6 @@ export function SmartSyncButton({
         <Icon size={12} />
       )}
       <span>{config.label}</span>
-    </button>
+    </Button>
   );
 }

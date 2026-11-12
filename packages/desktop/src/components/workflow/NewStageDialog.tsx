@@ -1,5 +1,9 @@
-import { useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { X } from "lucide-react";
+import { useState } from "react";
 import { WorkflowStage } from "../../lib/workflow-types";
 
 interface Props {
@@ -55,26 +59,43 @@ export function NewStageDialog({ existingNames, onAdd, onClose }: Props) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="w-[400px] rounded-lg border border-gx-border bg-gx-surface shadow-xl">
-        <div className="flex items-center justify-between border-b border-gx-border px-4 py-3">
-          <h2 className="text-sm font-medium text-gx-text">New Stage</h2>
-          <button
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) {
+          onClose();
+        }
+      }}
+    >
+      <DialogContent
+        showCloseButton={false}
+        aria-describedby={undefined}
+        className="block gap-0 p-0 w-[400px] rounded-lg border border-border bg-card shadow-xl"
+      >
+        <div className="flex items-center justify-between border-b border-border px-4 py-3">
+          <DialogTitle className="text-sm font-medium text-foreground">
+            New Stage
+          </DialogTitle>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
-            className="rounded p-1 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+            className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
             onClick={onClose}
           >
             <X size={16} />
-          </button>
+          </Button>
         </div>
 
         <form onSubmit={handleSubmit} className="p-4">
           <div className="space-y-3">
             <div>
-              <label className="mb-1 block text-xs text-gx-muted">Stage Name</label>
-              <input
+              <label className="mb-1 block text-xs text-muted-foreground">
+                Stage Name
+              </label>
+              <Input
                 type="text"
-                className="input-field w-full text-sm"
+                className="w-full text-sm"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="e.g. train, preprocess, evaluate"
@@ -83,9 +104,11 @@ export function NewStageDialog({ existingNames, onAdd, onClose }: Props) {
             </div>
 
             <div>
-              <label className="mb-1 block text-xs text-gx-muted">Command</label>
-              <textarea
-                className="input-field w-full resize-y font-mono text-xs"
+              <label className="mb-1 block text-xs text-muted-foreground">
+                Command
+              </label>
+              <Textarea
+                className="w-full resize-y font-mono text-xs"
                 rows={3}
                 value={cmd}
                 onChange={(e) => setCmd(e.target.value)}
@@ -94,22 +117,22 @@ export function NewStageDialog({ existingNames, onAdd, onClose }: Props) {
             </div>
 
             {error && (
-              <div className="rounded border border-gx-error/40 bg-gx-error/10 px-3 py-2 text-xs text-gx-error">
+              <div className="rounded border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
                 {error}
               </div>
             )}
           </div>
 
           <div className="mt-4 flex justify-end gap-2">
-            <button type="button" className="btn text-xs" onClick={onClose}>
+            <Button variant="outline" type="button" className="text-xs" onClick={onClose}>
               Cancel
-            </button>
-            <button type="submit" className="btn btn-primary text-xs">
+            </Button>
+            <Button variant="default" type="submit" className="text-xs">
               Add Stage
-            </button>
+            </Button>
           </div>
         </form>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

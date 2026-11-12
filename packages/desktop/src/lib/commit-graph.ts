@@ -312,10 +312,7 @@ export function layoutGraph(commits: CommitRow[]): GraphData {
 
 // ---- Colour palette ----
 
-export const PALETTE = [
-  "#4f8cff", "#4ade80", "#facc15", "#f87171", "#a78bfa",
-  "#22d3ee", "#f472b6", "#fb923c", "#34d399", "#c084fc",
-];
+export const PALETTE = Array.from({ length: 10 }, (_, index) => `rgb(var(--chart-${index + 1}))`);
 
 export function colorForIndex(idx: number): string {
   return PALETTE[idx % PALETTE.length];

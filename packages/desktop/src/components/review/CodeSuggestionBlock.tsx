@@ -1,5 +1,6 @@
-import { useCallback, useState } from "react";
+import { Button } from "@/components/ui/button";
 import { AlertCircle, Check, Clock, GitCommitHorizontal, Loader2 } from "lucide-react";
+import { useCallback, useState } from "react";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -84,23 +85,23 @@ export function CodeSuggestionBlock({
   const canApply = hasWriteAccess && !applied && !outdated && !loading;
 
   return (
-    <div className="my-1.5 rounded border border-gx-border bg-gx-bg-sub overflow-hidden">
+    <div className="my-1.5 rounded border border-border bg-background overflow-hidden">
       {/* Header */}
-      <div className="flex items-center justify-between border-b border-gx-border/50 px-3 py-1.5">
-        <div className="flex items-center gap-1.5 text-[10px] text-gx-muted">
+      <div className="flex items-center justify-between border-b border-border/50 px-3 py-1.5">
+        <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
           <GitCommitHorizontal size={10} className="shrink-0" />
           <span className="font-medium">Suggested change</span>
         </div>
 
         <div className="flex items-center gap-1.5">
           {applied && (
-            <span className="inline-flex items-center gap-1 rounded bg-green-500/15 px-1.5 py-0.5 text-[9px] font-medium text-green-400">
+            <span className="inline-flex items-center gap-1 rounded bg-success/15 px-1.5 py-0.5 text-[9px] font-medium text-success">
               <Check size={9} />
               Applied
             </span>
           )}
           {outdated && !applied && (
-            <span className="inline-flex items-center gap-1 rounded bg-orange-500/15 px-1.5 py-0.5 text-[9px] font-medium text-orange-400">
+            <span className="inline-flex items-center gap-1 rounded bg-warning/15 px-1.5 py-0.5 text-[9px] font-medium text-warning">
               <Clock size={9} />
               Outdated
             </span>
@@ -109,16 +110,16 @@ export function CodeSuggestionBlock({
       </div>
 
       {/* Diff view */}
-      <div className="divide-y divide-gx-border/30">
+      <div className="divide-y divide-border/30">
         {/* Before (original) */}
         <div className="px-3 py-1.5">
-          <div className="mb-1 text-[9px] font-medium uppercase tracking-wide text-gx-muted">
+          <div className="mb-1 text-[9px] font-medium uppercase tracking-wide text-muted-foreground">
             Before
           </div>
-          <pre className="overflow-x-auto rounded bg-red-500/5 px-2 py-1.5 font-mono text-[11px] leading-relaxed text-gx-text">
+          <pre className="overflow-x-auto rounded bg-destructive/5 px-2 py-1.5 font-mono text-[11px] leading-relaxed text-foreground">
             {originalCode.split("\n").map((line, i) => (
               <div key={i} className="flex">
-                <span className="mr-2 select-none text-red-400/70">−</span>
+                <span className="mr-2 select-none text-destructive/70">−</span>
                 <span>{line}</span>
               </div>
             ))}
@@ -127,13 +128,13 @@ export function CodeSuggestionBlock({
 
         {/* After (suggested) */}
         <div className="px-3 py-1.5">
-          <div className="mb-1 text-[9px] font-medium uppercase tracking-wide text-gx-muted">
+          <div className="mb-1 text-[9px] font-medium uppercase tracking-wide text-muted-foreground">
             After
           </div>
-          <pre className="overflow-x-auto rounded bg-green-500/5 px-2 py-1.5 font-mono text-[11px] leading-relaxed text-gx-text">
+          <pre className="overflow-x-auto rounded bg-success/5 px-2 py-1.5 font-mono text-[11px] leading-relaxed text-foreground">
             {suggestedCode.split("\n").map((line, i) => (
               <div key={i} className="flex">
-                <span className="mr-2 select-none text-green-400/70">+</span>
+                <span className="mr-2 select-none text-success/70">+</span>
                 <span>{line}</span>
               </div>
             ))}
@@ -142,18 +143,20 @@ export function CodeSuggestionBlock({
       </div>
 
       {/* Footer: Apply button or status */}
-      <div className="border-t border-gx-border/50 px-3 py-1.5">
+      <div className="border-t border-border/50 px-3 py-1.5">
         {error && (
-          <div className="mb-1.5 flex items-center gap-1.5 text-[10px] text-red-400">
+          <div className="mb-1.5 flex items-center gap-1.5 text-[10px] text-destructive">
             <AlertCircle size={10} />
             {error}
           </div>
         )}
 
         {canApply && (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
-            className="inline-flex items-center gap-1 rounded bg-gx-accent/10 px-2 py-1 text-[10px] text-gx-accent hover:bg-gx-accent/20 disabled:cursor-not-allowed disabled:opacity-50"
+            className="inline-flex items-center gap-1 rounded bg-primary/10 px-2 py-1 text-[10px] text-primary hover:bg-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
             onClick={handleApply}
             disabled={loading}
             aria-label="Apply suggestion"
@@ -169,11 +172,11 @@ export function CodeSuggestionBlock({
                 Apply suggestion
               </>
             )}
-          </button>
+          </Button>
         )}
 
         {!canApply && !applied && !outdated && !hasWriteAccess && (
-          <span className="text-[10px] text-gx-muted">
+          <span className="text-[10px] text-muted-foreground">
             Write access required to apply suggestions
           </span>
         )}

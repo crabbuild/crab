@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Remote repo sidebar extension.
  *
@@ -7,7 +8,6 @@
  * grouping.
  */
 
-import { useCallback, useMemo, useState } from "react";
 import clsx from "clsx";
 import {
   FolderGit2,
@@ -16,6 +16,7 @@ import {
   Terminal,
   X,
 } from "lucide-react";
+import { useCallback, useMemo, useState } from "react";
 import { RemoteBadge } from "./RemoteBadge";
 
 // ── Types ────────────────────────────────────────────────────────
@@ -90,15 +91,14 @@ export function RemoteRepoSidebar({
   if (remoteRepos.length === 0) return null;
 
   return (
-    <div className="border-t border-gray-200 dark:border-gray-700 pt-1">
-      <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400 dark:text-gray-500">
+    <div className="border-t border-border border-border pt-1">
+      <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground text-muted-foreground">
         Remote
       </div>
 
-      {groupByConnection && grouped ? (
-        Array.from(grouped.entries()).map(([profileId, repos]) => (
+      {groupByConnection && grouped ? Array.from(grouped.entries()).map(([profileId, repos]) => (
           <div key={profileId}>
-            <div className="px-3 py-0.5 text-[10px] text-gray-400 dark:text-gray-500">
+            <div className="px-3 py-0.5 text-[10px] text-muted-foreground text-muted-foreground">
               {repos[0]?.profileLabel ?? profileId}
             </div>
             {repos.map((repo) => (
@@ -114,8 +114,7 @@ export function RemoteRepoSidebar({
             ))}
           </div>
         ))
-      ) : (
-        remoteRepos.map((repo) => (
+        : remoteRepos.map((repo) => (
           <RemoteRepoRow
             key={repo.repoId}
             repo={repo}
@@ -125,8 +124,7 @@ export function RemoteRepoSidebar({
             onClose={() => onCloseRepo(repo.repoId)}
             onOpenTerminal={() => onOpenTerminal(repo.profileId, repo.remotePath)}
           />
-        ))
-      )}
+        ))}
     </div>
   );
 }
@@ -165,8 +163,8 @@ function RemoteRepoRow({
     <div
       className={clsx(
         "group flex items-center gap-1.5 px-3 py-1 cursor-pointer",
-        "hover:bg-gray-50 dark:hover:bg-gray-800/50",
-        isActive && "bg-blue-50 dark:bg-blue-900/20 border-l-2 border-blue-500",
+        "hover:bg-background hover:bg-card/50",
+        isActive && "bg-info/10 bg-info/20 border-l-2 border-info",
       )}
       onClick={handleClick}
       onMouseEnter={() => setHovered(true)}
@@ -177,12 +175,12 @@ function RemoteRepoRow({
     >
       {/* Status indicator */}
       {repo.connecting ? (
-        <Loader2 className="w-3 h-3 animate-spin text-yellow-500 shrink-0" />
+        <Loader2 className="w-3 h-3 animate-spin text-warning shrink-0" />
       ) : (
         <FolderGit2
           className={clsx(
             "w-3.5 h-3.5 shrink-0",
-            repo.connected ? "text-blue-500" : "text-gray-400",
+            repo.connected ? "text-info" : "text-muted-foreground",
           )}
         />
       )}
@@ -190,7 +188,7 @@ function RemoteRepoRow({
       {/* Repo name */}
       <span className="text-sm truncate flex-1">{repo.name}</span>
 
-      {/* SSH badge */}
+      {/* Repo name */}
       <RemoteBadge
         colour={repo.profileColour}
         label={repo.profileLabel}
@@ -198,38 +196,44 @@ function RemoteRepoRow({
         compact
       />
 
-      {/* Hover actions */}
+      {/* SSH badge */}
       {hovered && repo.connected && (
         <div className="flex items-center gap-0.5">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             onClick={(e) => { e.stopPropagation(); onOpenTerminal(); }}
-            className="p-0.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700"
+            className="p-0.5 rounded hover:bg-card hover:bg-card"
             title="Open Terminal"
             aria-label="Open terminal at repo root"
           >
             <Terminal className="w-3 h-3" />
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             onClick={(e) => { e.stopPropagation(); onClose(); }}
-            className="p-0.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700"
+            className="p-0.5 rounded hover:bg-card hover:bg-card"
             title="Close"
             aria-label="Close remote repo"
           >
             <X className="w-3 h-3" />
-          </button>
+          </Button>
         </div>
       )}
 
       {/* Disconnected overlay */}
       {!repo.connected && !repo.connecting && hovered && (
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           onClick={(e) => { e.stopPropagation(); onConnect(); }}
-          className="p-0.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700"
+          className="p-0.5 rounded hover:bg-card hover:bg-card"
           title="Connect"
           aria-label="Connect to remote server"
         >
-          <Plug className="w-3 h-3 text-gray-400" />
-        </button>
+          <Plug className="w-3 h-3 text-muted-foreground" />
+        </Button>
       )}
     </div>
   );

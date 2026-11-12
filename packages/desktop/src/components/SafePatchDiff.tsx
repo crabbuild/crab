@@ -138,7 +138,7 @@ function PerHunkFallback({
     // Mode-only or unfamiliar Git output must remain visible. An unparsed
     // nonempty patch is not evidence that the file has no changes.
     return patch.trim().length === 0 ? (
-      <div className="py-6 text-center text-sm text-gx-muted">No changes.</div>
+      <div className="py-6 text-center text-sm text-muted-foreground">No changes.</div>
     ) : (
       <HunkErrorBoundary fallbackPatch={patch}>
         <PatchDiff patch={patch} className={className} options={options}
@@ -226,14 +226,14 @@ class HunkErrorBoundary extends Component<
     if (this.state.error) {
       if (this.props.fallbackPatch) {
         return (
-          <pre className="whitespace-pre-wrap font-mono text-[10px] text-gx-text/70 px-2.5 py-2 max-h-[320px] overflow-auto">
+          <pre className="whitespace-pre-wrap font-mono text-[10px] text-foreground/70 px-2.5 py-2 max-h-[320px] overflow-auto">
             {this.props.fallbackPatch}
           </pre>
         );
       }
       return (
-        <div className="border-b border-gx-border/30 bg-gx-bg-sub px-4 py-2 text-[11px] text-gx-muted">
-          <span className="text-gx-warn">⚠</span> Hunk render failed — raw content shown below
+        <div className="border-b border-border/30 bg-background px-4 py-2 text-[11px] text-muted-foreground">
+          <span className="text-warning">⚠</span> Hunk render failed — raw content shown below
         </div>
       );
     }
@@ -286,15 +286,15 @@ function BinaryDiffCard({ patch }: { patch: string }) {
 
   return (
     <div className="flex flex-col items-center justify-center gap-3 py-8">
-      <div className="rounded-lg bg-gx-surface p-3">
-        <FileCode2 size={24} className="text-gx-muted" />
+      <div className="rounded-lg bg-card p-3">
+        <FileCode2 size={24} className="text-muted-foreground" />
       </div>
       <div className="text-center">
-        <div className="text-sm text-gx-text">Binary file</div>
+        <div className="text-sm text-foreground">Binary file</div>
         {path && (
-          <div className="mt-0.5 font-mono text-[11px] text-gx-muted">{path}</div>
+          <div className="mt-0.5 font-mono text-[11px] text-muted-foreground">{path}</div>
         )}
-        <p className="mt-2 max-w-xs text-[11px] text-gx-muted">
+        <p className="mt-2 max-w-xs text-[11px] text-muted-foreground">
           This file is binary and cannot be displayed as a text diff.
         </p>
       </div>

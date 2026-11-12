@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * TransferDropZone — drag-and-drop overlay for uploading files to a remote directory.
  *
@@ -7,9 +8,9 @@
  * Handles permission-denied errors with user notification.
  */
 
-import { useState, useCallback, useRef, useEffect } from "react";
-import { Upload, FolderUp, AlertCircle } from "lucide-react";
 import clsx from "clsx";
+import { AlertCircle, FolderUp, Upload } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -242,8 +243,8 @@ export function TransferDropZone({
         <div
           className={clsx(
             "absolute inset-0 z-50 flex flex-col items-center justify-center",
-            "bg-blue-500/10 dark:bg-blue-400/10",
-            "border-2 border-dashed border-blue-400 dark:border-blue-500",
+            "bg-info/10 bg-info/10",
+            "border-2 border-dashed border-info border-info",
             "rounded-lg backdrop-blur-sm",
             "transition-opacity duration-150",
           )}
@@ -252,22 +253,23 @@ export function TransferDropZone({
         >
           {isProcessing ? (
             <div className="flex flex-col items-center gap-2">
-              <FolderUp className="w-10 h-10 text-blue-500 dark:text-blue-400 animate-pulse" />
-              <p className="text-sm font-medium text-blue-700 dark:text-blue-300">
+              <FolderUp className="w-10 h-10 text-info text-info animate-pulse" />
+              <p className="text-sm font-medium text-info text-info">
                 Processing files…
               </p>
             </div>
           ) : (
             <div className="flex flex-col items-center gap-2">
-              <Upload className="w-10 h-10 text-blue-500 dark:text-blue-400" />
-              <p className="text-sm font-medium text-blue-700 dark:text-blue-300">
+              <Upload className="w-10 h-10 text-info text-info" />
+              <p className="text-sm font-medium text-info text-info">
                 Drop to upload to:
               </p>
-              <p className="text-xs text-blue-600 dark:text-blue-400 font-mono px-3 py-1 bg-blue-100 dark:bg-blue-900/40 rounded">
+              <p className="text-xs text-info text-info font-mono px-3 py-1 bg-info/10 bg-info/40 rounded">
                 {remoteDir}
               </p>
-              <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                Up to {MAX_FILES_PER_DROP} files · Folders supported (max depth {MAX_FOLDER_DEPTH})
+              <p className="text-xs text-muted-foreground text-muted-foreground mt-1">
+                Up to {MAX_FILES_PER_DROP} files · Folders supported (max depth{" "}
+                {MAX_FOLDER_DEPTH})
               </p>
             </div>
           )}
@@ -280,30 +282,32 @@ export function TransferDropZone({
           className={clsx(
             "absolute bottom-4 left-4 right-4 z-50",
             "flex items-start gap-2 px-3 py-2.5 rounded-lg",
-            "bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800",
+            "bg-destructive/10 bg-destructive/30 border border-destructive border-destructive",
             "shadow-sm",
           )}
           role="alert"
         >
-          <AlertCircle className="w-4 h-4 text-red-500 dark:text-red-400 shrink-0 mt-0.5" />
+          <AlertCircle className="w-4 h-4 text-destructive text-destructive shrink-0 mt-0.5" />
           <div className="flex-1 min-w-0">
-            <p className="text-sm font-medium text-red-700 dark:text-red-300">
+            <p className="text-sm font-medium text-destructive text-destructive">
               {error.message}
             </p>
             {error.directory && (
-              <p className="text-xs text-red-600 dark:text-red-400 truncate mt-0.5">
+              <p className="text-xs text-destructive text-destructive truncate mt-0.5">
                 {error.directory}
               </p>
             )}
           </div>
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={dismissError}
-            className="shrink-0 text-red-400 hover:text-red-600 dark:hover:text-red-300"
+            className="shrink-0 text-destructive hover:text-destructive hover:text-destructive"
             aria-label="Dismiss error"
           >
             ×
-          </button>
+          </Button>
         </div>
       )}
     </div>

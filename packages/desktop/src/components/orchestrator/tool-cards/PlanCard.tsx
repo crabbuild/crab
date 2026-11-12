@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Specialized renderer for plan mode tool calls.
  *
@@ -14,12 +15,18 @@
  * of the chat surface.
  */
 
-import { useState } from "react";
 import clsx from "clsx";
-import { ChevronDown, ChevronRight, ClipboardList, CheckCircle2, Loader2 } from "lucide-react";
+import {
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  ClipboardList,
+  Loader2,
+} from "lucide-react";
+import { useState } from "react";
 import { Streamdown } from "streamdown";
-import type { ToolCardRendererProps } from "./types";
 import { CollapsedCardLine } from "./CollapsedCardLine";
+import type { ToolCardRendererProps } from "./types";
 
 // ── Component ───────────────────────────────────────────────────────
 
@@ -37,7 +44,7 @@ export function PlanModeCard({ event, defaultExpanded, collapsed: collapsedProp,
   const isLive = status === "streaming" || status === "in_progress" || status === "updated";
   const [expanded, setExpanded] = useState(defaultExpanded ?? isLive);
 
-  const Icon = isLive ? Loader2 : (isEnter ? ClipboardList : CheckCircle2);
+  const Icon = isLive ? Loader2 : isEnter ? ClipboardList : CheckCircle2;
   const label = isLive ? "Planning…" : isEnter ? "Plan" : "Plan Ready";
   const description = isLive
     ? "Drafting plan"
@@ -50,9 +57,9 @@ export function PlanModeCard({ event, defaultExpanded, collapsed: collapsedProp,
   if (collapsed) {
     const defaultSummary = (
       <>
-        <Icon size={11} className={clsx("shrink-0", isLive ? "text-gx-info animate-spin" : "text-gx-muted")} />
-        <span className="font-medium text-gx-text/80">{label}</span>
-        <span className="truncate text-gx-muted">{description}</span>
+        <Icon size={11} className={clsx("shrink-0", isLive ? "text-info animate-spin" : "text-muted-foreground")} />
+        <span className="font-medium text-foreground/80">{label}</span>
+        <span className="truncate text-muted-foreground">{description}</span>
       </>
     );
     return (
@@ -68,15 +75,17 @@ export function PlanModeCard({ event, defaultExpanded, collapsed: collapsedProp,
     <div
       className={clsx(
         "rounded-md border overflow-hidden transition-colors",
-        isLive ? "border-gx-info/30 bg-gx-info/5" : "border-gx-border/40",
+        isLive ? "border-info/30 bg-info/5" : "border-border/40",
       )}
     >
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={() => hasContent && setExpanded(!expanded)}
         className={clsx(
           "flex w-full items-center gap-2 px-2.5 py-1.5 text-[10px] text-left transition",
-          hasContent && "hover:bg-gx-surface-hover cursor-pointer",
+          hasContent && "hover:bg-accent cursor-pointer",
           !hasContent && "cursor-default",
         )}
       >
@@ -84,23 +93,26 @@ export function PlanModeCard({ event, defaultExpanded, collapsed: collapsedProp,
           size={11}
           className={clsx(
             "shrink-0",
-            isLive ? "text-gx-info animate-spin" : "text-gx-muted",
+            isLive ? "text-info animate-spin" : "text-muted-foreground",
           )}
         />
-        <span className={clsx("shrink-0 font-medium", isLive ? "text-gx-info" : "text-gx-muted")}>
+        <span className={clsx("shrink-0 font-medium", isLive ? "text-info" : "text-muted-foreground")}>
           {label}
         </span>
-        <span className="flex-1 text-gx-muted/80 truncate">{description}</span>
+        <span className="flex-1 text-muted-foreground/80 truncate">
+          {description}
+        </span>
 
-        {hasContent && (
-          expanded
-            ? <ChevronDown size={10} className="shrink-0 text-gx-muted/60" />
-            : <ChevronRight size={10} className="shrink-0 text-gx-muted/60" />
-        )}
-      </button>
+        {hasContent &&
+          (expanded ? (
+            <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
+          ) : (
+            <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
+          ))}
+      </Button>
 
       {expanded && hasContent && (
-        <div className="border-t border-gx-border/30 max-h-[360px] overflow-auto px-3 py-2">
+        <div className="border-t border-border/30 max-h-[360px] overflow-auto px-3 py-2">
           <div className="prose-agent text-[11px]">
             <Streamdown shikiTheme={["github-light", "github-dark"]}>
               {plan}

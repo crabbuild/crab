@@ -1,4 +1,21 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import clsx from "clsx";
 import {
   AlertTriangle,
@@ -7,6 +24,9 @@ import {
   GitBranch,
   Plus,
 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AgentWorkflowDefinition, HydratedWorktreeEntry, rpc } from "../../ipc";
+import { AgentIcon } from "./AgentIcon";
 import {
   ChatInput,
   ChatInputAgent,
@@ -14,12 +34,10 @@ import {
   ChatInputSubmission,
   ChatMode,
 } from "./ChatInput";
-import { AgentIcon } from "./AgentIcon";
-import { SlashCommand } from "./SlashCommandDropdown";
-import { WorkspaceTemplate } from "./TemplatePicker";
-import { AgentWorkflowDefinition, HydratedWorktreeEntry, rpc } from "../../ipc";
 import { useAgentModels } from "./model-catalog";
 import { ModelDiscoveryStatus } from "./ModelDiscoveryStatus";
+import { SlashCommand } from "./SlashCommandDropdown";
+import { WorkspaceTemplate } from "./TemplatePicker";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -248,12 +266,12 @@ export function NewChatLanding({
     <div className="flex h-full flex-col items-center justify-center px-6">
       <div className="w-full max-w-[640px] space-y-5">
         {/* Heading */}
-        <h1 className="text-center text-lg font-semibold text-gx-text">
+        <h1 className="text-center text-lg font-semibold text-foreground">
           What should we build in{" "}
-          <span className="text-gx-accent">{repoName}</span>?
+          <span className="text-primary">{repoName}</span>?
         </h1>
 
-        {/* Main input area */}
+        {/* Heading */}
         <div className="relative">
           <ModelDiscoveryStatus discovery={modelDiscovery} />
           <ChatInput
@@ -324,58 +342,66 @@ export function NewChatLanding({
           />
         </div>
 
-        {/* Worktree warning */}
+        {/* Branch selector */}
         {(worktreeConflict || primaryWorkspaceNotice) && (
-          <div className="flex items-start gap-2 rounded-lg border border-gx-warn/40 bg-gx-warn/5 px-3 py-2 text-[11px] text-gx-warn">
+          <div className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/5 px-3 py-2 text-[11px] text-warning">
             <AlertTriangle size={13} className="mt-0.5 shrink-0" />
             <span>{worktreeConflict || primaryWorkspaceNotice}</span>
           </div>
         )}
 
-        {/* Recent chats / suggestions */}
+        {/* Branch selector */}
         {recentChats.length > 0 && (
           <div className="space-y-2">
             {recentChats.slice(0, 3).map((chat) => (
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 key={chat.id}
                 type="button"
                 onClick={() => onSelectRecentChat?.(chat.id)}
-                className="flex w-full items-center gap-3 rounded-lg border border-gx-border bg-gx-bg-sub px-4 py-3 text-left transition hover:border-gx-accent/40 hover:bg-gx-surface-hover"
+                className="justify-start flex w-full items-center gap-3 rounded-lg border border-border bg-background px-4 py-3 text-left transition hover:border-primary/40 hover:bg-accent"
               >
                 <AgentIcon agentName={chat.agentType} size={14} />
-                <span className="min-w-0 flex-1 truncate text-xs text-gx-text">
+                <span className="min-w-0 flex-1 truncate text-xs text-foreground">
                   {chat.title}
                 </span>
-                <span className="shrink-0 text-[10px] text-gx-muted">
+                <span className="shrink-0 text-[10px] text-muted-foreground">
                   {formatRelativeTime(chat.timestamp)}
                 </span>
-              </button>
+              </Button>
             ))}
           </div>
         )}
 
-        {/* Templates (when no recent chats) */}
+        {/* Recent chats / suggestions */}
         {recentChats.length === 0 && templates.length > 0 && (
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
             {templates.slice(0, 6).map((t) => (
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 key={t.name}
                 type="button"
                 onClick={() => onSelectTemplate?.(t.name)}
-                className="flex flex-col items-start gap-1 rounded-lg border border-gx-border bg-gx-bg-sub p-3 text-left transition hover:border-gx-accent/40 hover:bg-gx-surface-hover"
+                className="justify-start flex flex-col items-start gap-1 rounded-lg border border-border bg-background p-3 text-left transition hover:border-primary/40 hover:bg-accent"
               >
                 {t.icon && <span className="text-base">{t.icon}</span>}
-                <span className="text-[11px] font-medium text-gx-text">{t.name}</span>
+                <span className="text-[11px] font-medium text-foreground">
+                  {t.name}
+                </span>
                 {t.description && (
-                  <span className="text-[10px] text-gx-muted line-clamp-2">{t.description}</span>
+                  <span className="text-[10px] text-muted-foreground line-clamp-2">
+                    {t.description}
+                  </span>
                 )}
-              </button>
+              </Button>
             ))}
           </div>
         )}
       </div>
 
-      {/* Create Worktree Dialog */}
+      {/* Templates (when no recent chats) */}
       {showCreateWorktreeDialog && repoId && (
         <CreateWorktreeDialog
           repoId={repoId}
@@ -469,150 +495,200 @@ function CreateWorktreeDialog({
   );
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
-      <div
-        className="w-full max-w-sm rounded-lg border border-gx-border bg-gx-bg p-4 shadow-xl"
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) {
+          onClose();
+        }
+      }}
+    >
+      <DialogContent
+        showCloseButton={false}
+        aria-describedby={undefined}
+        className="block gap-0 p-0 w-full max-w-sm rounded-lg border border-border bg-background p-4 shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <h3 className="mb-3 text-sm font-semibold text-gx-text">Create Worktree</h3>
+        <DialogTitle className="mb-3 text-sm font-semibold text-foreground">
+          Create Worktree
+        </DialogTitle>
 
         <form onSubmit={handleSubmit} className="space-y-3">
           {/* Mode tabs */}
           <div className="flex gap-1 text-[10px]">
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className={clsx(
                 "rounded px-2.5 py-1 transition",
                 mode === "new-branch"
-                  ? "bg-gx-accent/20 text-gx-text font-medium"
-                  : "text-gx-muted hover:text-gx-text",
+                  ? "bg-primary/20 text-foreground font-medium"
+                  : "text-muted-foreground hover:text-foreground",
               )}
               onClick={() => setMode("new-branch")}
             >
               New branch
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className={clsx(
                 "rounded px-2.5 py-1 transition",
                 mode === "existing-branch"
-                  ? "bg-gx-accent/20 text-gx-text font-medium"
-                  : "text-gx-muted hover:text-gx-text",
+                  ? "bg-primary/20 text-foreground font-medium"
+                  : "text-muted-foreground hover:text-foreground",
               )}
               onClick={() => setMode("existing-branch")}
             >
               Existing branch
-            </button>
+            </Button>
           </div>
 
-          {/* Branch name / selector */}
+          {/* Mode tabs */}
           {mode === "new-branch" ? (
             <div>
-              <label className="mb-1 block text-[11px] font-medium text-gx-muted">
+              <label className="mb-1 block text-[11px] font-medium text-muted-foreground">
                 Branch name
               </label>
-              <input
+              <Input
                 ref={inputRef}
                 type="text"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="feature/my-task"
-                className="w-full rounded-md border border-gx-border bg-gx-bg-sub px-3 py-1.5 text-xs text-gx-text placeholder:text-gx-muted/60 focus:border-gx-accent focus:outline-none"
+                className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-xs text-foreground placeholder:text-muted-foreground/60 focus:border-primary focus:outline-none"
               />
             </div>
           ) : (
             <div>
-              <label className="mb-1 block text-[11px] font-medium text-gx-muted">
+              <label className="mb-1 block text-[11px] font-medium text-muted-foreground">
                 Branch to check out
               </label>
-              <select
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                className="w-full rounded-md border border-gx-border bg-gx-bg-sub px-3 py-1.5 text-xs text-gx-text focus:border-gx-accent focus:outline-none"
+              <Select
+                value={":" + String(name)}
+                onValueChange={(selectedValue) => {
+                  const value = selectedValue.slice(1);
+                  return setName(value);
+                }}
               >
-                <option value="">Select a branch…</option>
-                {branches.map((b) => (
-                  <option key={b} value={b}>{b}</option>
-                ))}
-              </select>
+                <SelectTrigger className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-xs text-foreground focus:border-primary focus:outline-none">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    <SelectItem value={":" + String("")}>
+                      Select a branch…
+                    </SelectItem>
+                    {branches.map((b) => (
+                      <SelectItem key={b} value={":" + String(b)}>
+                        {b}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
             </div>
           )}
 
           {/* Start point (for new branch mode) */}
           {mode === "new-branch" && (
             <div>
-              <label className="mb-1 block text-[11px] font-medium text-gx-muted">
+              <label className="mb-1 block text-[11px] font-medium text-muted-foreground">
                 Start from
               </label>
-              <select
-                value={startPoint}
-                onChange={(e) => setStartPoint(e.target.value)}
-                className="w-full rounded-md border border-gx-border bg-gx-bg-sub px-3 py-1.5 text-xs text-gx-text focus:border-gx-accent focus:outline-none"
+              <Select
+                value={":" + String(startPoint)}
+                onValueChange={(selectedValue) => {
+                  const value = selectedValue.slice(1);
+                  return setStartPoint(value);
+                }}
               >
-                {branches.map((b) => (
-                  <option key={b} value={b}>{b}</option>
-                ))}
-              </select>
+                <SelectTrigger className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-xs text-foreground focus:border-primary focus:outline-none">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    {branches.map((b) => (
+                      <SelectItem key={b} value={":" + String(b)}>
+                        {b}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
             </div>
           )}
 
           {/* Folder path (optional) */}
           <div>
-            <label className="mb-1 block text-[11px] font-medium text-gx-muted">
-              Location <span className="font-normal text-gx-muted/60">(optional — uses default if empty)</span>
+            <label className="mb-1 block text-[11px] font-medium text-muted-foreground">
+              Location{" "}
+              <span className="font-normal text-muted-foreground/60">
+                (optional — uses default if empty)
+              </span>
             </label>
             <div className="flex items-center gap-1.5">
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 onClick={handlePickPath}
-                className="flex flex-1 items-center justify-between rounded-md border border-gx-border bg-gx-bg-sub px-3 py-1.5 text-left text-xs transition hover:border-gx-muted/60 focus:border-gx-accent focus:outline-none"
+                className="flex flex-1 items-center justify-between rounded-md border border-border bg-background px-3 py-1.5 text-left text-xs transition hover:border-muted-foreground/60 focus:border-primary focus:outline-none"
               >
-                <span className={path ? "truncate text-gx-text" : "text-gx-muted/60"}>
+                <span className={path ? "truncate text-foreground" : "text-muted-foreground/60"}>
                   {path || "Default location (sibling to repo)"}
                 </span>
-                <FolderTree size={11} className="shrink-0 text-gx-muted ml-2" />
-              </button>
+                <FolderTree size={11} className="shrink-0 text-muted-foreground ml-2" />
+              </Button>
               {path && (
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
                   onClick={() => setPath("")}
-                  className="shrink-0 rounded p-1 text-gx-muted hover:text-gx-text"
+                  className="shrink-0 rounded p-1 text-muted-foreground hover:text-foreground"
                   aria-label="Clear path"
                 >
                   ×
-                </button>
+                </Button>
               )}
             </div>
           </div>
 
           {/* Error */}
           {error && (
-            <div className="rounded-md border border-gx-error/30 bg-gx-error/5 px-3 py-1.5 text-[11px] text-gx-error">
+            <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-1.5 text-[11px] text-destructive">
               {error}
             </div>
           )}
 
-          {/* Actions */}
+          {/* Error */}
           <div className="flex justify-end gap-2 pt-1">
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={onClose}
               disabled={busy}
-              className="rounded-md border border-gx-border px-3 py-1.5 text-xs text-gx-muted hover:text-gx-text transition disabled:opacity-50"
+              className="rounded-md border border-border px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground transition disabled:opacity-50"
             >
               Cancel
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="default"
+              size="compact"
               type="submit"
               disabled={!name.trim() || busy}
-              className="rounded-md bg-gx-accent px-3 py-1.5 text-xs font-medium text-white transition hover:bg-gx-accent/80 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition hover:bg-primary/80 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {busy ? "Creating…" : "Create"}
-            </button>
+            </Button>
           </div>
         </form>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -637,145 +713,167 @@ function WorktreeSelector({
   label: string;
   primaryPath?: string | null;
 }) {
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [open, onClose]);
-
   const nonMainWorktrees = worktrees.filter((w) => !w.is_main);
   const mainWorktree = worktrees.find((w) => w.is_main);
   const primaryDisplayPath = mainWorktree?.path ?? primaryPath ?? "";
   const primaryBranch = mainWorktree?.branch || "current branch";
 
   return (
-    <div ref={ref} className="relative">
-      <button
-        type="button"
-        onClick={onToggle}
-        className={clsx(
+    <div className="relative">
+      <DropdownMenu
+        open={open}
+        onOpenChange={(next) => {
+          if (next !== open) {
+            if (next) onToggle();
+            else onClose();
+          }
+        }}
+      >
+        <DropdownMenuTrigger asChild>
+          <Button
+            variant="ghost"
+            size="compact"
+            type="button"
+            className={clsx(
           "flex items-center gap-1 rounded-md px-2.5 py-1.5 text-[11px] transition border",
           open
-            ? "border-gx-accent/50 bg-gx-surface-hover text-gx-text"
-            : "border-gx-border text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
+            ? "border-primary/50 bg-accent text-foreground"
+            : "border-border text-muted-foreground hover:bg-accent hover:text-foreground",
         )}
-      >
-        <FolderTree size={11} />
-        <span>{label}</span>
-        <ChevronDown size={10} className={clsx("transition", open && "rotate-180")} />
-      </button>
+          >
+            <FolderTree size={11} />
+            <span>{label}</span>
+            <ChevronDown size={10} className={clsx("transition", open && "rotate-180")} />
+          </Button>
+        </DropdownMenuTrigger>
 
-      {open && (
-        <div className="absolute bottom-full right-0 z-50 mb-1 min-w-[260px] max-h-[300px] overflow-auto rounded-lg border border-gx-border bg-gx-bg shadow-lg">
-          <div className="px-3 py-1.5 border-b border-gx-border/50 text-[10px] font-medium uppercase tracking-wider text-gx-muted">
-            Worktree
-          </div>
-          <div className="py-1">
-            {/* Auto option */}
-            <button
-              type="button"
-              onClick={() => { onChange({ mode: "auto" }); onClose(); }}
-              className={clsx(
-                "flex w-full items-start gap-2 px-3 py-2 text-left transition",
-                choice.mode === "auto" ? "bg-gx-accent/10" : "hover:bg-gx-surface-hover",
-              )}
-            >
-              <div className="min-w-0 flex-1">
-                <div className="text-[11px] font-medium text-gx-text">Auto (recommended)</div>
-                <div className="text-[10px] text-gx-muted">Crab creates an isolated worktree automatically</div>
+        {open && (
+          <DropdownMenuContent
+            side="top"
+            align="end"
+            className="p-0 min-w-[260px] max-h-[300px] overflow-auto rounded-lg border border-border bg-background"
+          >
+            <DropdownMenuGroup>
+              <div className="px-3 py-1.5 border-b border-border/50 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                Worktree
               </div>
-              {choice.mode === "auto" && <span className="mt-0.5 text-gx-accent">✓</span>}
-            </button>
-
-            {/* Primary workspace option */}
-            <button
-              type="button"
-              onClick={() => { onChange({ mode: "primary" }); onClose(); }}
-              className={clsx(
+              <div className="py-1">
+                {/* Auto option */}
+                <DropdownMenuItem
+                  onSelect={() => { onChange({ mode: "auto" }); onClose(); }}
+                  className={clsx(
                 "flex w-full items-start gap-2 px-3 py-2 text-left transition",
-                choice.mode === "primary" ? "bg-gx-accent/10" : "hover:bg-gx-surface-hover",
+                choice.mode === "auto" ? "bg-primary/10" : "hover:bg-accent",
               )}
-            >
-              <div className="min-w-0 flex-1">
-                <div className="text-[11px] font-medium text-gx-text">Work locally</div>
-                <div className="text-[10px] text-gx-muted">Run directly in the open repo folder</div>
-                {(primaryBranch || primaryDisplayPath) && (
-                  <div className="mt-0.5 flex items-center gap-2 text-[10px] text-gx-muted">
-                    <span className="flex items-center gap-0.5">
-                      <GitBranch size={9} />
-                      {primaryBranch}
-                    </span>
-                    {primaryDisplayPath && (
-                      <span className="truncate font-mono opacity-60">
-                        {primaryDisplayPath.split("/").slice(-2).join("/")}
-                      </span>
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[11px] font-medium text-foreground">
+                      Auto (recommended)
+                    </div>
+                    <div className="text-[10px] text-muted-foreground">
+                      Crab creates an isolated worktree automatically
+                    </div>
+                  </div>
+                  {choice.mode === "auto" && (
+                    <span className="mt-0.5 text-primary">✓</span>
+                  )}
+                </DropdownMenuItem>
+
+                {/* Primary workspace option */}
+                <DropdownMenuItem
+                  onSelect={() => { onChange({ mode: "primary" }); onClose(); }}
+                  className={clsx(
+                "flex w-full items-start gap-2 px-3 py-2 text-left transition",
+                choice.mode === "primary" ? "bg-primary/10" : "hover:bg-accent",
+              )}
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[11px] font-medium text-foreground">
+                      Work locally
+                    </div>
+                    <div className="text-[10px] text-muted-foreground">
+                      Run directly in the open repo folder
+                    </div>
+                    {(primaryBranch || primaryDisplayPath) && (
+                      <div className="mt-0.5 flex items-center gap-2 text-[10px] text-muted-foreground">
+                        <span className="flex items-center gap-0.5">
+                          <GitBranch size={9} />
+                          {primaryBranch}
+                        </span>
+                        {primaryDisplayPath && (
+                          <span className="truncate font-mono opacity-60">
+                            {primaryDisplayPath.split("/").slice(-2).join("/")}
+                          </span>
+                        )}
+                      </div>
                     )}
                   </div>
-                )}
-              </div>
-              {choice.mode === "primary" && <span className="mt-0.5 text-gx-accent">✓</span>}
-            </button>
+                  {choice.mode === "primary" && (
+                    <span className="mt-0.5 text-primary">✓</span>
+                  )}
+                </DropdownMenuItem>
 
-            {/* Existing worktrees */}
-            {nonMainWorktrees.length > 0 && (
-              <>
-                <div className="px-3 py-1 text-[9px] font-semibold uppercase tracking-wider text-gx-muted/70 mt-1">
-                  Existing worktrees
-                </div>
-                {nonMainWorktrees.map((wt) => {
-                  const name = wt.meta?.display_name || wt.path.split("/").pop() || wt.path;
-                  const isSelected = choice.mode === "existing" && choice.path === wt.path;
-                  return (
-                    <button
-                      key={wt.path}
-                      type="button"
-                      onClick={() => { onChange({ mode: "existing", path: wt.path }); onClose(); }}
-                      className={clsx(
+                {/* Existing worktrees */}
+                {nonMainWorktrees.length > 0 && (
+                  <>
+                    <div className="px-3 py-1 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/70 mt-1">
+                      Existing worktrees
+                    </div>
+                    {nonMainWorktrees.map((wt) => {
+                      const name = wt.meta?.display_name || wt.path.split("/").pop() || wt.path;
+                      const isSelected = choice.mode === "existing" && choice.path === wt.path;
+                      return (
+                        <DropdownMenuItem
+                          key={wt.path}
+                          onSelect={() => { onChange({ mode: "existing", path: wt.path }); onClose(); }}
+                          className={clsx(
                         "flex w-full items-start gap-2 px-3 py-2 text-left transition",
-                        isSelected ? "bg-gx-accent/10" : "hover:bg-gx-surface-hover",
+                        isSelected ? "bg-primary/10" : "hover:bg-accent",
                       )}
-                    >
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-1.5 text-[11px] font-medium text-gx-text">
-                          <span className="truncate">{name}</span>
-                          {wt.locked && (
-                            <span className="shrink-0 text-[9px] text-gx-warn">locked</span>
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5 text-[11px] font-medium text-foreground">
+                              <span className="truncate">{name}</span>
+                              {wt.locked && (
+                                <span className="shrink-0 text-[9px] text-warning">
+                                  locked
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
+                              <span className="flex items-center gap-0.5">
+                                <GitBranch size={9} />
+                                {wt.branch || "detached"}
+                              </span>
+                              <span className="truncate font-mono opacity-60">
+                                {wt.path.split("/").slice(-2).join("/")}
+                              </span>
+                            </div>
+                          </div>
+                          {isSelected && (
+                            <span className="mt-0.5 text-primary">✓</span>
                           )}
-                        </div>
-                        <div className="flex items-center gap-2 text-[10px] text-gx-muted">
-                          <span className="flex items-center gap-0.5">
-                            <GitBranch size={9} />
-                            {wt.branch || "detached"}
-                          </span>
-                          <span className="truncate font-mono opacity-60">{wt.path.split("/").slice(-2).join("/")}</span>
-                        </div>
-                      </div>
-                      {isSelected && <span className="mt-0.5 text-gx-accent">✓</span>}
-                    </button>
-                  );
-                })}
-              </>
-            )}
+                        </DropdownMenuItem>
+                      );
+                    })}
+                  </>
+                )}
 
-            {/* Create new worktree */}
-            <div className="border-t border-gx-border/50 mt-1 pt-1">
-              <button
-                type="button"
-                onClick={() => { onChange({ mode: "new", name: "", baseBranch: "" }); onClose(); }}
-                className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text transition"
-              >
-                <Plus size={11} />
-                <span>Create new worktree manually…</span>
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+                {/* Create new worktree */}
+                <div className="border-t border-border/50 mt-1 pt-1">
+                  <DropdownMenuItem
+                    onSelect={() => { onChange({ mode: "new", name: "", baseBranch: "" }); onClose(); }}
+                    className="justify-start flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground transition"
+                  >
+                    <Plus size={11} />
+                    <span>Create new worktree manually…</span>
+                  </DropdownMenuItem>
+                </div>
+              </div>
+            </DropdownMenuGroup>
+          </DropdownMenuContent>
+        )}
+      </DropdownMenu>
     </div>
   );
 }
@@ -800,59 +898,68 @@ interface DropdownButtonProps {
 }
 
 function DropdownButton({ open, onToggle, onClose, label, items, onSelect, selectedId }: DropdownButtonProps) {
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [open, onClose]);
-
   return (
-    <div ref={ref} className="relative">
-      <button
-        type="button"
-        onClick={onToggle}
-        className={clsx(
+    <div className="relative">
+      <DropdownMenu
+        open={open}
+        onOpenChange={(next) => {
+          if (next !== open) {
+            if (next) onToggle();
+            else onClose();
+          }
+        }}
+      >
+        <DropdownMenuTrigger asChild>
+          <Button
+            variant="ghost"
+            size="compact"
+            type="button"
+            className={clsx(
           "flex items-center gap-1 rounded-md px-2.5 py-1.5 text-[11px] transition border",
           open
-            ? "border-gx-accent/50 bg-gx-surface-hover text-gx-text"
-            : "border-gx-border text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
+            ? "border-primary/50 bg-accent text-foreground"
+            : "border-border text-muted-foreground hover:bg-accent hover:text-foreground",
         )}
-      >
-        {label}
-        <ChevronDown size={10} className={clsx("transition", open && "rotate-180")} />
-      </button>
+          >
+            {label}
+            <ChevronDown size={10} className={clsx("transition", open && "rotate-180")} />
+          </Button>
+        </DropdownMenuTrigger>
 
-      {open && (
-        <div className="absolute bottom-full right-0 z-50 mb-1 min-w-[160px] max-h-[240px] overflow-auto rounded-lg border border-gx-border bg-gx-bg shadow-lg">
-          <div className="py-1">
-            {items.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                disabled={item.disabled}
-                onClick={() => { onSelect(item.id); onClose(); }}
-                className={clsx(
+        {open && (
+          <DropdownMenuContent
+            side="top"
+            align="end"
+            className="p-0 min-w-[160px] max-h-[240px] overflow-auto rounded-lg border border-border bg-background"
+          >
+            <DropdownMenuGroup>
+              <div className="py-1">
+                {items.map((item) => (
+                  <DropdownMenuItem
+                    key={item.id}
+                    disabled={item.disabled}
+                    onSelect={() => { onSelect(item.id); onClose(); }}
+                    className={clsx(
                   "flex w-full items-center gap-2 px-3 py-1.5 text-[11px] transition",
                   item.id === selectedId
-                    ? "bg-gx-accent/10 text-gx-accent"
-                    : "text-gx-text hover:bg-gx-surface-hover",
+                    ? "bg-primary/10 text-primary"
+                    : "text-foreground hover:bg-accent",
                   item.disabled && "opacity-50 cursor-not-allowed",
                 )}
-              >
-                <span className="flex-1 text-left">{item.label}</span>
-                {item.suffix && (
-                  <span className="text-[9px] text-gx-muted">{item.suffix}</span>
-                )}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
+                  >
+                    <span className="flex-1 text-left">{item.label}</span>
+                    {item.suffix && (
+                      <span className="text-[9px] text-muted-foreground">
+                        {item.suffix}
+                      </span>
+                    )}
+                  </DropdownMenuItem>
+                ))}
+              </div>
+            </DropdownMenuGroup>
+          </DropdownMenuContent>
+        )}
+      </DropdownMenu>
     </div>
   );
 }

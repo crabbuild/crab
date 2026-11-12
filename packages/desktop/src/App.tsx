@@ -1,38 +1,48 @@
-import { useCallback, useEffect, useRef, useState, useMemo } from "react";
-import { StoreProvider, useActiveRepo, useStore, WorkspaceRepoEntry, getActiveWorkspace, repositoryKey } from "./state";
-import { SettingsProvider, useSetting, useSettings } from "./settings";
-import { PtyModeProvider } from "./lib/pty-mode-context";
-import { SessionProvider, useSession, useWorkspaceSession, useActiveRepoKey } from "./lib/session-context";
-import { rpc, type RepoHandle } from "./ipc";
-import { Sidebar } from "./components/Sidebar";
-import { RepoDetail } from "./components/RepoDetail";
+import { ApplicationDialogs } from "@/components/ApplicationDialogs";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CommandPalette } from "./components/CommandPalette";
 import { EmptyState } from "./components/EmptyState";
 import { ProgressDrawer } from "./components/ProgressDrawer";
+import { RepoDetail } from "./components/RepoDetail";
+import { Sidebar } from "./components/Sidebar";
+import { TelemetryOptInModal } from "./components/TelemetryOptInModal";
+import { TerminalKeepAlive, TerminalKeepAliveHandle } from "./components/TerminalKeepAlive";
+import { ToastManager } from "./components/ToastManager";
 import { TopBar } from "./components/TopBar";
 import { UpdateBanner } from "./components/UpdateBanner";
-import { TelemetryOptInModal } from "./components/TelemetryOptInModal";
-import { CommandPalette } from "./components/CommandPalette";
-import { ToastManager } from "./components/ToastManager";
 import { Welcome } from "./components/Welcome";
-import { WorkspaceDashboardView } from "./views/WorkspaceDashboardView";
-import { SshView } from "./views/SshView";
-import { SettingsView } from "./views/SettingsView";
-import { TerminalKeepAlive, TerminalKeepAliveHandle } from "./components/TerminalKeepAlive";
-import { useTabBarShortcuts } from "./components/workspace/TabBar";
 import { FuzzySwitcher } from "./components/workspace/FuzzySwitcher";
-import { useWorkspaceRepoSelect } from "./hooks/useWorkspaceRepoSelect";
-import { useWorkspaceIPC } from "./hooks/useWorkspaceIPC";
-import { useFuzzySwitcherShortcut } from "./hooks/useFuzzySwitcherShortcut";
-import { useNavHistory, NavEntry } from "./hooks/useNavHistory";
-import { useHeapWatcherEffect } from "./hooks/useHeapWatcher";
+import { useTabBarShortcuts } from "./components/workspace/TabBar";
 import { useCommandPaletteShortcuts } from "./hooks/useCommandPaletteShortcuts";
 import { useFileTransfers } from "./hooks/useFileTransfers";
+import { useFuzzySwitcherShortcut } from "./hooks/useFuzzySwitcherShortcut";
+import { useHeapWatcherEffect } from "./hooks/useHeapWatcher";
+import { NavEntry, useNavHistory } from "./hooks/useNavHistory";
 import { useSshHealthAlerts } from "./hooks/useSshHealthAlerts";
+import { useWorkspaceIPC } from "./hooks/useWorkspaceIPC";
+import { useWorkspaceRepoSelect } from "./hooks/useWorkspaceRepoSelect";
+import { rpc, type RepoHandle } from "./ipc";
+import { localPathName } from "./lib/local-path-name";
+import { PtyModeProvider } from "./lib/pty-mode-context";
+import {
+  SessionProvider,
+  useActiveRepoKey,
+  useSession,
+  useWorkspaceSession,
+} from "./lib/session-context";
+import type { StartupCommand } from "./lib/terminal-presets";
 import { setupAllToastPublishers } from "./lib/toast-publishers";
 import { dismissToast, publishToast } from "./lib/toasts";
-import { localPathName } from "./lib/local-path-name";
+import { SettingsProvider, useSetting, useSettings } from "./settings";
+import {
+  getActiveWorkspace,
+  repositoryKey,
+  StoreProvider, useActiveRepo, useStore, WorkspaceRepoEntry,
+} from "./state";
+import { SettingsView } from "./views/SettingsView";
+import { SshView } from "./views/SshView";
 import type { SshTerminalRequest, TerminalStartupRequest } from "./views/TerminalView";
-import type { StartupCommand } from "./lib/terminal-presets";
+import { WorkspaceDashboardView } from "./views/WorkspaceDashboardView";
 
 // Side-effect imports: register commands in the command-registry at startup.
 import "./lib/git-commands";
@@ -509,14 +519,16 @@ function Shell() {
   }, [state.repos]);
 
   const handleViewChanged = useCallback((entry: NavEntry) => {
-    setTerminalRepoId(entry.view === "terminal" ? active?.repo_id ?? null : null);
+    setTerminalRepoId(entry.view === "terminal" ? (active?.repo_id ?? null) : null,
+      );
     if (entry.view === "terminal") setTerminalActivated(true);
-    // Restored entries already own this position in history. Compare routes
-    // instead of suppressing user navigation until the next animation frame.
-    if (entry.view === nav.current?.view && (entry.commit ?? null) === (nav.current.commit ?? null)) return;
-    // Attach the current workspace repo path to the entry for cross-repo nav.
-    nav.push({ ...entry, repoPath: entry.repoPath ?? activeWorkspaceRelativePath });
-  }, [nav, activeWorkspaceRelativePath, active?.repo_id]);
+      // Restored entries already own this position in history. Compare routes
+      // instead of suppressing user navigation until the next animation frame.
+      if (entry.view === nav.current?.view && (entry.commit ?? null) === (nav.current.commit ?? null)) return;
+      // Attach the current workspace repo path to the entry for cross-repo nav.
+      nav.push({ ...entry, repoPath: entry.repoPath ?? activeWorkspaceRelativePath });
+  }, [nav, activeWorkspaceRelativePath, active?.repo_id],
+  );
 
   const handleNavigate = useCallback((entry: NavEntry) => {
     nav.navigate({ ...entry, repoPath: entry.repoPath ?? activeWorkspaceRelativePath });
@@ -548,7 +560,7 @@ function Shell() {
   }, []);
 
   return (
-    <div className={`flex h-full w-full flex-col bg-gx-bg text-gx-text ${showActivityBar ? "[--activity-bar-width:3rem]" : "[--activity-bar-width:0px]"}`}>
+    <div className={`flex h-full w-full flex-col bg-background text-foreground ${showActivityBar ? "[--activity-bar-width:3rem]" : "[--activity-bar-width:0px]"}`}>
       <TopBar
         repoSidebarOpen={repoSidebarOpen}
         onExpandRepoSidebar={() => setRepoSidebarOpen(true)}
@@ -595,12 +607,12 @@ function Shell() {
           )}
           {/* Share the rail width with WorkspaceShell; keep one host mounted
               across page and repository changes so PTYs are never recreated. */}
-          <section aria-label="Terminal page" className={terminalActive ? "absolute inset-y-0 right-0 left-[var(--activity-bar-width)] flex min-h-0 bg-gx-bg-sub" : "hidden"}>
+          <section aria-label="Terminal page" className={terminalActive ? "absolute inset-y-0 right-0 left-[var(--activity-bar-width)] flex min-h-0 bg-background" : "hidden"}>
             {terminalActivated && (
               <TerminalKeepAlive
                 ref={terminalKeepAliveRef}
                 repos={state.repos}
-                activeRepoId={terminalActive ? active?.repo_id ?? null : null}
+                activeRepoId={terminalActive ? (active?.repo_id ?? null) : null}
                 maxKeptAlive={effectiveKeepAliveLimit}
                 sshRequest={sshTerminalRequest}
                 onSshRequestHandled={() => setSshTerminalRequest(null)}
@@ -632,6 +644,7 @@ function Shell() {
         }}
       />
       <ToastManager />
+      <ApplicationDialogs />
       <Welcome />
       {fuzzySwitcher.open && state.workspaces.length > 0 && (
         <FuzzySwitcher

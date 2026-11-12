@@ -215,7 +215,7 @@ const GraphDots = memo(function GraphDots({
             />
           );
         } else if (isTip) {
-          const ringColor = isTag ? "#facc15" : colour;
+          const ringColor = isTag ? "rgb(var(--warning))" : colour;
           return (
             <g key={`v${v.id}`}>
               <circle
@@ -232,7 +232,7 @@ const GraphDots = memo(function GraphDots({
                 cy={y}
                 r={CURRENT_DOT_RADIUS}
                 fill={colour}
-                stroke="rgb(var(--gx-bg))"
+                stroke="rgb(var(--background))"
                 strokeWidth={1.5}
                 opacity={opacity}
               />
@@ -246,7 +246,7 @@ const GraphDots = memo(function GraphDots({
               cy={y}
               r={DOT_RADIUS}
               fill={colour}
-              stroke="rgb(var(--gx-bg))"
+              stroke="rgb(var(--background))"
               strokeWidth={1.5}
               opacity={opacity}
             />

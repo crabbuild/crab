@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * ProblemsPanel — bottom drawer listing all LSP diagnostics across open files.
  *
@@ -5,7 +6,6 @@
  * file and line. Shows error/warning/info counts in the header.
  */
 
-import { useCallback, useMemo } from "react";
 import {
   AlertCircle,
   AlertTriangle,
@@ -13,6 +13,7 @@ import {
   Info,
   X,
 } from "lucide-react";
+import { useCallback, useMemo } from "react";
 import {
   useAllDiagnostics,
   useTotalDiagnosticCounts,
@@ -52,45 +53,49 @@ export function ProblemsPanel({ onNavigate, onClose }: Props) {
   const totalCount = totalCounts.errors + totalCounts.warnings + totalCounts.infos + totalCounts.hints;
 
   return (
-    <div className="flex flex-col border-t border-gx-border bg-gx-surface max-h-[280px]">
+    <div className="flex flex-col border-t border-border bg-card max-h-[280px]">
       {/* Header */}
-      <div className="flex shrink-0 items-center justify-between border-b border-gx-border px-3 py-1.5">
+      <div className="flex shrink-0 items-center justify-between border-b border-border px-3 py-1.5">
         <div className="flex items-center gap-3">
-          <span className="text-[11px] font-medium text-gx-text">Problems</span>
+          <span className="text-[11px] font-medium text-foreground">
+            Problems
+          </span>
           <div className="flex items-center gap-2 text-[10px]">
             {totalCounts.errors > 0 && (
-              <span className="flex items-center gap-0.5 text-gx-error">
+              <span className="flex items-center gap-0.5 text-destructive">
                 <AlertCircle size={10} />
                 {totalCounts.errors}
               </span>
             )}
             {totalCounts.warnings > 0 && (
-              <span className="flex items-center gap-0.5 text-gx-warn">
+              <span className="flex items-center gap-0.5 text-warning">
                 <AlertTriangle size={10} />
                 {totalCounts.warnings}
               </span>
             )}
             {totalCounts.infos > 0 && (
-              <span className="flex items-center gap-0.5 text-gx-muted">
+              <span className="flex items-center gap-0.5 text-muted-foreground">
                 <Info size={10} />
                 {totalCounts.infos}
               </span>
             )}
           </div>
         </div>
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={onClose}
-          className="rounded p-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text transition"
+          className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground transition"
           aria-label="Close problems panel"
         >
           <X size={12} />
-        </button>
+        </Button>
       </div>
 
       {/* Content */}
       {totalCount === 0 ? (
-        <div className="flex items-center justify-center py-6 text-xs text-gx-muted">
+        <div className="flex items-center justify-center py-6 text-xs text-muted-foreground">
           No problems detected
         </div>
       ) : (
@@ -137,40 +142,42 @@ function FileGroup({
   return (
     <div>
       {/* File header */}
-      <div className="flex items-center gap-1.5 px-3 py-1 bg-gx-bg-sub sticky top-0 z-10">
-        <ChevronDown size={10} className="shrink-0 text-gx-muted" />
-        <span className="text-[11px] text-gx-text truncate flex-1" title={displayPath}>
+      <div className="flex items-center gap-1.5 px-3 py-1 bg-background sticky top-0 z-10">
+        <ChevronDown size={10} className="shrink-0 text-muted-foreground" />
+        <span className="text-[11px] text-foreground truncate flex-1" title={displayPath}>
           {displayPath}
         </span>
         <div className="flex items-center gap-1.5 shrink-0 text-[10px]">
           {errorCount > 0 && (
-            <span className="text-gx-error">{errorCount}</span>
+            <span className="text-destructive">{errorCount}</span>
           )}
-          {warnCount > 0 && (
-            <span className="text-gx-warn">{warnCount}</span>
-          )}
+          {warnCount > 0 && <span className="text-warning">{warnCount}</span>}
         </div>
       </div>
 
       {/* Diagnostics */}
       {sorted.map((entry, idx) => (
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           key={`${entry.startLineNumber}-${entry.startColumn}-${idx}`}
           type="button"
           onClick={() => onClick(entry)}
-          className="flex w-full items-start gap-2 px-3 py-0.5 pl-6 text-left hover:bg-gx-surface-hover transition text-[11px]"
+          className="justify-start flex w-full items-start gap-2 px-3 py-0.5 pl-6 text-left hover:bg-accent transition text-[11px]"
         >
           <SeverityIcon severity={entry.severity} />
-          <span className="flex-1 text-gx-text truncate">{entry.message}</span>
-          <span className="shrink-0 text-gx-muted tabular-nums text-[10px]">
+          <span className="flex-1 text-foreground truncate">
+            {entry.message}
+          </span>
+          <span className="shrink-0 text-muted-foreground tabular-nums text-[10px]">
             [{entry.startLineNumber}:{entry.startColumn}]
           </span>
           {entry.source && (
-            <span className="shrink-0 text-gx-muted/60 text-[10px]">
+            <span className="shrink-0 text-muted-foreground/60 text-[10px]">
               {entry.source}
             </span>
           )}
-        </button>
+        </Button>
       ))}
     </div>
   );
@@ -181,13 +188,21 @@ function FileGroup({
 function SeverityIcon({ severity }: { severity: number }) {
   switch (severity) {
     case 8:
-      return <AlertCircle size={11} className="shrink-0 text-gx-error mt-px" />;
+      return (
+        <AlertCircle size={11} className="shrink-0 text-destructive mt-px" />
+      );
     case 4:
-      return <AlertTriangle size={11} className="shrink-0 text-gx-warn mt-px" />;
+      return (
+        <AlertTriangle size={11} className="shrink-0 text-warning mt-px" />
+      );
     case 2:
-      return <Info size={11} className="shrink-0 text-gx-muted mt-px" />;
+      return (
+        <Info size={11} className="shrink-0 text-muted-foreground mt-px" />
+      );
     default:
-      return <Info size={11} className="shrink-0 text-gx-muted/50 mt-px" />;
+      return (
+        <Info size={11} className="shrink-0 text-muted-foreground/50 mt-px" />
+      );
   }
 }
 

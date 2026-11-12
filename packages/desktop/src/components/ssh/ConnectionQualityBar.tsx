@@ -17,15 +17,15 @@ interface ConnectionQualityBarProps {
 // ── Helpers ──────────────────────────────────────────────────────
 
 const QUALITY_COLORS: Record<QualityLevel, string> = {
-  green: "text-green-500",
-  yellow: "text-yellow-500",
-  red: "text-red-500",
+  green: "text-success",
+  yellow: "text-warning",
+  red: "text-destructive",
 };
 
 const QUALITY_BG_COLORS: Record<QualityLevel, string> = {
-  green: "bg-green-500",
-  yellow: "bg-yellow-500",
-  red: "bg-red-500",
+  green: "bg-success",
+  yellow: "bg-warning",
+  red: "bg-destructive",
 };
 
 function formatLatency(ms: number): string {
@@ -62,7 +62,7 @@ export function ConnectionQualityBar({ quality, profileLabel }: ConnectionQualit
         title="Connection quality unavailable"
         aria-label="Connection quality: unavailable"
       >
-        <WifiOff className="w-3.5 h-3.5 text-gray-400 dark:text-gray-500" />
+        <WifiOff className="w-3.5 h-3.5 text-muted-foreground text-muted-foreground" />
       </div>
     );
   }
@@ -91,7 +91,7 @@ export function ConnectionQualityBar({ quality, profileLabel }: ConnectionQualit
 
       {/* Tooltip (shown on hover) */}
       <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block z-50 pointer-events-none">
-        <div className="bg-gray-900 dark:bg-gray-800 text-white rounded-md px-3 py-2 shadow-lg whitespace-nowrap text-xs">
+        <div className="bg-background bg-card text-foreground rounded-md px-3 py-2 shadow-lg whitespace-nowrap text-xs">
           <div className="font-medium mb-1 flex items-center gap-1.5">
             <span
               className={clsx("w-2 h-2 rounded-full", QUALITY_BG_COLORS[quality.level])}
@@ -99,7 +99,7 @@ export function ConnectionQualityBar({ quality, profileLabel }: ConnectionQualit
             />
             {profileLabel ? `${profileLabel} — ${getQualityLabel(quality.level)}` : getQualityLabel(quality.level)}
           </div>
-          <div className="space-y-0.5 text-gray-300">
+          <div className="space-y-0.5 text-muted-foreground">
             <p>Latency: {formatLatency(quality.latencyMs)}</p>
             <p>Bandwidth: {formatBandwidth(quality.bandwidthMbps)}</p>
             <p>Packet Loss: {formatPacketLoss(quality.packetLossPercent)}</p>

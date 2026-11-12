@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Live File Tree — Real-time view of files the agent has modified.
  *
@@ -6,9 +7,9 @@
  * its diff in the Diff tab.
  */
 
-import { useEffect, useMemo, useState } from "react";
-import { FileCode, FilePlus, FileX } from "lucide-react";
 import clsx from "clsx";
+import { FileCode, FilePlus, FileX } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -54,7 +55,7 @@ export function LiveFileTree({ files, isStreaming, onSelectFile, selectedFile }:
   if (editedFiles.length === 0) {
     if (!isStreaming) {
       return (
-        <div className="flex h-full items-center justify-center px-3 text-center text-[11px] text-gx-muted">
+        <div className="flex h-full items-center justify-center px-3 text-center text-[11px] text-muted-foreground">
           No files modified.
         </div>
       );
@@ -66,11 +67,14 @@ export function LiveFileTree({ files, isStreaming, onSelectFile, selectedFile }:
   return (
     <div className="flex h-full flex-col overflow-hidden">
       {/* Header */}
-      <div className="sticky top-0 z-10 flex items-center gap-2 border-b border-gx-border bg-gx-surface px-3 py-1.5 text-[10px] text-gx-muted">
-        <span>{editedFiles.length} file{editedFiles.length !== 1 ? "s" : ""} modified</span>
+      <div className="sticky top-0 z-10 flex items-center gap-2 border-b border-border bg-card px-3 py-1.5 text-[10px] text-muted-foreground">
+        <span>
+          {editedFiles.length} file{editedFiles.length !== 1 ? "s" : ""}{" "}
+          modified
+        </span>
         {isStreaming && (
-          <span className="ml-auto flex items-center gap-1 text-gx-success">
-            <span className="h-1.5 w-1.5 rounded-full bg-gx-success animate-pulse" />
+          <span className="ml-auto flex items-center gap-1 text-success">
+            <span className="h-1.5 w-1.5 rounded-full bg-success animate-pulse" />
             Live
           </span>
         )}
@@ -83,16 +87,18 @@ export function LiveFileTree({ files, isStreaming, onSelectFile, selectedFile }:
           const isSelected = selectedFile === file.path;
 
           return (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               key={file.path}
               type="button"
               onClick={() => onSelectFile?.(file.path)}
               className={clsx(
                 "group flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] transition",
                 isSelected
-                  ? "bg-gx-accent/10 text-gx-text"
-                  : "text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
-                isRecent && isStreaming && !isSelected && "bg-gx-success/5",
+                  ? "bg-primary/10 text-foreground"
+                  : "text-muted-foreground hover:bg-accent hover:text-foreground",
+                isRecent && isStreaming && !isSelected && "bg-success/5",
               )}
               title={file.path}
             >
@@ -106,16 +112,16 @@ export function LiveFileTree({ files, isStreaming, onSelectFile, selectedFile }:
 
               {/* Edit count badge */}
               {file.editCount > 1 && (
-                <span className="shrink-0 rounded-full bg-gx-accent/10 px-1.5 text-[9px] text-gx-accent">
+                <span className="shrink-0 rounded-full bg-primary/10 px-1.5 text-[9px] text-primary">
                   {file.editCount}
                 </span>
               )}
 
               {/* Recency pulse */}
               {isRecent && isStreaming && (
-                <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-gx-success animate-pulse" />
+                <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-success animate-pulse" />
               )}
-            </button>
+            </Button>
           );
         })}
       </div>
@@ -130,11 +136,15 @@ function FileStatusIcon({ status, isRecent }: { status: LiveFile["status"]; isRe
 
   switch (status) {
     case "added":
-      return <FilePlus size={12} className={clsx(baseClass, "text-gx-success")} />;
+      return <FilePlus size={12} className={clsx(baseClass, "text-success")} />;
     case "deleted":
-      return <FileX size={12} className={clsx(baseClass, "text-gx-error")} />;
+      return (
+        <FileX size={12} className={clsx(baseClass, "text-destructive")} />
+      );
     case "modified":
     default:
-      return <FileCode size={12} className={clsx(baseClass, "text-gx-warn", isRecent && "animate-pulse")} />;
+      return (
+        <FileCode size={12} className={clsx(baseClass, "text-warning", isRecent && "animate-pulse")} />
+      );
   }
 }

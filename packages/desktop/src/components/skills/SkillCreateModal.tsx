@@ -1,10 +1,16 @@
-import { useState, useRef, useEffect } from "react";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { X } from "lucide-react";
-import { useSkills } from "../../state/skills-store";
+import { useEffect, useRef, useState } from "react";
 import { publishToast } from "../../lib/toasts";
+import { useSkills } from "../../state/skills-store";
 
 function isValidName(name: string): boolean {
-  return /^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]?$/.test(name) && !name.includes("--");
+  return (
+    /^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]?$/.test(name) && !name.includes("--")
+  );
 }
 
 interface Props {
@@ -67,87 +73,102 @@ export function SkillCreateModal({ open, onClose }: Props) {
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Escape") onClose();
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") handleCreate();
   };
 
   if (!open) return null;
 
   return (
-    <div
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm"
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
-      onKeyDown={handleKeyDown}
+    <Dialog
+      open
+      onOpenChange={(open) => { if (!open) onClose(); }}
     >
-      <div className="w-full max-w-lg rounded-xl border border-gx-border bg-gx-bg shadow-2xl">
+      <DialogContent
+        onKeyDown={handleKeyDown}
+        showCloseButton={false}
+        aria-describedby={undefined}
+        className="block gap-0 p-0 w-full max-w-lg rounded-xl border border-border bg-background shadow-2xl"
+      >
         {/* Header */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-gx-border">
-          <h3 className="text-sm font-semibold text-gx-text">New Skill</h3>
-          <button
-            className="p-1 rounded hover:bg-gx-surface-hover text-gx-muted hover:text-gx-text transition-colors"
+        <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+          <DialogTitle className="text-sm font-semibold text-foreground">
+            New Skill
+          </DialogTitle>
+          <Button
+            variant="ghost"
+            size="compact"
+            className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
             onClick={onClose}
           >
             <X size={16} />
-          </button>
+          </Button>
         </div>
 
         {/* Body */}
         <div className="px-4 py-3 space-y-3">
           <div>
-            <label className="block text-xs font-medium text-gx-muted mb-1">Name</label>
-            <input
+            <label className="block text-xs font-medium text-muted-foreground mb-1">
+              Name
+            </label>
+            <Input
               ref={nameRef}
               type="text"
               placeholder="my-skill"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              className="w-full rounded border border-gx-border bg-gx-surface-hover px-2 py-1.5 text-xs text-gx-text placeholder:text-gx-muted focus:outline-none focus:border-gx-accent"
+              className="w-full rounded border border-border bg-accent px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary"
             />
-            <p className="text-[10px] text-gx-muted mt-0.5">
+            <p className="text-[10px] text-muted-foreground mt-0.5">
               Lowercase letters, numbers, and hyphens. 1-64 characters.
             </p>
           </div>
           <div>
-            <label className="block text-xs font-medium text-gx-muted mb-1">Description</label>
-            <input
+            <label className="block text-xs font-medium text-muted-foreground mb-1">
+              Description
+            </label>
+            <Input
               type="text"
               placeholder="A short description of what this skill does"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              className="w-full rounded border border-gx-border bg-gx-surface-hover px-2 py-1.5 text-xs text-gx-text placeholder:text-gx-muted focus:outline-none focus:border-gx-accent"
+              className="w-full rounded border border-border bg-accent px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary"
             />
           </div>
           <div>
-            <label className="block text-xs font-medium text-gx-muted mb-1">
-              Body <span className="text-gx-muted">(optional)</span>
+            <label className="block text-xs font-medium text-muted-foreground mb-1">
+              Body <span className="text-muted-foreground">(optional)</span>
             </label>
-            <textarea
+            <Textarea
               placeholder="Markdown content for the skill..."
               value={body}
               onChange={(e) => setBody(e.target.value)}
               rows={6}
-              className="w-full rounded border border-gx-border bg-gx-surface-hover px-2 py-1.5 text-xs text-gx-text font-mono placeholder:text-gx-muted focus:outline-none focus:border-gx-accent resize-y"
+              className="w-full rounded border border-border bg-accent px-2 py-1.5 text-xs text-foreground font-mono placeholder:text-muted-foreground focus:outline-none focus:border-primary resize-y"
             />
           </div>
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-gx-border">
-          <button
-            className="rounded-md px-3 py-1.5 text-xs font-medium text-gx-muted hover:text-gx-text transition-colors"
+        <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-border">
+          <Button
+            variant="ghost"
+            size="compact"
+            className="rounded-md px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
             onClick={onClose}
           >
             Cancel
-          </button>
-          <button
-            className="rounded-md bg-gx-accent px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 transition-opacity disabled:opacity-50"
+          </Button>
+          <Button
+            variant="default"
+            size="compact"
+            className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 transition-opacity disabled:opacity-50"
             onClick={handleCreate}
             disabled={creating}
           >
             {creating ? "Creating..." : "Create Skill"}
-          </button>
+          </Button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

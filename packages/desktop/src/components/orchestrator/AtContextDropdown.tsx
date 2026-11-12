@@ -1,3 +1,10 @@
+import { Button } from "@/components/ui/button";
+import {
+  CommandGroup,
+  CommandItem,
+  CommandList,
+  CommandPopover,
+} from "@/components/ui/command";
 /**
  * AtContextDropdown — inline typeahead triggered by `@` in the chat composer.
  *
@@ -13,13 +20,7 @@
  *      ranked by relevance.
  */
 
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import type { LucideIcon } from "lucide-react";
 import {
   Bookmark,
   Brain,
@@ -30,10 +31,16 @@ import {
   Terminal,
   Workflow,
 } from "lucide-react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { AgentWorkflowDefinition, CommitRow, DirEntry, rpc } from "../../ipc";
 import { searchInstructions } from "../../lib/instructions-library";
 import { searchSkills } from "../../lib/skills-library";
-import type { LucideIcon } from "lucide-react";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -61,6 +68,7 @@ export interface AtContextItem {
 
 interface Props {
   /** The text after `@` that the user has typed so far. */
+  anchorRef: React.RefObject<HTMLElement | null>;
   filter: string;
   /** Whether the dropdown is visible. */
   visible: boolean;
@@ -103,7 +111,10 @@ const CATEGORIES: CategoryMeta[] = [
 
 // ── Component ───────────────────────────────────────────────────────
 
-export function AtContextDropdown({ filter, visible, repoId, workflows = [], onSelect, onCategorySelect }: Props) {
+export function AtContextDropdown({
+  anchorRef,
+  filter, visible, repoId, workflows = [], onSelect, onCategorySelect,
+}: Props) {
   const [activeIndex, setActiveIndex] = useState(0);
   const [kindFilter, setKindFilter] = useState<AtContextKind | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -329,36 +340,45 @@ export function AtContextDropdown({ filter, visible, repoId, workflows = [], onS
 
   useEffect(() => {
     if (!visible) return;
-    document.addEventListener("keydown", handleKeyDown, true);
-    return () => document.removeEventListener("keydown", handleKeyDown, true);
-  }, [visible, handleKeyDown]);
+    const anchor = anchorRef.current;
+    anchor?.addEventListener("keydown", handleKeyDown);
+    return () => anchor?.removeEventListener("keydown", handleKeyDown);
+  }, [visible, handleKeyDown, anchorRef]);
 
   if (!visible) return null;
 
   return (
-    <div
-      ref={listRef}
-      role="listbox"
-      aria-label="Context mentions"
-      className="absolute bottom-full left-0 right-0 mb-1 max-h-[min(280px,var(--composer-popup-height))] overflow-auto rounded-lg border border-gx-border bg-gx-bg shadow-lg z-50"
+    <CommandPopover
+      anchorRef={anchorRef}
+      onClose={() => onSelect(null)}
+      value={String(activeIndex)}
+      onValueChange={(value) => setActiveIndex(Number(value))}
     >
+      <CommandList
+        ref={listRef}
+        className="max-h-[min(280px,var(--composer-popup-height))]"
+        label="Context mentions"
+      >
+        <CommandGroup>
       {/* Kind filter header — shows when narrowed to a specific type */}
       {kindFilter && (
-        <div className="sticky top-0 z-10 flex items-center justify-between border-b border-gx-border/50 bg-gx-bg/95 backdrop-blur-sm px-3 py-1.5">
-          <span className="text-[10px] font-medium uppercase tracking-wider text-gx-muted">
+        <div className="sticky top-0 z-10 flex items-center justify-between border-b border-border/50 bg-background/95 backdrop-blur-sm px-3 py-1.5">
+          <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
             {CATEGORIES.find((c) => c.kind === kindFilter)?.label ?? kindFilter}
           </span>
-          <button
-            type="button"
+          <Button
+                variant="ghost"
+                size="compact"
+                type="button"
             onClick={() => setKindFilter(null)}
-            className="text-[10px] text-gx-accent hover:underline"
+            className="text-[10px] text-primary hover:underline"
           >
-            ← All types
-          </button>
+                ← All types
+              </Button>
         </div>
       )}
       {items.length === 0 ? (
-        <div className="px-3 py-2 text-[11px] text-gx-muted">
+        <div className="px-3 py-2 text-[11px] text-muted-foreground">
           {kindFilter
             ? `No ${kindFilter}s matching "${filter}". Keep typing or press Esc to go back.`
             : `No matches for "@${filter}". Keep typing or press Esc.`}
@@ -369,13 +389,11 @@ export function AtContextDropdown({ filter, visible, repoId, workflows = [], onS
           const Icon = meta?.Icon ?? FileText;
           const isCategory = !item.value;
           return (
-            <button
-              key={item.id}
-              type="button"
-              role="option"
-              aria-selected={i === activeIndex}
-              data-active={i === activeIndex}
-              onClick={() => {
+            <CommandItem
+                  value={String(i)}
+                  key={item.id}
+                  data-active={i === activeIndex}
+                  onSelect={() => {
                 if (item.value) {
                   onSelect(item);
                 } else {
@@ -383,27 +401,28 @@ export function AtContextDropdown({ filter, visible, repoId, workflows = [], onS
                   handleCategoryPick(item.kind);
                 }
               }}
-              onMouseEnter={() => setActiveIndex(i)}
               className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition ${
                 i === activeIndex
-                  ? "bg-gx-accent/10 text-gx-text"
-                  : "text-gx-text hover:bg-gx-surface-hover"
+                  ? "bg-primary/10 text-foreground"
+                  : "text-foreground hover:bg-accent"
               } ${isCategory ? "cursor-pointer" : ""}`}
             >
-              <Icon size={12} className="shrink-0 text-gx-accent" />
-              <span className={`truncate ${isCategory ? "font-semibold text-gx-muted" : "font-medium"}`}>
+              <Icon size={12} className="shrink-0 text-primary" />
+              <span className={`truncate ${isCategory ? "font-semibold text-muted-foreground" : "font-medium"}`}>
                 {item.label}
               </span>
               {item.hint && (
-                <span className="ml-auto shrink-0 truncate text-[10px] text-gx-muted max-w-[40%]">
+                <span className="ml-auto shrink-0 truncate text-[10px] text-muted-foreground max-w-[40%]">
                   {item.hint}
                 </span>
               )}
-            </button>
+            </CommandItem>
           );
         })
       )}
-    </div>
+    </CommandGroup>
+      </CommandList>
+    </CommandPopover>
   );
 }
 
@@ -416,7 +435,7 @@ function fuzzyFilterEntries(
   max: number,
 ): AtContextItem[] {
   const pool = entries.filter((e) =>
-    mode === "folder" ? e.kind === "dir" : (e.kind !== "dir" && e.kind !== "submodule"),
+    mode === "folder" ? e.kind === "dir" : e.kind !== "dir" && e.kind !== "submodule",
   );
 
   const scored: Array<{ entry: DirEntry; score: number }> = [];

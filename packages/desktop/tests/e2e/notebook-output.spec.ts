@@ -1,3 +1,4 @@
+import { chooseSelect } from "../helpers/select";
 import { test, expect, _electron as electron } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -50,7 +51,10 @@ for (const kind of ["HTML", "SVG"] as const) test(`saved notebook ${kind} output
     await page.screenshot({ path: test.info().outputPath("isolated-notebook-output-dark.png") });
     await page.keyboard.press(process.platform === "darwin" ? "Meta+," : "Control+,");
     await page.getByRole("tab", { name: "User", exact: true }).click();
-    await page.getByRole("group", { name: "Theme", exact: true }).getByRole("combobox").selectOption("light");
+    await chooseSelect(
+        page.getByRole("group", { name: "Theme", exact: true }).getByRole("combobox"),
+        "light",
+      );
     await expect(page.locator("html")).toHaveClass(/theme-light/);
     await page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Files", exact: true }).click();
     await expect(frame.getByText(marker, { exact: true })).toBeVisible();

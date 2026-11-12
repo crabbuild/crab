@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import clsx from "clsx";
 import { GitGraph, GitMergeConflict } from "lucide-react";
+import { useEffect, useState } from "react";
 import { CommitRow } from "../ipc";
 import { OpenRepo } from "../state";
-import { TimelineView } from "./TimelineView";
 import { ConflictsView } from "./ConflictsView";
+import { TimelineView } from "./TimelineView";
 
 type Tab = "timeline" | "conflicts";
 
@@ -74,26 +75,32 @@ export function TimelineAndConflictsView({
   }, [activeTab]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <Tabs
+      value={activeTab}
+      onValueChange={(value) => setActiveTab(value as Tab)}
+      className="flex h-full min-h-0 flex-col">
       {/* Tab bar */}
-      <div className="flex shrink-0 items-center border-b border-gx-border bg-gx-surface">
+      <TabsList className="h-auto shrink-0 justify-start rounded-none border-b border-border bg-card p-0">
         <TabButton
+          value={"timeline"}
           active={activeTab === "timeline"}
-          onClick={() => setActiveTab("timeline")}
           icon={<GitGraph size={12} />}
           label="Timeline"
         />
         <TabButton
+          value={"conflicts"}
           active={activeTab === "conflicts"}
-          onClick={() => setActiveTab("conflicts")}
           icon={<GitMergeConflict size={12} />}
           label="Conflicts"
           badge={conflictCount}
         />
-      </div>
+      </TabsList>
 
       {/* Tab content */}
-      <div className="flex min-h-0 flex-1 flex-col">
+      <TabsContent
+        value={activeTab}
+        className="mt-0 flex min-h-0 flex-1 flex-col"
+      >
         {activeTab === "timeline" ? (
           <TimelineView
             repo={repo}
@@ -110,8 +117,8 @@ export function TimelineAndConflictsView({
             onConflictCountChange={onConflictCountChange}
           />
         )}
-      </div>
-    </div>
+      </TabsContent>
+    </Tabs>
   );
 }
 
@@ -119,29 +126,26 @@ export function TimelineAndConflictsView({
 
 function TabButton({
   active,
-  onClick,
+  value,
   icon,
   label,
   badge,
 }: {
   active: boolean;
-  onClick: () => void;
+  value: Tab;
   icon: React.ReactNode;
   label: string;
   badge?: number;
 }) {
   return (
-    <button
-      type="button"
+    <TabsTrigger
       className={clsx(
         "relative flex items-center gap-1.5 px-3 py-2 text-xs font-medium transition",
         active
-          ? "text-gx-text"
-          : "text-gx-muted hover:text-gx-text",
+          ? "text-foreground"
+          : "text-muted-foreground hover:text-foreground",
       )}
-      onClick={onClick}
-      role="tab"
-      aria-selected={active}
+      value={value}
     >
       {icon}
       {label}
@@ -150,8 +154,8 @@ function TabButton({
           className={clsx(
             "ml-0.5 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full px-1 text-[10px] font-medium",
             active
-              ? "bg-gx-accent/20 text-gx-accent"
-              : "bg-gx-border text-gx-muted",
+              ? "bg-primary/20 text-primary"
+              : "bg-border text-muted-foreground",
           )}
         >
           {badge > 99 ? "99+" : badge}
@@ -159,8 +163,8 @@ function TabButton({
       )}
       {/* Active indicator */}
       {active && (
-        <span className="absolute inset-x-0 bottom-0 h-[2px] rounded-full bg-gx-accent" />
+        <span className="absolute inset-x-0 bottom-0 h-[2px] rounded-full bg-primary" />
       )}
-    </button>
+    </TabsTrigger>
   );
 }

@@ -1,14 +1,15 @@
-import { useState } from "react";
+import { Button } from "@/components/ui/button";
 import clsx from "clsx";
 import {
+  ArrowUp,
   Check,
   ChevronDown,
   ChevronRight,
   Circle,
   ListTodo,
   Loader2,
-  ArrowUp,
 } from "lucide-react";
+import { useState } from "react";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -79,19 +80,19 @@ function StatusIcon({ status }: { status: TodoWriteItem["status"] }) {
   switch (status) {
     case "completed":
       return (
-        <div className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-gx-success/20 text-gx-success">
+        <div className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-success/20 text-success">
           <Check size={10} strokeWidth={3} />
         </div>
       );
     case "in_progress":
       return (
-        <div className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-gx-accent/20 text-gx-accent">
+        <div className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-primary/20 text-primary">
           <Loader2 size={10} className="animate-spin" />
         </div>
       );
     default:
       return (
-        <div className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-gx-border text-gx-muted">
+        <div className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-border text-muted-foreground">
           <Circle size={8} />
         </div>
       );
@@ -100,9 +101,9 @@ function StatusIcon({ status }: { status: TodoWriteItem["status"] }) {
 
 function StatusBadge({ status }: { status: TodoWriteItem["status"] }) {
   const styles = {
-    completed: "bg-gx-success/15 text-gx-success border-gx-success/30",
-    in_progress: "bg-gx-accent/15 text-gx-accent border-gx-accent/30",
-    pending: "bg-gx-surface text-gx-muted border-gx-border",
+    completed: "bg-success/15 text-success border-success/30",
+    in_progress: "bg-primary/15 text-primary border-primary/30",
+    pending: "bg-card text-muted-foreground border-border",
   };
   const labels = {
     completed: "done",
@@ -122,13 +123,13 @@ function ProgressBar({ completed, total }: { completed: number; total: number })
   const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
   return (
     <div className="flex items-center gap-2">
-      <div className="flex-1 h-1.5 rounded-full bg-gx-surface overflow-hidden">
+      <div className="flex-1 h-1.5 rounded-full bg-card overflow-hidden">
         <div
-          className="h-full rounded-full bg-gx-success/70 transition-all duration-300"
+          className="h-full rounded-full bg-success/70 transition-all duration-300"
           style={{ width: `${pct}%` }}
         />
       </div>
-      <span className="text-[9px] text-gx-muted font-mono tabular-nums">
+      <span className="text-[9px] text-muted-foreground font-mono tabular-nums">
         {completed}/{total}
       </span>
     </div>
@@ -158,21 +159,27 @@ function DeltaSection({ changed, added, todos }: {
 
   return (
     <div className="space-y-1 mb-2">
-      <span className="text-[9px] font-medium text-gx-muted uppercase tracking-wider">Changes</span>
+      <span className="text-[9px] font-medium text-muted-foreground uppercase tracking-wider">
+        Changes
+      </span>
       {entries.map((entry) => (
         <div key={entry.key} className="flex items-center gap-2 text-[10px]">
           {entry.type === "added" ? (
             <>
-              <span className="text-gx-success">+</span>
-              <span className="flex-1 truncate text-gx-text">{entry.content}</span>
-              <span className="text-[9px] text-gx-success/70 italic">new</span>
+              <span className="text-success">+</span>
+              <span className="flex-1 truncate text-foreground">
+                {entry.content}
+              </span>
+              <span className="text-[9px] text-success/70 italic">new</span>
             </>
           ) : (
             <>
-              <ArrowUp size={9} className="text-gx-accent shrink-0" />
-              <span className="flex-1 truncate text-gx-text">{entry.content}</span>
-              <span className="text-[9px] text-gx-muted">
-                {entry.from} → <span className="text-gx-accent">{entry.to}</span>
+              <ArrowUp size={9} className="text-primary shrink-0" />
+              <span className="flex-1 truncate text-foreground">
+                {entry.content}
+              </span>
+              <span className="text-[9px] text-muted-foreground">
+                {entry.from} → <span className="text-primary">{entry.to}</span>
               </span>
             </>
           )}
@@ -208,32 +215,36 @@ export function TodoWriteCard({ input, previousInput, defaultExpanded = false }:
   const hasDeltas = changed.size > 0 || added.size > 0;
 
   return (
-    <div className="rounded-md border border-gx-border/50 bg-gx-bg-sub overflow-hidden">
+    <div className="rounded-md border border-border/50 bg-background overflow-hidden">
       {/* Header */}
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={() => setExpanded(!expanded)}
-        className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-gx-surface-hover transition cursor-pointer"
+        className="justify-start flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-accent transition cursor-pointer"
       >
-        <ListTodo size={11} className="text-orange-400 shrink-0" />
-        <span className="shrink-0 text-[10px] font-medium text-gx-muted/80">Todos</span>
+        <ListTodo size={11} className="text-warning shrink-0" />
+        <span className="shrink-0 text-[10px] font-medium text-muted-foreground/80">
+          Todos
+        </span>
 
         {/* Compact progress summary */}
-        <span className="flex items-center gap-1.5 text-[10px] text-gx-text/80">
+        <span className="flex items-center gap-1.5 text-[10px] text-foreground/80">
           {completed > 0 && (
-            <span className="flex items-center gap-0.5 text-gx-success">
+            <span className="flex items-center gap-0.5 text-success">
               <Check size={9} strokeWidth={3} />
               {completed}
             </span>
           )}
           {inProgress > 0 && (
-            <span className="flex items-center gap-0.5 text-gx-accent">
+            <span className="flex items-center gap-0.5 text-primary">
               <Loader2 size={9} />
               {inProgress}
             </span>
           )}
           {pending > 0 && (
-            <span className="flex items-center gap-0.5 text-gx-muted">
+            <span className="flex items-center gap-0.5 text-muted-foreground">
               <Circle size={8} />
               {pending}
             </span>
@@ -242,21 +253,22 @@ export function TodoWriteCard({ input, previousInput, defaultExpanded = false }:
 
         {/* Delta indicator */}
         {hasDeltas && (
-          <span className="rounded bg-gx-accent/15 px-1 py-0.5 text-[8px] font-medium text-gx-accent">
+          <span className="rounded bg-primary/15 px-1 py-0.5 text-[8px] font-medium text-primary">
             {changed.size + added.size} updated
           </span>
         )}
 
         <span className="flex-1" />
-        {expanded
-          ? <ChevronDown size={10} className="shrink-0 text-gx-muted/60" />
-          : <ChevronRight size={10} className="shrink-0 text-gx-muted/60" />
-        }
-      </button>
+        {expanded ? (
+          <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
+        ) : (
+          <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
+        )}
+      </Button>
 
       {/* Expanded content */}
       {expanded && (
-        <div className="border-t border-gx-border/30 px-2.5 py-2 space-y-2">
+        <div className="border-t border-border/30 px-2.5 py-2 space-y-2">
           {/* Progress bar */}
           <ProgressBar completed={completed} total={total} />
 
@@ -277,7 +289,7 @@ export function TodoWriteCard({ input, previousInput, defaultExpanded = false }:
                   key={key}
                   className={clsx(
                     "flex items-center gap-2 rounded px-1.5 py-1 transition",
-                    isChanged && "bg-gx-accent/5 border-l-2 border-gx-accent/40",
+                    isChanged && "bg-primary/5 border-l-2 border-primary/40",
                     !isChanged && "border-l-2 border-transparent",
                   )}
                 >
@@ -285,9 +297,9 @@ export function TodoWriteCard({ input, previousInput, defaultExpanded = false }:
                   <span
                     className={clsx(
                       "flex-1 text-[10px] leading-tight",
-                      item.status === "completed" && "text-gx-muted line-through",
-                      item.status === "in_progress" && "text-gx-text font-medium",
-                      item.status === "pending" && "text-gx-text/80",
+                      item.status === "completed" && "text-muted-foreground line-through",
+                      item.status === "in_progress" && "text-foreground font-medium",
+                      item.status === "pending" && "text-foreground/80",
                     )}
                   >
                     {item.content}

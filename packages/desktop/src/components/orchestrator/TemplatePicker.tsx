@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import clsx from "clsx";
 
 // ── Types ───────────────────────────────────────────────────────────
@@ -42,7 +43,7 @@ export interface TemplatePickerProps {
 export function TemplatePicker({ templates, selectedTemplate, onSelect }: TemplatePickerProps) {
   if (templates.length === 0) {
     return (
-      <p className="text-xs text-gx-muted">No templates available.</p>
+      <p className="text-xs text-muted-foreground">No templates available.</p>
     );
   }
 
@@ -56,7 +57,9 @@ export function TemplatePicker({ templates, selectedTemplate, onSelect }: Templa
         const isSelected = selectedTemplate === template.name;
 
         return (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             key={template.name}
             type="button"
             role="option"
@@ -64,10 +67,10 @@ export function TemplatePicker({ templates, selectedTemplate, onSelect }: Templa
             onClick={() => onSelect(template.name)}
             className={clsx(
               "flex flex-col items-start gap-1 rounded-lg border p-3 text-left transition",
-              "hover:bg-gx-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gx-accent",
+              "hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
               isSelected
-                ? "border-gx-accent bg-gx-accent/10"
-                : "border-gx-border bg-gx-bg-sub",
+                ? "border-primary bg-primary/10"
+                : "border-border bg-background",
             )}
           >
             {template.icon && (
@@ -75,15 +78,15 @@ export function TemplatePicker({ templates, selectedTemplate, onSelect }: Templa
                 {template.icon}
               </span>
             )}
-            <span className="text-xs font-medium text-gx-text">
+            <span className="text-xs font-medium text-foreground">
               {template.name}
             </span>
             {template.description && (
-              <span className="text-[11px] leading-snug text-gx-muted line-clamp-2">
+              <span className="text-[11px] leading-snug text-muted-foreground line-clamp-2">
                 {template.description}
               </span>
             )}
-          </button>
+          </Button>
         );
       })}
     </div>

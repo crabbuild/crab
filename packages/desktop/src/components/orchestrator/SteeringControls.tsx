@@ -1,5 +1,21 @@
-import { useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Toggle } from "@/components/ui/toggle";
 import { ChevronDown, ChevronRight, Shield, Zap } from "lucide-react";
+import { useState } from "react";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -95,28 +111,30 @@ export function SteeringControls({ controls, agentType, onChange }: Props) {
   };
 
   return (
-    <div className="border-b border-gx-border/60">
+    <div className="border-b border-border/60">
       {/* Collapse toggle */}
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={() => setExpanded(!expanded)}
-        className="flex w-full items-center gap-1.5 px-3 py-1.5 text-[11px] text-gx-muted transition hover:text-gx-text"
+        className="flex w-full items-center gap-1.5 px-3 py-1.5 text-[11px] text-muted-foreground transition hover:text-foreground"
         aria-expanded={expanded}
         aria-controls="steering-controls-panel"
       >
         {expanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
         <span>Steering</span>
         {controls.fastMode && (
-          <span className="ml-1 rounded-full bg-gx-accent/15 px-1.5 py-0.5 text-[9px] text-gx-accent">
+          <span className="ml-1 rounded-full bg-primary/15 px-1.5 py-0.5 text-[9px] text-primary">
             Fast
           </span>
         )}
         {controls.model && (
-          <span className="ml-1 text-[9px] text-gx-muted/70">
+          <span className="ml-1 text-[9px] text-muted-foreground/70">
             {models.find((m) => m.value === controls.model)?.label ?? controls.model}
           </span>
         )}
-      </button>
+      </Button>
 
       {/* Expanded panel */}
       {expanded && (
@@ -131,24 +149,35 @@ export function SteeringControls({ controls, agentType, onChange }: Props) {
             <div className="flex items-center gap-1.5">
               <label
                 htmlFor="steering-model"
-                className="text-[10px] text-gx-muted"
+                className="text-[10px] text-muted-foreground"
               >
                 Model
               </label>
-              <select
-                id="steering-model"
-                className="rounded border border-gx-border bg-gx-bg px-1.5 py-0.5 text-[10px] text-gx-text focus-visible:outline-none focus:border-gx-accent"
-                value={controls.model ?? ""}
-                onChange={(e) => handleModelChange(e.target.value)}
-                aria-label="Select model"
+              <Select
+                value={":" + String(controls.model ?? "")}
+                onValueChange={(selectedValue) => {
+                  const value = selectedValue.slice(1);
+                  return handleModelChange(value);
+                }}
               >
-                <option value="">Default</option>
+                <SelectTrigger
+                  id="steering-model"
+                  className="rounded border border-border bg-background px-1.5 py-0.5 text-[10px] text-foreground focus-visible:outline-none focus:border-primary"
+                  aria-label="Select model"
+              >
+                <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    <SelectItem value={":" + String("")}>Default</SelectItem>
                 {models.map((m) => (
-                  <option key={m.value} value={m.value}>
+                  <SelectItem key={m.value} value={":" + String(m.value)}>
                     {m.label}
-                  </option>
-                ))}
-              </select>
+                  </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
             </div>
           )}
 
@@ -156,81 +185,91 @@ export function SteeringControls({ controls, agentType, onChange }: Props) {
           <div className="flex items-center gap-1.5">
             <label
               htmlFor="steering-reasoning"
-              className="text-[10px] text-gx-muted"
+              className="text-[10px] text-muted-foreground"
             >
               Reasoning
             </label>
-            <select
-              id="steering-reasoning"
-              className="rounded border border-gx-border bg-gx-bg px-1.5 py-0.5 text-[10px] text-gx-text focus-visible:outline-none focus:border-gx-accent"
-              value={controls.reasoningLevel ?? "medium"}
-              onChange={(e) => handleReasoningChange(e.target.value as ReasoningLevel)}
-              aria-label="Reasoning level"
+            <Select
+              value={":" + String(controls.reasoningLevel ?? "medium")}
+              onValueChange={(selectedValue) => {
+                const value = selectedValue.slice(1);
+                return handleReasoningChange(value as ReasoningLevel);
+              }}
             >
-              {REASONING_LEVELS.map((l) => (
-                <option key={l.value} value={l.value}>
+              <SelectTrigger
+                id="steering-reasoning"
+                className="rounded border border-border bg-background px-1.5 py-0.5 text-[10px] text-foreground focus-visible:outline-none focus:border-primary"
+                aria-label="Reasoning level"
+            >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  {REASONING_LEVELS.map((l) => (
+                <SelectItem key={l.value} value={":" + String(l.value)}>
                   {l.label}
-                </option>
-              ))}
-            </select>
+                </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
           </div>
 
           {/* Fast mode toggle */}
-          <button
-            type="button"
-            onClick={handleFastModeToggle}
-            className={`flex items-center gap-1 rounded border px-2 py-0.5 text-[10px] transition ${
-              controls.fastMode
-                ? "border-gx-accent/60 bg-gx-accent/10 text-gx-accent"
-                : "border-gx-border bg-gx-bg text-gx-muted hover:text-gx-text"
-            }`}
-            role="switch"
-            aria-checked={controls.fastMode ?? false}
+          <Toggle
             aria-label="Fast mode"
+            pressed={controls.fastMode ?? false}
+            onPressedChange={handleFastModeToggle}
           >
             <Zap size={10} />
             Fast
-          </button>
+          </Toggle>
 
           {/* Permissions button */}
           <div className="relative">
-            <button
-              type="button"
+            <Popover open={permissionsOpen} onOpenChange={setPermissionsOpen}>
+              <PopoverTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="compact"
+                  type="button"
               onClick={() => setPermissionsOpen(!permissionsOpen)}
-              className="flex items-center gap-1 rounded border border-gx-border bg-gx-bg px-2 py-0.5 text-[10px] text-gx-muted transition hover:text-gx-text"
+              className="flex items-center gap-1 rounded border border-border bg-background px-2 py-0.5 text-[10px] text-muted-foreground transition hover:text-foreground"
               aria-expanded={permissionsOpen}
               aria-haspopup="dialog"
               aria-label="Tool permissions"
             >
               <Shield size={10} />
-              Permissions
-            </button>
+                  Permissions
+                </Button>
+              </PopoverTrigger>
 
             {/* Permissions dropdown */}
             {permissionsOpen && (
-              <div
-                className="absolute left-0 top-full z-10 mt-1 w-56 rounded border border-gx-border bg-gx-bg p-3 shadow-lg"
-                role="dialog"
+              <PopoverContent
+                  side="bottom"
+                  align="start"
+                  className=" w-56 rounded border border-border bg-background p-3 "
+                  role="dialog"
                 aria-label="Tool permissions"
               >
-                <div className="mb-2 text-[10px] font-medium text-gx-text">
-                  Tool Permissions
-                </div>
+                <div className="mb-2 text-[10px] font-medium text-foreground">
+                    Tool Permissions
+                  </div>
                 <ul className="space-y-1.5" role="list">
                   {PERMISSION_LABELS.map(({ key, label, hint }) => {
                     const checked = controls.toolPermissions?.[key] ?? true;
                     return (
                       <li key={key} className="flex items-center gap-2">
-                        <input
-                          type="checkbox"
-                          id={`perm-${key}`}
+                        <Checkbox
+                            id={`perm-${key}`}
                           checked={checked}
-                          onChange={(e) => handlePermissionChange(key, e.target.checked)}
-                          className="h-3 w-3 rounded border-gx-border accent-gx-accent"
+                            onCheckedChange={(checked) => handlePermissionChange(key, checked === true)}
+                          className="h-3 w-3 rounded border-border accent-primary"
                         />
                         <label
                           htmlFor={`perm-${key}`}
-                          className="flex-1 text-[10px] text-gx-text"
+                          className="flex-1 text-[10px] text-foreground"
                           title={hint}
                         >
                           {label}
@@ -239,18 +278,21 @@ export function SteeringControls({ controls, agentType, onChange }: Props) {
                     );
                   })}
                 </ul>
-                <button
-                  type="button"
+                <Button
+                    variant="ghost"
+                    size="compact"
+                    type="button"
                   onClick={() => setPermissionsOpen(false)}
-                  className="mt-2 w-full rounded border border-gx-border px-2 py-1 text-[10px] text-gx-muted transition hover:bg-gx-surface-hover hover:text-gx-text"
+                  className="mt-2 w-full rounded border border-border px-2 py-1 text-[10px] text-muted-foreground transition hover:bg-accent hover:text-foreground"
                 >
-                  Done
-                </button>
+                    Done
+                  </Button>
+                </PopoverContent>
+              )}
+            </Popover>
               </div>
-            )}
-          </div>
         </div>
       )}
     </div>
-  );
+      );
 }

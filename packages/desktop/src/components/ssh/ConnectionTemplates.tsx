@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Connection Templates — template picker shown in the "Add Connection"
  * dialog as a first step before the form. Provides pre-built configs
@@ -167,7 +168,7 @@ export function ConnectionTemplates({
   const allTemplates = [...BUILT_IN_TEMPLATES, ...customTemplates];
 
   return (
-    <div className="ssh-templates" role="dialog" aria-labelledby="ssh-templates-title">
+    <div className="ssh-templates">
       <header className="ssh-templates__header">
         <h2 id="ssh-templates-title">Choose a template</h2>
         <p className="ssh-templates__subtitle">
@@ -177,7 +178,9 @@ export function ConnectionTemplates({
 
       <div className="ssh-templates__grid" role="list" aria-label="Connection templates">
         {allTemplates.map((template) => (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             key={template.id}
             className={`ssh-templates__card ${template.isCustom ? "ssh-templates__card--custom" : ""}`}
             onClick={() => onSelect(template)}
@@ -188,22 +191,26 @@ export function ConnectionTemplates({
               {template.icon}
             </span>
             <span className="ssh-templates__card-name">{template.name}</span>
-            <span className="ssh-templates__card-desc">{template.description}</span>
+            <span className="ssh-templates__card-desc">
+              {template.description}
+            </span>
             {template.isCustom && (
               <span className="ssh-templates__card-badge">Custom</span>
             )}
-          </button>
+          </Button>
         ))}
       </div>
 
       <footer className="ssh-templates__footer">
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           className="ssh-templates__skip"
           onClick={onSkip}
           aria-label="Skip template selection and configure manually"
         >
           Configure manually →
-        </button>
+        </Button>
       </footer>
     </div>
   );

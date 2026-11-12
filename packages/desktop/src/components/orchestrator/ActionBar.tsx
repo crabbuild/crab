@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import {
 Check,
 MessageSquare,
@@ -98,7 +99,7 @@ export function ActionBar(props: Props) {
 
 function Bar({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex shrink-0 items-center gap-2 border-t border-gx-border px-4 py-2 bg-gx-surface">
+    <div className="flex shrink-0 items-center gap-2 border-t border-border px-4 py-2 bg-card">
       {children}
     </div>
   );
@@ -117,19 +118,21 @@ function ActionButton({
 }) {
   const cls =
     variant === "primary"
-      ? "bg-gx-accent text-white hover:bg-gx-accent/80"
+      ? "bg-primary text-primary-foreground hover:bg-primary/80"
       : variant === "danger"
-        ? "border border-gx-error/40 text-gx-error hover:bg-gx-error/10"
-        : "border border-gx-border text-gx-text hover:bg-gx-surface-hover";
+        ? "border border-destructive/40 text-destructive hover:bg-destructive/10"
+        : "border border-border text-foreground hover:bg-accent";
 
   return (
-    <button
+    <Button
+      variant="ghost"
+      size="compact"
       type="button"
       onClick={onClick}
       className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition ${cls}`}
     >
       {icon}
       {label}
-    </button>
+    </Button>
   );
 }

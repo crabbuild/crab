@@ -1,3 +1,5 @@
+import { Toggle } from "@/components/ui/toggle";
+import clsx from "clsx";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ImperativePanelHandle,
@@ -5,8 +7,6 @@ import {
   PanelGroup,
   PanelResizeHandle,
 } from "react-resizable-panels";
-import clsx from "clsx";
-import { ActivityBar } from "./ActivityBar";
 import {
   navigationGroup,
   VIEW_GROUPS,
@@ -14,6 +14,7 @@ import {
   type SidebarView,
 } from "../lib/navigation";
 import { useSetting } from "../settings";
+import { ActivityBar } from "./ActivityBar";
 
 interface Props {
   /** View content keyed by id. `undefined` means "not yet built" — the
@@ -150,31 +151,32 @@ export function WorkspaceShell({
     <nav
       aria-label={group === "files" ? "Files" : "Git"}
       className={clsx(
-        "flex shrink-0 gap-1 border-b border-gx-border bg-gx-surface px-2 py-1",
+        "flex shrink-0 gap-1 border-b border-border bg-card px-2 py-1",
         group === "files" ? "h-9 min-w-0 items-center overflow-x-auto" : "flex-wrap",
       )}
     >
       {VIEW_GROUPS[group]
         .filter((view) => !hiddenViews.includes(view))
         .map((view) => (
-          <button
+          <Toggle
+            size="sm"
             key={view}
             type="button"
-            aria-pressed={activeView === view}
+            pressed={activeView === view}
             onClick={() => {
               onViewChange(view);
               setOpen(true);
             }}
             className={clsx(
-              "rounded px-2 text-xs focus-visible:outline focus-visible:outline-2 focus-visible:outline-gx-accent",
+              "rounded px-2 text-xs focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary",
               group === "files" ? "shrink-0 py-1" : "py-1.5",
               activeView === view
-                ? "bg-gx-accent/15 text-gx-text"
-                : "text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
+                ? "bg-primary/15 text-foreground"
+                : "text-muted-foreground hover:bg-accent hover:text-foreground",
             )}
           >
             {VIEW_LABELS[view]}
-          </button>
+          </Toggle>
         ))}
     </nav>
   );
@@ -213,24 +215,28 @@ export function WorkspaceShell({
             }}
             onExpand={() => setOpen(true)}
             className={clsx(
-              "flex min-h-0 flex-col bg-gx-surface",
+              "flex min-h-0 flex-col bg-card",
               !sidebarVisible && "hidden",
             )}
           >
-            {group === "files" ? groupNavigation : (
-              <div className="flex shrink-0 items-center justify-between border-b border-gx-border px-3 py-2 text-[11px] uppercase tracking-wider text-gx-muted">
+            {group === "files" ? (
+              groupNavigation
+            ) : (
+              <div className="flex shrink-0 items-center justify-between border-b border-border px-3 py-2 text-[11px] uppercase tracking-wider text-muted-foreground">
                 <span>{VIEW_LABELS[activeView]}</span>
               </div>
             )}
             <div className="flex min-h-0 flex-1 flex-col">
               {activeContent ?? (
-                <div className="p-3 text-xs text-gx-muted">Coming soon.</div>
+                <div className="p-3 text-xs text-muted-foreground">
+                  Coming soon.
+                </div>
               )}
             </div>
           </Panel>
           <PanelResizeHandle
             className={clsx(
-              "w-[3px] cursor-col-resize bg-transparent transition-colors hover:bg-gx-accent/50",
+              "w-[3px] cursor-col-resize bg-transparent transition-colors hover:bg-primary/50",
               !sidebarVisible && "pointer-events-none w-0",
             )}
           />

@@ -1,8 +1,19 @@
-import { useEffect, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Toggle } from "@/components/ui/toggle";
 import clsx from "clsx";
-import { CheckCircle2, ExternalLink, Trash2, Clock, XCircle, Pin, GitBranch, FolderPlus, Pencil } from "lucide-react";
-import { AgentIcon, agentAccentColor, agentProviderLabel } from "./AgentIcon";
+import { CheckCircle2,
+  Clock,
+  ExternalLink,
+  FolderPlus,
+  GitBranch,
+  Pencil,
+  Pin,
+  Trash2,
+  XCircle,
+} from "lucide-react";
+import { useEffect, useState } from "react";
 import type { TaskStatus } from "../../../electron/orchestrator";
+import { AgentIcon, agentAccentColor, agentProviderLabel } from "./AgentIcon";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -67,18 +78,18 @@ export interface OrchestratorTask {
 // ── Status dot styling ──────────────────────────────────────────────
 
 const STATUS_DOT: Record<TaskStatus, string> = {
-  running: "bg-gx-success animate-pulse",
-  planning: "bg-gx-warn",
-  reviewing: "bg-gx-info",
-  iterating: "bg-gx-thinking",
-  queued: "bg-gx-warn animate-pulse",
-  applied: "bg-gx-success",
-  archived: "bg-gx-muted",
-  failed: "bg-gx-error",
-  stopped: "bg-gx-muted",
-  interrupted: "bg-gx-muted",
-  created: "bg-gx-muted/50",
-  discarded: "bg-gx-muted/60",
+  running: "bg-success animate-pulse",
+  planning: "bg-warning",
+  reviewing: "bg-info",
+  iterating: "bg-thinking",
+  queued: "bg-warning animate-pulse",
+  applied: "bg-success",
+  archived: "bg-muted-foreground",
+  failed: "bg-destructive",
+  stopped: "bg-muted-foreground",
+  interrupted: "bg-muted-foreground",
+  created: "bg-muted-foreground/50",
+  discarded: "bg-muted-foreground/60",
 };
 
 // ── Elapsed time formatter ──────────────────────────────────────────
@@ -154,16 +165,17 @@ export function TaskCard({ task, isSelected, onClick, compact, onDelete, onToggl
   if (compact) {
     return (
       <div className="group relative flex justify-center">
-        <button
+        <Toggle
+          size="sm"
           type="button"
           onClick={onClick}
           className={clsx(
             "flex h-10 w-10 items-center justify-center rounded-md border transition",
             isSelected
-              ? "border-gx-accent/50 bg-gx-accent/10"
-              : "border-gx-border bg-gx-surface hover:bg-gx-surface-hover",
+              ? "border-primary/50 bg-primary/10"
+              : "border-border bg-card hover:bg-accent",
           )}
-          aria-pressed={isSelected}
+          pressed={isSelected}
           aria-label={`Task: ${task.sidebarLabel ?? task.title}`}
           title={task.sidebarLabel ?? task.title}
         >
@@ -176,32 +188,35 @@ export function TaskCard({ task, isSelected, onClick, compact, onDelete, onToggl
             className={clsx("absolute bottom-1 right-1 h-2 w-2 rounded-full", STATUS_DOT[task.status])}
             aria-label={task.status}
           />
-        </button>
+        </Toggle>
       </div>
     );
   }
 
   return (
     <div className="group relative" style={{ paddingLeft: depth > 0 ? Math.min(depth * 12, 36) : 0 }}>
-    <button
-      type="button"
+    <Toggle
+        size="sm"
+        type="button"
       onClick={onClick}
       className={clsx(
         "w-full rounded-md border px-3 py-2 text-left transition",
         isSelected
-          ? "border-gx-accent/50 bg-gx-accent/10"
-          : "border-gx-border bg-gx-surface hover:bg-gx-surface-hover",
+          ? "border-primary/50 bg-primary/10"
+          : "border-border bg-card hover:bg-accent",
       )}
-      aria-pressed={isSelected}
+        pressed={isSelected}
       aria-label={`Task: ${task.title}`}
     >
       {/* Row 1: status indicator + title */}
       <div className="flex items-center gap-2">
-        {hasChildren && <GitBranch size={10} className="shrink-0 text-gx-muted" />}
+        {hasChildren && (
+            <GitBranch size={10} className="shrink-0 text-muted-foreground" />
+          )}
         {task.status === "applied" || task.status === "reviewing" ? (
-          <CheckCircle2 size={10} className="shrink-0 text-gx-success" />
+          <CheckCircle2 size={10} className="shrink-0 text-success" />
         ) : task.status === "failed" ? (
-          <XCircle size={10} className="shrink-0 text-gx-error" />
+          <XCircle size={10} className="shrink-0 text-destructive" />
         ) : (
           <span
             className={clsx("h-2 w-2 shrink-0 rounded-full", STATUS_DOT[task.status])}
@@ -210,9 +225,9 @@ export function TaskCard({ task, isSelected, onClick, compact, onDelete, onToggl
         )}
         <span className={clsx(
           "min-w-0 flex-1 truncate text-xs font-medium",
-          (task.status === "applied" || task.status === "reviewing")
-            ? "text-gx-text/80"
-            : "text-gx-text",
+              task.status === "applied" || task.status === "reviewing"
+                ? "text-foreground/80"
+            : "text-foreground",
         )}>
             {task.sidebarLabel ?? task.title}
         </span>
@@ -220,7 +235,7 @@ export function TaskCard({ task, isSelected, onClick, compact, onDelete, onToggl
 
       {/* Row 2: agent name + elapsed time + completion status */}
       {!compact && (
-        <div className="mt-1 flex items-center gap-1.5 pl-4 text-[10px] text-gx-muted">
+        <div className="mt-1 flex items-center gap-1.5 pl-4 text-[10px] text-muted-foreground">
           <AgentIcon
             agentName={task.agentName}
             size={10}
@@ -230,31 +245,31 @@ export function TaskCard({ task, isSelected, onClick, compact, onDelete, onToggl
             {task.spawnedRole ?? agentProviderLabel(task.agentName)}
           </span>
           {task.status === "queued" ? (
-            <span className="shrink-0 text-gx-warn">· Waiting</span>
+            <span className="shrink-0 text-warning">· Waiting</span>
           ) : task.status === "applied" || task.status === "reviewing" ? (
-            <span className="shrink-0 flex items-center gap-1 text-gx-success">
+            <span className="shrink-0 flex items-center gap-1 text-success">
               <CheckCircle2 size={9} />
               <span>Complete · {elapsed}</span>
             </span>
           ) : task.status === "failed" ? (
-            <span className="shrink-0 flex items-center gap-1 text-gx-error">
+            <span className="shrink-0 flex items-center gap-1 text-destructive">
               <XCircle size={9} />
               <span>{elapsed}</span>
             </span>
           ) : task.status === "stopped" || task.status === "interrupted" || task.status === "discarded" ? (
-            <span className="shrink-0 flex items-center gap-1 text-gx-muted">
+            <span className="shrink-0 flex items-center gap-1 text-muted-foreground">
               <Clock size={9} />
               <span>{elapsed}</span>
             </span>
           ) : (
             <span className="shrink-0 flex items-center gap-1">
-              <Clock size={9} className="text-gx-muted/60" />
+              <Clock size={9} className="text-muted-foreground/60" />
               <span>{elapsed}</span>
             </span>
           )}
           {task.prUrl && (
             <span
-              className="shrink-0 flex items-center gap-0.5 text-gx-accent cursor-pointer hover:underline"
+              className="shrink-0 flex items-center gap-0.5 text-primary cursor-pointer hover:underline"
               onClick={(e) => {
                 e.stopPropagation();
                 (window as any).crab?.openUrl(task.prUrl);
@@ -262,21 +277,22 @@ export function TaskCard({ task, isSelected, onClick, compact, onDelete, onToggl
               role="link"
               aria-label={`PR #${task.prNumber}`}
             >
-              <ExternalLink size={8} />
-              #{task.prNumber}
+              <ExternalLink size={8} />#{task.prNumber}
             </span>
           )}
-          {isPinned && <Pin size={9} className="shrink-0 fill-gx-accent text-gx-accent" />}
+          {isPinned && (
+              <Pin size={9} className="shrink-0 fill-primary text-primary" />
+            )}
           {task.sidebarGroup && (
-            <span className="flex min-w-0 items-center gap-0.5 truncate text-gx-muted/80" title={`Collection: ${task.sidebarGroup}`}>
+            <span className="flex min-w-0 items-center gap-0.5 truncate text-muted-foreground/80" title={`Collection: ${task.sidebarGroup}`}>
               <FolderPlus size={9} className="shrink-0" />
               <span className="truncate">{task.sidebarGroup}</span>
             </span>
           )}
           {task.workflowRunId && (
-            <span className="shrink-0 text-gx-accent/90" title="Workflow session">
-              · Workflow
-            </span>
+            <span className="shrink-0 text-primary/90" title="Workflow session">
+                · Workflow
+              </span>
           )}
         </div>
       )}
@@ -285,37 +301,41 @@ export function TaskCard({ task, isSelected, onClick, compact, onDelete, onToggl
       {!compact && task.progress && (task.status === "running" || task.status === "iterating") && (
         <div className="mt-1.5 pl-4">
           <div className="flex items-center gap-2">
-            <div className="h-1 flex-1 overflow-hidden rounded-full bg-gx-border">
+            <div className="h-1 flex-1 overflow-hidden rounded-full bg-border">
               <div
-                className="h-full rounded-full bg-gx-accent transition-all"
+                className="h-full rounded-full bg-primary transition-all"
                 style={{ width: `${Math.round((task.progress.done / task.progress.total) * 100)}%` }}
               />
             </div>
-            <span className="shrink-0 text-[9px] text-gx-muted">
+            <span className="shrink-0 text-[9px] text-muted-foreground">
               {task.progress.done}/{task.progress.total}
             </span>
           </div>
         </div>
       )}
-    </button>
+    </Toggle>
 
       {/* Delete button (visible on hover for terminal-state tasks) */}
       {canDelete && onDelete && (
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={(e) => {
             e.stopPropagation();
             onDelete(task.id);
           }}
-          className="absolute right-2 top-2 hidden rounded p-1 text-gx-muted hover:bg-gx-error/20 hover:text-gx-error transition group-hover:block"
+          className="absolute right-2 top-2 hidden rounded p-1 text-muted-foreground hover:bg-destructive/20 hover:text-destructive transition group-hover:block"
           aria-label={`Delete task: ${task.title}`}
           title="Delete task"
         >
           <Trash2 size={12} />
-        </button>
+        </Button>
       )}
       {onTogglePin && (
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={(e) => {
             e.stopPropagation();
@@ -324,42 +344,46 @@ export function TaskCard({ task, isSelected, onClick, compact, onDelete, onToggl
           className={clsx(
             "absolute right-7 top-2 hidden rounded p-1 transition group-hover:block",
             isPinned
-              ? "text-gx-accent hover:bg-gx-accent/10"
-              : "text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
+              ? "text-primary hover:bg-primary/10"
+              : "text-muted-foreground hover:bg-accent hover:text-foreground",
           )}
           aria-label={isPinned ? `Unpin task: ${task.title}` : `Pin task: ${task.title}`}
           title={isPinned ? "Unpin chat" : "Pin chat"}
         >
           <Pin size={12} className={isPinned ? "fill-current" : undefined} />
-        </button>
+        </Button>
       )}
       {onSetGroup && (
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={(e) => {
             e.stopPropagation();
             onSetGroup(task.id, task.sidebarGroup);
           }}
-          className="absolute right-12 top-2 hidden rounded p-1 text-gx-muted transition hover:bg-gx-surface-hover hover:text-gx-text group-hover:block"
+          className="absolute right-12 top-2 hidden rounded p-1 text-muted-foreground transition hover:bg-accent hover:text-foreground group-hover:block"
           aria-label={task.sidebarGroup ? `Move task from collection: ${task.title}` : `Add task to collection: ${task.title}`}
           title={task.sidebarGroup ? "Change collection" : "Add to collection"}
         >
           <FolderPlus size={12} />
-        </button>
+        </Button>
       )}
       {onRename && (
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={(e) => {
             e.stopPropagation();
             onRename(task.id, task.title);
           }}
-          className="absolute right-[68px] top-2 hidden rounded p-1 text-gx-muted transition hover:bg-gx-surface-hover hover:text-gx-text group-hover:block"
+          className="absolute right-[68px] top-2 hidden rounded p-1 text-muted-foreground transition hover:bg-accent hover:text-foreground group-hover:block"
           aria-label={`Rename task: ${task.title}`}
           title="Rename chat"
         >
           <Pencil size={12} />
-        </button>
+        </Button>
       )}
     </div>
   );

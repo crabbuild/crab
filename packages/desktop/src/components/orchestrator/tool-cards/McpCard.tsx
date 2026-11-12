@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { useCardExpanded } from "./useCardExpanded";
 /**
  * Specialized renderer for MCP (Model Context Protocol) tool calls.
@@ -18,22 +19,21 @@ import { useCardExpanded } from "./useCardExpanded";
  * of "JSON blob in a code block") for the most common cases.
  */
 
-
 import clsx from "clsx";
 import {
+  CheckCircle2,
   ChevronDown,
   ChevronRight,
-  Plug,
   Database,
   ExternalLink,
   GitBranch,
   Loader2,
-  CheckCircle2,
+  Plug,
   XCircle,
 } from "lucide-react";
-import type { ToolCardRendererProps } from "./types";
 import { CollapsedCardLine } from "./CollapsedCardLine";
 import { ShikiPreview } from "./ShikiPreview";
+import type { ToolCardRendererProps } from "./types";
 
 const OUTPUT_TRUNCATION_LIMIT = 3000;
 
@@ -66,21 +66,26 @@ export function McpCard({ event, defaultExpanded = false, collapsed: collapsedPr
   // Collapsed one-liner branch.
   const collapsed = collapsedProp ?? false;
   if (collapsed) {
-    const statusIcon = status === "in_progress"
-      ? <Loader2 size={11} className="shrink-0 text-gx-info animate-spin" />
-      : status === "failed"
-        ? <XCircle size={11} className="shrink-0 text-gx-error" />
-        : <CheckCircle2 size={11} className="shrink-0 text-gx-success" />;
+    const statusIcon =
+      status === "in_progress" ? (
+        <Loader2 size={11} className="shrink-0 text-info animate-spin" />
+      ) : status === "failed" ? (
+        <XCircle size={11} className="shrink-0 text-destructive" />
+      ) : (
+        <CheckCircle2 size={11} className="shrink-0 text-success" />
+      );
     const defaultSummary = (
       <>
         {statusIcon}
-        <span className="font-medium text-gx-text/80">{label}</span>
+        <span className="font-medium text-foreground/80">{label}</span>
         {server && (
-          <span className="text-[9px] text-gx-muted">[{server}]</span>
+          <span className="text-[9px] text-muted-foreground">[{server}]</span>
         )}
-        <span className="truncate text-gx-text/70 font-mono">{summary}</span>
+        <span className="truncate text-foreground/70 font-mono">{summary}</span>
         {durationMs !== null && (
-          <span className="shrink-0 text-[9px] font-mono text-gx-muted">{(durationMs / 1000).toFixed(2)}s</span>
+          <span className="shrink-0 text-[9px] font-mono text-muted-foreground">
+            {(durationMs / 1000).toFixed(2)}s
+          </span>
         )}
       </>
     );
@@ -97,65 +102,70 @@ export function McpCard({ event, defaultExpanded = false, collapsed: collapsedPr
     <div
       className={clsx(
         "rounded-md border overflow-hidden transition-colors",
-        status === "in_progress" ? "border-gx-info/30 bg-gx-info/5" :
-        status === "failed"      ? "border-gx-error/30 bg-gx-error/5" :
-                                   "border-gx-border/40",
+        status === "in_progress" ? "border-info/30 bg-info/5" :
+        status === "failed"      ? "border-destructive/30 bg-destructive/5" :
+                                   "border-border/40",
       )}
     >
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={() => (hasOutput || fastCard) && setExpanded(!expanded)}
         className={clsx(
           "flex w-full items-center gap-2 px-2.5 py-1.5 text-[10px] text-left transition",
-          (hasOutput || fastCard) && "hover:bg-gx-surface-hover cursor-pointer",
+          (hasOutput || fastCard) && "hover:bg-accent cursor-pointer",
           !hasOutput && !fastCard && "cursor-default",
         )}
       >
-        <Icon size={11} className="text-gx-muted shrink-0" />
+        <Icon size={11} className="text-muted-foreground shrink-0" />
         {server && (
-          <span className="shrink-0 rounded border border-gx-border/40 bg-gx-surface px-1 py-0.5 text-[8px] font-medium text-gx-muted">
+          <span className="shrink-0 rounded border border-border/40 bg-card px-1 py-0.5 text-[8px] font-medium text-muted-foreground">
             {server}
           </span>
         )}
-        <span className="shrink-0 font-medium text-gx-muted">{label}</span>
-        <span className="min-w-0 flex-1 truncate font-mono text-gx-text/80">{summary}</span>
+        <span className="shrink-0 font-medium text-muted-foreground">
+          {label}
+        </span>
+        <span className="min-w-0 flex-1 truncate font-mono text-foreground/80">
+          {summary}
+        </span>
 
         {durationMs !== null && (
-          <span className="shrink-0 rounded px-1 py-0.5 text-[8px] font-mono text-gx-muted border border-gx-border/40">
+          <span className="shrink-0 rounded px-1 py-0.5 text-[8px] font-mono text-muted-foreground border border-border/40">
             {(durationMs / 1000).toFixed(2)}s
           </span>
         )}
 
         {/* Status pill */}
         {status === "in_progress" && (
-          <span className="shrink-0 inline-flex items-center gap-0.5 text-[8px] text-gx-info">
+          <span className="shrink-0 inline-flex items-center gap-0.5 text-[8px] text-info">
             <Loader2 size={9} className="animate-spin" />
             running
           </span>
         )}
         {status === "failed" && (
-          <span className="shrink-0 inline-flex items-center gap-0.5 text-[8px] text-gx-error">
+          <span className="shrink-0 inline-flex items-center gap-0.5 text-[8px] text-destructive">
             <XCircle size={9} />
             failed
           </span>
         )}
         {status === "completed" && !isProgressUpdate && (
-          <CheckCircle2 size={10} className="shrink-0 text-gx-success" />
+          <CheckCircle2 size={10} className="shrink-0 text-success" />
         )}
 
-        {(hasOutput || fastCard) && (
-          expanded
-            ? <ChevronDown size={10} className="shrink-0 text-gx-muted/60" />
-            : <ChevronRight size={10} className="shrink-0 text-gx-muted/60" />
-        )}
-      </button>
+        {(hasOutput || fastCard) &&
+          (expanded ? (
+            <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
+          ) : (
+            <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
+          ))}
+      </Button>
 
       {expanded && (hasOutput || fastCard) && (
-        <div className="border-t border-gx-border/30 max-h-[260px] overflow-auto">
+        <div className="border-t border-border/30 max-h-[260px] overflow-auto">
           {fastCard}
-          {!fastCard && hasOutput && (
-            <McpOutputRenderer output={output} />
-          )}
+          {!fastCard && hasOutput && <McpOutputRenderer output={output} />}
         </div>
       )}
     </div>
@@ -195,7 +205,7 @@ function McpOutputRenderer({ output }: { output: string }) {
 
   // Fallback: plain monospace.
   return (
-    <pre className="px-2.5 py-2 font-mono text-[10px] leading-[1.5] text-gx-text/60 whitespace-pre-wrap">
+    <pre className="px-2.5 py-2 font-mono text-[10px] leading-[1.5] text-foreground/60 whitespace-pre-wrap">
       {text}
     </pre>
   );
@@ -218,7 +228,9 @@ function renderFastCard(
   const args = (input?.arguments ?? input) as Record<string, unknown> | undefined;
 
   // GitHub MCP — issue / PR creation responses
-  if (server === "github" && (tool === "create_issue" || tool === "create_pull_request" || tool === "create_pr")) {
+  if (
+    server === "github" && (tool === "create_issue" || tool === "create_pull_request" || tool === "create_pr")
+  ) {
     const result = parseJsonish(output);
     const url = pickString(result, ["html_url", "url"]);
     const number = pickNumber(result, ["number"]);
@@ -227,10 +239,12 @@ function renderFastCard(
     return (
       <div className="px-3 py-2">
         <div className="flex items-center gap-2 text-[10px]">
-          <GitBranch size={11} className="text-gx-muted" />
-          <span className="font-medium text-gx-text/90 truncate">{title}</span>
+          <GitBranch size={11} className="text-muted-foreground" />
+          <span className="font-medium text-foreground/90 truncate">
+            {title}
+          </span>
           {number !== null && (
-            <span className="rounded bg-gx-accent/10 px-1 py-0.5 text-[9px] font-mono text-gx-accent border border-gx-accent/20">
+            <span className="rounded bg-primary/10 px-1 py-0.5 text-[9px] font-mono text-primary border border-primary/20">
               #{number}
             </span>
           )}
@@ -239,30 +253,36 @@ function renderFastCard(
               href={url}
               target="_blank"
               rel="noopener noreferrer"
-              className="ml-auto inline-flex items-center gap-0.5 text-[9px] text-gx-accent hover:text-gx-accent-hover"
+              className="ml-auto inline-flex items-center gap-0.5 text-[9px] text-primary hover:text-primary-hover"
             >
               Open <ExternalLink size={9} />
             </a>
           )}
         </div>
         {body && (
-          <p className="mt-1 text-[10px] text-gx-text/70 line-clamp-3 whitespace-pre-wrap">{body}</p>
+          <p className="mt-1 text-[10px] text-foreground/70 line-clamp-3 whitespace-pre-wrap">
+            {body}
+          </p>
         )}
       </div>
     );
   }
 
   // GitHub MCP — file get / search
-  if (server === "github" && (tool === "get_file_contents" || tool === "search_code")) {
+  if (
+    server === "github" && (tool === "get_file_contents" || tool === "search_code")
+  ) {
     const path = pickString(args, ["path", "query"]);
     const ref = pickString(args, ["ref", "branch"]);
     return (
       <div className="px-3 py-2">
         <div className="flex items-center gap-2 text-[10px]">
-          <GitBranch size={11} className="text-gx-muted" />
-          <span className="font-mono text-gx-text/90 truncate">{path ?? tool}</span>
+          <GitBranch size={11} className="text-muted-foreground" />
+          <span className="font-mono text-foreground/90 truncate">
+            {path ?? tool}
+          </span>
           {ref && (
-            <span className="inline-flex items-center gap-0.5 rounded bg-gx-surface px-1 py-0.5 text-[9px] text-gx-muted border border-gx-border/40">
+            <span className="inline-flex items-center gap-0.5 rounded bg-card px-1 py-0.5 text-[9px] text-muted-foreground border border-border/40">
               <GitBranch size={9} /> {ref}
             </span>
           )}
@@ -280,7 +300,9 @@ function renderFastCard(
   }
 
   // Linear MCP — issue creation / fetch
-  if (server === "linear" && (tool === "create_issue" || tool === "get_issue" || tool === "update_issue")) {
+  if (
+    server === "linear" && (tool === "create_issue" || tool === "get_issue" || tool === "update_issue")
+  ) {
     const result = parseJsonish(output);
     const identifier = pickString(result, ["identifier"]);
     const title = pickString(result, ["title"]) ?? pickString(args, ["title"]);
@@ -288,16 +310,18 @@ function renderFastCard(
     return (
       <div className="px-3 py-2">
         <div className="flex items-center gap-2 text-[10px]">
-          <span className="rounded bg-gx-accent/10 px-1 py-0.5 text-[9px] font-mono text-gx-accent border border-gx-accent/20">
+          <span className="rounded bg-primary/10 px-1 py-0.5 text-[9px] font-mono text-primary border border-primary/20">
             {identifier ?? "linear"}
           </span>
-          <span className="font-medium text-gx-text/90 truncate">{title ?? "(no title)"}</span>
+          <span className="font-medium text-foreground/90 truncate">
+            {title ?? "(no title)"}
+          </span>
           {url && (
             <a
               href={url}
               target="_blank"
               rel="noopener noreferrer"
-              className="ml-auto inline-flex items-center gap-0.5 text-[9px] text-gx-accent hover:text-gx-accent-hover"
+              className="ml-auto inline-flex items-center gap-0.5 text-[9px] text-primary hover:text-primary-hover"
             >
               Open <ExternalLink size={9} />
             </a>

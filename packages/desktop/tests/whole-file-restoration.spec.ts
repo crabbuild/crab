@@ -23,15 +23,15 @@ describe("whole-file controls without text hunks", () => {
       onSelect: vi.fn(), onDoubleClick: vi.fn(), onToggleFile: vi.fn(), onContextMenu: vi.fn(),
     }));
     const batch = renderToStaticMarkup(createElement(BatchActionBar, { count: 2, onStage: vi.fn(), onUnstage: vi.fn(), onClear: vi.fn() }));
-    expect(zones).toMatch(/<button(?=[^>]*aria-label="Discard changes in model.bin")(?=[^>]*disabled)[^>]*>/);
-    expect(batch).toMatch(/<button(?=[^>]*title="Discard selected files \(Delete\)")(?=[^>]*disabled)[^>]*>/);
+    expect(zones).toMatch(/<button(?=[^>]*aria-label="Discard changes in model.bin")(?=[^>]*\sdisabled(?:=|\s|>))[^>]*>/);
+    expect(batch).toMatch(/<button(?=[^>]*aria-label="Discard selected files")(?=[^>]*\sdisabled(?:=|\s|>))[^>]*>/);
   });
   it("offers an enabled discard only when a verified whole-file owner is supplied", () => {
     const props = { patch: binary, onStageHunk: vi.fn(), onDiscardHunk: vi.fn(), onStageFile: vi.fn() };
     const unavailable = renderToStaticMarkup(createElement(InlinePatchDiff, props));
     const available = renderToStaticMarkup(createElement(InlinePatchDiff, { ...props, onDiscardFile: vi.fn() }));
-    expect(unavailable).toMatch(/<button(?=[^>]*aria-label="Discard entire file change")(?=[^>]*disabled)[^>]*>/);
-    expect(available).not.toMatch(/<button(?=[^>]*aria-label="Discard entire file change")(?=[^>]*disabled)[^>]*>/);
+    expect(unavailable).toMatch(/<button(?=[^>]*aria-label="Discard entire file change")(?=[^>]*\sdisabled(?:=|\s|>))[^>]*>/);
+    expect(available).not.toMatch(/<button(?=[^>]*aria-label="Discard entire file change")(?=[^>]*\sdisabled(?:=|\s|>))[^>]*>/);
     expect(available).toContain("Binary or mode change");
   });
 });

@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { useCallback, useEffect, useRef, useState, type SyntheticEvent } from "react";
 import { Film, Loader2, Music } from "lucide-react";
 import { onAgentEvent, rpc, type MediaSource } from "../../ipc";
@@ -87,13 +88,13 @@ export function MediaView({ repoId, path, rev, kind }: { repoId: string; path: s
     onPause: (event: SyntheticEvent<HTMLMediaElement>) => { if (!restoring.current && event.currentTarget === element.current && !event.currentTarget.error) { playback.current.playing = false; rememberEvent(event); } },
   };
   const icon = kind === "video" ? <Film size={14} /> : <Music size={14} />;
-  return <section aria-label={`${kind === "video" ? "Video" : "Audio"} preview`} className="flex h-full min-h-0 flex-col items-center justify-center gap-4 bg-gx-bg-sub p-4">
-    <p className="flex max-w-full items-center gap-2 text-xs text-gx-muted">{icon}<span className="truncate">{path.split("/").pop()}</span>{source && <span className="shrink-0">· {formatBytes(source.size)}</span>}</p>
-    {!nativeSessionId ? <p role="status" className="text-xs text-gx-muted">Waiting for repository recovery…</p> : error ? <div className="max-w-xl space-y-3 text-xs"><p role="alert" className="break-words rounded border border-gx-error/40 bg-gx-error/10 p-3 text-gx-error">{error}</p><button type="button" className="btn" onClick={() => setRetry(retry + 1)}>Reopen media</button></div> : <>
+  return <section aria-label={`${kind === "video" ? "Video" : "Audio"} preview`} className="flex h-full min-h-0 flex-col items-center justify-center gap-4 bg-background p-4">
+    <p className="flex max-w-full items-center gap-2 text-xs text-muted-foreground">{icon}<span className="truncate">{path.split("/").pop()}</span>{source && <span className="shrink-0">· {formatBytes(source.size)}</span>}</p>
+    {!nativeSessionId ? <p role="status" className="text-xs text-muted-foreground">Waiting for repository recovery…</p> : error ? <div className="max-w-xl space-y-3 text-xs"><p role="alert" className="break-words rounded border border-destructive/40 bg-destructive/10 p-3 text-destructive">{error}</p><Button variant="outline" type="button" onClick={() => setRetry(retry + 1)}>Reopen media</Button></div> : <>
       {source && (kind === "video" ? <video {...controls} className="min-h-0 max-w-full flex-1 rounded" /> : <audio {...controls} className="w-full max-w-lg" />)}
-      {resumeBlocked && <p role="status" className="text-xs text-gx-muted">Media restored. Press Play to resume.</p>}
-      {!ready && <p role="status" className="flex items-center gap-2 text-xs text-gx-muted"><Loader2 size={14} className="animate-spin" />{source ? "Preparing media…" : "Opening media…"}</p>}
-      {source?.kind === "lfs" && !ready && <p className="max-w-lg text-center text-xs text-gx-muted">A first read may verify the complete LFS object before playback can begin.</p>}
+      {resumeBlocked && <p role="status" className="text-xs text-muted-foreground">Media restored. Press Play to resume.</p>}
+      {!ready && <p role="status" className="flex items-center gap-2 text-xs text-muted-foreground"><Loader2 size={14} className="animate-spin" />{source ? "Preparing media…" : "Opening media…"}</p>}
+      {source?.kind === "lfs" && !ready && <p className="max-w-lg text-center text-xs text-muted-foreground">A first read may verify the complete LFS object before playback can begin.</p>}
     </>}
   </section>;
 }

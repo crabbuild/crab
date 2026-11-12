@@ -16,20 +16,20 @@ interface Props {
 
 const config: Record<string, { icon: typeof Circle; color: string; label: string }> = {
   // snake_case keys (TypeScript type convention)
-  up_to_date: { icon: CheckCircle2, color: "text-gx-success", label: "Up to date" },
-  outdated: { icon: AlertTriangle, color: "text-gx-warn", label: "Outdated" },
-  not_run: { icon: Circle, color: "text-gx-muted", label: "Not run" },
-  frozen: { icon: Snowflake, color: "text-gx-info", label: "Frozen" },
-  conditional_skip: { icon: Ban, color: "text-gx-muted/60", label: "Skipped" },
+  up_to_date: { icon: CheckCircle2, color: "text-success", label: "Up to date" },
+  outdated: { icon: AlertTriangle, color: "text-warning", label: "Outdated" },
+  not_run: { icon: Circle, color: "text-muted-foreground", label: "Not run" },
+  frozen: { icon: Snowflake, color: "text-info", label: "Frozen" },
+  conditional_skip: { icon: Ban, color: "text-muted-foreground/60", label: "Skipped" },
   // PascalCase keys (serde default serialization from Rust backend)
-  UpToDate: { icon: CheckCircle2, color: "text-gx-success", label: "Up to date" },
-  Outdated: { icon: AlertTriangle, color: "text-gx-warn", label: "Outdated" },
-  NotRun: { icon: Circle, color: "text-gx-muted", label: "Not run" },
-  Frozen: { icon: Snowflake, color: "text-gx-info", label: "Frozen" },
-  ConditionalSkip: { icon: Ban, color: "text-gx-muted/60", label: "Skipped" },
+  UpToDate: { icon: CheckCircle2, color: "text-success", label: "Up to date" },
+  Outdated: { icon: AlertTriangle, color: "text-warning", label: "Outdated" },
+  NotRun: { icon: Circle, color: "text-muted-foreground", label: "Not run" },
+  Frozen: { icon: Snowflake, color: "text-info", label: "Frozen" },
+  ConditionalSkip: { icon: Ban, color: "text-muted-foreground/60", label: "Skipped" },
 };
 
-const fallbackStatus = { icon: Circle, color: "text-gx-muted", label: "Unknown" };
+const fallbackStatus = { icon: Circle, color: "text-muted-foreground", label: "Unknown" };
 
 export function StatusBadge({ status, size = 12, showLabel = false }: Props) {
   const { icon: Icon, color, label } = config[status] ?? fallbackStatus;

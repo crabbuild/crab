@@ -1,7 +1,32 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Combobox } from "@/components/ui/combobox";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
+import {
+  closestCenter,
+  DndContext,
+  DragEndEvent,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import clsx from "clsx";
-import { matchesRepository, workspaceIdentity } from "../lib/workspace-sidebar";
-import { localPathName } from "../lib/local-path-name";
 import {
   ChevronDown,
   ChevronRight,
@@ -13,9 +38,9 @@ import {
   FolderPlus,
   FolderTree,
   GripVertical,
+  Loader2,
   Lock,
   LockOpen,
-  Loader2,
   PanelLeftClose,
   Pin,
   PinOff,
@@ -26,32 +51,24 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import {
-  DndContext,
-  closestCenter,
-  KeyboardSensor,
-  PointerSensor,
-  useSensor,
-  useSensors,
-  DragEndEvent,
-} from "@dnd-kit/core";
-import {
-  arrayMove,
-  SortableContext,
-  sortableKeyboardCoordinates,
-  useSortable,
-  verticalListSortingStrategy,
-} from "@dnd-kit/sortable";
-import { CSS } from "@dnd-kit/utilities";
-import { useStore, OpenRepo, sortRepos, getActiveWorkspace, repositoryKey } from "../state";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useWorkspaceRepoSelect } from "../hooks/useWorkspaceRepoSelect";
 import { dialogs, isStorageRepositoryUrl, rpc, WorktreeEntry } from "../ipc";
+import { localPathName } from "../lib/local-path-name";
+import { matchesRepository, workspaceIdentity } from "../lib/workspace-sidebar";
+import {
+  getActiveWorkspace,
+  OpenRepo,
+  repositoryKey,
+  sortRepos,
+  useStore,
+} from "../state";
 import { CloneDialog } from "./CloneDialog";
 import { OpenSnapshotDialog } from "./OpenSnapshotDialog";
-import { WorkspaceSidebar } from "./workspace/WorkspaceSidebar";
-import { WorkspaceSettings } from "./workspace/WorkspaceSettings";
-import { RemoteWorkspaceDialog } from "./workspace/RemoteWorkspaceDialog";
-import { useWorkspaceRepoSelect } from "../hooks/useWorkspaceRepoSelect";
 import { RepositorySidebarScroll } from "./RepositorySidebarScroll";
+import { RemoteWorkspaceDialog } from "./workspace/RemoteWorkspaceDialog";
+import { WorkspaceSettings } from "./workspace/WorkspaceSettings";
+import { WorkspaceSidebar } from "./workspace/WorkspaceSidebar";
 
 interface Props {
   /** Invoked when the user hits the icon-only collapse button. */
@@ -110,23 +127,6 @@ export function Sidebar({ onCollapse, onOpenSettings }: Props) {
   }, []);
 
   // Close the add menu when clicking outside
-  useEffect(() => {
-    if (!addMenuOpen) return;
-    const handleClick = (e: MouseEvent) => {
-      if (addMenuRef.current && !addMenuRef.current.contains(e.target as Node)) {
-        setAddMenuOpen(false);
-      }
-    };
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setAddMenuOpen(false);
-    };
-    document.addEventListener("mousedown", handleClick);
-    document.addEventListener("keydown", handleKey);
-    return () => {
-      document.removeEventListener("mousedown", handleClick);
-      document.removeEventListener("keydown", handleKey);
-    };
-  }, [addMenuOpen]);
 
   // Determine the active workspace repo relative path for highlighting
   const activeWorkspaceRelativePath = useMemo(() => {
@@ -352,89 +352,102 @@ export function Sidebar({ onCollapse, onOpenSettings }: Props) {
 
   return (
     <aside
-      className="relative flex shrink-0 flex-col border-r border-gx-border bg-gx-surface"
+      className="relative flex shrink-0 flex-col border-r border-border bg-card"
       style={{ width }}
     >
       <div className="flex items-center gap-1.5 p-3">
-        <button type="button" className="btn h-[30px] w-[30px] shrink-0 justify-center px-0" onClick={openLocal} disabled={busy} title="Open Repository">
+        <Button variant="outline" type="button" className="h-[30px] w-[30px] shrink-0 justify-center px-0" onClick={openLocal} disabled={busy} title="Open Repository">
           <FolderOpen size={14} />
-        </button>
-        <button type="button" className="btn h-[30px] w-[30px] shrink-0 justify-center px-0" onClick={openWorkspace} disabled={busy} title="Open Workspace">
+        </Button>
+        <Button variant="outline" type="button" className="h-[30px] w-[30px] shrink-0 justify-center px-0" onClick={openWorkspace} disabled={busy} title="Open Workspace">
           <FolderGit2 size={14} />
-        </button>
-        <button type="button" className="btn h-[30px] w-[30px] shrink-0 justify-center px-0" onClick={() => setCloneOpen(true)} disabled={busy} title="Clone Repository">
+        </Button>
+        <Button variant="outline" type="button" className="h-[30px] w-[30px] shrink-0 justify-center px-0" onClick={() => setCloneOpen(true)} disabled={busy} title="Clone Repository">
           <Download size={14} />
-        </button>
+        </Button>
         {/* More actions dropdown */}
         <div className="relative" ref={addMenuRef}>
-          <button
+          <DropdownMenu open={addMenuOpen} onOpenChange={setAddMenuOpen}>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline"
             type="button"
-            className="btn h-[30px] w-[30px] shrink-0 justify-center px-0"
+            className="h-[30px] w-[30px] shrink-0 justify-center px-0"
             onClick={() => setAddMenuOpen((v) => !v)}
             title="More actions"
             aria-label="More actions"
           >
-            <EllipsisVertical size={14} />
-          </button>
-          {addMenuOpen && (
-            <div className="absolute left-0 top-full z-50 mt-1 w-56 rounded border border-gx-border bg-gx-surface shadow-xl py-1">
-              <button type="button" className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-gx-text hover:bg-gx-accent/10 transition" onClick={() => { setAddMenuOpen(false); setSnapshotOpen(true); }}>
-                <Cloud size={12} /> Open storage snapshot
-              </button>
-              <button
-                type="button"
-                className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-gx-text hover:bg-gx-accent/10 transition"
-                onClick={async () => { setAddMenuOpen(false); await createWorkspace(); }}
+                <EllipsisVertical size={14} />
+              </Button>
+            </DropdownMenuTrigger>
+            {addMenuOpen && (
+              <DropdownMenuContent
+                side="bottom"
+                align="start"
+                className=" w-56 rounded border border-border bg-card py-1"
               >
-                <FolderPlus size={12} /> Create Workspace
-              </button>
-              <div className="my-1 border-t border-gx-border" />
-              <button
-                type="button"
-                className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-gx-text hover:bg-gx-accent/10 transition"
-                onClick={() => { setAddMenuOpen(false); handleCloneToWorkspace(); }}
-              >
-                <Download size={12} /> Clone Repository to Workspace
-              </button>
-              <div className="my-1 border-t border-gx-border" />
-              <button
-                type="button"
-                className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-gx-text hover:bg-gx-accent/10 transition"
-                onClick={() => {
+                <DropdownMenuGroup>
+                  <DropdownMenuItem
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground hover:bg-primary/10 transition"
+                    onSelect={() => { setAddMenuOpen(false); setSnapshotOpen(true); }}
+                  >
+                    <Cloud size={12} /> Open storage snapshot
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground hover:bg-primary/10 transition"
+                    onSelect={async () => { setAddMenuOpen(false); await createWorkspace(); }}
+                  >
+                    <FolderPlus size={12} /> Create Workspace
+                  </DropdownMenuItem>
+                  <div className="my-1 border-t border-border" />
+                  <DropdownMenuItem
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground hover:bg-primary/10 transition"
+                    onSelect={() => { setAddMenuOpen(false); handleCloneToWorkspace(); }}
+                  >
+                    <Download size={12} /> Clone Repository to Workspace
+                  </DropdownMenuItem>
+                  <div className="my-1 border-t border-border" />
+                  <DropdownMenuItem
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground hover:bg-primary/10 transition"
+                    onSelect={() => {
                   setAddMenuOpen(false);
                   setRemoteDialogOpen(true);
                 }}
-              >
-                <Cloud size={12} /> Connect to Remote Workspace
-              </button>
-              <div className="my-1 border-t border-gx-border" />
-              <button type="button" className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-gx-text hover:bg-gx-accent/10 transition" onClick={() => { setAddMenuOpen(false); onOpenSettings(); }}>
-                <Settings size={12} /> Settings
-              </button>
-            </div>
-          )}
+                  >
+                    <Cloud size={12} /> Connect to Remote Workspace
+                  </DropdownMenuItem>
+                  <div className="my-1 border-t border-border" />
+                  <DropdownMenuItem
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground hover:bg-primary/10 transition"
+                    onSelect={() => { setAddMenuOpen(false); onOpenSettings(); }}
+                  >
+                    <Settings size={12} /> Settings
+                  </DropdownMenuItem>
+                </DropdownMenuGroup>
+              </DropdownMenuContent>
+            )}
+          </DropdownMenu>
         </div>
         <div className="flex-1" />
-        <button
+        <Button variant="outline"
           type="button"
-          className="btn h-[30px] w-[30px] shrink-0 justify-center px-0"
+          className="h-[30px] w-[30px] shrink-0 justify-center px-0"
           onClick={onCollapse}
           title="Collapse Repositories (⇧⌘B)"
           aria-label="Collapse Repositories"
         >
           <PanelLeftClose size={14} />
-        </button>
+        </Button>
       </div>
 
       {error && (
-        <div className="mx-3 mb-2 rounded border border-gx-error/40 bg-gx-error/10 p-2 text-xs text-gx-error">
+        <div className="mx-3 mb-2 rounded border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">
           {error}
         </div>
       )}
 
       <div className="relative mx-3 mb-1 mt-1 flex shrink-0 items-center">
-        <Search size={12} className="pointer-events-none absolute left-2 text-gx-muted" />
-        <input
+        <Search size={12} className="pointer-events-none absolute left-2 text-muted-foreground" />
+        <Input
           aria-label="Filter repositories"
           placeholder="Filter repositories…"
           value={query}
@@ -442,28 +455,41 @@ export function Sidebar({ onCollapse, onOpenSettings }: Props) {
           onKeyDown={(event) => {
             if (event.key === "Escape") { event.stopPropagation(); setQuery(""); }
           }}
-          className="w-full rounded border border-gx-border bg-gx-bg-sub py-1.5 pl-7 pr-7 text-xs text-gx-text placeholder:text-gx-muted focus:border-gx-accent focus:outline-none"
+          className="w-full rounded border border-border bg-background py-1.5 pl-7 pr-7 text-xs text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
         />
         {query && (
-          <button type="button" aria-label="Clear repository filter" className="absolute right-1 rounded p-1 text-gx-muted hover:text-gx-text" onClick={() => setQuery("")}>
+          <Button
+            variant="ghost"
+            size="compact"
+            type="button"
+            aria-label="Clear repository filter"
+            className="absolute right-1 rounded p-1 text-muted-foreground hover:text-foreground"
+            onClick={() => setQuery("")}
+          >
             <X size={12} />
-          </button>
+          </Button>
         )}
       </div>
       <RepositorySidebarScroll storageKey={scrollKey} filtered={Boolean(query.trim())}>
-        {/* ── Workspaces section (when any workspace is active) ── */}
+        {/* ── Repositories section ── */}
         {state.workspaces.length > 0 && (
           <div>
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
-              className="flex w-full items-center gap-1 px-3 pt-2 pb-1 text-[11px] uppercase tracking-wider text-gx-muted hover:text-gx-text transition"
+              className="flex w-full items-center gap-1 px-3 pt-2 pb-1 text-[11px] uppercase tracking-wider text-muted-foreground hover:text-foreground transition"
               onClick={() => setWorkspacesSectionCollapsed((v) => !v)}
               aria-expanded={!workspacesSectionCollapsed || Boolean(query.trim())}
               aria-label="Toggle Workspaces section"
             >
-              {workspacesSectionCollapsed ? <ChevronRight size={11} /> : <ChevronDown size={11} />}
+              {workspacesSectionCollapsed ? (
+                <ChevronRight size={11} />
+              ) : (
+                <ChevronDown size={11} />
+              )}
               <span>Workspaces</span>
-            </button>
+            </Button>
             {(!workspacesSectionCollapsed || query.trim()) && (
               <div className="pl-2">
                 {state.workspaces.map((ws) => (
@@ -491,29 +517,37 @@ export function Sidebar({ onCollapse, onOpenSettings }: Props) {
           </div>
         )}
 
-        {/* ── Repositories section ── */}
+        {/* Pinned repos (not draggable, always on top, alphabetic) */}
         {(() => {
           // When workspaces are active, show standalone repos; otherwise show all repos
           const reposToShow = (state.workspaces.length > 0 ? standaloneRepos : visibleRepos).filter((repo) => matchesRepository(query, repo.label, repo.path ?? repo.url));
           if (state.workspaces.length > 0 && reposToShow.length === 0) return null;
           return (
             <div>
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
-                className="flex w-full items-center gap-1 px-3 pt-2 pb-1 text-[11px] uppercase tracking-wider text-gx-muted hover:text-gx-text transition"
+                className="flex w-full items-center gap-1 px-3 pt-2 pb-1 text-[11px] uppercase tracking-wider text-muted-foreground hover:text-foreground transition"
                 onClick={() => setReposSectionCollapsed((v) => !v)}
                 aria-expanded={!reposSectionCollapsed || Boolean(query.trim())}
                 aria-label="Toggle Repositories section"
               >
-                {reposSectionCollapsed ? <ChevronRight size={11} /> : <ChevronDown size={11} />}
+                {reposSectionCollapsed ? (
+                  <ChevronRight size={11} />
+                ) : (
+                  <ChevronDown size={11} />
+                )}
                 <span>Repositories</span>
-              </button>
+              </Button>
               {(!reposSectionCollapsed || query.trim()) && (
                 <ul className="mt-1 pl-3 pr-2">
                   {reposToShow.length === 0 && (
-                    <li className="px-2 py-6 text-center text-xs text-gx-muted">{query.trim() ? "No matching repositories" : "No repositories open yet."}</li>
+                    <li className="px-2 py-6 text-center text-xs text-muted-foreground">
+                      {query.trim() ? "No matching repositories" : "No repositories open yet."}
+                    </li>
                   )}
-                  {/* Pinned repos (not draggable, always on top, alphabetic) */}
+                  {/* Unpinned repos (draggable, user-ordered or alphabetic) */}
                   {reposToShow.filter((r) => state.pinnedPaths.has(repositoryKey(r))).map((repo) => (
                     <RepoSidebarEntry
                       key={repo.repo_id}
@@ -554,7 +588,8 @@ export function Sidebar({ onCollapse, onOpenSettings }: Props) {
                       }}
                     />
                   ))}
-                  {/* Unpinned repos (draggable, user-ordered or alphabetic) */}
+                  {/* Workspace picker modal — shown when multiple workspaces exist and user
+          needs to choose which one to add/clone into */}
                   <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
                     <SortableContext
                       items={reposToShow.filter((r) => !state.pinnedPaths.has(repositoryKey(r))).map((r) => r.repo_id)}
@@ -614,48 +649,65 @@ export function Sidebar({ onCollapse, onOpenSettings }: Props) {
         onClose={() => { setCloneOpen(false); setCloneTargetWorkspace(null); }}
         targetWorkspaceRootPath={cloneTargetWorkspace}
       />
-      {snapshotOpen && <OpenSnapshotDialog onClose={() => setSnapshotOpen(false)} />}
+      {snapshotOpen && (
+        <OpenSnapshotDialog onClose={() => setSnapshotOpen(false)} />
+      )}
 
-      {/* Workspace picker modal — shown when multiple workspaces exist and user
-          needs to choose which one to add/clone into */}
+      {/* Workspace settings modal */}
       {workspacePickerAction && state.workspaces.length > 1 && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50">
-          <div className="w-72 rounded-lg border border-gx-border bg-gx-surface shadow-2xl p-4">
-            <h3 className="text-sm font-semibold text-gx-text mb-1">
+        <Dialog
+          open
+          onOpenChange={(open) => {
+            if (!open) setWorkspacePickerAction(null);
+          }}
+        >
+          <DialogContent
+            showCloseButton={false}
+            aria-describedby={undefined}
+            className="block gap-0 p-0 w-72 rounded-lg border border-border bg-card shadow-2xl p-4"
+          >
+            <DialogTitle className="sr-only">Select workspace</DialogTitle>
+            <h3 className="text-sm font-semibold text-foreground mb-1">
               {workspacePickerAction === "clone" ? "Clone Repository to Workspace" : "Select Workspace"}
             </h3>
-            <p className="text-[11px] text-gx-muted mb-3">
+            <p className="text-[11px] text-muted-foreground mb-3">
               Select the workspace to target:
             </p>
             <ul className="flex flex-col gap-1">
               {state.workspaces.map((ws) => (
                 <li key={ws.rootPath}>
-                  <button
+                  <Button
+                    variant="ghost"
+                    size="compact"
                     type="button"
-                    className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-xs text-gx-text hover:bg-gx-accent/10 border border-gx-border hover:border-gx-accent/50 transition"
+                    className="justify-start flex w-full items-center gap-2 rounded px-3 py-2 text-left text-xs text-foreground hover:bg-primary/10 border border-border hover:border-primary/50 transition"
                     onClick={() => handleWorkspacePickerSelect(ws.rootPath)}
                   >
-                    <FolderGit2 size={13} className="shrink-0 text-gx-accent" />
+                    <FolderGit2 size={13} className="shrink-0 text-primary" />
                     <div className="min-w-0 flex-1">
                       <div className="truncate font-medium">{ws.name}</div>
-                      <div className="truncate text-[10px] text-gx-muted">{ws.rootPath}</div>
+                      <div className="truncate text-[10px] text-muted-foreground">
+                        {ws.rootPath}
+                      </div>
                     </div>
-                  </button>
+                  </Button>
                 </li>
               ))}
             </ul>
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
-              className="mt-3 w-full rounded px-3 py-1.5 text-xs text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover border border-gx-border transition"
+              className="mt-3 w-full rounded px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-accent border border-border transition"
               onClick={() => setWorkspacePickerAction(null)}
             >
               Cancel
-            </button>
-          </div>
-        </div>
+            </Button>
+          </DialogContent>
+        </Dialog>
       )}
 
-      {/* Workspace settings modal */}
+      {/* Resize handle */}
       {settingsOpen && state.workspaces.length > 0 && (
         <WorkspaceSettings
           workspace={getActiveWorkspace(state)!}
@@ -663,7 +715,7 @@ export function Sidebar({ onCollapse, onOpenSettings }: Props) {
         />
       )}
 
-      {/* Remote workspace dialog */}
+      {/* Resize handle */}
       <RemoteWorkspaceDialog
         open={remoteDialogOpen}
         onClose={() => setRemoteDialogOpen(false)}
@@ -672,7 +724,7 @@ export function Sidebar({ onCollapse, onOpenSettings }: Props) {
 
       {/* Resize handle */}
       <div
-        className="absolute right-0 top-0 h-full w-[4px] cursor-col-resize hover:bg-gx-accent/40 active:bg-gx-accent/60 transition-colors z-10"
+        className="absolute right-0 top-0 h-full w-[4px] cursor-col-resize hover:bg-primary/40 active:bg-primary/60 transition-colors z-10"
         onMouseDown={onResizeStart}
         role="separator"
         aria-orientation="vertical"
@@ -881,12 +933,12 @@ function RepoSidebarEntry({
 
   return (
     <li className="mb-1">
-      {/* ── Repo header ── */}
+      {/* Collapsed info */}
       <div className="group flex w-full items-center gap-1 rounded text-sm">
-        {/* Drag handle (only for unpinned/sortable entries) */}
+        {/* Collapsed info */}
         {dragHandleProps && (
           <span
-            className="shrink-0 cursor-grab p-0.5 text-gx-muted/50 hover:text-gx-muted active:cursor-grabbing"
+            className="shrink-0 cursor-grab p-0.5 text-muted-foreground/50 hover:text-muted-foreground active:cursor-grabbing"
             {...dragHandleProps.attributes}
             {...dragHandleProps.listeners}
             aria-label="Drag to reorder"
@@ -894,9 +946,11 @@ function RepoSidebarEntry({
             <GripVertical size={12} />
           </span>
         )}
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
-          className="shrink-0 p-0.5 text-gx-muted hover:text-gx-text"
+          className="shrink-0 p-0.5 text-muted-foreground hover:text-foreground"
           onClick={() => {
             const willExpand = !expanded;
             setExpanded(willExpand);
@@ -909,30 +963,34 @@ function RepoSidebarEntry({
           aria-label={expanded ? "Collapse" : "Expand"}
         >
           {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={onSelect}
           className={clsx(
             "flex min-w-0 flex-1 items-center gap-1.5 rounded px-1.5 py-1.5 text-left transition",
-            isAnyWorktreeActive ? "bg-gx-accent/15 text-gx-text" : "text-gx-muted hover:bg-gx-surface-hover",
+            isAnyWorktreeActive ? "bg-primary/15 text-foreground" : "text-muted-foreground hover:bg-accent",
           )}
         >
-          {isPinned && <Pin size={10} className="shrink-0 text-gx-accent" />}
-          <span className={clsx("min-w-0 flex-1 truncate font-medium", repo.deferred && "opacity-60")}>{repo.label}</span>
+          {isPinned && <Pin size={10} className="shrink-0 text-primary" />}
+          <span className={clsx("min-w-0 flex-1 truncate font-medium", repo.deferred && "opacity-60")}>
+            {repo.label}
+          </span>
           {linkedWorktrees.length > 0 && (
-            <span className="shrink-0 rounded bg-gx-accent/15 px-1.5 py-0.5 text-[9px] font-medium text-gx-accent">
+            <span className="shrink-0 rounded bg-primary/15 px-1.5 py-0.5 text-[9px] font-medium text-primary">
               {linkedWorktrees.length + 1}
             </span>
           )}
-        </button>
-        {/* Pin/Unpin button */}
+        </Button>
+        {/* Error */}
         <span
           className={clsx(
             "shrink-0 p-0.5 transition cursor-pointer",
             isPinned
-              ? "text-gx-accent hover:text-gx-muted"
-              : "opacity-0 group-hover:opacity-100 text-gx-muted hover:text-gx-accent",
+              ? "text-primary hover:text-muted-foreground"
+              : "opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-primary",
           )}
           onClick={isPinned ? onUnpin : onPin}
           role="button"
@@ -942,7 +1000,7 @@ function RepoSidebarEntry({
           {isPinned ? <PinOff size={12} /> : <Pin size={12} />}
         </span>
         <span
-          className="shrink-0 p-0.5 opacity-0 transition group-hover:opacity-100 text-gx-muted hover:text-gx-text cursor-pointer"
+          className="shrink-0 p-0.5 opacity-0 transition group-hover:opacity-100 text-muted-foreground hover:text-foreground cursor-pointer"
           onClick={onClose}
           role="button"
           aria-label="Close repository"
@@ -951,42 +1009,48 @@ function RepoSidebarEntry({
         </span>
       </div>
 
-      {/* Collapsed info */}
+      {/* Worktree items */}
       {!expanded && (
-        <div className="truncate pl-7 pr-3 pb-0.5 font-mono text-[10px] text-gx-muted">
+        <div className="truncate pl-7 pr-3 pb-0.5 font-mono text-[10px] text-muted-foreground">
           {repo.url}
         </div>
       )}
 
-      {/* ── Expanded: worktree list ── */}
+      {/* Worktree items */}
       {expanded && (
-        <div className="mt-0.5 ml-3 border-l-2 border-gx-border/40 pl-2 pb-0">
-          {/* Header */}
-          <div className="flex items-center gap-1.5 py-1 text-[10px] text-gx-muted">
+        <div className="mt-0.5 ml-3 border-l-2 border-border/40 pl-2 pb-0">
+          {/* Hover action icons for non-main worktrees */}
+          <div className="flex items-center gap-1.5 py-1 text-[10px] text-muted-foreground">
             <FolderTree size={10} />
-            <span className="font-medium uppercase tracking-wider">Worktrees</span>
+            <span className="font-medium uppercase tracking-wider">
+              Worktrees
+            </span>
             <div className="ml-auto flex gap-1">
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
-                className="rounded p-0.5 hover:bg-gx-surface-hover hover:text-gx-text"
+                className="rounded p-0.5 hover:bg-accent hover:text-foreground"
                 onClick={() => setShowAddForm((v) => !v)}
                 title="Add worktree"
               >
                 <Plus size={11} />
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
-                className="rounded p-0.5 hover:bg-gx-surface-hover hover:text-gx-text"
+                className="rounded p-0.5 hover:bg-accent hover:text-foreground"
                 onClick={handlePrune}
                 title="Prune stale"
                 disabled={busy}
               >
                 <Scissors size={11} />
-              </button>
+              </Button>
             </div>
           </div>
 
-          {/* Add form */}
+          {/* Hover action icons for non-main worktrees */}
           {showAddForm && (
             <AddWorktreeForm
               repoId={repo.repo_id}
@@ -996,132 +1060,147 @@ function RepoSidebarEntry({
             />
           )}
 
-          {/* Loading */}
+          {/* Hover action icons for non-main worktrees */}
           {wtLoading && (
-            <div className="flex items-center gap-1.5 py-2 text-[10px] text-gx-muted">
+            <div className="flex items-center gap-1.5 py-2 text-[10px] text-muted-foreground">
               <Loader2 size={10} className="animate-spin" /> Loading…
             </div>
           )}
 
-          {/* Error */}
+          {/* Branch */}
           {wtError && (
-            <div className="rounded border border-gx-error/40 bg-gx-error/10 px-2 py-1.5 text-[10px] text-gx-error mb-1">
+            <div className="rounded border border-destructive/40 bg-destructive/10 px-2 py-1.5 text-[10px] text-destructive mb-1">
               <p className="break-words whitespace-pre-wrap">{wtError}</p>
               {wtErrorPath && /modified or untracked|--force/.test(wtError) && (
                 <div className="mt-1.5 flex justify-end">
-                  <button
+                  <Button
+                    variant="ghost"
+                    size="compact"
                     type="button"
-                    className="rounded bg-gx-error/20 px-2 py-0.5 font-medium hover:bg-gx-error/30 transition"
+                    className="rounded bg-destructive/20 px-2 py-0.5 font-medium hover:bg-destructive/30 transition"
                     onClick={handleForceRemove}
                     disabled={busy}
                   >
                     Force Remove
-                  </button>
+                  </Button>
                 </div>
               )}
             </div>
           )}
 
-          {/* Worktree items */}
-          {!wtLoading && allWorktrees.map((wt) => {
-            const isActive = activeWtPath === wt.path;
+          {/* Branch */}
+          {!wtLoading &&
+            allWorktrees.map((wt) => {
+              const isActive = activeWtPath === wt.path;
 
-            return (
-              <div
+              return (
+                <div
                 key={wt.path}
                 className={clsx(
                   "group/wt rounded px-1.5 py-1.5 cursor-pointer transition mb-0.5",
                   isActive
-                    ? "bg-gx-accent/12 ring-1 ring-gx-accent/40"
-                    : "hover:bg-gx-surface-hover",
+                    ? "bg-primary/12 ring-1 ring-primary/40"
+                    : "hover:bg-accent",
                 )}
                 onClick={() => handleSelectWorktree(wt)}
                 role="button"
                 tabIndex={0}
                 aria-label={`Switch to worktree ${dirName(wt.path)}`}
               >
-                <div className="flex items-center gap-1.5">
-                  <FolderTree size={11} className={clsx("shrink-0", isActive ? "text-gx-accent" : "text-gx-muted")} />
-                  <span className={clsx("min-w-0 flex-1 truncate text-[12px] font-medium", isActive ? "text-gx-text" : "text-gx-muted")}>
-                    {dirName(wt.path)}
-                  </span>
-                  {/* Hover action icons for non-main worktrees */}
-                  {!wt.is_main && (
-                    <span className="shrink-0 flex items-center gap-0.5 opacity-0 group-hover/wt:opacity-100 transition">
-                      {wt.is_locked ? (
-                        <button
+                  <div className="flex items-center gap-1.5">
+                    <FolderTree size={11} className={clsx("shrink-0", isActive ? "text-primary" : "text-muted-foreground")} />
+                    <span className={clsx("min-w-0 flex-1 truncate text-[12px] font-medium", isActive ? "text-foreground" : "text-muted-foreground")}>
+                      {dirName(wt.path)}
+                    </span>
+                    {/* Path */}
+                    {!wt.is_main && (
+                      <span className="shrink-0 flex items-center gap-0.5 opacity-0 group-hover/wt:opacity-100 transition">
+                        {wt.is_locked ? (
+                          <Button
+                            variant="ghost"
+                            size="compact"
+                            type="button"
+                            className="rounded p-0.5 text-muted-foreground hover:text-warning hover:bg-accent"
+                            onClick={(e) => { e.stopPropagation(); handleUnlock(wt.path); }}
+                            disabled={busy}
+                            title="Unlock worktree"
+                            aria-label="Unlock worktree"
+                          >
+                            <LockOpen size={11} />
+                          </Button>
+                        ) : (
+                          <Button
+                            variant="ghost"
+                            size="compact"
+                            type="button"
+                            className="rounded p-0.5 text-muted-foreground hover:text-warning hover:bg-accent"
+                            onClick={(e) => { e.stopPropagation(); handleLock(wt.path); }}
+                            disabled={busy}
+                            title="Lock worktree"
+                            aria-label="Lock worktree"
+                          >
+                            <Lock size={11} />
+                          </Button>
+                        )}
+                        <Button
+                          variant="ghost"
+                          size="compact"
                           type="button"
-                          className="rounded p-0.5 text-gx-muted hover:text-gx-warn hover:bg-gx-surface-hover"
-                          onClick={(e) => { e.stopPropagation(); handleUnlock(wt.path); }}
+                          className="rounded p-0.5 text-muted-foreground hover:text-destructive hover:bg-accent"
+                          onClick={(e) => { e.stopPropagation(); handleRemove(wt.path, wt.is_locked); }}
                           disabled={busy}
-                          title="Unlock worktree"
-                          aria-label="Unlock worktree"
+                          title="Remove worktree"
+                          aria-label="Remove worktree"
                         >
-                          <LockOpen size={11} />
-                        </button>
-                      ) : (
-                        <button
-                          type="button"
-                          className="rounded p-0.5 text-gx-muted hover:text-gx-warn hover:bg-gx-surface-hover"
-                          onClick={(e) => { e.stopPropagation(); handleLock(wt.path); }}
-                          disabled={busy}
-                          title="Lock worktree"
-                          aria-label="Lock worktree"
-                        >
-                          <Lock size={11} />
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        className="rounded p-0.5 text-gx-muted hover:text-gx-error hover:bg-gx-surface-hover"
-                        onClick={(e) => { e.stopPropagation(); handleRemove(wt.path, wt.is_locked); }}
-                        disabled={busy}
-                        title="Remove worktree"
-                        aria-label="Remove worktree"
-                      >
-                        <Trash2 size={11} />
-                      </button>
-                    </span>
+                          <Trash2 size={11} />
+                        </Button>
+                      </span>
+                    )}
+                    {wt.is_main && (
+                      <span className="shrink-0 rounded bg-info/20 px-1 py-0.5 text-[8px] font-bold text-info">
+                        MAIN
+                      </span>
+                    )}
+                    {isActive && (
+                    <span className="shrink-0 w-1.5 h-1.5 rounded-full bg-primary" title="Active" />
                   )}
-                  {wt.is_main && (
-                    <span className="shrink-0 rounded bg-gx-info/20 px-1 py-0.5 text-[8px] font-bold text-gx-info">
-                      MAIN
-                    </span>
-                  )}
-                  {isActive && (
-                    <span className="shrink-0 w-1.5 h-1.5 rounded-full bg-gx-accent" title="Active" />
-                  )}
-                  {wt.is_locked && (
-                    <span title={wt.lock_reason ?? "Locked"}>
-                      <Lock size={9} className="text-gx-warn" />
-                    </span>
-                  )}
-                  {wt.is_prunable && (
-                    <span className="shrink-0 rounded bg-gx-error/20 px-1 py-0.5 text-[8px] font-bold text-gx-error">
-                      STALE
-                    </span>
-                  )}
-                </div>
+                    {wt.is_locked && (
+                      <span title={wt.lock_reason ?? "Locked"}>
+                        <Lock size={9} className="text-warning" />
+                      </span>
+                    )}
+                    {wt.is_prunable && (
+                      <span className="shrink-0 rounded bg-destructive/20 px-1 py-0.5 text-[8px] font-bold text-destructive">
+                        STALE
+                      </span>
+                    )}
+                  </div>
 
-                {/* Branch */}
-                <div className="mt-0.5 pl-[18px] text-[10px] text-gx-muted">
-                  {wt.is_detached ? (
-                    <span className="italic">detached @ {wt.head.slice(0, 7)}</span>
-                  ) : wt.branch ? (
-                    <span className="font-mono">{shortBranch(wt.branch)}</span>
-                  ) : null}
-                </div>
+                  {/* Path — folder picker button */}
+                  <div className="mt-0.5 pl-[18px] text-[10px] text-muted-foreground">
+                    {wt.is_detached ? (
+                      <span className="italic">
+                        detached @ {wt.head.slice(0, 7)}
+                      </span>
+                    ) : wt.branch ? (
+                      <span className="font-mono">
+                        {shortBranch(wt.branch)}
+                      </span>
+                    ) : null}
+                  </div>
 
-                {/* Path */}
-                <div className="mt-0.5 pl-[18px] truncate font-mono text-[9px] text-gx-muted/50" title={wt.path}>
-                  {wt.path}
+                  {/* Path — folder picker button */}
+                  <div className="mt-0.5 pl-[18px] truncate font-mono text-[9px] text-muted-foreground/50" title={wt.path}>
+                    {wt.path}
+                  </div>
                 </div>
-              </div>
-            );
-          })}
+              );
+            })}
 
           {!wtLoading && worktrees && allWorktrees.length === 0 && (
-            <div className="py-2 text-center text-[10px] text-gx-muted italic">No worktrees found.</div>
+            <div className="py-2 text-center text-[10px] text-muted-foreground italic">
+              No worktrees found.
+            </div>
           )}
         </div>
       )}
@@ -1271,61 +1350,68 @@ function AddWorktreeForm({ repoId, onCreated, onCancel, checkedOutBranches }: Ad
   }
 
   return (
-    <form onSubmit={handleSubmit} className="mb-2 rounded border border-gx-border bg-gx-bg-sub p-2">
-      <div className="mb-1.5 text-[10px] font-medium text-gx-text">New Worktree</div>
-      <div className="mb-2 flex rounded-md border border-gx-border overflow-hidden text-[10px]">
+    <form onSubmit={handleSubmit} className="mb-2 rounded border border-border bg-background p-2">
+      <div className="mb-1.5 text-[10px] font-medium text-foreground">
+        New Worktree
+      </div>
+      <div className="mb-2 flex rounded-md border border-border overflow-hidden text-[10px]">
         {(["existing", "new-branch", "detached"] as const).map((m) => (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             key={m}
             type="button"
             className={clsx(
               "flex-1 px-2 py-1 transition text-center",
-              mode === m ? "bg-gx-accent/20 text-gx-text font-medium" : "text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover",
+              mode === m ? "bg-primary/20 text-foreground font-medium" : "text-muted-foreground hover:text-foreground hover:bg-accent",
             )}
             onClick={() => setMode(m)}
           >
             {m === "existing" ? "Existing" : m === "new-branch" ? "New Branch" : "Detached"}
-          </button>
+          </Button>
         ))}
       </div>
 
-      {/* Path — folder picker button */}
+      {/* Trigger button */}
       <div className="mb-1.5 flex items-center gap-1">
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
-          className="flex flex-1 items-center justify-between rounded border border-gx-border bg-gx-bg px-2 py-1 text-left text-[11px] transition hover:border-gx-muted/60 focus-visible:outline-none focus:border-gx-accent"
+          className="flex flex-1 items-center justify-between rounded border border-border bg-background px-2 py-1 text-left text-[11px] transition hover:border-muted-foreground/60 focus-visible:outline-none focus:border-primary"
           onClick={handlePickPath}
           title="Select worktree folder"
         >
-          <span className={path ? "truncate text-gx-text" : "text-gx-muted/60"}>
+          <span className={path ? "truncate text-foreground" : "text-muted-foreground/60"}>
             {path || "Select location…"}
           </span>
-          <FolderOpen size={11} className="shrink-0 text-gx-muted" />
-        </button>
+          <FolderOpen size={11} className="shrink-0 text-muted-foreground" />
+        </Button>
         {path && (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
-            className="shrink-0 rounded p-0.5 text-gx-muted hover:text-gx-text"
+            className="shrink-0 rounded p-0.5 text-muted-foreground hover:text-foreground"
             onClick={() => setPath("")}
             title="Clear"
             aria-label="Clear path"
           >
             <X size={10} />
-          </button>
+          </Button>
         )}
       </div>
 
-      {/* Branch / commit selector — varies by mode */}
+      {/* Dropdown */}
       {mode === "existing" && (
-        <SidebarSearchableField
+        <Combobox
           value={branch}
           placeholder="Select branch…"
           options={branchOptions}
           loading={refsLoading}
           open={showBranchPicker}
-          onToggle={() => setShowBranchPicker(!showBranchPicker)}
-          onSelect={(v) => { setBranch(v); setShowBranchPicker(false); }}
-          onClose={() => setShowBranchPicker(false)}
+          onOpenChange={setShowBranchPicker}
+          onValueChange={(v) => { setBranch(v); setShowBranchPicker(false); }}
           searchPlaceholder="Search branches…"
           emptyMessage="No branches found"
         />
@@ -1333,21 +1419,20 @@ function AddWorktreeForm({ repoId, onCreated, onCancel, checkedOutBranches }: Ad
 
       {mode === "new-branch" && (
         <>
-          <input
-            className="mb-1.5 w-full rounded border border-gx-border bg-gx-bg px-2 py-1 text-[11px] focus-visible:outline-none focus:border-gx-accent"
+          <Input
+            className="mb-1.5 w-full rounded border border-border bg-background px-2 py-1 text-[11px] focus-visible:outline-none focus:border-primary"
             placeholder="New branch name"
             value={branch}
             onChange={(e) => setBranch(e.target.value)}
           />
-          <SidebarSearchableField
+          <Combobox
             value={startPoint}
             placeholder="Start point (HEAD)…"
             options={commitTagOptions}
             loading={commitsLoading || refsLoading}
             open={showStartPointPicker}
-            onToggle={() => setShowStartPointPicker(!showStartPointPicker)}
-            onSelect={(v) => { setStartPoint(v); setShowStartPointPicker(false); }}
-            onClose={() => setShowStartPointPicker(false)}
+            onOpenChange={setShowStartPointPicker}
+            onValueChange={(v) => { setStartPoint(v); setShowStartPointPicker(false); }}
             searchPlaceholder="Search commits, tags…"
             emptyMessage="No commits found"
           />
@@ -1355,28 +1440,36 @@ function AddWorktreeForm({ repoId, onCreated, onCancel, checkedOutBranches }: Ad
       )}
 
       {mode === "detached" && (
-        <SidebarSearchableField
+        <Combobox
           value={branch}
           placeholder="Select commit / tag…"
           options={commitTagOptions}
           loading={commitsLoading || refsLoading}
           open={showDetachedPicker}
-          onToggle={() => setShowDetachedPicker(!showDetachedPicker)}
-          onSelect={(v) => { setBranch(v); setShowDetachedPicker(false); }}
-          onClose={() => setShowDetachedPicker(false)}
+          onOpenChange={setShowDetachedPicker}
+          onValueChange={(v) => { setBranch(v); setShowDetachedPicker(false); }}
           searchPlaceholder="Search commits, tags…"
           emptyMessage="No commits or tags found"
         />
       )}
 
       {error && (
-        <div className="mb-1.5 rounded bg-gx-error/10 px-2 py-1 text-[10px] text-gx-error">{error}</div>
+        <div className="mb-1.5 rounded bg-destructive/10 px-2 py-1 text-[10px] text-destructive">
+          {error}
+        </div>
       )}
       <div className="flex gap-2">
-        <button type="submit" className="btn btn-primary flex-1 justify-center text-[11px]" disabled={busy || !path.trim()}>
-          {busy ? <Loader2 size={10} className="animate-spin" /> : <Plus size={10} />} Create
-        </button>
-        <button type="button" className="btn flex-1 justify-center text-[11px]" onClick={onCancel}>Cancel</button>
+        <Button variant="default" type="submit" className="flex-1 justify-center text-[11px]" disabled={busy || !path.trim()}>
+          {busy ? (
+            <Loader2 size={10} className="animate-spin" />
+          ) : (
+            <Plus size={10} />
+          )}{" "}
+          Create
+        </Button>
+        <Button variant="outline" type="button" className="flex-1 justify-center text-[11px]" onClick={onCancel}>
+          Cancel
+        </Button>
       </div>
     </form>
   );
@@ -1386,134 +1479,3 @@ function AddWorktreeForm({ repoId, onCreated, onCancel, checkedOutBranches }: Ad
  * Compact searchable select field for the sidebar worktree form.
  * Shows a trigger button that opens a dropdown with search + scrollable list.
  */
-function SidebarSearchableField({
-  value,
-  placeholder,
-  options,
-  loading,
-  open,
-  onToggle,
-  onSelect,
-  onClose,
-  searchPlaceholder,
-  emptyMessage,
-}: {
-  value: string;
-  placeholder: string;
-  options: { value: string; label: string; detail?: string; disabled?: boolean }[];
-  loading: boolean;
-  open: boolean;
-  onToggle: () => void;
-  onSelect: (value: string) => void;
-  onClose: () => void;
-  searchPlaceholder: string;
-  emptyMessage: string;
-}) {
-  const [search, setSearch] = useState("");
-  const panelRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    if (open) inputRef.current?.focus();
-  }, [open]);
-
-  useEffect(() => {
-    if (!open) return;
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    const handleClick = (e: MouseEvent) => {
-      if (panelRef.current && !panelRef.current.contains(e.target as Node)) {
-        onClose();
-      }
-    };
-    window.addEventListener("keydown", handleKey);
-    window.addEventListener("mousedown", handleClick);
-    return () => {
-      window.removeEventListener("keydown", handleKey);
-      window.removeEventListener("mousedown", handleClick);
-    };
-  }, [open, onClose]);
-
-  const filtered = useMemo(() => {
-    if (!search.trim()) return options;
-    const q = search.toLowerCase();
-    return options.filter(
-      (o) =>
-        o.label.toLowerCase().includes(q) ||
-        o.value.toLowerCase().includes(q) ||
-        (o.detail && o.detail.toLowerCase().includes(q)),
-    );
-  }, [options, search]);
-
-  return (
-    <div className="relative mb-1.5">
-      {/* Trigger button */}
-      <button
-        type="button"
-        className="flex w-full items-center justify-between rounded border border-gx-border bg-gx-bg px-2 py-1 text-left text-[11px] transition hover:border-gx-muted/60 focus-visible:outline-none focus:border-gx-accent"
-        onClick={onToggle}
-      >
-        <span className={value ? "truncate text-gx-text" : "text-gx-muted/60"}>
-          {value || placeholder}
-        </span>
-        <ChevronDown size={10} className="shrink-0 text-gx-muted" />
-      </button>
-
-      {/* Dropdown */}
-      {open && (
-        <div
-          ref={panelRef}
-          className="absolute left-0 right-0 top-full z-50 mt-1 rounded border border-gx-border bg-gx-surface shadow-xl"
-        >
-          <div className="flex items-center gap-1 border-b border-gx-border px-2 py-1">
-            <Search size={10} className="shrink-0 text-gx-muted" />
-            <input
-              ref={inputRef}
-              className="flex-1 bg-transparent text-[11px] text-gx-text placeholder:text-gx-muted/60 focus-visible:outline-none"
-              placeholder={searchPlaceholder}
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-            />
-          </div>
-          <div className="max-h-[180px] overflow-auto py-0.5">
-            {loading && (
-              <div className="flex items-center gap-1.5 px-2 py-2 text-[10px] text-gx-muted">
-                <Loader2 size={10} className="animate-spin" /> Loading…
-              </div>
-            )}
-            {!loading && filtered.length === 0 && (
-              <div className="px-2 py-2 text-[10px] text-gx-muted">{emptyMessage}</div>
-            )}
-            {!loading &&
-              filtered.map((opt) => (
-                <button
-                  key={opt.value}
-                  type="button"
-                  className={clsx(
-                    "flex w-full items-center gap-1.5 px-2 py-1 text-left transition",
-                    opt.disabled
-                      ? "cursor-not-allowed opacity-50"
-                      : "hover:bg-gx-accent/10",
-                    opt.value === value && !opt.disabled && "bg-gx-accent/5",
-                  )}
-                  onClick={() => { if (!opt.disabled) onSelect(opt.value); }}
-                  disabled={opt.disabled}
-                >
-                  <div className="min-w-0 flex-1">
-                    <div className={clsx("truncate text-[11px]", opt.disabled ? "text-gx-muted" : "text-gx-text")}>{opt.label}</div>
-                    {opt.detail && (
-                      <div className={clsx("truncate font-mono text-[9px]", opt.disabled ? "text-gx-muted/60" : "text-gx-muted")}>{opt.detail}</div>
-                    )}
-                  </div>
-                  {opt.value === value && !opt.disabled && (
-                    <span className="shrink-0 text-[9px] text-gx-accent">✓</span>
-                  )}
-                </button>
-              ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}

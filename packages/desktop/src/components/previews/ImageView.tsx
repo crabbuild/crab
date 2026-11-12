@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { useEffect, useState } from "react";
 import { Maximize2, Minimize2 } from "lucide-react";
 import { rpc } from "../../ipc";
@@ -46,21 +47,21 @@ export function ImageView({ repoId, path, rev }: Props) {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex shrink-0 items-center justify-between border-b border-gx-border bg-gx-surface px-3 py-1.5 text-[11px] text-gx-muted">
+      <div className="flex shrink-0 items-center justify-between border-b border-border bg-card px-3 py-1.5 text-[11px] text-muted-foreground">
         <span>Image · {size != null ? formatBytes(size) : "…"}</span>
-        <button
+        <Button variant="outline"
           type="button"
-          className="btn text-xs"
+          className="text-xs"
           onClick={() => setFit((f) => !f)}
           title={fit ? "Show at actual size" : "Fit to window"}
         >
           {fit ? <Maximize2 size={12} /> : <Minimize2 size={12} />}
           {fit ? "Actual size" : "Fit"}
-        </button>
+        </Button>
       </div>
-      <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-auto bg-gx-bg-sub p-4">
+      <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-auto bg-background p-4">
         {err && (
-          <div className="rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">
+          <div className="rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
             {err}
           </div>
         )}

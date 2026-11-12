@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { DropdownMenuItem, PointMenu } from "@/components/ui/dropdown-menu";
 import clsx from "clsx";
-import { Streamdown } from "streamdown";
 import {
   AlertCircle,
   Bot,
@@ -13,34 +13,40 @@ import {
   Pin,
   User,
 } from "lucide-react";
-import { OrchestratorTask } from "./TaskCard";
-import { TodoList, TodoItem } from "./TodoList";
-import { CheckpointMarker } from "./CheckpointMarker";
-import { RevertCheckpointDialog } from "./RevertCheckpointDialog";
-import { SlashCommand } from "./SlashCommandDropdown";
-import { CreateCommandDialog } from "./CreateCommandDialog";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Streamdown } from "streamdown";
+import type { AgentWorkflowDefinition, AgentWorkflowRun } from "../../ipc";
+import { publishToast } from "../../lib/toasts";
 import {
-  ChatInput,
   ChatAttachment,
+  ChatInput,
   ChatInputAgent,
   ChatInputModel,
   ChatInputSubmission,
   ChatMode,
 } from "./ChatInput";
-import { ToolCard } from "./ToolCard";
-import { TodoProgressPanel } from "./TodoProgressPanel";
+import { CheckpointMarker } from "./CheckpointMarker";
+import { CreateCommandDialog } from "./CreateCommandDialog";
+import { GoalBar } from "./GoalBar";
+import { ResumeBanner } from "./ResumeBanner";
+import { RevertCheckpointDialog } from "./RevertCheckpointDialog";
+import { SlashCommand } from "./SlashCommandDropdown";
+import { OrchestratorTask } from "./TaskCard";
 import { TaskProgressPanel } from "./TaskProgressPanel";
-import { WorkflowProgressInline } from "./WorkflowProgressInline";
+import { TodoItem, TodoList } from "./TodoList";
+import { TodoProgressPanel } from "./TodoProgressPanel";
 import { resolveToolCard } from "./tool-cards";
 import { HunkActionsProvider } from "./tool-cards/HunkActionsContext";
+import { ToolCard } from "./ToolCard";
 import { TurnCostChip } from "./TurnCostChip";
-import { ResumeBanner } from "./ResumeBanner";
-import { GoalBar } from "./GoalBar";
-import { publishToast } from "../../lib/toasts";
-import type { AgentWorkflowDefinition, AgentWorkflowRun } from "../../ipc";
+import { WorkflowProgressInline } from "./WorkflowProgressInline";
 
 // ── Types ───────────────────────────────────────────────────────────
-import type { ChatMessage, ToolEvent, Checkpoint } from "../../../electron/agent-chat-messages";
+import type {
+  ChatMessage,
+  Checkpoint,
+  ToolEvent,
+} from "../../../electron/agent-chat-messages";
 import { ModelDiscoveryStatus, type ModelDiscoveryControls } from "./ModelDiscoveryStatus";
 
 interface Props {
@@ -274,10 +280,8 @@ export function ChatTab({
   useEffect(() => {
     if (!pinMenu) return;
     const close = () => setPinMenu(null);
-    window.addEventListener("click", close);
     window.addEventListener("scroll", close, true);
     return () => {
-      window.removeEventListener("click", close);
       window.removeEventListener("scroll", close, true);
     };
   }, [pinMenu]);
@@ -511,9 +515,9 @@ export function ChatTab({
 
   return (
     <HunkActionsProvider value={{ taskId: task.id, taskTitle: task.title, worktreePath: task.worktreePath }}>
-    <div className="flex h-full flex-col">
-      {/* Revert checkpoint confirmation dialog */}
-      {revertTurn !== null && onRevertCheckpoint && (
+      <div className="flex h-full flex-col">
+        {/* Revert checkpoint confirmation dialog */}
+        {revertTurn !== null && onRevertCheckpoint && (
         <RevertCheckpointDialog
           turnNumber={revertTurn}
           onConfirm={() => {
@@ -524,62 +528,66 @@ export function ChatTab({
         />
       )}
 
-      {/* Pin context menu */}
-      {pinMenu && (
-        <div
-          className="fixed z-[9999] min-w-[180px] rounded-md border border-gx-border bg-gx-surface py-1 shadow-xl"
-          style={{ left: pinMenu.x, top: pinMenu.y }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <button
-            type="button"
-            onClick={() => {
+        {/* Revert checkpoint confirmation dialog */}
+        {pinMenu && (
+          <PointMenu position={pinMenu} onClose={() => setPinMenu(null)}>
+            <DropdownMenuItem
+              onSelect={() => {
               void pinMessageToContext(pinMenu.message);
               setPinMenu(null);
             }}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] text-gx-text hover:bg-gx-surface-hover"
-          >
-            <Pin size={11} className="text-gx-accent" />
-            Pin to context for future turns
-          </button>
-        </div>
-      )}
+              className="justify-start flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] text-foreground hover:bg-accent"
+            >
+              <Pin size={11} className="text-primary" />
+              Pin to context for future turns
+            </DropdownMenuItem>
+          </PointMenu>
+        )}
 
-      {/* Resume banner — offers "pick up where you left off" when a prior
-          session left checkpoints behind but no in-memory messages. */}
-      <ResumeBanner
+        {/* Pin context menu */}
+        <ResumeBanner
         taskId={task.id}
         lastMessageTs={lastMessageTs}
         onResume={focusComposer}
       />
 
-      {task.agentName === "codex" && <GoalBar key={task.id} taskId={task.id} isStreaming={isStreaming} closed={["archived", "applied", "discarded"].includes(task.status)} />}
+        {task.agentName === "codex" && (
+          <GoalBar key={task.id} taskId={task.id} isStreaming={isStreaming} closed={["archived", "applied", "discarded"].includes(task.status)} />
+        )}
 
-      {/* Messages area */}
-      <div
+        {/* Resume banner — offers "pick up where you left off" when a prior
+          session left checkpoints behind but no in-memory messages. */}
+        <div
         ref={scrollRef}
         onScroll={handleScroll}
         className="flex-1 overflow-auto px-4 py-3"
       >
-      <div className="mx-auto max-w-4xl space-y-3">
-        {/* Collapsible todo section */}
-        {todos.length > 0 && onToggleTodo && onAddTodo && onRemoveTodo && (
-          <div className="rounded-lg border border-gx-border bg-gx-surface">
-            <button
-              type="button"
-              onClick={() => setTodosExpanded(!todosExpanded)}
-              className="flex w-full items-center gap-2 px-3 py-2 text-xs text-gx-text hover:bg-gx-surface-hover transition rounded-lg"
-            >
-              {todosExpanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
-              <ListTodo size={11} className="text-gx-accent" />
-              <span className="font-medium">Todos</span>
-              <span className="text-gx-muted">
-                ({todos.filter((t) => !t.done).length}/{todos.length} remaining)
-              </span>
-            </button>
-            {todosExpanded && (
-              <div className="border-t border-gx-border px-2 py-2">
-                <TodoList
+          <div className="mx-auto max-w-4xl space-y-3">
+            {/* Messages area */}
+            {todos.length > 0 && onToggleTodo && onAddTodo && onRemoveTodo && (
+              <div className="rounded-lg border border-border bg-card">
+                <Button
+                  variant="ghost"
+                  size="compact"
+                  type="button"
+                  onClick={() => setTodosExpanded(!todosExpanded)}
+                  className="flex w-full items-center gap-2 px-3 py-2 text-xs text-foreground hover:bg-accent transition rounded-lg"
+                >
+                  {todosExpanded ? (
+                    <ChevronDown size={11} />
+                  ) : (
+                    <ChevronRight size={11} />
+                  )}
+                  <ListTodo size={11} className="text-primary" />
+                  <span className="font-medium">Todos</span>
+                  <span className="text-muted-foreground">
+                    ({todos.filter((t) => !t.done).length}/{todos.length}{" "}
+                    remaining)
+                  </span>
+                </Button>
+                {todosExpanded && (
+                  <div className="border-t border-border px-2 py-2">
+                    <TodoList
                   taskId={task.id}
                   todos={todos}
                   onToggle={onToggleTodo}
@@ -587,28 +595,28 @@ export function ChatTab({
                   onRemove={onRemoveTodo}
                   compact
                 />
+                  </div>
+                )}
               </div>
             )}
-          </div>
-        )}
 
-        {messages.length === 0 && !isStreaming && (
-          <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
-            <Bot size={28} className="text-gx-muted/50" />
-            <p className="text-xs text-gx-muted max-w-[280px]">
-              The agent will show its progress here as it works on your task.
-            </p>
-          </div>
-        )}
+            {messages.length === 0 && !isStreaming && (
+              <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
+                <Bot size={28} className="text-muted-foreground/50" />
+                <p className="text-xs text-muted-foreground max-w-[280px]">
+                  The agent will show its progress here as it works on your
+                  task.
+                </p>
+              </div>
+            )}
 
-        {/* Structured transcript renderer (turn-based) or flat message list */}
-        {transcript ? (
-          transcript
-        ) : (
-          messages.map((msg, idx) => {
-            // Thinking messages: show as "Thought for Xs" after streaming ends,
-            // or as a live "Thinking…" indicator during streaming.
-            if (msg.kind === "thinking") {
+            {/* Structured transcript renderer (turn-based) or flat message list */}
+            {transcript
+              ? transcript
+              : messages.map((msg, idx) => {
+                  // Thinking messages: show as "Thought for Xs" after streaming ends,
+                  // or as a live "Thinking…" indicator during streaming.
+                  if (msg.kind === "thinking") {
               // Calculate duration: time between this thinking message and the
               // next non-thinking message (or now if still streaming).
               const nextMsg = messages.slice(idx + 1).find((m) => m.kind !== "thinking");
@@ -629,9 +637,10 @@ export function ChatTab({
                 />
               );
             }
-            return isPlanMessage(msg, task, messages)
-              ? <PlanCard key={msg.id} message={msg} agentName={task.agentName} />
-              : <MessageBubble
+                  return isPlanMessage(msg, task, messages) ? (
+                    <PlanCard key={msg.id} message={msg} agentName={task.agentName} />
+                  ) : (
+                    <MessageBubble
                   key={msg.id}
                   message={msg}
                   agentName={task.agentName}
@@ -641,12 +650,12 @@ export function ChatTab({
                     e.preventDefault();
                     setPinMenu({ x: e.clientX, y: e.clientY, message: msg });
                   } : undefined}
-                />;
-          })
-        )}
+                />
+                  );
+                })}
 
-        {/* Checkpoint markers interspersed after their corresponding turns */}
-        {checkpoints.map((cp) => (
+            {/* Checkpoint markers interspersed after their corresponding turns */}
+            {checkpoints.map((cp) => (
           <CheckpointMarker
             key={`checkpoint-${cp.turnNumber}`}
             turnNumber={cp.turnNumber}
@@ -655,74 +664,80 @@ export function ChatTab({
           />
         ))}
 
-        {isStreaming && (
-          <div className="flex items-start gap-2">
-            <div className="rounded-lg bg-gx-surface px-3 py-2 text-xs text-gx-muted">
-              <Loader2 size={12} className="animate-spin" />
-            </div>
-          </div>
-        )}
+            {isStreaming && (
+              <div className="flex items-start gap-2">
+                <div className="rounded-lg bg-card px-3 py-2 text-xs text-muted-foreground">
+                  <Loader2 size={12} className="animate-spin" />
+                </div>
+              </div>
+            )}
 
-        {/* Awaiting response indicator — shown immediately after user
+            {/* Awaiting response indicator — shown immediately after user
             submits, before isStreaming flips. Bridges the perceived dead zone. */}
-        {isAwaitingResponse && !isStreaming && (
+            {isAwaitingResponse && !isStreaming && (
           <AwaitingResponseIndicator
             agentName={task.agentName}
             startTime={awaitingStartRef.current}
           />
         )}
-      </div>{/* close max-w-4xl */}
-      </div>
+          </div>
+          {/* close max-w-4xl */}
+        </div>
 
-      {/* Jump to bottom */}
-      {!autoScroll && (
-        <div className="flex justify-center pb-1">
-          <button
-            type="button"
-            onClick={() => {
+        {/* Jump to bottom */}
+        {!autoScroll && (
+          <div className="flex justify-center pb-1">
+            <Button
+              variant="ghost"
+              size="compact"
+              type="button"
+              onClick={() => {
               setAutoScroll(true);
               scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
             }}
-            className="flex items-center gap-1 rounded-full bg-gx-surface border border-gx-border px-2 py-0.5 text-[10px] text-gx-muted hover:text-gx-text transition"
-          >
-            <ChevronDown size={10} /> Jump to bottom
-          </button>
-        </div>
-      )}
+              className="flex items-center gap-1 rounded-full bg-card border border-border px-2 py-0.5 text-[10px] text-muted-foreground hover:text-foreground transition"
+            >
+              <ChevronDown size={10} /> Jump to bottom
+            </Button>
+          </div>
+        )}
 
-      {/* Max iterations warning */}
-      {iterationCount >= 5 && (
-        <div className="shrink-0 mx-3 mb-1 rounded-md border border-gx-warn/40 bg-gx-warn/10 px-3 py-2 text-xs text-gx-warn">
-          {iterationCount} iterations — consider breaking this into smaller tasks.
-        </div>
-      )}
+        {/* Max iterations warning */}
+        {iterationCount >= 5 && (
+          <div className="shrink-0 mx-3 mb-1 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
+            {iterationCount} iterations — consider breaking this into smaller
+            tasks.
+          </div>
+        )}
 
-      {/* Todo progress panel — fixed at bottom for clear visibility */}
-      {latestTodoWrite && (
+        {/* Task progress panel — aggregates TaskCreate/TaskUpdate into a checklist */}
+        {latestTodoWrite && (
         <TodoProgressPanel
           input={latestTodoWrite.input}
           previousInput={latestTodoWrite.previousInput}
         />
       )}
 
-      {/* Task progress panel — aggregates TaskCreate/TaskUpdate into a checklist */}
-      {taskManagementEvents.length > 0 && (
+        {/* Workflow progress panel — shows active workflow runs for this chat */}
+        {taskManagementEvents.length > 0 && (
         <TaskProgressPanel taskEvents={taskManagementEvents} />
       )}
 
-      {/* Workflow progress panel — shows active workflow runs for this chat */}
-      {workflowRuns.length > 0 && (
+        {/* Input area */}
+        {workflowRuns.length > 0 && (
         <WorkflowProgressInline runs={workflowRuns} />
       )}
 
-      {/* Input area */}
-      <div className="shrink-0 p-3">
-        {(task.status === "archived" || task.status === "applied" || task.status === "discarded") && <p role="status" className="mx-auto mb-2 max-w-4xl text-xs text-gx-muted">
-          {task.status === "discarded" ? "This conversation was discarded. Start a new chat to continue." : "Reopen this conversation to send messages."}
-        </p>}
-        <fieldset disabled={task.status === "archived" || task.status === "applied" || task.status === "discarded"} className="mx-auto min-w-0 max-w-4xl border-0 p-0">
-        <ModelDiscoveryStatus discovery={modelDiscovery} />
-        <ChatInput
+        {/* Input area */}
+        <div className="shrink-0 p-3">
+          {(task.status === "archived" || task.status === "applied" || task.status === "discarded") && (
+            <p role="status" className="mx-auto mb-2 max-w-4xl text-xs text-muted-foreground">
+              {task.status === "discarded" ? "This conversation was discarded. Start a new chat to continue." : "Reopen this conversation to send messages."}
+            </p>
+          )}
+          <fieldset disabled={task.status === "archived" || task.status === "applied" || task.status === "discarded"} className="mx-auto min-w-0 max-w-4xl border-0 p-0">
+            <ModelDiscoveryStatus discovery={modelDiscovery} />
+            <ChatInput
           placeholder={
             task.status === "reviewing"
               ? "Send feedback, / for commands, @ for context…"
@@ -753,10 +768,10 @@ export function ChatTab({
           activeEditorFile={activeEditorFile ?? null}
           activeEditorLabel={activeEditorLabel ?? null}
         />
-        </fieldset>
+          </fieldset>
+        </div>
       </div>
-    </div>
-    <CreateCommandDialog
+      <CreateCommandDialog
       open={createCommandOpen}
       onClose={() => setCreateCommandOpen(false)}
       onCreated={handleCommandCreated}
@@ -791,7 +806,7 @@ function AwaitingResponseIndicator({ agentName: _agentName, startTime }: { agent
 
   return (
     <div className="flex items-start gap-2">
-      <div className="rounded-lg bg-gx-surface px-3 py-2 text-xs text-gx-muted flex items-center gap-2">
+      <div className="rounded-lg bg-card px-3 py-2 text-xs text-muted-foreground flex items-center gap-2">
         <span className="inline-flex gap-[3px]">
           <span className="w-1.5 h-1.5 rounded-full bg-current animate-bounce [animation-delay:0ms]" />
           <span className="w-1.5 h-1.5 rounded-full bg-current animate-bounce [animation-delay:150ms]" />
@@ -815,11 +830,13 @@ function ThinkingBubble({ message, durationSec: _durationSec, isLive, agentName:
 
   return (
     <div className="flex items-start gap-2">
-      <div className="max-w-[85%] rounded-lg bg-gx-thinking/5 border border-gx-thinking/20 px-3 py-2 text-xs leading-relaxed text-gx-muted">
-        <button
+      <div className="max-w-[85%] rounded-lg bg-thinking/5 border border-thinking/20 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={() => setExpanded(!expanded)}
-          className="flex items-center gap-1.5 text-[10px] font-medium text-gx-thinking cursor-pointer hover:text-gx-accent transition w-full text-left"
+          className="justify-start flex items-center gap-1.5 text-[10px] font-medium text-thinking cursor-pointer hover:text-primary transition w-full text-left"
         >
           {isLive ? (
             <Loader2 size={10} className="animate-spin" />
@@ -829,9 +846,9 @@ function ThinkingBubble({ message, durationSec: _durationSec, isLive, agentName:
             <ChevronRight size={10} />
           )}
           {durationLabel}
-        </button>
+        </Button>
         {expanded && message.content && (
-          <div className="mt-1.5 pt-1.5 border-t border-gx-thinking/15 italic">
+          <div className="mt-1.5 pt-1.5 border-t border-thinking/15 italic">
             <MarkdownContent content={message.content} />
           </div>
         )}
@@ -867,16 +884,18 @@ function MessageBubble({
     if (isShort) {
       return (
         <div className="flex items-center gap-2 px-1 py-1">
-          <CheckCircle2 size={8} className="text-gx-success shrink-0 agent-status-icon" />
-          <span className="text-xs text-gx-success font-medium">{message.content || "Task completed"}</span>
+          <CheckCircle2 size={8} className="text-success shrink-0 agent-status-icon" />
+          <span className="text-xs text-success font-medium">
+            {message.content || "Task completed"}
+          </span>
         </div>
       );
     }
     // Longer done messages → render with markdown like normal agent messages.
     return (
       <div className="flex items-start gap-2">
-        <CheckCircle2 size={8} className="text-gx-success shrink-0 agent-status-icon mt-1" />
-        <div className="max-w-[85%] rounded-lg bg-gx-surface px-3 py-2 text-xs leading-relaxed text-gx-text">
+        <CheckCircle2 size={8} className="text-success shrink-0 agent-status-icon mt-1" />
+        <div className="max-w-[85%] rounded-lg bg-card px-3 py-2 text-xs leading-relaxed text-foreground">
           <MarkdownContent content={message.content} />
         </div>
       </div>
@@ -887,8 +906,8 @@ function MessageBubble({
   if (isError) {
     return (
       <div className="flex items-start gap-2">
-        <AlertCircle size={8} className="text-gx-error shrink-0 agent-status-icon mt-1" />
-        <div className="max-w-[85%] rounded-lg border border-gx-error/30 bg-gx-error/10 px-3 py-2 text-xs leading-relaxed text-gx-error">
+        <AlertCircle size={8} className="text-destructive shrink-0 agent-status-icon mt-1" />
+        <div className="max-w-[85%] rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs leading-relaxed text-destructive">
           <MarkdownContent content={message.content} />
         </div>
       </div>
@@ -903,16 +922,16 @@ function MessageBubble({
     >
       {/* User messages keep their avatar; agent messages use left-border accent instead */}
       {isUser && (
-        <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-gx-info/15">
-          <User size={12} className="text-gx-info" />
+        <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-info/15">
+          <User size={12} className="text-info" />
         </div>
       )}
       <div
         className={clsx(
           "max-w-[85%] rounded-lg px-3 py-2 text-xs leading-relaxed relative",
           isUser
-            ? "bg-gx-info/15 text-gx-text"
-            : "bg-gx-surface text-gx-text",
+            ? "bg-info/15 text-foreground"
+            : "bg-card text-foreground",
         )}
       >
         {/* Cost chip — only shown on agent messages with known cost. */}
@@ -963,7 +982,9 @@ function ToolEventCard({ event }: { event: ToolEvent }) {
   }
 
   // Fallback: generic tool card.
-  return <ToolCard tool={tool} summary={event.summary} input={event.input} detail={event.detail} />;
+  return (
+    <ToolCard tool={tool} summary={event.summary} input={event.input} detail={event.detail} />
+  );
 }
 
 // ── Markdown renderer ───────────────────────────────────────────────
@@ -1019,15 +1040,15 @@ function isPlanMessage(message: ChatMessage, task: OrchestratorTask, messages: C
 function PlanCard({ message, agentName: _agentName }: { message: ChatMessage; agentName: string }) {
   return (
     <div className="flex items-start gap-2">
-      <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-gx-warn/15">
-        <ClipboardList size={12} className="text-gx-warn" />
+      <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-warning/15">
+        <ClipboardList size={12} className="text-warning" />
       </div>
-      <div className="max-w-[90%] rounded-lg border border-gx-warn/30 bg-gx-warn/5 px-4 py-3">
-        <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold text-gx-warn">
+      <div className="max-w-[90%] rounded-lg border border-warning/30 bg-warning/5 px-4 py-3">
+        <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold text-warning">
           <ClipboardList size={11} />
           Implementation Plan
         </div>
-        <pre className="whitespace-pre-wrap font-sans text-xs leading-relaxed text-gx-text">
+        <pre className="whitespace-pre-wrap font-sans text-xs leading-relaxed text-foreground">
           {message.content}
         </pre>
 
@@ -1059,11 +1080,13 @@ function deriveTitle(content: string): string {
 
 /** Slug-safe lowercased identifier derived from free-form text. */
 function slugify(input: string): string {
-  return input
+  return (
+    input
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
-    .slice(0, 40) || "note";
+    .slice(0, 40) || "note"
+  );
 }
 
 /** Compact YYYYMMDD-HHMMSS timestamp for file naming. */

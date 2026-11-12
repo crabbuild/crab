@@ -1,3 +1,6 @@
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 /**
  * SSH Config Import Dialog — allows selective import of hosts from
  * ~/.ssh/config into Crab Desktop connection profiles.
@@ -6,7 +9,6 @@
  * imported, and previews what each import will create.
  */
 
-import { useCallback, useEffect, useId, useRef, useState } from "react";
 import clsx from "clsx";
 import {
   Check,
@@ -19,6 +21,7 @@ import {
   Shield,
   X,
 } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -63,7 +66,6 @@ export function SshConfigImport({
   onImport,
   existingProfiles,
 }: SshConfigImportProps) {
-  const titleId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
   const [hosts, setHosts] = useState<ImportableHost[]>([]);
   const [loading, setLoading] = useState(false);
@@ -81,17 +83,6 @@ export function SshConfigImport({
   }, [isOpen]);
 
   // Escape to close
-  useEffect(() => {
-    if (!isOpen) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        onClose();
-      }
-    };
-    window.addEventListener("keydown", handler, true);
-    return () => window.removeEventListener("keydown", handler, true);
-  }, [isOpen, onClose]);
 
   // Load SSH config when dialog opens
   const loadConfig = useCallback(async () => {
@@ -210,49 +201,48 @@ export function SshConfigImport({
   if (!isOpen) return null;
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) {
+          onClose();
+        }
       }}
-      role="presentation"
     >
-      <div
+      <DialogContent
+        showCloseButton={false}
+        aria-describedby={undefined}
         ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
         tabIndex={-1}
-        className="relative flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-gx-border bg-gx-bg shadow-2xl"
+        className="block gap-0 p-0 flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-border bg-background shadow-2xl"
       >
         {/* Header */}
-        <div className="flex shrink-0 items-start gap-3 border-b border-gx-border p-5">
-          <div className="mt-0.5 shrink-0 rounded bg-gx-accent/15 p-2 text-gx-accent">
+        <div className="flex shrink-0 items-start gap-3 border-b border-border p-5">
+          <div className="mt-0.5 shrink-0 rounded bg-primary/15 p-2 text-primary">
             <FileDown size={18} aria-hidden="true" />
           </div>
           <div className="min-w-0 flex-1">
-            <h2
-              id={titleId}
-              className="text-sm font-semibold text-gx-text"
-            >
+            <DialogTitle className="text-sm font-semibold text-foreground">
               Import from SSH Config
-            </h2>
-            <p className="mt-0.5 text-xs text-gx-muted">
+            </DialogTitle>
+            <p className="mt-0.5 text-xs text-muted-foreground">
               Select hosts from{" "}
-              <code className="rounded bg-gx-bg-sub px-1 py-0.5 font-mono text-[11px]">
+              <code className="rounded bg-background px-1 py-0.5 font-mono text-[11px]">
                 ~/.ssh/config
               </code>{" "}
               to import as connection profiles.
             </p>
           </div>
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={onClose}
-            className="shrink-0 rounded p-1 text-gx-muted transition hover:bg-gx-surface-hover hover:text-gx-text"
+            className="shrink-0 rounded p-1 text-muted-foreground transition hover:bg-accent hover:text-foreground"
             aria-label="Close dialog"
           >
             <X size={16} />
-          </button>
+          </Button>
         </div>
 
         {/* Body */}
@@ -260,7 +250,7 @@ export function SshConfigImport({
           {/* Loading state */}
           {loading && (
             <div
-              className="flex items-center justify-center gap-2 py-12 text-sm text-gx-muted"
+              className="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground"
               aria-live="polite"
             >
               <Loader2 size={16} className="animate-spin" />
@@ -271,10 +261,10 @@ export function SshConfigImport({
           {/* Error state */}
           {error && (
             <div
-              className="rounded border border-red-500/40 bg-red-500/10 p-3 text-xs text-red-300"
+              className="rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive"
               role="alert"
             >
-              <strong className="font-medium text-red-200">Error:</strong>{" "}
+              <strong className="font-medium text-destructive">Error:</strong>{" "}
               {error}
             </div>
           )}
@@ -282,13 +272,13 @@ export function SshConfigImport({
           {/* Empty state */}
           {!loading && !error && hosts.length === 0 && (
             <div className="flex flex-col items-center gap-2 py-12 text-center">
-              <p className="text-sm text-gx-muted">
+              <p className="text-sm text-muted-foreground">
                 No hosts found in{" "}
-                <code className="rounded bg-gx-bg-sub px-1 py-0.5 font-mono text-[11px]">
+                <code className="rounded bg-background px-1 py-0.5 font-mono text-[11px]">
                   ~/.ssh/config
                 </code>
               </p>
-              <p className="text-xs text-gx-muted">
+              <p className="text-xs text-muted-foreground">
                 Add Host blocks to your SSH config file and try again.
               </p>
             </div>
@@ -300,8 +290,8 @@ export function SshConfigImport({
               className={clsx(
                 "mb-4 rounded border p-3 text-xs",
                 importResult.errors.length > 0
-                  ? "border-red-500/40 bg-red-500/10 text-red-300"
-                  : "border-green-500/40 bg-green-500/10 text-green-300",
+                  ? "border-destructive/40 bg-destructive/10 text-destructive"
+                  : "border-success/40 bg-success/10 text-success",
               )}
               role="alert"
               aria-live="polite"
@@ -319,7 +309,7 @@ export function SshConfigImport({
                     <strong>{importResult.successCount}</strong>{" "}
                     {importResult.successCount === 1 ? "host" : "hosts"}
                     {importResult.skippedCount > 0 && (
-                      <span className="text-gx-muted">
+                      <span className="text-muted-foreground">
                         {" "}
                         · {importResult.skippedCount} already imported
                       </span>
@@ -335,25 +325,29 @@ export function SshConfigImport({
             <>
               {/* Select all / Deselect all controls */}
               <div className="mb-3 flex items-center gap-3">
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
-                  className="text-xs font-medium text-gx-accent hover:underline disabled:text-gx-muted disabled:no-underline"
+                  className="text-xs font-medium text-primary hover:underline disabled:text-muted-foreground disabled:no-underline"
                   onClick={selectAll}
                   disabled={allSelected || importableCount === 0}
                   aria-label="Select all importable hosts"
                 >
                   Select All
-                </button>
-                <button
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
-                  className="text-xs font-medium text-gx-accent hover:underline disabled:text-gx-muted disabled:no-underline"
+                  className="text-xs font-medium text-primary hover:underline disabled:text-muted-foreground disabled:no-underline"
                   onClick={deselectAll}
                   disabled={selectedCount === 0}
                   aria-label="Deselect all hosts"
                 >
                   Deselect All
-                </button>
-                <span className="ml-auto text-[11px] text-gx-muted">
+                </Button>
+                <span className="ml-auto text-[11px] text-muted-foreground">
                   {selectedCount} of {importableCount} selected
                 </span>
               </div>
@@ -378,12 +372,14 @@ export function SshConfigImport({
         </div>
 
         {/* Footer */}
-        <div className="flex shrink-0 items-center gap-2 border-t border-gx-border p-4">
-          <button
+        <div className="flex shrink-0 items-center gap-2 border-t border-border p-4">
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className={clsx(
-              "flex items-center gap-1.5 rounded border border-gx-border px-3 py-1.5 text-xs text-gx-text transition",
-              "hover:bg-gx-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gx-accent",
+              "flex items-center gap-1.5 rounded border border-border px-3 py-1.5 text-xs text-foreground transition",
+              "hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
             )}
             onClick={loadConfig}
             disabled={loading}
@@ -394,27 +390,31 @@ export function SshConfigImport({
               className={loading ? "animate-spin" : ""}
             />
             Refresh
-          </button>
+          </Button>
           <div className="flex-1" />
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className={clsx(
-              "rounded border border-gx-border px-3 py-1.5 text-xs text-gx-text transition",
-              "hover:bg-gx-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gx-accent",
+              "rounded border border-border px-3 py-1.5 text-xs text-foreground transition",
+              "hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
             )}
             onClick={onClose}
           >
             {importResult ? "Done" : "Cancel"}
-          </button>
+          </Button>
           {!importResult && (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className={clsx(
                 "flex items-center gap-1.5 rounded border px-3 py-1.5 text-xs font-medium transition",
-                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gx-accent",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
                 selectedCount > 0
-                  ? "border-gx-accent/60 bg-gx-accent/15 text-gx-accent hover:bg-gx-accent/25"
-                  : "cursor-not-allowed border-gx-border bg-gx-bg-sub text-gx-muted opacity-50",
+                  ? "border-primary/60 bg-primary/15 text-primary hover:bg-primary/25"
+                  : "cursor-not-allowed border-border bg-background text-muted-foreground opacity-50",
               )}
               onClick={handleImport}
               disabled={selectedCount === 0 || importing}
@@ -426,11 +426,11 @@ export function SshConfigImport({
                 <FileDown size={12} />
               )}
               Import Selected{selectedCount > 0 ? ` (${selectedCount})` : ""}
-            </button>
+            </Button>
           )}
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -452,36 +452,35 @@ function HostEntry({
       className={clsx(
         "rounded-lg border transition",
         host.alreadyImported
-          ? "border-gx-border/50 bg-gx-bg-sub/50 opacity-60"
+          ? "border-border/50 bg-background/50 opacity-60"
           : host.selected
-            ? "border-gx-accent/40 bg-gx-accent/5"
-            : "border-gx-border bg-gx-surface",
+            ? "border-primary/40 bg-primary/5"
+            : "border-border bg-card",
       )}
     >
       {/* Main row */}
       <div className="flex items-center gap-3 px-3 py-2.5">
-        <input
-          type="checkbox"
+        <Checkbox
           checked={host.selected}
-          onChange={onToggle}
+          onCheckedChange={onToggle}
           disabled={host.alreadyImported}
-          className="h-4 w-4 shrink-0 rounded border-gx-border accent-gx-accent"
+          className="h-4 w-4 shrink-0 rounded border-border accent-primary"
           aria-label={`${host.alreadyImported ? "Already imported" : "Select"} ${host.alias}`}
         />
 
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <span className="text-xs font-semibold text-gx-text">
+            <span className="text-xs font-semibold text-foreground">
               {host.alias}
             </span>
             {host.alreadyImported && (
-              <span className="inline-flex items-center gap-1 rounded-full bg-gx-surface-hover px-2 py-0.5 text-[10px] font-medium text-gx-muted">
+              <span className="inline-flex items-center gap-1 rounded-full bg-accent px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
                 <Check size={10} />
                 Already imported
               </span>
             )}
           </div>
-          <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-gx-muted">
+          <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground">
             <span>
               {host.user ? `${host.user}@` : ""}
               {host.hostname}
@@ -496,16 +495,20 @@ function HostEntry({
               {authMethod}
             </span>
             {host.proxyJump && (
-              <span className="text-gx-muted">via {host.proxyJump}</span>
+              <span className="text-muted-foreground">
+                via {host.proxyJump}
+              </span>
             )}
           </div>
         </div>
 
         {/* Preview toggle */}
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={onTogglePreview}
-          className="shrink-0 rounded p-1 text-gx-muted transition hover:bg-gx-surface-hover hover:text-gx-text"
+          className="shrink-0 rounded p-1 text-muted-foreground transition hover:bg-accent hover:text-foreground"
           aria-expanded={host.previewExpanded}
           aria-label={`${host.previewExpanded ? "Hide" : "Show"} import preview for ${host.alias}`}
         >
@@ -514,13 +517,13 @@ function HostEntry({
           ) : (
             <ChevronRight size={14} />
           )}
-        </button>
+        </Button>
       </div>
 
       {/* Preview panel */}
       {host.previewExpanded && (
-        <div className="border-t border-gx-border/50 bg-gx-bg-sub/30 px-4 py-3">
-          <p className="mb-2 text-[10px] font-medium uppercase tracking-wide text-gx-muted">
+        <div className="border-t border-border/50 bg-background/30 px-4 py-3">
+          <p className="mb-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
             Profile Preview
           </p>
           <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-[11px]">
@@ -557,8 +560,8 @@ function HostEntry({
 function PreviewField({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-baseline gap-1.5">
-      <span className="shrink-0 text-gx-muted">{label}:</span>
-      <span className="truncate font-mono text-gx-text">{value}</span>
+      <span className="shrink-0 text-muted-foreground">{label}:</span>
+      <span className="truncate font-mono text-foreground">{value}</span>
     </div>
   );
 }

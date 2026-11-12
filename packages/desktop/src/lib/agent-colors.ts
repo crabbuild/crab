@@ -17,17 +17,17 @@ export function agentBorderColor(adapterName: string | undefined | null): string
   const name = (adapterName ?? "").toLowerCase();
 
   if (name.includes("codex") || name.includes("openai") || name.startsWith("gpt-")) {
-    // Codex → --gx-accent
-    return "rgb(var(--gx-accent))";
+    // Codex → --primary
+    return "rgb(var(--primary))";
   }
 
   if (name.includes("claude") || name.includes("anthropic")) {
-    // Claude Code → --gx-thinking
-    return "rgb(var(--gx-thinking))";
+    // Claude Code → --thinking
+    return "rgb(var(--thinking))";
   }
 
-  // Generic / unknown → --gx-muted
-  return "rgb(var(--gx-muted))";
+  // Generic / unknown → --muted-foreground
+  return "rgb(var(--muted-foreground))";
 }
 
 /**
@@ -38,12 +38,12 @@ export function agentBorderClass(adapterName: string | undefined | null): string
   const name = (adapterName ?? "").toLowerCase();
 
   if (name.includes("codex") || name.includes("openai") || name.startsWith("gpt-")) {
-    return "border-l-[rgb(var(--gx-accent))]";
+    return "border-l-[rgb(var(--primary))]";
   }
 
   if (name.includes("claude") || name.includes("anthropic")) {
-    return "border-l-[rgb(var(--gx-thinking))]";
+    return "border-l-[rgb(var(--thinking))]";
   }
 
-  return "border-l-[rgb(var(--gx-muted))]";
+  return "border-l-[rgb(var(--muted-foreground))]";
 }

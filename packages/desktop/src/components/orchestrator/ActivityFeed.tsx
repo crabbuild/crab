@@ -1,19 +1,28 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import clsx from "clsx";
 import {
+  AlertCircle,
+  Bot,
   Brain,
+  CheckCircle2,
   ChevronDown,
   ChevronRight,
-  CheckCircle2,
-  AlertCircle,
-  FileText,
   FilePen,
-  Terminal,
-  Search,
+  FileText,
   Filter,
   MessageSquare,
-  Bot,
+  Search,
+  Terminal,
 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -51,11 +60,11 @@ export type EventFilter = "all" | "files" | "commands" | "errors";
  *  Semantic tokens where possible; fall back to 600-scale so labels
  *  remain AA-legible on light themes while staying distinguishable. */
 const AGENT_COLORS = [
-  "text-gx-info",
-  "text-gx-thinking",
-  "text-emerald-600 dark:text-emerald-400",
-  "text-orange-600 dark:text-orange-400",
-  "text-pink-600 dark:text-pink-400",
+  "text-info",
+  "text-thinking",
+  "text-success text-success",
+  "text-warning text-warning",
+  "text-thinking text-thinking",
 ];
 
 function getAgentColor(agentId: string | undefined, agentMap: Map<string, number>): string {
@@ -180,47 +189,62 @@ export function ActivityFeed({ events, isStreaming }: Props) {
   return (
     <div className="flex h-full flex-col">
       {/* Header: summary + filter */}
-      <div className="shrink-0 border-b border-gx-border bg-gx-surface px-4 py-2.5">
+      <div className="shrink-0 border-b border-border bg-card px-4 py-2.5">
         <div className="flex items-center justify-between gap-3">
-          {/* Event count summary */}
-          <div className="flex items-center gap-3 text-[11px] text-gx-muted">
+          {/* Header: summary + filter */}
+          <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
             {summary.filesRead > 0 && (
               <span className="flex items-center gap-1">
-                <FileText size={11} className="text-gx-info" />
+                <FileText size={11} className="text-info" />
                 {summary.filesRead} read
               </span>
             )}
             {summary.filesWritten > 0 && (
               <span className="flex items-center gap-1">
-                <FilePen size={11} className="text-gx-success" />
+                <FilePen size={11} className="text-success" />
                 {summary.filesWritten} written
               </span>
             )}
             {summary.commandsRun > 0 && (
               <span className="flex items-center gap-1">
-                <Terminal size={11} className="text-gx-warn" />
+                <Terminal size={11} className="text-warning" />
                 {summary.commandsRun} run
               </span>
             )}
-            {summary.filesRead === 0 && summary.filesWritten === 0 && summary.commandsRun === 0 && (
-              <span>No events yet</span>
-            )}
+            {summary.filesRead === 0 && summary.filesWritten === 0 && summary.commandsRun === 0 && <span>No events yet</span>}
           </div>
 
           {/* Filter dropdown */}
           <div className="relative">
-            <select
-              value={filter}
-              onChange={(e) => setFilter(e.target.value as EventFilter)}
-              className="appearance-none rounded border border-gx-border bg-gx-bg px-2 py-0.5 pr-6 text-[11px] text-gx-text focus:border-gx-accent focus:outline-none"
-              aria-label="Filter events"
+            <Select
+              value={":" + String(filter)}
+              onValueChange={(selectedValue) => {
+                const value = selectedValue.slice(1);
+                return setFilter(value as EventFilter);
+              }}
             >
-              <option value="all">All</option>
-              <option value="files">Files only</option>
-              <option value="commands">Commands only</option>
-              <option value="errors">Errors only</option>
-            </select>
-            <Filter size={10} className="pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2 text-gx-muted" />
+              <SelectTrigger
+                className="appearance-none rounded border border-border bg-background px-2 py-0.5 pr-6 text-[11px] text-foreground focus:border-primary focus:outline-none"
+                aria-label="Filter events"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  <SelectItem value={":" + String("all")}>All</SelectItem>
+                  <SelectItem value={":" + String("files")}>
+                    Files only
+                  </SelectItem>
+                  <SelectItem value={":" + String("commands")}>
+                    Commands only
+                  </SelectItem>
+                  <SelectItem value={":" + String("errors")}>
+                    Errors only
+                  </SelectItem>
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+            <Filter size={10} className="pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
           </div>
         </div>
       </div>
@@ -232,7 +256,7 @@ export function ActivityFeed({ events, isStreaming }: Props) {
         className="flex-1 overflow-auto px-3 py-3 space-y-1.5"
       >
         {filteredEvents.length === 0 && (
-          <div className="flex h-full items-center justify-center text-xs text-gx-muted">
+          <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
             {events.length === 0 ? "Waiting for agent events…" : "No events match the current filter."}
           </div>
         )}
@@ -252,16 +276,18 @@ export function ActivityFeed({ events, isStreaming }: Props) {
       {/* Jump to bottom button */}
       {!autoScroll && (
         <div className="flex justify-center pb-1">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={() => {
               setAutoScroll(true);
               scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
             }}
-            className="flex items-center gap-1 rounded-full border border-gx-border bg-gx-surface px-2.5 py-1 text-[10px] text-gx-muted hover:text-gx-text transition"
+            className="flex items-center gap-1 rounded-full border border-border bg-card px-2.5 py-1 text-[10px] text-muted-foreground hover:text-foreground transition"
           >
             <ChevronDown size={10} /> Jump to bottom
-          </button>
+          </Button>
         </div>
       )}
     </div>
@@ -293,26 +319,28 @@ function EventCard({
     return (
       <div className={clsx("flex gap-2", isLatest && "animate-pulse-subtle")}>
         <div className="mt-0.5 shrink-0">
-          <div className="flex h-6 w-6 items-center justify-center rounded-full bg-gx-accent/15">
-            <Bot size={12} className="text-gx-accent" />
+          <div className="flex h-6 w-6 items-center justify-center rounded-full bg-primary/15">
+            <Bot size={12} className="text-primary" />
           </div>
         </div>
         <div className="min-w-0 flex-1">
-          <div className="rounded-lg rounded-tl-sm bg-gx-surface border border-gx-border/50 px-3 py-2">
-            <p className="text-xs text-gx-text whitespace-pre-wrap break-words leading-relaxed">
+          <div className="rounded-lg rounded-tl-sm bg-card border border-border/50 px-3 py-2">
+            <p className="text-xs text-foreground whitespace-pre-wrap break-words leading-relaxed">
               {event.content?.slice(0, 300) ?? ""}
               {event.content && event.content.length > 300 && (
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
                   onClick={onToggle}
-                  className="ml-1 text-gx-accent hover:underline"
+                  className="ml-1 text-primary hover:underline"
                 >
                   {expanded ? "show less" : "…more"}
-                </button>
+                </Button>
               )}
             </p>
             {expanded && event.content && event.content.length > 300 && (
-              <p className="mt-1 text-xs text-gx-text whitespace-pre-wrap break-words leading-relaxed">
+              <p className="mt-1 text-xs text-foreground whitespace-pre-wrap break-words leading-relaxed">
                 {event.content.slice(300)}
               </p>
             )}
@@ -323,7 +351,9 @@ function EventCard({
                 {event.agentRole ?? event.agentId.slice(0, 6)}
               </span>
             )}
-            <span className="text-[9px] text-gx-muted">{formatRelativeTime(event.timestamp)}</span>
+            <span className="text-[9px] text-muted-foreground">
+              {formatRelativeTime(event.timestamp)}
+            </span>
           </div>
         </div>
       </div>
@@ -334,24 +364,28 @@ function EventCard({
   if (category === "thinking") {
     return (
       <div className="group">
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={onToggle}
-          className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition hover:bg-gx-surface"
+          className="justify-start flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition hover:bg-card"
           aria-expanded={expanded}
         >
-          <Brain size={13} className="shrink-0 text-gx-thinking/80" />
-          <span className="min-w-0 flex-1 truncate text-[11px] text-gx-muted italic">
+          <Brain size={13} className="shrink-0 text-thinking/80" />
+          <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground italic">
             {expanded ? "Thinking…" : (event.content?.slice(0, 80) ?? "Thinking…")}
           </span>
-          <span className="shrink-0 text-[9px] text-gx-muted">{formatRelativeTime(event.timestamp)}</span>
-          <span className="shrink-0 text-gx-muted">
+          <span className="shrink-0 text-[9px] text-muted-foreground">
+            {formatRelativeTime(event.timestamp)}
+          </span>
+          <span className="shrink-0 text-muted-foreground">
             {expanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
           </span>
-        </button>
+        </Button>
         {expanded && event.content && (
-          <div className="ml-7 mt-1 rounded-md border border-gx-border/30 bg-gx-bg-sub px-3 py-2">
-            <p className="text-[11px] text-gx-muted italic whitespace-pre-wrap leading-relaxed">
+          <div className="ml-7 mt-1 rounded-md border border-border/30 bg-background px-3 py-2">
+            <p className="text-[11px] text-muted-foreground italic whitespace-pre-wrap leading-relaxed">
               {event.content}
             </p>
           </div>
@@ -363,12 +397,14 @@ function EventCard({
   // Done events render as a green success card
   if (category === "done") {
     return (
-      <div className="flex items-center gap-2 rounded-md border border-gx-success/25 bg-gx-success/5 px-3 py-2">
-        <CheckCircle2 size={14} className="shrink-0 text-gx-success" />
-        <span className="min-w-0 flex-1 text-xs text-gx-success font-medium">
+      <div className="flex items-center gap-2 rounded-md border border-success/25 bg-success/5 px-3 py-2">
+        <CheckCircle2 size={14} className="shrink-0 text-success" />
+        <span className="min-w-0 flex-1 text-xs text-success font-medium">
           {event.content ?? "Agent completed"}
         </span>
-        <span className="shrink-0 text-[9px] text-gx-muted">{formatRelativeTime(event.timestamp)}</span>
+        <span className="shrink-0 text-[9px] text-muted-foreground">
+          {formatRelativeTime(event.timestamp)}
+        </span>
       </div>
     );
   }
@@ -376,25 +412,29 @@ function EventCard({
   // Error events render as red alert cards
   if (category === "error") {
     return (
-      <div className="rounded-md border border-gx-error/30 bg-gx-error/5 px-3 py-2">
+      <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2">
         <div className="flex items-center gap-2">
-          <AlertCircle size={14} className="shrink-0 text-gx-error" />
-          <span className="min-w-0 flex-1 truncate text-xs text-gx-error font-medium">
+          <AlertCircle size={14} className="shrink-0 text-destructive" />
+          <span className="min-w-0 flex-1 truncate text-xs text-destructive font-medium">
             {event.error ?? event.content ?? "Error"}
           </span>
-          <span className="shrink-0 text-[9px] text-gx-muted">{formatRelativeTime(event.timestamp)}</span>
+          <span className="shrink-0 text-[9px] text-muted-foreground">
+            {formatRelativeTime(event.timestamp)}
+          </span>
         </div>
         {(event.error ?? event.content ?? "").length > 80 && (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={onToggle}
-            className="mt-1 ml-6 text-[10px] text-gx-error/80 hover:text-gx-error transition"
+            className="mt-1 ml-6 text-[10px] text-destructive/80 hover:text-destructive transition"
           >
             {expanded ? "Hide details" : "Show details"}
-          </button>
+          </Button>
         )}
         {expanded && (
-          <p className="mt-2 ml-6 text-[11px] text-gx-error/90 whitespace-pre-wrap">
+          <p className="mt-2 ml-6 text-[11px] text-destructive/90 whitespace-pre-wrap">
             {event.error ?? event.content}
           </p>
         )}
@@ -407,51 +447,49 @@ function EventCard({
     <div
       className={clsx(
         "rounded-md border px-3 py-2 transition",
-        isLatest ? "border-gx-accent/20 bg-gx-accent/5" : "border-gx-border/40 bg-gx-bg",
+        isLatest ? "border-primary/20 bg-primary/5" : "border-border/40 bg-background",
       )}
     >
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={hasExpandableContent ? onToggle : undefined}
-        className="flex w-full items-center gap-2.5 text-left"
+        className="justify-start flex w-full items-center gap-2.5 text-left"
         aria-expanded={hasExpandableContent ? expanded : undefined}
       >
-        {/* Colored icon */}
+        {/* Multi-agent label */}
         <div className={clsx("flex h-6 w-6 shrink-0 items-center justify-center rounded", bgColor)}>
           {icon}
         </div>
 
-        {/* Multi-agent label */}
+        {/* One-line summary */}
         {event.agentId && (
-          <span className={clsx("shrink-0 text-[9px] font-medium rounded px-1 py-0.5 bg-gx-surface", agentColor)}>
+          <span className={clsx("shrink-0 text-[9px] font-medium rounded px-1 py-0.5 bg-card", agentColor)}>
             {event.agentRole ?? event.agentId.slice(0, 6)}
           </span>
         )}
 
-        {/* One-line summary */}
-        <span className="min-w-0 flex-1 truncate text-[11px] text-gx-text">
+        {/* Timestamp */}
+        <span className="min-w-0 flex-1 truncate text-[11px] text-foreground">
           {label}
         </span>
 
-        {/* Timestamp */}
-        <span className="shrink-0 text-[9px] text-gx-muted">
+        {/* Expand indicator */}
+        <span className="shrink-0 text-[9px] text-muted-foreground">
           {formatRelativeTime(event.timestamp)}
         </span>
 
-        {/* Expand indicator */}
+        {/* Expandable detail */}
         {hasExpandableContent && (
-          <span className="shrink-0 text-gx-muted">
+          <span className="shrink-0 text-muted-foreground">
             {expanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
           </span>
         )}
-      </button>
+      </Button>
 
       {/* Expandable detail */}
-      {expanded && detail && (
-        <div className="mt-2 ml-8">
-          {detail}
-        </div>
-      )}
+      {expanded && detail && <div className="mt-2 ml-8">{detail}</div>}
     </div>
   );
 }
@@ -465,68 +503,71 @@ function getEventDisplay(
   switch (category) {
     case "file_read":
       return {
-        icon: <FileText size={12} className="text-gx-info" />,
-        bgColor: "bg-gx-info/10",
+        icon: <FileText size={12} className="text-info" />,
+        bgColor: "bg-info/10",
         label: `Read ${extractPath(event)}`,
         detail: null,
       };
 
     case "file_edit":
       return {
-        icon: <FilePen size={12} className="text-gx-success" />,
-        bgColor: "bg-gx-success/10",
+        icon: <FilePen size={12} className="text-success" />,
+        bgColor: "bg-success/10",
         label: `Edited ${extractPath(event)}`,
         detail: event.diff ? <MiniDiff diff={event.diff} /> : null,
       };
 
     case "command":
       return {
-        icon: <Terminal size={12} className="text-gx-warn" />,
-        bgColor: "bg-gx-warn/10",
+        icon: <Terminal size={12} className="text-warning" />,
+        bgColor: "bg-warning/10",
         label: `Ran: ${event.command ?? "command"}${event.exitCode != null && event.exitCode !== 0 ? ` (exit ${event.exitCode})` : ""}`,
         detail: <CommandOutput event={event} />,
       };
 
     case "search":
       return {
-        icon: <Search size={12} className="text-gx-thinking" />,
-        bgColor: "bg-gx-thinking/10",
+        icon: <Search size={12} className="text-thinking" />,
+        bgColor: "bg-thinking/10",
         label: `Searched for '${extractSearchPattern(event)}'`,
         detail: null,
       };
 
     case "done":
       return {
-        icon: <CheckCircle2 size={12} className="text-gx-success" />,
-        bgColor: "bg-gx-success/10",
+        icon: <CheckCircle2 size={12} className="text-success" />,
+        bgColor: "bg-success/10",
         label: event.content ?? "Agent completed",
         detail: null,
       };
 
     case "error":
       return {
-        icon: <AlertCircle size={12} className="text-gx-error" />,
-        bgColor: "bg-gx-error/10",
+        icon: <AlertCircle size={12} className="text-destructive" />,
+        bgColor: "bg-destructive/10",
         label: event.error ?? event.content ?? "Error",
         detail: null,
       };
 
     case "thinking":
       return {
-        icon: <Brain size={12} className="text-gx-thinking/80" />,
-        bgColor: "bg-gx-thinking/10",
+        icon: <Brain size={12} className="text-thinking/80" />,
+        bgColor: "bg-thinking/10",
         label: event.content?.slice(0, 80) ?? "Thinking…",
         detail: null,
       };
 
     default:
       return {
-        icon: <MessageSquare size={12} className="text-gx-muted" />,
-        bgColor: "bg-gx-surface",
+        icon: <MessageSquare size={12} className="text-muted-foreground" />,
+        bgColor: "bg-card",
         label: event.content?.slice(0, 100) ?? "Event",
-        detail: event.content && event.content.length > 100 ? (
-          <p className="text-[11px] text-gx-text whitespace-pre-wrap">{event.content}</p>
-        ) : null,
+        detail:
+          event.content && event.content.length > 100 ? (
+            <p className="text-[11px] text-foreground whitespace-pre-wrap">
+              {event.content}
+            </p>
+          ) : null,
       };
   }
 }
@@ -560,15 +601,15 @@ function MiniDiff({ diff }: { diff: string }) {
   const { lines, truncated } = truncateLines(diff, expanded ? Infinity : 10);
 
   return (
-    <div className="rounded border border-gx-border/50 bg-gx-bg-sub overflow-hidden">
+    <div className="rounded border border-border/50 bg-background overflow-hidden">
       <pre className="overflow-x-auto p-2 text-[10px] leading-relaxed font-mono">
         {lines.map((line, i) => (
           <div
             key={i}
             className={clsx(
-              line.startsWith("+") && !line.startsWith("+++") && "text-gx-success bg-gx-success/5",
-              line.startsWith("-") && !line.startsWith("---") && "text-gx-error bg-gx-error/5",
-              line.startsWith("@@") && "text-gx-info",
+              line.startsWith("+") && !line.startsWith("+++") && "text-success bg-success/5",
+              line.startsWith("-") && !line.startsWith("---") && "text-destructive bg-destructive/5",
+              line.startsWith("@@") && "text-info",
             )}
           >
             {line}
@@ -576,13 +617,15 @@ function MiniDiff({ diff }: { diff: string }) {
         ))}
       </pre>
       {truncated && !expanded && (
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={() => setExpanded(true)}
-          className="w-full border-t border-gx-border/50 px-2 py-1 text-[10px] text-gx-muted hover:text-gx-text transition text-center"
+          className="w-full border-t border-border/50 px-2 py-1 text-[10px] text-muted-foreground hover:text-foreground transition text-center"
         >
           Show full diff…
-        </button>
+        </Button>
       )}
     </div>
   );
@@ -596,7 +639,7 @@ function CommandOutput({ event }: { event: AgentEvent }) {
 
   if (!output) {
     return event.exitCode != null ? (
-      <span className={clsx("text-[10px]", event.exitCode === 0 ? "text-gx-success" : "text-gx-error")}>
+      <span className={clsx("text-[10px]", event.exitCode === 0 ? "text-success" : "text-destructive")}>
         Exit code: {event.exitCode}
       </span>
     ) : null;
@@ -605,25 +648,27 @@ function CommandOutput({ event }: { event: AgentEvent }) {
   const { lines, truncated } = truncateLines(output, expanded ? Infinity : 20, true);
 
   return (
-    <div className="rounded border border-gx-border/50 bg-gx-bg-sub overflow-hidden">
+    <div className="rounded border border-border/50 bg-background overflow-hidden">
       {event.exitCode != null && (
         <div className={clsx(
-          "border-b border-gx-border/50 px-2 py-1 text-[10px]",
-          event.exitCode === 0 ? "text-gx-success" : "text-gx-error",
+          "border-b border-border/50 px-2 py-1 text-[10px]",
+          event.exitCode === 0 ? "text-success" : "text-destructive",
         )}>
           Exit code: {event.exitCode}
         </div>
       )}
       {truncated && !expanded && (
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={() => setExpanded(true)}
-          className="w-full border-b border-gx-border/50 px-2 py-1 text-[10px] text-gx-muted hover:text-gx-text transition text-center"
+          className="w-full border-b border-border/50 px-2 py-1 text-[10px] text-muted-foreground hover:text-foreground transition text-center"
         >
           Show full output ({output.split("\n").length} lines)…
-        </button>
+        </Button>
       )}
-      <pre className="overflow-x-auto p-2 text-[10px] leading-relaxed font-mono text-gx-muted">
+      <pre className="overflow-x-auto p-2 text-[10px] leading-relaxed font-mono text-muted-foreground">
         {lines.join("\n")}
       </pre>
     </div>

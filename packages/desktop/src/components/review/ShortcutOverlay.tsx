@@ -1,4 +1,5 @@
-import { useCallback, useEffect, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Keyboard, X } from "lucide-react";
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -59,76 +60,55 @@ const SHORTCUT_CATEGORIES: ShortcutCategory[] = [
  */
 export function ShortcutOverlay({ visible, onClose }: ShortcutOverlayProps) {
   // Close on `?` or Escape pressed anywhere in the document.
-  useEffect(() => {
-    if (!visible) return;
-
-    function handleKeyDown(e: globalThis.KeyboardEvent) {
-      if (e.key === "?" || e.key === "Escape") {
-        e.preventDefault();
-        onClose();
-      }
-    }
-
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [visible, onClose]);
-
-  const handleBackdropClick = useCallback(() => {
-    onClose();
-  }, [onClose]);
-
-  const handlePanelKeyDown = useCallback(
-    (e: ReactKeyboardEvent<HTMLDivElement>) => {
-      // Prevent keydown from propagating to the navigator context.
-      e.stopPropagation();
-    },
-    [],
-  );
 
   if (!visible) return null;
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="shortcut-overlay-title"
+    <Dialog
+      open
+      onOpenChange={(open) => {
+      if (!open) onClose();
+      }}
     >
       {/* Backdrop */}
-      <div
-        className="absolute inset-0 bg-black/60"
-        onClick={handleBackdropClick}
-        aria-hidden="true"
-      />
 
       {/* Panel */}
-      <div
-        className="relative z-10 w-full max-w-md rounded-lg border border-gx-border bg-gx-surface shadow-xl"
-        onKeyDown={handlePanelKeyDown}
+      <DialogContent
+        aria-describedby={undefined}
+        showCloseButton={false}
+        className={
+          "w-full max-w-md rounded-lg border border-border bg-card shadow-xl" +
+          " p-0 gap-0"
+        }
+        onKeyDown={(event) => {
+          if (event.key === "?") onClose();
+      }}
       >
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-gx-border px-4 py-3">
+        <div className="flex items-center justify-between border-b border-border px-4 py-3">
           <div className="flex items-center gap-2">
-            <Keyboard size={14} className="text-gx-muted" />
-            <h2 id="shortcut-overlay-title" className="text-sm font-semibold text-gx-text">
+            <Keyboard size={14} className="text-muted-foreground" />
+            <DialogTitle className="text-sm font-semibold text-foreground">
               Keyboard Shortcuts
-            </h2>
+            </DialogTitle>
           </div>
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
-            className="rounded p-1 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+            className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
             onClick={onClose}
             aria-label="Close shortcuts overlay"
           >
             <X size={14} />
-          </button>
+          </Button>
         </div>
 
         {/* Content */}
         <div className="px-4 py-3 space-y-4">
           {SHORTCUT_CATEGORIES.map((category) => (
             <div key={category.title}>
-              <h3 className="mb-2 text-[11px] font-medium uppercase tracking-wide text-gx-muted">
+              <h3 className="mb-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
                 {category.title}
               </h3>
               <div className="space-y-1.5">
@@ -137,16 +117,18 @@ export function ShortcutOverlay({ visible, onClose }: ShortcutOverlayProps) {
                     key={shortcut.description}
                     className="flex items-center justify-between gap-3"
                   >
-                    <span className="text-[11px] text-gx-text/80">
+                    <span className="text-[11px] text-foreground/80">
                       {shortcut.description}
                     </span>
                     <div className="flex shrink-0 items-center gap-1">
                       {shortcut.keys.map((key, idx) => (
                         <span key={idx}>
                           {idx > 0 && (
-                            <span className="mx-0.5 text-[10px] text-gx-muted">/</span>
+                            <span className="mx-0.5 text-[10px] text-muted-foreground">
+                              /
+                            </span>
                           )}
-                          <kbd className="inline-block min-w-[20px] rounded border border-gx-border bg-gx-bg-sub px-1.5 py-0.5 text-center font-mono text-[10px] text-gx-text">
+                          <kbd className="inline-block min-w-[20px] rounded border border-border bg-background px-1.5 py-0.5 text-center font-mono text-[10px] text-foreground">
                             {key}
                           </kbd>
                         </span>
@@ -160,12 +142,20 @@ export function ShortcutOverlay({ visible, onClose }: ShortcutOverlayProps) {
         </div>
 
         {/* Footer hint */}
-        <div className="border-t border-gx-border px-4 py-2">
-          <p className="text-[9px] text-gx-muted">
-            Press <kbd className="rounded border border-gx-border bg-gx-bg-sub px-1 py-0.5 font-mono text-[9px]">?</kbd> or <kbd className="rounded border border-gx-border bg-gx-bg-sub px-1 py-0.5 font-mono text-[9px]">Esc</kbd> to close
+        <div className="border-t border-border px-4 py-2">
+          <p className="text-[9px] text-muted-foreground">
+            Press{" "}
+            <kbd className="rounded border border-border bg-background px-1 py-0.5 font-mono text-[9px]">
+              ?
+            </kbd>{" "}
+            or{" "}
+            <kbd className="rounded border border-border bg-background px-1 py-0.5 font-mono text-[9px]">
+              Esc
+            </kbd>{" "}
+            to close
           </p>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

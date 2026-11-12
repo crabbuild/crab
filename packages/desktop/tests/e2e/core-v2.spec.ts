@@ -1,3 +1,4 @@
+import { chooseSelect } from "../helpers/select";
 import { test, expect, _electron as electron, type ElectronApplication, type Page } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, realpathSync, rmSync, cpSync } from "node:fs";
@@ -165,7 +166,10 @@ test("workflow sidebar manages files, flushes edits, and runs cross-file depende
     await select("train.workflow.yaml");
     await page.locator('.react-flow__node[data-id="fit"]').click();
     const inspector = page.getByRole("complementary", { name: "Stage properties", exact: true });
-    await inspector.getByRole("combobox", { name: "Use a workflow output", exact: true }).selectOption("features.txt");
+    await chooseSelect(
+      inspector.getByRole("combobox", { name: "Use a workflow output", exact: true }),
+      "features.txt",
+    );
     await inspector.getByRole("textbox", { name: "Stage command", exact: true }).fill(JSON.stringify(["node", "-e", "const fs=require('fs'); setTimeout(() => fs.writeFileSync('model.txt', fs.readFileSync('features.txt', 'utf8') + 'trained'), 2000)"]));
     // Switch immediately, before the autosave debounce. Navigation must flush.
     await select("prepare.workflow.yaml");
@@ -578,7 +582,7 @@ for (const deletion of ["before-launch", "after-launch"] as const) {
       await terminal.locator(".xterm-helper-textarea:visible").first().focus();
       await page.keyboard.type(`node -e "require('fs').writeFileSync(process.argv[1],process.cwd())" "${proof}"`);
       await page.keyboard.press("Enter");
-      await expect.poll(() => existsSync(proof) ? readFileSync(proof, "utf8") : "").toBe(realpathSync(repository));
+      await expect.poll(() => (existsSync(proof) ? readFileSync(proof, "utf8") : "")).toBe(realpathSync(repository));
       expect(JSON.parse(readFileSync(pidFile, "utf8")).pid).not.toBe(previousPid);
       await page.screenshot({ path: test.info().outputPath("terminal-runtime-recovered.png") });
     } finally {
@@ -627,7 +631,7 @@ test("terminal restore is isolated by profile and repository", async () => {
     const proof = path.join(root, "working-directory.txt");
     await page.keyboard.type(`node -e "require('fs').writeFileSync(process.argv[1],process.cwd())" "${proof}"`);
     await page.keyboard.press("Enter");
-    await expect.poll(() => existsSync(proof) ? readFileSync(proof, "utf8") : "").toBe(realpathSync(repository));
+    await expect.poll(() => (existsSync(proof) ? readFileSync(proof, "utf8") : "")).toBe(realpathSync(repository));
     await page.screenshot({ path: test.info().outputPath("terminal-isolation.png") });
     await application.close();
     application = await electron.launch({ executablePath: packagedExecutable(), args: [`--user-data-dir=${path.join(root, "profile-b")}`], env });

@@ -1,13 +1,17 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import clsx from "clsx";
 import { AlertTriangle, FileCode2, GitCommitHorizontal, HardDrive, Loader2, Sparkles } from "lucide-react";
-import { OpenRepo } from "../state";
-import { DirEntry, rpc } from "../ipc";
-import { useSetting, useSettings } from "../settings";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { ConventionalSubject } from "../components/ConventionalSubject";
-import { formatBytes } from "../lib/format";
 import { IssueSuggestions } from "../components/IssueSuggestions";
+import { DirEntry, rpc } from "../ipc";
 import { getConfiguredGenerator } from "../lib/commit-message-generator";
+import { formatBytes } from "../lib/format";
+import { useSetting, useSettings } from "../settings";
+import { OpenRepo } from "../state";
 // Side-effect imports: register generators on load
 import "../lib/local-llama-generator";
 import "../lib/openai-compatible-generator";
@@ -341,7 +345,7 @@ export function CommitComposer({ repo, hasStaged, stagedPaths, onCommitSuccess }
   }, [generator, suggesting, repo.repo_id, repo.path, repo.url]);
 
   return (
-    <div className="flex min-w-0 shrink-0 flex-col border-t border-gx-border bg-gx-surface px-3 py-2">
+    <div className="flex min-w-0 shrink-0 flex-col border-t border-border bg-card px-3 py-2">
       {conventionalCommits ? (
         <ConventionalSubject
           value={draft.subject}
@@ -350,10 +354,10 @@ export function CommitComposer({ repo, hasStaged, stagedPaths, onCommitSuccess }
         />
       ) : (
         <div className="relative">
-          <input
+          <Input
             ref={subjectRef}
             type="text"
-            className="w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-xs text-gx-text placeholder:text-gx-muted focus:border-gx-accent focus-visible:outline-none"
+            className="w-full rounded border border-border bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:border-primary focus-visible:outline-none"
             placeholder="Commit message"
             value={draft.subject}
             onChange={(e) => {
@@ -374,9 +378,9 @@ export function CommitComposer({ repo, hasStaged, stagedPaths, onCommitSuccess }
         </div>
       )}
       <div className="relative">
-        <textarea
+        <Textarea
           ref={bodyRef}
-          className="mt-1 w-full resize-none rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-xs text-gx-text placeholder:text-gx-muted focus:border-gx-accent focus-visible:outline-none"
+          className="mt-1 w-full resize-none rounded border border-border bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:border-primary focus-visible:outline-none"
           placeholder="Extended description…"
           rows={3}
           value={draft.body}
@@ -398,31 +402,29 @@ export function CommitComposer({ repo, hasStaged, stagedPaths, onCommitSuccess }
       </div>
       <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-2">
         <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5">
-          <label className="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[11px] text-gx-muted">
-            <input
-              type="checkbox"
+          <label className="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[11px] text-muted-foreground">
+            <Checkbox
               checked={draft.amend}
-              onChange={() => dispatch({ type: "toggle-amend" })}
-              className="accent-gx-accent"
+              onCheckedChange={() => dispatch({ type: "toggle-amend" })}
+              className="accent-primary"
             />
             Amend
           </label>
           <label
-            className="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[11px] text-gx-muted"
+            className="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[11px] text-muted-foreground"
             title="Add Signed-off-by trailer"
           >
-            <input
-              type="checkbox"
+            <Checkbox
               checked={draft.signOff}
-              onChange={() => dispatch({ type: "toggle-sign-off" })}
-              className="accent-gx-accent"
+              onCheckedChange={() => dispatch({ type: "toggle-sign-off" })}
+              className="accent-primary"
             />
             Sign-off
           </label>
           <label
             className={clsx(
               "flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[11px]",
-              signingAvailable ? "text-gx-muted" : "text-gx-muted/50 cursor-not-allowed",
+              signingAvailable ? "text-muted-foreground" : "text-muted-foreground/50 cursor-not-allowed",
             )}
             title={
               signingAvailable
@@ -430,19 +432,20 @@ export function CommitComposer({ repo, hasStaged, stagedPaths, onCommitSuccess }
                 : "No signing key configured (set user.signingkey in git config)"
             }
           >
-            <input
-              type="checkbox"
+            <Checkbox
               checked={draft.sign}
               disabled={!signingAvailable}
-              onChange={() => dispatch({ type: "toggle-sign" })}
-              className="accent-gx-accent"
+              onCheckedChange={() => dispatch({ type: "toggle-sign" })}
+              className="accent-primary"
             />
             Sign
           </label>
         </div>
         <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-2">
           {generator && (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               disabled={suggesting || !hasStaged}
               onClick={() => void handleSuggest()}
@@ -450,8 +453,8 @@ export function CommitComposer({ repo, hasStaged, stagedPaths, onCommitSuccess }
               className={clsx(
                 "flex shrink-0 items-center gap-1 whitespace-nowrap rounded px-2 py-1 text-xs transition",
                 suggesting || !hasStaged
-                  ? "cursor-not-allowed text-gx-muted/50"
-                  : "text-gx-muted hover:bg-gx-bg-sub hover:text-gx-text",
+                  ? "cursor-not-allowed text-muted-foreground/50"
+                  : "text-muted-foreground hover:bg-background hover:text-foreground",
               )}
               aria-label="Suggest commit message"
             >
@@ -461,9 +464,11 @@ export function CommitComposer({ repo, hasStaged, stagedPaths, onCommitSuccess }
                 <Sparkles size={12} />
               )}
               Suggest
-            </button>
+            </Button>
           )}
-          <button
+          <Button
+            variant="default"
+            size="compact"
             type="button"
             disabled={commitDisabled}
             onClick={() => void handleCommit()}
@@ -471,8 +476,8 @@ export function CommitComposer({ repo, hasStaged, stagedPaths, onCommitSuccess }
             className={clsx(
               "flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded px-3 py-1 text-xs font-medium transition",
               commitDisabled
-                ? "cursor-not-allowed bg-gx-accent/30 text-gx-muted"
-                : "bg-gx-accent text-white hover:bg-gx-accent/80",
+                ? "cursor-not-allowed bg-primary/30 text-muted-foreground"
+                : "bg-primary text-primary-foreground hover:bg-primary/80",
             )}
             aria-label="Commit staged changes"
           >
@@ -482,38 +487,42 @@ export function CommitComposer({ repo, hasStaged, stagedPaths, onCommitSuccess }
               <GitCommitHorizontal size={12} />
             )}
             {draft.amend ? "Amend" : "Commit"}
-          </button>
+          </Button>
         </div>
       </div>
       {/* Notebook output stripping indicator */}
       {stagedNotebooks.length > 0 && stripNotebookOutputs && (
-        <div className="mt-1.5 flex items-center gap-1.5 rounded bg-gx-accent/10 px-2 py-1 text-[11px] text-gx-accent">
+        <div className="mt-1.5 flex items-center gap-1.5 rounded bg-primary/10 px-2 py-1 text-[11px] text-primary">
           <FileCode2 size={11} />
-          Outputs will be stripped from {stagedNotebooks.length} notebook{stagedNotebooks.length > 1 ? "s" : ""}
+          Outputs will be stripped from {stagedNotebooks.length} notebook
+          {stagedNotebooks.length > 1 ? "s" : ""}
         </div>
       )}
       {stagedNotebooks.length > 0 && !stripNotebookOutputs && (
-        <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-gx-muted">
+        <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-muted-foreground">
           <FileCode2 size={11} />
           <span>Tip: </span>
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
-            className="underline decoration-dotted hover:text-gx-text"
+            className="underline decoration-dotted hover:text-foreground"
             onClick={() => update("stripNotebookOutputs", true)}
           >
             Strip notebook outputs
-          </button>
+          </Button>
           <span> before commit</span>
         </div>
       )}
       {/* Large-file pre-commit warning */}
       {largeFiles.length > 0 && (
-        <div className="mt-1.5 rounded border border-gx-warn/40 bg-gx-warn/10 px-2 py-1.5">
-          <div className="flex items-center gap-1.5 text-[11px] font-medium text-gx-warn">
+        <div className="mt-1.5 rounded border border-warning/40 bg-warning/10 px-2 py-1.5">
+          <div className="flex items-center gap-1.5 text-[11px] font-medium text-warning">
             <HardDrive size={11} />
-            {largeFiles.length} file{largeFiles.length > 1 ? "s" : ""} &gt; {largeFileThresholdMb} MB not tracked by Crab
+            {largeFiles.length} file{largeFiles.length > 1 ? "s" : ""} &gt;{" "}
+            {largeFileThresholdMb} MB not tracked by Crab
           </div>
-          <ul className="mt-1 space-y-0.5 text-[10px] text-gx-warn/80">
+          <ul className="mt-1 space-y-0.5 text-[10px] text-warning/80">
             {largeFiles.map((f) => (
               <li key={f.path} className="truncate" title={f.path}>
                 {f.path.split("/").pop()} ({formatBytes(f.size)})
@@ -521,34 +530,40 @@ export function CommitComposer({ repo, hasStaged, stagedPaths, onCommitSuccess }
             ))}
           </ul>
           <div className="mt-1.5 flex items-center gap-2">
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               disabled={trackingInProgress}
               onClick={() => void handleTrackWithCrab()}
-              className="rounded bg-gx-warn/15 px-2 py-0.5 text-[10px] font-medium text-gx-warn transition hover:bg-gx-warn/25 disabled:opacity-50"
+              className="rounded bg-warning/15 px-2 py-0.5 text-[10px] font-medium text-warning transition hover:bg-warning/25 disabled:opacity-50"
             >
               {trackingInProgress ? "Tracking…" : "Track with Crab"}
-            </button>
-            <span className="text-[10px] text-gx-warn/60">or commit anyway</span>
+            </Button>
+            <span className="text-[10px] text-warning/60">
+              or commit anyway
+            </span>
           </div>
         </div>
       )}
       {toast && (
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={() => setToast(null)}
           className={clsx(
             "mt-2 w-full rounded border px-2 py-1 text-left text-[11px] transition",
             toast.kind === "error"
-              ? "border-gx-error/40 bg-gx-error/10 text-gx-error"
-              : "border-gx-border bg-gx-bg-sub text-gx-text",
+              ? "border-destructive/40 bg-destructive/10 text-destructive"
+              : "border-border bg-background text-foreground",
           )}
         >
           <span className="inline-flex items-center gap-1">
             {toast.kind === "error" && <AlertTriangle size={10} />}
             {toast.text}
           </span>
-        </button>
+        </Button>
       )}
     </div>
   );

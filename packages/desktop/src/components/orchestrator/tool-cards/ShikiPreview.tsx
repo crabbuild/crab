@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Renders a code snippet with Shiki syntax highlighting.
  *
@@ -16,11 +17,11 @@
  * and anywhere else in the chat surface that needs themed code.
  */
 
-import { useEffect, useRef, useState } from "react";
 import clsx from "clsx";
+import { useEffect, useRef, useState } from "react";
 import { useEffectiveTheme } from "../../../hooks/useEffectiveTheme";
-import { highlight } from "../../../lib/shiki-highlight";
 import { languageForPath } from "../../../lib/codex-diff";
+import { highlight } from "../../../lib/shiki-highlight";
 
 interface Props {
   /** Source code to highlight. */
@@ -87,18 +88,20 @@ export function ShikiPreview({ code, path, lang, maxLines = DEFAULT_MAX_LINES, c
         />
       ) : (
         // Plain-text placeholder shown while Shiki is loading.
-        <pre className="font-mono text-[11px] leading-[1.55] text-gx-text/70 whitespace-pre overflow-auto px-2.5 py-2">
+        <pre className="font-mono text-[11px] leading-[1.55] text-foreground/70 whitespace-pre overflow-auto px-2.5 py-2">
           {displayCode}
         </pre>
       )}
       {truncated && (
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={() => setShowAll(true)}
-          className="mt-1 self-start text-[9px] text-gx-accent hover:text-gx-accent-hover transition px-2.5 pb-1"
+          className="mt-1 self-start text-[9px] text-primary hover:text-primary-hover transition px-2.5 pb-1"
         >
           Show {hiddenLines} more lines…
-        </button>
+        </Button>
       )}
     </div>
   );

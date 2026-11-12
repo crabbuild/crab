@@ -1,6 +1,7 @@
-import { useCallback, useEffect } from "react";
+import { Button } from "@/components/ui/button";
 import clsx from "clsx";
 import { X } from "lucide-react";
+import { useCallback, useEffect } from "react";
 import type { WorkspaceRepoEntry } from "../../state";
 
 export interface TabBarProps {
@@ -38,7 +39,7 @@ export function TabBar({ tabs, activeRelativePath, onSelect, onClose }: TabBarPr
 
   return (
     <div
-      className="flex h-[30px] shrink-0 items-center gap-px overflow-x-auto border-b border-gx-border bg-gx-bg-sub px-1"
+      className="flex h-[30px] shrink-0 items-center gap-px overflow-x-auto border-b border-border bg-background px-1"
       role="tablist"
       aria-label="Workspace repo tabs"
     >
@@ -54,8 +55,8 @@ export function TabBar({ tabs, activeRelativePath, onSelect, onClose }: TabBarPr
             className={clsx(
               "group relative flex h-[26px] max-w-[180px] shrink-0 cursor-pointer items-center gap-1 rounded px-2 text-xs transition select-none",
               isActive
-                ? "bg-gx-bg text-gx-text shadow-sm"
-                : "text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
+                ? "bg-background text-foreground shadow-sm"
+                : "text-muted-foreground hover:bg-accent hover:text-foreground",
             )}
             onClick={() => onSelect(entry.relativePath)}
             onAuxClick={(e) => handleAuxClick(e, entry.relativePath)}
@@ -67,18 +68,20 @@ export function TabBar({ tabs, activeRelativePath, onSelect, onClose }: TabBarPr
             {/* Dirty indicator dot */}
             {isDirty && (
               <span
-                className="h-2 w-2 shrink-0 rounded-full bg-orange-400"
+                className="h-2 w-2 shrink-0 rounded-full bg-warning"
                 title={`${entry.dirtyCount} uncommitted change${entry.dirtyCount === 1 ? "" : "s"}`}
               />
             )}
 
             {/* Close button — visible on hover */}
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className={clsx(
                 "ml-0.5 shrink-0 rounded p-0.5 transition",
                 "opacity-0 group-hover:opacity-100",
-                "hover:bg-gx-surface-hover hover:text-gx-error",
+                "hover:bg-accent hover:text-destructive",
               )}
               onClick={(e) => {
                 e.stopPropagation();
@@ -88,7 +91,7 @@ export function TabBar({ tabs, activeRelativePath, onSelect, onClose }: TabBarPr
               title="Close tab"
             >
               <X size={11} />
-            </button>
+            </Button>
           </div>
         );
       })}

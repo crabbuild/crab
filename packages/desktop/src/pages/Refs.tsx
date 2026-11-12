@@ -18,13 +18,13 @@ export function RefsPage({ repo }: { repo: OpenRepo }) {
 
   if (error) {
     return (
-      <div className="m-4 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-sm text-gx-error">
+      <div className="m-4 rounded border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
         {error}
       </div>
     );
   }
 
-  if (!refs) return <div className="p-4 text-sm text-gx-muted">Loading refs…</div>;
+  if (!refs) return <div className="p-4 text-sm text-muted-foreground">Loading refs…</div>;
 
   const branches = refs.filter((r) => r.kind === "branch");
   const tags = refs.filter((r) => r.kind === "tag");
@@ -43,17 +43,17 @@ function Section({ icon, title, entries }: { icon: React.ReactNode; title: strin
   if (entries.length === 0) return null;
   return (
     <div className="mb-6">
-      <h3 className="mb-2 flex items-center gap-2 text-xs uppercase tracking-wider text-gx-muted">
-        {icon} {title} <span className="text-gx-muted">({entries.length})</span>
+      <h3 className="mb-2 flex items-center gap-2 text-xs uppercase tracking-wider text-muted-foreground">
+        {icon} {title} <span className="text-muted-foreground">({entries.length})</span>
       </h3>
-      <ul className="rounded border border-gx-border">
+      <ul className="rounded border border-border">
         {entries.map((r, i) => (
           <li
             key={r.name}
-            className={`flex items-center justify-between gap-3 px-3 py-2 text-sm ${i > 0 ? "border-t border-gx-border" : ""}`}
+            className={`flex items-center justify-between gap-3 px-3 py-2 text-sm ${i > 0 ? "border-t border-border" : ""}`}
           >
             <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{r.name}</span>
-            <span className="shrink-0 font-mono text-[11px] text-gx-muted">
+            <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
               {r.target.slice(0, 12)}
             </span>
           </li>

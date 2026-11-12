@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { Button } from "@/components/ui/button";
 import clsx from "clsx";
 import {
   AlertCircle,
@@ -16,13 +16,14 @@ import {
   Settings,
   X,
 } from "lucide-react";
-import type { Workspace, WorkspaceRepoEntry } from "../../state";
+import { useEffect, useMemo, useState } from "react";
 import {
   groupWorkspaceRepositories,
   readWorkspaceSidebarState,
   workspaceIdentity,
   workspaceRepoIdentity,
 } from "../../lib/workspace-sidebar";
+import type { Workspace, WorkspaceRepoEntry } from "../../state";
 import { ContextMenu, type MenuItemDef } from "../ContextMenu";
 
 export interface WorkspaceSidebarProps {
@@ -134,15 +135,17 @@ export function WorkspaceSidebar({
   return (
     <section aria-label={`${workspace.name} workspace`}>
       <div
-        className="flex items-center gap-1 rounded px-2 py-1.5 hover:bg-gx-surface-hover/50"
+        className="flex items-center gap-1 rounded px-2 py-1.5 hover:bg-accent/50"
         onContextMenu={(event) => {
           event.preventDefault();
           setMenu({ x: event.clientX, y: event.clientY });
         }}
       >
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
-          className="shrink-0 rounded p-1 text-gx-muted hover:text-gx-text"
+          className="shrink-0 rounded p-1 text-muted-foreground hover:text-foreground"
           aria-label={collapsed ? "Expand workspace" : "Collapse workspace"}
           aria-expanded={!collapsed}
           onClick={() =>
@@ -153,10 +156,12 @@ export function WorkspaceSidebar({
           }
         >
           {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
-          className="min-w-0 flex-1 text-left"
+          className="justify-start min-w-0 flex-1 text-left"
           onClick={onShowDashboard}
           title={
             workspace.kind === "remote"
@@ -164,39 +169,41 @@ export function WorkspaceSidebar({
               : workspace.rootPath
           }
         >
-          <span className="flex items-center gap-1 text-xs font-semibold text-gx-text">
+          <span className="flex items-center gap-1 text-xs font-semibold text-foreground">
             <span className="truncate">{workspace.name}</span>
             {workspace.kind === "remote" && (
-              <Cloud size={11} className="shrink-0 text-gx-accent" />
+              <Cloud size={11} className="shrink-0 text-primary" />
             )}
           </span>
-          <span className="block truncate text-[10px] text-gx-muted">
+          <span className="block truncate text-[10px] text-muted-foreground">
             {workspace.kind === "remote"
               ? `${workspace.profileLabel ?? workspace.profileId}:`
               : ""}
             {workspace.rootPath}
           </span>
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           aria-label={`${workspace.name} workspace actions`}
           aria-haspopup="menu"
           aria-expanded={menu != null}
           title="Workspace actions"
-          className="shrink-0 rounded p-1.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+          className="shrink-0 rounded p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground"
           onClick={(event) => {
             const rect = event.currentTarget.getBoundingClientRect();
             setMenu(menu ? null : { x: rect.left, y: rect.bottom });
           }}
         >
           <MoreHorizontal size={14} />
-        </button>
+        </Button>
       </div>
       {!collapsed &&
         (groups.length ? (
           groups.map((group) => (
             <div key={group.label}>
-              <div className="px-4 pb-1 pt-2 text-[10px] font-medium text-gx-muted">
+              <div className="px-4 pb-1 pt-2 text-[10px] font-medium text-muted-foreground">
                 {group.label}
               </div>
               <ul
@@ -218,7 +225,7 @@ export function WorkspaceSidebar({
                       }
                     />
                     {(children.get(entry.relativePath)?.length ?? 0) > 0 && (
-                      <ul className="ml-3 border-l border-gx-border/40 pl-1.5">
+                      <ul className="ml-3 border-l border-border/40 pl-1.5">
                         {children.get(entry.relativePath)!.map((child) => (
                           <li key={child.relativePath}>
                             <WorkspaceRepoRow
@@ -239,19 +246,21 @@ export function WorkspaceSidebar({
             </div>
           ))
         ) : (
-          <div className="px-4 py-5 text-xs text-gx-muted">
+          <div className="px-4 py-5 text-xs text-muted-foreground">
             {query.trim()
               ? "No matching repositories"
               : "No repositories found"}
             {!query.trim() && onCloneRepository && (
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
-                className="mt-3 flex items-center gap-1 rounded border border-gx-border px-2 py-1.5 hover:text-gx-text"
+                className="mt-3 flex items-center gap-1 rounded border border-border px-2 py-1.5 hover:text-foreground"
                 onClick={onCloneRepository}
               >
                 <Download size={12} />
                 Clone Repository
-              </button>
+              </Button>
             )}
           </div>
         ))}
@@ -317,7 +326,7 @@ function WorkspaceRepoRow({
       <div
         className={clsx(
           "group mb-0.5 flex items-center rounded",
-          isActive ? "bg-gx-accent/15" : "hover:bg-gx-surface-hover",
+          isActive ? "bg-primary/15" : "hover:bg-accent",
         )}
         onContextMenu={(event) => {
           if (!actions.length) return;
@@ -325,10 +334,12 @@ function WorkspaceRepoRow({
           setMenu({ x: event.clientX, y: event.clientY });
         }}
       >
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           aria-current={isActive ? "true" : undefined}
-          className="flex min-w-0 flex-1 items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs focus-visible:outline focus-visible:outline-2 focus-visible:outline-gx-accent"
+          className="justify-start flex min-w-0 flex-1 items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
           title={
             entry.error
               ? `${entry.absolutePath}\nError: ${entry.error}`
@@ -339,18 +350,18 @@ function WorkspaceRepoRow({
           {entry.error ? (
             <AlertCircle
               size={12}
-              className="shrink-0 text-gx-error"
+              className="shrink-0 text-destructive"
               aria-label={entry.error}
             />
           ) : isWorktree ? (
-            <FolderTree size={11} className="shrink-0 text-gx-muted" />
+            <FolderTree size={11} className="shrink-0 text-muted-foreground" />
           ) : null}
           <span className="min-w-0 flex-1">
-            <span className="block truncate font-medium text-gx-text">
+            <span className="block truncate font-medium text-foreground">
               {entry.name}
             </span>
             {isActive && entry.branch && (
-              <span className="mt-0.5 flex items-center gap-1 text-[10px] text-gx-muted">
+              <span className="mt-0.5 flex items-center gap-1 text-[10px] text-muted-foreground">
                 <GitBranch size={10} />
                 <span className="truncate">{entry.branch}</span>
               </span>
@@ -358,7 +369,7 @@ function WorkspaceRepoRow({
           </span>
           {entry.level === 2 && !isActive && (
             <span
-              className="h-1 w-1 shrink-0 rounded-full bg-gx-accent"
+              className="h-1 w-1 shrink-0 rounded-full bg-primary"
               title="Open"
             />
           )}
@@ -366,26 +377,28 @@ function WorkspaceRepoRow({
             <span
               aria-label={changed}
               title={changed}
-              className="shrink-0 rounded bg-gx-surface-hover px-1.5 py-0.5 text-[10px] tabular-nums text-gx-muted"
+              className="shrink-0 rounded bg-accent px-1.5 py-0.5 text-[10px] tabular-nums text-muted-foreground"
             >
               {entry.dirtyCount}
             </span>
           )}
-        </button>
+        </Button>
         {onTogglePin && (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             aria-label={`${pinned ? "Unpin" : "Pin"} ${entry.name}`}
             title={pinned ? "Unpin repository" : "Pin repository"}
             onClick={onTogglePin}
             className={clsx(
-              "mr-1 shrink-0 rounded p-1 text-gx-muted hover:text-gx-text focus-visible:opacity-100",
+              "mr-1 shrink-0 rounded p-1 text-muted-foreground hover:text-foreground focus-visible:opacity-100",
               !pinned &&
                 "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100",
             )}
           >
             <Pin size={11} className={pinned ? "fill-current" : undefined} />
-          </button>
+          </Button>
         )}
       </div>
       {menu && (

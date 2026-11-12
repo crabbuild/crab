@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import clsx from "clsx";
 import {
   AlertTriangle,
@@ -34,16 +35,16 @@ interface ConnectionCardProps {
 function statusColor(status: SshConnectionState["status"] | undefined): string {
   switch (status) {
     case "connected":
-      return "text-green-500 dark:text-green-400";
+      return "text-success text-success";
     case "connecting":
     case "disconnecting":
     case "deploying":
     case "reconnecting":
-      return "text-yellow-500 dark:text-yellow-400";
+      return "text-warning text-warning";
     case "error":
-      return "text-red-500 dark:text-red-400";
+      return "text-destructive text-destructive";
     default:
-      return "text-gray-400 dark:text-gray-500";
+      return "text-muted-foreground text-muted-foreground";
   }
 }
 
@@ -141,12 +142,12 @@ export function ConnectionCard({
   return (
     <div
       className={clsx(
-        "group relative rounded-lg border bg-gx-surface p-4 transition-all",
-        focused && "ring-2 ring-gx-accent ring-offset-1 ring-offset-gx-bg",
-        isConnected && "border-green-500/30 dark:border-green-400/20",
-        status === "error" && "border-red-500/30 dark:border-red-400/20",
-        !isConnected && status !== "error" && "border-gx-border",
-        "hover:border-gx-accent/40 hover:shadow-sm",
+        "group relative rounded-lg border bg-card p-4 transition-all",
+        focused && "ring-2 ring-primary ring-offset-1 ring-offset-background",
+        isConnected && "border-success/30 border-success/20",
+        status === "error" && "border-destructive/30 border-destructive/20",
+        !isConnected && status !== "error" && "border-border",
+        "hover:border-primary/40 hover:shadow-sm",
       )}
       role="article"
       aria-label={`${profile.label} connection - ${statusLabel(status)}`}
@@ -156,13 +157,13 @@ export function ConnectionCard({
         className="absolute left-1 top-1/2 -translate-y-1/2 cursor-grab opacity-0 transition-opacity group-hover:opacity-60"
         aria-hidden="true"
       >
-        <GripVertical size={14} className="text-gx-muted" />
+        <GripVertical size={14} className="text-muted-foreground" />
       </div>
 
       {/* Pin indicator */}
       {profile.pinned && (
         <div className="absolute -top-1.5 right-3" aria-label="Pinned connection">
-          <Pin size={10} className="text-gx-accent" />
+          <Pin size={10} className="text-primary" />
         </div>
       )}
 
@@ -180,10 +181,10 @@ export function ConnectionCard({
         <div className="min-w-0 flex-1">
           {/* Header row */}
           <div className="flex items-center gap-2">
-            <h3 className="truncate text-sm font-semibold text-gx-text">
+            <h3 className="truncate text-sm font-semibold text-foreground">
               {profile.label}
             </h3>
-            <span className="truncate text-xs text-gx-muted">
+            <span className="truncate text-xs text-muted-foreground">
               ({profile.host})
             </span>
             {/* Tags */}
@@ -192,7 +193,7 @@ export function ConnectionCard({
                 {profile.tags.slice(0, 3).map((tag) => (
                   <span
                     key={tag}
-                    className="rounded-full bg-gx-surface-hover px-1.5 py-0.5 text-[10px] text-gx-muted"
+                    className="rounded-full bg-accent px-1.5 py-0.5 text-[10px] text-muted-foreground"
                   >
                     {tag}
                   </span>
@@ -202,7 +203,7 @@ export function ConnectionCard({
           </div>
 
           {/* Status line */}
-          <div className="mt-0.5 flex items-center gap-2 text-xs text-gx-muted">
+          <div className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground">
             <span className={statusColor(status)} role="status" aria-live="polite">
               {statusLabel(status)}
             </span>
@@ -223,7 +224,7 @@ export function ConnectionCard({
             {connectionState?.error && (
               <>
                 <span aria-hidden="true">·</span>
-                <span className="text-red-500 dark:text-red-400">{connectionState.error}</span>
+                <span className="text-destructive text-destructive">{connectionState.error}</span>
               </>
             )}
           </div>
@@ -246,8 +247,8 @@ export function ConnectionCard({
                 className={clsx(
                   "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium",
                   connectionState.healthAlerts.some((a) => a.severity === "critical")
-                    ? "bg-red-500/15 text-red-500 dark:bg-red-400/15 dark:text-red-400"
-                    : "bg-yellow-500/15 text-yellow-600 dark:bg-yellow-400/15 dark:text-yellow-400",
+                    ? "bg-destructive/15 text-destructive bg-destructive/15 text-destructive"
+                    : "bg-warning/15 text-warning bg-warning/15 text-warning",
                 )}
                 title={connectionState.healthAlerts.map((a) => a.message).join("\n")}
               >
@@ -261,19 +262,19 @@ export function ConnectionCard({
 
           {/* Detected agent CLIs (connected only) */}
           {isConnected && connectionState?.detectedAgents && connectionState.detectedAgents.some(a => a.available) && (
-            <div className="mt-1 flex items-center gap-1.5 text-xs text-gx-muted" aria-label="Available agent CLIs">
-              <Bot size={11} className="shrink-0 text-gx-muted" aria-hidden="true" />
+            <div className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground" aria-label="Available agent CLIs">
+              <Bot size={11} className="shrink-0 text-muted-foreground" aria-hidden="true" />
               {connectionState.detectedAgents
                 .filter(a => a.available)
                 .map((agent) => (
                   <span
                     key={agent.name}
-                    className="inline-flex items-center rounded bg-gx-surface-hover px-1.5 py-0.5 text-[10px] font-medium text-gx-text"
+                    className="inline-flex items-center rounded bg-accent px-1.5 py-0.5 text-[10px] font-medium text-foreground"
                     title={agent.version ? `${agent.name} (${agent.version}) at ${agent.path}` : `${agent.name} at ${agent.path}`}
                   >
                     {agent.name}
                     {agent.version && (
-                      <span className="ml-0.5 text-gx-muted">{agent.version}</span>
+                      <span className="ml-0.5 text-muted-foreground">{agent.version}</span>
                     )}
                   </span>
                 ))}
@@ -290,25 +291,25 @@ export function ConnectionCard({
               <span
                 className={clsx(
                   "inline-block h-2 w-2 rounded-full",
-                  connectionState.latencyMs < 50 && "bg-green-500",
-                  connectionState.latencyMs >= 50 && connectionState.latencyMs <= 200 && "bg-yellow-500",
-                  connectionState.latencyMs > 200 && "bg-red-500",
+                  connectionState.latencyMs < 50 && "bg-success",
+                  connectionState.latencyMs >= 50 && connectionState.latencyMs <= 200 && "bg-warning",
+                  connectionState.latencyMs > 200 && "bg-destructive",
                 )}
                 aria-hidden="true"
               />
               <span
                 className={clsx(
                   "font-medium",
-                  connectionState.latencyMs < 50 && "text-green-600 dark:text-green-400",
-                  connectionState.latencyMs >= 50 && connectionState.latencyMs <= 200 && "text-yellow-600 dark:text-yellow-400",
-                  connectionState.latencyMs > 200 && "text-red-600 dark:text-red-400",
+                  connectionState.latencyMs < 50 && "text-success text-success",
+                  connectionState.latencyMs >= 50 && connectionState.latencyMs <= 200 && "text-warning text-warning",
+                  connectionState.latencyMs > 200 && "text-destructive text-destructive",
                 )}
               >
                 {connectionState.latencyMs}ms
               </span>
               {connectionState.highLatencyMode && (
                 <span
-                  className="ml-1 inline-flex items-center rounded-full bg-red-500/15 px-1.5 py-0.5 text-[10px] font-medium text-red-600 dark:bg-red-400/15 dark:text-red-400"
+                  className="ml-1 inline-flex items-center rounded-full bg-destructive/15 px-1.5 py-0.5 text-[10px] font-medium text-destructive bg-destructive/15 text-destructive"
                   role="status"
                   aria-label="High latency mode active"
                 >
@@ -323,18 +324,18 @@ export function ConnectionCard({
         <div className="flex shrink-0 items-center gap-1">
           {isConnected && (
             <>
-              <button
+              <Button size="icon" variant="ghost"
                 type="button"
-                className="btn-icon"
+
                 onClick={onOpenTerminal}
                 title="Open terminal"
                 aria-label={`Open terminal on ${profile.label}`}
               >
                 <Terminal size={14} />
-              </button>
-              <button
+              </Button>
+              <Button size="icon" variant="ghost"
                 type="button"
-                className="btn-icon"
+
                 onClick={() => {
                   window.dispatchEvent(new CustomEvent("crab:open-ssh-file-browser", { detail: { profileId: profile.id, hostname: profile.host } }));
                 }}
@@ -342,10 +343,10 @@ export function ConnectionCard({
                 aria-label={`Browse files on ${profile.label}`}
               >
                 <FolderOpen size={14} />
-              </button>
-              <button
+              </Button>
+              <Button size="icon" variant="ghost"
                 type="button"
-                className="btn-icon"
+
                 onClick={() => {
                   window.dispatchEvent(new CustomEvent("crab:open-ssh-port-forwards", { detail: { profileId: profile.id, hostname: profile.host } }));
                 }}
@@ -353,70 +354,70 @@ export function ConnectionCard({
                 aria-label={`Manage port forwards for ${profile.label}`}
               >
                 <ArrowRightLeft size={14} />
-              </button>
-              <button
+              </Button>
+              <Button size="icon" variant="ghost"
                 type="button"
-                className="btn-icon text-red-500 hover:text-red-600 dark:text-red-400 dark:hover:text-red-300"
+                className="text-destructive hover:text-destructive text-destructive hover:text-destructive"
                 onClick={onDisconnect}
                 title="Disconnect"
                 aria-label={`Disconnect from ${profile.label}`}
               >
                 <Unplug size={14} />
-              </button>
+              </Button>
             </>
           )}
           {!isConnected && !isConnecting && (
             <>
-              <button
+              <Button size="icon" variant="ghost"
                 type="button"
-                className="btn-icon text-green-600 hover:text-green-700 dark:text-green-400 dark:hover:text-green-300"
+                className="text-success hover:text-success text-success hover:text-success"
                 onClick={onConnect}
                 title="Connect"
                 aria-label={`Connect to ${profile.label}`}
               >
                 <Plug size={14} />
-              </button>
-              <button
+              </Button>
+              <Button size="icon" variant="ghost"
                 type="button"
-                className="btn-icon"
+
                 onClick={onEdit}
                 title="Edit"
                 aria-label={`Edit ${profile.label}`}
               >
                 <Pencil size={14} />
-              </button>
-              <button
+              </Button>
+              <Button size="icon" variant="ghost"
                 type="button"
-                className="btn-icon text-red-500 hover:text-red-600 dark:text-red-400 dark:hover:text-red-300"
+                className="text-destructive hover:text-destructive text-destructive hover:text-destructive"
                 onClick={onDelete}
                 title="Delete"
                 aria-label={`Delete ${profile.label}`}
               >
                 <Trash2 size={14} />
-              </button>
+              </Button>
             </>
           )}
           {isConnecting && (
-            <button
+            <Button size="icon" variant="ghost"
               type="button"
-              className="btn-icon"
+
               onClick={onDisconnect}
               title="Cancel"
               aria-label={`Cancel connection to ${profile.label}`}
             >
               <Unplug size={14} />
-            </button>
+            </Button>
           )}
           {/* Pin toggle (always visible on hover) */}
-          <button
+          <Button size="icon" variant="ghost"
             type="button"
-            className="btn-icon opacity-0 transition-opacity group-hover:opacity-100"
+            className="opacity-0 transition-opacity group-hover:opacity-100"
             onClick={onTogglePin}
             title={profile.pinned ? "Unpin" : "Pin to top"}
             aria-label={profile.pinned ? `Unpin ${profile.label}` : `Pin ${profile.label} to top`}
           >
             {profile.pinned ? <PinOff size={12} /> : <Pin size={12} />}
-          </button>
+          </Button>
         </div>
       </div>
     </div>

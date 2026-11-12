@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * PTY Daemon diagnostics panel.
  *
@@ -107,14 +108,14 @@ function MetricCard({
   muted?: boolean;
 }) {
   return (
-    <div className="rounded-lg border border-gx-border bg-gx-surface p-4">
-      <div className="mb-2 flex items-center gap-2 text-[11px] text-gx-muted">
+    <div className="rounded-lg border border-border bg-card p-4">
+      <div className="mb-2 flex items-center gap-2 text-[11px] text-muted-foreground">
         {icon}
         {label}
       </div>
       <div
         className={clsx(
-          muted ? "text-gx-muted" : "text-gx-text",
+          muted ? "text-muted-foreground" : "text-foreground",
           mono ? "truncate font-mono text-xs" : "font-mono text-lg font-semibold",
         )}
         title={value}
@@ -128,7 +129,7 @@ function MetricCard({
 function BreakerBadge({ state }: { state: CircuitBreakerSnapshot["state"] }) {
   if (state === "closed") {
     return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-gx-success/15 px-2 py-0.5 text-[11px] font-medium text-gx-success">
+      <span className="inline-flex items-center gap-1 rounded-full bg-success/15 px-2 py-0.5 text-[11px] font-medium text-success">
         <CheckCircle2 size={10} />
         closed
       </span>
@@ -136,14 +137,14 @@ function BreakerBadge({ state }: { state: CircuitBreakerSnapshot["state"] }) {
   }
   if (state === "open") {
     return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-gx-error/15 px-2 py-0.5 text-[11px] font-medium text-gx-error">
+      <span className="inline-flex items-center gap-1 rounded-full bg-destructive/15 px-2 py-0.5 text-[11px] font-medium text-destructive">
         <XCircle size={10} />
         open
       </span>
     );
   }
   return (
-    <span className="inline-flex items-center gap-1 rounded-full bg-gx-warning/15 px-2 py-0.5 text-[11px] font-medium text-gx-warning">
+    <span className="inline-flex items-center gap-1 rounded-full bg-warning/15 px-2 py-0.5 text-[11px] font-medium text-warning">
       <AlertTriangle size={10} />
       half-open
     </span>
@@ -153,7 +154,7 @@ function BreakerBadge({ state }: { state: CircuitBreakerSnapshot["state"] }) {
 function MemoryPressureBadge({ pressure }: { pressure: "ok" | "warn" | "critical" | null }) {
   if (!pressure || pressure === "ok") {
     return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-gx-success/15 px-2 py-0.5 text-[11px] font-medium text-gx-success">
+      <span className="inline-flex items-center gap-1 rounded-full bg-success/15 px-2 py-0.5 text-[11px] font-medium text-success">
         <CheckCircle2 size={10} />
         ok
       </span>
@@ -161,14 +162,14 @@ function MemoryPressureBadge({ pressure }: { pressure: "ok" | "warn" | "critical
   }
   if (pressure === "warn") {
     return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-gx-warning/15 px-2 py-0.5 text-[11px] font-medium text-gx-warning">
+      <span className="inline-flex items-center gap-1 rounded-full bg-warning/15 px-2 py-0.5 text-[11px] font-medium text-warning">
         <AlertTriangle size={10} />
         warn
       </span>
     );
   }
   return (
-    <span className="inline-flex items-center gap-1 rounded-full bg-gx-error/15 px-2 py-0.5 text-[11px] font-medium text-gx-error">
+    <span className="inline-flex items-center gap-1 rounded-full bg-destructive/15 px-2 py-0.5 text-[11px] font-medium text-destructive">
       <XCircle size={10} />
       critical
     </span>
@@ -285,25 +286,25 @@ export function DiagnosticsView() {
       {/* Header row */}
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-base font-semibold text-gx-text">PTY Daemon</h2>
-          <p className="mt-0.5 text-[11px] text-gx-muted">
+          <h2 className="text-base font-semibold text-foreground">PTY Daemon</h2>
+          <p className="mt-0.5 text-[11px] text-muted-foreground">
             Persistent terminal daemon — keeps sessions alive across app restarts.
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <button
+          <Button variant="outline"
             type="button"
-            className="btn text-xs"
+            className="text-xs"
             onClick={() => void fetchDiagnostics()}
             disabled={loading}
             aria-label="Refresh daemon diagnostics"
           >
             <RefreshCw size={12} className={loading ? "animate-spin" : ""} />
             Refresh
-          </button>
-          <button
+          </Button>
+          <Button variant="outline"
             type="button"
-            className="btn text-xs"
+            className="text-xs"
             onClick={() => void handleRestart()}
             disabled={restartInProgress}
             aria-label="Restart PTY daemon"
@@ -314,7 +315,7 @@ export function DiagnosticsView() {
               <RotateCcw size={12} />
             )}
             {restartInProgress ? "Restarting…" : "Restart Daemon"}
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -324,8 +325,8 @@ export function DiagnosticsView() {
           className={clsx(
             "rounded border px-3 py-2 text-xs",
             restartResult.success
-              ? "border-gx-success/40 bg-gx-success/10 text-gx-success"
-              : "border-gx-error/40 bg-gx-error/10 text-gx-error",
+              ? "border-success/40 bg-success/10 text-success"
+              : "border-destructive/40 bg-destructive/10 text-destructive",
           )}
         >
           {restartResult.success
@@ -336,14 +337,14 @@ export function DiagnosticsView() {
 
       {/* Error state */}
       {error && (
-        <div className="rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">
+        <div className="rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
           {error}
         </div>
       )}
 
       {/* Loading placeholder */}
       {loading && !diag && (
-        <div className="flex items-center gap-2 text-sm text-gx-muted">
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
           <Loader2 size={14} className="animate-spin" />
           Loading daemon diagnostics…
         </div>
@@ -353,15 +354,15 @@ export function DiagnosticsView() {
         <>
           {/* Path-mismatch banner */}
           {diag.pathMismatch && (
-            <div className="rounded border border-gx-warning/40 bg-gx-warning/10 p-3">
-              <div className="mb-2 flex items-center gap-2 text-sm font-medium text-gx-warning">
+            <div className="rounded border border-warning/40 bg-warning/10 p-3">
+              <div className="mb-2 flex items-center gap-2 text-sm font-medium text-warning">
                 <AlertTriangle size={14} />
                 Daemon binary mismatch detected
               </div>
               {diag.previousEntryPath && (
-                <p className="mb-2 text-xs text-gx-muted">
+                <p className="mb-2 text-xs text-muted-foreground">
                   Running daemon was started from a different location:{" "}
-                  <code className="rounded bg-gx-bg-sub px-1 py-0.5 font-mono text-[11px]">
+                  <code className="rounded bg-background px-1 py-0.5 font-mono text-[11px]">
                     {diag.previousEntryPath}
                   </code>
                 </p>
@@ -371,8 +372,8 @@ export function DiagnosticsView() {
                   className={clsx(
                     "mb-2 rounded px-2 py-1 text-xs",
                     upgradeResult.success
-                      ? "bg-gx-success/10 text-gx-success"
-                      : "bg-gx-error/10 text-gx-error",
+                      ? "bg-success/10 text-success"
+                      : "bg-destructive/10 text-destructive",
                   )}
                 >
                   {upgradeResult.success
@@ -380,9 +381,9 @@ export function DiagnosticsView() {
                     : `Upgrade failed: ${upgradeResult.error ?? "unknown error"}`}
                 </div>
               )}
-              <button
+              <Button variant="outline"
                 type="button"
-                className="btn text-xs"
+                className="text-xs"
                 onClick={() => void handleUpgrade()}
                 disabled={upgradeInProgress}
                 aria-label="Apply daemon upgrade"
@@ -393,7 +394,7 @@ export function DiagnosticsView() {
                   <UploadCloud size={12} />
                 )}
                 {upgradeInProgress ? "Applying…" : "Apply daemon upgrade"}
-              </button>
+              </Button>
             </div>
           )}
 
@@ -465,8 +466,8 @@ export function DiagnosticsView() {
               icon={<FileText size={12} />}
               muted={diag.fdCount == null}
             />
-            <div className="rounded-lg border border-gx-border bg-gx-surface p-4">
-              <div className="mb-2 flex items-center gap-2 text-[11px] text-gx-muted">
+            <div className="rounded-lg border border-border bg-card p-4">
+              <div className="mb-2 flex items-center gap-2 text-[11px] text-muted-foreground">
                 <Activity size={12} />
                 Memory pressure
               </div>
@@ -475,35 +476,35 @@ export function DiagnosticsView() {
           </div>
 
           {/* Circuit breaker */}
-          <div className="rounded-lg border border-gx-border bg-gx-surface p-4">
-            <div className="mb-3 flex items-center gap-2 text-xs font-medium text-gx-muted">
+          <div className="rounded-lg border border-border bg-card p-4">
+            <div className="mb-3 flex items-center gap-2 text-xs font-medium text-muted-foreground">
               <Shield size={13} />
               Circuit Breaker
             </div>
             <div className="flex flex-wrap items-center gap-4 text-sm">
               <div className="flex items-center gap-2">
-                <span className="text-gx-muted text-xs">State</span>
+                <span className="text-muted-foreground text-xs">State</span>
                 <BreakerBadge state={diag.circuitBreaker.state} />
               </div>
               <div className="flex items-center gap-2">
-                <span className="text-gx-muted text-xs">Failures</span>
-                <span className="font-mono text-sm text-gx-text">
+                <span className="text-muted-foreground text-xs">Failures</span>
+                <span className="font-mono text-sm text-foreground">
                   {diag.circuitBreaker.failureCount}
                 </span>
               </div>
               {diag.circuitBreaker.state === "open" &&
                 diag.circuitBreaker.cooldownRemainingMs != null && (
                   <div className="flex items-center gap-2">
-                    <span className="text-gx-muted text-xs">Cooldown remaining</span>
-                    <span className="font-mono text-sm text-gx-warning">
+                    <span className="text-muted-foreground text-xs">Cooldown remaining</span>
+                    <span className="font-mono text-sm text-warning">
                       {formatCooldown(diag.circuitBreaker.cooldownRemainingMs)}
                     </span>
                   </div>
                 )}
               {diag.circuitBreaker.openedAt != null && (
                 <div className="flex items-center gap-2">
-                  <span className="text-gx-muted text-xs">Opened at</span>
-                  <span className="font-mono text-xs text-gx-text">
+                  <span className="text-muted-foreground text-xs">Opened at</span>
+                  <span className="font-mono text-xs text-foreground">
                     {new Date(diag.circuitBreaker.openedAt).toLocaleTimeString()}
                   </span>
                 </div>
@@ -512,14 +513,14 @@ export function DiagnosticsView() {
           </div>
 
           {/* Paths */}
-          <div className="rounded-lg border border-gx-border bg-gx-surface p-4">
-            <div className="mb-3 text-xs font-medium text-gx-muted">Paths</div>
+          <div className="rounded-lg border border-border bg-card p-4">
+            <div className="mb-3 text-xs font-medium text-muted-foreground">Paths</div>
             <div className="space-y-2 text-xs">
               <PathRow label="Audit log" value={diag.auditLogPath} />
               <PathRow label="Quotas config" value={diag.quotasPath} />
               <PathRow label="Terminal history" value={diag.historyBasePath} />
               {diag.daemonEntryFromEnv && (
-                <div className="flex items-center gap-1.5 rounded bg-gx-accent/10 px-2 py-1 text-[11px] text-gx-accent">
+                <div className="flex items-center gap-1.5 rounded bg-primary/10 px-2 py-1 text-[11px] text-primary">
                   <Zap size={10} />
                   Daemon entry path overridden via <code className="font-mono">CRAB_DAEMON_ENTRY</code>
                 </div>
@@ -528,18 +529,18 @@ export function DiagnosticsView() {
           </div>
 
           {/* Session type breakdown */}
-          <div className="rounded-lg border border-gx-border bg-gx-surface p-4">
-            <div className="mb-3 text-xs font-medium text-gx-muted">Active session breakdown</div>
+          <div className="rounded-lg border border-border bg-card p-4">
+            <div className="mb-3 text-xs font-medium text-muted-foreground">Active session breakdown</div>
             <div className="flex gap-6 text-sm">
               <div>
-                <div className="text-[10px] uppercase tracking-wider text-gx-muted">Daemon</div>
-                <div className="mt-0.5 font-mono text-lg font-semibold text-gx-text">
+                <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Daemon</div>
+                <div className="mt-0.5 font-mono text-lg font-semibold text-foreground">
                   {diag.resolvedSessionTypeBreakdown.daemon}
                 </div>
               </div>
               <div>
-                <div className="text-[10px] uppercase tracking-wider text-gx-muted">In-process</div>
-                <div className="mt-0.5 font-mono text-lg font-semibold text-gx-text">
+                <div className="text-[10px] uppercase tracking-wider text-muted-foreground">In-process</div>
+                <div className="mt-0.5 font-mono text-lg font-semibold text-foreground">
                   {diag.resolvedSessionTypeBreakdown.inProcess}
                 </div>
               </div>
@@ -554,13 +555,13 @@ export function DiagnosticsView() {
 function PathRow({ label, value }: { label: string; value: string | null }) {
   return (
     <div className="flex items-start gap-3">
-      <span className="w-28 shrink-0 text-gx-muted">{label}</span>
+      <span className="w-28 shrink-0 text-muted-foreground">{label}</span>
       {value ? (
-        <code className="min-w-0 flex-1 truncate rounded bg-gx-bg-sub px-1 py-0.5 font-mono text-[11px] text-gx-text" title={value}>
+        <code className="min-w-0 flex-1 truncate rounded bg-background px-1 py-0.5 font-mono text-[11px] text-foreground" title={value}>
           {value}
         </code>
       ) : (
-        <span className="text-gx-muted italic">not configured</span>
+        <span className="text-muted-foreground italic">not configured</span>
       )}
     </div>
   );

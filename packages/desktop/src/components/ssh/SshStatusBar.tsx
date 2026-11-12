@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * SSH Status Bar Integration — shows connection status in the
  * application status bar (bottom). Displays "SSH: N connected"
@@ -24,17 +25,17 @@ interface SshStatusBarProps {
 // ── Helpers ──────────────────────────────────────────────────────
 
 function getStatusDotColor(status: string, latencyMs?: number): string {
-  if (status === "error") return "var(--color-error)";
-  if (status === "connecting" || status === "reconnecting") return "var(--color-warning)";
+  if (status === "error") return "rgb(var(--destructive))";
+  if (status === "connecting" || status === "reconnecting") return "rgb(var(--warning))";
   if (status === "connected") {
     if (latencyMs !== undefined) {
-      if (latencyMs < 50) return "var(--color-success)";
-      if (latencyMs < 200) return "var(--color-warning)";
-      return "var(--color-error)";
+      if (latencyMs < 50) return "rgb(var(--success))";
+      if (latencyMs < 200) return "rgb(var(--warning))";
+      return "rgb(var(--destructive))";
     }
-    return "var(--color-success)";
+    return "rgb(var(--success))";
   }
-  return "var(--color-muted)";
+  return "rgb(var(--muted-foreground))";
 }
 
 // ── Component ────────────────────────────────────────────────────
@@ -46,13 +47,17 @@ export function SshStatusBar({ connections, onClick }: SshStatusBarProps) {
   const hasIssues = connections.some((c) => c.status === "error" || c.status === "reconnecting");
 
   return (
-    <button
+    <Button
+      variant="ghost"
+      size="compact"
       className="ssh-status-bar"
       onClick={onClick}
       aria-label={`SSH: ${connectedCount} connected${hasIssues ? " (issues detected)" : ""}`}
       title={connections.map((c) => `${c.label}: ${c.status}`).join("\n")}
     >
-      <span className="ssh-status-bar__icon" aria-hidden="true">⬡</span>
+      <span className="ssh-status-bar__icon" aria-hidden="true">
+        ⬡
+      </span>
       {connections.length <= 2 ? (
         // Show individual names for 1-2 connections
         <span className="ssh-status-bar__names">
@@ -71,10 +76,14 @@ export function SshStatusBar({ connections, onClick }: SshStatusBarProps) {
         // Show count for 3+ connections
         <span className="ssh-status-bar__count">
           SSH: {connectedCount}/{connections.length}
-          {hasIssues && <span className="ssh-status-bar__warning" aria-hidden="true">⚠</span>}
+          {hasIssues && (
+            <span className="ssh-status-bar__warning" aria-hidden="true">
+              ⚠
+            </span>
+          )}
         </span>
       )}
-    </button>
+    </Button>
   );
 }
 
@@ -112,7 +121,7 @@ export function createSshNotification(
         type,
         profileLabel,
         message: `Connected to ${profileLabel}`,
-        colour: "var(--color-success)",
+        colour: "rgb(var(--success))",
         autoDismissMs: 3000,
       };
     case "disconnected":
@@ -120,7 +129,7 @@ export function createSshNotification(
         type,
         profileLabel,
         message: `Disconnected from ${profileLabel}`,
-        colour: "var(--color-muted)",
+        colour: "rgb(var(--muted-foreground))",
         autoDismissMs: 5000,
       };
     case "reconnect_failed":
@@ -128,7 +137,7 @@ export function createSshNotification(
         type,
         profileLabel,
         message: `Failed to reconnect to ${profileLabel}`,
-        colour: "var(--color-error)",
+        colour: "rgb(var(--destructive))",
         action: action ?? { label: "Retry", handler: () => {} },
       };
     case "deploy_complete":
@@ -136,7 +145,7 @@ export function createSshNotification(
         type,
         profileLabel,
         message: `Agent deployed to ${profileLabel}`,
-        colour: "var(--color-info)",
+        colour: "rgb(var(--info))",
         autoDismissMs: 3000,
       };
     case "port_forward_detected":
@@ -144,7 +153,7 @@ export function createSshNotification(
         type,
         profileLabel,
         message: detail ?? `Port detected on ${profileLabel}`,
-        colour: "var(--color-accent)",
+        colour: "rgb(var(--primary))",
         action: action ?? { label: "Forward", handler: () => {} },
       };
     case "idle_timeout":
@@ -152,7 +161,7 @@ export function createSshNotification(
         type,
         profileLabel,
         message: `Disconnected from ${profileLabel} due to inactivity`,
-        colour: "var(--color-muted)",
+        colour: "rgb(var(--muted-foreground))",
         action: { label: "Reconnect", handler: () => {} },
       };
   }

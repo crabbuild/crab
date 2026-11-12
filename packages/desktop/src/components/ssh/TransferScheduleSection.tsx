@@ -1,3 +1,20 @@
+import { Button } from "@/components/ui/button";
+import { Calendar } from "@/components/ui/calendar";
+import { Input } from "@/components/ui/input";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { format, startOfDay } from "date-fns";
 /**
  * TransferScheduleSection — displays scheduled transfers and allows
  * creating/cancelling scheduled transfers.
@@ -6,17 +23,17 @@
  * and compressed sizes. Validates that scheduled times are in the future.
  */
 
-import { useState, useCallback, useEffect } from "react";
-import {
-  Clock,
-  Calendar,
-  X,
-  Plus,
-  AlertCircle,
-  TrendingDown,
-  Archive,
-} from "lucide-react";
 import clsx from "clsx";
+import {
+  AlertCircle,
+  Archive,
+  Calendar as CalendarIcon,
+  Clock,
+  Plus,
+  TrendingDown,
+  X,
+} from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
 import type { ScheduledTransfer, TransferDirection } from "../../../electron/ssh-types";
 import { formatBytes } from "./TransferProgressBar";
 
@@ -33,7 +50,7 @@ interface ScheduleFormData {
   localPath: string;
   remotePath: string;
   direction: TransferDirection;
-  scheduledAt: string; // datetime-local input value
+  scheduledAt: string; // Local date and time, without a timezone suffix.
 }
 
 // ── Component ────────────────────────────────────────────────────
@@ -116,90 +133,193 @@ export function TransferScheduleSection({ profileId, transfers }: TransferSchedu
   }, [formData, profileId, fetchScheduled]);
 
   // Get minimum datetime for the input (now + 1 minute)
-  const minDateTime = new Date(Date.now() + 60_000).toISOString().slice(0, 16);
+  const selectedDate = formData.scheduledAt
+    ? new Date(formData.scheduledAt)
+    : undefined;
+  const selectedTime = formData.scheduledAt.slice(11) || "00:00";
 
   return (
     <div className="flex flex-col gap-3" role="region" aria-label="Scheduled transfers">
       {/* Header */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-gray-100 dark:border-gray-700">
+      <div className="flex items-center justify-between px-3 py-2 border-b border-border border-border">
         <div className="flex items-center gap-2">
-          <Calendar className="w-4 h-4 text-purple-500 dark:text-purple-400" />
-          <h3 className="text-xs font-semibold text-gray-600 dark:text-gray-300">
+          <Calendar className="w-4 h-4 text-thinking text-thinking" />
+          <h3 className="text-xs font-semibold text-muted-foreground text-muted-foreground">
             Scheduled Transfers
           </h3>
           {scheduled.length > 0 && (
-            <span className="text-xs text-gray-400 dark:text-gray-500">
+            <span className="text-xs text-muted-foreground text-muted-foreground">
               ({scheduled.length})
             </span>
           )}
         </div>
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={() => setShowForm(!showForm)}
-          className="flex items-center gap-1 px-2 py-1 text-xs font-medium text-purple-600 dark:text-purple-400 hover:bg-purple-50 dark:hover:bg-purple-900/20 rounded transition-colors"
+          className="flex items-center gap-1 px-2 py-1 text-xs font-medium text-thinking text-thinking hover:bg-thinking/10 hover:bg-thinking/20 rounded transition-colors"
           aria-label={showForm ? "Cancel new schedule" : "Schedule new transfer"}
         >
           {showForm ? <X size={12} /> : <Plus size={12} />}
           <span>{showForm ? "Cancel" : "Schedule"}</span>
-        </button>
+        </Button>
       </div>
 
       {/* Schedule creation form */}
       {showForm && (
-        <div className="px-3 py-3 mx-3 rounded-lg border border-purple-200 dark:border-purple-800 bg-purple-50/50 dark:bg-purple-900/10">
+        <div className="px-3 py-3 mx-3 rounded-lg border border-thinking border-thinking bg-thinking/50 bg-thinking/10">
           <div className="space-y-2.5">
             {/* Direction */}
             <div className="flex items-center gap-2">
-              <label className="text-xs text-gray-600 dark:text-gray-400 w-20">Direction</label>
-              <select
-                value={formData.direction}
-                onChange={(e) => setFormData((d) => ({ ...d, direction: e.target.value as TransferDirection }))}
-                className="flex-1 px-2 py-1 text-xs rounded border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-900"
+              <label className="text-xs text-muted-foreground text-muted-foreground w-20">
+                Direction
+              </label>
+              <Select
+                value={":" + String(formData.direction)}
+                onValueChange={(selectedValue) => {
+                  const value = selectedValue.slice(1);
+                  return setFormData((d) => ({
+                    ...d,
+                    direction: value as TransferDirection,
+                  }));
+                }}
               >
-                <option value="upload">Upload</option>
-                <option value="download">Download</option>
-              </select>
+                <SelectTrigger className="flex-1 px-2 py-1 text-xs rounded border border-border border-border bg-background bg-background">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    <SelectItem value={":" + String("upload")}>
+                      Upload
+                    </SelectItem>
+                    <SelectItem value={":" + String("download")}>
+                      Download
+                    </SelectItem>
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
             </div>
 
             {/* Local path */}
             <div className="flex items-center gap-2">
-              <label className="text-xs text-gray-600 dark:text-gray-400 w-20">Local Path</label>
-              <input
+              <label className="text-xs text-muted-foreground text-muted-foreground w-20">
+                Local Path
+              </label>
+              <Input
                 type="text"
                 value={formData.localPath}
                 onChange={(e) => setFormData((d) => ({ ...d, localPath: e.target.value }))}
                 placeholder="/path/to/local/file"
-                className="flex-1 px-2 py-1 text-xs rounded border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-900 font-mono"
+                className="flex-1 px-2 py-1 text-xs rounded border border-border border-border bg-background bg-background font-mono"
               />
             </div>
 
             {/* Remote path */}
             <div className="flex items-center gap-2">
-              <label className="text-xs text-gray-600 dark:text-gray-400 w-20">Remote Path</label>
-              <input
+              <label className="text-xs text-muted-foreground text-muted-foreground w-20">
+                Remote Path
+              </label>
+              <Input
                 type="text"
                 value={formData.remotePath}
                 onChange={(e) => setFormData((d) => ({ ...d, remotePath: e.target.value }))}
                 placeholder="/remote/path/file"
-                className="flex-1 px-2 py-1 text-xs rounded border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-900 font-mono"
+                className="flex-1 px-2 py-1 text-xs rounded border border-border border-border bg-background bg-background font-mono"
               />
             </div>
 
             {/* Scheduled time */}
             <div className="flex items-center gap-2">
-              <label className="text-xs text-gray-600 dark:text-gray-400 w-20">Start Time</label>
-              <input
-                type="datetime-local"
-                value={formData.scheduledAt}
-                min={minDateTime}
-                onChange={(e) => setFormData((d) => ({ ...d, scheduledAt: e.target.value }))}
-                className="flex-1 px-2 py-1 text-xs rounded border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-900"
-              />
+              <label className="text-xs text-muted-foreground text-muted-foreground w-20">
+                Start Time
+              </label>
+              <div className="flex min-w-0 flex-1 items-center gap-1">
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button
+                      className="min-w-0 flex-1 justify-start text-xs"
+                      aria-label="Scheduled date"
+                    >
+                      <CalendarIcon size={12} />
+                      {selectedDate
+                        ? format(selectedDate, "PP")
+                        : "Pick a date"}
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-auto p-0">
+                    <Calendar
+                      mode="single"
+                      selected={selectedDate}
+                      disabled={{ before: startOfDay(new Date()) }}
+                      initialFocus
+                      onSelect={(date) => {
+                        if (date)
+                          setFormData((data) => ({
+                            ...data,
+                            scheduledAt: `${format(date, "yyyy-MM-dd")}T${selectedTime}`,
+                          }));
+                      }}
+                    />
+                  </PopoverContent>
+                </Popover>
+                <Select
+                  disabled={!selectedDate}
+                  value={selectedTime.slice(0, 2)}
+                  onValueChange={(hour) =>
+                    setFormData((data) => ({
+                      ...data,
+                      scheduledAt: `${data.scheduledAt.slice(0, 11)}${hour}:${selectedTime.slice(3)}`,
+                    }))
+                  }
+                >
+                  <SelectTrigger aria-label="Scheduled hour" className="w-16">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      {Array.from({ length: 24 }, (_, hour) =>
+                        String(hour).padStart(2, "0"),
+                      ).map((hour) => (
+                        <SelectItem key={hour} value={hour}>
+                          {hour}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+                <span>:</span>
+                <Select
+                  disabled={!selectedDate}
+                  value={selectedTime.slice(3)}
+                  onValueChange={(minute) =>
+                    setFormData((data) => ({
+                      ...data,
+                      scheduledAt: `${data.scheduledAt.slice(0, 11)}${selectedTime.slice(0, 2)}:${minute}`,
+                    }))
+                  }
+                >
+                  <SelectTrigger aria-label="Scheduled minute" className="w-16">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      {Array.from({ length: 60 }, (_, minute) =>
+                        String(minute).padStart(2, "0"),
+                      ).map((minute) => (
+                        <SelectItem key={minute} value={minute}>
+                          {minute}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
 
             {/* Error */}
             {formError && (
-              <div className="flex items-center gap-1.5 text-xs text-red-600 dark:text-red-400">
+              <div className="flex items-center gap-1.5 text-xs text-destructive text-destructive">
                 <AlertCircle size={12} />
                 <span>{formError}</span>
               </div>
@@ -207,19 +327,21 @@ export function TransferScheduleSection({ profileId, transfers }: TransferSchedu
 
             {/* Submit */}
             <div className="flex justify-end pt-1">
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 onClick={handleSubmit}
                 disabled={isSubmitting}
                 className={clsx(
                   "px-3 py-1.5 text-xs font-medium rounded-md transition-colors",
-                  "bg-purple-600 text-white hover:bg-purple-700",
-                  "dark:bg-purple-700 dark:hover:bg-purple-600",
+                  "bg-thinking text-thinking-foreground hover:bg-thinking",
+                  "bg-thinking hover:bg-thinking",
                   "disabled:opacity-50 disabled:cursor-not-allowed",
                 )}
               >
                 {isSubmitting ? "Scheduling…" : "Schedule Transfer"}
-              </button>
+              </Button>
             </div>
           </div>
         </div>
@@ -228,13 +350,13 @@ export function TransferScheduleSection({ profileId, transfers }: TransferSchedu
       {/* Scheduled transfers list */}
       {scheduled.length === 0 && !showForm ? (
         <div className="flex flex-col items-center py-6 px-4">
-          <Clock className="w-8 h-8 text-gray-300 dark:text-gray-600 mb-2" />
-          <p className="text-xs text-gray-400 dark:text-gray-500 text-center">
+          <Clock className="w-8 h-8 text-muted-foreground text-muted-foreground mb-2" />
+          <p className="text-xs text-muted-foreground text-muted-foreground text-center">
             No scheduled transfers
           </p>
         </div>
       ) : (
-        <ul role="list" className="divide-y divide-gray-100 dark:divide-gray-800">
+        <ul role="list" className="divide-y divide-border divide-border">
           {scheduled.map((item) => (
             <ScheduledRow
               key={item.id}
@@ -263,45 +385,50 @@ function ScheduledRow({ item, transferInfo, onCancel }: ScheduledRowProps) {
   const timeUntil = formatTimeUntil(item.scheduledAt - Date.now());
 
   return (
-    <li className="flex items-center gap-2 px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-800/50">
-      <Clock className="w-4 h-4 text-purple-500 dark:text-purple-400 shrink-0" />
+    <li className="flex items-center gap-2 px-3 py-2 hover:bg-background hover:bg-card/50">
+      <Clock className="w-4 h-4 text-thinking text-thinking shrink-0" />
       <div className="flex-1 min-w-0">
-        <p className="text-sm text-gray-800 dark:text-gray-200 truncate">{fileName}</p>
-        <p className="text-xs text-gray-500 dark:text-gray-400 truncate">
+        <p className="text-sm text-foreground text-foreground truncate">
+          {fileName}
+        </p>
+        <p className="text-xs text-muted-foreground text-muted-foreground truncate">
           → {item.remotePath}
         </p>
         <div className="flex items-center gap-2 mt-0.5">
-          <span className="text-[10px] text-purple-600 dark:text-purple-400">
+          <span className="text-[10px] text-thinking text-thinking">
             {scheduledDate.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
           </span>
-          <span className="text-[10px] text-gray-400 dark:text-gray-500">
+          <span className="text-[10px] text-muted-foreground text-muted-foreground">
             ({timeUntil})
           </span>
           {/* Delta savings indicator */}
           {transferInfo?.deltaSavingsPercent !== undefined && transferInfo.deltaSavingsPercent > 0 && (
-            <span className="flex items-center gap-0.5 text-[10px] text-green-600 dark:text-green-400">
-              <TrendingDown size={10} />
-              {transferInfo.deltaSavingsPercent.toFixed(1)}% saved
-            </span>
-          )}
+              <span className="flex items-center gap-0.5 text-[10px] text-success text-success">
+                <TrendingDown size={10} />
+                {transferInfo.deltaSavingsPercent.toFixed(1)}% saved
+              </span>
+            )}
           {/* Compressed size indicator */}
           {transferInfo?.compressedBytes !== undefined && transferInfo.compressedBytes > 0 && (
-            <span className="flex items-center gap-0.5 text-[10px] text-blue-600 dark:text-blue-400">
-              <Archive size={10} />
-              {formatBytes(transferInfo.totalBytes)} → {formatBytes(transferInfo.compressedBytes)}
-            </span>
-          )}
+              <span className="flex items-center gap-0.5 text-[10px] text-info text-info">
+                <Archive size={10} />
+                {formatBytes(transferInfo.totalBytes)} →{" "}
+                {formatBytes(transferInfo.compressedBytes)}
+              </span>
+            )}
         </div>
       </div>
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={onCancel}
-        className="shrink-0 p-1 rounded hover:bg-red-50 dark:hover:bg-red-900/20 text-gray-400 hover:text-red-500 dark:hover:text-red-400 transition-colors"
+        className="shrink-0 p-1 rounded hover:bg-destructive/10 hover:bg-destructive/20 text-muted-foreground hover:text-destructive hover:text-destructive transition-colors"
         aria-label={`Cancel scheduled transfer: ${fileName}`}
         title="Cancel scheduled transfer"
       >
         <X size={14} />
-      </button>
+      </Button>
     </li>
   );
 }

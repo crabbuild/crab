@@ -1,14 +1,25 @@
-import { useCallback,useEffect,useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import clsx from "clsx";
 import {
-Play,
-Square,
-Plus,RefreshCw,
-Clock,
-CheckCircle2,
-XCircle,
-Loader2
+  CheckCircle2,
+  Clock,
+  Loader2,
+  Play,
+  Plus,
+  RefreshCw,
+  Square,
+  XCircle,
 } from "lucide-react";
+import { useCallback,useEffect,useState } from "react";
 import { rpc } from "../../ipc";
 import type { ExperimentEntry,ExpStatusKind } from "../../lib/workflow-types";
 
@@ -17,10 +28,10 @@ interface Props {
 }
 
 const statusConfig: Record<ExpStatusKind, { icon: typeof Clock; color: string; label: string }> = {
-  pending: { icon: Clock, color: "text-gx-muted", label: "Pending" },
-  running: { icon: Loader2, color: "text-gx-info", label: "Running" },
-  done: { icon: CheckCircle2, color: "text-gx-success", label: "Done" },
-  failed: { icon: XCircle, color: "text-gx-error", label: "Failed" },
+  pending: { icon: Clock, color: "text-muted-foreground", label: "Pending" },
+  running: { icon: Loader2, color: "text-info", label: "Running" },
+  done: { icon: CheckCircle2, color: "text-success", label: "Done" },
+  failed: { icon: XCircle, color: "text-destructive", label: "Failed" },
 };
 
 export function ExperimentPanel({ repoId }: Props) {
@@ -91,94 +102,108 @@ export function ExperimentPanel({ repoId }: Props) {
   return (
     <div className="flex h-full flex-col">
       {/* Controls */}
-      <div className="flex items-center gap-2 border-b border-gx-border px-4 py-3">
-        <button
+      <div className="flex items-center gap-2 border-b border-border px-4 py-3">
+        <Button variant="outline"
           type="button"
-          className="btn flex items-center gap-1 text-xs"
+          className="flex items-center gap-1 text-xs"
           onClick={() => setShowQueue(!showQueue)}
         >
           <Plus size={12} /> Queue
-        </button>
+        </Button>
 
         {pendingCount > 0 && (
-          <button
+          <Button variant="default"
             type="button"
-            className="btn btn-primary flex items-center gap-1 text-xs"
+            className="flex items-center gap-1 text-xs"
             onClick={handleStart}
           >
             <Play size={12} /> Start (jobs: {jobs})
-          </button>
+          </Button>
         )}
 
         {runningCount > 0 && (
-          <button
+          <Button variant="outline"
             type="button"
-            className="btn flex items-center gap-1 text-xs text-gx-error"
+            className="flex items-center gap-1 text-xs text-destructive"
             onClick={handleStop}
           >
             <Square size={12} /> Stop
-          </button>
+          </Button>
         )}
 
         <div className="flex-1" />
 
-        <select
-          className="input-field w-16 text-xs"
-          value={jobs}
-          onChange={(e) => setJobs(Number(e.target.value))}
-          title="Parallel jobs"
+        <Select
+          value={":" + String(jobs)}
+          onValueChange={(selectedValue) => {
+            const value = selectedValue.slice(1);
+            return setJobs(Number(value));
+          }}
         >
-          {[1, 2, 3, 4, 6, 8].map((n) => (
-            <option key={n} value={n}>{n}</option>
-          ))}
-        </select>
+          <SelectTrigger className="w-16 text-xs" title="Parallel jobs">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              {[1, 2, 3, 4, 6, 8].map((n) => (
+                <SelectItem key={n} value={":" + String(n)}>
+                  {n}
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          </SelectContent>
+        </Select>
 
-        <button
+        <Button variant="outline"
           type="button"
-          className="btn flex items-center gap-1 text-xs"
+          className="flex items-center gap-1 text-xs"
           onClick={fetchExperiments}
           disabled={loading}
         >
           <RefreshCw size={12} className={loading ? "animate-spin" : ""} />
-        </button>
+        </Button>
       </div>
 
       {/* Queue form */}
       {showQueue && (
-        <div className="border-b border-gx-border bg-gx-bg/50 px-4 py-3">
-          <div className="mb-2 text-xs font-medium text-gx-text">Queue Experiments</div>
+        <div className="border-b border-border bg-background/50 px-4 py-3">
+          <div className="mb-2 text-xs font-medium text-foreground">
+            Queue Experiments
+          </div>
           <div className="flex items-end gap-2">
             <div className="flex-1">
-              <label className="mb-1 block text-[10px] text-gx-muted">Parameter</label>
-              <input
-                className="input-field w-full text-xs"
+              <label className="mb-1 block text-[10px] text-muted-foreground">
+                Parameter
+              </label>
+              <Input
+                className="w-full text-xs"
                 placeholder="train.lr"
                 value={paramKey}
                 onChange={(e) => setParamKey(e.target.value)}
               />
             </div>
             <div className="flex-1">
-              <label className="mb-1 block text-[10px] text-gx-muted">
+              <label className="mb-1 block text-[10px] text-muted-foreground">
                 Values (comma-separated or range)
               </label>
-              <input
-                className="input-field w-full text-xs"
+              <Input
+                className="w-full text-xs"
                 placeholder="0.001, 0.01, 0.1 or range(0.001, 0.01, 0.003)"
                 value={paramValues}
                 onChange={(e) => setParamValues(e.target.value)}
               />
             </div>
-            <button
+            <Button variant="default"
               type="button"
-              className="btn btn-primary text-xs"
+              className="text-xs"
               onClick={handleEnqueue}
               disabled={!paramKey.trim() || !paramValues.trim()}
             >
               Queue
-            </button>
+            </Button>
           </div>
           {paramValues.trim() && (
-            <div className="mt-1 text-[10px] text-gx-muted">
+            <div className="mt-1 text-[10px] text-muted-foreground">
               Preview: {parseValues(paramValues.trim()).length} experiment(s)
             </div>
           )}
@@ -188,22 +213,24 @@ export function ExperimentPanel({ repoId }: Props) {
       {/* Experiment list */}
       <div className="flex-1 overflow-y-auto">
         {experiments.length === 0 && !loading && (
-          <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-gx-muted">
+          <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-muted-foreground">
             <div>No experiments queued.</div>
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
-              className="text-xs text-gx-accent hover:underline"
+              className="text-xs text-primary hover:underline"
               onClick={() => setShowQueue(true)}
             >
               Queue your first experiment
-            </button>
+            </Button>
           </div>
         )}
 
         {experiments.length > 0 && (
           <table className="w-full text-xs">
             <thead>
-              <tr className="border-b border-gx-border text-left text-gx-muted">
+              <tr className="border-b border-border text-left text-muted-foreground">
                 <th className="px-4 py-2 font-medium">ID</th>
                 <th className="px-4 py-2 font-medium">Parameters</th>
                 <th className="px-4 py-2 font-medium">Status</th>
@@ -215,15 +242,15 @@ export function ExperimentPanel({ repoId }: Props) {
                 const config = statusConfig[exp.status];
                 const Icon = config.icon;
                 return (
-                  <tr key={exp.id} className="border-b border-gx-border/50 hover:bg-gx-surface-hover">
-                    <td className="px-4 py-2 font-mono text-gx-text">
+                  <tr key={exp.id} className="border-b border-border/50 hover:bg-accent">
+                    <td className="px-4 py-2 font-mono text-foreground">
                       {exp.id.slice(-8)}
                     </td>
                     <td className="px-4 py-2">
                       {Object.entries(exp.param_overrides).map(([k, v]) => (
                         <span key={k} className="mr-2">
-                          <span className="text-gx-muted">{k}=</span>
-                          <span className="text-gx-text">{v}</span>
+                          <span className="text-muted-foreground">{k}=</span>
+                          <span className="text-foreground">{v}</span>
                         </span>
                       ))}
                     </td>
@@ -233,7 +260,9 @@ export function ExperimentPanel({ repoId }: Props) {
                         {config.label}
                       </span>
                     </td>
-                    <td className="px-4 py-2 text-gx-muted">{exp.queued_at}</td>
+                    <td className="px-4 py-2 text-muted-foreground">
+                      {exp.queued_at}
+                    </td>
                   </tr>
                 );
               })}

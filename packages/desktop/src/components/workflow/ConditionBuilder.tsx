@@ -1,3 +1,12 @@
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { useCallback } from "react";
 import type { ConditionSpec } from "../../lib/workflow-types";
 
@@ -31,20 +40,33 @@ export function ConditionBuilder({ condition, onChange }: Props) {
 
   return (
     <div className="space-y-2">
-      <select
-        className="input-field w-full text-xs"
-        value={condition?.kind ?? "none"}
-        onChange={(e) => handleKindChange(e.target.value)}
+      <Select
+        value={":" + String(condition?.kind ?? "none")}
+        onValueChange={(selectedValue) => {
+          const value = selectedValue.slice(1);
+          return handleKindChange(value);
+        }}
       >
-        <option value="none">No condition</option>
-        <option value="env">Environment variable</option>
-        <option value="file_exists">File exists</option>
-        <option value="expr">Expression</option>
-      </select>
+        <SelectTrigger className="w-full text-xs">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectGroup>
+            <SelectItem value={":" + String("none")}>No condition</SelectItem>
+            <SelectItem value={":" + String("env")}>
+              Environment variable
+            </SelectItem>
+            <SelectItem value={":" + String("file_exists")}>
+              File exists
+            </SelectItem>
+            <SelectItem value={":" + String("expr")}>Expression</SelectItem>
+          </SelectGroup>
+        </SelectContent>
+      </Select>
 
       {condition && (
-        <input
-          className="input-field w-full font-mono text-xs"
+        <Input
+          className="w-full font-mono text-xs"
           placeholder={
             condition.kind === "env"
               ? "CI"
@@ -58,7 +80,7 @@ export function ConditionBuilder({ condition, onChange }: Props) {
       )}
 
       {condition && (
-        <div className="text-[10px] text-gx-muted">
+        <div className="text-[10px] text-muted-foreground">
           {condition.kind === "env" && "Stage runs only if this env var is set and non-empty."}
           {condition.kind === "file_exists" && "Stage runs only if this file exists."}
           {condition.kind === "expr" && "Stage runs only if this expression evaluates to true."}

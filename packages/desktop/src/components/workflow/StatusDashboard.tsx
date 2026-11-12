@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { useCallback, useEffect, useState } from "react";
 import clsx from "clsx";
 import {
@@ -27,20 +28,20 @@ const statusConfig: Record<
   { icon: typeof Circle; color: string; label: string }
 > = {
   // snake_case keys (TypeScript type convention)
-  up_to_date: { icon: CheckCircle2, color: "text-gx-success", label: "Up to date" },
-  outdated: { icon: AlertTriangle, color: "text-gx-warn", label: "Outdated" },
-  not_run: { icon: Circle, color: "text-gx-muted", label: "Not run" },
-  frozen: { icon: Snowflake, color: "text-gx-info", label: "Frozen" },
-  conditional_skip: { icon: Ban, color: "text-gx-muted", label: "Skipped" },
+  up_to_date: { icon: CheckCircle2, color: "text-success", label: "Up to date" },
+  outdated: { icon: AlertTriangle, color: "text-warning", label: "Outdated" },
+  not_run: { icon: Circle, color: "text-muted-foreground", label: "Not run" },
+  frozen: { icon: Snowflake, color: "text-info", label: "Frozen" },
+  conditional_skip: { icon: Ban, color: "text-muted-foreground", label: "Skipped" },
   // PascalCase keys (serde default serialization from Rust backend)
-  UpToDate: { icon: CheckCircle2, color: "text-gx-success", label: "Up to date" },
-  Outdated: { icon: AlertTriangle, color: "text-gx-warn", label: "Outdated" },
-  NotRun: { icon: Circle, color: "text-gx-muted", label: "Not run" },
-  Frozen: { icon: Snowflake, color: "text-gx-info", label: "Frozen" },
-  ConditionalSkip: { icon: Ban, color: "text-gx-muted", label: "Skipped" },
+  UpToDate: { icon: CheckCircle2, color: "text-success", label: "Up to date" },
+  Outdated: { icon: AlertTriangle, color: "text-warning", label: "Outdated" },
+  NotRun: { icon: Circle, color: "text-muted-foreground", label: "Not run" },
+  Frozen: { icon: Snowflake, color: "text-info", label: "Frozen" },
+  ConditionalSkip: { icon: Ban, color: "text-muted-foreground", label: "Skipped" },
 };
 
-const fallbackStatus = { icon: Circle, color: "text-gx-muted", label: "Unknown" };
+const fallbackStatus = { icon: Circle, color: "text-muted-foreground", label: "Unknown" };
 
 export function StatusDashboard({ repoId, workflowPath, onRunOutdated, onRunAll }: Props) {
   const [report, setReport] = useState<WorkflowStatusReport | null>(null);
@@ -72,7 +73,7 @@ export function StatusDashboard({ repoId, workflowPath, onRunOutdated, onRunAll 
 
   if (!workflowPath) {
     return (
-      <div className="flex h-full items-center justify-center text-sm text-gx-muted">
+      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
         No workflow file loaded.
       </div>
     );
@@ -81,25 +82,25 @@ export function StatusDashboard({ repoId, workflowPath, onRunOutdated, onRunAll 
   return (
     <div className="flex h-full flex-col">
       {/* Summary bar */}
-      <div className="flex items-center gap-4 border-b border-gx-border px-4 py-3">
+      <div className="flex items-center gap-4 border-b border-border px-4 py-3">
         <div className="flex flex-1 items-center gap-3 text-xs">
           {upToDateCount > 0 && (
-            <span className="flex items-center gap-1 text-gx-success">
+            <span className="flex items-center gap-1 text-success">
               <CheckCircle2 size={12} /> {upToDateCount} up-to-date
             </span>
           )}
           {outdatedStages.length > 0 && (
-            <span className="flex items-center gap-1 text-gx-warn">
+            <span className="flex items-center gap-1 text-warning">
               <AlertTriangle size={12} /> {outdatedStages.length} outdated
             </span>
           )}
           {notRunCount > 0 && (
-            <span className="flex items-center gap-1 text-gx-muted">
+            <span className="flex items-center gap-1 text-muted-foreground">
               <Circle size={12} /> {notRunCount} not run
             </span>
           )}
           {frozenCount > 0 && (
-            <span className="flex items-center gap-1 text-gx-info">
+            <span className="flex items-center gap-1 text-info">
               <Snowflake size={12} /> {frozenCount} frozen
             </span>
           )}
@@ -107,35 +108,35 @@ export function StatusDashboard({ repoId, workflowPath, onRunOutdated, onRunAll 
 
         <div className="flex items-center gap-2">
           {outdatedStages.length > 0 && (
-            <button
+            <Button variant="default"
               type="button"
-              className="btn btn-primary flex items-center gap-1 text-xs"
+              className="flex items-center gap-1 text-xs"
               onClick={() => onRunOutdated(outdatedStages.map((s) => s.name))}
             >
               <Play size={12} /> Run Outdated
-            </button>
+            </Button>
           )}
-          <button
+          <Button variant="outline"
             type="button"
-            className="btn flex items-center gap-1 text-xs"
+            className="flex items-center gap-1 text-xs"
             onClick={onRunAll}
           >
             <Play size={12} /> Run All
-          </button>
-          <button
+          </Button>
+          <Button variant="outline"
             type="button"
-            className="btn flex items-center gap-1 text-xs"
+            className="flex items-center gap-1 text-xs"
             onClick={fetchStatus}
             disabled={loading}
           >
             <RefreshCw size={12} className={loading ? "animate-spin" : ""} /> Refresh
-          </button>
+          </Button>
         </div>
       </div>
 
       {/* Error state */}
       {error && (
-        <div className="border-b border-gx-border bg-gx-error/10 px-4 py-2 text-xs text-gx-error">
+        <div className="border-b border-border bg-destructive/10 px-4 py-2 text-xs text-destructive">
           {error}
         </div>
       )}
@@ -145,7 +146,7 @@ export function StatusDashboard({ repoId, workflowPath, onRunOutdated, onRunAll 
         {report && (
           <table className="w-full text-xs">
             <thead>
-              <tr className="border-b border-gx-border text-left text-gx-muted">
+              <tr className="border-b border-border text-left text-muted-foreground">
                 <th className="px-4 py-2 font-medium">Stage</th>
                 <th className="px-4 py-2 font-medium">Status</th>
                 <th className="px-4 py-2 font-medium">Changed</th>
@@ -161,7 +162,7 @@ export function StatusDashboard({ repoId, workflowPath, onRunOutdated, onRunAll 
         )}
 
         {!report && !loading && !error && (
-          <div className="flex h-full items-center justify-center text-sm text-gx-muted">
+          <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
             Run the pipeline once to see status.
           </div>
         )}
@@ -181,19 +182,19 @@ function StageRow({ stage }: { stage: StageStatusEntry }) {
     <>
       <tr
         className={clsx(
-          "border-b border-gx-border/50 hover:bg-gx-surface-hover",
+          "border-b border-border/50 hover:bg-accent",
           hasDetails && "cursor-pointer",
         )}
         onClick={() => hasDetails && setExpanded(!expanded)}
       >
-        <td className="px-4 py-2 font-mono text-gx-text">{stage.name}</td>
+        <td className="px-4 py-2 font-mono text-foreground">{stage.name}</td>
         <td className="px-4 py-2">
           <span className={clsx("flex items-center gap-1.5", config.color)}>
             <Icon size={12} />
             {config.label}
           </span>
         </td>
-        <td className="px-4 py-2 text-gx-muted">
+        <td className="px-4 py-2 text-muted-foreground">
           {stage.changed_deps.length > 0 && (
             <span>{stage.changed_deps.length} dep{stage.changed_deps.length > 1 ? "s" : ""}</span>
           )}
@@ -203,20 +204,20 @@ function StageRow({ stage }: { stage: StageStatusEntry }) {
             </span>
           )}
         </td>
-        <td className="px-4 py-2 text-right text-gx-muted">
+        <td className="px-4 py-2 text-right text-muted-foreground">
           {stage.last_duration_ms != null
             ? `${(stage.last_duration_ms / 1000).toFixed(1)}s`
             : "—"}
         </td>
       </tr>
       {expanded && hasDetails && (
-        <tr className="border-b border-gx-border/50 bg-gx-bg/50">
+        <tr className="border-b border-border/50 bg-background/50">
           <td colSpan={4} className="px-6 py-2">
             {stage.changed_deps.length > 0 && (
               <div className="mb-1">
-                <span className="text-gx-muted">Changed deps: </span>
+                <span className="text-muted-foreground">Changed deps: </span>
                 {stage.changed_deps.map((d) => (
-                  <span key={d} className="mr-2 font-mono text-gx-warn">
+                  <span key={d} className="mr-2 font-mono text-warning">
                     {d}
                   </span>
                 ))}
@@ -224,14 +225,14 @@ function StageRow({ stage }: { stage: StageStatusEntry }) {
             )}
             {stage.changed_params.length > 0 && (
               <div>
-                <span className="text-gx-muted">Changed params: </span>
+                <span className="text-muted-foreground">Changed params: </span>
                 {stage.changed_params.map((p) => (
                   <span key={p.key} className="mr-2">
-                    <span className="font-mono text-gx-text">{p.key}</span>
-                    <span className="text-gx-muted">: </span>
-                    <span className="text-gx-error line-through">{p.old_value}</span>
-                    <span className="text-gx-muted"> → </span>
-                    <span className="text-gx-success">{p.new_value}</span>
+                    <span className="font-mono text-foreground">{p.key}</span>
+                    <span className="text-muted-foreground">: </span>
+                    <span className="text-destructive line-through">{p.old_value}</span>
+                    <span className="text-muted-foreground"> → </span>
+                    <span className="text-success">{p.new_value}</span>
                   </span>
                 ))}
               </div>

@@ -1,3 +1,17 @@
+import { Button } from "@/components/ui/button";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 /**
  * Checkpoint Timeline — Navigate agent iteration history.
  *
@@ -10,10 +24,10 @@
  * turn. Active node glows. Hover reveals turn info and revert option.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { RotateCcw } from "lucide-react";
-import { useWorkspaceSnapshots } from "../../lib/use-workspace-snapshots";
 import clsx from "clsx";
+import { RotateCcw } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useWorkspaceSnapshots } from "../../lib/use-workspace-snapshots";
 import { OrchestratorTask } from "./TaskCard";
 
 // ── Types ───────────────────────────────────────────────────────────
@@ -59,14 +73,17 @@ export function CheckpointTimeline({ task, onRestore, onSelectTurn, selectedTurn
     });
   }, [checkpoints]);
 
-  const handleSelect = useCallback((turn: typeof turns[0]) => {
+  const handleSelect = useCallback(
+    (turn: (typeof turns)[0]) => {
     if (!turn.hasSha) return;
     onSelectTurn?.({
       fromSha: turn.fromSha,
       toSha: turn.toSha,
       turnNumber: turn.turnNumber,
     });
-  }, [onSelectTurn]);
+  },
+    [onSelectTurn],
+  );
 
   const handleRestore = async (sourceRef: string) => {
     if (await restore(sourceRef)) onRestore?.();
@@ -77,21 +94,23 @@ export function CheckpointTimeline({ task, onRestore, onSelectTurn, selectedTurn
   return (
     <div className="flex shrink-0 items-center gap-3 px-4 py-2">
       {/* "All" reset link on the left */}
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={() => onSelectTurn?.(null)}
         className={clsx(
           "shrink-0 text-[10px] font-medium transition",
           selectedTurn == null
-            ? "text-gx-accent"
-            : "text-gx-muted hover:text-gx-text",
+            ? "text-primary"
+            : "text-muted-foreground hover:text-foreground",
         )}
       >
         All changes
-      </button>
+      </Button>
 
       {/* Separator */}
-      <div className="h-3 w-px bg-gx-border/50" />
+      <div className="h-3 w-px bg-border/50" />
 
       {/* Turn nodes — simple inline row, no scroll container */}
       <div
@@ -100,50 +119,58 @@ export function CheckpointTimeline({ task, onRestore, onSelectTurn, selectedTurn
         style={{ scrollbarWidth: "none" }}
       >
         {turns.map((turn) => {
-            const isActive = selectedTurn === turn.turnNumber;
-            const isHovered = hoveredTurn === turn.turnNumber;
+          const isActive = selectedTurn === turn.turnNumber;
+          const isHovered = hoveredTurn === turn.turnNumber;
 
-            return (
-              <div
-                key={turn.turnNumber}
-                className="relative flex shrink-0 flex-col items-center"
-                onMouseEnter={() => setHoveredTurn(turn.turnNumber)}
-                onMouseLeave={() => setHoveredTurn(null)}
+          return (
+            <div
+              key={turn.turnNumber}
+              className="relative flex shrink-0 flex-col items-center"
+            >
+              {/* Node button — transparent wrapper, only the inner dot is visible */}
+              <Popover
+                open={isHovered}
+                onOpenChange={(open) =>
+                  setHoveredTurn(open ? turn.turnNumber : null)
+                }
               >
-                {/* Node button — transparent wrapper, only the inner dot is visible */}
-                <button
-                  type="button"
-                  onClick={() => handleSelect(turn)}
-                  disabled={!turn.hasSha}
-                  className={clsx(
-                    "group relative flex h-4 w-4 items-center justify-center bg-transparent border-0 p-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-gx-accent/40 rounded-full",
+                <PopoverTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="compact"
+                    type="button"
+                    onClick={() => handleSelect(turn)}
+                    disabled={!turn.hasSha}
+                    className={clsx(
+                    "group relative flex h-4 w-4 items-center justify-center bg-transparent border-0 p-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 rounded-full",
                     !turn.hasSha && "opacity-40 cursor-not-allowed",
                     turn.hasSha && "cursor-pointer",
                   )}
-                  aria-label={`Turn ${turn.turnNumber}`}
-                >
-                  {/* Main dot — only this is visually rendered */}
-                  <span
+                    aria-label={`Turn ${turn.turnNumber}`}
+                  >
+                    {/* Main dot — only this is visually rendered */}
+                    <span
                     className={clsx(
                       "relative rounded-full transition-colors",
                       isActive
-                        ? "h-3 w-3 bg-gx-accent"
+                        ? "h-3 w-3 bg-primary"
                         : turn.isLatest
-                          ? "h-2 w-2 bg-gx-success"
-                          : "h-2 w-2 bg-gx-muted/50 group-hover:bg-gx-muted",
+                          ? "h-2 w-2 bg-success"
+                          : "h-2 w-2 bg-muted-foreground/50 group-hover:bg-muted-foreground",
                     )}
                   />
-                </button>
+                  </Button>
+                </PopoverTrigger>
 
                 {/* Label below */}
                 <span
                   className={clsx(
                     "absolute top-5 text-[9px] font-mono transition whitespace-nowrap",
                     isActive
-                      ? "text-gx-accent font-semibold"
+                      ? "text-primary font-semibold"
                       : isHovered
-                        ? "text-gx-text"
-                        : "text-gx-muted/50",
+                        ? "text-foreground"
+                        : "text-muted-foreground/50",
                   )}
                 >
                   {turn.turnNumber}
@@ -151,42 +178,74 @@ export function CheckpointTimeline({ task, onRestore, onSelectTurn, selectedTurn
 
                 {/* Hover tooltip with revert */}
                 {isHovered && turn.hasSha && (
-                  <div className="absolute bottom-full left-1/2 z-50 mb-3 flex -translate-x-1/2 items-center gap-2 rounded-md border border-gx-border bg-gx-surface px-2.5 py-1.5 whitespace-nowrap">
+                  <PopoverContent
+                    side="top"
+                    className="flex w-auto items-center gap-2 px-2.5 py-1.5 whitespace-nowrap"
+                  >
                     <div className="flex flex-col items-start">
-                      <span className="text-[10px] font-medium text-gx-text">
+                      <span className="text-[10px] font-medium text-foreground">
                         Turn {turn.turnNumber}
                       </span>
-                      <span className="text-[9px] text-gx-muted font-mono">
+                      <span className="text-[9px] text-muted-foreground font-mono">
                         {turn.fromSha.slice(0, 7)}
                       </span>
                     </div>
                     {turn.hasSha && (
-                      <button
+                      <Button
+                        variant="ghost"
+                        size="compact"
                         type="button"
                         disabled={restoring}
                         onClick={(e) => { e.stopPropagation(); void handleRestore(turn.ref); }}
-                        className="flex items-center gap-1 rounded border border-gx-error/30 bg-gx-error/5 px-1.5 py-0.5 text-[9px] text-gx-error hover:bg-gx-error/10 disabled:opacity-50 transition"
+                        className="flex items-center gap-1 rounded border border-destructive/30 bg-destructive/5 px-1.5 py-0.5 text-[9px] text-destructive hover:bg-destructive/10 disabled:opacity-50 transition"
                       >
                         <RotateCcw size={8} /> Restore files
-                      </button>
+                      </Button>
                     )}
 
                     {/* Tooltip arrow */}
-                    <div className="absolute left-1/2 top-full h-2 w-2 -translate-x-1/2 -translate-y-1 rotate-45 border-b border-r border-gx-border bg-gx-surface" />
-                  </div>
+                  </PopoverContent>
                 )}
-              </div>
-            );
-          })}
+              </Popover>
+            </div>
+          );
+        })}
       </div>
 
-      {error && <div className="text-xs text-gx-error"><p role="alert">{error}</p><button type="button" onClick={reload}>Reload saved file states</button></div>}
-      {backups.length > 0 && <select aria-label="Restore saved file backup" disabled={restoring} value="" onChange={event => void handleRestore(event.target.value)}>
-        <option value="">Backups</option>
-        {backups.map(backup => <option key={backup.ref} value={backup.ref}>{new Date(backup.createdAt).toLocaleString()}</option>)}
-      </select>}
+      {error && (
+        <div className="text-xs text-destructive">
+          <p role="alert">{error}</p>
+          <Button variant="ghost" size="compact" type="button" onClick={reload}>
+            Reload saved file states
+          </Button>
+        </div>
+      )}
+      {backups.length > 0 && (
+        <Select
+          disabled={restoring}
+          value={":" + String("")}
+          onValueChange={(selectedValue) => {
+            const value = selectedValue.slice(1);
+            return void handleRestore(value);
+          }}
+        >
+          <SelectTrigger aria-label="Restore saved file backup">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              <SelectItem value={":" + String("")}>Backups</SelectItem>
+              {backups.map((backup) => (
+                <SelectItem key={backup.ref} value={":" + String(backup.ref)}>
+                  {new Date(backup.createdAt).toLocaleString()}
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          </SelectContent>
+        </Select>
+      )}
       {/* Right: turn counter */}
-      <div className="ml-auto shrink-0 text-[10px] tabular-nums text-gx-muted/60">
+      <div className="ml-auto shrink-0 text-[10px] tabular-nums text-muted-foreground/60">
         {selectedTurn != null ? `Turn ${selectedTurn}` : `${turns.length} turn${turns.length !== 1 ? "s" : ""}`}
       </div>
     </div>

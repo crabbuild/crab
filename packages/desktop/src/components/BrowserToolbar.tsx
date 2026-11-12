@@ -1,37 +1,52 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
+import {
+  CommandGroup,
+  CommandItem,
+  CommandList,
+  CommandPopover,
+} from "@/components/ui/command";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
+import clsx from "clsx";
 import {
   ArrowLeft,
   ArrowRight,
   Camera,
+  ChevronDown,
   Crosshair,
   Globe,
-  RefreshCw,
-  X,
-  Plus,
   Loader2,
-  Search,
   Lock,
-  Unlock,
+  Monitor,
+  Plus,
+  RefreshCw,
+  Search,
+  Settings,
+  Smartphone,
   Star,
+  Unlock,
+  User,
+  X,
   ZoomIn,
   ZoomOut,
-  Smartphone,
-  Monitor,
-  User,
-  ChevronDown,
-  Settings,
 } from "lucide-react";
-import clsx from "clsx";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  normalizeBrowserNavigationUrl,
-  CRAB_BROWSER_BLANK_URL,
-  DEFAULT_SEARCH_ENGINE,
-} from "../lib/browser-url";
+  BrowserAddressBarSuggestion,
+  buildBrowserAddressBarSuggestions,
+} from "../lib/browser-address-bar-suggestions";
 import { loadHistory } from "../lib/browser-history";
 import {
-  buildBrowserAddressBarSuggestions,
-  BrowserAddressBarSuggestion,
-} from "../lib/browser-address-bar-suggestions";
+  CRAB_BROWSER_BLANK_URL,
+  DEFAULT_SEARCH_ENGINE,
+  normalizeBrowserNavigationUrl,
+} from "../lib/browser-url";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -100,10 +115,7 @@ interface BrowserToolbarProps {
   onManageProfiles?: () => void;
 }
 
-
 // ─── URL History Persistence ────────────────────────────────────────────────
-
-
 
 // ─── Component ──────────────────────────────────────────────────────────────
 
@@ -256,7 +268,7 @@ export function BrowserToolbar({
   }, [activeTabId]);
 
   return (
-    <div className="flex flex-col border-b border-gx-border bg-gx-surface">
+    <div className="flex flex-col border-b border-border bg-card">
       {/* Tab bar */}
       <div className="flex items-center gap-0 overflow-x-auto px-2 pt-1">
         {tabs.map((tab) => {
@@ -267,8 +279,8 @@ export function BrowserToolbar({
               className={clsx(
                 "group flex shrink-0 items-center gap-1.5 rounded-t-md px-3 py-1.5 text-xs cursor-pointer select-none max-w-[180px] transition",
                 isActive
-                  ? "bg-gx-bg text-gx-text border border-gx-border border-b-0"
-                  : "text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover",
+                  ? "bg-background text-foreground border border-border border-b-0"
+                  : "text-muted-foreground hover:text-foreground hover:bg-accent",
               )}
               onClick={() => onSelectTab(tab.id)}
               role="tab"
@@ -280,14 +292,16 @@ export function BrowserToolbar({
               ) : tab.faviconUrl ? (
                 <img src={tab.faviconUrl} alt="" className="h-3.5 w-3.5 shrink-0 rounded" />
               ) : (
-                <Globe size={10} className="shrink-0 text-gx-muted" />
+                <Globe size={10} className="shrink-0 text-muted-foreground" />
               )}
               <span className="truncate min-w-0 flex-1">
                 {tab.title || "New Tab"}
               </span>
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
-                className="shrink-0 rounded p-0.5 opacity-0 group-hover:opacity-100 hover:bg-gx-surface-hover text-gx-muted hover:text-gx-text transition"
+                className="shrink-0 rounded p-0.5 opacity-0 group-hover:opacity-100 hover:bg-accent text-muted-foreground hover:text-foreground transition"
                 onClick={(e) => {
                   e.stopPropagation();
                   onCloseTab(tab.id);
@@ -295,31 +309,35 @@ export function BrowserToolbar({
                 aria-label="Close tab"
               >
                 <X size={10} />
-              </button>
+              </Button>
             </div>
           );
         })}
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
-          className="shrink-0 rounded p-1 text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover transition"
+          className="shrink-0 rounded p-1 text-muted-foreground hover:text-foreground hover:bg-accent transition"
           onClick={onCreateTab}
           aria-label="New tab"
           title="New Tab"
         >
           <Plus size={14} />
-        </button>
+        </Button>
       </div>
 
       {/* Navigation bar */}
       <div className="flex items-center gap-1.5 px-2 py-1.5">
         {/* Back */}
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           className={clsx(
             "rounded p-1 transition",
             activeTab?.canGoBack
-              ? "text-gx-text hover:bg-gx-surface-hover"
-              : "text-gx-muted/40 cursor-not-allowed",
+              ? "text-foreground hover:bg-accent"
+              : "text-muted-foreground/40 cursor-not-allowed",
           )}
           onClick={() => activeTabId && onGoBack(activeTabId)}
           disabled={!activeTab?.canGoBack}
@@ -327,16 +345,18 @@ export function BrowserToolbar({
           title="Back"
         >
           <ArrowLeft size={16} />
-        </button>
+        </Button>
 
         {/* Forward */}
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           className={clsx(
             "rounded p-1 transition",
             activeTab?.canGoForward
-              ? "text-gx-text hover:bg-gx-surface-hover"
-              : "text-gx-muted/40 cursor-not-allowed",
+              ? "text-foreground hover:bg-accent"
+              : "text-muted-foreground/40 cursor-not-allowed",
           )}
           onClick={() => activeTabId && onGoForward(activeTabId)}
           disabled={!activeTab?.canGoForward}
@@ -344,43 +364,47 @@ export function BrowserToolbar({
           title="Forward"
         >
           <ArrowRight size={16} />
-        </button>
+        </Button>
 
         {/* Reload/Stop */}
         {activeTab?.loading ? (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
-            className="rounded p-1 text-gx-text hover:bg-gx-surface-hover transition"
+            className="rounded p-1 text-foreground hover:bg-accent transition"
             onClick={() => activeTabId && onStop(activeTabId)}
             aria-label="Stop loading"
             title="Stop"
           >
             <X size={14} />
-          </button>
+          </Button>
         ) : (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
-            className="rounded p-1 text-gx-text hover:bg-gx-surface-hover transition"
+            className="rounded p-1 text-foreground hover:bg-accent transition"
             onClick={() => activeTabId && onReload(activeTabId)}
             aria-label="Reload"
             title="Reload"
           >
             <RefreshCw size={14} />
-          </button>
+          </Button>
         )}
 
         {/* URL Bar */}
         <div className="relative flex min-w-0 flex-1">
-          <div className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md border border-gx-border bg-gx-bg px-2.5 py-1 text-sm">
+          <div className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1 text-sm">
             {/* Security indicator */}
             {isSecure ? (
-              <Lock size={12} className="shrink-0 text-gx-success" />
+              <Lock size={12} className="shrink-0 text-success" />
             ) : activeTab?.url && !activeTab.url.startsWith("about:") && !activeTab.url.startsWith("data:") ? (
-              <Unlock size={12} className="shrink-0 text-gx-muted" />
+              <Unlock size={12} className="shrink-0 text-muted-foreground" />
             ) : (
-              <Globe size={12} className="shrink-0 text-gx-muted" />
+              <Globe size={12} className="shrink-0 text-muted-foreground" />
             )}
-            <input
+            <Input
               ref={addressInputRef}
               type="text"
               defaultValue={addressBarValue}
@@ -391,11 +415,8 @@ export function BrowserToolbar({
                   setSuggestionsOpen(true);
                 }
               }}
-              onBlur={() => {
-                setTimeout(() => setSuggestionsOpen(false), 200);
-              }}
               placeholder="Search or enter URL..."
-              className="min-w-0 flex-1 bg-transparent text-gx-text placeholder-gx-muted/60 outline-none text-[13px]"
+              className="min-w-0 flex-1 bg-transparent text-foreground placeholder-muted-foreground/60 outline-none text-[13px]"
               spellCheck={false}
               autoCapitalize="none"
               autoCorrect="off"
@@ -407,227 +428,280 @@ export function BrowserToolbar({
 
           {/* Suggestions dropdown */}
           {suggestionsOpen && suggestions.length > 0 && (
-            <div className="absolute left-0 right-0 top-full z-50 mt-0.5 rounded-md border border-gx-border bg-gx-surface shadow-xl py-0.5">
-              {suggestions.map((s, i) => (
-                <button
-                  key={`${s.url}-${i}`}
-                  type="button"
-                  className={clsx(
+            <CommandPopover
+              anchorRef={addressInputRef}
+              onClose={() => setSuggestionsOpen(false)}
+              side="bottom"
+              value={String(selectedSuggestionIndex)}
+              onValueChange={(value) =>
+                setSelectedSuggestionIndex(Number(value))
+              }
+            >
+              <CommandList className="max-h-48">
+                <CommandGroup>
+                  {suggestions.map((s, i) => (
+                    <CommandItem
+                      value={String(i)}
+                      key={`${s.url}-${i}`}
+                      className={clsx(
                     "flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition",
                     i === selectedSuggestionIndex
-                      ? "bg-gx-accent/10 text-gx-text"
-                      : "text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
+                      ? "bg-primary/10 text-foreground"
+                      : "text-muted-foreground hover:bg-accent hover:text-foreground",
                   )}
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    handleSuggestionSelect(s.url);
-                  }}
-                >
-                  {s.isSearch ? (
+                      onSelect={() => {
+                        handleSuggestionSelect(s.url);
+                      }}
+                    >
+                      {s.isSearch ? (
                     <Search size={12} className="shrink-0" />
                   ) : (
                     <Globe size={12} className="shrink-0" />
                   )}
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate">{s.title}</div>
-                    {s.subtitle && (
-                      <div className="truncate text-[10px] text-gx-muted/60">{s.subtitle}</div>
-                    )}
-                  </div>
-                </button>
-              ))}
-            </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate">{s.title}</div>
+                        {s.subtitle && (
+                          <div className="truncate text-[10px] text-muted-foreground/60">
+                            {s.subtitle}
+                          </div>
+                        )}
+                      </div>
+                    </CommandItem>
+                  ))}
+                </CommandGroup>
+              </CommandList>
+            </CommandPopover>
           )}
         </div>
 
         {/* Viewport preset selector */}
-        {(viewportPresets && viewportPresetId !== undefined && onSetViewportPreset) ? (
+        {viewportPresets && viewportPresetId !== undefined && onSetViewportPreset ? (
           <div className="relative" ref={viewportMenuRef}>
-            <button
-              type="button"
-              className="flex items-center gap-1 rounded px-1.5 py-1 text-[11px] text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover transition"
-              onClick={() => setViewportMenuOpen((v) => !v)}
-              title="Viewport preset"
-              aria-label="Viewport preset"
+            <DropdownMenu
+              open={viewportMenuOpen}
+              onOpenChange={setViewportMenuOpen}
             >
-              <Smartphone size={12} />
-              <ChevronDown size={10} />
-            </button>
-            {viewportMenuOpen && (
-              <div className="absolute right-0 top-full z-50 mt-1 min-w-[180px] rounded-md border border-gx-border bg-gx-surface py-1 shadow-lg">
-                <button
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
-                  className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition ${!viewportPresetId ? 'bg-gx-accent/10 text-gx-text' : 'text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text'}`}
-                  onClick={() => { onSetViewportPreset(null); setViewportMenuOpen(false); }}
+                  className="flex items-center gap-1 rounded px-1.5 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-accent transition"
+                  onClick={() => setViewportMenuOpen((v) => !v)}
+                  title="Viewport preset"
+                  aria-label="Viewport preset"
                 >
-                  <Monitor size={12} />
-                  Responsive
-                </button>
-                {viewportPresets.map((preset) => (
-                  <button
-                    key={preset.id}
-                    type="button"
-                    className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition ${viewportPresetId === preset.id ? 'bg-gx-accent/10 text-gx-text' : 'text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text'}`}
-                    onClick={() => { onSetViewportPreset(preset.id); setViewportMenuOpen(false); }}
-                  >
-                    <Smartphone size={12} />
-                    {preset.label}
-                  </button>
-                ))}
-              </div>
-            )}
+                  <Smartphone size={12} />
+                  <ChevronDown size={10} />
+                </Button>
+              </DropdownMenuTrigger>
+              {viewportMenuOpen && (
+                <DropdownMenuContent
+                  side="bottom"
+                  align="end"
+                  className=" min-w-[180px] rounded-md border border-border bg-card py-1 "
+                >
+                  <DropdownMenuGroup>
+                    <DropdownMenuItem
+                      className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition ${!viewportPresetId ? 'bg-primary/10 text-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground'}`}
+                      onSelect={() => { onSetViewportPreset(null); setViewportMenuOpen(false); }}
+                    >
+                      <Monitor size={12} />
+                      Responsive
+                    </DropdownMenuItem>
+                    {viewportPresets.map((preset) => (
+                      <DropdownMenuItem
+                        key={preset.id}
+                        className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition ${viewportPresetId === preset.id ? 'bg-primary/10 text-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground'}`}
+                        onSelect={() => { onSetViewportPreset(preset.id); setViewportMenuOpen(false); }}
+                      >
+                        <Smartphone size={12} />
+                        {preset.label}
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuGroup>
+                </DropdownMenuContent>
+              )}
+            </DropdownMenu>
           </div>
         ) : null}
 
         {/* Zoom controls */}
         {onZoomIn && onZoomOut ? (
           <div className="flex items-center gap-0.5 rounded px-1">
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
-              className="rounded px-1 py-1 text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover transition"
+              className="rounded px-1 py-1 text-muted-foreground hover:text-foreground hover:bg-accent transition"
               onClick={onZoomOut}
               aria-label="Zoom Out"
               title="Zoom Out (Cmd+-)"
             >
               <ZoomOut size={12} />
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
-              className="rounded px-1 py-1 text-[11px] text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover transition min-w-[32px] text-center"
+              className="rounded px-1 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-accent transition min-w-[32px] text-center"
               onClick={onZoomReset}
               aria-label="Reset Zoom"
               title="Reset Zoom (Cmd+0)"
             >
               {Math.round((zoomLevel ?? 1) * 100)}%
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
-              className="rounded px-1 py-1 text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover transition"
+              className="rounded px-1 py-1 text-muted-foreground hover:text-foreground hover:bg-accent transition"
               onClick={onZoomIn}
               aria-label="Zoom In"
               title="Zoom In (Cmd+=)"
             >
               <ZoomIn size={12} />
-            </button>
+            </Button>
           </div>
         ) : null}
 
         {/* Session profile selector */}
         {onSelectProfile ? (
           <div className="relative" ref={profileMenuRef}>
-            <button
-              type="button"
-              className="flex items-center gap-1 rounded px-1.5 py-1 text-[11px] text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover transition"
-              onClick={() => setProfileMenuOpen((v) => !v)}
-              title="Session profile"
-              aria-label="Session profile"
+            <DropdownMenu
+              open={profileMenuOpen}
+              onOpenChange={setProfileMenuOpen}
             >
-              <User size={12} />
-              <ChevronDown size={10} />
-            </button>
-            {profileMenuOpen && (
-              <div className="absolute right-0 top-full z-50 mt-1 min-w-[200px] rounded-md border border-gx-border bg-gx-surface py-1 shadow-lg">
-                {/* Default profile option */}
-                <button
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
-                  className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition ${!activeProfileId ? 'bg-gx-accent/10 text-gx-text' : 'text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text'}`}
-                  onClick={() => { onSelectProfile(null); setProfileMenuOpen(false); }}
+                  className="flex items-center gap-1 rounded px-1.5 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-accent transition"
+                  onClick={() => setProfileMenuOpen((v) => !v)}
+                  title="Session profile"
+                  aria-label="Session profile"
                 >
-                  <Globe size={12} />
-                  Default Session
-                </button>
-                {(sessionProfiles || []).map((profile) => (
-                  <button
-                    key={profile.id}
-                    type="button"
-                    className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition ${activeProfileId === profile.id ? 'bg-gx-accent/10 text-gx-text' : 'text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text'}`}
-                    onClick={() => { onSelectProfile(profile.id); setProfileMenuOpen(false); }}
-                  >
-                    <User size={12} />
-                    <span className="truncate">{profile.label}</span>
-                    <span className="ml-auto text-[10px] text-gx-muted/50">{profile.scope}</span>
-                  </button>
-                ))}
-                <div className="my-1 border-t border-gx-border" />
-                {onCreateProfile ? (
-                  <button
-                    type="button"
-                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text transition"
-                    onClick={() => { onCreateProfile(); setProfileMenuOpen(false); }}
-                  >
-                    <Plus size={12} />
-                    Create Profile
-                  </button>
-                ) : null}
-                {onManageProfiles ? (
-                  <button
-                    type="button"
-                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text transition"
-                    onClick={() => { onManageProfiles(); setProfileMenuOpen(false); }}
-                  >
-                    <Settings size={12} />
-                    Manage Profiles
-                  </button>
-                ) : null}
-              </div>
-            )}
+                  <User size={12} />
+                  <ChevronDown size={10} />
+                </Button>
+              </DropdownMenuTrigger>
+              {profileMenuOpen && (
+                <DropdownMenuContent
+                  side="bottom"
+                  align="end"
+                  className=" min-w-[200px] rounded-md border border-border bg-card py-1 "
+                >
+                  <DropdownMenuGroup>
+                    {/* Default profile option */}
+                    <DropdownMenuItem
+                      className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition ${!activeProfileId ? 'bg-primary/10 text-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground'}`}
+                      onSelect={() => { onSelectProfile(null); setProfileMenuOpen(false); }}
+                    >
+                      <Globe size={12} />
+                      Default Session
+                    </DropdownMenuItem>
+                    {(sessionProfiles || []).map((profile) => (
+                      <DropdownMenuItem
+                        key={profile.id}
+                        className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition ${activeProfileId === profile.id ? 'bg-primary/10 text-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground'}`}
+                        onSelect={() => { onSelectProfile(profile.id); setProfileMenuOpen(false); }}
+                      >
+                        <User size={12} />
+                        <span className="truncate">{profile.label}</span>
+                        <span className="ml-auto text-[10px] text-muted-foreground/50">
+                          {profile.scope}
+                        </span>
+                      </DropdownMenuItem>
+                    ))}
+                    <div className="my-1 border-t border-border" />
+                    {onCreateProfile ? (
+                      <DropdownMenuItem
+                        className="justify-start flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-muted-foreground hover:bg-accent hover:text-foreground transition"
+                        onSelect={() => { onCreateProfile(); setProfileMenuOpen(false); }}
+                      >
+                        <Plus size={12} />
+                        Create Profile
+                      </DropdownMenuItem>
+                    ) : null}
+                    {onManageProfiles ? (
+                      <DropdownMenuItem
+                        className="justify-start flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-muted-foreground hover:bg-accent hover:text-foreground transition"
+                        onSelect={() => { onManageProfiles(); setProfileMenuOpen(false); }}
+                      >
+                        <Settings size={12} />
+                        Manage Profiles
+                      </DropdownMenuItem>
+                    ) : null}
+                  </DropdownMenuGroup>
+                </DropdownMenuContent>
+              )}
+            </DropdownMenu>
           </div>
         ) : null}
 
         {/* Bookmark */}
         {onToggleBookmark ? (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="rounded px-1.5 py-1 text-[11px] transition"
-            style={{ color: isBookmarked ? '#eab308' : undefined }}
+            style={{ color: isBookmarked ? 'rgb(var(--warning))' : undefined }}
             onClick={onToggleBookmark}
             aria-label={isBookmarked ? 'Remove bookmark' : 'Add bookmark'}
             title={isBookmarked ? 'Remove bookmark' : 'Add bookmark'}
           >
-            <Star size={14} fill={isBookmarked ? '#eab308' : 'none'} />
-          </button>
+            <Star size={14} fill={isBookmarked ? 'rgb(var(--warning))' : 'none'} />
+          </Button>
         ) : null}
 
         {/* Screenshot to Clipboard */}
         {onScreenshot ? (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
-            className="rounded px-1.5 py-1 text-[11px] text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover transition"
+            className="rounded px-1.5 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-accent transition"
             onClick={onScreenshot}
             aria-label="Screenshot to Clipboard"
             title="Screenshot to Clipboard"
           >
             <Camera size={14} />
-          </button>
+          </Button>
         ) : null}
 
         {/* Grab Mode (Element Picker) */}
         {onToggleGrab ? (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className={`rounded px-1.5 py-1 text-[11px] transition ${
               grabModeActive
-                ? 'text-gx-accent bg-gx-accent/10'
-                : 'text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover'
+                ? 'text-primary bg-primary/10'
+                : 'text-muted-foreground hover:text-foreground hover:bg-accent'
             }`}
             onClick={onToggleGrab}
             aria-label={grabModeActive ? 'Exit Grab Mode' : 'Grab Mode'}
             title={grabModeActive ? 'Exit Grab Mode' : 'Grab Mode (Element Picker)'}
           >
             <Crosshair size={14} />
-          </button>
+          </Button>
         ) : null}
 
         {/* DevTools */}
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
-          className="rounded px-1.5 py-1 text-[11px] text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover transition"
+          className="rounded px-1.5 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-accent transition"
           onClick={() => activeTabId && onOpenDevTools(activeTabId)}
           aria-label="Open DevTools"
           title="Developer Tools"
         >
           DevTools
-        </button>
+        </Button>
       </div>
     </div>
   );

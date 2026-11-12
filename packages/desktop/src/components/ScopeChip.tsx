@@ -8,7 +8,7 @@ import { Folder } from "lucide-react";
 export function ScopeChip() {
   return (
     <span
-      className="ml-2 inline-flex items-center gap-1 rounded-full bg-gx-accent/10 px-2 py-0.5 text-[10px] font-medium text-gx-accent"
+      className="ml-2 inline-flex items-center gap-1 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary"
       aria-label="This setting has a workspace override"
     >
       <Folder size={9} className="shrink-0" />

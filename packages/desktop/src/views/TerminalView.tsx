@@ -1,117 +1,134 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Terminal as XTerm } from "@xterm/xterm";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+  PointMenu,
+} from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import { Slider } from "@/components/ui/slider";
+import { Toggle } from "@/components/ui/toggle";
+import { requestConfirmation } from "@/lib/application-dialogs";
+import { ClipboardAddon } from "@xterm/addon-clipboard";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
-import { WebLinksAddon } from "@xterm/addon-web-links";
-import { Unicode11Addon } from "@xterm/addon-unicode11";
-import { ClipboardAddon } from "@xterm/addon-clipboard";
 import { SerializeAddon } from "@xterm/addon-serialize";
+import { Unicode11Addon } from "@xterm/addon-unicode11";
+import { WebLinksAddon } from "@xterm/addon-web-links";
+import { Terminal as XTerm } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
+import clsx from "clsx";
 import {
-  X,
+  AlertTriangle,
+  ArrowDown,
+  ArrowDownToLine,
+  ArrowUp,
+  Bookmark,
   ChevronDown,
+  Circle,
+  ClipboardCopy,
+  Columns2,
+  Command,
+  Copy,
   ChevronDown as DropdownIcon,
+  EyeOff,
+  FileDown,
+  LayoutGrid,
+  Lock,
+  MoreHorizontal,
+  Palette,
+  PanelLeftOpen,
+  PanelRightOpen,
+  Pin,
+  PinOff,
+  Radio,
+  RotateCcw,
+  Search,
+  SendHorizonal,
+  SlidersHorizontal,
   SplitSquareHorizontal,
   SplitSquareVertical,
   Terminal as TerminalIcon,
-  LayoutGrid,
-  Copy,
-  Radio,
-  ArrowDownToLine,
-  Lock,
-  Unlock,
-  FileDown,
-  Command,
-  UserPlus,
-  Palette,
-  SendHorizonal,
-  SlidersHorizontal,
-  AlertTriangle,
-  ArrowUp,
-  ArrowDown,
-  ClipboardCopy,
-  Type,
-  Bookmark,
-  RotateCcw,
-  PanelLeftOpen,
-  PanelRightOpen,
-  Search,
-  EyeOff,
-  Pin,
-  PinOff,
   Trash2,
-  Columns2,
-  MoreHorizontal,
-  Circle,
+  Type,
+  Unlock,
+  UserPlus,
+  X,
 } from "lucide-react";
-import clsx from "clsx";
-import { OpenRepo } from "../state";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { PasteConfirmDialog } from "../components/PasteConfirmDialog";
+import { PresetDropdown } from "../components/PresetDropdown";
+import { SplitTreeRenderer } from "../components/SplitTreeRenderer";
+import { TerminalBookmarksPanel } from "../components/TerminalBookmarks";
+import { TerminalBreadcrumbBar } from "../components/TerminalBreadcrumbBar";
+import { TerminalFontSettings } from "../components/TerminalFontSettings";
+import { TerminalSearchEnhanced } from "../components/TerminalSearchEnhanced";
+import { TerminalStatusBar } from "../components/TerminalStatusBar";
 import { useEffectiveTheme } from "../hooks/useEffectiveTheme";
+import { usePtyMode } from "../lib/pty-mode-context";
 import {
-  registerTerminal,
+  attachWebgl,
+  buildFontFamily,
+  rebuildWebgl,
+  type WebglState,
+} from "../lib/terminal-font";
+import {
+  DEFAULT_NOTIFICATION_CONFIG,
+  formatNotification,
+  shouldNotify,
+  type CommandCompletion,
+  type NotificationConfig,
+} from "../lib/terminal-notifications";
+import {
+  analyzePaste,
+  DEFAULT_PASTE_GUARD_CONFIG,
+  wrapBracketedPaste,
+  type PasteAnalysis,
+  type PasteGuardConfig,
+} from "../lib/terminal-paste-guard";
+import {
+  captureLayout,
+  deserializeLayout,
+  restoreLayoutTree,
+  type PersistedSession,
+  type SaveStateRequest,
+} from "../lib/terminal-persistence";
+import {
   appendOutput,
   markTerminalClosed,
+  registerTerminal,
   removeTerminal,
   terminalTail,
 } from "../lib/terminal-registry";
-import {
-  TERMINAL_SCHEMES,
-  getScheme,
-  getStoredSchemeId,
-  resolveTheme,
-  setStoredSchemeId,
-} from "../lib/terminal-themes";
-import {
-  attachShellIntegration,
-  formatDuration,
-  type ShellIntegrationState,
-} from "../lib/terminal-shell-integration";
-import {
-  validateScrollbackConfig,
-  estimateMemory,
-  MIN_MAX_LINES,
-  MAX_MAX_LINES,
-  type ScrollbackConfig,
-} from "../lib/terminal-scrollback";
-import {
-  analyzePaste,
-  wrapBracketedPaste,
-  DEFAULT_PASTE_GUARD_CONFIG,
-  type PasteGuardConfig,
-  type PasteAnalysis,
-} from "../lib/terminal-paste-guard";
-import { PasteConfirmDialog } from "../components/PasteConfirmDialog";
-import {
-  shouldNotify,
-  formatNotification,
-  DEFAULT_NOTIFICATION_CONFIG,
-  type NotificationConfig,
-  type CommandCompletion,
-} from "../lib/terminal-notifications";
-import { publishToast } from "../lib/toasts";
-import { TerminalBreadcrumbBar } from "../components/TerminalBreadcrumbBar";
-import {
-  captureLayout,
-  restoreLayoutTree,
-  deserializeLayout,
-  type SaveStateRequest,
-  type PersistedSession,
-} from "../lib/terminal-persistence";
 import {
   queueRestoreSnapshot,
   replayQueuedRestoreSnapshot,
   type PendingRestoreSnapshotMap,
 } from "../lib/terminal-restore-snapshots";
 import {
-  type SplitNode,
-  type LeafNode,
-  type LeafTab,
-  type SplitDirection,
+  estimateMemory,
+  MAX_MAX_LINES,
+  MIN_MAX_LINES,
+  validateScrollbackConfig,
+  type ScrollbackConfig,
+} from "../lib/terminal-scrollback";
+import {
+  attachShellIntegration,
+  formatDuration,
+  type ShellIntegrationState,
+} from "../lib/terminal-shell-integration";
+import {
   createLeaf,
-  splitLeafInPlace,
-  removeLeaf,
-  updateLeaf,
-  updateBranchSizes,
+  createPresetLayout,
   findLeaf,
   findLeafByTab,
   getAllLeaves,
@@ -119,33 +136,36 @@ import {
   getNextLeaf,
   getPrevLeaf,
   PRESET_LAYOUTS,
-  createPresetLayout,
+  removeLeaf,
+  splitLeafInPlace,
+  updateBranchSizes,
+  updateLeaf,
+  type LeafNode,
+  type LeafTab,
+  type SplitDirection,
+  type SplitNode,
 } from "../lib/terminal-split-tree";
-import { SplitTreeRenderer } from "../components/SplitTreeRenderer";
-import { PresetDropdown } from "../components/PresetDropdown";
 import {
-  loadFontConfig,
+  getScheme,
+  getStoredSchemeId,
+  resolveTheme,
+  setStoredSchemeId,
+  TERMINAL_SCHEMES,
+} from "../lib/terminal-themes";
+import {
   applyFontConfig,
-  extractDropPaths,
-  detectAgent,
-  stripAnsiCodes,
-  getLastCommand,
   BookmarkManager,
+  detectAgent,
+  extractDropPaths,
+  getLastCommand,
   getTimeFilteredRange,
+  loadFontConfig,
+  stripAnsiCodes,
   type FontConfig,
   type SemanticFilter,
 } from "../lib/terminal-ux-enhancements";
-import {
-  buildFontFamily,
-  attachWebgl,
-  rebuildWebgl,
-  type WebglState,
-} from "../lib/terminal-font";
-import { TerminalFontSettings } from "../components/TerminalFontSettings";
-import { TerminalStatusBar } from "../components/TerminalStatusBar";
-import { TerminalSearchEnhanced } from "../components/TerminalSearchEnhanced";
-import { TerminalBookmarksPanel } from "../components/TerminalBookmarks";
-import { usePtyMode } from "../lib/pty-mode-context";
+import { publishToast } from "../lib/toasts";
+import { OpenRepo } from "../state";
 
 // --- Types ---
 
@@ -415,7 +435,9 @@ function workspaceStateKey(persistenceKey: string): string {
   return `${LS_WORKSPACE_STATE_PREFIX}${persistenceKey}`;
 }
 
-function loadWorkspaceState(persistenceKey: string): TerminalWorkspaceStateV1 | null {
+function loadWorkspaceState(
+  persistenceKey: string,
+): TerminalWorkspaceStateV1 | null {
   try {
     const raw = localStorage.getItem(workspaceStateKey(persistenceKey));
     if (!raw) return null;
@@ -426,7 +448,10 @@ function loadWorkspaceState(persistenceKey: string): TerminalWorkspaceStateV1 | 
       pinnedSessionIds: Array.isArray(parsed.pinnedSessionIds) ? parsed.pinnedSessionIds.filter((id): id is string => typeof id === "string") : [],
       hiddenSessionIds: Array.isArray(parsed.hiddenSessionIds) ? parsed.hiddenSessionIds.filter((id): id is string => typeof id === "string") : [],
       sessionSidebarSide: parsed.sessionSidebarSide === "right" ? "right" : "left",
-      titles: parsed.titles && typeof parsed.titles === "object" && !Array.isArray(parsed.titles) ? parsed.titles as Record<string, string> : {},
+      titles:
+        parsed.titles && typeof parsed.titles === "object" && !Array.isArray(parsed.titles)
+          ? (parsed.titles as Record<string, string>)
+          : {},
       updatedAt: typeof parsed.updatedAt === "number" ? parsed.updatedAt : 0,
     };
   } catch {
@@ -795,10 +820,13 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
           if (pending) { inst.xterm.write(pending.join("")); pendingDataRef.current.delete(id); }
         }
       }
-      setSplitTree(tree => updateLeaf(tree, leaf.id, pane => ({ ...pane,
-        tabs: pane.tabs.map(item => item.id === id ? tab : item),
-        activeTab: pane.activeTab === id ? tab.id : pane.activeTab,
-      })));
+      setSplitTree((tree) =>
+        updateLeaf(tree, leaf.id, (pane) => ({
+          ...pane,
+          tabs: pane.tabs.map((item) => (item.id === id ? tab : item)),
+          activeTab: pane.activeTab === id ? tab.id : pane.activeTab,
+        })),
+      );
     } catch (error) {
       terminalsRef.current.get(id)?.xterm.write(`\r\n[Cannot resume terminal: ${error instanceof Error ? error.message : String(error)}. Press Enter to retry.]\r\n`);
     } finally { retryingRestoreRef.current.delete(id); }
@@ -810,18 +838,26 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
     return tab?.sshRemote ? sshTermIpc.write(id, data) : ptyIpc.write(id, data);
   }, []);
 
-  const saveLayout = useCallback((includeScrollback = false) => {
-    const currentTree = splitTreeRef.current;
-    const layout = captureLayout(currentTree, activePaneIdRef.current,
-      (tab) => shellIntegrationRef.current.get(tab.id)?.state.cwd ?? tab.cwd ?? (tab.sshRemote ? "" : repo.path ?? ""));
-    const scrollbackData: Record<string, string> = {};
-    if (includeScrollback) {
+  const saveLayout = useCallback(
+    (includeScrollback = false) => {
+      const currentTree = splitTreeRef.current;
+      const layout = captureLayout(
+        currentTree,
+        activePaneIdRef.current,
+        (tab) =>
+          shellIntegrationRef.current.get(tab.id)?.state.cwd ?? tab.cwd ??
+          (tab.sshRemote ? "" : (repo.path ?? "")),
+      );
+      const scrollbackData: Record<string, string> = {};
+      if (includeScrollback) {
       for (const [id, inst] of terminalsRef.current) {
         scrollbackData[id] = inst.serialize.serialize();
       }
     }
-    return ptyIpc.saveState({ persistenceKey, layout, scrollbackData });
-  }, [persistenceKey, repo.path]);
+      return ptyIpc.saveState({ persistenceKey, layout, scrollbackData });
+    },
+    [persistenceKey, repo.path],
+  );
 
   const restoredRef = useRef(false);
   const restoreMountedRef = useRef(false);
@@ -1017,7 +1053,9 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
   }, [splitTree, activePaneId, visible]);
 
   const getActivePane = useCallback(() => {
-    return findLeaf(splitTree, activePaneId) ?? getAllLeaves(splitTree)[0] ?? null;
+    return (
+      findLeaf(splitTree, activePaneId) ?? getAllLeaves(splitTree)[0] ?? null
+    );
   }, [splitTree, activePaneId]);
 
   /** Get all active terminal IDs across all panes. */
@@ -1025,7 +1063,12 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
     return getAllTabIds(splitTree);
   }
 
-  async function spawnTab(paneId: string, shell?: string, profile?: TermProfile, sessionTypeOverride?: "daemon" | "in-process") {
+  async function spawnTab(
+    paneId: string,
+    shell?: string,
+    profile?: TermProfile,
+    sessionTypeOverride?: "daemon" | "in-process",
+  ) {
     // Inherit the active tab's tracked cwd (from shell integration) when opening a new tab.
     const activeLeaf = findLeaf(splitTree, paneId) ?? findLeaf(splitTree, activePaneId);
     const activeTabId = activeLeaf?.activeTab;
@@ -1043,7 +1086,9 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
       const { id, resolvedSessionType } = result;
       persistenceReadyRef.current = true;
       tabCounter.current++;
-      const shellName = profile?.name || (shellPath ? shellPath.split("/").pop() ?? "shell" : "zsh");
+      const shellName =
+        profile?.name ||
+        (shellPath ? (shellPath.split("/").pop() ?? "shell") : "zsh");
       const title = profile?.name || `${shellName} ${tabCounter.current}`;
       const tab: TermTab = { id, title, shell: shellPath ?? "", cwd, startupCommand: profile?.startupCommand, resolvedSessionType };
       // Mark this terminal as pending startup so the first data clears the loading indicator.
@@ -1320,7 +1365,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
    * Smart close: if the shell is at a prompt (no running command), close
    * immediately without confirmation. Otherwise show a confirmation dialog.
    */
-  function killTab(paneId: string, tabId: string) {
+  async function killTab(paneId: string, tabId: string) {
     const si = shellIntegrationRef.current.get(tabId);
     const atPrompt = si?.state.atPrompt ?? true;
     if (atPrompt) {
@@ -1328,7 +1373,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
       killTabImmediate(paneId, tabId);
     } else {
       // Command is running — ask for confirmation.
-      const confirmed = window.confirm(
+      const confirmed = await requestConfirmation(
         "A command is still running in this terminal. Are you sure you want to close it?",
       );
       if (confirmed) {
@@ -1411,8 +1456,9 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
     // Each successful close leaves the layout immediately. A failed SSH
     // termination keeps its tab visible and recoverable, as tab close does.
     for (const tab of leaf.tabs) {
-      if ((tab as TermTab).resolvedSessionType === "daemon") hideTabImmediate(paneId, tab.id);
-      else if (!await killTabImmediate(paneId, tab.id)) return;
+      if ((tab as TermTab).resolvedSessionType === "daemon")
+        hideTabImmediate(paneId, tab.id);
+      else if (!(await killTabImmediate(paneId, tab.id))) return;
     }
     // Clean up MRU history for this pane.
     tabMruRef.current.delete(paneId);
@@ -1454,8 +1500,8 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
     let content: string;
     if (format === "html") {
       content = t.serialize.serialize({ excludeModes: true });
-      // Wrap in basic HTML with ANSI-to-HTML styling
-      content = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Terminal Output</title><style>body{background:#0b0d12;color:#e7eaf1;font-family:monospace;white-space:pre;padding:16px;}</style></head><body>${content}</body></html>`;
+      const palette = resolveTheme(schemeId, theme);
+      content = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Terminal Output</title><style>body{background:${palette.background};color:${palette.foreground};font-family:monospace;white-space:pre;padding:16px;}</style></head><body>${content}</body></html>`;
     } else {
       t.xterm.selectAll();
       content = t.xterm.getSelection() || "";
@@ -1607,7 +1653,6 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
       if (term) term.xterm.scrollToLine(range.startLine);
     }
   }
-
 
   // Hidden kept-alive terminals retain PTYs, but must not consume app shortcuts.
   useEffect(() => {
@@ -1815,8 +1860,6 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
     setContextMenu(null);
   }
 
-  useEffect(() => { if (!contextMenu) return; const close = () => setContextMenu(null); window.addEventListener("click", close); return () => window.removeEventListener("click", close); }, [contextMenu]);
-
   // Listen for data from the pty with buffering.
   /** Tracks terminal IDs that were spawned with a startup command and
    *  haven't received their first real data yet. On first data, we clear
@@ -1951,7 +1994,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
             ...l,
             tabs: l.tabs.map((t) =>
               t.id === evt.id
-                ? { ...t, coldRestored: { savedAt: evt.savedAt } } as LeafTab
+                ? ({ ...t, coldRestored: { savedAt: evt.savedAt } } as LeafTab)
                 : t,
             ),
           })),
@@ -1989,7 +2032,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
           ...l,
           tabs: l.tabs.map((t) =>
             t.id === sessionId
-              ? { ...t, coldRestored: undefined } as LeafTab
+              ? ({ ...t, coldRestored: undefined } as LeafTab)
               : t,
           ),
         })),
@@ -2092,188 +2135,244 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
   );
 
   return (
-    <div className="flex h-full w-full min-w-0 flex-col bg-gx-bg-sub">
+    <div className="flex h-full w-full min-w-0 flex-col bg-background">
       {/* Toolbar row */}
-      <div className="flex shrink-0 items-center gap-1 border-y border-gx-border bg-gx-surface px-2 py-1">
+      <div className="flex shrink-0 items-center gap-1 border-y border-border bg-card px-2 py-1">
         {/* Broadcast toggle */}
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={() => setBroadcastMode((v) => !v)}
           className={clsx(
             "flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px]",
-            broadcastMode ? "bg-gx-warn/20 text-gx-warn" : "text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover",
+            broadcastMode ? "bg-warning/20 text-warning" : "text-muted-foreground hover:text-foreground hover:bg-accent",
           )}
           title="Broadcast input to all terminals"
         >
           <Radio size={10} />
           {broadcastMode && <span>Broadcast</span>}
-        </button>
+        </Button>
 
         {/* Quick commands */}
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={() => { setQuickCmdOpen((v) => !v); setTimeout(() => cmdInputRef.current?.focus(), 50); }}
-          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover"
+          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent"
           title="Quick commands (⌘⇧R)"
         >
           <Command size={10} />
-        </button>
+        </Button>
 
         {/* Profiles */}
         <div className="relative">
-          <button
-            type="button"
-            onClick={() => setProfileMenuOpen((v) => !v)}
-            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover"
-            title="Terminal profiles"
-          >
-            <UserPlus size={10} />
-          </button>
-          {profileMenuOpen && (
-            <ProfileMenu
-              profiles={profiles}
-              onSelect={(p) => { setProfileMenuOpen(false); void spawnTab(activePaneId, undefined, p); }}
-              onSave={(name) => { setProfileMenuOpen(false); saveProfile(name, ""); }}
-              onDelete={(name) => { const updated = profiles.filter((p) => p.name !== name); setProfiles(updated); saveProfiles(updated); }}
-              onClose={() => setProfileMenuOpen(false)}
-            />
-          )}
+          <Popover open={profileMenuOpen} onOpenChange={setProfileMenuOpen}>
+            <PopoverTrigger asChild>
+              <Button
+                variant="ghost"
+                size="compact"
+                type="button"
+                className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent"
+                title="Terminal profiles"
+              >
+                <UserPlus size={10} />
+              </Button>
+            </PopoverTrigger>
+            {profileMenuOpen && (
+              <ProfileMenu
+                profiles={profiles}
+                onSelect={(p) => { setProfileMenuOpen(false); void spawnTab(activePaneId, undefined, p); }}
+                onSave={(name) => { setProfileMenuOpen(false); saveProfile(name, ""); }}
+                onDelete={(name) => { const updated = profiles.filter((p) => p.name !== name); setProfiles(updated); saveProfiles(updated); }}
+              />
+            )}
+          </Popover>
         </div>
 
         {/* Export */}
         <div className="relative">
-          <button
-            type="button"
-            onClick={() => setExportMenuOpen((v) => !v)}
-            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover"
-            title="Export output"
-          >
-            <FileDown size={10} />
-          </button>
-          {exportMenuOpen && (
-            <div className="absolute left-0 top-full z-50 mt-1 min-w-[120px] rounded border border-gx-border bg-gx-surface py-1 shadow-lg">
-              <button type="button" onClick={() => exportOutput("text")} className="block w-full px-3 py-1 text-left text-[11px] text-gx-text hover:bg-gx-surface-hover">Plain Text</button>
-              <button type="button" onClick={() => exportOutput("html")} className="block w-full px-3 py-1 text-left text-[11px] text-gx-text hover:bg-gx-surface-hover">HTML (styled)</button>
-            </div>
-          )}
+          <DropdownMenu open={exportMenuOpen} onOpenChange={setExportMenuOpen}>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="compact"
+                type="button"
+                onClick={() => setExportMenuOpen((v) => !v)}
+                className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent"
+                title="Export output"
+              >
+                <FileDown size={10} />
+              </Button>
+            </DropdownMenuTrigger>
+            {exportMenuOpen && (
+              <DropdownMenuContent
+                side="bottom"
+                align="start"
+                className=" min-w-[120px] rounded border border-border bg-card py-1 "
+              >
+                <DropdownMenuGroup>
+                  <DropdownMenuItem
+                    onSelect={() => exportOutput("text")}
+                    className="justify-start block w-full px-3 py-1 text-left text-[11px] text-foreground hover:bg-accent"
+                  >
+                    Plain Text
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onSelect={() => exportOutput("html")}
+                    className="justify-start block w-full px-3 py-1 text-left text-[11px] text-foreground hover:bg-accent"
+                  >
+                    HTML (styled)
+                  </DropdownMenuItem>
+                </DropdownMenuGroup>
+              </DropdownMenuContent>
+            )}
+          </DropdownMenu>
         </div>
 
         {/* Colour scheme picker */}
         <div className="relative">
-          <button
-            type="button"
-            onClick={() => setSchemeMenuOpen((v) => !v)}
-            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover"
-            title={`Terminal colour scheme (${getScheme(schemeId).name})`}
-            aria-label="Terminal colour scheme"
-          >
-            <Palette size={10} />
-          </button>
-          {schemeMenuOpen && (
-            <SchemeMenu
-              currentId={schemeId}
-              mode={theme}
-              onSelect={(id) => {
+          <DropdownMenu open={schemeMenuOpen} onOpenChange={setSchemeMenuOpen}>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="compact"
+                type="button"
+                className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent"
+                title={`Terminal colour scheme (${getScheme(schemeId).name})`}
+                aria-label="Terminal colour scheme"
+              >
+                <Palette size={10} />
+              </Button>
+            </DropdownMenuTrigger>
+            {schemeMenuOpen && (
+              <SchemeMenu
+                currentId={schemeId}
+                mode={theme}
+                onSelect={(id) => {
                 setSchemeId(id);
                 setStoredSchemeId(id);
                 setSchemeMenuOpen(false);
               }}
-              onClose={() => setSchemeMenuOpen(false)}
-            />
-          )}
+              />
+            )}
+          </DropdownMenu>
         </div>
 
         {/* Font settings (Task 26.1) */}
         <div className="relative">
-          <button
-            type="button"
-            onClick={() => setFontMenuOpen((v) => !v)}
-            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover"
-            title="Terminal font settings"
-            aria-label="Terminal font settings"
+          <Popover open={fontMenuOpen} onOpenChange={setFontMenuOpen}>
+            <PopoverTrigger asChild>
+              <Button
+                variant="ghost"
+                size="compact"
+                type="button"
+                className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent"
+                title="Terminal font settings"
+                aria-label="Terminal font settings"
+              >
+                <Type size={10} />
+              </Button>
+            </PopoverTrigger>
+            {fontMenuOpen && (
+              <TerminalFontSettings onChange={handleFontChange} />
+            )}
+          </Popover>
+        </div>
+
+        {/* Font settings (Task 26.1) */}
+        <div className="relative">
+          <Popover
+            open={scrollbackMenuOpen}
+            onOpenChange={setScrollbackMenuOpen}
           >
-            <Type size={10} />
-          </button>
-          {fontMenuOpen && (
-            <TerminalFontSettings
-              onClose={() => setFontMenuOpen(false)}
-              onChange={handleFontChange}
-            />
-          )}
+            <PopoverTrigger asChild>
+              <Button
+                variant="ghost"
+                size="compact"
+                type="button"
+                className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent"
+                title="Scrollback buffer settings"
+                aria-label="Scrollback buffer settings"
+              >
+                <SlidersHorizontal size={10} />
+              </Button>
+            </PopoverTrigger>
+            {scrollbackMenuOpen && <ScrollbackSettingsMenu />}
+          </Popover>
+        </div>
+
+        {/* Font settings (Task 26.1) */}
+        <div className="relative">
+          <Popover
+            open={pasteGuardMenuOpen}
+            onOpenChange={setPasteGuardMenuOpen}
+          >
+            <PopoverTrigger asChild>
+              <Button
+                variant="ghost"
+                size="compact"
+                type="button"
+                className={clsx(
+              "flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px]",
+              pasteGuardConfig.enabled
+                ? "text-muted-foreground hover:text-foreground hover:bg-accent"
+                : "text-warning/70 hover:text-warning hover:bg-warning/10",
+            )}
+                title={pasteGuardConfig.enabled ? "Paste protection enabled" : "Paste protection disabled"}
+                aria-label="Paste protection settings"
+              >
+                <AlertTriangle size={10} />
+              </Button>
+            </PopoverTrigger>
+            {pasteGuardMenuOpen && (
+              <PasteGuardSettingsMenu
+                config={pasteGuardConfig}
+                onChange={(updated) => {
+                setPasteGuardConfig(updated);
+                savePasteGuardConfig(updated);
+              }}
+              />
+            )}
+          </Popover>
         </div>
 
         {/* Scrollback settings */}
         <div className="relative">
-          <button
-            type="button"
-            onClick={() => setScrollbackMenuOpen((v) => !v)}
-            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover"
-            title="Scrollback buffer settings"
-            aria-label="Scrollback buffer settings"
+          <DropdownMenu
+            open={scrollbarMenuOpen}
+            onOpenChange={setScrollbarMenuOpen}
           >
-            <SlidersHorizontal size={10} />
-          </button>
-          {scrollbackMenuOpen && (
-            <ScrollbackSettingsMenu
-              onClose={() => setScrollbackMenuOpen(false)}
-            />
-          )}
-        </div>
-
-        {/* Paste guard settings */}
-        <div className="relative">
-          <button
-            type="button"
-            onClick={() => setPasteGuardMenuOpen((v) => !v)}
-            className={clsx(
-              "flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px]",
-              pasteGuardConfig.enabled
-                ? "text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover"
-                : "text-gx-warn/70 hover:text-gx-warn hover:bg-gx-warn/10",
-            )}
-            title={pasteGuardConfig.enabled ? "Paste protection enabled" : "Paste protection disabled"}
-            aria-label="Paste protection settings"
-          >
-            <AlertTriangle size={10} />
-          </button>
-          {pasteGuardMenuOpen && (
-            <PasteGuardSettingsMenu
-              config={pasteGuardConfig}
-              onChange={(updated) => {
-                setPasteGuardConfig(updated);
-                savePasteGuardConfig(updated);
-              }}
-              onClose={() => setPasteGuardMenuOpen(false)}
-            />
-          )}
-        </div>
-
-        {/* Scrollbar mode settings */}
-        <div className="relative">
-          <button
-            type="button"
-            onClick={() => setScrollbarMenuOpen((v) => !v)}
-            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover"
-            title={`Scrollbar: ${scrollbarMode}`}
-            aria-label="Scrollbar mode settings"
-          >
-            <SlidersHorizontal size={10} className="rotate-90" />
-          </button>
-          {scrollbarMenuOpen && (
-            <ScrollbarModeMenu
-              currentMode={scrollbarMode}
-              onSelect={(mode) => {
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="compact"
+                type="button"
+                className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent"
+                title={`Scrollbar: ${scrollbarMode}`}
+                aria-label="Scrollbar mode settings"
+              >
+                <SlidersHorizontal size={10} className="rotate-90" />
+              </Button>
+            </DropdownMenuTrigger>
+            {scrollbarMenuOpen && (
+              <ScrollbarModeMenu
+                currentMode={scrollbarMode}
+                onSelect={(mode) => {
                 setScrollbarMode(mode);
                 saveScrollbarMode(mode);
                 setScrollbarMenuOpen(false);
               }}
-              onClose={() => setScrollbarMenuOpen(false)}
-            />
-          )}
+              />
+            )}
+          </DropdownMenu>
         </div>
 
-        {/* Breadcrumb bar toggle (global default) */}
-        <button
+        {/* Paste guard settings */}
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={() => {
             const next = !breadcrumbDefault;
@@ -2285,103 +2384,143 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
           }}
           className={clsx(
             "flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px]",
-            breadcrumbDefault ? "text-gx-accent" : "text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover",
+            breadcrumbDefault ? "text-primary" : "text-muted-foreground hover:text-foreground hover:bg-accent",
           )}
           title={breadcrumbDefault ? "Hide breadcrumb bar (all tabs)" : "Show breadcrumb bar (all tabs)"}
           aria-label="Toggle breadcrumb bar"
         >
           <ChevronDown size={10} className="-rotate-90" />
-        </button>
+        </Button>
 
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={() => setSessionsManagerOpen(true)}
           className={clsx(
             "flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px]",
             backgroundDaemonCount > 0
-              ? "text-gx-accent hover:bg-gx-accent/10"
-              : "text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover",
+              ? "text-primary hover:bg-primary/10"
+              : "text-muted-foreground hover:text-foreground hover:bg-accent",
           )}
           title={backgroundDaemonCount > 0 ? `${backgroundDaemonCount} background daemon session${backgroundDaemonCount === 1 ? "" : "s"}` : "Terminal sessions"}
           aria-label="Terminal sessions"
         >
-          {sessionSidebarSide === "left" ? <PanelLeftOpen size={10} /> : <PanelRightOpen size={10} />}
+          {sessionSidebarSide === "left" ? (
+            <PanelLeftOpen size={10} />
+          ) : (
+            <PanelRightOpen size={10} />
+          )}
           {backgroundDaemonCount > 0 && <span>{backgroundDaemonCount}</span>}
-        </button>
+        </Button>
 
         <div className="flex-1" />
 
+        {/* Breadcrumb bar toggle (global default) */}
+        {onSendErrorToAgent &&
+          (() => {
+            const activeTab = getActivePane()?.activeTab;
+            if (!activeTab) return null;
+            const failure = failedExits.get(activeTab);
+            if (!failure) return null;
+            return (
+              <div className="flex items-center gap-1.5 mr-2 text-[10px]">
+                <span className="text-destructive">
+                  Exit {failure.exitCode}
+                </span>
+                <Button
+                  variant="ghost"
+                  size="compact"
+                  type="button"
+                  onClick={() => sendErrorToAgent(activeTab)}
+                  className="inline-flex items-center gap-1 rounded-md border border-primary/40 bg-primary/10 px-2 py-0.5 text-primary hover:bg-primary/20 transition"
+                  title="Send the last 200 lines to the agent and ask it to fix this"
+                >
+                  <SendHorizonal size={9} /> Send error to agent
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="compact"
+                  type="button"
+                  onClick={() => dismissError(activeTab)}
+                  className="rounded p-0.5 text-muted-foreground hover:text-foreground"
+                  aria-label="Dismiss exit notice"
+                >
+                  <X size={10} />
+                </Button>
+              </div>
+            );
+          })()}
+
         {/* Failed-exit "Send error to agent" pill — surfaces when an
             agent-owned callback is wired and a tab ended non-zero. */}
-        {onSendErrorToAgent && (() => {
-          const activeTab = getActivePane()?.activeTab;
-          if (!activeTab) return null;
-          const failure = failedExits.get(activeTab);
-          if (!failure) return null;
-          return (
-            <div className="flex items-center gap-1.5 mr-2 text-[10px]">
-              <span className="text-gx-error">Exit {failure.exitCode}</span>
-              <button
-                type="button"
-                onClick={() => sendErrorToAgent(activeTab)}
-                className="inline-flex items-center gap-1 rounded-md border border-gx-accent/40 bg-gx-accent/10 px-2 py-0.5 text-gx-accent hover:bg-gx-accent/20 transition"
-                title="Send the last 200 lines to the agent and ask it to fix this"
-              >
-                <SendHorizonal size={9} /> Send error to agent
-              </button>
-              <button
-                type="button"
-                onClick={() => dismissError(activeTab)}
-                className="rounded p-0.5 text-gx-muted hover:text-gx-text"
-                aria-label="Dismiss exit notice"
-              >
-                <X size={10} />
-              </button>
-            </div>
-          );
-        })()}
+        <Button
+          variant="ghost"
+          size="compact"
+          type="button"
+          onClick={() => splitPane("horizontal")}
+          className="flex items-center rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+          title="Split right (⌘\)"
+        >
+          <SplitSquareHorizontal size={11} />
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
+          type="button"
+          onClick={() => splitPane("vertical")}
+          className="flex items-center rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+          title="Split down (⌘⇧|)"
+        >
+          <SplitSquareVertical size={11} />
+        </Button>
 
         {/* Split buttons */}
-        <button type="button" onClick={() => splitPane("horizontal")} className="flex items-center rounded px-1 py-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text" title="Split right (⌘\)">
-          <SplitSquareHorizontal size={11} />
-        </button>
-        <button type="button" onClick={() => splitPane("vertical")} className="flex items-center rounded px-1 py-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text" title="Split down (⌘⇧|)">
-          <SplitSquareVertical size={11} />
-        </button>
-
-        {/* Preset layouts */}
         <div className="relative">
-          <button
-            type="button"
-            onClick={() => setPresetMenuOpen((v) => !v)}
-            className="flex items-center rounded px-1 py-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
-            title="Preset layouts"
-            aria-label="Preset layouts"
-          >
-            <LayoutGrid size={11} />
-          </button>
-          {presetMenuOpen && (
-            <div className="absolute right-0 top-full z-50 mt-1 min-w-[140px] rounded border border-gx-border bg-gx-surface py-1 shadow-lg">
-              {PRESET_LAYOUTS.map((preset) => (
-                <button
-                  key={preset.id}
-                  type="button"
-                  onClick={() => { applyPresetLayout(preset.cols, preset.rows); setPresetMenuOpen(false); }}
-                  className="block w-full px-3 py-1.5 text-left text-[11px] text-gx-text hover:bg-gx-surface-hover"
-                >
-                  <span className="font-medium">{preset.label}</span>
-                  <span className="ml-2 text-gx-muted">{preset.description}</span>
-                </button>
-              ))}
-            </div>
-          )}
+          <DropdownMenu open={presetMenuOpen} onOpenChange={setPresetMenuOpen}>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="compact"
+                type="button"
+                onClick={() => setPresetMenuOpen((v) => !v)}
+                className="flex items-center rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+                title="Preset layouts"
+                aria-label="Preset layouts"
+              >
+                <LayoutGrid size={11} />
+              </Button>
+            </DropdownMenuTrigger>
+            {presetMenuOpen && (
+              <DropdownMenuContent
+                side="bottom"
+                align="end"
+                className=" min-w-[140px] rounded border border-border bg-card py-1 "
+              >
+                <DropdownMenuGroup>
+                  {PRESET_LAYOUTS.map((preset) => (
+                    <DropdownMenuItem
+                      key={preset.id}
+                      onSelect={() => { applyPresetLayout(preset.cols, preset.rows); setPresetMenuOpen(false); }}
+                      className="justify-start block w-full px-3 py-1.5 text-left text-[11px] text-foreground hover:bg-accent"
+                    >
+                      <span className="font-medium">{preset.label}</span>
+                      <span className="ml-2 text-muted-foreground">
+                        {preset.description}
+                      </span>
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuGroup>
+              </DropdownMenuContent>
+            )}
+          </DropdownMenu>
         </div>
       </div>
 
-      {/* Quick commands palette */}
+      {/* Preset layouts */}
       {quickCmdOpen && (
-        <div className="shrink-0 border-b border-gx-border bg-gx-surface px-3 py-2">
-          <input
+        <div className="shrink-0 border-b border-border bg-card px-3 py-2">
+          <Input
             ref={cmdInputRef}
             type="text"
             value={cmdFilter}
@@ -2391,27 +2530,29 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
               if (e.key === "Escape") { setQuickCmdOpen(false); setCmdFilter(""); }
             }}
             placeholder="Type a command or search history…"
-            className="w-full bg-transparent text-[12px] text-gx-text placeholder:text-gx-muted outline-none"
+            className="w-full bg-transparent text-[12px] text-foreground placeholder:text-muted-foreground outline-none"
             autoFocus
           />
           {filteredHistory.length > 0 && (
             <div className="mt-1 max-h-32 overflow-y-auto">
               {filteredHistory.slice(0, 10).map((cmd, i) => (
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   key={i}
                   type="button"
                   onClick={() => runQuickCommand(cmd)}
-                  className="block w-full truncate rounded px-2 py-0.5 text-left text-[11px] text-gx-text hover:bg-gx-surface-hover"
+                  className="justify-start block w-full truncate rounded px-2 py-0.5 text-left text-[11px] text-foreground hover:bg-accent"
                 >
                   <span className="font-mono">{cmd}</span>
-                </button>
+                </Button>
               ))}
             </div>
           )}
         </div>
       )}
 
-      {/* Search bar — enhanced with replace, time filter, and semantic filter */}
+      {/* Quick commands palette */}
       {searchVisible && (
         <TerminalSearchEnhanced
           query={searchQuery} onQueryChange={setSearchQuery}
@@ -2433,7 +2574,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
         />
       )}
 
-      {/* Bookmarks panel (Task 27.5) */}
+      {/* Search bar — enhanced with replace, time filter, and semantic filter */}
       {bookmarksOpen && (() => {
         const activeTab = getActivePane()?.activeTab;
         const mgr = activeTab ? bookmarkManagersRef.current.get(activeTab) : null;
@@ -2532,10 +2673,21 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
         {sessionSidebarSide === "right" && sessionManager}
       </div>
 
-      {/* Context menu */}
-      {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} onAction={contextMenuAction} daemonReady={daemonReady} breakerOpen={breakerOpen} />}
+      {/* Cold-restore confirmation dialog — shown when a session was
+          checkpointed before a crash and the user needs to confirm resume. */}
+      {contextMenu && (
+        <ContextMenu
+          onClose={() => setContextMenu(null)}
+          x={contextMenu.x}
+          y={contextMenu.y}
+          onAction={contextMenuAction}
+          daemonReady={daemonReady}
+          breakerOpen={breakerOpen}
+        />
+      )}
 
-      {/* Paste confirmation dialog */}
+      {/* Cold-restore confirmation dialog — shown when a session was
+          checkpointed before a crash and the user needs to confirm resume. */}
       {pasteDialogState && (
         <PasteConfirmDialog
           analysis={pasteDialogState.analysis}
@@ -2553,20 +2705,27 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
         const savedDate = new Date(pending.savedAt);
         const savedLabel = savedDate.toLocaleString();
         return (
-          <div
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="cold-restore-title"
+          <Dialog
+            open
+            onOpenChange={(open) => {
+              if (!open) discardColdRestore(pending.id);
+            }}
           >
-            <div className="w-full max-w-md rounded-lg border border-gx-border bg-gx-surface p-5 shadow-xl">
-              <h2 id="cold-restore-title" className="mb-2 text-[13px] font-semibold text-gx-text">
+            <DialogContent
+              showCloseButton={false}
+              aria-describedby={undefined}
+              className="block gap-0 p-0 w-full max-w-md rounded-lg border border-border bg-card p-5 shadow-xl"
+            >
+              <DialogTitle className="sr-only">
+                Restore terminal session?
+              </DialogTitle>
+              <h2 id="cold-restore-title" className="mb-2 text-[13px] font-semibold text-foreground">
                 Restore terminal session?
               </h2>
-              <p className="mb-4 text-[12px] text-gx-muted">
+              <p className="mb-4 text-[12px] text-muted-foreground">
                 A terminal session was saved on {savedLabel}.
                 {pending.cwd && (
-                  <span className="block mt-1 font-mono text-[11px] text-gx-text truncate" title={pending.cwd}>
+                  <span className="block mt-1 font-mono text-[11px] text-foreground truncate" title={pending.cwd}>
                     {pending.cwd}
                   </span>
                 )}
@@ -2574,17 +2733,21 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
 
               {/* Env key prompts — only shown when secrets were stripped */}
               {pending.sanitizedKeys.length > 0 && (
-                <div className="mb-4 rounded border border-gx-warn/30 bg-gx-warn/5 p-3">
-                  <p className="mb-2 text-[11px] text-gx-warn">
+                <div className="mb-4 rounded border border-warning/30 bg-warning/5 p-3">
+                  <p className="mb-2 text-[11px] text-warning">
                     These environment variables were stripped on save:{" "}
-                    <span className="font-mono">{pending.sanitizedKeys.join(", ")}</span>.
-                    Provide values now or leave blank to use defaults.
+                    <span className="font-mono">
+                      {pending.sanitizedKeys.join(", ")}
+                    </span>
+                    . Provide values now or leave blank to use defaults.
                   </p>
                   <div className="flex flex-col gap-2">
                     {pending.sanitizedKeys.map((key) => (
                       <label key={key} className="flex flex-col gap-0.5">
-                        <span className="text-[10px] font-mono text-gx-muted">{key}</span>
-                        <input
+                        <span className="text-[10px] font-mono text-muted-foreground">
+                          {key}
+                        </span>
+                        <Input
                           type="password"
                           placeholder="(leave blank for default)"
                           value={pending.envValues[key] ?? ""}
@@ -2602,7 +2765,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
                               return next;
                             });
                           }}
-                          className="rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-[11px] text-gx-text outline-none focus:border-gx-accent"
+                          className="rounded border border-border bg-background px-2 py-1 text-[11px] text-foreground outline-none focus:border-primary"
                         />
                       </label>
                     ))}
@@ -2611,23 +2774,27 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
               )}
 
               <div className="flex justify-end gap-2">
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
                   onClick={() => discardColdRestore(pending.id)}
-                  className="rounded px-3 py-1.5 text-[11px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+                  className="rounded px-3 py-1.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
                 >
                   Discard
-                </button>
-                <button
+                </Button>
+                <Button
+                  variant="default"
+                  size="compact"
                   type="button"
                   onClick={() => confirmColdRestore(pending.id)}
-                  className="rounded bg-gx-accent px-3 py-1.5 text-[11px] font-medium text-white hover:bg-gx-accent/90"
+                  className="rounded bg-primary px-3 py-1.5 text-[11px] font-medium text-primary-foreground hover:bg-primary/90"
                 >
                   Restore
-                </button>
+                </Button>
               </div>
-            </div>
-          </div>
+            </DialogContent>
+          </Dialog>
         );
       })()}
     </div>
@@ -2800,10 +2967,15 @@ function TerminalPane({
         theme: resolveTheme(schemeId, theme),
       });
 
-      const fit = new FitAddon(); xterm.loadAddon(fit);
-      const search = new SearchAddon(); xterm.loadAddon(search);
-      const serialize = new SerializeAddon(); xterm.loadAddon(serialize);
-      const unicode11 = new Unicode11Addon(); xterm.loadAddon(unicode11); xterm.unicode.activeVersion = "11";
+      const fit = new FitAddon();
+      xterm.loadAddon(fit);
+      const search = new SearchAddon();
+      xterm.loadAddon(search);
+      const serialize = new SerializeAddon();
+      xterm.loadAddon(serialize);
+      const unicode11 = new Unicode11Addon();
+      xterm.loadAddon(unicode11);
+      xterm.unicode.activeVersion = "11";
       xterm.loadAddon(new ClipboardAddon());
 
       // File path link detection: match patterns like file.rs:42:5 or ./src/main.ts:10
@@ -2837,7 +3009,8 @@ function TerminalPane({
       });
 
       const wrapper = document.createElement("div");
-      wrapper.style.height = "100%"; wrapper.style.width = "100%";
+      wrapper.style.height = "100%";
+      wrapper.style.width = "100%";
       wrapper.style.position = "absolute";
       wrapper.style.top = "0";
       wrapper.style.left = "0";
@@ -3050,8 +3223,8 @@ function TerminalPane({
           const rect = termElement.getBoundingClientRect();
           // xterm renders cells in a grid; calculate cell dimensions.
           const cellWidth = termElement.querySelector(".xterm-rows")?.clientWidth
-            ? (termElement.querySelector(".xterm-rows")!.clientWidth / xterm.cols)
-            : (rect.width / xterm.cols);
+            ? termElement.querySelector(".xterm-rows")!.clientWidth / xterm.cols
+            : rect.width / xterm.cols;
 
           const relativeX = e.clientX - rect.left;
           const targetCol = Math.floor(relativeX / cellWidth);
@@ -3067,7 +3240,6 @@ function TerminalPane({
           void writeTerminalRef.current(id, sequence);
         }, 50);
       });
-
     }
 
     // Focus the active terminal so keystrokes route to the correct PTY.
@@ -3221,16 +3393,16 @@ function TerminalPane({
   return (
     <div className={clsx(
       "relative flex h-full min-w-0 min-h-0 flex-col",
-      isActive && "ring-1 ring-inset ring-gx-accent/50",
+      isActive && "ring-1 ring-inset ring-primary/50",
       !isActive && "ring-0 opacity-90",
     )} onClick={onActivate}>
       {/* Active pane indicator bar */}
       <div className={clsx(
         "absolute top-0 left-0 right-0 h-[2px] z-10 transition-colors",
-        isActive ? "bg-gx-accent" : "bg-transparent",
+        isActive ? "bg-primary" : "bg-transparent",
       )} />
-      {/* Tab bar */}
-      <div className="flex shrink-0 items-center border-b border-gx-border bg-gx-surface">
+      {/* Active pane indicator bar */}
+      <div className="flex shrink-0 items-center border-b border-border bg-card">
         <TerminalTabStrip
           tabs={pane.tabs as TermTab[]}
           activeTab={pane.activeTab}
@@ -3250,25 +3422,45 @@ function TerminalPane({
           onSpawnPlain={() => onSpawnTab()}
         />
 
-
         <div className="relative ml-auto flex items-center gap-1 pr-2">
-          {/* Scroll lock */}
-          <button type="button" onClick={() => onScrollLockToggle(!scrollLocked)}
-            className={clsx("flex items-center rounded px-1 py-0.5", scrollLocked ? "text-gx-warn" : "text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover")}
-            title={scrollLocked ? "Scroll locked — new output won't auto-scroll" : "Click to lock scroll"}>
+          {/* Tab bar */}
+          <Button
+            variant="ghost"
+            size="compact"
+            type="button"
+            onClick={() => onScrollLockToggle(!scrollLocked)}
+            className={clsx("flex items-center rounded px-1 py-0.5", scrollLocked ? "text-warning" : "text-muted-foreground hover:text-foreground hover:bg-accent")}
+            title={scrollLocked ? "Scroll locked — new output won't auto-scroll" : "Click to lock scroll"}
+          >
             {scrollLocked ? <Lock size={10} /> : <Unlock size={10} />}
-          </button>
+          </Button>
 
-          {/* Per-pane terminal actions */}
-          <button type="button" onClick={() => { const si = pane.activeTab ? shellIntegrationRef.current.get(pane.activeTab) : null; if (si) si.jumpToPreviousPrompt(); }}
-            className="flex items-center rounded px-1 py-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text" title="Previous prompt (⌘↑)">
+          {/* Scroll lock */}
+          <Button
+            variant="ghost"
+            size="compact"
+            type="button"
+            onClick={() => { const si = pane.activeTab ? shellIntegrationRef.current.get(pane.activeTab) : null; if (si) si.jumpToPreviousPrompt(); }}
+            className="flex items-center rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+            title="Previous prompt (⌘↑)"
+          >
             <ArrowUp size={10} />
-          </button>
-          <button type="button" onClick={() => { const si = pane.activeTab ? shellIntegrationRef.current.get(pane.activeTab) : null; if (si) si.jumpToNextPrompt(); }}
-            className="flex items-center rounded px-1 py-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text" title="Next prompt (⌘↓)">
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
+            type="button"
+            onClick={() => { const si = pane.activeTab ? shellIntegrationRef.current.get(pane.activeTab) : null; if (si) si.jumpToNextPrompt(); }}
+            className="flex items-center rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+            title="Next prompt (⌘↓)"
+          >
             <ArrowDown size={10} />
-          </button>
-          <button type="button" onClick={() => {
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
+            type="button"
+            onClick={() => {
             if (!pane.activeTab) return;
             const si = shellIntegrationRef.current.get(pane.activeTab);
             if (!si) return;
@@ -3276,43 +3468,68 @@ function TerminalPane({
             let lastExecIndex = -1;
             for (let i = marks.length - 1; i >= 0; i--) { if (marks[i].type === "command-executed") { lastExecIndex = i; break; } }
             if (lastExecIndex >= 0) { const text = si.selectCommandOutput(lastExecIndex); if (text) void navigator.clipboard.writeText(stripAnsiCodes(text)); }
-          }} className="flex items-center rounded px-1 py-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text" title="Copy last command output">
+          }}
+            className="flex items-center rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+            title="Copy last command output"
+          >
             <ClipboardCopy size={10} />
-          </button>
-          <button type="button" onClick={() => {
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
+            type="button"
+            onClick={() => {
             if (!pane.activeTab) return;
             const si = shellIntegrationRef.current.get(pane.activeTab);
             const term = terminalsRef.current.get(pane.activeTab);
             if (!si || !term) return;
             const cmd = getLastCommand(term.xterm, si.state.marks);
             if (cmd) void writeTerminalRef.current(pane.activeTab, cmd + "\r");
-          }} className="flex items-center rounded px-1 py-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text" title="Retry last command">
+          }}
+            className="flex items-center rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+            title="Retry last command"
+          >
             <RotateCcw size={10} />
-          </button>
-          <button type="button" onClick={() => {
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
+            type="button"
+            onClick={() => {
             if (!pane.activeTab) return;
             const t = terminalsRef.current.get(pane.activeTab);
             if (!t) return; t.xterm.selectAll();
             const text = t.xterm.getSelection(); t.xterm.clearSelection();
             if (text) void navigator.clipboard.writeText(text);
-          }} className="flex items-center rounded px-1 py-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text" title="Copy all output">
+          }}
+            className="flex items-center rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+            title="Copy all output"
+          >
             <Copy size={10} />
-          </button>
+          </Button>
 
           {/* Per-tab breadcrumb toggle */}
-          <button type="button" onClick={() => { if (pane.activeTab) onToggleBreadcrumb(pane.activeTab); }}
+          <Button
+            variant="ghost"
+            size="compact"
+            type="button"
+            onClick={() => { if (pane.activeTab) onToggleBreadcrumb(pane.activeTab); }}
             className={clsx(
               "flex items-center rounded px-1 py-0.5",
               pane.activeTab && (breadcrumbPerTab.get(pane.activeTab) ?? breadcrumbDefault)
-                ? "text-gx-accent" : "text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover",
+                ? "text-primary" : "text-muted-foreground hover:text-foreground hover:bg-accent",
             )}
             title={pane.activeTab && (breadcrumbPerTab.get(pane.activeTab) ?? breadcrumbDefault) ? "Hide breadcrumb (this tab)" : "Show breadcrumb (this tab)"}
           >
             <ChevronDown size={10} className="-rotate-90" />
-          </button>
+          </Button>
 
           {/* Per-tab bookmark: add bookmark at current cursor position */}
-          <button type="button" onClick={() => {
+          <Button
+            variant="ghost"
+            size="compact"
+            type="button"
+            onClick={() => {
             if (!pane.activeTab) return;
             const term = terminalsRef.current.get(pane.activeTab);
             if (!term) return;
@@ -3322,33 +3539,70 @@ function TerminalPane({
             mgr.add(line);
             bumpBookmarks();
             setBookmarksPanelOpen(true);
-          }} className="flex items-center rounded px-1 py-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text" title="Add bookmark at cursor">
+          }}
+            className="flex items-center rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+            title="Add bookmark at cursor"
+          >
             <Bookmark size={10} />
-          </button>
+          </Button>
           {/* Toggle bookmarks panel */}
-          {(() => { const mgr = pane.activeTab ? bookmarkManagersRef.current.get(pane.activeTab) : null; const count = mgr?.count ?? 0; return count > 0 ? (
-            <button type="button" onClick={() => setBookmarksPanelOpen((v) => !v)}
-              className={clsx("flex items-center rounded px-1 py-0.5 text-[9px]",
-                bookmarksPanelOpen ? "text-gx-accent" : "text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover")}
-              title={`${count} bookmark${count > 1 ? "s" : ""}`}
-            >{count}</button>
-          ) : null; })()}
+          {(() => {
+            const mgr = pane.activeTab ? bookmarkManagersRef.current.get(pane.activeTab) : null;
+            const count = mgr?.count ?? 0;
+            return count > 0 ? (
+              <Button
+                variant="ghost"
+                size="compact"
+                type="button"
+                onClick={() => setBookmarksPanelOpen((v) => !v)}
+                className={clsx("flex items-center rounded px-1 py-0.5 text-[9px]",
+                bookmarksPanelOpen ? "text-primary" : "text-muted-foreground hover:text-foreground hover:bg-accent")}
+                title={`${count} bookmark${count > 1 ? "s" : ""}`}
+              >
+                {count}
+              </Button>
+            ) : null;
+          })()}
 
-          {/* Shell selector */}
-          <button type="button" onClick={() => onShellMenuToggle(!shellMenuOpen)} className="flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text" title="Select shell">
-            <TerminalIcon size={10} /><DropdownIcon size={8} />
-          </button>
-          {shellMenuOpen && (
-            <div className="absolute right-0 top-full z-50 mt-1 min-w-[140px] rounded border border-gx-border bg-gx-surface py-1 shadow-lg">
-              {availableShells.map((sh) => (
-                <button key={sh} type="button" onClick={() => { onShellMenuToggle(false); onSpawnTab(sh); }} className="block w-full px-3 py-1 text-left text-[11px] text-gx-text hover:bg-gx-surface-hover">
-                  {sh.split("/").pop()}<span className="ml-2 text-gx-muted">{sh}</span>
-                </button>
-              ))}
-            </div>
+          <DropdownMenu open={shellMenuOpen} onOpenChange={onShellMenuToggle}>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="compact"
+                className="gap-0.5 px-1.5 py-0.5 text-muted-foreground"
+                aria-label="Select shell"
+              >
+                <TerminalIcon size={10} />
+                <DropdownIcon size={8} />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuGroup>
+                {availableShells.map((shell) => (
+                  <DropdownMenuItem
+                    key={shell}
+                    onSelect={() => onSpawnTab(shell)}
+                  >
+                    {shell.split("/").pop()}
+                    <span className="ml-2 text-muted-foreground">{shell}</span>
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
+
+          {onClose && (
+            <Button
+              variant="ghost"
+              size="compact"
+              type="button"
+              onClick={onClose}
+              className="flex items-center rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-destructive"
+              title="Close pane"
+            >
+              <X size={12} />
+            </Button>
           )}
-
-          {onClose && <button type="button" onClick={onClose} className="flex items-center rounded px-1 py-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-error" title="Close pane"><X size={12} /></button>}
         </div>
       </div>
 
@@ -3369,103 +3623,138 @@ function TerminalPane({
       })()}
 
       {/* Per-tab bookmarks panel */}
-      {bookmarksPanelOpen && pane.activeTab && (() => {
-        const mgr = bookmarkManagersRef.current.get(pane.activeTab!);
-        const bookmarks = mgr?.bookmarks ?? [];
-        // Use bookmarkVersion to track changes
-        void bookmarkVersion;
-        return bookmarks.length > 0 ? (
-          <div className="shrink-0 border-b border-gx-border bg-gx-surface px-2 py-1 max-h-24 overflow-y-auto">
-            <div className="flex items-center justify-between mb-1">
-              <span className="text-[9px] text-gx-muted uppercase tracking-wider">Bookmarks</span>
-              <button type="button" onClick={() => setBookmarksPanelOpen(false)} className="text-gx-muted hover:text-gx-text"><X size={9} /></button>
-            </div>
-            {bookmarks.map((bm) => (
-              <div key={bm.id} className="group flex items-center gap-1 py-0.5 text-[10px]">
-                {renamingBookmarkId === bm.id ? (
-                  <input
+      {bookmarksPanelOpen && pane.activeTab &&
+        (() => {
+          const mgr = bookmarkManagersRef.current.get(pane.activeTab!);
+          const bookmarks = mgr?.bookmarks ?? [];
+          // Use bookmarkVersion to track changes
+          void bookmarkVersion;
+          return bookmarks.length > 0 ? (
+            <div className="shrink-0 border-b border-border bg-card px-2 py-1 max-h-24 overflow-y-auto">
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[9px] text-muted-foreground uppercase tracking-wider">
+                  Bookmarks
+                </span>
+                <Button
+                  variant="ghost"
+                  size="compact"
+                  type="button"
+                  onClick={() => setBookmarksPanelOpen(false)}
+                  className="text-muted-foreground hover:text-foreground"
+                >
+                  <X size={9} />
+                </Button>
+              </div>
+              {bookmarks.map((bm) => (
+                <div key={bm.id} className="group flex items-center gap-1 py-0.5 text-[10px]">
+                  {renamingBookmarkId === bm.id ? (
+                  <Input
                     autoFocus
                     type="text"
                     defaultValue={bm.label}
-                    className="flex-1 bg-transparent text-[10px] text-gx-text outline-none border-b border-gx-accent px-1"
+                    className="flex-1 bg-transparent text-[10px] text-foreground outline-none border-b border-primary px-1"
                     onBlur={(e) => { if (mgr) { mgr.rename(bm.id, e.target.value || bm.label); bumpBookmarks(); } setRenamingBookmarkId(null); }}
                     onKeyDown={(e) => { if (e.key === "Enter") { if (mgr) { mgr.rename(bm.id, (e.target as HTMLInputElement).value || bm.label); bumpBookmarks(); } setRenamingBookmarkId(null); } if (e.key === "Escape") setRenamingBookmarkId(null); }}
                   />
                 ) : (
-                  <button
+                    <Button
+                      variant="ghost"
+                      size="compact"
+                      type="button"
+                      onClick={() => { const t = terminalsRef.current.get(pane.activeTab!); if (t) t.xterm.scrollToLine(bm.line); }}
+                      onDoubleClick={() => setRenamingBookmarkId(bm.id)}
+                      className="justify-start flex-1 text-left truncate text-foreground hover:text-primary"
+                      title={`Line ${bm.line} — double-click to rename`}
+                    >
+                      {bm.label}
+                    </Button>
+                  )}
+                  <Button
+                    variant="ghost"
+                    size="compact"
                     type="button"
-                    onClick={() => { const t = terminalsRef.current.get(pane.activeTab!); if (t) t.xterm.scrollToLine(bm.line); }}
-                    onDoubleClick={() => setRenamingBookmarkId(bm.id)}
-                    className="flex-1 text-left truncate text-gx-text hover:text-gx-accent"
-                    title={`Line ${bm.line} — double-click to rename`}
+                    onClick={() => { if (mgr) { mgr.remove(bm.id); bumpBookmarks(); } }}
+                    className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive"
+                    title="Remove bookmark"
                   >
-                    {bm.label}
-                  </button>
-                )}
-                <button
-                  type="button"
-                  onClick={() => { if (mgr) { mgr.remove(bm.id); bumpBookmarks(); } }}
-                  className="opacity-0 group-hover:opacity-100 text-gx-muted hover:text-gx-error"
-                  title="Remove bookmark"
-                >
-                  <X size={8} />
-                </button>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div className="shrink-0 border-b border-gx-border bg-gx-surface px-2 py-1.5 text-[10px] text-gx-muted flex items-center justify-between">
-            <span>No bookmarks — click <Bookmark size={9} className="inline" /> to add one</span>
-            <button type="button" onClick={() => setBookmarksPanelOpen(false)} className="text-gx-muted hover:text-gx-text"><X size={9} /></button>
-          </div>
-        );
-      })()}
+                    <X size={8} />
+                  </Button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="shrink-0 border-b border-border bg-card px-2 py-1.5 text-[10px] text-muted-foreground flex items-center justify-between">
+              <span>
+                No bookmarks — click <Bookmark size={9} className="inline" /> to
+                add one
+              </span>
+              <Button
+                variant="ghost"
+                size="compact"
+                type="button"
+                onClick={() => setBookmarksPanelOpen(false)}
+                className="text-muted-foreground hover:text-foreground"
+              >
+                <X size={9} />
+              </Button>
+            </div>
+          );
+        })()}
 
-      {/* Terminal container with drag-and-drop */}
+      {/* Drop indicator overlay (Task 26.2) */}
       <div ref={containerRef} className={clsx(
         "min-h-0 min-w-0 flex-1 overflow-hidden relative",
         `scrollbar-mode-${scrollbarMode}`,
         scrollbarMode === "native" && scrollbarAutohide && "scrollbar-autohide",
-        dragOver && "ring-2 ring-inset ring-gx-accent/50",
+        dragOver && "ring-2 ring-inset ring-primary/50",
       )}
         onContextMenu={(e) => { if (pane.activeTab) onContextMenu(e, pane.activeTab); }}
         onDrop={handleDrop} onDragOver={handleDragOver} onDragLeave={handleDragLeave}
       >
         {!pane.activeTab && (
-          <div className="absolute inset-0 z-10 flex items-center justify-center bg-gx-bg-sub">
-            <div className="flex items-center gap-2 rounded-md border border-gx-border bg-gx-surface px-3 py-2 text-[11px] text-gx-muted">
-              <button
+          <div className="absolute inset-0 z-10 flex items-center justify-center bg-background">
+            <div className="flex items-center gap-2 rounded-md border border-border bg-card px-3 py-2 text-[11px] text-muted-foreground">
+              <Button
+                variant="default"
+                size="compact"
                 type="button"
                 onClick={() => onSpawnTab()}
-                className="rounded bg-gx-accent px-2 py-1 font-medium text-white hover:bg-gx-accent/90"
+                className="rounded bg-primary px-2 py-1 font-medium text-primary-foreground hover:bg-primary/90"
               >
                 New terminal
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 onClick={onOpenSessionManager}
-                className="rounded border border-gx-border px-2 py-1 text-gx-text hover:bg-gx-surface-hover"
+                className="rounded border border-border px-2 py-1 text-foreground hover:bg-accent"
               >
-                Sessions{backgroundSessionCount > 0 ? ` (${backgroundSessionCount})` : ""}
-              </button>
+                Sessions
+                {backgroundSessionCount > 0 ? ` (${backgroundSessionCount})` : ""}
+              </Button>
             </div>
           </div>
         )}
-        {/* Drop indicator overlay (Task 26.2) */}
+        {/* Scroll to bottom button */}
         {dragOver && (
-          <div className="absolute inset-0 z-30 flex items-center justify-center bg-gx-accent/5 pointer-events-none">
-            <span className="rounded-lg border-2 border-dashed border-gx-accent/40 px-4 py-2 text-[12px] text-gx-accent">
+          <div className="absolute inset-0 z-30 flex items-center justify-center bg-primary/5 pointer-events-none">
+            <span className="rounded-lg border-2 border-dashed border-primary/40 px-4 py-2 text-[12px] text-primary">
               Drop to insert path
             </span>
           </div>
         )}
       </div>
 
-      {/* Terminal status bar (Task 26.5) */}
+      {/* Scroll to bottom button */}
       <TerminalStatusBar
         shellName={pane.tabs.find((t) => t.id === pane.activeTab)?.shell?.split("/").pop() ?? "zsh"}
         cwd={trackedCwd}
-        shellIntegration={pane.activeTab ? shellIntegrationRef.current.get(pane.activeTab)?.state ?? null : null}
+        shellIntegration={
+          pane.activeTab
+            ? (shellIntegrationRef.current.get(pane.activeTab)?.state ?? null)
+            : null
+        }
         scrollbackLines={pane.activeTab ? (terminalsRef.current.get(pane.activeTab)?.xterm.buffer?.active?.length ?? 0) : 0}
         maxScrollback={10000}
         connected={true}
@@ -3493,11 +3782,16 @@ function TerminalPane({
 
       {/* Scroll to bottom button */}
       {showScrollBtn && (
-        <button type="button" onClick={onScrollToBottom}
-          className="absolute bottom-8 right-4 z-20 flex items-center gap-1 rounded-full bg-gx-surface border border-gx-border px-2 py-1 text-[10px] text-gx-muted shadow-lg hover:text-gx-text hover:bg-gx-surface-hover transition"
-          title="Scroll to bottom">
+        <Button
+          variant="ghost"
+          size="compact"
+          type="button"
+          onClick={onScrollToBottom}
+          className="absolute bottom-8 right-4 z-20 flex items-center gap-1 rounded-full bg-card border border-border px-2 py-1 text-[10px] text-muted-foreground shadow-lg hover:text-foreground hover:bg-accent transition"
+          title="Scroll to bottom"
+        >
           <ArrowDownToLine size={12} /> Bottom
-        </button>
+        </Button>
       )}
     </div>
   );
@@ -3558,10 +3852,10 @@ function TerminalTabStrip({
               data-tab-id={t.id}
               onClick={() => onSetActiveTab(t.id)}
               className={clsx(
-                "group flex h-7 min-w-[116px] max-w-[190px] shrink-0 cursor-pointer items-center gap-1 border-r border-gx-border px-2 text-[11px]",
+                "group flex h-7 min-w-[116px] max-w-[190px] shrink-0 cursor-pointer items-center gap-1 border-r border-border px-2 text-[11px]",
                 activeTab === t.id
-                  ? "bg-gx-bg-sub text-gx-text"
-                  : "text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
+                  ? "bg-background text-foreground"
+                  : "text-muted-foreground hover:bg-accent hover:text-foreground",
               )}
               title={isDaemon ? "Daemon terminal - survives app restart" : sType === "in-process" ? "Local in-process terminal" : undefined}
             >
@@ -3569,18 +3863,18 @@ function TerminalTabStrip({
                 <span
                   className={clsx(
                     "inline-block h-2 w-2 shrink-0 rounded-full",
-                    tabBadges.get(t.id) === "success" ? "bg-green-500" : "bg-red-500",
+                    tabBadges.get(t.id) === "success" ? "bg-success" : "bg-destructive",
                   )}
                   aria-label={tabBadges.get(t.id) === "success" ? "Command succeeded" : "Command failed"}
                 />
               )}
               {isDaemon && (
-                <Circle size={7} className="shrink-0 fill-gx-accent text-gx-accent" aria-label="Daemon terminal" />
+                <Circle size={7} className="shrink-0 fill-primary text-primary" aria-label="Daemon terminal" />
               )}
               {t.sshRemote && (
                 <span
-                  className="inline-flex max-w-[80px] shrink-0 items-center truncate rounded px-1 py-0.5 text-[9px] font-medium text-white"
-                  style={{ backgroundColor: t.sshRemote.colour || "#6366f1" }}
+                  className="inline-flex max-w-[80px] shrink-0 items-center truncate rounded px-1 py-0.5 text-[9px] font-medium text-foreground"
+                  style={{ backgroundColor: t.sshRemote.colour || "rgb(var(--info))" }}
                   aria-label={`Remote terminal: ${t.sshRemote.hostname}`}
                 >
                   {t.sshRemote.hostname}
@@ -3588,18 +3882,18 @@ function TerminalTabStrip({
               )}
               {t.coldRestored && (
                 <span
-                  className="inline-flex shrink-0 items-center rounded px-1 py-0.5 text-[8px] font-medium leading-none bg-gx-warn/15 text-gx-warn"
+                  className="inline-flex shrink-0 items-center rounded px-1 py-0.5 text-[8px] font-medium leading-none bg-warning/15 text-warning"
                   title={`Restored from ${new Date(t.coldRestored.savedAt).toLocaleString()}`}
                 >
                   Restored
                 </span>
               )}
               {renamingTab === t.id ? (
-                <input
+                <Input
                   ref={renameInputRef}
                   type="text"
                   defaultValue={t.title}
-                  className="min-w-0 flex-1 bg-transparent text-[11px] text-gx-text outline-none border-b border-gx-accent"
+                  className="min-w-0 flex-1 bg-transparent text-[11px] text-foreground outline-none border-b border-primary"
                   onClick={(e) => e.stopPropagation()}
                   onBlur={(e) => onRenameTab(t.id, e.target.value)}
                   onKeyDown={(e) => {
@@ -3608,46 +3902,52 @@ function TerminalTabStrip({
                   }}
                 />
               ) : (
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
                   onClick={(e) => { e.stopPropagation(); onSetActiveTab(t.id); }}
                   onDoubleClick={() => setRenamingTab(t.id)}
-                  className="min-w-0 flex-1 truncate text-left"
+                  className="justify-start min-w-0 flex-1 truncate text-left"
                   title="Double-click to rename"
                 >
                   {t.title}
-                </button>
+                </Button>
               )}
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 onClick={(e) => { e.stopPropagation(); onCloseTab(t.id); }}
                 className={clsx(
                   "shrink-0 opacity-0 transition group-hover:opacity-100",
-                  isDaemon ? "hover:text-gx-accent" : "hover:text-gx-error",
+                  isDaemon ? "hover:text-primary" : "hover:text-destructive",
                 )}
                 aria-label={isDaemon ? "Hide daemon terminal" : "Close terminal"}
                 title={isDaemon ? "Hide tab - session keeps running" : "Close terminal"}
               >
                 {isDaemon ? <EyeOff size={10} /> : <X size={10} />}
-              </button>
+              </Button>
             </div>
           );
         })}
       </div>
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={onOpenSessionManager}
         className={clsx(
-          "flex h-7 shrink-0 items-center gap-1 border-l border-gx-border px-2 text-[10px]",
+          "flex h-7 shrink-0 items-center gap-1 border-l border-border px-2 text-[10px]",
           backgroundSessionCount > 0
-            ? "text-gx-accent hover:bg-gx-accent/10"
-            : "text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
+            ? "text-primary hover:bg-primary/10"
+            : "text-muted-foreground hover:bg-accent hover:text-foreground",
         )}
         title="Open terminal session manager"
         aria-label="Open terminal session manager"
       >
         <MoreHorizontal size={12} />
-      </button>
+      </Button>
     </div>
   );
 }
@@ -3708,113 +4008,142 @@ function TerminalSessionManager({
   return (
     <aside
       className={clsx(
-        "flex h-full w-[clamp(300px,24vw,420px)] shrink-0 flex-col bg-gx-surface",
-        side === "left" ? "border-r border-gx-border" : "border-l border-gx-border",
+        "flex h-full w-[clamp(300px,24vw,420px)] shrink-0 flex-col bg-card",
+        side === "left" ? "border-r border-border" : "border-l border-border",
       )}
       aria-label="Terminal sessions"
     >
-        <div className="flex shrink-0 items-center gap-2 border-b border-gx-border px-3 py-2">
-          <div className="min-w-0 flex-1">
-            <div className="text-[12px] font-semibold text-gx-text">Terminal Sessions</div>
-            <div className="text-[10px] text-gx-muted">
-              {sessions.length} daemon session{sessions.length === 1 ? "" : "s"} · {openTabs.length} open tab{openTabs.length === 1 ? "" : "s"}
-            </div>
+      <div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-2">
+        <div className="min-w-0 flex-1">
+          <div className="text-[12px] font-semibold text-foreground">
+            Terminal Sessions
           </div>
-          <div className="flex shrink-0 items-center rounded border border-gx-border bg-gx-bg-sub p-0.5" aria-label="Pin sidebar side">
-            <button
-              type="button"
-              onClick={() => onSideChange("left")}
-              className={clsx(
-                "rounded px-1 py-0.5",
-                side === "left" ? "bg-gx-accent text-white" : "text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
-              )}
-              title="Pin sidebar to left"
-              aria-label="Pin sidebar to left"
-              aria-pressed={side === "left"}
-            >
-              <PanelLeftOpen size={12} />
-            </button>
-            <button
-              type="button"
-              onClick={() => onSideChange("right")}
-              className={clsx(
-                "rounded px-1 py-0.5",
-                side === "right" ? "bg-gx-accent text-white" : "text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
-              )}
-              title="Pin sidebar to right"
-              aria-label="Pin sidebar to right"
-              aria-pressed={side === "right"}
-            >
-              <PanelRightOpen size={12} />
-            </button>
+          <div className="text-[10px] text-muted-foreground">
+            {sessions.length} daemon session{sessions.length === 1 ? "" : "s"} ·{" "}
+            {openTabs.length} open tab{openTabs.length === 1 ? "" : "s"}
           </div>
-          <button type="button" onClick={onRefresh} className="rounded p-1 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text" title="Refresh sessions">
-            <RotateCcw size={13} />
-          </button>
-          <button type="button" onClick={onClose} className="rounded p-1 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text" aria-label="Close">
-            <X size={14} />
-          </button>
         </div>
+        <div className="flex shrink-0 items-center rounded border border-border bg-background p-0.5" aria-label="Pin sidebar side">
+          <Toggle
+            size="sm"
+            type="button"
+            onClick={() => onSideChange("left")}
+            className={clsx(
+                "rounded px-1 py-0.5",
+                side === "left" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent hover:text-foreground",
+              )}
+            title="Pin sidebar to left"
+            aria-label="Pin sidebar to left"
+            pressed={side === "left"}
+          >
+            <PanelLeftOpen size={12} />
+          </Toggle>
+          <Toggle
+            size="sm"
+            type="button"
+            onClick={() => onSideChange("right")}
+            className={clsx(
+                "rounded px-1 py-0.5",
+                side === "right" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent hover:text-foreground",
+              )}
+            title="Pin sidebar to right"
+            aria-label="Pin sidebar to right"
+            pressed={side === "right"}
+          >
+            <PanelRightOpen size={12} />
+          </Toggle>
+        </div>
+        <Button
+          variant="ghost"
+          size="compact"
+          type="button"
+          onClick={onRefresh}
+          className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+          title="Refresh sessions"
+        >
+          <RotateCcw size={13} />
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
+          type="button"
+          onClick={onClose}
+          className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+          aria-label="Close"
+        >
+          <X size={14} />
+        </Button>
+      </div>
 
-        <div className="shrink-0 border-b border-gx-border px-3 py-2">
-          <div className="flex items-center gap-2 rounded border border-gx-border bg-gx-bg-sub px-2 py-1.5">
-            <Search size={13} className="shrink-0 text-gx-muted" />
-            <input
+      <div className="shrink-0 border-b border-border px-3 py-2">
+        <div className="flex items-center gap-2 rounded border border-border bg-background px-2 py-1.5">
+          <Search size={13} className="shrink-0 text-muted-foreground" />
+          <Input
               value={search}
               onChange={(e) => onSearchChange(e.target.value)}
               placeholder="Search sessions by title, cwd, or agent"
-              className="min-w-0 flex-1 bg-transparent text-[11px] text-gx-text placeholder:text-gx-muted outline-none"
+              className="min-w-0 flex-1 bg-transparent text-[11px] text-foreground placeholder:text-muted-foreground outline-none"
               autoFocus
             />
-          </div>
         </div>
+      </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
-          <SessionGroup title="Open Tabs" empty="No open terminal tabs." count={visibleOpenTabs.length}>
-            {visibleOpenTabs.map(({ paneId, tab }) => {
-              const session = sessionById.get(tab.id);
-              const isDaemon = (session != null) || tab.resolvedSessionType === "daemon";
-              return (
-                <SessionRow
-                  key={tab.id}
-                  title={tab.title}
-                  subtitle={session ? sessionSubtitle(session) : tab.shell || "Local terminal"}
-                  status={tab.id === activeTabId ? "Active" : isDaemon ? "Open" : "Local"}
-                  pinned={pinnedSessionIds.has(tab.id)}
-                  onPrimary={() => onFocusTab(tab.id)}
-                  primaryLabel="Focus"
-                  actions={(
-                    <>
-                      {isDaemon && (
-                        <IconButton title="Hide tab" onClick={() => onHide(paneId, tab.id)}>
-                          <EyeOff size={12} />
-                        </IconButton>
-                      )}
-                      {session && (
-                        <IconButton title={pinnedSessionIds.has(tab.id) ? "Unpin" : "Pin"} onClick={() => onTogglePin(tab.id)}>
-                          {pinnedSessionIds.has(tab.id) ? <PinOff size={12} /> : <Pin size={12} />}
-                        </IconButton>
-                      )}
-                      {session && (
-                        <IconButton
-                          title="Kill daemon session"
-                          danger
-                          onClick={() => {
-                            if (window.confirm("Kill this daemon terminal session?")) onKill(session);
-                          }}
-                        >
-                          <Trash2 size={12} />
-                        </IconButton>
-                      )}
-                    </>
-                  )}
-                />
-              );
-            })}
-          </SessionGroup>
+      <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
+        <SessionGroup title="Open Tabs" empty="No open terminal tabs." count={visibleOpenTabs.length}>
+          {visibleOpenTabs.map(({ paneId, tab }) => {
+            const session = sessionById.get(tab.id);
+            const isDaemon =
+              session != null || tab.resolvedSessionType === "daemon";
+            return (
+              <SessionRow
+                key={tab.id}
+                title={tab.title}
+                subtitle={session ? sessionSubtitle(session) : tab.shell || "Local terminal"}
+                status={tab.id === activeTabId ? "Active" : isDaemon ? "Open" : "Local"}
+                pinned={pinnedSessionIds.has(tab.id)}
+                onPrimary={() => onFocusTab(tab.id)}
+                primaryLabel="Focus"
+                actions={
+                  <>
+                    {isDaemon && (
+                      <IconButton title="Hide tab" onClick={() => onHide(paneId, tab.id)}>
+                        <EyeOff size={12} />
+                      </IconButton>
+                    )}
+                    {session && (
+                      <IconButton title={pinnedSessionIds.has(tab.id) ? "Unpin" : "Pin"} onClick={() => onTogglePin(tab.id)}>
+                        {pinnedSessionIds.has(tab.id) ? (
+                          <PinOff size={12} />
+                        ) : (
+                          <Pin size={12} />
+                        )}
+                      </IconButton>
+                    )}
+                    {session && (
+                      <IconButton
+                        title="Kill daemon session"
+                        danger
+                        onClick={async () => {
+                          if (
+                            await requestConfirmation(
+                              "Kill this daemon terminal session?",
+                            )
+                          )
+                            onKill(session);
+                        }}
+                      >
+                        <Trash2 size={12} />
+                      </IconButton>
+                    )}
+                  </>
+                }
+              />
+            );
+          })}
+        </SessionGroup>
 
-          <SessionGroup title="Pinned Background" empty="No pinned background sessions." count={pinned.length}>
-            {pinned.map((session) => (
+        <SessionGroup title="Pinned Background" empty="No pinned background sessions." count={pinned.length}>
+          {pinned.map((session) => (
               <DaemonSessionRow
                 key={session.id}
                 session={session}
@@ -3825,10 +4154,10 @@ function TerminalSessionManager({
                 onKill={onKill}
               />
             ))}
-          </SessionGroup>
+        </SessionGroup>
 
-          <SessionGroup title="Agent Sessions" empty="No background agent sessions." count={agentSessions.length}>
-            {agentSessions.map((session) => (
+        <SessionGroup title="Agent Sessions" empty="No background agent sessions." count={agentSessions.length}>
+          {agentSessions.map((session) => (
               <DaemonSessionRow
                 key={session.id}
                 session={session}
@@ -3839,10 +4168,10 @@ function TerminalSessionManager({
                 onKill={onKill}
               />
             ))}
-          </SessionGroup>
+        </SessionGroup>
 
-          <SessionGroup title="Repo Shells" empty="No background repo shells." count={shellSessions.length}>
-            {shellSessions.map((session) => (
+        <SessionGroup title="Repo Shells" empty="No background repo shells." count={shellSessions.length}>
+          {shellSessions.map((session) => (
               <DaemonSessionRow
                 key={session.id}
                 session={session}
@@ -3853,8 +4182,8 @@ function TerminalSessionManager({
                 onKill={onKill}
               />
             ))}
-          </SessionGroup>
-        </div>
+        </SessionGroup>
+      </div>
     </aside>
   );
 }
@@ -3868,13 +4197,17 @@ function SessionGroup({ title, count, empty, children }: {
   return (
     <section className="mb-3">
       <div className="mb-1 flex items-center justify-between px-1">
-        <h3 className="text-[10px] font-semibold uppercase tracking-wide text-gx-muted">{title}</h3>
-        <span className="text-[10px] text-gx-muted">{count}</span>
+        <h3 className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+          {title}
+        </h3>
+        <span className="text-[10px] text-muted-foreground">{count}</span>
       </div>
       {count > 0 ? (
         <div className="space-y-1">{children}</div>
       ) : (
-        <div className="rounded border border-dashed border-gx-border px-2 py-2 text-[11px] text-gx-muted">{empty}</div>
+        <div className="rounded border border-dashed border-border px-2 py-2 text-[11px] text-muted-foreground">
+          {empty}
+        </div>
       )}
     </section>
   );
@@ -3903,7 +4236,7 @@ function DaemonSessionRow({
       pinned={pinned}
       onPrimary={() => onAttach(session)}
       primaryLabel="Attach"
-      actions={(
+      actions={
         <>
           <IconButton title="Open in split" onClick={() => onOpenInSplit(session)}>
             <Columns2 size={12} />
@@ -3914,14 +4247,17 @@ function DaemonSessionRow({
           <IconButton
             title="Kill daemon session"
             danger
-            onClick={() => {
-              if (window.confirm("Kill this daemon terminal session?")) onKill(session);
+            onClick={async () => {
+              if (
+                await requestConfirmation("Kill this daemon terminal session?")
+              )
+                onKill(session);
             }}
           >
             <Trash2 size={12} />
           </IconButton>
         </>
-      )}
+      }
     />
   );
 }
@@ -3944,24 +4280,36 @@ function SessionRow({
   actions: React.ReactNode;
 }) {
   return (
-    <div className="group flex items-center gap-2 rounded border border-gx-border bg-gx-bg-sub px-2 py-2 hover:border-gx-accent/40">
-      <button type="button" onClick={onPrimary} className="min-w-0 flex-1 text-left">
-        <div className="flex min-w-0 items-center gap-1.5">
-          <span className="truncate text-[12px] font-medium text-gx-text">{title}</span>
-          {pinned && <Pin size={10} className="shrink-0 text-gx-accent" />}
-          <span className="shrink-0 rounded bg-gx-surface px-1 py-0.5 text-[9px] text-gx-muted">{status}</span>
-        </div>
-        <div className="mt-0.5 truncate text-[10px] text-gx-muted" title={subtitle}>
-          {subtitle}
-        </div>
-      </button>
-      <button
+    <div className="group flex items-center gap-2 rounded border border-border bg-background px-2 py-2 hover:border-primary/40">
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={onPrimary}
-        className="rounded bg-gx-accent px-2 py-1 text-[10px] font-medium text-white hover:bg-gx-accent/90"
+        className="justify-start min-w-0 flex-1 text-left"
+      >
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span className="truncate text-[12px] font-medium text-foreground">
+            {title}
+          </span>
+          {pinned && <Pin size={10} className="shrink-0 text-primary" />}
+          <span className="shrink-0 rounded bg-card px-1 py-0.5 text-[9px] text-muted-foreground">
+            {status}
+          </span>
+        </div>
+        <div className="mt-0.5 truncate text-[10px] text-muted-foreground" title={subtitle}>
+          {subtitle}
+        </div>
+      </Button>
+      <Button
+        variant="default"
+        size="compact"
+        type="button"
+        onClick={onPrimary}
+        className="rounded bg-primary px-2 py-1 text-[10px] font-medium text-primary-foreground hover:bg-primary/90"
       >
         {primaryLabel}
-      </button>
+      </Button>
       <div className="flex shrink-0 items-center gap-0.5">{actions}</div>
     </div>
   );
@@ -3974,105 +4322,96 @@ function IconButton({ title, onClick, children, danger = false }: {
   danger?: boolean;
 }) {
   return (
-    <button
+    <Button
+      variant="ghost"
+      size="compact"
       type="button"
       onClick={onClick}
       className={clsx(
         "rounded p-1",
         danger
-          ? "text-gx-muted hover:bg-gx-error/10 hover:text-gx-error"
-          : "text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
+          ? "text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+          : "text-muted-foreground hover:bg-accent hover:text-foreground",
       )}
       title={title}
       aria-label={title}
     >
       {children}
-    </button>
+    </Button>
   );
 }
 
 // --- Scheme Menu ---
 
 function SchemeMenu({
-  currentId, mode, onSelect, onClose,
+  currentId,
+  mode,
+  onSelect,
 }: {
   currentId: string;
   mode: "dark" | "light";
   onSelect: (id: string) => void;
-  onClose: () => void;
 }) {
   // Close on Escape for keyboard users.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
 
   return (
-    <div
-      role="menu"
-      aria-label="Terminal colour schemes"
-      className="absolute left-0 top-full z-50 mt-1 min-w-[240px] rounded border border-gx-border bg-gx-surface p-1 shadow-xl"
+    <DropdownMenuContent
+      align="start"
+      className="min-w-[240px] rounded border border-border bg-card p-1"
     >
-      <div className="px-2 py-1 text-[9px] uppercase tracking-wider text-gx-muted/70">
-        Colour scheme · {mode === "dark" ? "dark" : "light"}
-      </div>
-      {TERMINAL_SCHEMES.map((scheme) => {
-        const palette = mode === "dark" ? scheme.dark : scheme.light;
-        const selected = scheme.id === currentId;
-        // Preview swatches: background + 3 representative ANSI colours.
-        const swatches = [
+      <DropdownMenuGroup>
+        <div className="px-2 py-1 text-[9px] uppercase tracking-wider text-muted-foreground/70">
+          Colour scheme · {mode === "dark" ? "dark" : "light"}
+        </div>
+        {TERMINAL_SCHEMES.map((scheme) => {
+          const palette = mode === "dark" ? scheme.dark : scheme.light;
+          const selected = scheme.id === currentId;
+          // Preview swatches: background + 3 representative ANSI colours.
+          const swatches = [
           palette.background ?? "#000",
           palette.red ?? "#f00",
           palette.green ?? "#0f0",
           palette.blue ?? "#00f",
         ];
-        return (
-          <button
-            key={scheme.id}
-            type="button"
-            role="menuitemradio"
-            aria-checked={selected}
-            onClick={() => onSelect(scheme.id)}
-            className={clsx(
+          return (
+            <DropdownMenuItem
+              key={scheme.id}
+              onSelect={() => onSelect(scheme.id)}
+              className={clsx(
               "flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[11px] transition",
               selected
-                ? "bg-gx-accent/15 text-gx-text"
-                : "text-gx-text hover:bg-gx-surface-hover",
+                ? "bg-primary/15 text-foreground"
+                : "text-foreground hover:bg-accent",
             )}
-            title={scheme.description}
-          >
-            {/* Swatch row — 4 tiny squares so the user can eyeball the palette. */}
-            <div
-              className="flex h-4 w-12 shrink-0 overflow-hidden rounded border border-gx-border/50"
+              title={scheme.description}
+            >
+              {/* Line count slider */}
+              <div
+              className="flex h-4 w-12 shrink-0 overflow-hidden rounded border border-border/50"
               aria-hidden
             >
-              {swatches.map((color, i) => (
+                {swatches.map((color, i) => (
                 <span key={i} className="flex-1" style={{ background: color }} />
               ))}
-            </div>
-            <span className="flex-1 truncate">{scheme.name}</span>
-            {selected && (
-              <span className="text-[9px] font-semibold text-gx-accent">✓</span>
+              </div>
+              <span className="flex-1 truncate">{scheme.name}</span>
+              {selected && (
+              <span className="text-[9px] font-semibold text-primary">✓</span>
             )}
-          </button>
-        );
-      })}
-    </div>
+            </DropdownMenuItem>
+          );
+        })}
+      </DropdownMenuGroup>
+    </DropdownMenuContent>
   );
 }
 
 // --- Scrollback Settings Menu ---
 
-function ScrollbackSettingsMenu({ onClose }: { onClose: () => void }) {
+function ScrollbackSettingsMenu({}: {}) {
   const [config, setConfig] = useState<ScrollbackConfig>(loadScrollbackConfig);
 
   // Close on Escape.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
 
   const memoryBytes = estimateMemory(config.maxLines);
   const showWarning = config.maxLines > 100_000;
@@ -4091,43 +4430,43 @@ function ScrollbackSettingsMenu({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <div
-      role="dialog"
-      aria-label="Scrollback buffer settings"
-      className="absolute left-0 top-full z-50 mt-1 w-[280px] rounded border border-gx-border bg-gx-surface p-3 shadow-xl"
+    <PopoverContent
+      align="start"
+      className="w-[280px] rounded border border-border bg-card p-3"
     >
-      <div className="mb-3 text-[11px] font-medium text-gx-text">
+      <div className="mb-3 text-[11px] font-medium text-foreground">
         Scrollback Buffer
       </div>
 
-      {/* Line count slider */}
+      {/* Numeric input for precise control */}
       <div className="mb-2">
-        <label className="mb-1 flex items-center justify-between text-[10px] text-gx-muted">
+        <label className="mb-1 flex items-center justify-between text-[10px] text-muted-foreground">
           <span>Buffer size</span>
-          <span className="font-mono text-gx-text">
+          <span className="font-mono text-foreground">
             {config.maxLines.toLocaleString()} lines
           </span>
         </label>
-        <input
-          type="range"
+        <Slider
           min={MIN_MAX_LINES}
           max={MAX_MAX_LINES}
           step={1000}
-          value={config.maxLines}
-          onChange={(e) => handleLineCountChange(Number(e.target.value))}
-          className="w-full accent-gx-accent"
+          value={[Number(config.maxLines)]}
+          onValueChange={([value]) =>
+            handleLineCountChange(Number(String(value)))
+          }
+          className="w-full accent-primary"
           aria-label="Scrollback line count"
         />
-        <div className="mt-0.5 flex justify-between text-[9px] text-gx-muted">
+        <div className="mt-0.5 flex justify-between text-[9px] text-muted-foreground">
           <span>1K</span>
           <span>1M</span>
         </div>
       </div>
 
-      {/* Numeric input for precise control */}
+      {/* Memory estimate */}
       <div className="mb-3">
         <div className="flex items-center gap-2">
-          <input
+          <Input
             type="number"
             min={MIN_MAX_LINES}
             max={MAX_MAX_LINES}
@@ -4137,23 +4476,23 @@ function ScrollbackSettingsMenu({ onClose }: { onClose: () => void }) {
               const n = Number(e.target.value);
               if (Number.isFinite(n)) handleLineCountChange(n);
             }}
-            className="w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 font-mono text-[11px] text-gx-text focus-visible:outline-none focus:border-gx-accent"
+            className="w-full rounded border border-border bg-background px-2 py-1 font-mono text-[11px] text-foreground focus-visible:outline-none focus:border-primary"
             aria-label="Scrollback line count (exact)"
           />
         </div>
       </div>
 
-      {/* Memory estimate */}
-      <div className="mb-2 flex items-center justify-between rounded bg-gx-bg-sub px-2 py-1.5 text-[10px]">
-        <span className="text-gx-muted">Estimated memory</span>
-        <span className="font-mono font-medium text-gx-text">
+      {/* Warning for high values */}
+      <div className="mb-2 flex items-center justify-between rounded bg-background px-2 py-1.5 text-[10px]">
+        <span className="text-muted-foreground">Estimated memory</span>
+        <span className="font-mono font-medium text-foreground">
           {formatMemory(memoryBytes)}
         </span>
       </div>
 
-      {/* Warning for high values */}
+      {/* Enable/disable toggle */}
       {showWarning && (
-        <div className="flex items-start gap-1.5 rounded bg-gx-warn/10 px-2 py-1.5 text-[10px] text-gx-warn">
+        <div className="flex items-start gap-1.5 rounded bg-warning/10 px-2 py-1.5 text-[10px] text-warning">
           <AlertTriangle size={11} className="mt-0.5 shrink-0" />
           <span>
             High scrollback ({config.maxLines.toLocaleString()} lines) will use{" "}
@@ -4163,53 +4502,49 @@ function ScrollbackSettingsMenu({ onClose }: { onClose: () => void }) {
         </div>
       )}
 
-      <div className="mt-3 text-[9px] text-gx-muted">
+      <div className="mt-3 text-[9px] text-muted-foreground">
         Changes apply to new terminal sessions.
       </div>
-    </div>
+    </PopoverContent>
   );
 }
 
 // --- Paste Guard Settings Menu ---
 
-function PasteGuardSettingsMenu({ config, onChange, onClose }: {
+function PasteGuardSettingsMenu({
+  config,
+  onChange,
+}: {
   config: PasteGuardConfig;
   onChange: (config: PasteGuardConfig) => void;
-  onClose: () => void;
 }) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
   return (
-    <div
-      role="dialog"
-      aria-label="Paste protection settings"
-      className="absolute left-0 top-full z-50 mt-1 w-[260px] rounded border border-gx-border bg-gx-surface p-3 shadow-xl"
+    <PopoverContent
+      align="start"
+      className="w-[260px] rounded border border-border bg-card p-3"
     >
-      <div className="mb-3 text-[11px] font-medium text-gx-text">
+      <div className="mb-3 text-[11px] font-medium text-foreground">
         Paste Protection
       </div>
 
-      {/* Enable/disable toggle */}
+      {/* Multi-line threshold */}
       <label className="mb-3 flex cursor-pointer items-center justify-between">
-        <span className="text-[11px] text-gx-text">Enable paste guard</span>
-        <input
-          type="checkbox"
+        <span className="text-[11px] text-foreground">Enable paste guard</span>
+        <Checkbox
           checked={config.enabled}
-          onChange={(e) => onChange({ ...config, enabled: e.target.checked })}
-          className="h-4 w-4 rounded border-gx-border accent-gx-accent"
+          onCheckedChange={(checked) =>
+            onChange({ ...config, enabled: checked === true })
+          }
+          className="h-4 w-4 rounded border-border accent-primary"
         />
       </label>
 
       {/* Multi-line threshold */}
       <div className={clsx("transition-opacity", !config.enabled && "opacity-50 pointer-events-none")}>
-        <label className="mb-1 block text-[10px] text-gx-muted">
+        <label className="mb-1 block text-[10px] text-muted-foreground">
           Multi-line threshold (lines)
         </label>
-        <input
+        <Input
           type="number"
           min={1}
           max={1000}
@@ -4220,111 +4555,163 @@ function PasteGuardSettingsMenu({ config, onChange, onClose }: {
               onChange({ ...config, multiLineThreshold: Math.min(n, 1000) });
             }
           }}
-          className="w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 font-mono text-[11px] text-gx-text focus-visible:outline-none focus:border-gx-accent"
+          className="w-full rounded border border-border bg-background px-2 py-1 font-mono text-[11px] text-foreground focus-visible:outline-none focus:border-primary"
           aria-label="Multi-line paste threshold"
         />
-        <div className="mt-1 text-[9px] text-gx-muted">
+        <div className="mt-1 text-[9px] text-muted-foreground">
           Pastes with more lines than this will require confirmation.
         </div>
       </div>
 
       {!config.enabled && (
-        <div className="mt-3 flex items-start gap-1.5 rounded bg-gx-warn/10 px-2 py-1.5 text-[10px] text-gx-warn">
+        <div className="mt-3 flex items-start gap-1.5 rounded bg-warning/10 px-2 py-1.5 text-[10px] text-warning">
           <AlertTriangle size={11} className="mt-0.5 shrink-0" />
           <span>
-            Paste protection is disabled. All pasted content will be written directly to the terminal without inspection.
+            Paste protection is disabled. All pasted content will be written
+            directly to the terminal without inspection.
           </span>
         </div>
       )}
-    </div>
+    </PopoverContent>
   );
 }
 
 // --- Scrollbar Mode Menu ---
 
-function ScrollbarModeMenu({ currentMode, onSelect, onClose }: {
+function ScrollbarModeMenu({
+  currentMode,
+  onSelect,
+}: {
   currentMode: ScrollbarMode;
   onSelect: (mode: ScrollbarMode) => void;
-  onClose: () => void;
 }) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
   return (
-    <div
-      role="menu"
-      aria-label="Scrollbar mode"
-      className="absolute left-0 top-full z-50 mt-1 w-[220px] rounded border border-gx-border bg-gx-surface p-1 shadow-xl"
+    <DropdownMenuContent
+      align="start"
+      className="w-[220px] rounded border border-border bg-card p-1"
     >
-      <div className="px-2 py-1 text-[9px] uppercase tracking-wider text-gx-muted/70">
-        Scrollbar mode
-      </div>
-      {SCROLLBAR_MODES.map((mode) => {
-        const selected = mode.id === currentMode;
-        return (
-          <button
-            key={mode.id}
-            type="button"
-            role="menuitemradio"
-            aria-checked={selected}
-            onClick={() => onSelect(mode.id)}
-            className={clsx(
+      <DropdownMenuGroup>
+        <div className="px-2 py-1 text-[9px] uppercase tracking-wider text-muted-foreground/70">
+          Scrollbar mode
+        </div>
+        {SCROLLBAR_MODES.map((mode) => {
+          const selected = mode.id === currentMode;
+          return (
+            <DropdownMenuItem
+              key={mode.id}
+              onSelect={() => onSelect(mode.id)}
+              className={clsx(
               "flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[11px] transition",
               selected
-                ? "bg-gx-accent/15 text-gx-text"
-                : "text-gx-text hover:bg-gx-surface-hover",
+                ? "bg-primary/15 text-foreground"
+                : "text-foreground hover:bg-accent",
             )}
-          >
-            <span className="flex-1">
-              <span className="block">{mode.label}</span>
-              <span className="block text-[9px] text-gx-muted">{mode.description}</span>
-            </span>
-            {selected && (
-              <span className="text-[9px] font-semibold text-gx-accent">✓</span>
+            >
+              <span className="flex-1">
+                <span className="block">{mode.label}</span>
+                <span className="block text-[9px] text-muted-foreground">
+                  {mode.description}
+                </span>
+              </span>
+              {selected && (
+              <span className="text-[9px] font-semibold text-primary">✓</span>
             )}
-          </button>
-        );
-      })}
-      <div className="mt-1 px-2 py-1 text-[9px] text-gx-muted">
-        Changes apply immediately to all terminals.
-      </div>
-    </div>
+            </DropdownMenuItem>
+          );
+        })}
+        <div className="mt-1 px-2 py-1 text-[9px] text-muted-foreground">
+          Changes apply immediately to all terminals.
+        </div>
+      </DropdownMenuGroup>
+    </DropdownMenuContent>
   );
 }
 
 // --- Profile Menu ---
 
-function ProfileMenu({ profiles, onSelect, onSave, onDelete, onClose }: {
-  profiles: TermProfile[]; onSelect: (p: TermProfile) => void;
-  onSave: (name: string) => void; onDelete: (name: string) => void; onClose: () => void;
+function ProfileMenu({
+  profiles,
+  onSelect,
+  onSave,
+  onDelete,
+}: {
+  profiles: TermProfile[];
+  onSelect: (p: TermProfile) => void;
+  onSave: (name: string) => void;
+  onDelete: (name: string) => void;
 }) {
   const [newName, setNewName] = useState("");
   return (
-    <div className="absolute left-0 top-full z-50 mt-1 min-w-[180px] rounded border border-gx-border bg-gx-surface py-1 shadow-lg">
-      {profiles.length > 0 ? profiles.map((p) => (
-        <div key={p.name} className="flex items-center justify-between px-3 py-1 hover:bg-gx-surface-hover">
-          <button type="button" onClick={() => onSelect(p)} className="flex-1 text-left text-[11px] text-gx-text truncate">{p.name}</button>
-          <button type="button" onClick={() => onDelete(p.name)} className="text-gx-muted hover:text-gx-error ml-2"><X size={9} /></button>
+    <PopoverContent
+      align="start"
+      className="min-w-[180px] rounded border border-border bg-card py-1"
+    >
+      {profiles.length > 0 ? (
+        profiles.map((p) => (
+          <div key={p.name} className="flex items-center justify-between px-3 py-1 hover:bg-accent">
+            <Button
+              variant="ghost"
+              size="compact"
+              type="button"
+              onClick={() => onSelect(p)}
+              className="justify-start flex-1 text-left text-[11px] text-foreground truncate"
+            >
+              {p.name}
+            </Button>
+            <Button
+              variant="ghost"
+              size="compact"
+              type="button"
+              onClick={() => onDelete(p.name)}
+              className="text-muted-foreground hover:text-destructive ml-2"
+            >
+              <X size={9} />
+            </Button>
+          </div>
+        ))
+      ) : (
+        <div className="px-3 py-1 text-[11px] text-muted-foreground">
+          No profiles saved
         </div>
-      )) : <div className="px-3 py-1 text-[11px] text-gx-muted">No profiles saved</div>}
-      <div className="border-t border-gx-border mt-1 pt-1 px-3 pb-1">
+      )}
+      <div className="border-t border-border mt-1 pt-1 px-3 pb-1">
         <div className="flex items-center gap-1">
-          <input type="text" value={newName} onChange={(e) => setNewName(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter" && newName.trim()) { onSave(newName.trim()); setNewName(""); } if (e.key === "Escape") onClose(); }}
-            placeholder="Save profile…" className="flex-1 bg-transparent text-[11px] text-gx-text placeholder:text-gx-muted outline-none" />
-          <button type="button" onClick={() => { if (newName.trim()) { onSave(newName.trim()); setNewName(""); } }} className="text-[10px] text-gx-accent hover:text-gx-accent-hover">Save</button>
+          <Input
+            type="text"
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && newName.trim()) { onSave(newName.trim()); setNewName(""); }
+            }}
+            placeholder="Save profile…"
+            className="flex-1 bg-transparent text-[11px] text-foreground placeholder:text-muted-foreground outline-none"
+          />
+          <Button
+            variant="ghost"
+            size="compact"
+            type="button"
+            onClick={() => { if (newName.trim()) { onSave(newName.trim()); setNewName(""); } }}
+            className="text-[10px] text-primary hover:text-primary-hover"
+          >
+            Save
+          </Button>
         </div>
       </div>
-    </div>
+    </PopoverContent>
   );
 }
 
 // --- Context Menu ---
 
-function ContextMenu({ x, y, onAction, daemonReady, breakerOpen }: {
+function ContextMenu({
+  onClose,
+  x,
+  y,
+  onAction,
+  daemonReady,
+  breakerOpen,
+}: {
+  onClose: () => void;
   x: number;
   y: number;
   onAction: (action: string) => void;
@@ -4361,28 +4748,33 @@ function ContextMenu({ x, y, onAction, daemonReady, breakerOpen }: {
     { label: "Kill Terminal", action: "kill", shortcut: "⌘W" },
   ];
   return (
-    <div className="fixed z-[9999] min-w-[200px] rounded border border-gx-border bg-gx-surface py-1 shadow-xl" style={{ left: x, top: y }}>
-      {items.map((item, i) => item.label === "---" ? (
-        <div key={i} className="my-1 border-t border-gx-border" />
+    <PointMenu position={{ x, y }} onClose={onClose}>
+      {items.map((item, i) =>
+        item.label === "---" ? (
+        <div key={i} className="my-1 border-t border-border" />
       ) : (
-        <button
-          key={item.action}
-          type="button"
-          onClick={() => { if (!item.disabled) onAction(item.action); }}
-          disabled={item.disabled}
-          title={item.tooltip}
-          className={clsx(
+          <DropdownMenuItem
+            key={item.action}
+            onSelect={() => { if (!item.disabled) onAction(item.action); }}
+            disabled={item.disabled}
+            title={item.tooltip}
+            className={clsx(
             "flex w-full items-center justify-between px-3 py-1.5 text-left text-[11px]",
             item.disabled
-              ? "cursor-not-allowed text-gx-muted/50"
-              : "text-gx-text hover:bg-gx-surface-hover",
+              ? "cursor-not-allowed text-muted-foreground/50"
+              : "text-foreground hover:bg-accent",
           )}
-        >
-          <span>{item.label}</span>
-          {item.shortcut && <span className="ml-4 text-gx-muted">{item.shortcut}</span>}
-        </button>
-      ))}
-    </div>
+          >
+            <span>{item.label}</span>
+            {item.shortcut && (
+              <span className="ml-4 text-muted-foreground">
+                {item.shortcut}
+              </span>
+            )}
+          </DropdownMenuItem>
+        ),
+      )}
+    </PointMenu>
   );
 }
 

@@ -179,7 +179,7 @@ export function PatchMinimap({ patch, scrollContainer }: Props) {
   return (
     <div
       ref={containerRef}
-      className="relative shrink-0 cursor-pointer select-none bg-gx-bg-sub"
+      className="relative shrink-0 cursor-pointer select-none bg-background"
       style={{ width: MINIMAP_WIDTH }}
       onClick={handleClick}
       role="scrollbar"

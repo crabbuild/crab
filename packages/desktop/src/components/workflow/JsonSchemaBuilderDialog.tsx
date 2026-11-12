@@ -1,16 +1,29 @@
-import { useEffect, useMemo, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
 import clsx from "clsx";
 import { Check, Plus, Trash2, Wand2, X } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 
-import {
-  createSchemaBuilderField,
-  jsonSchemaToBuilderModel,
-  schemaBuilderModelToJsonSchema,
-} from "../../lib/json-schema-builder";
 import type {
   SchemaBuilderField,
   SchemaBuilderFieldType,
   SchemaBuilderModel,
+} from "../../lib/json-schema-builder";
+import {
+  createSchemaBuilderField,
+  jsonSchemaToBuilderModel,
+  schemaBuilderModelToJsonSchema,
 } from "../../lib/json-schema-builder";
 
 type JsonSchemaObject = Record<string, unknown>;
@@ -69,7 +82,9 @@ export function JsonSchemaBuilderDialog({
 
   const commitAdvanced = () => {
     try {
-      const parsed = advancedDraft.trim() ? JSON.parse(advancedDraft) as unknown : {};
+      const parsed = advancedDraft.trim()
+        ? (JSON.parse(advancedDraft) as unknown)
+        : {};
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
         throw new Error("Schema must be a JSON object.");
       }
@@ -90,52 +105,71 @@ export function JsonSchemaBuilderDialog({
   };
 
   return (
-    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="schema-builder-title">
-      <div className="flex max-h-[86vh] w-[760px] max-w-full flex-col overflow-hidden rounded-lg border border-gx-border bg-gx-surface shadow-2xl">
-        <div className="flex items-center gap-3 border-b border-gx-border px-4 py-3">
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) {
+          onClose();
+        }
+      }}
+    >
+      <DialogContent
+        showCloseButton={false}
+        aria-describedby={undefined}
+        className="block gap-0 p-0 flex max-h-[86vh] w-[760px] max-w-full flex-col overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
+      >
+        <div className="flex items-center gap-3 border-b border-border px-4 py-3">
           <div className="min-w-0 flex-1">
-            <h2 id="schema-builder-title" className="text-sm font-semibold text-gx-text">Output Schema</h2>
-            <p className="mt-0.5 text-[11px] text-gx-muted">Define the JSON fields downstream branches and mappings can rely on.</p>
+            <DialogTitle className="text-sm font-semibold text-foreground">
+              Output Schema
+            </DialogTitle>
+            <p className="mt-0.5 text-[11px] text-muted-foreground">
+              Define the JSON fields downstream branches and mappings can rely
+              on.
+            </p>
           </div>
-          <div className="flex overflow-hidden rounded-md border border-gx-border bg-gx-bg-sub p-0.5">
+          <div className="flex overflow-hidden rounded-md border border-border bg-background p-0.5">
             {(["simple", "advanced"] as const).map((item) => (
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 key={item}
                 type="button"
                 className={clsx(
                   "rounded px-3 py-1 text-xs font-medium transition",
-                  mode === item ? "bg-gx-surface-hover text-gx-text shadow-sm" : "text-gx-muted hover:text-gx-text",
+                  mode === item ? "bg-accent text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
                 )}
                 onClick={() => setMode(item)}
               >
                 {MODE_LABELS[item]}
-              </button>
+              </Button>
             ))}
           </div>
-          <button type="button" className="btn-icon h-7 w-7" onClick={onClose} aria-label="Close schema builder">
+          <Button size="icon" variant="ghost" type="button" className="h-7 w-7" onClick={onClose} aria-label="Close schema builder">
             <X size={14} />
-          </button>
+          </Button>
         </div>
 
         <div className="min-h-0 flex-1 overflow-auto px-4 py-3">
           {mode === "simple" ? (
             <div className="space-y-4">
               {advancedOnly && (
-                <div className="rounded border border-gx-warn/40 bg-gx-warn/10 px-3 py-2 text-xs text-gx-warn">
-                  This schema contains advanced JSON Schema fields. Simple edits will keep only supported fields.
+                <div className="rounded border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
+                  This schema contains advanced JSON Schema fields. Simple edits
+                  will keep only supported fields.
                 </div>
               )}
-              <label className="block space-y-1 text-xs text-gx-muted">
+              <label className="block space-y-1 text-xs text-muted-foreground">
                 <span>Schema name</span>
-                <input
-                  className="input-field h-9 w-full text-sm"
+                <Input
+                  className="h-9 w-full text-sm"
                   value={model.name}
                   onChange={(event) => setModel({ ...model, name: event.target.value })}
                   placeholder="schema"
                 />
               </label>
               <div className="space-y-2">
-                <div className="grid grid-cols-[28px_1fr_86px_1.2fr_74px_32px] items-center gap-2 border-b border-gx-border pb-2 text-[11px] text-gx-muted">
+                <div className="grid grid-cols-[28px_1fr_86px_1.2fr_74px_32px] items-center gap-2 border-b border-border pb-2 text-[11px] text-muted-foreground">
                   <span />
                   <span>Name</span>
                   <span>Type</span>
@@ -144,8 +178,11 @@ export function JsonSchemaBuilderDialog({
                   <span />
                 </div>
                 {model.properties.length === 0 ? (
-                  <div className="rounded border border-dashed border-gx-border bg-gx-bg-sub/40 p-4 text-center text-xs text-gx-muted">
-                    Add fields such as <span className="font-mono text-gx-text">result</span>, <span className="font-mono text-gx-text">score</span>, or <span className="font-mono text-gx-text">status</span>.
+                  <div className="rounded border border-dashed border-border bg-background/40 p-4 text-center text-xs text-muted-foreground">
+                    Add fields such as{" "}
+                    <span className="font-mono text-foreground">result</span>,{" "}
+                    <span className="font-mono text-foreground">score</span>, or{" "}
+                    <span className="font-mono text-foreground">status</span>.
                   </div>
                 ) : (
                   <FieldList
@@ -154,19 +191,19 @@ export function JsonSchemaBuilderDialog({
                   />
                 )}
               </div>
-              <button
+              <Button variant="outline"
                 type="button"
-                className="btn flex h-8 items-center gap-1.5 text-xs"
+                className="flex h-8 items-center gap-1.5 text-xs"
                 onClick={() => setModel({ ...model, properties: [...model.properties, createSchemaBuilderField(createLocalId)] })}
               >
                 <Plus size={13} />
                 Add property
-              </button>
+              </Button>
             </div>
           ) : (
             <div className="space-y-2">
-              <textarea
-                className={clsx("input-field min-h-[360px] w-full resize-y font-mono text-[11px]", advancedError && "border-gx-error")}
+              <Textarea
+                className={clsx(" min-h-[360px] w-full resize-y font-mono text-[11px]", advancedError && "border-destructive")}
                 value={advancedDraft}
                 spellCheck={false}
                 onChange={(event) => {
@@ -174,15 +211,17 @@ export function JsonSchemaBuilderDialog({
                   setAdvancedError(null);
                 }}
               />
-              {advancedError && <div className="text-xs text-gx-error">{advancedError}</div>}
+              {advancedError && (
+                <div className="text-xs text-destructive">{advancedError}</div>
+              )}
             </div>
           )}
         </div>
 
-        <div className="flex items-center gap-2 border-t border-gx-border px-4 py-3">
-          <button
+        <div className="flex items-center gap-2 border-t border-border px-4 py-3">
+          <Button variant="outline"
             type="button"
-            className="btn flex items-center gap-1.5 text-xs"
+            className="flex items-center gap-1.5 text-xs"
             title="Generate schema draft"
             onClick={() => {
               if (mode === "simple" && model.properties.length === 0) {
@@ -195,20 +234,22 @@ export function JsonSchemaBuilderDialog({
           >
             <Wand2 size={13} />
             Starter field
-          </button>
+          </Button>
           <div className="flex-1" />
-          <button type="button" className="btn text-xs" onClick={onClose}>Cancel</button>
-          <button
+          <Button variant="outline" type="button" className="text-xs" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button variant="default"
             type="button"
-            className="btn btn-primary flex items-center gap-1.5 text-xs"
+            className="flex items-center gap-1.5 text-xs"
             onClick={mode === "simple" ? commitSimple : commitAdvanced}
           >
             <Check size={13} />
             Update
-          </button>
+          </Button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -220,7 +261,7 @@ function FieldList({
   onChange: (fields: SchemaBuilderField[]) => void;
 }) {
   const updateField = (id: string, field: SchemaBuilderField) => {
-    onChange(fields.map((item) => item.id === id ? field : item));
+    onChange(fields.map((item) => (item.id === id ? field : item)));
   };
   return (
     <div className="space-y-2">
@@ -249,49 +290,64 @@ function FieldEditor({
     onChange({
       ...field,
       type,
-      enumValues: type === "ENUM" ? field.enumValues ?? [""] : undefined,
-      properties: type === "OBJ" ? field.properties ?? [] : undefined,
-      arrayItem: type === "ARR" ? field.arrayItem ?? createSchemaBuilderField(createLocalId, "STR") : undefined,
+      enumValues: type === "ENUM" ? (field.enumValues ?? [""]) : undefined,
+      properties: type === "OBJ" ? (field.properties ?? []) : undefined,
+      arrayItem:
+        type === "ARR"
+          ? (field.arrayItem ?? createSchemaBuilderField(createLocalId, "STR"))
+          : undefined,
     });
   };
 
   return (
-    <div className="space-y-2 rounded border border-gx-border bg-gx-bg-sub/50 p-2">
+    <div className="space-y-2 rounded border border-border bg-background/50 p-2">
       <div className="grid grid-cols-[28px_1fr_86px_1.2fr_74px_32px] items-center gap-2">
-        <input
-          type="checkbox"
+        <Checkbox
           className="justify-self-center"
           checked={field.required ?? false}
-          onChange={(event) => onChange({ ...field, required: event.target.checked })}
+          onCheckedChange={(checked) =>
+            onChange({ ...field, required: checked === true })
+          }
           aria-label={`Require ${field.name || "property"}`}
         />
-        <input
-          className="input-field h-8 min-w-0 text-xs"
+        <Input
+          className="h-8 min-w-0 text-xs"
           value={field.name}
           onChange={(event) => onChange({ ...field, name: event.target.value })}
           placeholder="result"
         />
-        <select
-          className="input-field h-8 min-w-0 text-xs"
-          value={field.type}
-          onChange={(event) => updateType(event.target.value as SchemaBuilderFieldType)}
+        <Select
+          value={":" + String(field.type)}
+          onValueChange={(selectedValue) => {
+            const value = selectedValue.slice(1);
+            return updateType(value as SchemaBuilderFieldType);
+          }}
         >
-          {FIELD_TYPES.map((type) => (
-            <option key={type.value} value={type.value}>{type.label}</option>
-          ))}
-        </select>
-        <input
-          className="input-field h-8 min-w-0 text-xs"
+          <SelectTrigger className="h-8 min-w-0 text-xs">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              {FIELD_TYPES.map((type) => (
+                <SelectItem key={type.value} value={":" + String(type.value)}>
+                  {type.label}
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          </SelectContent>
+        </Select>
+        <Input
+          className="h-8 min-w-0 text-xs"
           value={field.description ?? ""}
           onChange={(event) => onChange({ ...field, description: event.target.value })}
           placeholder="result"
         />
-        <span className={clsx("text-center text-[10px]", field.required ? "text-gx-accent" : "text-gx-muted")}>
+        <span className={clsx("text-center text-[10px]", field.required ? "text-primary" : "text-muted-foreground")}>
           {field.required ? "Yes" : "No"}
         </span>
-        <button type="button" className="btn-icon h-7 w-7 text-gx-error" onClick={onDelete} aria-label={`Delete ${field.name || "property"}`}>
+        <Button size="icon" variant="ghost" type="button" className="h-7 w-7 text-destructive" onClick={onDelete} aria-label={`Delete ${field.name || "property"}`}>
           <Trash2 size={13} />
-        </button>
+        </Button>
       </div>
       {field.type === "ENUM" && (
         <EnumValueEditor
@@ -321,25 +377,27 @@ function EnumValueEditor({ values, onChange }: { values: string[]; onChange: (va
     <div className="flex flex-wrap gap-1.5 pl-7">
       {list.map((value, index) => (
         <div key={index} className="flex items-center gap-1">
-          <input
-            className="input-field h-7 w-28 font-mono text-[11px]"
+          <Input
+            className="h-7 w-28 font-mono text-[11px]"
             value={value}
             onChange={(event) => onChange(list.map((item, itemIndex) => itemIndex === index ? event.target.value : item))}
             placeholder="value"
           />
           {list.length > 1 && (
-            <button
+            <Button size="icon" variant="ghost"
               type="button"
-              className="btn-icon h-7 w-7 text-gx-error"
+              className="h-7 w-7 text-destructive"
               onClick={() => onChange(list.filter((_, itemIndex) => itemIndex !== index))}
               aria-label={`Delete enum value ${index + 1}`}
             >
               <Trash2 size={12} />
-            </button>
+            </Button>
           )}
         </div>
       ))}
-      <button type="button" className="btn h-7 text-[11px]" onClick={() => onChange([...list, ""])}>Add value</button>
+      <Button variant="outline" type="button" className="h-7 text-[11px]" onClick={() => onChange([...list, ""])}>
+        Add value
+      </Button>
     </div>
   );
 }
@@ -352,11 +410,11 @@ function NestedFieldEditor({
   onChange: (fields: SchemaBuilderField[]) => void;
 }) {
   return (
-    <div className="space-y-2 border-l border-gx-border pl-4">
+    <div className="space-y-2 border-l border-border pl-4">
       <FieldList fields={fields} onChange={onChange} />
-      <button type="button" className="btn h-7 text-[11px]" onClick={() => onChange([...fields, createSchemaBuilderField(createLocalId)])}>
+      <Button variant="outline" type="button" className="h-7 text-[11px]" onClick={() => onChange([...fields, createSchemaBuilderField(createLocalId)])}>
         Add nested property
-      </button>
+      </Button>
     </div>
   );
 }
@@ -369,8 +427,8 @@ function ArrayItemEditor({
   onChange: (field: SchemaBuilderField) => void;
 }) {
   return (
-    <div className="space-y-2 border-l border-gx-border pl-4">
-      <div className="text-[11px] text-gx-muted">Array item</div>
+    <div className="space-y-2 border-l border-border pl-4">
+      <div className="text-[11px] text-muted-foreground">Array item</div>
       <FieldEditor field={{ ...item, name: item.name || "item" }} onChange={onChange} onDelete={() => onChange(createSchemaBuilderField(createLocalId, "STR"))} />
     </div>
   );

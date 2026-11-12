@@ -27,13 +27,13 @@ export function GeoJsonView({ repoId, path, rev }: Props) {
     return () => { cancelled = true; };
   }, [repoId, path, rev]);
 
-  if (err) return <div className="m-4 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">{err}</div>;
-  if (!geojson) return <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted"><Loader2 size={14} className="animate-spin" /> Loading GeoJSON…</div>;
+  if (err) return <div className="m-4 rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">{err}</div>;
+  if (!geojson) return <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2 size={14} className="animate-spin" /> Loading GeoJSON…</div>;
 
   return (
-    <div className="flex h-full flex-col bg-gx-bg-sub">
-      <div className="flex shrink-0 items-center gap-2 border-b border-gx-border bg-gx-surface px-3 py-1.5 text-[11px] text-gx-muted">
-        <Globe size={12} className="text-gx-accent" /> GeoJSON · {path.split("/").pop()}
+    <div className="flex h-full flex-col bg-background">
+      <div className="flex shrink-0 items-center gap-2 border-b border-border bg-card px-3 py-1.5 text-[11px] text-muted-foreground">
+        <Globe size={12} className="text-primary" /> GeoJSON · {path.split("/").pop()}
       </div>
       <div className="min-h-0 flex-1 overflow-auto p-4">
         <GeoSvg data={geojson} />
@@ -47,7 +47,7 @@ export function GeoJsonView({ repoId, path, rev }: Props) {
 function GeoSvg({ data }: { data: unknown }) {
   const svgRef = useRef<SVGSVGElement>(null);
   const features = extractFeatures(data);
-  if (features.length === 0) return <div className="text-xs text-gx-muted">No renderable features found.</div>;
+  if (features.length === 0) return <div className="text-xs text-muted-foreground">No renderable features found.</div>;
 
   // Compute bounding box.
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -84,9 +84,9 @@ function GeoSvg({ data }: { data: unknown }) {
   }
 
   return (
-    <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} className="w-full rounded border border-gx-border bg-gx-surface" style={{ maxHeight: 500 }}>
-      {paths.map((d, i) => <path key={i} d={d} fill="rgb(var(--gx-accent) / 0.15)" stroke="rgb(var(--gx-accent))" strokeWidth={1.5} />)}
-      {points.map((p, i) => <circle key={`p${i}`} cx={p[0]} cy={p[1]} r={3} fill="rgb(var(--gx-accent))" />)}
+    <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} className="w-full rounded border border-border bg-card" style={{ maxHeight: 500 }}>
+      {paths.map((d, i) => <path key={i} d={d} fill="rgb(var(--primary) / 0.15)" stroke="rgb(var(--primary))" strokeWidth={1.5} />)}
+      {points.map((p, i) => <circle key={`p${i}`} cx={p[0]} cy={p[1]} r={3} fill="rgb(var(--primary))" />)}
     </svg>
   );
 }

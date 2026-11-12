@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Quick-attach chips rendered inline above the chat composer.
  *
@@ -16,7 +17,7 @@
  * hides lower-priority chips behind a "+N more" overflow indicator.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import clsx from "clsx";
 import {
   Clipboard,
   FileCode,
@@ -25,16 +26,16 @@ import {
   Loader2,
   Terminal,
 } from "lucide-react";
-import clsx from "clsx";
-import type { ChatAttachment } from "./ChatInput";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { rpc } from "../../ipc";
 import {
   listTerminals,
   subscribe as subscribeTerminals,
   terminalTail,
   type TerminalSession,
 } from "../../lib/terminal-registry";
-import { rpc } from "../../ipc";
 import { publishToast } from "../../lib/toasts";
+import type { ChatAttachment } from "./ChatInput";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -259,7 +260,11 @@ export function QuickAttachBar({
     if (taskId) {
       result.push({
         key: "diff",
-        icon: diffLoading ? <Loader2 size={10} className="animate-spin" /> : <GitCommit size={10} />,
+        icon: diffLoading ? (
+          <Loader2 size={10} className="animate-spin" />
+        ) : (
+          <GitCommit size={10} />
+        ),
         label: "Diff vs HEAD",
         title: "Attach working-tree changes as a diff",
         onClick: attachDiff,
@@ -324,7 +329,7 @@ export function QuickAttachBar({
       role="toolbar"
       aria-label="Quick attachments"
     >
-      <span className="shrink-0 text-gx-muted">Attach:</span>
+      <span className="shrink-0 text-muted-foreground">Attach:</span>
 
       {chips.map((chip) => (
         <Chip
@@ -338,7 +343,7 @@ export function QuickAttachBar({
       ))}
 
       {overflowCount > 0 && (
-        <span className="shrink-0 text-[9px] text-gx-muted/70">
+        <span className="shrink-0 text-[9px] text-muted-foreground/70">
           +{overflowCount} more
         </span>
       )}
@@ -383,7 +388,9 @@ function Chip({
   disabled?: boolean;
 }) {
   return (
-    <button
+    <Button
+      variant="ghost"
+      size="compact"
       type="button"
       data-chip
       onClick={onClick}
@@ -391,13 +398,13 @@ function Chip({
       title={title}
       className={clsx(
         "inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] transition",
-        "border-gx-border bg-gx-surface text-gx-text hover:border-gx-accent/50 hover:bg-gx-accent/10",
+        "border-border bg-card text-foreground hover:border-primary/50 hover:bg-primary/10",
         "disabled:opacity-50 disabled:cursor-not-allowed",
         "max-w-[160px]",
       )}
     >
       {icon}
       <span className="truncate">{label}</span>
-    </button>
+    </Button>
   );
 }

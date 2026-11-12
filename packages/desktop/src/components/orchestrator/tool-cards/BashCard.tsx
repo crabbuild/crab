@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Specialized renderer for Bash/Terminal/command_execution tool calls.
  *
@@ -16,26 +17,26 @@
  *   - detail (stdout/stderr output from tool_result)
  */
 
-import { useState } from "react";
 import clsx from "clsx";
 import {
+  Check,
+  CheckCircle2,
   ChevronDown,
   ChevronRight,
-  Terminal,
   Copy,
-  Check,
   Loader2,
-  CheckCircle2,
+  Terminal,
   XCircle,
 } from "lucide-react";
-import type { ToolCardRendererProps } from "./types";
-import { CollapsedCardLine } from "./CollapsedCardLine";
-import { ShikiPreview } from "./ShikiPreview";
-import { useCardExpanded } from "./useCardExpanded";
-import { languageForPath, isUnifiedDiff } from "../../../lib/codex-diff";
+import { useState } from "react";
 import { AnsiText, stripAnsiToText } from "../../../lib/ansi-text";
+import { isUnifiedDiff, languageForPath } from "../../../lib/codex-diff";
 import { summariseCommand } from "../../../lib/command-summaries";
 import { UnifiedDiff } from "../UnifiedDiff";
+import { CollapsedCardLine } from "./CollapsedCardLine";
+import { ShikiPreview } from "./ShikiPreview";
+import type { ToolCardRendererProps } from "./types";
+import { useCardExpanded } from "./useCardExpanded";
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -237,22 +238,30 @@ export function BashCard({ event, defaultExpanded = false, collapsed: collapsedP
   // Collapsed one-liner branch.
   const collapsed = collapsedProp ?? false;
   if (collapsed) {
-    const statusIcon = isRunning
-      ? <Loader2 size={11} className="shrink-0 text-gx-info animate-spin" />
-      : isError
-        ? <XCircle size={11} className="shrink-0 text-gx-error" />
-        : isSuccess
-          ? <CheckCircle2 size={11} className="shrink-0 text-gx-success" />
-          : <Terminal size={11} className="shrink-0 text-gx-muted" />;
+    const statusIcon = isRunning ? (
+          <Loader2 size={11} className="shrink-0 text-info animate-spin" />
+        ) : isError ? (
+          <XCircle size={11} className="shrink-0 text-destructive" />
+        ) : isSuccess ? (
+          <CheckCircle2 size={11} className="shrink-0 text-success" />
+        ) : (
+          <Terminal size={11} className="shrink-0 text-muted-foreground" />
+        );
     const defaultSummary = (
       <>
         {statusIcon}
-        <code className="font-mono text-gx-text/80 truncate">{displayCommand}</code>
+        <code className="font-mono text-foreground/80 truncate">
+          {displayCommand}
+        </code>
         {duration && (
-          <span className="shrink-0 text-[9px] font-mono text-gx-muted">{duration}</span>
+          <span className="shrink-0 text-[9px] font-mono text-muted-foreground">
+            {duration}
+          </span>
         )}
         {exitCode !== null && exitCode !== 0 && (
-          <span className="shrink-0 text-[9px] font-mono text-gx-error">exit {exitCode}</span>
+          <span className="shrink-0 text-[9px] font-mono text-destructive">
+            exit {exitCode}
+          </span>
         )}
       </>
     );
@@ -270,43 +279,45 @@ export function BashCard({ event, defaultExpanded = false, collapsed: collapsedP
       className={clsx(
         "rounded-md border overflow-hidden transition-colors",
         isError
-          ? "border-gx-error/30"
+          ? "border-destructive/30"
           : isRunning
-            ? "border-gx-info/30"
-            : "border-gx-border/40",
+            ? "border-info/30"
+            : "border-border/40",
       )}
     >
       {/* Header: command line */}
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={() => hasOutput && setExpanded(!expanded)}
         className={clsx(
           "flex w-full items-center gap-2 px-2.5 py-1.5 text-left transition group",
-          hasOutput && "hover:bg-gx-surface-hover cursor-pointer",
+          hasOutput && "hover:bg-accent cursor-pointer",
           !hasOutput && "cursor-default",
         )}
         aria-expanded={hasOutput ? expanded : undefined}
       >
         {/* Status icon */}
         {isRunning ? (
-          <Loader2 size={11} className="shrink-0 text-gx-info animate-spin" />
+          <Loader2 size={11} className="shrink-0 text-info animate-spin" />
         ) : isError ? (
-          <XCircle size={11} className="shrink-0 text-gx-error" />
+          <XCircle size={11} className="shrink-0 text-destructive" />
         ) : isSuccess ? (
-          <CheckCircle2 size={11} className="shrink-0 text-gx-success" />
+          <CheckCircle2 size={11} className="shrink-0 text-success" />
         ) : (
-          <Terminal size={11} className="shrink-0 text-gx-muted" />
+          <Terminal size={11} className="shrink-0 text-muted-foreground" />
         )}
 
         {/* Command */}
-        <code className="min-w-0 flex-1 truncate font-mono text-[10px] text-gx-text/80">
+        <code className="min-w-0 flex-1 truncate font-mono text-[10px] text-foreground/80">
           {displayCommand}
         </code>
 
         {/* Codex commandActions intent summary (compact, non-essential) */}
         {actionSummary && (
           <span
-            className="shrink-0 hidden md:inline-flex max-w-[280px] truncate text-[9px] text-gx-muted/70"
+            className="shrink-0 hidden md:inline-flex max-w-[280px] truncate text-[9px] text-muted-foreground/70"
             title={actionSummary}
           >
             {actionSummary}
@@ -316,7 +327,7 @@ export function BashCard({ event, defaultExpanded = false, collapsed: collapsedP
         {/* Parsed command summary badge (CHAT7.7 — coexists with actionSummary) */}
         {commandSummary && (
           <span
-            className="shrink-0 hidden md:inline-flex items-center gap-1 max-w-[280px] truncate rounded px-1 py-0.5 text-[9px] font-medium text-gx-text/70 bg-gx-surface/60 border border-gx-border/30"
+            className="shrink-0 hidden md:inline-flex items-center gap-1 max-w-[280px] truncate rounded px-1 py-0.5 text-[9px] font-medium text-foreground/70 bg-card/60 border border-border/30"
             title={commandSummary.badge}
           >
             <span>{commandSummary.icon}</span>
@@ -330,8 +341,8 @@ export function BashCard({ event, defaultExpanded = false, collapsed: collapsedP
             className={clsx(
               "shrink-0 rounded px-1 py-0.5 text-[8px] font-mono font-medium border",
               exitCode === 0
-                ? "bg-gx-success/10 text-gx-success border-gx-success/30"
-                : "bg-gx-error/10 text-gx-error border-gx-error/30",
+                ? "bg-success/10 text-success border-success/30"
+                : "bg-destructive/10 text-destructive border-destructive/30",
             )}
           >
             {exitCode === 0 ? "✓" : `exit ${exitCode}`}
@@ -340,40 +351,47 @@ export function BashCard({ event, defaultExpanded = false, collapsed: collapsedP
 
         {/* Duration badge */}
         {duration && (
-          <span className="shrink-0 rounded px-1 py-0.5 text-[8px] font-mono text-gx-muted border border-gx-border/40">
+          <span className="shrink-0 rounded px-1 py-0.5 text-[8px] font-mono text-muted-foreground border border-border/40">
             {duration}
           </span>
         )}
 
         {/* Running indicator */}
         {isRunning && (
-          <span className="shrink-0 rounded px-1 py-0.5 text-[8px] font-medium text-gx-info border border-gx-info/30 bg-gx-info/10">
+          <span className="shrink-0 rounded px-1 py-0.5 text-[8px] font-medium text-info border border-info/30 bg-info/10">
             running
           </span>
         )}
 
         {/* Copy button (visible on hover) */}
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={(e) => { e.stopPropagation(); handleCopy(); }}
-          className="shrink-0 opacity-0 group-hover:opacity-100 text-gx-muted hover:text-gx-text transition p-0.5"
+          className="shrink-0 opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground transition p-0.5"
           aria-label="Copy command"
         >
-          {copied ? <Check size={9} className="text-gx-success" /> : <Copy size={9} />}
-        </button>
+          {copied ? (
+            <Check size={9} className="text-success" />
+          ) : (
+            <Copy size={9} />
+          )}
+        </Button>
 
-        {hasOutput && (
-          expanded
-            ? <ChevronDown size={10} className="shrink-0 text-gx-muted/60" />
-            : <ChevronRight size={10} className="shrink-0 text-gx-muted/60" />
-        )}
-      </button>
+        {hasOutput &&
+          (expanded ? (
+            <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
+          ) : (
+            <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
+          ))}
+      </Button>
 
       {/* Expanded: output */}
       {expanded && hasOutput && (
-        <div className="border-t border-gx-border/30">
+        <div className="border-t border-border/30">
           {cwd && (
-            <div className="border-b border-gx-border/20 px-2.5 py-1 text-[9px] text-gx-muted/70 font-mono">
+            <div className="border-b border-border/20 px-2.5 py-1 text-[9px] text-muted-foreground/70 font-mono">
               cwd: {cwd}
             </div>
           )}
@@ -422,7 +440,7 @@ function TerminalOutput({
       <div className="max-h-[320px] overflow-auto">
         <UnifiedDiff patch={plainText} />
         {truncated && (
-          <div className="px-2.5 pb-1 text-[9px] text-gx-muted italic">
+          <div className="px-2.5 pb-1 text-[9px] text-muted-foreground italic">
             … output truncated ({Math.round(output.length / 1024)}KB total)
           </div>
         )}
@@ -437,7 +455,7 @@ function TerminalOutput({
       <div className="max-h-[320px] overflow-auto">
         <ShikiPreview code={text} lang={language} path={filePath ?? undefined} />
         {truncated && (
-          <div className="px-2.5 pb-1 text-[9px] text-gx-muted italic">
+          <div className="px-2.5 pb-1 text-[9px] text-muted-foreground italic">
             … output truncated ({Math.round(output.length / 1024)}KB total)
           </div>
         )}
@@ -452,13 +470,13 @@ function TerminalOutput({
       <pre
         className={clsx(
           "font-mono text-[10px] leading-[1.5] whitespace-pre-wrap break-all",
-          isError ? "text-gx-error/80" : "text-gx-text/60",
+          isError ? "text-destructive/80" : "text-foreground/60",
         )}
       >
         <AnsiText>{text}</AnsiText>
       </pre>
       {truncated && (
-        <div className="mt-1 text-[9px] text-gx-muted italic">
+        <div className="mt-1 text-[9px] text-muted-foreground italic">
           … output truncated ({Math.round(output.length / 1024)}KB total)
         </div>
       )}

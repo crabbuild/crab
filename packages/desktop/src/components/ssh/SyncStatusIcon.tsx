@@ -24,27 +24,27 @@ const STATUS_CONFIG: Record<
 > = {
   synced: {
     icon: Check,
-    colorClass: "text-green-500",
+    colorClass: "text-success",
     label: "Synced",
   },
   "pending-upload": {
     icon: ArrowUp,
-    colorClass: "text-blue-500",
+    colorClass: "text-info",
     label: "Pending upload",
   },
   "pending-download": {
     icon: ArrowDown,
-    colorClass: "text-blue-500",
+    colorClass: "text-info",
     label: "Pending download",
   },
   syncing: {
     icon: Loader2,
-    colorClass: "text-gx-accent",
+    colorClass: "text-primary",
     label: "Syncing",
   },
   conflict: {
     icon: AlertTriangle,
-    colorClass: "text-orange-500",
+    colorClass: "text-warning",
     label: "Conflict",
   },
 };

@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { useEffect, useState } from "react";
 import {
   AlertTriangle,
@@ -137,41 +138,41 @@ export function HealthView() {
   return (
     <section aria-label="Health & Diagnostics" className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h3 className="text-sm font-semibold text-gx-text">Health &amp; Diagnostics</h3>
+        <h3 className="text-sm font-semibold text-foreground">Health &amp; Diagnostics</h3>
         <div className="flex items-center gap-2">
-          <button
+          <Button variant="outline"
             type="button"
-            className="btn text-xs"
+            className="text-xs"
             onClick={() => void mainProcess.openLogsFolder()}
             aria-label="Open logs folder in file manager"
           >
             <FolderOpen size={12} />
             Open logs
-          </button>
-          <button
+          </Button>
+          <Button variant="outline"
             type="button"
-            className="btn text-xs"
+            className="text-xs"
             onClick={() => void fetchHealth()}
             disabled={loading}
             aria-label="Refresh health data"
           >
             <RefreshCw size={12} className={loading ? "animate-spin" : ""} />
             Refresh
-          </button>
-          <button
+          </Button>
+          <Button variant="outline"
             type="button"
-            className="btn text-xs"
+            className="text-xs"
             onClick={() => void copyDiagnostics()}
             aria-label="Copy diagnostics to clipboard"
           >
             <ClipboardCopy size={12} />
             {copied ? "Copied!" : "Copy diagnostics"}
-          </button>
+          </Button>
         </div>
       </div>
 
       {error && (
-        <div className="mb-4 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-sm text-gx-error">
+        <div className="mb-4 rounded border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
           {error}
         </div>
       )}
@@ -180,15 +181,15 @@ export function HealthView() {
           different app location is detected. The upgrade button triggers
           a zero-downtime handoff to the current binary. */}
       {daemonDiag?.pathMismatch && (
-        <div className="mb-4 rounded border border-gx-warning/40 bg-gx-warning/10 p-3">
-          <div className="mb-2 flex items-center gap-2 text-sm font-medium text-gx-warning">
+        <div className="mb-4 rounded border border-warning/40 bg-warning/10 p-3">
+          <div className="mb-2 flex items-center gap-2 text-sm font-medium text-warning">
             <AlertTriangle size={14} />
             Daemon binary mismatch detected
           </div>
           {daemonDiag.previousEntryPath && (
-            <p className="mb-2 text-xs text-gx-muted">
+            <p className="mb-2 text-xs text-muted-foreground">
               Running daemon was started from a different location:{" "}
-              <code className="rounded bg-gx-bg-sub px-1 py-0.5 font-mono text-[11px]">
+              <code className="rounded bg-background px-1 py-0.5 font-mono text-[11px]">
                 {daemonDiag.previousEntryPath}
               </code>
             </p>
@@ -198,8 +199,8 @@ export function HealthView() {
               className={clsx(
                 "mb-2 rounded px-2 py-1 text-xs",
                 upgradeResult.success
-                  ? "bg-gx-success/10 text-gx-success"
-                  : "bg-gx-error/10 text-gx-error",
+                  ? "bg-success/10 text-success"
+                  : "bg-destructive/10 text-destructive",
               )}
             >
               {upgradeResult.success
@@ -207,9 +208,9 @@ export function HealthView() {
                 : `Upgrade failed: ${upgradeResult.error ?? "unknown error"}`}
             </div>
           )}
-          <button
+          <Button variant="outline"
             type="button"
-            className="btn text-xs"
+            className="text-xs"
             onClick={() => void applyDaemonUpgrade()}
             disabled={upgradeInProgress}
             aria-label="Apply daemon upgrade"
@@ -220,12 +221,12 @@ export function HealthView() {
               <UploadCloud size={12} />
             )}
             {upgradeInProgress ? "Applying…" : "Apply daemon upgrade"}
-          </button>
+          </Button>
         </div>
       )}
 
       {loading && !health && (
-        <div className="flex items-center gap-2 text-sm text-gx-muted">
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
           <Loader2 size={14} className="animate-spin" />
           Loading health data…
         </div>
@@ -247,40 +248,40 @@ export function HealthView() {
             <Card
               title="Agent Version"
               value={health.agent_version}
-              icon={<CheckCircle2 size={14} className="text-gx-success" />}
+              icon={<CheckCircle2 size={14} className="text-success" />}
             />
             <Card
               title="CLI Version"
               value={health.crab_cli_version ?? "Not installed"}
               icon={
                 health.crab_cli_version ? (
-                  <CheckCircle2 size={14} className="text-gx-success" />
+                  <CheckCircle2 size={14} className="text-success" />
                 ) : (
-                  <XCircle size={14} className="text-gx-warning" />
+                  <XCircle size={14} className="text-warning" />
                 )
               }
             />
             {!health.crab_cli_version && (
-              <div className="col-span-full rounded-lg border border-gx-warn/30 bg-gx-warn/5 p-4">
-                <div className="mb-2 flex items-center gap-2 text-sm font-medium text-gx-warn">
+              <div className="col-span-full rounded-lg border border-warning/30 bg-warning/5 p-4">
+                <div className="mb-2 flex items-center gap-2 text-sm font-medium text-warning">
                   <AlertTriangle size={14} />
                   Crab CLI not detected
                 </div>
-                <p className="mb-3 text-xs text-gx-muted">
+                <p className="mb-3 text-xs text-muted-foreground">
                   The CLI may be installed but not in the agent&apos;s PATH. If you installed via{" "}
-                  <code className="rounded bg-gx-bg-sub px-1 py-0.5 font-mono text-[11px]">make install</code>{" "}
-                  it lives at <code className="rounded bg-gx-bg-sub px-1 py-0.5 font-mono text-[11px]">~/.cargo/bin/crab</code>.
+                  <code className="rounded bg-background px-1 py-0.5 font-mono text-[11px]">make install</code>{" "}
+                  it lives at <code className="rounded bg-background px-1 py-0.5 font-mono text-[11px]">~/.cargo/bin/crab</code>.
                 </p>
-                <div className="rounded border border-gx-border bg-gx-bg-sub p-3 font-mono text-[11px] text-gx-text">
-                  <div className="mb-1 text-gx-muted"># Install from source (recommended):</div>
+                <div className="rounded border border-border bg-background p-3 font-mono text-[11px] text-foreground">
+                  <div className="mb-1 text-muted-foreground"># Install from source (recommended):</div>
                   <div>cd crab && make install</div>
-                  <div className="mt-2 mb-1 text-gx-muted"># Verify installation:</div>
+                  <div className="mt-2 mb-1 text-muted-foreground"># Verify installation:</div>
                   <div>which crab</div>
                   <div>crab --version</div>
-                  <div className="mt-2 mb-1 text-gx-muted"># Ensure ~/.cargo/bin is in your PATH:</div>
+                  <div className="mt-2 mb-1 text-muted-foreground"># Ensure ~/.cargo/bin is in your PATH:</div>
                   <div>export PATH=&quot;$HOME/.cargo/bin:$PATH&quot;</div>
                 </div>
-                <p className="mt-2 text-[10px] text-gx-muted">
+                <p className="mt-2 text-[10px] text-muted-foreground">
                   Note: The desktop agent may not inherit your shell&apos;s PATH. Restart the app after installing.
                 </p>
               </div>
@@ -288,7 +289,7 @@ export function HealthView() {
             <Card
               title="Cache Directory"
               value={health.cache_dir}
-              icon={<HardDrive size={14} className="text-gx-muted" />}
+              icon={<HardDrive size={14} className="text-muted-foreground" />}
               mono
             />
           </div>
@@ -298,22 +299,22 @@ export function HealthView() {
             <Card
               title="Cache Used"
               value={formatBytes(health.cache_used_bytes)}
-              icon={<HardDrive size={14} className="text-gx-accent" />}
+              icon={<HardDrive size={14} className="text-primary" />}
             />
             <Card
               title="Disk Free"
               value={formatBytes(health.cache_free_bytes)}
-              icon={<HardDrive size={14} className="text-gx-muted" />}
+              icon={<HardDrive size={14} className="text-muted-foreground" />}
             />
             <Card
               title="Staging Size"
               value={formatBytes(health.staging_size_bytes)}
-              icon={<HardDrive size={14} className="text-gx-muted" />}
+              icon={<HardDrive size={14} className="text-muted-foreground" />}
             />
             <Card
               title="Last GC"
               value={health.last_gc_at ?? "Never"}
-              icon={<RefreshCw size={14} className="text-gx-muted" />}
+              icon={<RefreshCw size={14} className="text-muted-foreground" />}
             />
           </div>
 
@@ -340,14 +341,14 @@ function Card({
   mono?: boolean;
 }) {
   return (
-    <div className="rounded-lg border border-gx-border bg-gx-surface p-4">
-      <div className="mb-2 flex items-center gap-2 text-[11px] text-gx-muted">
+    <div className="rounded-lg border border-border bg-card p-4">
+      <div className="mb-2 flex items-center gap-2 text-[11px] text-muted-foreground">
         {icon}
         {title}
       </div>
       <div
         className={clsx(
-          "text-gx-text",
+          "text-foreground",
           mono ? "truncate font-mono text-xs" : "font-mono text-lg font-semibold",
         )}
         title={value}
@@ -364,8 +365,8 @@ function WarningChip({ warning }: { warning: AgentHealthWarning }) {
       className={clsx(
         "flex items-center gap-1.5 rounded-full px-3 py-1 text-xs",
         warning.level === "error"
-          ? "bg-gx-error/15 text-gx-error"
-          : "bg-gx-warning/15 text-gx-warning",
+          ? "bg-destructive/15 text-destructive"
+          : "bg-warning/15 text-warning",
       )}
     >
       <AlertTriangle size={11} />
@@ -378,9 +379,9 @@ function IndexerCard({ status }: { status: IndexerStatus | null }) {
   if (!status) return null;
 
   return (
-    <div className="rounded-lg border border-gx-border bg-gx-surface p-4">
-      <div className="mb-3 flex items-center gap-2 text-xs text-gx-muted">
-        <Database size={14} className="text-gx-muted" />
+    <div className="rounded-lg border border-border bg-card p-4">
+      <div className="mb-3 flex items-center gap-2 text-xs text-muted-foreground">
+        <Database size={14} className="text-muted-foreground" />
         Indexer
       </div>
       <div className="space-y-2 text-sm">
@@ -388,29 +389,29 @@ function IndexerCard({ status }: { status: IndexerStatus | null }) {
           <span
             className={clsx(
               "inline-block h-2 w-2 rounded-full",
-              status.running ? "bg-gx-success" : "bg-gray-400",
+              status.running ? "bg-success" : "bg-accent",
             )}
             aria-label={status.running ? "Running" : "Disabled"}
           />
-          <span className="text-gx-text">
+          <span className="text-foreground">
             {status.running ? "Running" : "Indexer disabled"}
           </span>
         </div>
         {status.db_path && (
           <div className="flex items-center justify-between">
-            <span className="text-gx-muted">Database</span>
-            <span className="truncate pl-2 font-mono text-xs text-gx-text" title={status.db_path}>
+            <span className="text-muted-foreground">Database</span>
+            <span className="truncate pl-2 font-mono text-xs text-foreground" title={status.db_path}>
               {status.db_path}
             </span>
           </div>
         )}
         <div className="flex items-center justify-between">
-          <span className="text-gx-muted">Entries cached</span>
-          <span className="text-gx-text">{status.entries_cached.toLocaleString()}</span>
+          <span className="text-muted-foreground">Entries cached</span>
+          <span className="text-foreground">{status.entries_cached.toLocaleString()}</span>
         </div>
         <div className="flex items-center justify-between">
-          <span className="text-gx-muted">Repos indexed</span>
-          <span className="text-gx-text">{status.repos_indexed.toLocaleString()}</span>
+          <span className="text-muted-foreground">Repos indexed</span>
+          <span className="text-foreground">{status.repos_indexed.toLocaleString()}</span>
         </div>
       </div>
     </div>
@@ -431,23 +432,23 @@ function RepoInfoSection() {
 
   return (
     <div className="space-y-4">
-      <h4 className="text-sm font-semibold text-gx-text">Repository Info</h4>
+      <h4 className="text-sm font-semibold text-foreground">Repository Info</h4>
 
       {/* HEAD + working dir */}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <Card title="HEAD" value={`${info.head_branch || "detached"} (${info.head_sha.slice(0, 12)})`} icon={<CheckCircle2 size={14} className="text-gx-accent" />} mono />
-        <Card title=".git size" value={formatBytes(info.git_dir_size)} icon={<HardDrive size={14} className="text-gx-muted" />} />
+        <Card title="HEAD" value={`${info.head_branch || "detached"} (${info.head_sha.slice(0, 12)})`} icon={<CheckCircle2 size={14} className="text-primary" />} mono />
+        <Card title=".git size" value={formatBytes(info.git_dir_size)} icon={<HardDrive size={14} className="text-muted-foreground" />} />
       </div>
 
       {/* Remotes */}
       {info.remotes.length > 0 && (
-        <div className="rounded-lg border border-gx-border bg-gx-surface p-4">
-          <div className="mb-2 text-[10px] uppercase tracking-wider text-gx-muted">Remotes ({info.remotes.length})</div>
+        <div className="rounded-lg border border-border bg-card p-4">
+          <div className="mb-2 text-[10px] uppercase tracking-wider text-muted-foreground">Remotes ({info.remotes.length})</div>
           <ul className="space-y-1 text-[12px]">
             {info.remotes.map((r, i) => (
               <li key={i} className="flex items-center gap-2">
-                <span className="shrink-0 font-semibold text-gx-text">{r.name}</span>
-                <span className="min-w-0 flex-1 truncate font-mono text-gx-muted">{sanitizeRemoteUrl(r.url)}</span>
+                <span className="shrink-0 font-semibold text-foreground">{r.name}</span>
+                <span className="min-w-0 flex-1 truncate font-mono text-muted-foreground">{sanitizeRemoteUrl(r.url)}</span>
                 <span className="chip text-[9px]">{r.type}</span>
               </li>
             ))}
@@ -457,13 +458,13 @@ function RepoInfoSection() {
 
       {/* Git config */}
       {info.config.length > 0 && (
-        <div className="rounded-lg border border-gx-border bg-gx-surface p-4">
-          <div className="mb-2 text-[10px] uppercase tracking-wider text-gx-muted">Git Config</div>
+        <div className="rounded-lg border border-border bg-card p-4">
+          <div className="mb-2 text-[10px] uppercase tracking-wider text-muted-foreground">Git Config</div>
           <ul className="space-y-1 text-[11px]">
             {info.config.map((c, i) => (
               <li key={i} className="flex items-center gap-2 font-mono">
-                <span className="shrink-0 text-gx-muted">{c.key}</span>
-                <span className="text-gx-text">= {c.value}</span>
+                <span className="shrink-0 text-muted-foreground">{c.key}</span>
+                <span className="text-foreground">= {c.value}</span>
               </li>
             ))}
           </ul>
@@ -472,8 +473,8 @@ function RepoInfoSection() {
 
       {/* Hooks */}
       {info.hooks.length > 0 && (
-        <div className="rounded-lg border border-gx-border bg-gx-surface p-4">
-          <div className="mb-2 text-[10px] uppercase tracking-wider text-gx-muted">Active Hooks ({info.hooks.length})</div>
+        <div className="rounded-lg border border-border bg-card p-4">
+          <div className="mb-2 text-[10px] uppercase tracking-wider text-muted-foreground">Active Hooks ({info.hooks.length})</div>
           <div className="flex flex-wrap gap-1">
             {info.hooks.map(h => (
               <span key={h} className="chip font-mono text-[10px]">{h}</span>
@@ -484,14 +485,14 @@ function RepoInfoSection() {
 
       {/* Submodules */}
       {info.submodules.length > 0 && (
-        <div className="rounded-lg border border-gx-border bg-gx-surface p-4">
-          <div className="mb-2 text-[10px] uppercase tracking-wider text-gx-muted">Submodules ({info.submodules.length})</div>
+        <div className="rounded-lg border border-border bg-card p-4">
+          <div className="mb-2 text-[10px] uppercase tracking-wider text-muted-foreground">Submodules ({info.submodules.length})</div>
           <ul className="space-y-1 text-[11px]">
             {info.submodules.map((s, i) => (
               <li key={i} className="flex items-center gap-2 font-mono">
-                <span className="text-gx-text">{s.path}</span>
-                <span className="text-gx-muted">{s.sha.slice(0, 7)}</span>
-                {s.describe && <span className="text-gx-muted">({s.describe})</span>}
+                <span className="text-foreground">{s.path}</span>
+                <span className="text-muted-foreground">{s.sha.slice(0, 7)}</span>
+                {s.describe && <span className="text-muted-foreground">({s.describe})</span>}
               </li>
             ))}
           </ul>

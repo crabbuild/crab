@@ -1,4 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { DropdownMenuItem, PointMenu } from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
+import { requestPrompt } from "@/lib/application-dialogs";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import clsx from "clsx";
 import {
   Copy,
@@ -14,31 +18,40 @@ import {
   Undo2,
   X,
 } from "lucide-react";
-import { useVirtualizer } from "@tanstack/react-virtual";
-import { OpenRepo } from "../state";
-import { CiCheck, CommitRef, CommitRow, ExperimentRun, ExperimentRunStatus, rpc, gitLogCancellable, isCancelledError } from "../ipc";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CiStatusChip } from "../components/CiStatusChip";
 import {
   CommitGraphSvg,
   graphWidth,
   ROW_HEIGHT,
 } from "../components/CommitGraph";
-import { computeTrunk } from "../lib/commit-graph";
-import { useCommitGraphAsync } from "../hooks/useCommitGraphAsync";
 import { CommitPopover } from "../components/CommitPopover";
-import { CiStatusChip } from "../components/CiStatusChip";
-import { executeCommand } from "../lib/command-registry";
-import type { CommandContext } from "../lib/command-registry";
-import { useFileWatcher, getWatchPath } from "../hooks/useFileWatcher";
+import { useCommitGraphAsync } from "../hooks/useCommitGraphAsync";
+import { getWatchPath, useFileWatcher } from "../hooks/useFileWatcher";
 import { useSessionScroll } from "../hooks/useSessionScroll";
+import {
+  CiCheck,
+  CommitRef,
+  CommitRow,
+  ExperimentRun,
+  ExperimentRunStatus,
+  gitLogCancellable,
+  isCancelledError,
+  rpc,
+} from "../ipc";
+import type { CommandContext } from "../lib/command-registry";
+import { executeCommand } from "../lib/command-registry";
+import { computeTrunk } from "../lib/commit-graph";
+import { OpenRepo } from "../state";
 
 // ── Experiment run chips in Timeline ────────────────────────────────
 
 const RUN_STATUS_COLOR: Record<ExperimentRunStatus, string> = {
-  running: "text-gx-info",
-  completed: "text-gx-success",
-  failed: "text-gx-error",
-  killed: "text-gx-warn",
-  unknown: "text-gx-muted",
+  running: "text-info",
+  completed: "text-success",
+  failed: "text-destructive",
+  killed: "text-warning",
+  unknown: "text-muted-foreground",
 };
 
 /**
@@ -625,14 +638,6 @@ export function TimelineView({
     return () => el.removeEventListener("scroll", onScroll);
   }, []);
 
-  // Click anywhere else → close context menu.
-  useEffect(() => {
-    if (!menu) return;
-    const onClick = () => setMenu(null);
-    window.addEventListener("click", onClick);
-    return () => window.removeEventListener("click", onClick);
-  }, [menu]);
-
   // Toast auto-dismiss (4 s).
   useEffect(() => {
     if (!toast) return;
@@ -642,7 +647,7 @@ export function TimelineView({
 
   return (
     <>
-      <div className="flex shrink-0 items-center justify-between border-b border-gx-border px-3 py-2 text-[11px] text-gx-muted">
+      <div className="flex shrink-0 items-center justify-between border-b border-border px-3 py-2 text-[11px] text-muted-foreground">
         <span className="flex items-center gap-1">
           <GitBranch size={12} />
           {filtered.length}/{total ?? commits?.length ?? 0}
@@ -652,9 +657,11 @@ export function TimelineView({
           )}
         </span>
         <div className="flex items-center gap-2">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
-            className="text-gx-muted hover:text-gx-text"
+            className="text-muted-foreground hover:text-foreground"
             onClick={() => {
               setFindOpen(true);
               requestAnimationFrame(() => findInputRef.current?.focus());
@@ -663,16 +670,18 @@ export function TimelineView({
             aria-label="Find commits"
           >
             <Search size={11} />
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
-            className="text-gx-muted hover:text-gx-text"
+            className="text-muted-foreground hover:text-foreground"
             onClick={refresh}
             title="Refresh"
             aria-label="Refresh timeline"
           >
             <RefreshCw size={11} />
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -689,15 +698,15 @@ export function TimelineView({
         />
       )}
 
-      <div className="shrink-0 space-y-1 border-b border-gx-border px-3 py-2">
-        <input
-          className="w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-xs focus-visible:outline-none focus:border-gx-accent"
+      <div className="shrink-0 space-y-1 border-b border-border px-3 py-2">
+        <Input
+          className="w-full rounded border border-border bg-background px-2 py-1 text-xs focus-visible:outline-none focus:border-primary"
           placeholder="Filter by subject…"
           value={subjectFilter}
           onChange={(e) => setSubjectFilter(e.target.value)}
         />
-        <input
-          className="w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-xs focus-visible:outline-none focus:border-gx-accent"
+        <Input
+          className="w-full rounded border border-border bg-background px-2 py-1 text-xs focus-visible:outline-none focus:border-primary"
           placeholder="Filter by author…"
           value={authorFilter}
           onChange={(e) => setAuthorFilter(e.target.value)}
@@ -714,17 +723,17 @@ export function TimelineView({
         aria-label="Commits"
       >
         {loading && !commits && (
-          <div className="flex items-center gap-2 p-3 text-xs text-gx-muted">
+          <div className="flex items-center gap-2 p-3 text-xs text-muted-foreground">
             <Loader2 size={12} className="animate-spin" /> Loading git log…
           </div>
         )}
         {err && (
-          <div className="m-3 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">
+          <div className="m-3 rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
             {err}
           </div>
         )}
         {!loading && filtered.length === 0 && commits && (
-          <div className="p-4 text-center text-xs text-gx-muted">
+          <div className="p-4 text-center text-xs text-muted-foreground">
             No commits match the current filters.
           </div>
         )}
@@ -750,28 +759,30 @@ export function TimelineView({
         )}
         {/* Load more button when there are more commits available. */}
         {commits && total != null && commits.length < total && commits.length < MAX_LOADED_COMMITS && (
-          <div className="flex items-center justify-center border-t border-gx-border/40 py-3">
-            <button
+            <div className="flex items-center justify-center border-t border-border/40 py-3">
+              <Button variant="outline"
               type="button"
-              className="btn text-xs"
+              className="text-xs"
               onClick={loadMore}
               disabled={loadingMore}
             >
-              {loadingMore ? (
-                <>
-                  <Loader2 size={11} className="animate-spin" /> Loading…
-                </>
-              ) : (
+                {loadingMore ? (
+                  <>
+                    <Loader2 size={11} className="animate-spin" /> Loading…
+                  </>
+                ) : (
                 `Load more (${commits.length} / ${total})`
               )}
-            </button>
-          </div>
-        )}
+              </Button>
+            </div>
+          )}
         {commits && total != null && commits.length >= MAX_LOADED_COMMITS && commits.length < total && (
-          <div className="flex items-center justify-center border-t border-gx-border/40 py-3 text-[10px] text-gx-muted">
-            Showing {commits.length.toLocaleString()} of {total.toLocaleString()} commits. Use Find (⌘F) to search the full history.
-          </div>
-        )}
+            <div className="flex items-center justify-center border-t border-border/40 py-3 text-[10px] text-muted-foreground">
+              Showing {commits.length.toLocaleString()} of{" "}
+              {total.toLocaleString()} commits. Use Find (⌘F) to search the full
+              history.
+            </div>
+          )}
       </div>
 
       {hover && (
@@ -797,18 +808,20 @@ export function TimelineView({
       {/* Inline toast */}
       {toast && (
         <div className="pointer-events-none fixed inset-x-0 bottom-4 z-50 flex justify-center">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={() => setToast(null)}
             className={`pointer-events-auto rounded border px-3 py-1.5 text-xs shadow-lg transition ${
               toast.kind === "error"
-                ? "border-gx-error/40 bg-gx-error/10 text-gx-error"
-                : "border-gx-border bg-gx-surface text-gx-text"
+                ? "border-destructive/40 bg-destructive/10 text-destructive"
+                : "border-border bg-card text-foreground"
             }`}
           >
             {toast.text}
-            <span className="ml-2 text-gx-muted">dismiss</span>
-          </button>
+            <span className="ml-2 text-muted-foreground">dismiss</span>
+          </Button>
         </div>
       )}
     </>
@@ -994,10 +1007,10 @@ function CommitListItem({
       className={clsx(
         "flex cursor-pointer items-center text-[12px] transition",
         selected
-          ? "bg-gx-accent/8 text-gx-text"
+          ? "bg-primary/8 text-foreground"
           : findHit
-            ? "bg-gx-warn/10 text-gx-text"
-            : "text-gx-text hover:bg-gx-surface-hover",
+            ? "bg-warning/10 text-foreground"
+            : "text-foreground hover:bg-accent",
       )}
       onClick={onClick}
       onMouseEnter={() => {
@@ -1010,7 +1023,7 @@ function CommitListItem({
         onContextMenu(e.clientX, e.clientY);
       }}
     >
-      <div className="flex min-w-0 flex-1 flex-col justify-center gap-0.5 border-b border-gx-border/40 px-2 py-1">
+      <div className="flex min-w-0 flex-1 flex-col justify-center gap-0.5 border-b border-border/40 px-2 py-1">
         <div className="flex min-w-0 items-center gap-2">
           <AuthorDot name={commit.author} />
           <span className="min-w-0 flex-1 truncate">{commit.subject}</span>
@@ -1020,7 +1033,7 @@ function CommitListItem({
             ))}
           </div>
           {isMerge && (
-            <span className="chip shrink-0 text-[9px] text-gx-accent">
+            <span className="chip shrink-0 text-[9px] text-primary">
               <GitMerge size={9} /> merge
             </span>
           )}
@@ -1031,7 +1044,7 @@ function CommitListItem({
             <CiStatusChip checks={ciChecks} size="sm" />
           )}
         </div>
-        <div className="flex min-w-0 items-center gap-2 text-[10.5px] text-gx-muted">
+        <div className="flex min-w-0 items-center gap-2 text-[10.5px] text-muted-foreground">
           <code className="shrink-0 font-mono">{commit.sha.slice(0, 7)}</code>
           <span className="min-w-0 truncate">{commit.author}</span>
           <span className="shrink-0">· {formatRelativeDate(commit.date)}</span>
@@ -1061,9 +1074,9 @@ function FindBar({
   onClose: () => void;
 }) {
   return (
-    <div className="flex shrink-0 items-center gap-1 border-b border-gx-border bg-gx-surface px-3 py-1.5">
-      <Search size={11} className="text-gx-muted" />
-      <input
+    <div className="flex shrink-0 items-center gap-1 border-b border-border bg-card px-3 py-1.5">
+      <Search size={11} className="text-muted-foreground" />
+      <Input
         ref={inputRef}
         value={query}
         onChange={(e) => onQuery(e.target.value)}
@@ -1077,38 +1090,44 @@ function FindBar({
           }
         }}
         placeholder="Find in commits (subject / author / sha / ref)…"
-        className="flex-1 rounded bg-transparent px-1 py-0.5 text-[11.5px] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-gx-accent"
+        className="flex-1 rounded bg-transparent px-1 py-0.5 text-[11.5px] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
       />
-      <span className="shrink-0 font-mono text-[10px] text-gx-muted">
+      <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
         {matches === 0 ? "no matches" : `${cursor + 1}/${matches}`}
       </span>
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={onPrev}
-        className="rounded px-1 py-0.5 text-[10px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+        className="rounded px-1 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
         title="Previous match (Shift+Enter)"
         aria-label="Previous match"
       >
         ▲
-      </button>
-      <button
+      </Button>
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={onNext}
-        className="rounded px-1 py-0.5 text-[10px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+        className="rounded px-1 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
         title="Next match (Enter)"
         aria-label="Next match"
       >
         ▼
-      </button>
-      <button
+      </Button>
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={onClose}
-        className="rounded px-1 py-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+        className="rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
         title="Close (Esc)"
         aria-label="Close search"
       >
         <X size={11} />
-      </button>
+      </Button>
     </div>
   );
 }
@@ -1135,10 +1154,6 @@ function CommitContextMenu({
     (r) => r.kind === "branch" || r.kind === "head_target",
   );
   const tags = refs.filter((r) => r.kind === "tag");
-
-  const MAX_WIDTH = 240;
-  const left = Math.min(x, window.innerWidth - MAX_WIDTH - 8);
-  const top = Math.min(y, window.innerHeight - 260);
 
   // Build a minimal CommandContext for executeCommand routing.
   const buildContext = (): CommandContext => ({
@@ -1174,7 +1189,7 @@ function CommitContextMenu({
 
   const handleCreateBranch = async () => {
     onClose();
-    const name = window.prompt("New branch name:");
+    const name = await requestPrompt("New branch name:");
     if (!name?.trim()) return;
     // git.branch.create-at expects "branchName:commitSha" format.
     void executeCommand("git.branch.create-at", buildContext(), `${name.trim()}:${commit.sha}`).then(() => onRefresh());
@@ -1187,12 +1202,7 @@ function CommitContextMenu({
   };
 
   return (
-    <div
-      role="menu"
-      style={{ position: "fixed", top, left, width: MAX_WIDTH, zIndex: 60 }}
-      onClick={(e) => e.stopPropagation()}
-      className="overflow-hidden rounded-md border border-gx-border bg-gx-surface p-1 text-[12px] shadow-2xl"
-    >
+    <PointMenu position={{ x, y }} onClose={onClose}>
       <MenuItem
         icon={<GitCommitHorizontal size={11} />}
         label="Cherry-Pick"
@@ -1282,14 +1292,17 @@ function CommitContextMenu({
           ))}
         </>
       )}
-    </div>
+    </PointMenu>
   );
 }
 
 /** Simple prompt for reset mode selection. Returns null if cancelled. */
 function promptResetMode(): Promise<"soft" | "mixed" | "hard" | null> {
-  return new Promise((resolve) => {
-    const choice = window.prompt("Reset mode (soft / mixed / hard):", "mixed");
+  return new Promise(async (resolve) => {
+    const choice = await requestPrompt(
+      "Reset mode (soft / mixed / hard):",
+      "mixed",
+    );
     if (!choice) {
       resolve(null);
       return;
@@ -1315,46 +1328,49 @@ function MenuItem({
   onClick: () => void;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="flex w-full items-center gap-2 rounded px-2 py-1 text-left text-[12px] text-gx-text transition hover:bg-gx-surface-hover"
+    <DropdownMenuItem
+      onSelect={onClick}
+      className="justify-start flex w-full items-center gap-2 rounded px-2 py-1 text-left text-[12px] text-foreground transition hover:bg-accent"
     >
-      <span className="shrink-0 text-gx-muted">{icon}</span>
+      <span className="shrink-0 text-muted-foreground">{icon}</span>
       <span className="min-w-0 flex-1 truncate">{label}</span>
-      {hint && <span className="shrink-0 text-[9.5px] text-gx-muted">{hint}</span>}
-    </button>
+      {hint && (
+        <span className="shrink-0 text-[9.5px] text-muted-foreground">
+          {hint}
+        </span>
+      )}
+    </DropdownMenuItem>
   );
 }
 
 function MenuHeader({ label }: { label: string }) {
   return (
-    <div className="px-2 py-0.5 text-[9px] uppercase tracking-wider text-gx-muted">
+    <div className="px-2 py-0.5 text-[9px] uppercase tracking-wider text-muted-foreground">
       {label}
     </div>
   );
 }
 
 function Divider() {
-  return <div className="my-1 border-t border-gx-border/60" />;
+  return <div className="my-1 border-t border-border/60" />;
 }
 
 function RefChipBadge({ r }: { r: CommitRef }) {
   const cls =
     r.kind === "tag"
-      ? "border-gx-warn/50 text-gx-warn"
+      ? "border-warning/50 text-warning"
       : r.kind === "head_target" || r.kind === "head"
-        ? "border-gx-accent/50 text-gx-accent"
+        ? "border-primary/50 text-primary"
         : r.kind === "remote"
-          ? "border-gx-muted/40 text-gx-muted"
-          : "border-gx-success/40 text-gx-success";
+          ? "border-muted-foreground/40 text-muted-foreground"
+          : "border-success/40 text-success";
   const short = r.name
     .replace(/^refs\/heads\//, "")
     .replace(/^refs\/tags\//, "")
     .replace(/^refs\/remotes\//, "");
   return (
     <span
-      className={`inline-block max-w-[120px] shrink truncate rounded-full border bg-gx-bg-sub px-1.5 py-[1px] align-middle font-mono text-[9px] ${cls}`}
+      className={`inline-block max-w-[120px] shrink truncate rounded-full border bg-background px-1.5 py-[1px] align-middle font-mono text-[9px] ${cls}`}
       title={`${r.kind} · ${r.name}`}
     >
       {r.kind === "tag" ? `🏷 ${short}` : short}
@@ -1367,7 +1383,7 @@ function AuthorDot({ name }: { name: string }) {
   const color = stringColor(name);
   return (
     <span
-      className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold text-white"
+      className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold text-foreground"
       style={{ background: color }}
       aria-label={`Author ${name}`}
     >

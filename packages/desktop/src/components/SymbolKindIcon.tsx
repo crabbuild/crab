@@ -27,15 +27,15 @@ const KIND_ICON_MAP: Record<SymbolKind, LucideIcon> = {
 };
 
 const KIND_COLOR_MAP: Record<SymbolKind, string> = {
-  function: "text-gx-warn",
-  method: "text-gx-warn",
-  class: "text-gx-info",
+  function: "text-warning",
+  method: "text-warning",
+  class: "text-info",
   interface: "text-sky-400",
   enum: "text-orange-400",
   variable: "text-emerald-400",
   constant: "text-emerald-500",
-  module: "text-gx-thinking",
-  struct: "text-gx-info",
+  module: "text-thinking",
+  struct: "text-info",
   trait: "text-sky-500",
   impl: "text-blue-300",
 };

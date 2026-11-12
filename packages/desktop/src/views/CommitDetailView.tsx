@@ -1,15 +1,13 @@
-import { useCallback, useEffect, forwardRef, useImperativeHandle, useMemo, useRef, useState } from "react";
-import clsx from "clsx";
-import { SafePatchDiff } from "../components/SafePatchDiff";
-import { LargeFileDiffView } from "../components/LargeFileDiffView";
-import { NotebookDiffView } from "../components/NotebookDiffView";
+import { Button } from "@/components/ui/button";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { repositoryTreeTheme } from "@/lib/repository-tree-theme";
+import type { GitStatus, GitStatusEntry } from "@pierre/trees";
 import {
   FileTree as PierreFileTree,
   useFileTree,
   useFileTreeSelection,
 } from "@pierre/trees/react";
-import type { GitStatus, GitStatusEntry } from "@pierre/trees";
-import { themeToTreeStyles } from "@pierre/trees";
+import clsx from "clsx";
 import {
   ChevronLeft,
   ChevronRight,
@@ -21,11 +19,31 @@ import {
   Loader2,
   ScrollText,
 } from "lucide-react";
-import { DirEntry } from "../ipc";
-import { OpenRepo } from "../state";
-import { CommitChanges, CommitFileChange, CommitRow, rpc, fileDiffCancellable, type FileComparison, type DiffVersion } from "../ipc";
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { LargeFileDiffView } from "../components/LargeFileDiffView";
+import { NotebookDiffView } from "../components/NotebookDiffView";
+import { SafePatchDiff } from "../components/SafePatchDiff";
 import { useEffectiveTheme } from "../hooks/useEffectiveTheme";
+import {
+  CommitChanges,
+  CommitFileChange,
+  CommitRow,
+  DirEntry,
+  fileDiffCancellable,
+  rpc,
+  type DiffVersion,
+  type FileComparison,
+} from "../ipc";
 import { diffOptions } from "../lib/diffTheme";
+import { OpenRepo } from "../state";
 
 interface FilePatchState {
   result: FileComparison | null;
@@ -173,14 +191,14 @@ export function CommitDetailView({
 
   if (loading) {
     return (
-      <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted">
+      <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
         <Loader2 size={14} className="animate-spin" /> Loading commit…
       </div>
     );
   }
   if (err) {
     return (
-      <div className="m-4 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">
+      <div className="m-4 rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
         {err}
       </div>
     );
@@ -188,103 +206,119 @@ export function CommitDetailView({
   if (!changes) return null;
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-gx-bg-sub">
-      <div className="shrink-0 border-b border-gx-border bg-gx-surface px-4 py-3">
+    <div className="flex h-full min-h-0 flex-col bg-background">
+      <div className="shrink-0 border-b border-border bg-card px-4 py-3">
         <div className="flex items-center justify-between gap-4">
           <div className="min-w-0">
-            <div className="truncate text-sm font-semibold">{changes.commit.subject}</div>
-            <div className="mt-0.5 flex items-center gap-2 text-[11px] text-gx-muted">
-              <code className="font-mono">{changes.commit.sha.slice(0, 12)}</code>
-              <button
+            <div className="truncate text-sm font-semibold">
+              {changes.commit.subject}
+            </div>
+            <div className="mt-0.5 flex items-center gap-2 text-[11px] text-muted-foreground">
+              <code className="font-mono">
+                {changes.commit.sha.slice(0, 12)}
+              </code>
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
-                className="text-gx-muted hover:text-gx-text"
+                className="text-muted-foreground hover:text-foreground"
                 onClick={() => void navigator.clipboard.writeText(changes.commit.sha)}
                 title="Copy full sha"
                 aria-label="Copy sha"
               >
                 <Copy size={11} />
-              </button>
+              </Button>
               <span>· {changes.commit.author}</span>
               <span>· {new Date(changes.commit.date).toLocaleString()}</span>
               {changes.is_merge && (
-                <span className="chip text-gx-accent">
-                  <GitMerge size={10} /> merge · {changes.commit.parents.length} parents
+                <span className="chip text-primary">
+                  <GitMerge size={10} /> merge · {changes.commit.parents.length}{" "}
+                  parents
                 </span>
               )}
             </div>
           </div>
           <div className="flex shrink-0 gap-1">
-            <button
+            <Button variant="outline"
               type="button"
-              className="btn text-xs"
+              className="text-xs"
               disabled={!prev}
               onClick={() => prev && onSelectCommit(prev.sha)}
               title="Newer commit"
             >
               <ChevronLeft size={12} />
-            </button>
-            <button
+            </Button>
+            <Button variant="outline"
               type="button"
-              className="btn text-xs"
+              className="text-xs"
               disabled={!next}
               onClick={() => next && onSelectCommit(next.sha)}
               title="Older commit"
             >
               <ChevronRight size={12} />
-            </button>
+            </Button>
           </div>
         </div>
-        <div className="mt-2 flex items-center gap-3 text-[12px] text-gx-text">
+        <div className="mt-2 flex items-center gap-3 text-[12px] text-foreground">
           <span>
-            <strong>{changes.entries.length}</strong> file{changes.entries.length === 1 ? "" : "s"} changed
+            <strong>{changes.entries.length}</strong> file
+            {changes.entries.length === 1 ? "" : "s"} changed
             {" · "}
-            <span className="font-semibold text-gx-success">
+            <span className="font-semibold text-success">
               +{changes.entries.reduce((s, e) => s + e.additions, 0)}
-            </span>
-            {" "}
-            <span className="font-semibold text-gx-error">
+            </span>{" "}
+            <span className="font-semibold text-destructive">
               −{changes.entries.reduce((s, e) => s + e.deletions, 0)}
             </span>
           </span>
-          <div
-            role="radiogroup"
+          <ToggleGroup
+            type="single"
+            value={viewMode}
+            onValueChange={(value) => {
+              if (value) setViewMode(value as typeof viewMode);
+            }}
             aria-label="Files view"
-            className="flex overflow-hidden rounded border border-gx-border"
+            className="gap-0 overflow-hidden rounded border border-border"
           >
-            <ModeButton
-              active={viewMode === "list"}
-              icon={<List size={11} />}
-              label="List"
-              onClick={() => setViewMode("list")}
-            />
-            <ModeButton
-              active={viewMode === "tree"}
-              icon={<FolderTree size={11} />}
-              label="Tree"
-              onClick={() => setViewMode("tree")}
-            />
-            <ModeButton
-              active={viewMode === "unified"}
-              icon={<ScrollText size={11} />}
-              label="Unified"
-              onClick={() => setViewMode("unified")}
-            />
-          </div>
+            <ToggleGroupItem
+              value={"list"}
+              className="h-6 min-w-0 gap-1 rounded-none px-2 text-[11px]"
+              aria-label={"List" + " view"}
+            >
+              {<List size={11} />}List
+            </ToggleGroupItem>
+            <ToggleGroupItem
+              value={"tree"}
+              className="h-6 min-w-0 gap-1 rounded-none px-2 text-[11px]"
+              aria-label={"Tree" + " view"}
+            >
+              {<FolderTree size={11} />}Tree
+            </ToggleGroupItem>
+            <ToggleGroupItem
+              value={"unified"}
+              className="h-6 min-w-0 gap-1 rounded-none px-2 text-[11px]"
+              aria-label={"Unified" + " view"}
+            >
+              {<ScrollText size={11} />}Unified
+            </ToggleGroupItem>
+          </ToggleGroup>
           {onOpenFileAtRev && activeFile && (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
-              className="ml-auto text-gx-muted hover:text-gx-text"
+              className="ml-auto text-muted-foreground hover:text-foreground"
               onClick={openActiveFileAsTab}
               title={`Open ${activeFile} at ${selectedSha.slice(0, 7)} as a tab`}
             >
               Open as tab
-            </button>
+            </Button>
           )}
         </div>
       </div>
 
       {changes.entries.length === 0 ? (
-        <div className="flex flex-1 items-center justify-center text-sm text-gx-muted">
+        <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
           No file changes in this commit.
         </div>
       ) : (
@@ -328,37 +362,6 @@ export function CommitDetailView({
   );
 }
 
-function ModeButton({
-  active,
-  icon,
-  label,
-  onClick,
-}: {
-  active: boolean;
-  icon: React.ReactNode;
-  label: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      role="radio"
-      aria-checked={active}
-      onClick={onClick}
-      className={clsx(
-        "flex items-center gap-1 px-2 py-0.5 text-[11px] transition",
-        active
-          ? "bg-gx-accent/20 text-gx-text"
-          : "text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
-      )}
-      title={`${label} view`}
-    >
-      {icon}
-      {label}
-    </button>
-  );
-}
-
 function FileList({
   entries,
   active,
@@ -369,49 +372,53 @@ function FileList({
   onSelect: (path: string) => void;
 }) {
   return (
-    <aside className="min-h-0 overflow-auto border-r border-gx-border bg-gx-surface">
+    <aside className="min-h-0 overflow-auto border-r border-border bg-card">
       <ul>
         {entries.map((e) => {
           const isActive = e.path === active;
           return (
             <li key={e.path}>
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 onClick={() => onSelect(e.path)}
                 className={clsx(
-                  "flex w-full items-start gap-2 border-b border-gx-border/40 px-3 py-1.5 text-left text-[12px] transition",
+                  "flex w-full items-start gap-2 border-b border-border/40 px-3 py-1.5 text-left text-[12px] transition",
                   isActive
-                    ? "bg-gx-accent/15 text-gx-text"
-                    : "text-gx-text hover:bg-gx-surface-hover",
+                    ? "bg-primary/15 text-foreground"
+                    : "text-foreground hover:bg-accent",
                 )}
                 title={e.path}
               >
-                <FileDiff size={12} className="mt-[2px] shrink-0 text-gx-muted" />
+                <FileDiff size={12} className="mt-[2px] shrink-0 text-muted-foreground" />
                 <div className="min-w-0 flex-1">
                   <div className="truncate font-mono text-[12.5px]">
                     {e.path.split("/").pop()}
                   </div>
                   {e.old_path && (
-                    <div className="truncate font-mono text-[10px] text-gx-muted">
+                    <div className="truncate font-mono text-[10px] text-muted-foreground">
                       ← {e.old_path}
                     </div>
                   )}
-                  <div className="mt-0.5 flex items-center gap-2 text-[10px] text-gx-muted">
+                  <div className="mt-0.5 flex items-center gap-2 text-[10px] text-muted-foreground">
                     {e.additions > 0 && (
-                      <span className="text-gx-success">+{e.additions}</span>
+                      <span className="text-success">+{e.additions}</span>
                     )}
                     {e.deletions > 0 && (
-                      <span className="text-gx-error">−{e.deletions}</span>
+                      <span className="text-destructive">−{e.deletions}</span>
                     )}
-                    {e.status === "renamed" && <span className="chip text-[9px]">rn</span>}
+                    {e.status === "renamed" && (
+                      <span className="chip text-[9px]">rn</span>
+                    )}
                   </div>
                   {e.path.includes("/") && (
-                    <div className="truncate text-[10px] text-gx-muted">
+                    <div className="truncate text-[10px] text-muted-foreground">
                       {e.path.slice(0, e.path.lastIndexOf("/"))}
                     </div>
                   )}
                 </div>
-              </button>
+              </Button>
             </li>
           );
         })}
@@ -499,10 +506,10 @@ function FileTreePane({
     }
   }, [model, active]);
 
-  const themeStyles = useMemo(() => buildTreeTheme(theme), [theme]);
+  const themeStyles = useMemo(() => repositoryTreeTheme(theme), [theme]);
 
   return (
-    <aside className="min-h-0 overflow-hidden border-r border-gx-border bg-gx-surface">
+    <aside className="min-h-0 overflow-hidden border-r border-border bg-card">
       <PierreFileTree model={model} className="block h-full" style={themeStyles} />
     </aside>
   );
@@ -537,38 +544,42 @@ function UnifiedFileNav({
   patches: Map<string, FilePatchState>;
 }) {
   return (
-    <aside className="min-h-0 overflow-auto border-r border-gx-border bg-gx-surface">
+    <aside className="min-h-0 overflow-auto border-r border-border bg-card">
       <ul className="py-1">
         {entries.map((e) => {
           const isActive = e.path === active;
           const state = patches.get(e.path);
           return (
             <li key={e.path}>
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 onClick={() => onSelect(e.path)}
                 className={clsx(
                   "flex w-full items-center gap-2 px-3 py-1 text-left text-[11px] transition",
                   isActive
-                    ? "bg-gx-accent/15 text-gx-text"
-                    : "text-gx-text hover:bg-gx-surface-hover",
+                    ? "bg-primary/15 text-foreground"
+                    : "text-foreground hover:bg-accent",
                 )}
                 title={e.path}
               >
-                <FileDiff size={11} className="shrink-0 text-gx-muted" />
+                <FileDiff size={11} className="shrink-0 text-muted-foreground" />
                 <span className="min-w-0 flex-1 truncate font-mono">
                   {e.path}
                 </span>
                 <span className="shrink-0 flex items-center gap-1 text-[10px]">
                   {e.additions > 0 && (
-                    <span className="text-gx-success">+{e.additions}</span>
+                    <span className="text-success">+{e.additions}</span>
                   )}
                   {e.deletions > 0 && (
-                    <span className="text-gx-error">−{e.deletions}</span>
+                    <span className="text-destructive">−{e.deletions}</span>
                   )}
-                  {state?.loading && <Loader2 size={9} className="animate-spin text-gx-muted" />}
+                  {state?.loading && (
+                    <Loader2 size={9} className="animate-spin text-muted-foreground" />
+                  )}
                 </span>
-              </button>
+              </Button>
             </li>
           );
         })}
@@ -676,50 +687,56 @@ const AllDiffsPane = forwardRef<
   }, []);
 
   return (
-    <div ref={scrollRef} className="min-h-0 overflow-auto bg-gx-bg-sub">
+    <div ref={scrollRef} className="min-h-0 overflow-auto bg-background">
       {entries.map((entry) => {
         const state = patches.get(entry.path);
         return (
           <div
             key={entry.path}
             ref={(el) => setFileRef(entry.path, el)}
-            className="border-b border-gx-border"
+            className="border-b border-border"
           >
             {/* Sticky file header — click to focus this file */}
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={() => onSelectFile(entry.path)}
               className={clsx(
-                "sticky top-0 z-10 flex w-full items-center gap-2 border-b border-gx-border/60 px-4 py-2 text-left backdrop-blur-sm transition",
+                "sticky top-0 z-10 flex w-full items-center gap-2 border-b border-border/60 px-4 py-2 text-left backdrop-blur-sm transition",
                 entry.path === activeFile
-                  ? "bg-gx-accent/10"
-                  : "bg-gx-surface/95 hover:bg-gx-surface-hover/95",
+                  ? "bg-primary/10"
+                  : "bg-card/95 hover:bg-accent/95",
               )}
             >
-              <FileDiff size={12} className="shrink-0 text-gx-muted" />
-              <span className="min-w-0 flex-1 truncate font-mono text-[12px] font-medium text-gx-text">
+              <FileDiff size={12} className="shrink-0 text-muted-foreground" />
+              <span className="min-w-0 flex-1 truncate font-mono text-[12px] font-medium text-foreground">
                 {entry.path}
               </span>
-              <span className="flex items-center gap-2 text-[10px] text-gx-muted">
+              <span className="flex items-center gap-2 text-[10px] text-muted-foreground">
                 {entry.additions > 0 && (
-                  <span className="font-semibold text-gx-success">+{entry.additions}</span>
+                  <span className="font-semibold text-success">
+                    +{entry.additions}
+                  </span>
                 )}
                 {entry.deletions > 0 && (
-                  <span className="font-semibold text-gx-error">−{entry.deletions}</span>
+                  <span className="font-semibold text-destructive">
+                    −{entry.deletions}
+                  </span>
                 )}
                 {entry.status === "renamed" && entry.old_path && (
                   <span className="chip text-[9px]">← {entry.old_path}</span>
                 )}
               </span>
-            </button>
+            </Button>
 
             {/* Diff content */}
             {state?.loading ? (
-              <div className="flex items-center justify-center gap-2 py-8 text-sm text-gx-muted">
+              <div className="flex items-center justify-center gap-2 py-8 text-sm text-muted-foreground">
                 <Loader2 size={14} className="animate-spin" /> Loading diff…
               </div>
             ) : state?.err ? (
-              <div className="m-3 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">
+              <div className="m-3 rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
                 {state.err}
               </div>
             ) : state?.result?.kind === "large_file" ? (
@@ -728,8 +745,12 @@ const AllDiffsPane = forwardRef<
               <NotebookDiffView data={state.result} />
             ) : state?.result?.kind === "git" ? (
               state.result.patch.trim().length === 0 ? (
-                <p className="px-4 py-6 text-xs text-gx-muted">No changes for this file.</p>
-              ) : <SafePatchDiff patch={state.result.patch} options={diffOptions(theme)} />
+                <p className="px-4 py-6 text-xs text-muted-foreground">
+                  No changes for this file.
+                </p>
+              ) : (
+                <SafePatchDiff patch={state.result.patch} options={diffOptions(theme)} />
+              )
             ) : null}
           </div>
         );
@@ -738,58 +759,6 @@ const AllDiffsPane = forwardRef<
   );
 });
 
-
 // Duplicate of the helper in ChangesView — small enough that the
 // copy is cheaper than a shared module while the tree-theming
 // surface is still evolving.
-function buildTreeTheme(mode: "dark" | "light"): React.CSSProperties {
-  const cs =
-    typeof window !== "undefined" ? getComputedStyle(document.documentElement) : null;
-  const rgb = (name: string, fallback: string): string => {
-    const raw = cs?.getPropertyValue(name).trim();
-    if (!raw) return fallback;
-    return `rgb(${raw})`;
-  };
-  const colors: Record<string, string> = {
-    "sideBar.background": rgb("--gx-surface", mode === "dark" ? "#171a21" : "#f4f5f9"),
-    "editor.background": rgb("--gx-bg-sub", mode === "dark" ? "#0b0d12" : "#ffffff"),
-    "sideBar.foreground": rgb("--gx-text", mode === "dark" ? "#e7eaf1" : "#171b23"),
-    "sideBarSectionHeader.foreground": rgb("--gx-muted", "#8a93a5"),
-    "sideBar.border": rgb("--gx-border", mode === "dark" ? "#242832" : "#dde0e8"),
-    "list.hoverBackground": rgb(
-      "--gx-surface-hover",
-      mode === "dark" ? "#1e222b" : "#e9ecf3",
-    ),
-    "list.activeSelectionBackground": rgb(
-      "--gx-accent",
-      mode === "dark" ? "#4f8cff" : "#2c6def",
-    ),
-    "list.activeSelectionForeground": "#ffffff",
-    focusBorder: rgb("--gx-accent", mode === "dark" ? "#4f8cff" : "#2c6def"),
-    "input.background": rgb("--gx-bg-sub", mode === "dark" ? "#0b0d12" : "#ffffff"),
-    "input.border": rgb("--gx-border", mode === "dark" ? "#242832" : "#dde0e8"),
-    "scrollbarSlider.background": rgb(
-      "--gx-border",
-      mode === "dark" ? "#242832" : "#dde0e8",
-    ),
-    "gitDecoration.addedResourceForeground": rgb(
-      "--gx-success",
-      mode === "dark" ? "#4ade80" : "#16a34a",
-    ),
-    "gitDecoration.modifiedResourceForeground": rgb(
-      "--gx-warn",
-      mode === "dark" ? "#facc15" : "#b48700",
-    ),
-    "gitDecoration.deletedResourceForeground": rgb(
-      "--gx-error",
-      mode === "dark" ? "#f87171" : "#dc2626",
-    ),
-  };
-  const styles = themeToTreeStyles({
-    type: mode,
-    bg: colors["sideBar.background"],
-    fg: colors["sideBar.foreground"],
-    colors,
-  });
-  return styles as unknown as React.CSSProperties;
-}

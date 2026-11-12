@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Collapsible group of contiguous tool cards.
  *
@@ -9,9 +10,9 @@
  * renderer with per-card collapse state from the store.
  */
 
-import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import clsx from "clsx";
 import { ChevronRight } from "lucide-react";
+import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import type { ToolEvent } from "../../../electron/agent-chat-messages";
 import { useChatUIState } from "../../lib/chat-ui-state";
 
@@ -100,7 +101,9 @@ export function ToolGroup({
 
   // Resolve collapsed state: store override → default
   const storeEntry = taskState?.groupCollapse[groupId];
-  const collapsed = keepExpanded ? false : storeEntry?.collapsed ?? defaultCollapsed;
+  const collapsed = keepExpanded
+    ? false
+    : (storeEntry?.collapsed ?? defaultCollapsed);
 
   const running = !complete;
   const elapsedStr = useElapsedTime(startedAt, running && collapsed);
@@ -119,45 +122,47 @@ export function ToolGroup({
   // ── Collapsed: complete ──────────────────────────────────────────
   if (collapsed && complete) {
     return (
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={handleToggle}
         aria-expanded={false}
         className={clsx(
           "flex w-full items-center gap-2 px-2.5 py-1.5",
           "text-[10px] text-left rounded-md",
-          "bg-gx-surface/40 hover:bg-gx-surface-hover cursor-pointer",
+          "bg-card/40 hover:bg-accent cursor-pointer",
           "transition-colors",
         )}
       >
-        <ChevronRight size={10} className="shrink-0 text-gx-muted/60" />
-        <span className="text-gx-muted">
+        <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
+        <span className="text-muted-foreground">
           {memberCount} tool call{memberCount !== 1 ? "s" : ""}
           {durationStr && <span className="ml-1">· {durationStr}</span>}
         </span>
-      </button>
+      </Button>
     );
   }
 
   // ── Collapsed: running ───────────────────────────────────────────
   if (collapsed && running) {
     return (
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={handleToggle}
         aria-expanded={false}
         className={clsx(
           "flex w-full items-center gap-2 px-2.5 py-1.5",
           "text-[10px] text-left rounded-md",
-          "bg-gx-surface/40 hover:bg-gx-surface-hover cursor-pointer",
+          "bg-card/40 hover:bg-accent cursor-pointer",
           "transition-colors",
         )}
       >
-        <span className="inline-block h-2 w-2 rounded-full bg-gx-info animate-pulse shrink-0" />
-        <span className="text-gx-muted">
-          Working… {elapsedStr}
-        </span>
-      </button>
+        <span className="inline-block h-2 w-2 rounded-full bg-info animate-pulse shrink-0" />
+        <span className="text-muted-foreground">Working… {elapsedStr}</span>
+      </Button>
     );
   }
 
@@ -168,23 +173,25 @@ export function ToolGroup({
           While running, cards render directly without a wrapper so the
           user sees tool activity in real time without extra chrome. */}
       {complete && (
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={handleToggle}
           aria-expanded={true}
           className={clsx(
             "flex w-full items-center gap-2 px-2.5 py-1",
             "text-[10px] text-left rounded-md",
-            "hover:bg-gx-surface-hover cursor-pointer",
+            "hover:bg-accent cursor-pointer",
             "transition-colors",
           )}
         >
-          <ChevronRight size={10} className="shrink-0 text-gx-muted/60 rotate-90 transition-transform" />
-          <span className="text-gx-muted">
+          <ChevronRight size={10} className="shrink-0 text-muted-foreground/60 rotate-90 transition-transform" />
+          <span className="text-muted-foreground">
             {memberCount} tool call{memberCount !== 1 ? "s" : ""}
             {durationStr && <span className="ml-1">· {durationStr}</span>}
           </span>
-        </button>
+        </Button>
       )}
 
       {/* Render each member through its card renderer */}

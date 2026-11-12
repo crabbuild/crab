@@ -1,142 +1,19 @@
+@import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist-mono";
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-/* Theme tokens. Every semantic colour the UI renders lives as a
-   CSS custom property so the whole app reacts when we toggle the
-   theme class on <html>. Values are bare RGB triples so Tailwind
-   can build the final colour with `/ <alpha-value>` — that's what
-   enables arbitrary-alpha tokens like `bg-gx-accent/20`. */
-
-:root {
-  /* Default = dark. The SettingsProvider replaces the class on
-     <html> on mount; this block keeps the app usable even before
-     React boots. */
-  color-scheme: dark;
-  --gx-bg: 15 17 21;            /* #0f1115 */
-  --gx-bg-sub: 11 13 18;        /* #0b0d12 */
-  --gx-surface: 23 26 33;       /* #171a21 */
-  --gx-surface-hover: 30 34 43; /* #1e222b */
-  --gx-border: 36 40 50;        /* #242832 */
-  --gx-muted: 138 147 165;      /* #8a93a5 */
-  --gx-text: 231 234 241;       /* #e7eaf1 */
-  --gx-accent: 79 140 255;      /* #4f8cff */
-  --gx-accent-hover: 61 118 224;/* #3d76e0 */
-  --gx-success: 74 222 128;     /* #4ade80 */
-  --gx-warn: 250 204 21;        /* #facc15 */
-  --gx-warning: 250 204 21;     /* #facc15 — alias for warn */
-  --gx-error: 248 113 113;      /* #f87171 */
-  --gx-info: 56 189 248;        /* #38bdf8 */
-  --gx-thinking: 167 139 250;   /* #a78bfa — violet-400, dark-mode cognition */
-
-  /* Streamdown expects shadcn/ui-style CSS variables for its internal
-     Tailwind classes (border-border, bg-background, text-foreground,
-     text-muted-foreground, bg-muted, text-primary, bg-sidebar).
-     Map them all — omitting any causes Streamdown to pick up Tailwind
-     defaults which drift from the theme. */
-  --background: 15 17 21;
-  --foreground: 231 234 241;
-  --muted: 28 32 40;
-  --muted-foreground: 138 147 165;
-  --primary: 79 140 255;
-  --primary-foreground: 255 255 255;
-  --border: 36 40 50;
-  --sidebar: 23 26 33;
-}
-
-html.theme-light {
-  color-scheme: light;
-  --gx-bg: 250 250 252;         /* #fafafc — page background */
-  --gx-bg-sub: 255 255 255;     /* pure white for editor / inputs */
-  --gx-surface: 244 245 249;    /* #f4f5f9 — sidebar / panels */
-  --gx-surface-hover: 233 236 243;
-  --gx-border: 221 224 232;
-  --gx-muted: 100 110 125;
-  --gx-text: 23 27 35;
-  --gx-accent: 44 109 239;
-  --gx-accent-hover: 30 94 219;
-  --gx-success: 22 163 74;
-  --gx-warn: 180 135 0;
-  --gx-warning: 180 135 0;      /* alias for warn */
-  --gx-error: 220 38 38;
-  --gx-info: 2 132 199;         /* #0284c7 */
-  --gx-thinking: 109 40 217;    /* #6d28d9 — violet-700, readable on white */
-
-  --background: 250 250 252;
-  --foreground: 23 27 35;
-  --muted: 241 243 248;         /* #f1f3f8 — Streamdown code block surface */
-  --muted-foreground: 100 110 125;
-  --primary: 44 109 239;
-  --primary-foreground: 255 255 255;
-  --border: 221 224 232;
-  --sidebar: 244 245 249;
-}
-
-html.theme-dark {
-  color-scheme: dark;
-}
-
-html.theme-hc-dark {
-  color-scheme: dark;
-  --gx-bg: 0 0 0;               /* #000000 — pure black */
-  --gx-bg-sub: 0 0 0;           /* #000000 */
-  --gx-surface: 12 12 12;       /* #0c0c0c */
-  --gx-surface-hover: 24 24 24; /* #181818 */
-  --gx-border: 110 110 110;     /* #6e6e6e — visible border */
-  --gx-muted: 200 200 200;      /* #c8c8c8 */
-  --gx-text: 255 255 255;       /* #ffffff — pure white */
-  --gx-accent: 100 170 255;     /* #64aaff — vivid blue */
-  --gx-accent-hover: 80 150 240;/* #5096f0 */
-  --gx-success: 90 255 150;     /* #5aff96 */
-  --gx-warn: 255 220 50;        /* #ffdc32 */
-  --gx-warning: 255 220 50;     /* #ffdc32 */
-  --gx-error: 255 100 100;      /* #ff6464 */
-  --gx-info: 80 210 255;        /* #50d2ff */
-  --gx-thinking: 200 170 255;   /* #c8aaff — high-contrast violet on black */
-
-  --background: 0 0 0;
-  --foreground: 255 255 255;
-  --muted: 24 24 24;
-  --muted-foreground: 200 200 200;
-  --primary: 100 170 255;
-  --primary-foreground: 0 0 0;
-  --border: 110 110 110;
-  --sidebar: 12 12 12;
-}
-
-html.theme-hc-light {
-  color-scheme: light;
-  --gx-bg: 255 255 255;         /* #ffffff — pure white */
-  --gx-bg-sub: 255 255 255;     /* #ffffff */
-  --gx-surface: 245 245 245;    /* #f5f5f5 */
-  --gx-surface-hover: 230 230 230; /* #e6e6e6 */
-  --gx-border: 0 0 0;           /* #000000 — strong border */
-  --gx-muted: 50 50 50;         /* #323232 */
-  --gx-text: 0 0 0;             /* #000000 — pure black */
-  --gx-accent: 0 60 180;        /* #003cb4 — strong blue */
-  --gx-accent-hover: 0 45 150;  /* #002d96 */
-  --gx-success: 0 120 50;       /* #007832 */
-  --gx-warn: 140 100 0;         /* #8c6400 */
-  --gx-warning: 140 100 0;      /* #8c6400 */
-  --gx-error: 180 0 0;          /* #b40000 */
-  --gx-info: 0 90 160;          /* #005aa0 */
-  --gx-thinking: 80 30 160;     /* #501ea0 — strong violet on white */
-
-  --background: 255 255 255;
-  --foreground: 0 0 0;
-  --muted: 235 235 235;
-  --muted-foreground: 50 50 50;
-  --primary: 0 60 180;
-  --primary-foreground: 255 255 255;
-  --border: 0 0 0;
-  --sidebar: 245 245 245;
-}
-
 @layer base {
+  * { @apply border-border; }
+  input[type="checkbox"], input[type="radio"], input[type="range"] { accent-color: rgb(var(--primary)); }
+  ::selection { background: rgb(var(--foreground) / 0.16); }
+
   /* Global focus-visible ring — ensures every interactive element has a
      visible keyboard-focus indicator meeting WCAG AA contrast. */
   :focus-visible {
-    outline: 2px solid rgb(var(--gx-accent));
+    outline: 2px solid rgb(var(--ring));
     outline-offset: 2px;
   }
 
@@ -146,9 +23,11 @@ html.theme-hc-light {
     height: 100%;
   }
   body {
-    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
-    background: rgb(var(--gx-bg));
-    color: rgb(var(--gx-text));
+    @apply font-sans;
+    font-size: 13px;
+    font-feature-settings: "ss01", "cv11";
+    background: rgb(var(--background));
+    color: rgb(var(--foreground));
   }
   /* Scrollbar styling — thin, overlay-style scrollbar consistent
      across the entire app. Uses the active theme tokens. */
@@ -157,15 +36,15 @@ html.theme-hc-light {
     height: 6px;
   }
   ::-webkit-scrollbar-thumb {
-    background: rgb(var(--gx-muted) / 0.3);
+    background: rgb(var(--muted-foreground) / 0.3);
     border-radius: 3px;
     transition: background 0.15s ease;
   }
   ::-webkit-scrollbar-thumb:hover {
-    background: rgb(var(--gx-muted) / 0.55);
+    background: rgb(var(--muted-foreground) / 0.55);
   }
   ::-webkit-scrollbar-thumb:active {
-    background: rgb(var(--gx-muted) / 0.7);
+    background: rgb(var(--muted-foreground) / 0.7);
   }
   ::-webkit-scrollbar-track {
     background: transparent;
@@ -179,7 +58,7 @@ html.theme-hc-light {
      scrolling fast in virtualised lists. */
   * {
     scrollbar-width: thin;            /* Firefox: thin variant */
-    scrollbar-color: rgb(var(--gx-muted) / 0.3) transparent;
+    scrollbar-color: rgb(var(--muted-foreground) / 0.3) transparent;
   }
 
 }
@@ -204,11 +83,11 @@ html.theme-hc-light {
   height: 6px;
 }
 .scrollbar-mode-native .xterm-viewport::-webkit-scrollbar-thumb {
-  background: rgb(var(--gx-muted) / 0.3);
+  background: rgb(var(--muted-foreground) / 0.3);
   border-radius: 3px;
 }
 .scrollbar-mode-native .xterm-viewport::-webkit-scrollbar-thumb:hover {
-  background: rgb(var(--gx-muted) / 0.55);
+  background: rgb(var(--muted-foreground) / 0.55);
 }
 .scrollbar-mode-native .xterm-viewport::-webkit-scrollbar-track {
   background: transparent;
@@ -223,11 +102,11 @@ html.theme-hc-light {
   height: 6px;
 }
 .scrollbar-mode-overlay .xterm-viewport::-webkit-scrollbar-thumb {
-  background: rgb(var(--gx-muted) / 0.3);
+  background: rgb(var(--muted-foreground) / 0.3);
   border-radius: 3px;
 }
 .scrollbar-mode-overlay .xterm-viewport::-webkit-scrollbar-thumb:hover {
-  background: rgb(var(--gx-muted) / 0.5);
+  background: rgb(var(--muted-foreground) / 0.5);
 }
 .scrollbar-mode-overlay .xterm-viewport::-webkit-scrollbar-track {
   background: transparent;
@@ -252,16 +131,16 @@ html.theme-hc-light {
   width: 6px;
 }
 .scrollbar-mode-native.scrollbar-autohide .xterm-viewport::-webkit-scrollbar-thumb {
-  background: rgb(var(--gx-muted) / 0.2);
+  background: rgb(var(--muted-foreground) / 0.2);
   border-radius: 3px;
 }
 .scrollbar-mode-native.scrollbar-autohide .xterm-viewport::-webkit-scrollbar-thumb:hover {
-  background: rgb(var(--gx-muted) / 0.5);
+  background: rgb(var(--muted-foreground) / 0.5);
 }
 
 /* Split pane focus indicators (Task 26.4) */
 .terminal-pane-focused {
-  box-shadow: inset 0 0 0 1px rgb(var(--gx-accent) / 0.3);
+  box-shadow: inset 0 0 0 1px rgb(var(--primary) / 0.3);
 }
 
 /* Terminal drop indicator animation */
@@ -269,8 +148,8 @@ html.theme-hc-light {
   animation: terminal-drop-pulse 1s ease-in-out infinite;
 }
 @keyframes terminal-drop-pulse {
-  0%, 100% { border-color: rgb(var(--gx-accent) / 0.3); }
-  50% { border-color: rgb(var(--gx-accent) / 0.7); }
+  0%, 100% { border-color: rgb(var(--primary) / 0.3); }
+  50% { border-color: rgb(var(--primary) / 0.7); }
 }
 
 /* Font ligature support for terminal */
@@ -293,20 +172,11 @@ html.theme-hc-light {
 }
 
 @layer components {
-  .btn {
-    @apply inline-flex items-center gap-2 rounded-md border border-gx-border bg-gx-surface px-3 py-1.5 text-sm text-gx-text transition hover:bg-gx-surface-hover active:scale-[0.99] disabled:opacity-50 disabled:pointer-events-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-gx-accent focus-visible:outline-offset-2;
-  }
-  .btn-icon {
-    @apply flex h-6 w-6 items-center justify-center rounded text-gx-muted transition hover:bg-gx-surface-hover hover:text-gx-text;
-  }
-  .btn-primary {
-    @apply border-transparent bg-gx-accent text-white hover:bg-gx-accent-hover;
-  }
   .kbd {
-    @apply rounded border border-gx-border bg-gx-bg-sub px-1.5 py-0.5 font-mono text-[11px] text-gx-muted;
+    @apply rounded border border-border bg-background px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground;
   }
   .chip {
-    @apply inline-flex items-center gap-1 rounded-full border border-gx-border bg-gx-bg-sub px-2 py-0.5 font-mono text-[11px] text-gx-muted;
+    @apply inline-flex items-center gap-1 rounded-full border border-border bg-background px-2 py-0.5 font-mono text-[11px] text-muted-foreground;
   }
 }
 
@@ -329,12 +199,6 @@ html.theme-hc-light {
 }
 
 @layer components {
-  .btn-danger {
-    @apply border-transparent bg-red-600 text-white hover:bg-red-700;
-  }
-  .input-field {
-    @apply rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-xs text-gx-text placeholder:text-gx-muted focus:border-gx-accent focus:outline-none focus:ring-0;
-  }
 }
 
 /* ── Agent markdown prose styling ─────────────────────────────────── */
@@ -355,7 +219,7 @@ html.theme-hc-light {
 .prose-agent h1, .prose-agent h2, .prose-agent h3, .prose-agent h4 {
   font-weight: 600;
   margin: 0.8em 0 0.3em;
-  color: var(--gx-text);
+  color: var(--foreground);
 }
 .prose-agent h1 { font-size: 1.1em; }
 .prose-agent h2 { font-size: 1.05em; }
@@ -364,7 +228,7 @@ html.theme-hc-light {
   font-family: ui-monospace, 'SF Mono', Menlo, monospace;
   font-size: 0.9em;
   background: rgb(var(--muted));
-  color: rgb(var(--gx-text));
+  color: rgb(var(--foreground));
   border-radius: 4px;
   padding: 0.15em 0.4em;
 }
@@ -399,20 +263,20 @@ html.theme-hc-light {
 .prose-agent strong { font-weight: 600; }
 .prose-agent em { font-style: italic; }
 .prose-agent a {
-  color: var(--gx-accent);
+  color: var(--primary);
   text-decoration: underline;
 }
 .prose-agent blockquote {
-  border-left: 3px solid rgb(var(--gx-accent));
-  background: rgb(var(--gx-accent) / 0.05);
+  border-left: 3px solid rgb(var(--primary));
+  background: rgb(var(--primary) / 0.05);
   border-radius: 0 4px 4px 0;
   padding: 0.5em 0.9em;
   margin: 0.5em 0;
-  color: rgb(var(--gx-text));
+  color: rgb(var(--foreground));
 }
 .prose-agent hr {
   border: none;
-  border-top: 1px solid var(--gx-border);
+  border-top: 1px solid var(--border);
   margin: 0.8em 0;
 }
 .prose-agent table {
@@ -421,11 +285,11 @@ html.theme-hc-light {
   font-size: 0.9em;
 }
 .prose-agent th, .prose-agent td {
-  border: 1px solid var(--gx-border);
+  border: 1px solid var(--border);
   padding: 0.3em 0.6em;
 }
 .prose-agent th {
-  background: var(--gx-bg-sub, rgba(0,0,0,0.15));
+  background: var(--background, rgba(0,0,0,0.15));
   font-weight: 600;
 }
 
@@ -476,9 +340,9 @@ html.theme-hc-light {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
   font-size: 10px;
   line-height: 1.6;
-  border: 1px solid var(--gx-border);
+  border: 1px solid var(--border);
   border-radius: 3px;
-  background: var(--gx-bg-sub, rgba(0, 0, 0, 0.05));
+  background: var(--background, rgba(0, 0, 0, 0.05));
 }
 
 /* ── ANSI terminal colours (BashCard output) ───────────────────────────
@@ -488,39 +352,39 @@ html.theme-hc-light {
    near-black background. Bright variants are slightly lighter so bold
    colours still stand out. */
 
-.ansi-black-fg          { color: #1f2329; }
-.ansi-red-fg            { color: #f87171; }
-.ansi-green-fg          { color: #4ade80; }
-.ansi-yellow-fg         { color: #facc15; }
-.ansi-blue-fg           { color: #60a5fa; }
-.ansi-magenta-fg        { color: #c084fc; }
-.ansi-cyan-fg           { color: #22d3ee; }
-.ansi-white-fg          { color: #e7eaf1; }
-.ansi-bright-black-fg   { color: #6b7280; }
-.ansi-bright-red-fg     { color: #fca5a5; }
-.ansi-bright-green-fg   { color: #86efac; }
-.ansi-bright-yellow-fg  { color: #fde68a; }
-.ansi-bright-blue-fg    { color: #93c5fd; }
-.ansi-bright-magenta-fg { color: #d8b4fe; }
-.ansi-bright-cyan-fg    { color: #67e8f9; }
-.ansi-bright-white-fg   { color: #f8fafc; }
+.ansi-black-fg          { color: rgb(var(--foreground)); }
+.ansi-red-fg            { color: rgb(var(--destructive)); }
+.ansi-green-fg          { color: rgb(var(--success)); }
+.ansi-yellow-fg         { color: rgb(var(--warning)); }
+.ansi-blue-fg           { color: rgb(var(--info)); }
+.ansi-magenta-fg        { color: rgb(var(--thinking)); }
+.ansi-cyan-fg           { color: rgb(var(--info)); }
+.ansi-white-fg          { color: rgb(var(--foreground)); }
+.ansi-bright-black-fg   { color: rgb(var(--foreground)); }
+.ansi-bright-red-fg     { color: rgb(var(--destructive)); }
+.ansi-bright-green-fg   { color: rgb(var(--success)); }
+.ansi-bright-yellow-fg  { color: rgb(var(--warning)); }
+.ansi-bright-blue-fg    { color: rgb(var(--info)); }
+.ansi-bright-magenta-fg { color: rgb(var(--thinking)); }
+.ansi-bright-cyan-fg    { color: rgb(var(--info)); }
+.ansi-bright-white-fg   { color: rgb(var(--foreground)); }
 
-.ansi-black-bg          { background-color: #1f2329; }
-.ansi-red-bg            { background-color: #7f1d1d; }
-.ansi-green-bg          { background-color: #14532d; }
-.ansi-yellow-bg         { background-color: #713f12; }
-.ansi-blue-bg           { background-color: #1e3a8a; }
-.ansi-magenta-bg        { background-color: #581c87; }
-.ansi-cyan-bg           { background-color: #155e75; }
-.ansi-white-bg          { background-color: #cbd5e1; color: #0b0d12; }
-.ansi-bright-black-bg   { background-color: #374151; }
-.ansi-bright-red-bg     { background-color: #991b1b; }
-.ansi-bright-green-bg   { background-color: #166534; }
-.ansi-bright-yellow-bg  { background-color: #854d0e; }
-.ansi-bright-blue-bg    { background-color: #1e40af; }
-.ansi-bright-magenta-bg { background-color: #6b21a8; }
-.ansi-bright-cyan-bg    { background-color: #0e7490; }
-.ansi-bright-white-bg   { background-color: #e2e8f0; color: #0b0d12; }
+.ansi-black-bg          { background-color: rgb(var(--foreground) / 0.15); }
+.ansi-red-bg            { background-color: rgb(var(--destructive) / 0.15); }
+.ansi-green-bg          { background-color: rgb(var(--success) / 0.15); }
+.ansi-yellow-bg         { background-color: rgb(var(--warning) / 0.15); }
+.ansi-blue-bg           { background-color: rgb(var(--info) / 0.15); }
+.ansi-magenta-bg        { background-color: rgb(var(--thinking) / 0.15); }
+.ansi-cyan-bg           { background-color: rgb(var(--info) / 0.15); }
+.ansi-white-bg          { background-color: rgb(var(--foreground) / 0.15); }
+.ansi-bright-black-bg   { background-color: rgb(var(--foreground) / 0.15); }
+.ansi-bright-red-bg     { background-color: rgb(var(--destructive) / 0.15); }
+.ansi-bright-green-bg   { background-color: rgb(var(--success) / 0.15); }
+.ansi-bright-yellow-bg  { background-color: rgb(var(--warning) / 0.15); }
+.ansi-bright-blue-bg    { background-color: rgb(var(--info) / 0.15); }
+.ansi-bright-magenta-bg { background-color: rgb(var(--thinking) / 0.15); }
+.ansi-bright-cyan-bg    { background-color: rgb(var(--info) / 0.15); }
+.ansi-bright-white-bg   { background-color: rgb(var(--foreground) / 0.15); }
 
 .ansi-bold              { font-weight: 600; }
 .ansi-italic            { font-style: italic; }
@@ -538,7 +402,7 @@ html.theme-hc-light {
 /* ── Tool card chrome (CHAT6.3, CHAT6.4) ──────────────────────────── */
 /* Default state: subtle background tint, no visible border. */
 .tool-card {
-  background: rgb(var(--gx-surface) / 0.4);
+  background: rgb(var(--card) / 0.4);
   border: 1px solid transparent;
   border-radius: 6px;
   transition: border-color 150ms ease, background 150ms ease;
@@ -546,21 +410,21 @@ html.theme-hc-light {
 /* Hover or expanded: 1 px border at 30% alpha. */
 .tool-card:hover,
 .tool-card[data-expanded="true"] {
-  border-color: rgb(var(--gx-border) / 0.3);
+  border-color: rgb(var(--border) / 0.3);
 }
 
 /* ── Agent message left-border accent (CHAT6.2) ───────────────────── */
 .agent-message-accent {
-  border-left: 2px solid rgb(var(--gx-muted));
+  border-left: 2px solid rgb(var(--muted-foreground));
 }
 .agent-message-accent--codex {
-  border-left-color: rgb(var(--gx-accent));
+  border-left-color: rgb(var(--primary));
 }
 .agent-message-accent--claude {
-  border-left-color: rgb(var(--gx-thinking));
+  border-left-color: rgb(var(--thinking));
 }
 .agent-message-accent--generic {
-  border-left-color: rgb(var(--gx-muted));
+  border-left-color: rgb(var(--muted-foreground));
 }
 
 /* ── Status icons: agent-only, ~8px, baseline-aligned (CHAT6.6, CHAT6.7) ── */
@@ -593,7 +457,7 @@ html.theme-hc-light {
   display: inline-block;
   width: 0.5em;
   height: 1em;
-  background: rgb(var(--gx-text));
+  background: rgb(var(--foreground));
   animation: streaming-cursor-pulse 1s steps(2) infinite;
   vertical-align: text-bottom;
 }

@@ -1,40 +1,50 @@
-import { useCallback,useEffect,useMemo,useRef,useState } from "react";
-import { useSessionScroll } from "../hooks/useSessionScroll";
-import { localPathName } from "../lib/local-path-name";
+import { Button } from "@/components/ui/button";
+import { Combobox } from "@/components/ui/combobox";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import {
-ArrowDown,
-ArrowUp,
-ChevronDown,
-ExternalLink,
-FolderOpen,
-FolderTree,
-GitBranch,
-GitCompareArrows,
-HardDrive,
-Loader2,
-Lock,
-LockOpen,
-Move as MoveIcon,
-Palette,
-Pencil,
-Pin,
-Plus,
-RefreshCw,
-Scissors,
-Search,
-Terminal,
-Trash2,
-X,
+  ArrowDown,
+  ArrowUp,
+  ExternalLink,
+  FolderOpen,
+  FolderTree,
+  GitBranch,
+  GitCompareArrows,
+  HardDrive,
+  Loader2,
+  Lock,
+  LockOpen,
+  Move as MoveIcon,
+  Palette,
+  Pencil,
+  Pin,
+  Plus,
+  RefreshCw,
+  Scissors,
+  Terminal,
+  Trash2,
+  X,
 } from "lucide-react";
-import { OpenRepo,useStore } from "../state";
-import { rpc,HydratedWorktreeEntry,WorktreeStatus,PushEstimate,RefEntry,CommitRow } from "../ipc";
-import { formatBytes } from "../lib/format";
-import { WorktreeRemoveConfirmDialog } from "../components/WorktreeRemoveConfirmDialog";
-import { ViewToolbar,type ToolbarAction } from "../components/ViewToolbar";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ContextMenu,type MenuItemDef } from "../components/ContextMenu";
-import { executeCommand,type CommandContext } from "../lib/command-registry";
-import { useFileWatcher,getWatchPath } from "../hooks/useFileWatcher";
+import { ViewToolbar,type ToolbarAction } from "../components/ViewToolbar";
+import { WorktreeRemoveConfirmDialog } from "../components/WorktreeRemoveConfirmDialog";
+import { getWatchPath, useFileWatcher } from "../hooks/useFileWatcher";
 import { useRepoCapabilities } from "../hooks/useRepoCapabilities";
+import { useSessionScroll } from "../hooks/useSessionScroll";
+import {
+  CommitRow,
+  HydratedWorktreeEntry,
+  PushEstimate,
+  RefEntry,
+  rpc,
+  WorktreeStatus,
+} from "../ipc";
+import { executeCommand,type CommandContext } from "../lib/command-registry";
+import { formatBytes } from "../lib/format";
+import { localPathName } from "../lib/local-path-name";
+import { OpenRepo,useStore } from "../state";
 
 /**
  * Parse a remote repo_id (e.g. `ssh://profileId/path`) into its
@@ -652,7 +662,7 @@ function WorktreeViewInner({
 
   return (
     <>
-      {/* View toolbar with Create Worktree action */}
+      {/* Unified status row */}
       <ViewToolbar
         title="Worktrees"
         icon={FolderTree}
@@ -660,7 +670,7 @@ function WorktreeViewInner({
         onAction={handleToolbarAction}
       />
 
-      {/* Compare picker overlay */}
+      {/* Unified status row */}
       {comparingFrom && worktrees && (
         <WorktreeComparePicker
           source={comparingFrom}
@@ -672,7 +682,7 @@ function WorktreeViewInner({
         />
       )}
 
-      {/* Remove confirmation dialog */}
+      {/* Add worktree button group */}
       {removeConfirm && (
         <WorktreeRemoveConfirmDialog
           worktreeName={removeConfirm.name}
@@ -683,62 +693,66 @@ function WorktreeViewInner({
         />
       )}
 
-      {/* Header with actions */}
-      <div className="shrink-0 border-b border-gx-border px-3 py-2">
-        <div className="mb-2 flex items-center justify-between text-[10px] uppercase tracking-wider text-gx-muted">
+      {/* Add worktree dialog */}
+      <div className="shrink-0 border-b border-border px-3 py-2">
+        <div className="mb-2 flex items-center justify-between text-[10px] uppercase tracking-wider text-muted-foreground">
           <span className="flex items-center gap-1">
             <FolderTree size={11} /> Worktrees
           </span>
           <div className="flex items-center gap-1">
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
-              className="text-gx-muted hover:text-gx-text"
+              className="text-muted-foreground hover:text-foreground"
               onClick={handlePrune}
               title="Prune stale worktrees"
               aria-label="Prune stale worktrees"
               disabled={busy}
             >
               <Scissors size={11} />
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
-              className="text-gx-muted hover:text-gx-text"
+              className="text-muted-foreground hover:text-foreground"
               onClick={refresh}
               title="Refresh"
               aria-label="Refresh worktrees"
             >
               <RefreshCw size={11} />
-            </button>
+            </Button>
           </div>
         </div>
 
-        {/* Unified status row */}
+        {/* Worktree cards */}
         {worktrees && worktrees.length > 0 && (
-          <div className="mb-2 rounded bg-gx-surface px-2 py-1 text-[11px] text-gx-muted">
+          <div className="mb-2 rounded bg-card px-2 py-1 text-[11px] text-muted-foreground">
             {worktrees.length} worktree{worktrees.length !== 1 ? "s" : ""}
             {dirtyWorktreeCount > 0 && (
-              <span className="text-gx-warn">
+              <span className="text-warning">
                 , {dirtyWorktreeCount} with uncommitted changes
               </span>
             )}
           </div>
         )}
 
-        {/* Add worktree button group */}
+        {/* Worktree cards */}
         {!dialogMode && (
           <div className="flex gap-1">
-            <button
+            <Button variant="default"
               type="button"
-              className="btn btn-primary flex-1 justify-center text-xs"
+              className="flex-1 justify-center text-xs"
               onClick={() => setDialogMode("add-branch")}
               disabled={busy}
             >
               <Plus size={12} /> Add Worktree
-            </button>
+            </Button>
           </div>
         )}
 
-        {/* Add worktree dialog */}
+        {/* Context menu — uses the reusable ContextMenu component */}
         {dialogMode && (
           <WorktreeAddDialog
             repo={repo}
@@ -760,20 +774,22 @@ function WorktreeViewInner({
         )}
       </div>
 
-      {/* Worktree cards */}
+      {/* Context menu — uses the reusable ContextMenu component */}
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto p-2">
         {loading && (
-          <div className="flex items-center gap-2 p-3 text-xs text-gx-muted">
+          <div className="flex items-center gap-2 p-3 text-xs text-muted-foreground">
             <Loader2 size={12} className="animate-spin" /> Loading worktrees…
           </div>
         )}
         {error && (
-          <div className="m-1 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">
+          <div className="m-1 rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
             {error}
           </div>
         )}
         {!loading && worktrees && worktrees.length === 0 && (
-          <div className="p-4 text-center text-xs text-gx-muted">No worktrees found.</div>
+          <div className="p-4 text-center text-xs text-muted-foreground">
+            No worktrees found.
+          </div>
         )}
         {worktrees && worktrees.length > 0 && (
           <div className="flex flex-col gap-2">
@@ -797,14 +813,18 @@ function WorktreeViewInner({
                 onRemove={requestRemove}
                 onContextMenu={handleCardContextMenu}
                 renaming={renaming?.path === wt.path ? renaming : null}
-                onRenameChange={(v) => setRenaming((r) => r ? { ...r, value: v } : null)}
+                onRenameChange={(v) =>
+                  setRenaming((r) => (r ? { ...r, value: v } : null))
+                }
                 onRenameSubmit={submitRename}
                 onRenameCancel={() => setRenaming(null)}
                 colourPicking={colourPicking?.path === wt.path}
                 onColourSelect={submitColour}
                 onColourCancel={() => setColourPicking(null)}
                 moving={moving?.path === wt.path ? moving : null}
-                onMoveChange={(v) => setMoving((m) => m ? { ...m, value: v } : null)}
+                onMoveChange={(v) =>
+                  setMoving((m) => (m ? { ...m, value: v } : null))
+                }
                 onMoveSubmit={submitMove}
                 onMoveCancel={() => setMoving(null)}
               />
@@ -839,153 +859,11 @@ interface SelectOption {
  * A searchable dropdown popup for selecting branches, commits, or tags.
  * Opens as a floating panel with a search input and scrollable list.
  */
-function SearchableSelectPopup({
-  options,
-  value,
-  onSelect,
-  onClose,
-  placeholder,
-  emptyMessage,
-  loading,
-}: {
-  options: SelectOption[];
-  value: string;
-  onSelect: (value: string) => void;
-  onClose: () => void;
-  placeholder: string;
-  emptyMessage: string;
-  loading?: boolean;
-}) {
-  const [search, setSearch] = useState("");
-  const inputRef = useRef<HTMLInputElement>(null);
-  const panelRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    inputRef.current?.focus();
-  }, []);
-
-  useEffect(() => {
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    const handleClick = (e: MouseEvent) => {
-      if (panelRef.current && !panelRef.current.contains(e.target as Node)) {
-        onClose();
-      }
-    };
-    window.addEventListener("keydown", handleKey);
-    window.addEventListener("mousedown", handleClick);
-    return () => {
-      window.removeEventListener("keydown", handleKey);
-      window.removeEventListener("mousedown", handleClick);
-    };
-  }, [onClose]);
-
-  const filtered = useMemo(() => {
-    if (!search.trim()) return options;
-    const q = search.toLowerCase();
-    return options.filter(
-      (o) =>
-        o.label.toLowerCase().includes(q) ||
-        o.value.toLowerCase().includes(q) ||
-        (o.detail && o.detail.toLowerCase().includes(q)),
-    );
-  }, [options, search]);
-
-  return (
-    <div
-      ref={panelRef}
-      className="absolute left-0 right-0 top-full z-30 mt-1 rounded-lg border border-gx-border bg-gx-surface shadow-xl"
-    >
-      <div className="flex items-center gap-1.5 border-b border-gx-border px-2 py-1.5">
-        <Search size={11} className="shrink-0 text-gx-muted" />
-        <input
-          ref={inputRef}
-          className="flex-1 bg-transparent text-xs text-gx-text placeholder:text-gx-muted/60 focus-visible:outline-none"
-          placeholder={placeholder}
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
-      </div>
-      <div className="max-h-[200px] overflow-auto py-1">
-        {loading && (
-          <div className="flex items-center gap-2 px-3 py-2 text-[11px] text-gx-muted">
-            <Loader2 size={11} className="animate-spin" /> Loading…
-          </div>
-        )}
-        {!loading && filtered.length === 0 && (
-          <div className="px-3 py-2 text-[11px] text-gx-muted">{emptyMessage}</div>
-        )}
-        {!loading &&
-          filtered.map((opt) => (
-            <button
-              key={opt.value}
-              type="button"
-              className={`flex w-full items-center gap-2 px-3 py-1.5 text-left transition ${
-                opt.disabled
-                  ? "cursor-not-allowed opacity-50"
-                  : opt.value === value
-                    ? "bg-gx-accent/5 hover:bg-gx-accent/10"
-                    : "hover:bg-gx-accent/10"
-              }`}
-              onClick={() => {
-                if (opt.disabled) return;
-                onSelect(opt.value);
-                onClose();
-              }}
-              disabled={opt.disabled}
-            >
-              <div className="min-w-0 flex-1">
-                <div className={`truncate text-[11px] font-medium ${opt.disabled ? "text-gx-muted" : "text-gx-text"}`}>
-                  {opt.label}
-                </div>
-                {opt.detail && (
-                  <div className={`truncate font-mono text-[10px] ${opt.disabled ? "text-gx-muted/60" : "text-gx-muted"}`}>
-                    {opt.detail}
-                  </div>
-                )}
-              </div>
-              {opt.value === value && !opt.disabled && (
-                <span className="shrink-0 text-[9px] text-gx-accent">✓</span>
-              )}
-            </button>
-          ))}
-      </div>
-    </div>
-  );
-}
 
 /**
  * A button that opens a searchable select popup. Shows the current
  * selection or a placeholder.
  */
-function SelectTrigger({
-  value,
-  displayLabel,
-  placeholder,
-  onClick,
-  disabled,
-}: {
-  value: string;
-  displayLabel?: string;
-  placeholder: string;
-  onClick: () => void;
-  disabled?: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      className="mb-1.5 flex w-full items-center justify-between rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-left text-xs transition hover:border-gx-muted/60 focus-visible:outline-none focus:border-gx-accent disabled:opacity-50"
-      onClick={onClick}
-      disabled={disabled}
-    >
-      <span className={value ? "text-gx-text" : "text-gx-muted/60"}>
-        {displayLabel || value || placeholder}
-      </span>
-      <ChevronDown size={12} className="shrink-0 text-gx-muted" />
-    </button>
-  );
-}
 
 // ── Worktree Add Dialog ──────────────────────────────────────────────
 
@@ -1136,238 +1014,210 @@ function WorktreeAddDialog({
   }
 
   return (
-    <div className="mt-2 rounded border border-gx-border bg-gx-bg-sub p-2">
+    <div className="mt-2 rounded border border-border bg-background p-2">
       <div className="mb-2 flex items-center justify-between">
-        <span className="text-[11px] font-medium text-gx-text">
+        <span className="text-[11px] font-medium text-foreground">
           {dialogMode === "add-new-branch"
             ? "New Branch Worktree"
             : dialogMode === "add-detached"
               ? "Detached Worktree"
               : "Checkout Branch in Worktree"}
         </span>
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
-          className="text-gx-muted hover:text-gx-text"
+          className="text-muted-foreground hover:text-foreground"
           onClick={onCancel}
           aria-label="Cancel"
         >
           <X size={12} />
-        </button>
+        </Button>
       </div>
 
       {/* Mode tabs */}
       <div className="mb-2 flex gap-1 text-[10px]">
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           className={`rounded px-2 py-0.5 transition ${
             dialogMode === "add-branch"
-              ? "bg-gx-accent/20 text-gx-text"
-              : "text-gx-muted hover:text-gx-text"
+              ? "bg-primary/20 text-foreground"
+              : "text-muted-foreground hover:text-foreground"
           }`}
           onClick={() => setDialogMode("add-branch")}
         >
           Existing
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           className={`rounded px-2 py-0.5 transition ${
             dialogMode === "add-new-branch"
-              ? "bg-gx-accent/20 text-gx-text"
-              : "text-gx-muted hover:text-gx-text"
+              ? "bg-primary/20 text-foreground"
+              : "text-muted-foreground hover:text-foreground"
           }`}
           onClick={() => setDialogMode("add-new-branch")}
         >
           New Branch
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           className={`rounded px-2 py-0.5 transition ${
             dialogMode === "add-detached"
-              ? "bg-gx-accent/20 text-gx-text"
-              : "text-gx-muted hover:text-gx-text"
+              ? "bg-primary/20 text-foreground"
+              : "text-muted-foreground hover:text-foreground"
           }`}
           onClick={() => setDialogMode("add-detached")}
         >
           Detached
-        </button>
+        </Button>
       </div>
 
-      {/* Path selector — text input for remote repos, folder picker for local */}
+      {/* Mode tabs */}
       {repo.is_remote ? (
         <div className="mb-1.5">
-          <input
-            className="w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-xs focus-visible:outline-none focus:border-gx-accent"
+          <Input
+            className="w-full rounded border border-border bg-background px-2 py-1 text-xs focus-visible:outline-none focus:border-primary"
             placeholder="Relative path (e.g. ../my-worktree)"
             value={addPath}
             onChange={(e) => setAddPath(e.target.value)}
           />
-          <p className="mt-0.5 text-[9px] leading-tight text-gx-muted/70">
+          <p className="mt-0.5 text-[9px] leading-tight text-muted-foreground/70">
             Path is resolved relative to the remote project directory.
           </p>
         </div>
       ) : (
         <div className="mb-1.5 flex items-center gap-1">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
-            className="flex flex-1 items-center justify-between rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-left text-xs transition hover:border-gx-muted/60 focus-visible:outline-none focus:border-gx-accent"
+            className="flex flex-1 items-center justify-between rounded border border-border bg-background px-2 py-1 text-left text-xs transition hover:border-muted-foreground/60 focus-visible:outline-none focus:border-primary"
             onClick={handlePickPath}
             title="Select worktree folder"
           >
-            <span className={addPath ? "truncate text-gx-text" : "text-gx-muted/60"}>
+            <span className={addPath ? "truncate text-foreground" : "text-muted-foreground/60"}>
               {addPath || "Select worktree location…"}
             </span>
-            <FolderOpen size={12} className="shrink-0 text-gx-muted" />
-          </button>
+            <FolderOpen size={12} className="shrink-0 text-muted-foreground" />
+          </Button>
           {addPath && (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
-              className="shrink-0 rounded p-1 text-gx-muted hover:text-gx-text"
+              className="shrink-0 rounded p-1 text-muted-foreground hover:text-foreground"
               onClick={() => setAddPath("")}
               title="Clear path"
               aria-label="Clear path"
             >
               <X size={11} />
-            </button>
+            </Button>
           )}
         </div>
       )}
 
-      {/* Branch selector — varies by mode */}
+      {/* Path selector — text input for remote repos, folder picker for local */}
       {dialogMode === "add-branch" && (
-        <div className="relative">
-          <SelectTrigger
-            value={addBranch}
-            placeholder="Select branch to check out…"
-            onClick={() => setShowBranchPicker(!showBranchPicker)}
-          />
-          {showBranchPicker && (
-            <SearchableSelectPopup
-              options={branchOptions}
-              value={addBranch}
-              onSelect={setAddBranch}
-              onClose={() => setShowBranchPicker(false)}
-              placeholder="Search branches…"
-              emptyMessage="No branches found"
-              loading={refsLoading}
-            />
-          )}
-        </div>
+        <Combobox
+          options={branchOptions}
+          value={addBranch}
+          emptyMessage="No branches found"
+          loading={refsLoading}
+          placeholder="Select branch to check out…"
+          searchPlaceholder="Search branches…"
+          onValueChange={setAddBranch}
+          open={showBranchPicker}
+          onOpenChange={setShowBranchPicker}
+        />
       )}
 
       {dialogMode === "add-new-branch" && (
         <>
-          {/* New branch name — still a text input since user types a new name */}
-          <input
-            className="mb-1.5 w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-xs focus-visible:outline-none focus:border-gx-accent"
+          {/* Branch selector — varies by mode */}
+          <Input
+            className="mb-1.5 w-full rounded border border-border bg-background px-2 py-1 text-xs focus-visible:outline-none focus:border-primary"
             placeholder="New branch name"
             value={addBranch}
             onChange={(e) => setAddBranch(e.target.value)}
           />
 
-          {/* Start point selector — searchable popup with commits/tags/branches */}
-          <div className="relative">
-            <SelectTrigger
-              value={addStartPoint}
-              placeholder="Start point (default: HEAD)…"
-              displayLabel={addStartPoint || undefined}
-              onClick={() => setShowStartPointPicker(!showStartPointPicker)}
-            />
-            {showStartPointPicker && (
-              <SearchableSelectPopup
-                options={commitOptions}
-                value={addStartPoint}
-                onSelect={setAddStartPoint}
-                onClose={() => setShowStartPointPicker(false)}
-                placeholder="Search commits, branches, tags…"
-                emptyMessage="No commits found"
-                loading={commitsLoading || refsLoading}
-              />
-            )}
-          </div>
+          {/* Branch selector — varies by mode */}
+          <Combobox
+            options={commitOptions}
+            value={addStartPoint}
+            emptyMessage="No commits found"
+            loading={commitsLoading || refsLoading}
+            placeholder="Start point (default: HEAD)…"
+            searchPlaceholder="Search commits, branches, tags…"
+            onValueChange={setAddStartPoint}
+            open={showStartPointPicker}
+            onOpenChange={setShowStartPointPicker}
+          />
         </>
       )}
 
       {dialogMode === "add-detached" && (
-        <div className="relative">
-          <SelectTrigger
-            value={addBranch}
-            placeholder="Select commit or tag…"
-            displayLabel={addBranch || undefined}
-            onClick={() => setShowDetachedPicker(!showDetachedPicker)}
-          />
-          {showDetachedPicker && (
-            <SearchableSelectPopup
-              options={commitOptions}
-              value={addBranch}
-              onSelect={setAddBranch}
-              onClose={() => setShowDetachedPicker(false)}
-              placeholder="Search commits, branches, tags…"
-              emptyMessage="No commits or tags found"
-              loading={commitsLoading || refsLoading}
-            />
-          )}
-        </div>
+        <Combobox
+          options={commitOptions}
+          value={addBranch}
+          emptyMessage="No commits or tags found"
+          loading={commitsLoading || refsLoading}
+          placeholder="Select commit or tag…"
+          searchPlaceholder="Search commits, branches, tags…"
+          onValueChange={setAddBranch}
+          open={showDetachedPicker}
+          onOpenChange={setShowDetachedPicker}
+        />
       )}
 
-      {/* Hydration choice */}
+      {/* New branch name — still a text input since user types a new name */}
       <fieldset className="mb-1.5">
-        <legend className="mb-1 text-[10px] font-medium text-gx-muted">
+        <legend className="mb-1 text-[10px] font-medium text-muted-foreground">
           Pointer file hydration
         </legend>
-        <div className="flex gap-1">
+        <RadioGroup
+          value={addHydration}
+          onValueChange={(next) => setAddHydration(next as typeof addHydration)}
+          className="flex gap-1"
+        >
           <label
             className={`flex-1 cursor-pointer rounded px-2 py-1 text-center text-[10px] transition ${
               addHydration === "pointers_only"
-                ? "bg-gx-accent/20 text-gx-text font-medium"
-                : "bg-gx-surface text-gx-muted hover:text-gx-text"
+                ? "bg-primary/20 text-foreground font-medium"
+                : "bg-card text-muted-foreground hover:text-foreground"
             }`}
           >
-            <input
-              type="radio"
-              name="hydration"
-              value="pointers_only"
-              checked={addHydration === "pointers_only"}
-              onChange={() => setAddHydration("pointers_only")}
-              className="sr-only"
-            />
+            <RadioGroupItem value="pointers_only" className="sr-only" />
             Keep as pointers
           </label>
           <label
             className={`flex-1 cursor-pointer rounded px-2 py-1 text-center text-[10px] transition ${
               addHydration === "on_access"
-                ? "bg-gx-accent/20 text-gx-text font-medium"
-                : "bg-gx-surface text-gx-muted hover:text-gx-text"
+                ? "bg-primary/20 text-foreground font-medium"
+                : "bg-card text-muted-foreground hover:text-foreground"
             }`}
           >
-            <input
-              type="radio"
-              name="hydration"
-              value="on_access"
-              checked={addHydration === "on_access"}
-              onChange={() => setAddHydration("on_access")}
-              className="sr-only"
-            />
+            <RadioGroupItem value="on_access" className="sr-only" />
             On access
           </label>
           <label
             className={`flex-1 cursor-pointer rounded px-2 py-1 text-center text-[10px] transition ${
               addHydration === "all"
-                ? "bg-gx-accent/20 text-gx-text font-medium"
-                : "bg-gx-surface text-gx-muted hover:text-gx-text"
+                ? "bg-primary/20 text-foreground font-medium"
+                : "bg-card text-muted-foreground hover:text-foreground"
             }`}
           >
-            <input
-              type="radio"
-              name="hydration"
-              value="all"
-              checked={addHydration === "all"}
-              onChange={() => setAddHydration("all")}
-              className="sr-only"
-            />
+            <RadioGroupItem value="all" className="sr-only" />
             Hydrate all
           </label>
-        </div>
-        <p className="mt-1 text-[9px] leading-tight text-gx-muted/70">
+        </RadioGroup>
+        <p className="mt-1 text-[9px] leading-tight text-muted-foreground/70">
           {addHydration === "pointers_only" &&
             "Files stay as lightweight pointers. Fastest checkout, no extra downloads."}
           {addHydration === "on_access" &&
@@ -1377,15 +1227,19 @@ function WorktreeAddDialog({
         </p>
       </fieldset>
 
-      <button
+      <Button variant="default"
         type="button"
-        className="btn btn-primary mt-1 w-full justify-center text-xs"
+        className="mt-1 w-full justify-center text-xs"
         onClick={onSubmit}
         disabled={busy || !addPath.trim()}
       >
-        {busy ? <Loader2 size={12} className="animate-spin" /> : <Plus size={12} />}
+        {busy ? (
+          <Loader2 size={12} className="animate-spin" />
+        ) : (
+          <Plus size={12} />
+        )}
         Create Worktree
-      </button>
+      </Button>
     </div>
   );
 }
@@ -1455,10 +1309,10 @@ function WorktreeCard({
     <div
       className={`group/card relative cursor-pointer rounded-lg border p-3 transition ${
         isSelected
-          ? "border-gx-accent bg-gx-accent/8 ring-1 ring-gx-accent/40"
+          ? "border-primary bg-primary/8 ring-1 ring-primary/40"
           : isActive
-            ? "border-gx-accent/50 bg-gx-accent/5"
-            : "border-gx-border bg-gx-surface hover:border-gx-muted/60"
+            ? "border-primary/50 bg-primary/5"
+            : "border-border bg-card hover:border-muted-foreground/60"
       }`}
       style={colourAccent ? { borderLeftColor: colourAccent, borderLeftWidth: "3px" } : undefined}
       onClick={() => onSelect(wt)}
@@ -1470,40 +1324,42 @@ function WorktreeCard({
     >
       {/* Top row: display name + badges */}
       <div className="flex items-center gap-1.5">
-        <FolderOpen size={13} className="shrink-0 text-gx-muted" />
-        <span className="truncate text-[12.5px] font-medium text-gx-text" title={wt.path}>
+        <FolderOpen size={13} className="shrink-0 text-muted-foreground" />
+        <span className="truncate text-[12.5px] font-medium text-foreground" title={wt.path}>
           {displayName}
         </span>
         {wt.is_main && (
-          <span className="shrink-0 rounded bg-gx-accent/20 px-1.5 py-0.5 text-[9px] font-semibold text-gx-accent">
+          <span className="shrink-0 rounded bg-primary/20 px-1.5 py-0.5 text-[9px] font-semibold text-primary">
             MAIN
           </span>
         )}
         {isActive && (
-          <span className="shrink-0 rounded bg-gx-success/20 px-1.5 py-0.5 text-[9px] font-semibold text-gx-success">
+          <span className="shrink-0 rounded bg-success/20 px-1.5 py-0.5 text-[9px] font-semibold text-success">
             ACTIVE
           </span>
         )}
         {wt.locked && (
           <span title={wt.lock_reason ? `Locked: ${wt.lock_reason}` : "Locked"}>
-            <Lock size={10} className="shrink-0 text-gx-warn" />
+            <Lock size={10} className="shrink-0 text-warning" />
           </span>
         )}
         {wt.prunable && (
-          <span className="shrink-0 rounded bg-gx-error/20 px-1.5 py-0.5 text-[9px] font-semibold text-gx-error">
+          <span className="shrink-0 rounded bg-destructive/20 px-1.5 py-0.5 text-[9px] font-semibold text-destructive">
             STALE
           </span>
         )}
         {wt.meta?.pinned && (
           <span title="Pinned">
-            <Pin size={10} className="shrink-0 text-gx-accent" />
+            <Pin size={10} className="shrink-0 text-primary" />
           </span>
         )}
 
-        {/* Open button — opens worktree as full workspace (secondary action) */}
-        <button
+        {/* Top row: display name + badges */}
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
-          className="ml-auto shrink-0 rounded bg-gx-surface px-2 py-0.5 text-[10px] font-medium text-gx-muted hover:bg-gx-accent/15 hover:text-gx-accent transition"
+          className="ml-auto shrink-0 rounded bg-card px-2 py-0.5 text-[10px] font-medium text-muted-foreground hover:bg-primary/15 hover:text-primary transition"
           onClick={(e) => { e.stopPropagation(); onOpen(wt.path); }}
           disabled={busy}
           title="Open worktree as full workspace"
@@ -1511,133 +1367,148 @@ function WorktreeCard({
         >
           <ExternalLink size={10} className="inline -mt-px mr-0.5" />
           Open
-        </button>
+        </Button>
 
-        {/* Hover action icons: Push, Pull, Lock/Unlock, Remove */}
+        {/* Top row: display name + badges */}
         {!wt.is_main && (
           <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition group-hover/card:opacity-100" onClick={(e) => e.stopPropagation()}>
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
-              className="rounded p-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-success"
+              className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-success"
               onClick={() => onPush(wt.path, shortBranch(wt.branch))}
               disabled={busy}
               title="Push"
               aria-label="Push worktree branch"
             >
               <ArrowUp size={12} />
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
-              className="rounded p-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-info"
+              className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-info"
               onClick={() => onPull(wt.path, shortBranch(wt.branch))}
               disabled={busy}
               title="Pull"
               aria-label="Pull worktree branch"
             >
               <ArrowDown size={12} />
-            </button>
+            </Button>
             {wt.locked ? (
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
-                className="rounded p-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-warn"
+                className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-warning"
                 onClick={() => onUnlock(wt.path)}
                 disabled={busy}
                 title="Unlock worktree"
                 aria-label="Unlock worktree"
               >
                 <LockOpen size={12} />
-              </button>
+              </Button>
             ) : (
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
-                className="rounded p-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-warn"
+                className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-warning"
                 onClick={() => onLock(wt.path)}
                 disabled={busy}
                 title="Lock worktree"
                 aria-label="Lock worktree"
               >
                 <Lock size={12} />
-              </button>
+              </Button>
             )}
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
-              className="rounded p-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-error"
+              className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-destructive"
               onClick={() => onRemove(wt.path)}
               disabled={busy}
               title="Remove worktree"
               aria-label="Remove worktree"
             >
               <Trash2 size={12} />
-            </button>
+            </Button>
           </span>
         )}
 
-        {/* For the main worktree, still show Push/Pull on hover */}
+        {/* Hover action icons: Push, Pull, Lock/Unlock, Remove */}
         {wt.is_main && (
           <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition group-hover/card:opacity-100" onClick={(e) => e.stopPropagation()}>
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
-              className="rounded p-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-success"
+              className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-success"
               onClick={() => onPush(wt.path, shortBranch(wt.branch))}
               disabled={busy}
               title="Push"
               aria-label="Push worktree branch"
             >
               <ArrowUp size={12} />
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
-              className="rounded p-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-info"
+              className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-info"
               onClick={() => onPull(wt.path, shortBranch(wt.branch))}
               disabled={busy}
               title="Pull"
               aria-label="Pull worktree branch"
             >
               <ArrowDown size={12} />
-            </button>
+            </Button>
           </span>
         )}
       </div>
 
-      {/* Branch row */}
-      <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-gx-muted">
+      {/* For the main worktree, still show Push/Pull on hover */}
+      <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-muted-foreground">
         <span className="truncate font-mono">{shortBranch(wt.branch)}</span>
         {wt.head && (
           <span className="font-mono opacity-60">({wt.head.slice(0, 7)})</span>
         )}
       </div>
 
-      {/* Status chips row: ahead/behind + dirty count + disk usage */}
+      {/* For the main worktree, still show Push/Pull on hover */}
       {(status || (estimate && estimate.total_bytes > 0)) && (
         <div className="mt-2 flex flex-wrap items-center gap-1.5">
-          {/* Ahead/behind chips */}
-          {status && (status.ahead !== null && status.ahead > 0) && (
-            <span className="inline-flex items-center rounded bg-gx-success/15 px-1.5 py-0.5 text-[10px] font-medium text-gx-success">
+          {/* For the main worktree, still show Push/Pull on hover */}
+          {status && status.ahead !== null && status.ahead > 0 && (
+            <span className="inline-flex items-center rounded bg-success/15 px-1.5 py-0.5 text-[10px] font-medium text-success">
               ↑{status.ahead}
             </span>
           )}
-          {status && (status.behind !== null && status.behind > 0) && (
-            <span className="inline-flex items-center rounded bg-gx-info/15 px-1.5 py-0.5 text-[10px] font-medium text-gx-info">
+          {status && status.behind !== null && status.behind > 0 && (
+            <span className="inline-flex items-center rounded bg-info/15 px-1.5 py-0.5 text-[10px] font-medium text-info">
               ↓{status.behind}
             </span>
           )}
-          {/* Dirty count badge */}
+          {/* Branch row */}
           {status && status.dirty_count > 0 && (
-            <span className="inline-flex items-center rounded bg-gx-warn/15 px-1.5 py-0.5 text-[10px] font-medium text-gx-warn">
+            <span className="inline-flex items-center rounded bg-warning/15 px-1.5 py-0.5 text-[10px] font-medium text-warning">
               {status.dirty_count} change{status.dirty_count !== 1 ? "s" : ""}
             </span>
           )}
-          {/* Disk usage chip */}
+          {/* Branch row */}
           {estimate && estimate.total_bytes > 0 && (
             <span
-              className="inline-flex items-center gap-0.5 rounded bg-gx-muted/10 px-1.5 py-0.5 text-[10px] font-medium text-gx-muted"
+              className="inline-flex items-center gap-0.5 rounded bg-muted-foreground/10 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
               title={`${formatBytes(estimate.total_bytes)} estimated disk usage${estimate.pointer_count > 0 ? ` (${estimate.pointer_count} pointer${estimate.pointer_count !== 1 ? "s" : ""})` : ""}`}
             >
               <HardDrive size={9} />
               {formatBytes(estimate.total_bytes)}
               {estimate.pointer_count > 0 && (
                 <span className="opacity-70">
-                  ({estimate.pointer_count} {estimate.pointer_count === 1 ? "ptr" : "ptrs"})
+                  ({estimate.pointer_count}{" "}
+                  {estimate.pointer_count === 1 ? "ptr" : "ptrs"})
                 </span>
               )}
             </span>
@@ -1647,14 +1518,14 @@ function WorktreeCard({
 
       {/* Lock reason */}
       {wt.lock_reason && (
-        <div className="mt-1.5 text-[10px] italic text-gx-warn/80">
+        <div className="mt-1.5 text-[10px] italic text-warning/80">
           Lock reason: {wt.lock_reason}
         </div>
       )}
 
       {/* Full path (subtle) */}
       <div
-        className="mt-1.5 truncate font-mono text-[10px] text-gx-muted/60"
+        className="mt-1.5 truncate font-mono text-[10px] text-muted-foreground/60"
         title={wt.path}
       >
         {wt.path}
@@ -1663,8 +1534,8 @@ function WorktreeCard({
       {/* Inline rename input */}
       {renaming && (
         <div className="mt-2 flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
-          <input
-            className="flex-1 rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-xs focus-visible:outline-none focus:border-gx-accent"
+          <Input
+            className="flex-1 rounded border border-border bg-background px-2 py-1 text-xs focus-visible:outline-none focus:border-primary"
             placeholder="Display name (empty to clear)"
             value={renaming.value}
             onChange={(e) => onRenameChange(e.target.value)}
@@ -1674,52 +1545,64 @@ function WorktreeCard({
             }}
             autoFocus
           />
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
-            className="rounded bg-gx-accent/15 px-2 py-1 text-[10px] font-medium text-gx-accent hover:bg-gx-accent/25"
+            className="rounded bg-primary/15 px-2 py-1 text-[10px] font-medium text-primary hover:bg-primary/25"
             onClick={onRenameSubmit}
             disabled={busy}
           >
             Save
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
-            className="rounded px-1.5 py-1 text-gx-muted hover:text-gx-text"
+            className="rounded px-1.5 py-1 text-muted-foreground hover:text-foreground"
             onClick={onRenameCancel}
           >
             <X size={12} />
-          </button>
+          </Button>
         </div>
       )}
 
       {/* Inline colour picker */}
       {colourPicking && (
         <div className="mt-2" onClick={(e) => e.stopPropagation()}>
-          <div className="mb-1 text-[10px] text-gx-muted">Pick a colour:</div>
+          <div className="mb-1 text-[10px] text-muted-foreground">
+            Pick a colour:
+          </div>
           <div className="flex items-center gap-1.5">
             {COLOUR_PRESETS.map((preset) => (
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 key={preset.label}
                 type="button"
                 className={`h-5 w-5 rounded-full border transition hover:scale-110 ${
                   preset.value === null
-                    ? "border-gx-border bg-gx-surface flex items-center justify-center"
+                    ? "border-border bg-card flex items-center justify-center"
                     : "border-transparent"
                 }`}
                 style={preset.value ? { backgroundColor: preset.value } : undefined}
                 title={preset.label}
                 onClick={() => onColourSelect(preset.value)}
               >
-                {preset.value === null && <X size={10} className="text-gx-muted" />}
-              </button>
+                {preset.value === null && (
+                  <X size={10} className="text-muted-foreground" />
+                )}
+              </Button>
             ))}
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
-              className="ml-1 rounded px-1.5 py-0.5 text-[10px] text-gx-muted hover:text-gx-text"
+              className="ml-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground"
               onClick={onColourCancel}
             >
               Cancel
-            </button>
+            </Button>
           </div>
         </div>
       )}
@@ -1727,8 +1610,8 @@ function WorktreeCard({
       {/* Inline move input */}
       {moving && (
         <div className="mt-2 flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
-          <input
-            className="flex-1 rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-xs focus-visible:outline-none focus:border-gx-accent"
+          <Input
+            className="flex-1 rounded border border-border bg-background px-2 py-1 text-xs focus-visible:outline-none focus:border-primary"
             placeholder="New path (e.g. ../new-location)"
             value={moving.value}
             onChange={(e) => onMoveChange(e.target.value)}
@@ -1738,27 +1621,30 @@ function WorktreeCard({
             }}
             autoFocus
           />
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
-            className="rounded bg-gx-accent/15 px-2 py-1 text-[10px] font-medium text-gx-accent hover:bg-gx-accent/25"
+            className="rounded bg-primary/15 px-2 py-1 text-[10px] font-medium text-primary hover:bg-primary/25"
             onClick={onMoveSubmit}
             disabled={busy || !moving.value.trim()}
           >
             Move
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
-            className="rounded px-1.5 py-1 text-gx-muted hover:text-gx-text"
+            className="rounded px-1.5 py-1 text-muted-foreground hover:text-foreground"
             onClick={onMoveCancel}
           >
             <X size={12} />
-          </button>
+          </Button>
         </div>
       )}
     </div>
   );
 }
-
 
 /**
  * Picker overlay shown when the user selects "Compare with…" from the
@@ -1791,17 +1677,27 @@ function WorktreeComparePicker({
   }, [onDismiss]);
 
   return (
-    <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/40">
-      <div className="w-[320px] rounded-lg border border-gx-border bg-gx-surface p-4 shadow-xl">
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) onDismiss();
+      }}
+    >
+      <DialogContent
+        showCloseButton={false}
+        aria-describedby={undefined}
+        className="block gap-0 p-0 w-[320px] rounded-lg border border-border bg-card p-4 shadow-xl"
+      >
+        <DialogTitle className="sr-only">Compare worktrees</DialogTitle>
         <div className="mb-3 flex items-center gap-2">
-          <GitCompareArrows size={14} className="text-gx-accent" />
-          <span className="text-[12px] font-medium text-gx-text">
+          <GitCompareArrows size={14} className="text-primary" />
+          <span className="text-[12px] font-medium text-foreground">
             Compare "{sourceLabel}" with…
           </span>
         </div>
 
         {targets.length === 0 ? (
-          <div className="py-4 text-center text-[11px] text-gx-muted">
+          <div className="py-4 text-center text-[11px] text-muted-foreground">
             No other worktrees to compare with.
           </div>
         ) : (
@@ -1809,37 +1705,41 @@ function WorktreeComparePicker({
             {targets.map((wt) => {
               const label = wt.meta?.display_name || dirName(wt.path);
               return (
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   key={wt.path}
                   type="button"
-                  className="flex w-full items-center gap-2 rounded px-3 py-2 text-left transition hover:bg-gx-accent/10"
+                  className="justify-start flex w-full items-center gap-2 rounded px-3 py-2 text-left transition hover:bg-primary/10"
                   onClick={() => onSelect(wt)}
                 >
-                  <FolderOpen size={12} className="shrink-0 text-gx-muted" />
+                  <FolderOpen size={12} className="shrink-0 text-muted-foreground" />
                   <div className="min-w-0 flex-1">
-                    <div className="truncate text-[12px] font-medium text-gx-text">
+                    <div className="truncate text-[12px] font-medium text-foreground">
                       {label}
                     </div>
-                    <div className="truncate font-mono text-[10px] text-gx-muted">
+                    <div className="truncate font-mono text-[10px] text-muted-foreground">
                       {shortBranch(wt.branch)}
                     </div>
                   </div>
-                </button>
+                </Button>
               );
             })}
           </div>
         )}
 
         <div className="mt-3 flex justify-end">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
-            className="rounded px-3 py-1 text-[11px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+            className="rounded px-3 py-1 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
             onClick={onDismiss}
           >
             Cancel
-          </button>
+          </Button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

@@ -1,19 +1,22 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Terminal } from "@xterm/xterm";
+import { Button } from "@/components/ui/button";
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
+import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { Plus, Send, X, Terminal as TerminalIcon } from "lucide-react";
-import { OrchestratorTask } from "./TaskCard";
+import { Plus, Send, Terminal as TerminalIcon, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffectiveTheme } from "../../hooks/useEffectiveTheme";
 import { attachWebgl } from "../../lib/terminal-font";
 import {
-  registerTerminal,
   appendOutput,
   markTerminalClosed,
+  registerTerminal,
   removeTerminal,
   terminalTail,
 } from "../../lib/terminal-registry";
+import { getStoredSchemeId, resolveTheme } from "../../lib/terminal-themes";
+import { OrchestratorTask } from "./TaskCard";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -65,6 +68,7 @@ const ptyIpc = {
  */
 export function TerminalTab({ task: _task, workspacePath, onSendErrorToAgent }: Props) {
   const [tabs, setTabs] = useState<TermTab[]>([]);
+  const theme = useEffectiveTheme();
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   /**
    * Non-zero exit codes per terminal id, surfaced as a "Send error to
@@ -253,6 +257,12 @@ export function TerminalTab({ task: _task, workspacePath, onSendErrorToAgent }: 
     });
   }, []);
 
+  useEffect(() => {
+    for (const { term } of instancesRef.current.values()) {
+      term.options.theme = resolveTheme(getStoredSchemeId(), theme);
+    }
+  }, [theme]);
+
   // Create/show/hide xterm instances when activeTabId changes.
   useEffect(() => {
     if (!containerRef.current || !activeTabId) return;
@@ -270,28 +280,7 @@ export function TerminalTab({ task: _task, workspacePath, onSendErrorToAgent }: 
         cursorBlink: true,
         fontSize: 13,
         fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, monospace",
-        theme: {
-          background: "#0b0d12",
-          foreground: "#e7eaf1",
-          cursor: "#4f8cff",
-          selectionBackground: "#2a3757",
-          black: "#1a1e2e",
-          red: "#f87171",
-          green: "#4ade80",
-          yellow: "#facc15",
-          blue: "#60a5fa",
-          magenta: "#c084fc",
-          cyan: "#22d3ee",
-          white: "#e7eaf1",
-          brightBlack: "#475569",
-          brightRed: "#fca5a5",
-          brightGreen: "#86efac",
-          brightYellow: "#fde047",
-          brightBlue: "#93c5fd",
-          brightMagenta: "#d8b4fe",
-          brightCyan: "#67e8f9",
-          brightWhite: "#f8fafc",
-        },
+        theme: resolveTheme(getStoredSchemeId(), theme),
         scrollback: 10000,
         allowProposedApi: true,
       });
@@ -354,7 +343,7 @@ export function TerminalTab({ task: _task, workspacePath, onSendErrorToAgent }: 
         });
       }
     }
-  }, [activeTabId, tabs]);
+  }, [activeTabId, tabs, theme]);
 
   // Handle container resize — fit the active terminal.
   // Also triggers when the terminal becomes visible (display: none → block).
@@ -402,7 +391,7 @@ export function TerminalTab({ task: _task, workspacePath, onSendErrorToAgent }: 
 
   if (!workspacePath) {
     return (
-      <div className="flex h-full items-center justify-center text-xs text-gx-muted">
+      <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
         No workspace directory available.
       </div>
     );
@@ -411,72 +400,82 @@ export function TerminalTab({ task: _task, workspacePath, onSendErrorToAgent }: 
   return (
     <div className="flex h-full flex-col">
       {/* Tab bar */}
-      <div className="flex shrink-0 items-center border-b border-gx-border bg-gx-surface">
+      <div className="flex shrink-0 items-center border-b border-border bg-card">
         {tabs.map((tab) => (
           <div
             key={tab.id}
-            className={`group flex items-center gap-1 border-r border-gx-border px-3 py-1.5 text-[11px] ${
+            className={`group flex items-center gap-1 border-r border-border px-3 py-1.5 text-[11px] ${
               activeTabId === tab.id
-                ? "bg-gx-bg-sub text-gx-text"
-                : "text-gx-muted hover:bg-gx-surface-hover"
+                ? "bg-background text-foreground"
+                : "text-muted-foreground hover:bg-accent"
             }`}
           >
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={() => setActiveTabId(tab.id)}
               className="flex items-center gap-1 truncate"
             >
               <TerminalIcon size={10} />
               {tab.title}
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={() => closeTab(tab.id)}
-              className="opacity-0 transition group-hover:opacity-100 hover:text-gx-error"
+              className="opacity-0 transition group-hover:opacity-100 hover:text-destructive"
               aria-label="Close terminal tab"
             >
               <X size={10} />
-            </button>
+            </Button>
           </div>
         ))}
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={() => void spawnTab()}
-          className="flex h-full items-center px-2 text-gx-muted hover:text-gx-text"
+          className="flex h-full items-center px-2 text-muted-foreground hover:text-foreground"
           title="New terminal tab"
           aria-label="New terminal tab"
         >
           <Plus size={12} />
-        </button>
+        </Button>
 
         {/* Per-tab failure banner */}
         {activeTabId && failedExits.has(activeTabId) && onSendErrorToAgent && (
           <div className="ml-auto flex items-center gap-1.5 pr-2 text-[10px]">
-            <span className="text-gx-error">
+            <span className="text-destructive">
               Exit {failedExits.get(activeTabId)!.exitCode}
             </span>
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={() => sendErrorToAgent(activeTabId)}
-              className="inline-flex items-center gap-1 rounded-md border border-gx-accent/40 bg-gx-accent/10 px-2 py-0.5 text-gx-accent hover:bg-gx-accent/20 transition"
+              className="inline-flex items-center gap-1 rounded-md border border-primary/40 bg-primary/10 px-2 py-0.5 text-primary hover:bg-primary/20 transition"
               title="Send the last 200 lines to the agent and ask it to fix this"
             >
               <Send size={9} /> Send error to agent
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={() => dismissError(activeTabId)}
-              className="rounded p-0.5 text-gx-muted hover:text-gx-text"
+              className="rounded p-0.5 text-muted-foreground hover:text-foreground"
               aria-label="Dismiss exit notice"
             >
               <X size={10} />
-            </button>
+            </Button>
           </div>
         )}
       </div>
 
       {/* Terminal container */}
-      <div ref={containerRef} className="min-h-0 flex-1 overflow-hidden bg-[#0b0d12] p-3" />
+      <div ref={containerRef} className="min-h-0 flex-1 overflow-hidden bg-background p-3" />
     </div>
   );
 }

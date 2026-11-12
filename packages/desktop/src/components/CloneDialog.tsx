@@ -1,5 +1,16 @@
-import { StorageConfigSection } from "../views/StorageConfigSection";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
 import clsx from "clsx";
 import {
   AlertCircle,
@@ -15,11 +26,13 @@ import {
   Server,
   X,
 } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { dialogs, nextJobId, rpc } from "../ipc";
-import { useStore } from "../state";
-import { useSetting } from "../settings";
-import { useJobLines } from "../lib/useJobLines";
 import { localPathName } from "../lib/local-path-name";
+import { useJobLines } from "../lib/useJobLines";
+import { useSetting } from "../settings";
+import { useStore } from "../state";
+import { StorageConfigSection } from "../views/StorageConfigSection";
 import { ManagedRepositoryPicker } from "./ManagedRepositoryPicker";
 
 // ─── Types ──────────────────────────────────────────────────────────
@@ -31,7 +44,6 @@ type RepoProvider =
   | "managed"
   | "crab"
   | "url";
-
 
 interface ProviderDef {
   id: RepoProvider;
@@ -306,7 +318,6 @@ export function CloneDialog({ open, onClose, targetWorkspaceRootPath }: Props) {
     setError(null);
   }, [provider]);
 
-
   if (!open) return null;
 
   async function pickDest() {
@@ -412,62 +423,74 @@ export function CloneDialog({ open, onClose, targetWorkspaceRootPath }: Props) {
   }
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
-      onClick={handleClose}
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="clone-dialog-title"
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) {
+          handleClose();
+        }
+      }}
     >
-      <div
-        className="flex max-h-[85vh] w-[min(720px,92vw)] flex-col rounded-xl border border-gx-border bg-gx-surface shadow-2xl"
+      <DialogContent
+        showCloseButton={false}
+        aria-describedby={undefined}
+        className="block gap-0 p-0 flex max-h-[85vh] w-[min(720px,92vw)] flex-col rounded-xl border border-border bg-card shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-gx-border px-5 py-4">
+        <div className="flex items-center justify-between border-b border-border px-5 py-4">
           <div>
-            <h2 id="clone-dialog-title" className="text-base font-semibold">
+            <DialogTitle className="text-base font-semibold">
               Clone Repository
-            </h2>
+            </DialogTitle>
             {targetWorkspaceRootPath && (
-              <p className="mt-0.5 text-[11px] text-gx-muted">
-                Into workspace: <span className="font-medium text-gx-accent">{localPathName(targetWorkspaceRootPath)}</span>
+              <p className="mt-0.5 text-[11px] text-muted-foreground">
+                Into workspace:{" "}
+                <span className="font-medium text-primary">
+                  {localPathName(targetWorkspaceRootPath)}
+                </span>
               </p>
             )}
           </div>
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
-            className="rounded p-1 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+            className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
             onClick={handleClose}
             aria-label="Close"
           >
             <X size={18} />
-          </button>
+          </Button>
         </div>
 
-        {/* Scrollable body */}
+        {/* Header */}
         <div className="flex-1 overflow-y-auto px-5 py-4">
-          {/* Provider selector */}
-          <label className="mb-2 block text-xs font-medium text-gx-muted uppercase tracking-wide">
+          {/* Scrollable body */}
+          <label className="mb-2 block text-xs font-medium text-muted-foreground uppercase tracking-wide">
             Provider
           </label>
           <div className="mb-4 grid grid-cols-3 gap-2 sm:grid-cols-6">
             {PROVIDERS.map((p) => (
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 key={p.id}
                 type="button"
                 className={clsx(
                   "flex flex-col items-center gap-1.5 rounded-lg border p-3 text-xs transition",
                   provider === p.id
-                    ? "border-gx-accent bg-gx-accent/10 text-gx-accent"
-                    : "border-gx-border bg-gx-bg-sub text-gx-muted hover:border-gx-accent/50 hover:text-gx-text",
+                    ? "border-primary bg-primary/10 text-primary"
+                    : "border-border bg-background text-muted-foreground hover:border-primary/50 hover:text-foreground",
                 )}
                 onClick={() => setProvider(p.id)}
                 title={p.description}
               >
-                <span className="flex h-6 w-6 items-center justify-center">{p.icon}</span>
+                <span className="flex h-6 w-6 items-center justify-center">
+                  {p.icon}
+                </span>
                 <span className="font-medium">{p.label}</span>
-              </button>
+              </Button>
             ))}
           </div>
 
@@ -485,9 +508,11 @@ export function CloneDialog({ open, onClose, targetWorkspaceRootPath }: Props) {
             </div>
           ) : (
             <>
-              <label className="mb-1 block text-xs text-gx-muted">Remote URL</label>
-              <input
-                className="input-field mb-3 w-full font-mono text-sm"
+              <label className="mb-1 block text-xs text-muted-foreground">
+                Remote URL
+              </label>
+              <Input
+                className="mb-3 w-full font-mono text-sm"
                 placeholder={currentProvider.placeholder}
                 value={url}
                 onChange={(e) => setUrl(e.target.value)}
@@ -496,13 +521,15 @@ export function CloneDialog({ open, onClose, targetWorkspaceRootPath }: Props) {
             </>
           )}
 
-          {/* Destination folder */}
-          <label className="mb-1 block text-xs text-gx-muted">Destination folder</label>
+          {/* Integration status banner for forge providers */}
+          <label className="mb-1 block text-xs text-muted-foreground">
+            Destination folder
+          </label>
           {isWorkspaceClone ? (
             /* Workspace clone: destination is pre-populated and immutable */
             <div className="flex gap-2">
               <div
-                className="input-field flex-1 font-mono text-sm bg-gx-bg-sub text-gx-muted cursor-not-allowed select-all"
+                className="flex-1 font-mono text-sm bg-background text-muted-foreground cursor-not-allowed select-all"
                 title="Destination is fixed to the workspace root directory"
               >
                 {workspaceDest || `${targetWorkspaceRootPath}/…`}
@@ -511,31 +538,36 @@ export function CloneDialog({ open, onClose, targetWorkspaceRootPath }: Props) {
           ) : (
             /* Non-workspace clone: editable destination with browse */
             <div className="flex gap-2">
-              <input
-                className="input-field flex-1 font-mono text-sm"
+              <Input
+                className="flex-1 font-mono text-sm"
                 placeholder={repoSlug ? `/path/to/parent/${repoSlug}` : "/path/to/new-clone"}
                 value={dest}
                 onChange={(e) => setDest(e.target.value)}
               />
-              <button type="button" className="btn" onClick={pickDest}>
+              <Button variant="outline" type="button" onClick={pickDest}>
                 <FolderOpen size={14} />
                 Browse
-              </button>
+              </Button>
             </div>
           )}
           {isWorkspaceClone && (
-            <p className="mt-1 mb-3 text-[10px] text-gx-muted">
+            <p className="mt-1 mb-3 text-[10px] text-muted-foreground">
               Repos must be cloned into the workspace root directory.
             </p>
           )}
           {!isWorkspaceClone && repoSlug && !dest.endsWith(repoSlug) && dest && (
-            <p className="mt-1 mb-3 text-[10px] text-gx-warn">
-              Tip: The repo will be cloned into a new "{repoSlug}" subdirectory inside the selected folder.
-            </p>
-          )}
-          {(!isWorkspaceClone && (!repoSlug || dest.endsWith(repoSlug) || !dest)) && <div className="mb-4" />}
+              <p className="mt-1 mb-3 text-[10px] text-warning">
+                Tip: The repo will be cloned into a new "{repoSlug}"
+                subdirectory inside the selected folder.
+              </p>
+            )}
+          {!isWorkspaceClone && (!repoSlug || dest.endsWith(repoSlug) || !dest) && (
+              <div className="mb-4" />
+            )}
 
-          {provider === "crab" && <StorageConfigSection onSelect={setStorageConnectionId} selectedId={storageConnectionId} />}
+          {provider === "crab" && (
+            <StorageConfigSection onSelect={setStorageConnectionId} selectedId={storageConnectionId} />
+          )}
 
           {/* Advanced options */}
           <AdvancedOptionsSection
@@ -546,28 +578,28 @@ export function CloneDialog({ open, onClose, targetWorkspaceRootPath }: Props) {
             isCrab={provider === "crab" || provider === "managed"}
           />
 
-          {/* Clone progress */}
+          {/* Advanced options */}
           {busy && progressLines.length > 0 && (
             <CloneProgress lines={progressLines} />
           )}
 
-          {/* Error display */}
+          {/* Advanced options */}
           {error && (
-            <div className="mt-3 flex items-start gap-2 rounded-lg border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">
+            <div className="mt-3 flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
               <AlertCircle size={14} className="mt-0.5 shrink-0" />
               <span>{error}</span>
             </div>
           )}
         </div>
 
-        {/* Footer */}
-        <div className="flex items-center justify-end gap-2 border-t border-gx-border px-5 py-3">
-          <button type="button" className="btn" onClick={handleClose} disabled={busy}>
+        {/* Clone progress */}
+        <div className="flex items-center justify-end gap-2 border-t border-border px-5 py-3">
+          <Button variant="outline" type="button" onClick={handleClose} disabled={busy}>
             Cancel
-          </button>
-          <button
+          </Button>
+          <Button variant="default"
             type="button"
-            className="btn btn-primary"
+
             onClick={doClone}
             disabled={busy || !url || !effectiveDest}
           >
@@ -582,10 +614,10 @@ export function CloneDialog({ open, onClose, targetWorkspaceRootPath }: Props) {
                 Clone
               </>
             )}
-          </button>
+          </Button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -622,40 +654,40 @@ function CloneProgress({ lines }: { lines: Array<{ line: string; stream: string 
   }, [lines]);
 
   return (
-    <div className="mt-3 rounded-lg border border-gx-border bg-gx-bg-sub p-3">
+    <div className="mt-3 rounded-lg border border-border bg-background p-3">
       {/* Phase label + percentage */}
       <div className="mb-2 flex items-center justify-between text-xs">
-        <span className="flex items-center gap-2 text-gx-muted">
-          <Loader2 size={12} className="animate-spin text-gx-accent" />
+        <span className="flex items-center gap-2 text-muted-foreground">
+          <Loader2 size={12} className="animate-spin text-primary" />
           {phase}…
         </span>
         {percent !== null && (
-          <span className="font-mono text-[11px] text-gx-accent">{percent}%</span>
+          <span className="font-mono text-[11px] text-primary">{percent}%</span>
         )}
       </div>
 
       {/* Progress bar */}
       {percent !== null && (
-        <div className="mb-2 h-1.5 w-full overflow-hidden rounded-full bg-gx-border">
+        <div className="mb-2 h-1.5 w-full overflow-hidden rounded-full bg-border">
           <div
-            className="h-full rounded-full bg-gx-accent transition-all duration-300 ease-out"
+            className="h-full rounded-full bg-primary transition-all duration-300 ease-out"
             style={{ width: `${percent}%` }}
           />
         </div>
       )}
       {percent === null && (
-        <div className="mb-2 h-1.5 w-full overflow-hidden rounded-full bg-gx-border">
-          <div className="h-full w-1/3 animate-pulse rounded-full bg-gx-accent/60" />
+        <div className="mb-2 h-1.5 w-full overflow-hidden rounded-full bg-border">
+          <div className="h-full w-1/3 animate-pulse rounded-full bg-primary/60" />
         </div>
       )}
 
       {/* Log output (last few lines) */}
       <div
         ref={scrollRef}
-        className="max-h-24 overflow-y-auto rounded border border-gx-border/50 bg-gx-bg p-2 font-mono text-[10px] leading-relaxed text-gx-muted scrollbar-none"
+        className="max-h-24 overflow-y-auto rounded border border-border/50 bg-background p-2 font-mono text-[10px] leading-relaxed text-muted-foreground scrollbar-none"
       >
         {lines.slice(-20).map((l, i) => (
-          <div key={i} className={l.stream === "stderr" ? "text-gx-warn/80" : ""}>
+          <div key={i} className={l.stream === "stderr" ? "text-warning/80" : ""}>
             {l.line}
           </div>
         ))}
@@ -678,7 +710,7 @@ function IntegrationBanner({
 
   if (status === "checking") {
     return (
-      <div className="mb-4 flex items-center gap-2 rounded-lg border border-gx-border bg-gx-bg-sub p-3 text-xs text-gx-muted">
+      <div className="mb-4 flex items-center gap-2 rounded-lg border border-border bg-background p-3 text-xs text-muted-foreground">
         <Loader2 size={14} className="animate-spin" />
         Checking {providerLabel} integration…
       </div>
@@ -687,7 +719,7 @@ function IntegrationBanner({
 
   if (status === "connected") {
     return (
-      <div className="mb-4 flex items-center gap-2 rounded-lg border border-gx-success/30 bg-gx-success/10 p-3 text-xs text-gx-success">
+      <div className="mb-4 flex items-center gap-2 rounded-lg border border-success/30 bg-success/10 p-3 text-xs text-success">
         <Check size={14} />
         Connected to {providerLabel}. You can clone private repositories.
       </div>
@@ -696,19 +728,22 @@ function IntegrationBanner({
 
   if (status === "not_connected") {
     return (
-      <div className="mb-4 rounded-lg border border-gx-warn/30 bg-gx-warn/10 p-3">
-        <div className="flex items-center gap-2 text-xs text-gx-warn">
+      <div className="mb-4 rounded-lg border border-warning/30 bg-warning/10 p-3">
+        <div className="flex items-center gap-2 text-xs text-warning">
           <Lock size={14} />
           <span className="font-medium">Not connected to {providerLabel}</span>
         </div>
-        <p className="mt-1.5 text-xs text-gx-muted">
+        <p className="mt-1.5 text-xs text-muted-foreground">
           You can still clone public repositories. To access private repos,
           connect your {providerLabel} account in{" "}
-          <span className="font-medium text-gx-text">Settings → Integrations</span>.
+          <span className="font-medium text-foreground">
+            Settings → Integrations
+          </span>
+          .
         </p>
-        <button
+        <Button variant="outline"
           type="button"
-          className="btn mt-2 text-xs"
+          className="mt-2 text-xs"
           onClick={() => {
             // Dispatch event to open settings at integrations section
             window.dispatchEvent(
@@ -718,7 +753,7 @@ function IntegrationBanner({
         >
           <ExternalLink size={12} />
           Connect {providerLabel}
-        </button>
+        </Button>
       </div>
     );
   }
@@ -755,45 +790,52 @@ function AdvancedOptionsSection({
 
   return (
     <div>
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
-        className="flex w-full items-center gap-2 rounded-lg border border-gx-border bg-gx-bg-sub px-3 py-2.5 text-xs text-gx-muted hover:border-gx-accent/50 hover:text-gx-text transition"
+        className="flex w-full items-center gap-2 rounded-lg border border-border bg-background px-3 py-2.5 text-xs text-muted-foreground hover:border-primary/50 hover:text-foreground transition"
         onClick={() => setShowAdvanced(!showAdvanced)}
       >
         {showAdvanced ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         <Server size={14} />
         <span className="font-medium">Advanced Options</span>
         {activeCount > 0 && (
-          <span className="ml-auto rounded-full bg-gx-accent/20 px-1.5 py-0.5 text-[10px] font-medium text-gx-accent">
+          <span className="ml-auto rounded-full bg-primary/20 px-1.5 py-0.5 text-[10px] font-medium text-primary">
             {activeCount} active
           </span>
         )}
-      </button>
+      </Button>
 
       {showAdvanced && (
-        <div className="mt-2 rounded-lg border border-gx-border bg-gx-bg-sub p-4 space-y-3">
+        <div className="mt-2 rounded-lg border border-border bg-background p-4 space-y-3">
           {/* Shallow clone */}
           <div className="flex items-start gap-3">
             <Checkbox
               checked={advanced.shallow}
-              onChange={(v) => setAdvanced((p) => ({ ...p, shallow: v }))}
+              onCheckedChange={(checked) => {
+                const v = checked === true;
+                return setAdvanced((p) => ({ ...p, shallow: v }));
+              }}
               id="opt-shallow"
             />
             <div className="flex-1">
-              <label htmlFor="opt-shallow" className="text-xs font-medium text-gx-text cursor-pointer">
+              <label htmlFor="opt-shallow" className="text-xs font-medium text-foreground cursor-pointer">
                 Shallow clone
               </label>
-              <p className="text-[10px] text-gx-muted">
+              <p className="text-[10px] text-muted-foreground">
                 Only fetch the most recent commits (faster for large repos)
               </p>
               {advanced.shallow && (
                 <div className="mt-1.5 flex items-center gap-2">
-                  <label className="text-[10px] text-gx-muted">Depth:</label>
-                  <input
+                  <label className="text-[10px] text-muted-foreground">
+                    Depth:
+                  </label>
+                  <Input
                     type="number"
                     min={1}
                     max={9999}
-                    className="input-field w-20 text-xs"
+                    className="w-20 text-xs"
                     value={advanced.shallowDepth}
                     onChange={(e) =>
                       setAdvanced((p) => ({ ...p, shallowDepth: Math.max(1, parseInt(e.target.value) || 1) }))
@@ -808,22 +850,27 @@ function AdvancedOptionsSection({
           <div className="flex items-start gap-3">
             <Checkbox
               checked={advanced.singleBranch}
-              onChange={(v) => setAdvanced((p) => ({ ...p, singleBranch: v }))}
+              onCheckedChange={(checked) => {
+                const v = checked === true;
+                return setAdvanced((p) => ({ ...p, singleBranch: v }));
+              }}
               id="opt-single-branch"
             />
             <div className="flex-1">
-              <label htmlFor="opt-single-branch" className="text-xs font-medium text-gx-text cursor-pointer">
+              <label htmlFor="opt-single-branch" className="text-xs font-medium text-foreground cursor-pointer">
                 Single branch
               </label>
-              <p className="text-[10px] text-gx-muted">
+              <p className="text-[10px] text-muted-foreground">
                 Only clone history for a single branch
               </p>
               {advanced.singleBranch && (
                 <div className="mt-1.5 flex items-center gap-2">
-                  <label className="text-[10px] text-gx-muted">Branch:</label>
-                  <input
+                  <label className="text-[10px] text-muted-foreground">
+                    Branch:
+                  </label>
+                  <Input
                     type="text"
-                    className="input-field flex-1 text-xs"
+                    className="flex-1 text-xs"
                     placeholder="main (default: remote HEAD)"
                     value={advanced.branch}
                     onChange={(e) => setAdvanced((p) => ({ ...p, branch: e.target.value }))}
@@ -838,26 +885,29 @@ function AdvancedOptionsSection({
             <div className="flex items-start gap-3">
               <Checkbox
                 checked={advanced.sparseCheckout}
-                onChange={(v) => setAdvanced((p) => ({ ...p, sparseCheckout: v }))}
+                onCheckedChange={(checked) => {
+                  const v = checked === true;
+                  return setAdvanced((p) => ({ ...p, sparseCheckout: v }));
+                }}
                 id="opt-sparse"
               />
               <div className="flex-1">
-                <label htmlFor="opt-sparse" className="text-xs font-medium text-gx-text cursor-pointer">
+                <label htmlFor="opt-sparse" className="text-xs font-medium text-foreground cursor-pointer">
                   Sparse checkout
                 </label>
-                <p className="text-[10px] text-gx-muted">
+                <p className="text-[10px] text-muted-foreground">
                   Only check out specific directories (cone mode)
                 </p>
                 {advanced.sparseCheckout && (
                   <div className="mt-1.5">
-                    <textarea
-                      className="input-field w-full resize-y font-mono text-xs"
+                    <Textarea
+                      className="w-full resize-y font-mono text-xs"
                       rows={3}
                       placeholder={"src/\ndocs/\n*.md"}
                       value={advanced.sparsePatterns}
                       onChange={(e) => setAdvanced((p) => ({ ...p, sparsePatterns: e.target.value }))}
                     />
-                    <p className="mt-0.5 text-[10px] text-gx-muted">
+                    <p className="mt-0.5 text-[10px] text-muted-foreground">
                       One pattern per line. Directories should end with /
                     </p>
                   </div>
@@ -870,32 +920,55 @@ function AdvancedOptionsSection({
           <div className="flex items-start gap-3">
             <Checkbox
               checked={!!advanced.filter}
-              onChange={(v) =>
-                setAdvanced((p) => ({ ...p, filter: v ? "blob:none" : "" }))
-              }
+              onCheckedChange={(checked) => {
+                const v = checked === true;
+                return setAdvanced((p) => ({ ...p, filter: v ? "blob:none" : "" }));
+              }}
               id="opt-filter"
             />
             <div className="flex-1">
-              <label htmlFor="opt-filter" className="text-xs font-medium text-gx-text cursor-pointer">
+              <label htmlFor="opt-filter" className="text-xs font-medium text-foreground cursor-pointer">
                 Partial clone (blobless)
               </label>
-              <p className="text-[10px] text-gx-muted">
-                Defer downloading file contents until checkout (treeless or blobless)
+              <p className="text-[10px] text-muted-foreground">
+                Defer downloading file contents until checkout (treeless or
+                blobless)
               </p>
               {advanced.filter && (
                 <div className="mt-1.5 flex items-center gap-2">
-                  <label className="text-[10px] text-gx-muted">Filter:</label>
-                  <select
-                    className="input-field text-xs"
-                    value={advanced.filter}
-                    onChange={(e) => setAdvanced((p) => ({ ...p, filter: e.target.value }))}
+                  <label className="text-[10px] text-muted-foreground">
+                    Filter:
+                  </label>
+                  <Select
+                    value={":" + String(advanced.filter)}
+                    onValueChange={(selectedValue) => {
+                      const value = selectedValue.slice(1);
+                      return setAdvanced((p) => ({ ...p, filter: value }));
+                    }}
                   >
-                    <option value="blob:none">blob:none (blobless)</option>
-                    <option value="tree:0">tree:0 (treeless)</option>
-                    <option value="blob:limit=1m">blob:limit=1m</option>
-                    <option value="blob:limit=10m">blob:limit=10m</option>
-                    <option value="blob:limit=100m">blob:limit=100m</option>
-                  </select>
+                    <SelectTrigger className="text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        <SelectItem value={":" + String("blob:none")}>
+                          blob:none (blobless)
+                        </SelectItem>
+                        <SelectItem value={":" + String("tree:0")}>
+                          tree:0 (treeless)
+                        </SelectItem>
+                        <SelectItem value={":" + String("blob:limit=1m")}>
+                          blob:limit=1m
+                        </SelectItem>
+                        <SelectItem value={":" + String("blob:limit=10m")}>
+                          blob:limit=10m
+                        </SelectItem>
+                        <SelectItem value={":" + String("blob:limit=100m")}>
+                          blob:limit=100m
+                        </SelectItem>
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
                 </div>
               )}
             </div>
@@ -905,15 +978,19 @@ function AdvancedOptionsSection({
           <div className="flex items-start gap-3">
             <Checkbox
               checked={advanced.noCheckout}
-              onChange={(v) => setAdvanced((p) => ({ ...p, noCheckout: v }))}
+              onCheckedChange={(checked) => {
+                const v = checked === true;
+                return setAdvanced((p) => ({ ...p, noCheckout: v }));
+              }}
               id="opt-no-checkout"
             />
             <div className="flex-1">
-              <label htmlFor="opt-no-checkout" className="text-xs font-medium text-gx-text cursor-pointer">
+              <label htmlFor="opt-no-checkout" className="text-xs font-medium text-foreground cursor-pointer">
                 No checkout
               </label>
-              <p className="text-[10px] text-gx-muted">
-                Skip checking out files after clone (useful for scripted workflows)
+              <p className="text-[10px] text-muted-foreground">
+                Skip checking out files after clone (useful for scripted
+                workflows)
               </p>
             </div>
           </div>
@@ -922,24 +999,30 @@ function AdvancedOptionsSection({
           <div className="flex items-start gap-3">
             <Checkbox
               checked={advanced.recurseSubmodules}
-              onChange={(v) => setAdvanced((p) => ({ ...p, recurseSubmodules: v }))}
+              onCheckedChange={(checked) => {
+                const v = checked === true;
+                return setAdvanced((p) => ({ ...p, recurseSubmodules: v }));
+              }}
               id="opt-submodules"
             />
             <div className="flex-1">
-              <label htmlFor="opt-submodules" className="text-xs font-medium text-gx-text cursor-pointer">
+              <label htmlFor="opt-submodules" className="text-xs font-medium text-foreground cursor-pointer">
                 Recurse submodules
               </label>
-              <p className="text-[10px] text-gx-muted">
+              <p className="text-[10px] text-muted-foreground">
                 Initialize and clone submodules recursively
               </p>
               {advanced.recurseSubmodules && (
                 <div className="mt-1.5 flex items-center gap-3">
                   <Checkbox
                     checked={advanced.shallowSubmodules}
-                    onChange={(v) => setAdvanced((p) => ({ ...p, shallowSubmodules: v }))}
+                    onCheckedChange={(checked) => {
+                      const v = checked === true;
+                      return setAdvanced((p) => ({ ...p, shallowSubmodules: v }));
+                    }}
                     id="opt-shallow-sub"
                   />
-                  <label htmlFor="opt-shallow-sub" className="text-[10px] text-gx-muted cursor-pointer">
+                  <label htmlFor="opt-shallow-sub" className="text-[10px] text-muted-foreground cursor-pointer">
                     Shallow submodules (depth 1)
                   </label>
                 </div>
@@ -947,42 +1030,52 @@ function AdvancedOptionsSection({
             </div>
           </div>
 
-          {/* Parallel jobs */}
+          {/* Mirror / Bare */}
           <div className="flex items-center gap-3">
-            <div className="w-4" /> {/* spacer for alignment */}
-            <label className="text-xs text-gx-muted">Parallel fetch jobs:</label>
-            <input
+            <div className="w-4" /> {/* Mirror / Bare */}
+            <label className="text-xs text-muted-foreground">
+              Parallel fetch jobs:
+            </label>
+            <Input
               type="number"
               min={0}
               max={32}
-              className="input-field w-16 text-xs"
+              className="w-16 text-xs"
               value={advanced.jobs}
               onChange={(e) =>
                 setAdvanced((p) => ({ ...p, jobs: Math.max(0, parseInt(e.target.value) || 0) }))
               }
             />
-            <span className="text-[10px] text-gx-muted">(0 = auto)</span>
+            <span className="text-[10px] text-muted-foreground">
+              (0 = auto)
+            </span>
           </div>
 
-          {/* Mirror / Bare */}
+          {/* Reference repository */}
           <div className="flex gap-6">
             <div className="flex items-center gap-2">
               <Checkbox
                 checked={advanced.mirror}
-                onChange={(v) => setAdvanced((p) => ({ ...p, mirror: v, bare: v ? true : p.bare }))}
+                onCheckedChange={(checked) => {
+                  const v = checked === true;
+                  return setAdvanced((p) => ({ ...p, mirror: v, bare: v ? true : p.bare }));
+                }}
                 id="opt-mirror"
               />
-              <label htmlFor="opt-mirror" className="text-xs text-gx-text cursor-pointer">
+              <label htmlFor="opt-mirror" className="text-xs text-foreground cursor-pointer">
                 Mirror
               </label>
             </div>
             <div className="flex items-center gap-2">
               <Checkbox
                 checked={advanced.bare}
-                onChange={(v) => setAdvanced((p) => ({ ...p, bare: v }))}
+                onCheckedChange={(checked) => {
+                  const v = checked === true;
+                  return setAdvanced((p) => ({ ...p, bare: v }));
+                }}
                 id="opt-bare"
               />
-              <label htmlFor="opt-bare" className="text-xs text-gx-text cursor-pointer">
+              <label htmlFor="opt-bare" className="text-xs text-foreground cursor-pointer">
                 Bare
               </label>
             </div>
@@ -990,18 +1083,19 @@ function AdvancedOptionsSection({
 
           {/* Reference repository */}
           <div>
-            <label className="mb-1 block text-xs text-gx-muted">
+            <label className="mb-1 block text-xs text-muted-foreground">
               Reference repository (optional)
             </label>
-            <input
+            <Input
               type="text"
-              className="input-field w-full text-xs"
+              className="w-full text-xs"
               placeholder="/path/to/reference/repo.git"
               value={advanced.reference}
               onChange={(e) => setAdvanced((p) => ({ ...p, reference: e.target.value }))}
             />
-            <p className="mt-0.5 text-[10px] text-gx-muted">
-              Use objects from a local reference repo to speed up clone (--reference)
+            <p className="mt-0.5 text-[10px] text-muted-foreground">
+              Use objects from a local reference repo to speed up clone
+              (--reference)
             </p>
           </div>
         </div>
@@ -1011,31 +1105,3 @@ function AdvancedOptionsSection({
 }
 
 // ─── Reusable form primitives ───────────────────────────────────────
-
-function Checkbox({
-  checked,
-  onChange,
-  id,
-}: {
-  checked: boolean;
-  onChange: (v: boolean) => void;
-  id: string;
-}) {
-  return (
-    <button
-      type="button"
-      role="checkbox"
-      aria-checked={checked}
-      id={id}
-      className={clsx(
-        "mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border transition",
-        checked
-          ? "border-gx-accent bg-gx-accent text-white"
-          : "border-gx-border bg-gx-bg hover:border-gx-accent/50",
-      )}
-      onClick={() => onChange(!checked)}
-    >
-      {checked && <Check size={10} strokeWidth={3} />}
-    </button>
-  );
-}

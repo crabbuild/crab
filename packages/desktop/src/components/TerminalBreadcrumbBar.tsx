@@ -1,5 +1,6 @@
-import { useMemo } from "react";
+import { Button } from "@/components/ui/button";
 import { ChevronRight, FolderOpen } from "lucide-react";
+import { useMemo } from "react";
 
 export interface TerminalBreadcrumbBarProps {
   /** Full working directory path (e.g. "/Users/dev/projects/crab"). */
@@ -26,32 +27,36 @@ export function TerminalBreadcrumbBar({ cwd, onNavigate }: TerminalBreadcrumbBar
 
   return (
     <nav
-      className="flex shrink-0 items-center gap-0.5 overflow-x-auto border-b border-gx-border bg-gx-bg-sub px-2 py-0.5 text-[10px]"
+      className="flex shrink-0 items-center gap-0.5 overflow-x-auto border-b border-border bg-background px-2 py-0.5 text-[10px]"
       aria-label="Terminal working directory"
     >
-      <FolderOpen size={11} className="shrink-0 text-gx-muted mr-0.5" />
+      <FolderOpen size={11} className="shrink-0 text-muted-foreground mr-0.5" />
       {/* Root slash */}
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
-        className="rounded px-0.5 py-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text transition"
+        className="rounded px-0.5 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground transition"
         title="/"
         onClick={() => onNavigate("/")}
       >
         /
-      </button>
+      </Button>
       {segments.map((seg, idx) => (
         <span key={seg.path} className="flex items-center gap-0.5">
           {idx > 0 && (
-            <ChevronRight size={9} className="shrink-0 text-gx-muted/60" />
+            <ChevronRight size={9} className="shrink-0 text-muted-foreground/60" />
           )}
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
-            className="rounded px-0.5 py-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text transition truncate max-w-[140px]"
+            className="rounded px-0.5 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground transition truncate max-w-[140px]"
             title={seg.path}
             onClick={() => onNavigate(seg.path)}
           >
             {seg.label}
-          </button>
+          </Button>
         </span>
       ))}
     </nav>
