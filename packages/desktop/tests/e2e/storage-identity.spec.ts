@@ -9,7 +9,7 @@ import type { AgentEvent } from "../../src/ipc";
 import { call, packagedExecutable, prepareFixtureSsh } from "./packaged-app";
 import { sshFixture } from "./ssh-fixture";
 import type { RepoHandle } from "../../src/ipc";
-import type { FileTransferActivity } from "../../electron/file-transfers";
+import type { FileTransferActivity, FileTransferSource } from "../../electron/file-transfers";
 
 type S3Profile = StorageConnectionInput & { credentials: { provider: "s3"; access_key_id: string; secret_access_key: string } };
 interface Fixture {
@@ -232,6 +232,15 @@ test("device storage identities reach SSH cold reads, replacement and saved rest
     expect(sha(readFileSync(path.join(directories[0], "lfs.safetensors")))).toBe(source.payloads[0].sha256);
     expect(git(directories[0], ["ls-files", "--stage", "-z"])).toEqual(batchIndex);
     expect(remote.requests.some(request => request.method === "files_restore" && request.repo_id === alphaId && request.storage_connection_id === alphaConnection)).toBe(true);
+    const restored = (await call(page, "activity_file_transfers", {}) as unknown as FileTransferActivity).jobs.find(job => job.op === "restore" && job.repoId === alphaId && job.intent.paths[0] === "lfs.safetensors")!;
+    const versions = await call(page, "activity_file_sources", { job_id: restored.job_id, start: 0, limit: 50 }) as unknown as FileTransferSource[];
+    expect(versions).toEqual([{ position: 0, path: "lfs.safetensors", kind: "lfs", hash: source.payloads[0].sha256, size: source.payloads[0].size, mode: null }]);
+    await page.getByRole("button", { name: "Activity", exact: true }).click();
+    await page.getByRole("button", { name: /^restore · / }).first().click();
+    await page.getByText("Captured source versions", { exact: true }).scrollIntoViewIfNeeded();
+    await expect(page.getByText(versions[0].hash, { exact: true }).first()).toBeVisible();
+    await page.screenshot({ animations: "disabled", path: test.info().outputPath("ssh-captured-sources.png") });
+    await page.getByRole("button", { name: "Close activity drawer", exact: true }).click();
     await page.screenshot({ path: test.info().outputPath("ssh-palette-transfers.png") });
     await page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Git", exact: true }).click();
     await page.getByRole("button", { name: "Worktrees", exact: true }).click();
@@ -384,6 +393,9 @@ test("device storage identities reach SSH cold reads, replacement and saved rest
         await page.getByRole("button", { name: "Retry transfer", exact: true }).first().click();
         await expect.poll(() => sha(readFileSync(path.join(directories[index], "cold.safetensors")))).toBe(source.cold_payloads[index].sha256);
         await expect.poll(async () => (await history()).jobs.find(job => job.intent.paths.includes("cold.safetensors") && job.status === "done")?.transfer?.files_published).toBe(1);
+        const completed = (await history()).jobs.find(job => job.intent.paths.includes("cold.safetensors") && job.status === "done")!;
+        expect(completed.transfer?.received_bytes).toBeGreaterThanOrEqual(source.cold_payloads[index].size);
+        await expect(page.getByText(/received from storage$/).first()).toBeInViewport();
         expect(git(directories[index], ["ls-files", "--stage", "-z"])).toEqual(indexBefore);
         await page.screenshot({ path: test.info().outputPath("ssh-activity-cold-retry.png") });
         await page.getByRole("button", { name: "Close activity drawer", exact: true }).click();

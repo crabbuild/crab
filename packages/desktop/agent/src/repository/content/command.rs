@@ -261,6 +261,13 @@ pub(super) async fn converted_blob_to_file(
     scope: &ReadScope,
     mut progress: impl FnMut(u64) -> Result<()> + Send + 'static,
 ) -> Result<()> {
+    // Git can read a Windows verbatim index path as an empty index. Scratch is
+    // inside this worktree; keep native ownership paths canonical and give Git
+    // the owned index relative to its working directory.
+    let root = tokio::fs::canonicalize(&index.root).await?;
+    let private_index = private_index
+        .strip_prefix(root)
+        .map_err(std::io::Error::other)?;
     let mut command = git_command(
         &index.root,
         &["ls-files", "--stage", "-z", "--", &index.path],

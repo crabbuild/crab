@@ -28,10 +28,11 @@ export function SqliteView({ repoId, path, rev, nativeSessionId }: Props) {
   const [err, setErr] = useState<string | null>(null);
   const [activeTable, setActiveTable] = useState<string | null>(null);
   const query = useMemo(() => fileQuery(repoId, path, rev), [repoId, path, rev]);
-  const { mode } = useSyncExternalStore(query.subscribe, query.snapshot, query.snapshot);
+  const { mode, sql } = useSyncExternalStore(query.subscribe, query.snapshot, query.snapshot);
+  const needsMetadata = mode === "browse" || sql === null;
 
   useEffect(() => {
-    if (mode === "sql") return;
+    if (!needsMetadata) return;
     const controller = new AbortController();
     setData(null);
     setErr(null);
@@ -44,7 +45,7 @@ export function SqliteView({ repoId, path, rev, nativeSessionId }: Props) {
       })
       .catch((e: Error) => { if (!controller.signal.aborted) setErr(e.message); });
     return () => controller.abort();
-  }, [repoId, path, rev, nativeSessionId, mode]);
+  }, [repoId, path, rev, nativeSessionId, needsMetadata]);
 
   const table = data?.tables.find(t => t.name === activeTable);
 
@@ -96,12 +97,16 @@ export function SqliteView({ repoId, path, rev, nativeSessionId }: Props) {
           </div>
         </div> : <FileBrowseState error={err} loading="Reading SQLite database…" />
       ) : (
-        <div className="min-h-0 flex-1">
-          <FileQueryPanel
-            query={query}
-            nativeSessionId={nativeSessionId}
-            tables={data?.tables}
-          />
+        <div className="flex min-h-0 flex-1 flex-col">
+          {err && <div role="alert" className="m-4 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">{err}</div>}
+          {!data && sql === null && !err && <p role="status" className="shrink-0 px-3 py-1.5 text-xs text-gx-muted">Reading table metadata…</p>}
+          <div className="min-h-0 flex-1">
+            <FileQueryPanel
+              query={query}
+              nativeSessionId={nativeSessionId}
+              tables={data?.tables}
+            />
+          </div>
         </div>
       )}
     </div>

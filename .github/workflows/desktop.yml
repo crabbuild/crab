@@ -76,11 +76,6 @@ jobs:
       - name: Test native desktop integration
         # Compilation, real CLI tests and Linux tests share the producer toolchain.
         run: node scripts/build-native.mjs --test
-      - name: Test workflow execution contracts
-        run: |
-          cargo test --release -p crab-workflow --locked --lib
-          cargo test --release -p crab --locked --no-default-features --lib cmd::run::tests::sole_workflow_file_keeps_discovery_target_identity
-          cargo test --release -p crab --locked --no-default-features --lib cmd::run::tests::local_execution_does_not_resolve_the_repository_remote
       - name: Qualify Linux runtime ABI and repository operations
         if: runner.os == 'Linux'
         run: node scripts/qualify-linux-runtime.mjs
@@ -284,9 +279,9 @@ jobs:
         run: |
           export E2E_SMOKE=1
           if [ "$RUNNER_OS" = Linux ]; then
-            xvfb-run -a npx playwright test tests/e2e/file-query.spec.ts --project=e2e-smoke --workers=1
+            xvfb-run -a npx playwright test tests/e2e/file-query.spec.ts tests/e2e/sqlite-default.spec.ts --project=e2e-smoke --workers=1
           else
-            npx playwright test tests/e2e/file-query.spec.ts --project=e2e-smoke --workers=1
+            npx playwright test tests/e2e/file-query.spec.ts tests/e2e/sqlite-default.spec.ts --project=e2e-smoke --workers=1
           fi
       - uses: actions/setup-python@v5
         with:

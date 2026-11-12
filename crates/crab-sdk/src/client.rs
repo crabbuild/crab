@@ -127,6 +127,7 @@ impl ClientState {
             .git
             .read_admission(limits, cancel.clone())
             .map_err(remote_error)?;
+        let admission = options.observe_admission(admission);
         let captured_layout = StoreLayout::new(
             resolved
                 .store
@@ -186,9 +187,11 @@ impl ClientState {
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<Store> {
         Ok(store.clone().with_read_admission(
-            self.git
-                .read_admission(options.owner_limits(), cancel.clone())
-                .map_err(remote_error)?,
+            options.observe_admission(
+                self.git
+                    .read_admission(options.owner_limits(), cancel.clone())
+                    .map_err(remote_error)?,
+            ),
         ))
     }
 
@@ -652,8 +655,13 @@ impl RemoteRepository {
             .0
             .operations
             .run(options.clone(), move |cancel| async move {
-                let operation = owner
-                    .operation_with_limits(OperationKind::Snapshot, &cancel, options.owner_limits())
+                let operation = options
+                    .open_read(
+                        &owner,
+                        OperationKind::Snapshot,
+                        &cancel,
+                        options.owner_limits(),
+                    )
                     .await
                     .map_err(remote_error)?;
                 let result = owner.snapshot(&revision.into_owner(), &operation).await;
@@ -693,8 +701,14 @@ impl Snapshot {
             .0
             .operations
             .run(options.operation.clone(), move |cancel| async move {
-                let operation = repository
-                    .operation_with_limits(OperationKind::Commit, &cancel, options.limits()?)
+                let operation = options
+                    .operation
+                    .open_read(
+                        &repository,
+                        OperationKind::Commit,
+                        &cancel,
+                        options.limits()?,
+                    )
                     .await
                     .map_err(remote_error)?;
                 let result = snapshot.commit(&operation).await;
@@ -732,8 +746,9 @@ impl Snapshot {
             .run(options.operation.clone(), move |cancel| async move {
                 let path = crab_remote_git::GitPath::new(path.as_bytes().to_vec())
                     .map_err(remote_error)?;
-                let operation = repository
-                    .operation_with_limits(OperationKind::Tree, &cancel, options.limits()?)
+                let operation = options
+                    .operation
+                    .open_read(&repository, OperationKind::Tree, &cancel, options.limits()?)
                     .await
                     .map_err(remote_error)?;
                 let result = snapshot.list_directory(&path, &page, &operation).await;
@@ -775,8 +790,14 @@ impl Snapshot {
             .0
             .operations
             .run(options.operation.clone(), move |cancel| async move {
-                let operation = repository
-                    .operation_with_limits(OperationKind::History, &cancel, options.limits()?)
+                let operation = options
+                    .operation
+                    .open_read(
+                        &repository,
+                        OperationKind::History,
+                        &cancel,
+                        options.limits()?,
+                    )
                     .await
                     .map_err(remote_error)?;
                 let result = snapshot.history(traversal, &page, &operation).await;
@@ -866,8 +887,9 @@ impl Snapshot {
             .run(options.operation.clone(), move |cancel| async move {
                 let path = crab_remote_git::GitPath::new(path.as_bytes().to_vec())
                     .map_err(remote_error)?;
-                let operation = repository
-                    .operation_with_limits(OperationKind::Diff, &cancel, options.limits()?)
+                let operation = options
+                    .operation
+                    .open_read(&repository, OperationKind::Diff, &cancel, options.limits()?)
                     .await
                     .map_err(remote_error)?;
                 let result = async {
@@ -896,8 +918,14 @@ impl Snapshot {
             .run(options.operation.clone(), move |cancel| async move {
                 let path = crab_remote_git::GitPath::new(path.as_bytes().to_vec())
                     .map_err(remote_error)?;
-                let operation = repository
-                    .operation_with_limits(OperationKind::Blame, &cancel, options.limits()?)
+                let operation = options
+                    .operation
+                    .open_read(
+                        &repository,
+                        OperationKind::Blame,
+                        &cancel,
+                        options.limits()?,
+                    )
                     .await
                     .map_err(remote_error)?;
                 let result = snapshot.blame(&path, &operation).await;
@@ -929,8 +957,14 @@ impl Snapshot {
             .run(options.operation.clone(), move |cancel| async move {
                 let path = crab_remote_git::GitPath::new(path.as_bytes().to_vec())
                     .map_err(remote_error)?;
-                let operation = repository
-                    .operation_with_limits(OperationKind::Content, &cancel, options.limits()?)
+                let operation = options
+                    .operation
+                    .open_read(
+                        &repository,
+                        OperationKind::Content,
+                        &cancel,
+                        options.limits()?,
+                    )
                     .await
                     .map_err(remote_error)?;
                 let result = async {
@@ -990,8 +1024,14 @@ impl Snapshot {
             .run(options.operation.clone(), move |cancel| async move {
                 let path = crab_remote_git::GitPath::new(path.as_bytes().to_vec())
                     .map_err(remote_error)?;
-                let operation = repository
-                    .operation_with_limits(OperationKind::Content, &cancel, options.limits()?)
+                let operation = options
+                    .operation
+                    .open_read(
+                        &repository,
+                        OperationKind::Content,
+                        &cancel,
+                        options.limits()?,
+                    )
                     .await
                     .map_err(remote_error)?;
                 let result = async {
@@ -1057,8 +1097,9 @@ impl Snapshot {
                 let limits = options.content_limits();
                 let path = crab_remote_git::GitPath::new(path.as_bytes().to_vec())
                     .map_err(remote_error)?;
-                let operation = repository
-                    .operation_with_limits(OperationKind::Content, &cancel, limits)
+                let operation = options
+                    .operation
+                    .open_read(&repository, OperationKind::Content, &cancel, limits)
                     .await
                     .map_err(remote_error)?;
                 let result = async {

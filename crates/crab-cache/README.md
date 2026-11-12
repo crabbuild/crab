@@ -54,7 +54,9 @@ filesystem supports it, falling back to a bounded copy; they never hard-link a
 repository pack to mutable cache state.
 
 Fills reserve capacity and publish
-privately through the shared catalog. The family participates in stats,
+privately through the shared catalog. Before writing payload bytes, reserved
+files record their exact temporary identity for process-death recovery.
+The family participates in stats,
 health, prune, verification, and cleanup. Git structure, sidecars, visible
 object closure, and authorization are reader responsibilities.
 
@@ -100,6 +102,7 @@ async fn example() -> Result<(), Box<dyn std::error::Error>> {
 | Key or route classification | [key.rs](src/key.rs), [path_class.rs](src/path_class.rs) | [cache-store adapter](../crab-cache-store/src/lib.rs) |
 | Object fill or repair | [local_cache.rs](src/local_cache.rs) | [read-through tests](src/local_cache/tests/read_through.rs), [repair tests](src/local_cache/tests/read_repair.rs) |
 | Budget and eviction | [catalog.rs](src/catalog.rs) | [removal.rs](src/catalog/removal.rs) |
+| Unpublished fill recovery | [pending.rs](src/catalog/pending.rs) | [private_fs.rs](src/private_fs.rs) |
 | Disk cleanup | [clean.rs](src/clean.rs), [lifecycle.rs](src/lifecycle.rs) | [private_fs.rs](src/private_fs.rs) |
 | Health reporting | [health.rs](src/health.rs) | [health tests](src/health/tests.rs) |
 | Remote client | [cache_client.rs](src/cache_client.rs) | [service.rs](src/service.rs) |
@@ -113,6 +116,13 @@ qualification limits beside the relevant contract.
 Directory guards coordinate cooperating local owners. Callers must join their
 workers before dropping a guard. Cache contents remain disposable; cleanup
 retains unknown state and does not authorize recursive deletion.
+
+Products with separate hash-named cache namespaces use `clean_cache_namespaces`.
+It retains the parent directory handle, opens each namespace beneath that
+captured parent, and applies payload cleanup through the namespace's own catalog.
+Unknown siblings, databases and workspaces remain untouched. Preview and apply
+both honor catalog leases and in-progress reservations; preview uses the existing
+private read-only SQLite snapshot and does not create or repair catalog state.
 
 For remote caches, enable `remote-client`, configure `CacheClient` authentication,
 and inspect health/capabilities before service-specific operations. Credential

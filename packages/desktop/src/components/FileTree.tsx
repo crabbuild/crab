@@ -250,6 +250,20 @@ export const FileTree = memo(function FileTree({
   // Selection → open file. Handled in a separate component to avoid
   // re-rendering the entire tree when selection changes.
 
+  const activateSelectedFile = useCallback((event: React.MouseEvent<HTMLElement>) => {
+    if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    const targets = event.nativeEvent.composedPath();
+    if (targets.some(target => target instanceof HTMLElement && target.dataset.type === "context-menu-trigger")) return;
+    const row = targets.find((target): target is HTMLElement => target instanceof HTMLElement && target.dataset.itemType === "file");
+    const path = row?.dataset.itemPath;
+    if (!path || model.getSelectedPaths()[0] !== path) return;
+    const entry = entryByPath.get(path);
+    if (!entry || entry.kind === "dir" || entry.kind === "submodule") return;
+    // Capture before the tree updates selection. A repeated activation emits
+    // no selection change, but must reopen a preview that the user closed.
+    onOpenFile(path, entry);
+  }, [model, entryByPath, onOpenFile]);
+
   // Theme-aware CSS variables fed into the Shadow DOM.
   // Cache the styles at module level to avoid calling getComputedStyle
   // (which forces layout) on every render.
@@ -551,6 +565,7 @@ export const FileTree = memo(function FileTree({
       <SelectionHandler model={model} entryByPath={entryByPath} onOpenFile={onOpenFile} />
       <PierreFileTree
         model={model}
+        onClickCapture={activateSelectedFile}
         className="block h-full"
         style={themeStyles}
         renderContextMenu={

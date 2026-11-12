@@ -19,6 +19,7 @@ import { mainProcess, rpc } from "../ipc";
 import { selectionTransfers } from "../hooks/useFileTransfers";
 import { localPathName } from "../lib/local-path-name";
 import { formatBytes } from "../lib/format";
+import type { FileTransferSource } from "../../electron/file-transfers";
 
 interface Props {
   open: boolean;
@@ -337,6 +338,23 @@ function JobCard({ jobId, job, expanded, onToggle, onFilter }: JobCardProps) {
   const [retrying, setRetrying] = useState(false);
   const [retryMessage, setRetryMessage] = useState<string | null>(null);
   const [pathPage, setPathPage] = useState(0);
+  const [sources, setSources] = useState<{ start: number; items: FileTransferSource[] } | null>(null);
+  const [sourceError, setSourceError] = useState<string | null>(null);
+  const [sourceRefresh, setSourceRefresh] = useState(0);
+  useEffect(() => {
+    if (!expanded || !job.intent) return;
+    let current = true;
+    const start = pathPage * 50;
+    setSourceError(null);
+    void rpc.fileTransferSources(jobId, start, 50).then(items => {
+      if (current) setSources({ start, items });
+    }, error => {
+      if (current) setSourceError(error instanceof Error ? error.message : String(error));
+    });
+    return () => { current = false; };
+  }, [expanded, jobId, pathPage, job.updatedAt, job.intent, sourceRefresh]);
+  const sourcePage = sources?.start === pathPage * 50 ? sources.items : null;
+  const byPosition = new Map(sourcePage?.map(source => [source.position, source]));
   const transfer = job.transfer;
   async function retry() {
     const intent = job.intent;
@@ -417,6 +435,7 @@ function JobCard({ jobId, job, expanded, onToggle, onFilter }: JobCardProps) {
       {transfer && <div className="space-y-1 px-2 pb-2 text-[10px] text-gx-muted">
         {job.status === "interrupted" && <p>Last recorded progress</p>}
         <p className="tabular-nums">{job.status === "running" && transfer.total_bytes === 0 && transfer.files_total ? "Checking selection…" : <>{formatBytes(transferBytes)}{transfer.total_bytes === null ? "" : ` / ${formatBytes(transfer.total_bytes)}`} {dehydrating ? "checked" : "written"}</>}</p>
+        <p className="tabular-nums" title="Consumed storage response bodies, including metadata and repeated reads. Connection setup and external commands are excluded.">{transfer.received_bytes == null ? "Storage received: not recorded" : `${formatBytes(transfer.received_bytes)} received from storage`}</p>
         {transfer.files_published != null && transfer.files_total != null && (
           <p>{transfer.files_published} of {transfer.files_total} files {completed}</p>
         )}
@@ -449,7 +468,19 @@ function JobCard({ jobId, job, expanded, onToggle, onFilter }: JobCardProps) {
           {job.intent && <div className="mt-2 space-y-1">
             <p className="break-all">{job.intent.repository}</p>
             <p>{job.intent.paths.length} selected paths · {new Date(job.startedAt).toLocaleString()}</p>
-            <ul className="max-h-32 overflow-auto font-mono">{job.intent.paths.slice(pathPage * 50, (pathPage + 1) * 50).map(path => <li className="break-all" key={path}>{path}</li>)}</ul>
+            <p>Captured source versions</p>
+            {sourceError ? <p role="alert" className="break-words text-gx-error">{sourceError} <button type="button" className="btn" onClick={() => setSourceRefresh(value => value + 1)}>Reload sources</button></p> : !sourcePage && <p role="status">Loading captured sources…</p>}
+            <ul className="max-h-48 space-y-2 overflow-auto">{job.intent.paths.slice(pathPage * 50, (pathPage + 1) * 50).map((path, index) => {
+              const source = byPosition.get(pathPage * 50 + index);
+              const algorithm = source?.kind === "git" ? "Git blob" : source?.kind === "crab" ? "BLAKE3" : "SHA-256";
+              return <li className="break-all" key={path}>
+                <p className="font-mono text-gx-text">{path}</p>
+                {source ? <>
+                  <p>{algorithm} · {formatBytes(source.size)}{source.mode ? ` · ${source.mode}` : ""}</p>
+                  <code>{source.hash}</code>
+                </> : sourcePage && <p>Source not recorded for this path.</p>}
+              </li>;
+            })}</ul>
             {job.intent.paths.length > 50 && <div className="flex gap-2">
               <button type="button" className="btn text-[9px]" disabled={pathPage === 0} onClick={() => setPathPage(page => page - 1)}>Previous paths</button>
               <button type="button" className="btn text-[9px]" disabled={(pathPage + 1) * 50 >= job.intent.paths.length} onClick={() => setPathPage(page => page + 1)}>Next paths</button>

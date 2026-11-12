@@ -145,6 +145,11 @@ async fn restoration_uses_the_staged_version_and_literal_paths_without_changing_
             .await
             .unwrap(),
     );
+    let oid = String::from_utf8(git(root, &["rev-parse", &format!(":{NAME}")])).unwrap();
+    assert_eq!(
+        serde_json::to_value(source.version().unwrap()).unwrap(),
+        json!({ "kind": "git", "hash": oid.trim(), "size": staged.len(), "mode": "100644" })
+    );
     assert_eq!(
         source.clone().run(|_| Ok(())).await.unwrap(),
         staged.len() as u64

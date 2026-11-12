@@ -6,7 +6,7 @@ import * as path from "node:path";
 import { tmpdir } from "node:os";
 import { call, packagedExecutable } from "./packaged-app";
 import type { ChunkDiffMetrics } from "../../src/ipc";
-import type { FileTransferActivity } from "../../electron/file-transfers";
+import type { FileTransferActivity, FileTransferSource } from "../../electron/file-transfers";
 
 test("path staging preserves literal selection and safely unstages an unborn repository", async () => {
   const root = mkdtempSync(path.join(process.env.CARGO_TARGET_DIR ?? tmpdir(), "desktop-staging-paths-"));
@@ -98,7 +98,30 @@ test("whole-file restoration protects literal selections, staging and pending ed
     await page.getByRole("button", { name: "Activity", exact: true }).click();
     await expect(page.getByText("Verified and restored", { exact: true })).toHaveCount(3);
     await expect(page.getByText("2 of 2 files restored", { exact: true })).toBeInViewport();
+    const activity = await call(page, "activity_file_transfers", {}) as unknown as FileTransferActivity;
+    const batch = activity.jobs.find(job => job.op === "restore" && job.intent.paths.length === 2)!;
+    const versions = await call(page, "activity_file_sources", { job_id: batch.job_id, start: 0, limit: 50 }) as unknown as FileTransferSource[];
+    expect(versions).toEqual(batch.intent.paths.map((file, position) => ({ position, path: file, kind: "git", hash: git(["rev-parse", `:${file}`]).toString().trim(), size: staged.length, mode: "100644" })));
+    await page.getByRole("button", { name: "restore · source", exact: true }).first().click();
+    await page.getByText("Captured source versions", { exact: true }).scrollIntoViewIfNeeded();
+    await expect(page.getByText(versions[0].hash, { exact: true }).first()).toBeVisible();
     await page.screenshot({ path: test.info().outputPath("whole-file-restore-activity.png") });
+    const sourceReceipt = async (hash: string) => application.evaluate(({ app }, { jobId, hash }) => {
+      const modules = process.getBuiltinModule("node:module") as typeof import("node:module");
+      const require = modules.createRequire(`${app.getAppPath()}/package.json`);
+      const Database = require("better-sqlite3") as typeof import("better-sqlite3");
+      const db = new Database(`${app.getPath("userData")}/ssh-enhanced.db`);
+      try { db.prepare("UPDATE file_transfer_sources SET hash=? WHERE job_id=? AND position=0").run(hash, jobId); }
+      finally { db.close(); }
+    }, { jobId: batch.job_id, hash });
+    await sourceReceipt("invalid");
+    const card = page.getByRole("button", { name: "restore · source", exact: true }).first();
+    await card.click(); await card.click();
+    const sourceFailure = page.getByRole("alert").filter({ has: page.getByRole("button", { name: "Reload sources", exact: true }) });
+    await expect(sourceFailure).toContainText("invalid captured source");
+    await sourceReceipt(versions[0].hash);
+    await page.getByRole("button", { name: "Reload sources", exact: true }).click();
+    await expect(sourceFailure).toHaveCount(0);
     await page.getByRole("button", { name: "Close activity drawer", exact: true }).click();
     const receiptFault = async (enabled: boolean) => application.evaluate(({ app }, enabled) => {
       const modules = process.getBuiltinModule("node:module") as typeof import("node:module");

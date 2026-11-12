@@ -71,7 +71,9 @@ For multi-platform builds:
 - Linux GNU: built on the target architecture against the glibc 2.28/GCC 8
   runtime ABI in AlmaLinux 8, using GCC Toolset 14 for current C++ dependencies.
   Hosts without that libc/compiler combination invoke Docker automatically; tests use the
-  same compiler. Staging checks every native binary with `readelf` before
+  same compiler. Cache namespace and workflow contract tests also enter through
+  `build-native.mjs --test`; host Cargo commands cannot reuse the producer's
+  ARM linker configuration. Staging checks every native binary with `readelf` before
   producing release assets. CI runs real repository RPCs in AlmaLinux 8,
   Debian 12, and Amazon Linux 2023. Alpine/musl and the Electron/native Node
   module ABI remain separate release gates.

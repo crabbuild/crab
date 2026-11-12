@@ -22,6 +22,17 @@ struct GitRestoration {
 }
 
 impl Restoration {
+    pub(crate) fn version(&self) -> Result<FileVersion> {
+        match &self.source {
+            RestoreSource::Pointer(source) => source.version(),
+            RestoreSource::Git(source) => Ok(FileVersion::git(
+                &source.index.oid,
+                source.size,
+                &source.index.mode,
+            )),
+        }
+    }
+
     pub(crate) async fn capture(
         repo: &BrowseSession,
         path: &str,

@@ -38,6 +38,13 @@ Open a file in **Files**, then use its preview or **File details**. Previews
 capture one version and use bounded native reads, including index and historical
 versions. Opening a preview does not replace a working pointer.
 
+Close a loading preview to cancel its reads. Clicking that selected file again
+reopens the preview without selecting another file first.
+
+SQLite uses its table metadata to choose the first SQL query. The editor remains
+usable while metadata loads. A query you type stays yours when the table lookup
+finishes; empty databases can still show their catalog.
+
 Audio/video playback and seeking use that captured source. A first LFS read can
 require verification of the complete object. Failures remain visible; **Reopen
 media** captures a fresh version. Codec support follows Electron's decoder.
@@ -80,6 +87,13 @@ jobs and every active job. A history-storage error blocks new transfers and offe
 **Reload Activity** after writable storage is restored. Native chunk resume and
 network-byte accounting remain open; bytes written are not a network measurement.
 
+Expand a transfer in **Activity** to inspect **Captured source versions**. Each
+record shows the literal path, content hash and logical size; ordinary Git
+restoration also records the index mode. These records survive restart and show
+what that attempt selected. They do not prove publication. An interrupted or
+older attempt may have no recorded source for a path; check the working file.
+A retry captures current versions in its own record and preserves the original.
+
 Hydration, dehydration and index restoration record ownership of private scratch
 files before writing payload bytes. After interruption, the next publication
 recovers matching recorded scratch. Recovery preserves foreign or replaced files
@@ -88,6 +102,13 @@ content was published: Activity retains that published count and reports failure
 Interrupted counters are labeled **Last recorded progress**; check the actual
 working files before retrying. Recovery does not infer ownership from filenames
 or automatically resume an old download.
+
+Activity reports written bytes and bytes received from storage separately. A
+cached transfer can write content while receiving zero bytes from storage;
+verification and repeated reads can receive more than the file's logical size.
+Received bytes include storage response bodies and metadata, excluding connection setup and
+external commands. Older records without a measurement show **Storage received:
+not recorded**. A retry keeps its own counters alongside the original attempt.
 
 ## Discard whole-file changes
 
@@ -118,9 +139,10 @@ repository, including SSH repositories with verified transfers available.
 If repository services fail, use the visible recovery error and **Retry reopening
 repository**. A healthy sibling repository remains usable. Reader sessions are
 revoked on recovery or storage-identity replacement; reopen details to capture
-fresh content. Cache inspection/cleanup has its own Settings controls. Editable
-cache budgets, offline retention and measured network accounting remain
-work, rather than implied by those controls.
+fresh content. Settings previews and cleans reusable CLI and SDK payloads while
+retaining active reads, catalogs, query workspaces and unknown data. Reopening
+content after cleanup may download it again. Editable cache budgets and offline
+retention remain open work.
 
 ## Qualification boundary
 
@@ -129,5 +151,5 @@ track/publish/lazy-clone/hydrate/edit/synchronize/rename/removal workflow, neste
 missing-file restoration, confirmed index restoration, pending-editor protection,
 selected identities and bounded local/SSH recovery.
 The [completion record](../large-file-support.md) separates that evidence from
-restartable transfers, storage budgets, larger workload
+on-disk SDK fill interruption, storage budgets, larger workload
 profiles and cross-platform/provider release gates.

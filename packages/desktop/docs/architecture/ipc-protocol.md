@@ -231,11 +231,40 @@ Batch progress includes `files_published` and `files_total`.
 Dehydration reports `checked_bytes` for the two full verification passes.
 Its `written_bytes` result counts the pointer bytes published. These checks use
 bounded ranges and apply the same cancellation and cleanup ownership as hydrate.
+
+`progress/read {job_id, repo_id, received_bytes}` independently reports cumulative
+consumed storage response-body bytes for the attempt. It includes metadata,
+partial failures and repeated bytes in resumed ranges; local reads, cache copies,
+connection setup and external commands do not contribute. Native SDK operations
+and the bundled pointer reader feed the same attempt-owned counter. Pointer
+reader frames identify their query ordinal, so concurrent previews and later
+transfers cannot inherit another query's traffic. SSH forwards these frames only
+to the pending owner. Main accepts monotonic safe-integer receipts and persists
+them independently of logical progress. An interrupted job shows its last recorded
+value; missing older receipts remain **Storage received: not recorded**. A retry
+starts a new counter and preserves the original attempt.
+
 `progress/complete` includes `outcome` for materialization: `completed`, `failed`
 or `cancelled`. Activity owns progress and cancellation across view changes.
 A transport error without a terminal result leaves the outcome unknown;
 reopening the working file establishes its representation. Resume/restart and
 long SSH request deadlines still require separate qualification.
+
+`progress/source {job_id, repo_id, position, source}` identifies each captured
+transfer input before publication. `position` is its zero-based position in the
+deduplicated literal selection. `source` contains `kind`, `hash`, logical `size`
+and `mode`: Crab BLAKE3 or LFS SHA-256 with a null mode, or an ordinary Git
+blob OID with its captured index mode. This is capture provenance, not a receipt
+that bytes were verified or published. Local and SSH forwarding use the owning
+pending operation; another repository, job or retired channel cannot contribute.
+
+The main Activity owner persists these immutable records in the existing profile
+database, separately from progress snapshots. A persistence failure requests
+cancellation and retains known records for **Reload Activity**. The main-only
+`activity_file_sources {job_id, start, limit}` reads 1–50 selection positions,
+including after restart with no open native repository. A missing record remains
+unknown. Retrying creates a new attempt with newly captured records; it cannot
+replace the earlier version. Pruning a finished job also removes its sources.
 
 The main process owns `media_open {repo_id, path, rev?, op_id?}` and
 `media_close {media_id}`. It captures a native file and exposes an opaque

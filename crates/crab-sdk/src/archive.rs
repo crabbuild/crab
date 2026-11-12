@@ -72,8 +72,9 @@ pub(crate) async fn open(
     let (send, entries) = mpsc::channel(1);
     let (ready, started) = oneshot::channel();
     let mut task = operations.start(options.operation.clone(), move |cancel| async move {
-        let operation = repository
-            .operation_with_limits(OperationKind::Archive, &cancel, limits)
+        let operation = options
+            .operation
+            .open_read(&repository, OperationKind::Archive, &cancel, limits)
             .await
             .map_err(remote_error)?;
         let cancellation = operation.cancellation().clone();

@@ -875,6 +875,30 @@ impl RemoteGitRepository {
         OperationContext::open(Arc::clone(&self.state), kind, cancellation, limits).await
     }
 
+    /// Start an independently budgeted operation with origin-body observations.
+    ///
+    /// Shared fetches credit their earliest live participant once. Cache hits
+    /// do not replay traffic; observations also include bytes rejected later.
+    pub async fn operation_with_read_progress(
+        &self,
+        kind: OperationKind,
+        cancellation: &CancellationToken,
+        limits: OperationLimits,
+        progress: crab_storage::ReadProgress,
+    ) -> Result<OperationContext> {
+        validate_operation_limits(limits)?;
+        let budget = crate::budget::OperationBudget::new(limits, self.state.runtime.clone())
+            .with_read_progress(progress);
+        OperationContext::open_with_budget(
+            Arc::clone(&self.state),
+            kind,
+            cancellation,
+            limits,
+            budget,
+        )
+        .await
+    }
+
     /// Resolve the immutable pack identities containing a batch of Git objects.
     ///
     /// This is a metadata-only join. Callers must still authenticate the

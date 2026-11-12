@@ -309,6 +309,10 @@ test("packaged desktop previews large pointers and materializes Crab and LFS con
     await expect(page.getByText("2 hydrated", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Activity", exact: true }).click();
     await expect(page.getByText("Verified and materialized", { exact: true })).toHaveCount(2);
+    const received = await call(page, "activity_file_transfers", {});
+    const hydrated = (received.jobs as Array<{ op: string; status: string; transfer?: { received_bytes?: number } }>).filter(job => job.op === "hydrate" && job.status === "done");
+    expect(hydrated).toHaveLength(2);
+    for (const job of hydrated) expect(job.transfer?.received_bytes).toBe(0);
     await expect(page.getByText("Verified and materialized", { exact: true }).first()).toBeInViewport();
     await page.screenshot({ path: test.info().outputPath("materialized-lfs-and-crab.png") });
 

@@ -233,12 +233,17 @@ async fn verify_native_reads(bucket: Option<String>) {
             .content_cache(crab_sdk::storage::ContentCache::new(&cache, 4 * 1024 * 1024).unwrap())
     };
     let client = builder.build().unwrap();
+    let (opening_progress, _) = crab_sdk::operation::ReadProgress::channel();
     let repository = client
         .open(crab_sdk::OpenOptions::remote(
             RepositoryLocator::new("repository").unwrap(),
         ))
+        .with_options(
+            crab_sdk::operation::Options::default().with_read_progress(opening_progress.clone()),
+        )
         .await
         .unwrap();
+    assert_eq!(opening_progress.received_bytes() > 0, cloud.is_some());
     let snapshot = repository
         .remote()
         .unwrap()
@@ -507,6 +512,8 @@ async fn verify_native_reads(bucket: Option<String>) {
     );
     #[cfg(feature = "files")]
     {
+        ranges::verify_origin_reads(&current, "z-lfs", second_bytes, cloud.is_some()).await;
+        ranges::verify_origin_reads(&current, "z-crab", second_bytes, cloud.is_some()).await;
         let hydrated = archive::collect(&current, crab_sdk::remote::ContentMode::Hydrated).await;
         let expected = archived
             .into_iter()

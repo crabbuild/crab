@@ -875,6 +875,140 @@ async fn dropping_an_unpublished_fill_releases_temporary_and_reservation() {
             .reservations_bytes,
         0
     );
+    assert_eq!(
+        open_catalog(&root)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM pending_files", [], |row| row
+                .get::<_, u64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn dead_fills_are_reclaimed_without_removing_unrecorded_temporaries() {
+    const CHILD_ROOT: &str = "CRAB_TEST_DEAD_FILL_ROOT";
+    if let Some(root) = std::env::var_os(CHILD_ROOT) {
+        use tokio::io::AsyncWriteExt as _;
+        let root = PathBuf::from(root);
+        let hash = crab_xet::hash::compute_data_hash(b"content").hex();
+        let destination = root.join("shards").join(&hash[..2]).join(hash);
+        let catalog = CacheCatalog::new(root.clone(), 1024 * 1024);
+        let pending = catalog
+            .reserve(&destination, 7)
+            .await
+            .unwrap()
+            .unwrap()
+            .pending_file()
+            .await
+            .unwrap();
+        let mut writer = pending.file().unwrap();
+        writer.write_all(b"content").await.unwrap();
+        writer.sync_all().await.unwrap();
+        drop(writer);
+        let temporary = std::fs::read_dir(destination.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(".tmp-")
+            })
+            .unwrap();
+        std::fs::write(root.with_extension("ready"), temporary.to_str().unwrap()).unwrap();
+        std::future::pending::<()>().await;
+        drop(pending);
+        return;
+    }
+
+    struct Child(std::process::Child);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    for (operation, replaced) in [
+        ("clean", false),
+        ("maintain", false),
+        ("clean", true),
+        ("maintain", true),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("cache");
+        let mut child = Child(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "catalog::tests::dead_fills_are_reclaimed_without_removing_unrecorded_temporaries",
+                ])
+                .env(CHILD_ROOT, &root)
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let ready = root.with_extension("ready");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready.exists() {
+            assert!(child.0.try_wait().unwrap().is_none(), "fill child exited");
+            assert!(
+                Instant::now() < deadline,
+                "fill child did not signal readiness"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let temporary = PathBuf::from(std::fs::read_to_string(ready).unwrap());
+        let foreign = temporary.with_file_name(".tmp-unrecorded");
+        std::fs::write(&foreign, b"retain").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&foreign, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let cancel = tokio_util::sync::CancellationToken::new();
+        crate::clean_cache(&root, false, &cancel).await.unwrap();
+        assert_eq!(std::fs::read(&temporary).unwrap(), b"content");
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
+        let moved = temporary.with_file_name("moved-payload");
+        if replaced {
+            std::fs::rename(&temporary, &moved).unwrap();
+            std::fs::write(&temporary, b"replacement").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600))
+                    .unwrap();
+            }
+        }
+        let before = CacheCatalog::read_only_stats(&root).unwrap();
+        let preview = crate::clean_cache(&root, true, &cancel).await.unwrap();
+        assert_eq!(preview.files_removed, u64::from(!replaced));
+        assert!(temporary.exists());
+        assert_eq!(CacheCatalog::read_only_stats(&root).unwrap(), before);
+        if operation == "clean" {
+            crate::clean_cache(&root, false, &cancel).await.unwrap();
+        } else {
+            CacheCatalog::new(root.clone(), 1024 * 1024)
+                .maintain()
+                .await
+                .unwrap();
+        }
+        if replaced {
+            assert_eq!(std::fs::read(&temporary).unwrap(), b"replacement");
+            assert_eq!(std::fs::read(&moved).unwrap(), b"content");
+        } else {
+            assert!(!temporary.exists(), "{operation} retained the dead fill");
+        }
+        assert_eq!(
+            CacheCatalog::read_only_stats(&root)
+                .unwrap()
+                .reservations_bytes,
+            0
+        );
+        assert_eq!(std::fs::read(&foreign).unwrap(), b"retain");
+    }
 }
 
 fn require_reservation_at_registration(root: &Path) {

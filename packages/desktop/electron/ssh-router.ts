@@ -71,7 +71,7 @@ const CACHEABLE_READ_METHODS = new Set([
 // never be returned from a stale cache as if they were the live checkout.
 const REPLAYABLE_READ_METHODS = new Set([...CACHEABLE_READ_METHODS, "git_worktree_list"]);
 const PROGRESS_METHODS = new Set([
-  "progress/line", "progress/transfer", "progress/complete", "progress/partial",
+  "progress/line", "progress/transfer", "progress/source", "progress/read", "progress/complete", "progress/partial",
   "crab/add_progress", "crab/push_step", "crab/push_progress",
 ]);
 

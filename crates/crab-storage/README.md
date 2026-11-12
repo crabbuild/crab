@@ -74,6 +74,14 @@ body reads and pending listings without retrying the cancellation.
 
 ### Read transport and admission
 
+`ReadProgress` observes physical origin response-body consumption through
+`ReadAdmission::received`, independently of `bytes` budget reservations. It
+counts partial failures, rejected chunks and repeated bytes in resumed ranges;
+headers, connection setup, local files and cache copies do not contribute.
+Counters are explicitly shared by their caller and use a bounded coalescing
+channel. Attaching observation preserves existing cancellation and admission.
+Managed HTTP gateways report the same receipts through `read_transport`.
+
 `read_prefix_target_identity` supplies resolved target proof only when every
 read under the requested prefix uses the bound transport. Overlapping scoped
 read or staging routes disable that proof: a routed child can otherwise make

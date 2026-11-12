@@ -18,7 +18,9 @@ mod files;
 mod native;
 pub(crate) use content::command::output as git_output;
 pub(crate) use content::diff;
-pub(crate) use content::{Dehydration, FileSource, MAX_COMPLETE_BYTES, ReadScope, Restoration};
+pub(crate) use content::{
+    Dehydration, FileSource, FileVersion, MAX_COMPLETE_BYTES, ReadScope, Restoration,
+};
 
 #[derive(Clone)]
 pub struct BrowseSession {
@@ -107,10 +109,10 @@ impl BrowseSession {
         scope.check()?;
         let cache = token_cache_directory()?;
         let managed = crab_sdk::managed::Options::new(&cache)?;
-        let content_root = crab_cache::default_cache_root().join("desktop-content");
+        let content_root = crate::cache::content_root();
         crab_cache::ensure_private_cache_directory(&content_root)?;
-        // Remote reconstruction requires an explicit finite cache; use the shared
-        // product root so diagnostics and cache clearing cover desktop reads too.
+        // Remote reconstruction uses the same product root inspected and cleaned
+        // by Settings; each storage identity retains a separate SDK namespace.
         let content = ContentCache::new(&content_root, 512 * 1024 * 1024)?;
         let mut builder = Client::builder().managed(managed).content_cache(content);
         let locator = if let Some(connection) = crate::storage_auth::current() {

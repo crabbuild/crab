@@ -28,6 +28,12 @@ pub enum Request {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Response {
+    /// Cumulative physical origin-body bytes; queries count range/chunk commands
+    /// from one on this pipe. None attributes retained-reader background work.
+    ReadProgress {
+        query: Option<u64>,
+        received_bytes: u64,
+    },
     Ready {
         size: u64,
         remote_url: Option<String>,

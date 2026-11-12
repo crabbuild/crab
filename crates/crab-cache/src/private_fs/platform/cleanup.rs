@@ -19,6 +19,59 @@ pub(in crate::private_fs) fn clean(
     Ok(report)
 }
 
+pub(in crate::private_fs) fn clean_namespaces(
+    directory: &Directory,
+    dry_run: bool,
+    cancel: &CancellationToken,
+) -> Result<CacheCleanReport> {
+    let mut report = CacheCleanReport {
+        dry_run,
+        ..Default::default()
+    };
+    let mut stream = DirectoryStream::new(directory)?;
+    while let Some(name) = stream.next_name()? {
+        check_cancelled(cancel)?;
+        if !name
+            .to_str()
+            .is_some_and(|name| crate::clean::hex(name, 64))
+        {
+            report.retained_entries += 1;
+            continue;
+        }
+        let result = (|| {
+            // Keep the namespace under the captured parent descriptor. A path
+            // reopen could clean a replacement tree after its parent moves.
+            let child = directory.child(&name, false)?;
+            let path = child.path.clone();
+            let pinned = crate::private_fs::PinnedRoot(child);
+            let mut removal = crate::catalog::PayloadRemoval::open(Some(&pinned), &path, dry_run)?;
+            pinned.clean(dry_run, cancel, &mut |relative, operation| {
+                removal.clean(relative, operation)
+            })
+        })();
+        match result {
+            Ok(child) => {
+                report.files_removed = report.files_removed.saturating_add(child.files_removed);
+                report.bytes_reclaimed =
+                    report.bytes_reclaimed.saturating_add(child.bytes_reclaimed);
+                report.retained_entries = report
+                    .retained_entries
+                    .saturating_add(child.retained_entries);
+                report.busy_entries = report.busy_entries.saturating_add(child.busy_entries);
+                report.unsafe_entries = report.unsafe_entries.saturating_add(child.unsafe_entries);
+            }
+            Err(CacheError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(CacheError::Io(error)) if error.kind() == io::ErrorKind::WouldBlock => {
+                report.busy_entries += 1
+            }
+            Err(CacheError::UnsafeRoot { .. }) => report.unsafe_entries += 1,
+            Err(error) => return Err(error),
+        }
+    }
+    check_cancelled(cancel)?;
+    Ok(report)
+}
+
 fn check_cancelled(cancel: &CancellationToken) -> Result<()> {
     if cancel.is_cancelled() {
         Err(CacheError::Cancelled)
@@ -48,18 +101,29 @@ fn clean_directory(
             EntryKind::Directory => directory
                 .child(&name, false)
                 .and_then(|child| clean_directory(&child, &relative, report, cancel, remove)),
-            EntryKind::Payload => {
+            EntryKind::Payload | EntryKind::Temporary => {
                 let name = component_name(&name)?;
                 // Cancellation is checked again immediately before mutation.
                 check_cancelled(cancel)?;
-                remove(&relative, &mut || {
+                remove(&relative, &mut |identity: Option<
+                    &crate::private_fs::FileIdentity,
+                >| {
                     check_cancelled(cancel)?;
-                    directory.remove_payload(&name, report.dry_run).map(Some)
+                    // A temporary name is a candidate, never deletion authority.
+                    // Its catalog must supply the exact captured file identity.
+                    if identity.is_none() && matches!(entry_kind(&relative), EntryKind::Temporary) {
+                        return Ok(None);
+                    }
+                    directory.remove_payload_if(&name, report.dry_run, &mut |file| {
+                        identity.map_or(Ok(true), |identity| identity.matches(file))
+                    })
                 })
                 .map(|removed| {
                     if let Some(bytes) = removed {
                         report.files_removed += 1;
                         report.bytes_reclaimed = report.bytes_reclaimed.saturating_add(bytes);
+                    } else {
+                        report.retained_entries += 1;
                     }
                 })
             }
@@ -104,9 +168,31 @@ mod tests {
             Path::new(""),
             &mut report,
             &CancellationToken::new(),
-            &mut |_, operation| operation(),
+            &mut |_, operation| operation(None),
         )
         .unwrap();
+        assert_eq!(report.files_removed, 1);
+        assert!(root.join(&relative).exists());
+        assert!(!moved.join(relative).exists());
+    }
+
+    #[test]
+    fn swapped_namespace_parent_cannot_redirect_payload_cleanup() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("cache");
+        let relative = format!("{}/chunks/ab/{}", "cd".repeat(32), "ab".repeat(32));
+        TemporaryFile::new(&root, &root.join(&relative))
+            .unwrap()
+            .commit()
+            .unwrap();
+        let pinned = Directory::root(&root, false).unwrap();
+        let moved = temp.path().join("moved");
+        std::fs::rename(&root, &moved).unwrap();
+        TemporaryFile::new(&root, &root.join(&relative))
+            .unwrap()
+            .commit()
+            .unwrap();
+        let report = clean_namespaces(&pinned, false, &CancellationToken::new()).unwrap();
         assert_eq!(report.files_removed, 1);
         assert!(root.join(&relative).exists());
         assert!(!moved.join(relative).exists());

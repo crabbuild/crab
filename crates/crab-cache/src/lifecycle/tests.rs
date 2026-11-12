@@ -197,6 +197,23 @@ fn preview_is_nonmutating_and_ignores_coordination_markers() {
     drop(owner);
 }
 
+#[cfg(unix)]
+#[test]
+fn nested_coordination_markers_remain_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TestRoot::new();
+    let path = dir.path().join("namespace");
+    std::fs::create_dir(&path).unwrap();
+    let cancel = CancellationToken::new();
+    let owner = CacheUseGuard::acquire(&path, &cancel).unwrap();
+    drop(owner);
+    let _clean = CacheCleanGuard::acquire(&path, &cancel).unwrap();
+    for suffix in [USE_LOCK_SUFFIX, CLEAN_LOCK_SUFFIX] {
+        let metadata = std::fs::metadata(lock_path(&path, suffix).unwrap()).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    }
+}
+
 #[test]
 fn cancellation_releases_admission_and_preserves_unremoved_data() {
     let dir = TestRoot::new();

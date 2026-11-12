@@ -2,6 +2,54 @@ use crab_sdk::operation::{ReadLimits, ReadOptions};
 use crab_sdk::remote::{ContentMode, HistoryTraversal, PageRequest, Snapshot};
 use crab_sdk::{ErrorKind, GitPath, Revision};
 
+#[cfg(feature = "files")]
+pub(super) async fn verify_origin_reads(
+    snapshot: &Snapshot,
+    name: &str,
+    original: &[u8],
+    cloud: bool,
+) {
+    use crab_sdk::operation::{Options, ReadProgress};
+
+    let (progress, _) = ReadProgress::channel();
+    let options = ReadOptions::default()
+        .with_operation(Options::default().with_read_progress(progress.clone()))
+        .with_range(1..17)
+        .unwrap();
+    let mut totals = Vec::new();
+    for _ in 0..2 {
+        let mut stream = snapshot
+            .open_file(GitPath::new(name.as_bytes().to_vec()).unwrap())
+            .with_options(options.clone())
+            .await
+            .unwrap();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = stream.next().await.unwrap() {
+            bytes.extend_from_slice(&chunk);
+        }
+        stream.close().await.unwrap();
+        assert_eq!(bytes, original[1..17]);
+        totals.push(progress.received_bytes());
+    }
+    let cold = totals[0];
+    let warm = totals[1] - totals[0];
+    if cloud {
+        assert!(cold > 0);
+        if name == "z-lfs" {
+            assert!(cold >= original.len() as u64);
+        }
+        assert!(
+            warm <= cold,
+            "warm origin traffic {warm} exceeded cold {cold}"
+        );
+    } else {
+        assert_eq!((cold, warm), (0, 0));
+    }
+    println!(
+        "origin-read-proof path={name} cold_bytes={cold} warm_bytes={warm} logical_range_bytes=16"
+    );
+}
+
 fn invalid<T>(result: crab_sdk::Result<T>) {
     assert_eq!(result.err().unwrap().kind(), ErrorKind::InvalidInput);
 }

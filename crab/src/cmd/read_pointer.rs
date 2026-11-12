@@ -6,6 +6,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use crab_lfs::{LfsReadCache, LfsReadSession};
 use crab_metadata::file_index_lookup::SharedFileIndexLookup;
 use crab_read::PointerReader;
+use crab_storage::ReadProgress;
 use crab_types::pointer_read::{Request, Response};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio_util::sync::CancellationToken;
@@ -57,7 +58,8 @@ pub async fn run(cancel: &CancellationToken) -> Result<()> {
         return emit(&mut output, Response::Closed).await;
     }
     let opening_cancel = cancel.child_token();
-    let opening = Session::open(&bytes, &opening_cancel);
+    let (read_progress, _) = ReadProgress::channel();
+    let opening = Session::open(&bytes, &opening_cancel, read_progress.clone());
     tokio::pin!(opening);
     let mut interruption = None;
     let opened = tokio::select! {
@@ -99,10 +101,25 @@ pub async fn run(cancel: &CancellationToken) -> Result<()> {
             },
         )
         .await?;
-        serve(&mut session, &mut input, &mut output, cancel).await
+        serve(
+            &mut session,
+            &mut input,
+            &mut output,
+            cancel,
+            &read_progress,
+        )
+        .await
     }
     .await;
     let closed = session.close().await;
+    emit(
+        &mut output,
+        Response::ReadProgress {
+            query: None,
+            received_bytes: read_progress.received_bytes(),
+        },
+    )
+    .await?;
     let terminal = result.and(closed);
     match terminal {
         Ok(()) => emit(&mut output, Response::Closed).await,
@@ -115,11 +132,19 @@ async fn serve<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin>(
     input: &mut Input<R>,
     output: &mut W,
     cancel: &CancellationToken,
+    read_progress: &ReadProgress,
 ) -> Result<()> {
+    let mut receipts = read_progress.subscribe();
+    let mut reported = 0;
+    let mut query_id = 0u64;
     loop {
         let command = tokio::select! {
             () = cancel.cancelled() => break,
             command = input.next() => command?,
+            Some(_) = receipts.next() => {
+                report_reads(output, read_progress, None, &mut reported).await?;
+                continue;
+            }
         };
         let Some(command) = command else {
             break;
@@ -131,29 +156,52 @@ async fn serve<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin>(
             // failure already acknowledges completion; do not enqueue another reply.
             Request::Cancel => continue,
             query @ (Request::Range { .. } | Request::Chunks { .. }) => {
+                // Flush background traffic before admitting a new query. This
+                // ordered boundary prevents a later caller inheriting old bytes.
+                report_reads(output, read_progress, None, &mut reported).await?;
+                query_id = query_id
+                    .checked_add(1)
+                    .ok_or_else(|| invalid("reader query counter overflow"))?;
                 let token = cancel.child_token();
                 let work = session.query(query, &token);
                 tokio::pin!(work);
                 let mut stop = false;
-                let result = tokio::select! {
-                    biased;
-                    result = &mut work => result,
-                    () = cancel.cancelled() => {
-                        token.cancel();
-                        stop = true;
-                        work.await
-                    }
-                    command = input.next() => {
-                        token.cancel();
-                        let result = work.await;
-                        match command? {
-                            None | Some(Request::Close) => stop = true,
-                            Some(Request::Cancel) => {},
-                            _ => return Err(invalid("only cancel or close may interrupt a query")),
+                let mut clock = tokio::time::interval(std::time::Duration::from_millis(80));
+                clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                let result = loop {
+                    tokio::select! {
+                        biased;
+                        result = &mut work => break result,
+                        () = cancel.cancelled() => {
+                            token.cancel();
+                            stop = true;
+                            break work.await
                         }
-                        result
+                        command = input.next() => {
+                            token.cancel();
+                            let result = work.await;
+                            match command? {
+                                None | Some(Request::Close) => stop = true,
+                                Some(Request::Cancel) => {},
+                                _ => return Err(invalid("only cancel or close may interrupt a query")),
+                            }
+                            break result
+                        }
+                    _ = clock.tick() => {
+                        if let Err(error) = report_reads(output, read_progress, Some(query_id), &mut reported).await {
+                            // A broken progress pipe still owns in-flight proof
+                            // workers. Drain them before the process can exit.
+                            token.cancel();
+                            let drained = work.await;
+                            return match drained {
+                                Err(read) if !cancelled(&read, &token) => Err(read),
+                                _ => Err(error),
+                            };
+                        }
+                    },
                     }
                 };
+                report_reads(output, read_progress, Some(query_id), &mut reported).await?;
                 if stop {
                     // Cancellation is advisory; preserve a real integrity/transport
                     // failure after the in-flight worker has fully drained.
@@ -176,6 +224,27 @@ async fn serve<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin>(
     Ok(())
 }
 
+async fn report_reads(
+    output: &mut (impl AsyncWrite + Unpin),
+    progress: &ReadProgress,
+    query: Option<u64>,
+    reported: &mut u64,
+) -> Result<()> {
+    let received_bytes = progress.received_bytes();
+    if received_bytes != *reported {
+        emit(
+            output,
+            Response::ReadProgress {
+                query,
+                received_bytes,
+            },
+        )
+        .await?;
+        *reported = received_bytes;
+    }
+    Ok(())
+}
+
 enum Pointer {
     Crab(crab_types::pointer::Pointer),
     Lfs(crab_git::LfsPointer),
@@ -191,10 +260,16 @@ struct Session {
     proofs: LfsReadCache,
     remote: Option<PointerReader>,
     lookup: Option<SharedFileIndexLookup>,
+    read_progress: ReadProgress,
+    origin_stop: CancellationToken,
 }
 
 impl Session {
-    async fn open(bytes: &[u8], cancel: &CancellationToken) -> Result<Self> {
+    async fn open(
+        bytes: &[u8],
+        cancel: &CancellationToken,
+        read_progress: ReadProgress,
+    ) -> Result<Self> {
         if bytes.len() > crab_git::MAX_LFS_POINTER_SIZE {
             return Err(invalid("pointer exceeds its size limit"));
         }
@@ -235,6 +310,8 @@ impl Session {
             proofs: LfsReadCache::default(),
             remote: None,
             lookup: None,
+            read_progress,
+            origin_stop: cancel.clone(),
         })
     }
 
@@ -301,7 +378,9 @@ impl Session {
 
     async fn ensure_remote(&mut self, cancel: &CancellationToken) -> Result<()> {
         if self.remote.is_none() {
-            let (hydrator, lookup) = remote_capture(&self.config, cancel).await?;
+            let (hydrator, lookup) =
+                remote_capture(&self.config, cancel, &self.read_progress, &self.origin_stop)
+                    .await?;
             self.lookup = Some(lookup);
             self.remote = Some(PointerReader::new(
                 Some(hydrator),
@@ -453,6 +532,8 @@ fn cancelled(error: &CrabError, token: &CancellationToken) -> bool {
 async fn remote_capture(
     config: &Config,
     cancel: &CancellationToken,
+    read_progress: &ReadProgress,
+    origin_stop: &CancellationToken,
 ) -> Result<(Arc<crab_read::ShardHydrator>, SharedFileIndexLookup)> {
     let url = config
         .remote_url
@@ -489,6 +570,16 @@ async fn remote_capture(
                 .await?;
         crate::storage::StoreLayout::new(resolved.store, resolved.prefix)
     };
+    let observed = layout
+        .store()
+        .as_storage()
+        .clone()
+        .with_read_admission(read_progress.read_admission(origin_stop.clone()));
+    let layout = crate::storage::StoreLayout::with_global_prefix(
+        crate::storage::Store::from_storage(observed),
+        layout.repo_prefix().to_owned(),
+        layout.global_prefix().to_owned(),
+    );
     let availability = crate::cmd::hydrate_restore::build_restore_availability(
         config,
         layout.store(),
