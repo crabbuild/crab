@@ -6,7 +6,7 @@
  *   for the Health & Diagnostics panel.
  */
 
-import type { DaemonClient } from "./daemon-client";
+import type { DaemonApi } from "./daemon-client";
 import type { IpcMainLike } from "./ipc-bridge";
 import type { DaemonMetricsSnapshot } from "./daemon-metrics";
 
@@ -18,7 +18,7 @@ export interface DaemonMetricsIpcOptions {
   /** Electron ipcMain instance. */
   ipcMain: IpcMainLike;
   /** The DaemonClient instance for querying daemon metrics. */
-  client: DaemonClient;
+  client: DaemonApi;
 }
 
 // ---------------------------------------------------------------------------

@@ -21,14 +21,17 @@ flowchart LR
 The daemon owns ordinary local shells and their foreground agents. Electron
 owns routing and renderer attachments. Closing an app window, quitting, or
 upgrading disconnects the client without killing daemon PTYs. The next app
-instance probes and reuses the live daemon even when its application entry path
-has changed. An explicitly requested in-process terminal remains ephemeral.
+instance discovers live owners and routes each existing session back to its daemon.
+New sessions use the current application's runtime, so deleting an older app bundle
+does not block daemon creation. An explicitly requested in-process terminal remains ephemeral.
 The packaged daemon launches through its logical
 `app.asar/dist-electron/daemon/daemon-main.cjs` entry. Electron resolves its native
 modules into the unpacked files; using the physical `.unpacked` entry makes
 node-pty expand its helper path twice and prevents macOS shell creation.
 Live daemon replacement is deferred while PTYs exist: the adopted-fd backend
-cannot resize those PTYs. Application updates can reuse the existing owner.
+cannot resize those PTYs. Application updates retain existing owners and start
+a current runtime for new sessions. Owner-specific disconnects only close that
+owner's renderer attachments.
 
 Repository and task surfaces compose `TerminalView`, including its emulator,
 input routing, toolbar, and persistence. The toolbar's Daemon/Normal selection
@@ -37,8 +40,14 @@ Normal terminals use the same emulator capabilities with Electron-owned lifetime
 Daemon unavailability disables durable creation and leaves explicit normal creation
 available. Daemon tab close detaches; normal tab close terminates.
 
-Daemon control files remain home-scoped. Unix socket paths that fit retain
-the address shipped in v2.0.0-alpha.1. Longer paths use a hash of the complete
+Daemon control files remain home-scoped under `daemon/runtimes/<entry-path-hash>/`.
+The app discovers these owners and the root endpoint shipped in v2.0.0-alpha.1.
+Only existing sessions route to previous owners; they are never killed to make
+room for new terminals. Quota configuration stays at `daemon/quotas.json` and
+applies to each owner. Histories belong to each runtime, preventing cold restore
+of another owner's live process. On startup, atomic directory moves claim history
+from dead owners (including alpha.1's global history); live histories stay put.
+Unix socket paths that fit retain their filesystem address. Longer paths use a hash of the complete
 control path in a private, user-owned directory under `/tmp`; tokens and PID
 metadata stay in the home directory. Startup rejects public or symlinked
 socket directories. Clients, stale cleanup and daemon shutdown resolve the

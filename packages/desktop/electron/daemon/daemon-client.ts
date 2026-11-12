@@ -62,6 +62,11 @@ export interface DaemonClientOptions {
   onColdRestoreAvailable?: (sessionId: string, payload: ColdRestorePayload) => void;
 }
 
+export type DaemonApi = Pick<DaemonClient,
+  "isConnected" | "ensureConnected" | "request" | "notify" | "getAgentSessions" |
+  "disconnect" | "mapSessionId" | "getDaemonSessionId" | "unmapSessionId"
+>;
+
 interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (reason: Error) => void;

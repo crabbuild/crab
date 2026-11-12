@@ -1,7 +1,7 @@
 import { test, expect, _electron as electron, type Page } from "@playwright/test";
 import { createServer } from "vite";
 import { createRequire } from "node:module";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
@@ -30,7 +30,13 @@ test("real terminal components recover processes and nested layouts across owner
   if (!url) throw new Error("Terminal fixture renderer did not start");
   const args = [path.join(desktop, "tests/fixtures/terminal-recovery/main.cjs"), "--fixture-root", root, "--renderer-url", url];
   const launch = (extra: string[] = []) => electron.launch({ executablePath: runtimeRequire("electron"), args: [...args, ...extra] });
-  let app = await launch();
+  const oldRuntime = path.join(root, "old-runtime");
+  const oldEntry = path.join(oldRuntime, "daemon/daemon-main.cjs");
+  cpSync(path.join(desktop, "dist-electron/daemon"), path.dirname(oldEntry), { recursive: true });
+  mkdirSync(path.join(oldRuntime, "node_modules"), { recursive: true });
+  cpSync(path.join(desktop, "node_modules/node-pty"), path.join(oldRuntime, "node_modules/node-pty"), { recursive: true });
+  symlinkSync(path.join(desktop, "node_modules/@xterm"), path.join(oldRuntime, "node_modules/@xterm"), process.platform === "win32" ? "junction" : "dir");
+  let app = await launch(["--daemon-entry", oldEntry]);
   const proof = path.join(root, "foreground.jsonl");
   const records = () => existsSync(proof) ? readFileSync(proof, "utf8").trim().split("\n").map(line => JSON.parse(line)) : [];
   try {
@@ -74,6 +80,9 @@ test("real terminal components recover processes and nested layouts across owner
     const checkpoint = path.join(stateDir, "scrollback", `${layout.tabs[0].id}.bin`);
     rmSync(checkpoint, { force: true });
     mkdirSync(checkpoint);
+    // Remove the owned runtime's actual helper, not merely a JS wrapper.
+    // Windows locks loaded DLLs; the new endpoint still proves owner separation there.
+    if (process.platform !== "win32") rmSync(oldRuntime, { recursive: true, force: true });
     const entry = path.join(root, "upgraded-daemon.cjs");
     writeFileSync(entry, `require(${JSON.stringify(path.join(desktop, "dist-electron/daemon/daemon-main.cjs"))});`);
     app = await launch(["--daemon-entry", entry]);
@@ -84,6 +93,12 @@ test("real terminal components recover processes and nested layouts across owner
     await page.keyboard.type("after-application-upgrade");
     await page.keyboard.press("Enter");
     await expect.poll(() => records().find(value => value.input === "after-application-upgrade")?.pid).toBe(pid);
+    await page.getByRole("button", { name: "New terminal", exact: true }).click();
+    const newProof = path.join(root, "new-daemon.jsonl");
+    await expect(page.locator(".xterm-helper-textarea:focus")).toHaveCount(1);
+    await page.keyboard.type([process.execPath, path.join(desktop, "tests/fixtures/terminal-recovery/agent.cjs"), newProof].map(quote).join(" "));
+    await page.keyboard.press("Enter");
+    await expect.poll(() => existsSync(newProof) && readFileSync(newProof, "utf8").includes('"input":"ready"')).toBe(true);
     await page.screenshot({ path: test.info().outputPath("terminal-recovery.png") });
     await page.getByRole("button", { name: "Toggle task terminal", exact: true }).click();
     await expect(page.locator(".xterm-helper-textarea:visible")).toHaveCount(1);
@@ -94,10 +109,17 @@ test("real terminal components recover processes and nested layouts across owner
   } finally {
     await app.close();
     await server.close();
-    const pidFile = path.join(root, "daemon/daemon-v2.pid");
-    if (existsSync(pidFile)) {
+    const runtimes = path.join(root, "daemon/runtimes");
+    const directories = [path.join(root, "daemon"), ...(existsSync(runtimes) ? readdirSync(runtimes).map(name => path.join(runtimes, name)) : [])];
+    for (const directory of directories) {
+      const pidFile = path.join(directory, "daemon-v2.pid");
+      if (!existsSync(pidFile)) continue;
       const { pid } = JSON.parse(readFileSync(pidFile, "utf8"));
       try { process.kill(pid, "SIGTERM"); } catch {}
+      await expect.poll(() => {
+        try { process.kill(pid, 0); return false; }
+        catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
+      }, { timeout: 10_000 }).toBe(true);
     }
     rmSync(root, { recursive: true, force: true, maxRetries: 5 });
   }

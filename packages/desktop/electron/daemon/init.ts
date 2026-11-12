@@ -12,7 +12,8 @@ import * as path from "node:path";
 import * as os from "node:os";
 
 import { DaemonSpawner } from "./daemon-spawner";
-import { DaemonClient } from "./daemon-client";
+import { DaemonClient, type DaemonApi } from "./daemon-client";
+import { DaemonSessions, daemonDirectory } from "./daemon-sessions";
 import { CircuitBreaker } from "./circuit-breaker";
 import { AutoRespawn } from "./auto-respawn";
 import { createDaemonBridge } from "./daemon-bridge";
@@ -68,7 +69,7 @@ export interface InitDaemonOptions {
 export interface DaemonSubsystem {
   /** Whether the daemon connected successfully at startup. */
   daemonReady: boolean;
-  daemonClient: DaemonClient;
+  daemonClient: DaemonApi;
   daemonSpawner: DaemonSpawner;
   autoRespawn: AutoRespawn;
   circuitBreaker: CircuitBreaker;
@@ -96,7 +97,7 @@ export async function initializeDaemonSubsystem(
 ): Promise<DaemonSubsystem> {
   const { ipcMain, app, getMainWindow, getWorkspacePath, log } = opts;
 
-  const socketDir =
+  const controlRoot =
     opts.socketDir ?? path.join(os.homedir(), ".crab", "desktop", "daemon");
 
   // Resolve the daemon entry path. If an explicit override is provided (tests
@@ -151,9 +152,9 @@ export async function initializeDaemonSubsystem(
       }));
       ipcMain.handle("crab:agent-sessions", () => []);
 
-      const noopSpawner = new DaemonSpawner({ socketDir, entryPath: "" });
+      const noopSpawner = new DaemonSpawner({ socketDir: controlRoot, entryPath: "" });
       const noopClient = new DaemonClient({
-        socketDir,
+        socketDir: controlRoot,
         daemonEntryPath: "",
         onSessionData: () => {},
         onSessionExit: () => {},
@@ -204,6 +205,7 @@ export async function initializeDaemonSubsystem(
 
   // After the early return above, daemonEntryPath is guaranteed non-null.
   const resolvedEntryPath: string = daemonEntryPath!;
+  const socketDir = daemonDirectory(controlRoot, resolvedEntryPath);
 
   // -------------------------------------------------------------------------
   // Spawner + Client
@@ -241,8 +243,13 @@ export async function initializeDaemonSubsystem(
     });
   }
 
-  const daemonClient = new DaemonClient({
+  const daemonClient = new DaemonSessions({
     socketDir,
+    controlRoot,
+    log,
+    onSessionsDisconnected: sessionIds => {
+      for (const sessionId of sessionIds) daemonBridge.synthesizeExitEvent(sessionId, -1);
+    },
     daemonEntryPath: resolvedEntryPath,
     onSessionData: (sessionId, data) => {
       bridgeHandleData?.(sessionId, data);
@@ -310,7 +317,7 @@ export async function initializeDaemonSubsystem(
   const autoRespawn = new AutoRespawn(
     {
       spawner: daemonSpawner,
-      getActiveSessionIds: () => daemonBridge.getDaemonSessionIds(),
+      getActiveSessionIds: () => daemonBridge.getDaemonSessionIds().filter(id => daemonClient.ownsCurrentSession(id)),
       synthesizeExitEvent: (sessionId: string, code: number) => {
         // Delegate to the bridge so the renderer receives crab:term-exit with
         // reason: "daemon-disconnected" and the session mappings are cleaned up.
@@ -353,15 +360,14 @@ export async function initializeDaemonSubsystem(
   // Initialize PTY mode (spawns daemon if needed, registers crab:pty-mode)
   // -------------------------------------------------------------------------
 
-  // Detect and handle a path mismatch before spawning. If the PID file
-  // records a different entry path, preserve live terminals. ensureRunning()
-  // can retire a missing runtime only after the daemon atomically accepts idle shutdown.
+  // Inspect the shipped root endpoint without replacing its live owner.
+  // New sessions use the current runtime's separate control directory.
   let pathMismatchResult: PathMismatchResult;
   try {
     pathMismatchResult = detectAndHandlePathMismatch({
-      pidPath: daemonSpawner.pidPath,
-      socketPath: daemonSpawner.socketPath,
-      tokenPath: daemonSpawner.tokenPath,
+      pidPath: path.join(controlRoot, "daemon-v2.pid"),
+      socketPath: path.join(controlRoot, "daemon-v2.sock"),
+      tokenPath: path.join(controlRoot, "daemon-v2.token"),
       currentEntryPath: resolvedEntryPath,
       log,
     });

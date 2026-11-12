@@ -7,7 +7,7 @@
  * Does NOT register IPC handlers — TermRouter owns that.
  */
 
-import type { DaemonClient } from "./daemon-client";
+import type { DaemonApi } from "./daemon-client";
 import { snapshotReplayData, type CreateOrAttachResult, type ColdRestorePayload } from "./protocol";
 import { reconcileOnStartup } from "./startup-reconciliation";
 import type { SessionInfo, TerminalSnapshot } from "./types";
@@ -61,7 +61,7 @@ export interface SpawnPayload {
 
 export interface DaemonBridgeOptions {
   /** The DaemonClient instance for communicating with the daemon. */
-  client: DaemonClient;
+  client: DaemonApi;
   /** Returns the current main BrowserWindow (or null if destroyed). */
   getMainWindow: () => BrowserWindowLike | null;
   /** The Electron app instance for hooking before-quit. */

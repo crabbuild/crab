@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import type { DaemonClient } from "./daemon/daemon-client";
+import type { DaemonApi } from "./daemon/daemon-client";
 import type { createDaemonBridge } from "./daemon/daemon-bridge";
 import type { IpcMainLike, TermRouter } from "./term-router";
 import { snapshotReplayData, type CreateOrAttachResult } from "./daemon/protocol";
@@ -100,7 +100,7 @@ export function toDaemonSessionSummary(
 
 export function registerTerminalSessionIpc(
   ipcMain: IpcMainLike,
-  client: DaemonClient,
+  client: DaemonApi,
   bridge: ReturnType<typeof createDaemonBridge>,
   router: TermRouter,
 ) {

@@ -88,7 +88,9 @@ Configurable scrollback buffer:
 
 Ordinary local terminals run in the PTY daemon. A command or agent started in
 one of these shells continues when the app closes or updates. Reopening the
-repository attaches to the same process. **Normal** in the toolbar mode menu or
+repository attaches to the same process. If an update removes the older app bundle,
+existing terminals keep their daemon and new terminals use the current runtime.
+Both Daemon and Normal remain available together. **Normal** in the toolbar mode menu or
 **New normal terminal** in the context menu creates an ephemeral terminal.
 Saved normal tabs reopen as fresh shells in their original mode, including when
 the daemon is unavailable. Saved startup commands and credentials are not replayed.

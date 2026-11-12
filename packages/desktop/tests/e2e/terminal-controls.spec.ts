@@ -1,7 +1,7 @@
 import { test, expect, _electron as electron, type Page } from "@playwright/test";
 import { createServer } from "vite";
 import { createRequire } from "node:module";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 
@@ -26,7 +26,8 @@ test("terminal controls keep normal and daemon lifetimes distinct with shared in
     ? readFileSync(proof(name), "utf8").trim().split("\n").map(line => JSON.parse(line)) : [];
   const quote = (value: string) => process.platform === "win32" ? `"${value}"` : `'${value.replace(/'/g, "'\\''")}'`;
   async function startAgent(page: Page, name: string) {
-    await page.locator(".xterm-helper-textarea:visible").last().focus();
+    await page.locator(".xterm:visible").last().click();
+    await expect(page.locator(".xterm-helper-textarea:visible").last()).toBeFocused();
     await page.keyboard.type([process.execPath, path.join(desktop, "tests/fixtures/terminal-recovery/agent.cjs"), proof(name)].map(quote).join(" "));
     await page.keyboard.press("Enter");
     await expect.poll(() => records(name).find(value => value.input === "ready")?.pid).toBeTruthy();
@@ -121,10 +122,17 @@ test("terminal controls keep normal and daemon lifetimes distinct with shared in
   } finally {
     await app.close();
     await server.close();
-    const pidFile = path.join(root, "daemon/daemon-v2.pid");
-    if (existsSync(pidFile)) {
+    const runtimes = path.join(root, "daemon/runtimes");
+    const directories = [path.join(root, "daemon"), ...(existsSync(runtimes) ? readdirSync(runtimes).map(name => path.join(runtimes, name)) : [])];
+    for (const directory of directories) {
+      const pidFile = path.join(directory, "daemon-v2.pid");
+      if (!existsSync(pidFile)) continue;
       const { pid } = JSON.parse(readFileSync(pidFile, "utf8"));
       try { process.kill(pid, "SIGTERM"); } catch {}
+      await expect.poll(() => {
+        try { process.kill(pid, 0); return false; }
+        catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
+      }, { timeout: 10_000 }).toBe(true);
     }
     rmSync(root, { recursive: true, force: true, maxRetries: 5 });
   }

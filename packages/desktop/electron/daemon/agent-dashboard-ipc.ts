@@ -8,7 +8,7 @@
  *   onAgentStateChange callback to the renderer process.
  */
 
-import type { DaemonClient } from "./daemon-client";
+import type { DaemonApi } from "./daemon-client";
 import type { AgentActivityState } from "./types";
 import type { IpcMainLike, BrowserWindowLike } from "./ipc-bridge";
 
@@ -31,7 +31,7 @@ export interface AgentDashboardIpcOptions {
   /** Electron ipcMain instance. */
   ipcMain: IpcMainLike;
   /** The DaemonClient instance for querying agent sessions. */
-  client: DaemonClient;
+  client: DaemonApi;
   /** Returns the current main BrowserWindow (or null if destroyed). */
   getMainWindow: () => BrowserWindowLike | null;
 }
