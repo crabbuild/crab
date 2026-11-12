@@ -18,7 +18,10 @@ for (const kind of ["crab", "lfs"] as const) {
   const outcomes = kind === "crab" ? ["cancel", "native-crash", "app-crash", "cleanup", "budget", "missing", "corrupt"] as const : ["cancel", "native-crash", "app-crash", "missing", "corrupt"] as const;
   for (const outcome of outcomes) {
     const contentFailure = outcome === "missing" || outcome === "corrupt";
-    test(outcome === "budget" ? "SDK identities and CLI share the saved desktop retention budget" : outcome === "cleanup" ? "SDK cache cleanup removes verified payloads and preserves retained state" : `SDK ${kind} ${contentFailure ? "content failure" : "partial response"} ${outcome} retries exact content`, async () => {
+    const title = outcome === "budget" ? "SDK identities and CLI share the saved desktop retention budget"
+      : outcome === "cleanup" ? "SDK cache cleanup removes verified payloads and preserves retained state"
+      : `SDK ${kind} ${contentFailure ? "content failure" : "partial response"} ${outcome} retries exact content`;
+    test(title, async () => {
       const descriptor = process.env.CRAB_DESKTOP_STORAGE_IDENTITY_FIXTURE;
       test.skip(!descriptor || (outcome === "native-crash" && process.platform === "win32"), "Requires the owned storage fixture; native process lookup requires POSIX");
       test.setTimeout(120_000);
