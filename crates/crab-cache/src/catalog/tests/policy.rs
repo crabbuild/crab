@@ -102,6 +102,27 @@ async fn busy_maintenance_keeps_the_previous_policy() {
 }
 
 #[tokio::test]
+async fn rejected_policy_write_preserves_the_saved_limit() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("cache");
+    let catalog = CacheCatalog::new(root.clone(), None);
+    catalog.set_retention_budget(Some(1024)).await.unwrap();
+    open_catalog(&root)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER reject_policy BEFORE UPDATE ON catalog_meta
+             BEGIN SELECT RAISE(ABORT, 'policy record unavailable'); END;",
+        )
+        .unwrap();
+
+    let rejected = catalog.set_retention_budget(Some(0)).await.is_err();
+    let saved = CacheCatalog::read_only_stats(&root)
+        .unwrap()
+        .retention_budget_bytes;
+    assert_eq!((rejected, saved), (true, Some(1024)));
+}
+
+#[tokio::test]
 async fn zero_budget_preserves_live_readers_and_reservations() {
     const MIB: u64 = 1024 * 1024;
     let temporary = tempfile::tempdir().unwrap();

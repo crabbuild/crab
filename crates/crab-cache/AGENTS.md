@@ -53,6 +53,11 @@ clean previews read-only; admission, ordinary maintenance and explicit cleanup
 share recovery. Preserve unrecorded/replaced files and the
 payload cleanup contract when a disposable index is unavailable.
 
+Identity insertion and explicit root-budget changes use FULL WAL commits;
+disposable accounting stays NORMAL. Do not expose a payload writer before its
+identity commit succeeds. Process-death proof does not establish filesystem
+rename/unlink durability through power loss.
+
 ## Invariants
 
 - Xorb range resolution, identity verification, and reads share one open file. The size-aware resolver accepts caller policy but validates its returned bounds; `get_xorb_range_if_present` keeps exact-range semantics.

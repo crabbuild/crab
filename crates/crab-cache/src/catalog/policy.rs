@@ -22,6 +22,11 @@ impl CacheCatalog {
             }
             let path = root.join(CATALOG_FILE);
             let mut connection = open_catalog(&pinned, &path)?;
+            // A confirmed user policy must survive more than process exit.
+            // Keep disposable accounting on NORMAL; sync this authority commit.
+            connection
+                .pragma_update(None, "synchronous", "FULL")
+                .map_err(|source| index_error(&path, source))?;
             let transaction = connection
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(|source| index_error(&path, source))?;

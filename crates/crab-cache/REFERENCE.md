@@ -103,7 +103,12 @@ dies following rename. A missing or unusable journal retains temporaries while
 preserving the shipped payload-cleanup-without-a-usable-index contract.
 
 Creation interrupted before identity registration can still leave empty,
-unclaimed files; recovery does not guess their ownership. Anonymous streams
+unclaimed files; recovery does not guess their ownership. A packaged macOS
+allocation-boundary probe observes one such file with zero logical bytes and
+zero allocated payload blocks. Its reservation is retired by retry, exact
+source reads succeed, and cleanup preserves the unrecorded inode. This is
+bounded process-death evidence, not cross-platform or power-loss qualification.
+Anonymous streams
 unlink before writing and keep their existing descriptor lifetime. Packaged
 process-death recovery has bounded macOS proof, including exact source bytes and
 actual orphan removal. Focused native cache checks pass on Windows and Linux;
@@ -381,10 +386,17 @@ Catalog writers retain their generation-bound WAL when short connections
 close. Reservation creation, owner release and payload removal use the same
 close policy; closing one SQL operation no longer requests a full checkpoint
 of the catalog. SQLite's existing automatic checkpoint policy remains enabled
-(the pinned dependency defaults to 1,000 pages), and synchronization settings,
-payload flushes, private filesystem checks and accounting transactions remain
-unchanged. A long active reader can still defer an automatic checkpoint under
+(the pinned dependency defaults to 1,000 pages). A long active reader can still defer an automatic checkpoint under
 SQLite's existing WAL rules.
+
+Disposable accounting uses WAL/NORMAL. Pending-file identity insertion and
+explicit root-budget changes instead commit with FULL synchronization: recovery
+authority must be flushed before exposing a payload writer, and a confirmed
+user policy must outlive process exit. A failed identity commit prevents writer
+admission. Journal retirement remains disposable; a stale record still requires
+the same exact-file comparison. SQLite documents the
+[WAL durability distinction](https://www.sqlite.org/pragma.html#pragma_synchronous).
+This does not qualify filesystem rename/unlink ordering through power loss.
 
 Committed catalog state may remain in WAL after all catalog handles close.
 Inspection reads that WAL through the existing read-only private VFS. Copying

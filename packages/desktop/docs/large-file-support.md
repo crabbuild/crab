@@ -181,8 +181,15 @@ reclamation. Full packaged Windows/Linux and provider qualification remain
 release gates.
 
 Creation interrupted before identity registration can still leave empty,
-unclaimed files. Allocation-before-record and power-loss qualification remain
-separate gaps; this bounded probe does not establish global disk-budget or
+unclaimed files. A packaged macOS probe now pauses immediately after exclusive
+allocation, before identity registration: it observes zero logical bytes and
+zero allocated payload blocks. Retry retires the reservation and returns exact
+source bytes with zero origin writes; cleanup retains the unrecorded inode.
+Other platforms and power-loss qualification remain separate gaps.
+Identity insertion and saved retention-policy changes now request FULL WAL
+synchronization, while disposable cache accounting stays NORMAL. Native sync
+ordering is being qualified separately from filesystem power-loss recovery.
+This bounded probe does not establish global disk-budget or
 offline-retention behavior.
 The fault library and diagnostic test remain external qualification artifacts;
 no production fault hook, cache-name deletion rule or new setting is added.

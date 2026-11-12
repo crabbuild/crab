@@ -17,7 +17,13 @@ pub(super) fn record(reservation: &CacheReservation, pending: &PendingFile) -> R
     let (relative, identity) = pending.record(&reservation.relative_path)?;
     let relative = relative_path(Path::new(""), &relative)?;
     let identity = serde_json::to_vec(&identity).map_err(std::io::Error::other)?;
-    connection(reservation)?
+    let connection = connection(reservation)?;
+    // Recovery authority must reach stable storage before payload bytes can
+    // outlive this process. WAL/NORMAL may lose a committed identity on power loss.
+    connection
+        .pragma_update(None, "synchronous", "FULL")
+        .map_err(|source| index_error(&reservation.catalog_path, source))?;
+    connection
         .execute(
             "INSERT INTO pending_files(relative_path, owner, pid, identity) VALUES (?1, ?2, ?3, ?4)",
             params![relative, reservation.id, std::process::id(), identity],
@@ -190,6 +196,39 @@ pub(super) fn recover(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn rejected_identity_record_never_exposes_payload_or_leaks_reservation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("cache");
+        let pinned = PinnedRoot::create(&root).unwrap();
+        let catalog = CacheCatalog::new(root.clone(), None);
+        let directory = root.join("chunks/aa");
+        let destination = directory.join("a".repeat(64));
+        let reservation = catalog.reserve(&destination, 7).await.unwrap().unwrap();
+        let connection = super::super::open_catalog(&pinned, &root.join(CATALOG_FILE)).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER reject_identity BEFORE INSERT ON pending_files
+                 BEGIN SELECT RAISE(ABORT, 'identity record unavailable'); END;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let rejected = reservation.write(b"payload").await.is_err();
+        let reserved = CacheCatalog::read_only_stats(&root)
+            .unwrap()
+            .reservations_bytes;
+        assert_eq!(
+            (
+                rejected,
+                reserved,
+                destination.exists(),
+                std::fs::read_dir(directory).unwrap().count(),
+            ),
+            (true, 0, false, 0)
+        );
+    }
 
     #[tokio::test]
     async fn invalid_journal_identity_keeps_temporary_and_allows_payload_cleanup() {

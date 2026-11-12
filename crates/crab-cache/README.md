@@ -55,7 +55,10 @@ repository pack to mutable cache state.
 
 Fills reserve capacity and publish
 privately through the shared catalog. Before writing payload bytes, reserved
-files record their exact temporary identity for process-death recovery.
+files durably record their exact temporary identity before exposing a writer.
+Saved root budgets use the same FULL WAL synchronization policy; disposable
+accounting retains NORMAL synchronization. Full filesystem power-loss recovery
+remains a separate qualification gate.
 The family participates in stats,
 health, prune, verification, and cleanup. Git structure, sidecars, visible
 object closure, and authorization are reader responsibilities.
