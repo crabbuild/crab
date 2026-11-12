@@ -52,6 +52,17 @@ remain if later catalog accounting fails. Git semantics and visibility remain
 outside this byte cache. Concurrent fills may duplicate work; this path does
 not yet provide per-key single-flight or remote cache-service pack retention.
 
+Complete LFS files use native SHA-256 under `lfs/aa/<sha256>`, including identity
+namespaces. A fill reserves its full declared length, streams bounded buffers,
+checks size and SHA-256, then publishes through the common private journal.
+Health, stats, prune, verification and cleanup include this family. A captured
+`LfsCacheFile` supplies descriptors to the LFS integrity owner; callers keep it
+alive through verification/delivery and release retained verification descriptors
+before finishing. Only a failed captured source grants exact repair authority.
+Cancellation and a conflicting caller length do not establish corruption.
+These files remain eligible for eviction and explicit cleanup; no offline pin
+or cache-service LFS route is implied.
+
 ## Cleanup and catalog retirement
 
 `clean_cache` is the shared explicit cleanup boundary. It streams recognized

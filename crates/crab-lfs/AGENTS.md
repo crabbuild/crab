@@ -63,6 +63,11 @@ shared-lock fix reaches HTTP but does not automatically reach that CLI surface.
   follow per-operation drain. This is not a durable GC pin.
   Only open-time absence may select remote. Resolve Git settings outside data
   callbacks. Tracked jobs retain global verification admission after cancellation.
+- `LfsReadSession::read_opened_range` uses an already-captured descriptor through
+  that same verifier. Proof keys bind source key, SHA-256 and declared size;
+  an ambient pathname cannot redirect the read. External cache owners retain
+  their lease through delivery and release operation-scoped proofs before
+  finishing it. Do not retain a cache file descriptor beyond its eviction lease.
 - Remote read-proof retention requires a bound canonical transport and fresh
   matching HEAD metadata. GET delivery still matches that verified validator;
   store incarnation, target, key and SHA-256 cannot cross cache authority.

@@ -618,7 +618,19 @@ async fn verify_native_reads(bucket: Option<String>) {
     ranges::verify_controls(&current, &filename).await;
     ranges::verify_progress(&current, &filename).await;
     #[cfg(feature = "files")]
-    lfs::verify(&current, &fixture_store, lfs_oid, second_bytes).await;
+    {
+        // Origin integrity/admission checks require cold reads. Retained immutable
+        // bytes are qualified independently, including a new client after restart.
+        lfs::verify_origin(options.clone(), &fixture_store, lfs_oid, second_bytes).await;
+        lfs::verify_retention(
+            options.clone(),
+            &fixture_store,
+            lfs_oid,
+            second_bytes,
+            &directory.path().join("lfs-cache"),
+        )
+        .await;
+    }
     #[cfg(feature = "files")]
     crab::verify(&current, second_bytes).await;
     #[cfg(feature = "files")]

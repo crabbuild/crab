@@ -35,8 +35,10 @@ use crab_xet::xorb::format::{ChunkMeta, MAX_XORB_SIZE, MerkleHash};
 use crab_xet::xorb::parser::XorbParser;
 
 mod git_pack_file;
+mod lfs_file;
 mod maintenance;
 mod xorb_file;
+pub use lfs_file::{LfsCacheFile, LfsCacheFill};
 use xorb_file::{read_xorb_file_metadata, verify_xorb_file_identity, verify_xorb_file_payload};
 
 /// Maximum metadata-shard body retained in or read from the local cache.
@@ -76,6 +78,8 @@ pub struct PruneStats {
     pub ref_transactions_evicted: u64,
     /// Number of native Git pack files evicted.
     pub git_packs_evicted: u64,
+    /// Number of complete LFS objects evicted.
+    pub lfs_objects_evicted: u64,
     /// Total bytes freed across all evictions.
     pub bytes_freed: u64,
     /// Cache objects pruned or selected for pruning.
@@ -99,6 +103,7 @@ pub enum PruneObjectKind {
     Xorb,
     RefTransaction,
     GitPack,
+    Lfs,
 }
 
 impl PruneObjectKind {
@@ -110,6 +115,7 @@ impl PruneObjectKind {
             Self::Xorb => "xorb",
             Self::RefTransaction => "ref-transaction",
             Self::GitPack => "git-pack",
+            Self::Lfs => "lfs",
         }
     }
 }
@@ -131,6 +137,7 @@ impl PruneStats {
             + self.xorbs_evicted
             + self.ref_transactions_evicted
             + self.git_packs_evicted
+            + self.lfs_objects_evicted
     }
 }
 
@@ -168,6 +175,10 @@ pub struct CacheStats {
     pub git_pack_bytes: u64,
     /// Number of cached native Git pack files.
     pub git_pack_count: u64,
+    /// Total bytes used by complete LFS objects.
+    pub lfs_bytes: u64,
+    /// Number of complete LFS objects.
+    pub lfs_count: u64,
     /// Total bytes used by cached workflow stage entries.
     pub stage_bytes: u64,
     /// Number of cached workflow stage entries.
@@ -192,7 +203,7 @@ pub struct LocalCache {
     root: PathBuf,
     relative_root: PathBuf,
     catalog: crate::catalog::CacheCatalog,
-    /// Shared byte ceiling for large data objects: chunk fragments, xorbs, and Git packs.
+    /// Shared byte ceiling for large data objects: chunk fragments, xorbs, Git packs, and LFS.
     chunk_max_bytes: Option<u64>,
     shard_max_bytes: Option<u64>,
     fill_locks: Box<[tokio::sync::Mutex<()>]>,
@@ -210,7 +221,7 @@ impl LocalCache {
 
     /// Create a cache with explicit byte budgets.
     ///
-    /// `chunk_max` is the shared ceiling for chunks, xorbs, and Git packs; `None` is unlimited.
+    /// `chunk_max` is the shared ceiling for chunks, xorbs, Git packs, and LFS; `None` is unlimited.
     #[must_use]
     pub fn with_limits(
         root: PathBuf,

@@ -15,11 +15,12 @@ interface Fixture {
 }
 
 for (const kind of ["crab", "lfs"] as const) {
-  const outcomes = kind === "crab" ? ["cancel", "native-crash", "app-crash", "cleanup", "budget", "missing", "corrupt"] as const : ["cancel", "native-crash", "app-crash", "missing", "corrupt"] as const;
+  const outcomes = kind === "crab" ? ["cancel", "native-crash", "app-crash", "cleanup", "budget", "missing", "corrupt"] as const : ["cancel", "native-crash", "app-crash", "missing", "corrupt", "retention", "cleanup", "budget"] as const;
   for (const outcome of outcomes) {
     const contentFailure = outcome === "missing" || outcome === "corrupt";
-    const title = outcome === "budget" ? "SDK identities and CLI share the saved desktop retention budget"
-      : outcome === "cleanup" ? "SDK cache cleanup removes verified payloads and preserves retained state"
+    const title = outcome === "retention" ? "SDK LFS retained content survives restart without its origin payload"
+      : outcome === "budget" ? `SDK ${kind === "lfs" ? "LFS " : ""}identities and CLI share the saved desktop retention budget`
+      : outcome === "cleanup" ? `SDK ${kind === "lfs" ? "LFS " : ""}cache cleanup removes verified payloads and preserves retained state`
       : `SDK ${kind} ${contentFailure ? "content failure" : "partial response"} ${outcome} retries exact content`;
     test(title, async () => {
       const descriptor = process.env.CRAB_DESKTOP_STORAGE_IDENTITY_FIXTURE;
@@ -97,6 +98,32 @@ for (const kind of ["crab", "lfs"] as const) {
         expect(repoId).toBeTruthy();
         await expect.poll(() => Boolean(epoch(repoId!))).toBe(true);
         const initialEpoch = epoch(repoId!);
+        if (outcome === "retention") {
+          const exact = async () => {
+            await page.locator(`[role="treeitem"][data-item-path="${filename}"]`).click();
+            await expect(page.getByText(payload.marker, { exact: false }).first()).toBeVisible();
+            const content = await call(page, "read_bytes", { repo_id: repoId, path: filename, max_bytes: payload.size + 1 });
+            const bytes = Buffer.from(String(content.bytes_b64), "base64");
+            expect({ size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") }).toEqual({ size: payload.size, sha256: payload.sha256 });
+          };
+          await exact();
+          const retained = inventory().filter(entry => /^namespaces\/[a-f0-9]{64}\/lfs\//.test(entry.path));
+          await application!.close();
+          application = undefined;
+          const before = await transport("missing_lfs");
+          page = await launch();
+          await openSnapshot(page);
+          repoId = await page.evaluate(() => localStorage.getItem("crab.activeRepoPath.v1"));
+          await exact();
+          expect(retained).toHaveLength(1);
+          expect(retained[0].bytes).toBe(payload.size);
+          const after = await transport("stats");
+          expect(after.faulted).toBe(before.faulted);
+          expect(after.writes).toBe(0);
+          await page.screenshot({ animations: "disabled", path: test.info().outputPath("sdk-lfs-retained.png") });
+          writeFileSync(test.info().outputPath("sdk-lfs-retention-proof.json"), JSON.stringify({ retained, before, after, exactBytesAfterRestart: true, originPayloadUnavailable: true }, null, 2));
+          return;
+        }
         if (contentFailure) {
           const before = await transport(`${outcome}_${kind}`);
           await page.locator(`[role="treeitem"][data-item-path="${filename}"]`).click();
@@ -128,7 +155,7 @@ for (const kind of ["crab", "lfs"] as const) {
         if (outcome === "budget") {
           await expect(page.getByText("Read-only storage snapshot", { exact: true })).toBeVisible();
           await expect(page.getByRole("button", { name: "Refresh hydration status", exact: true })).toHaveCount(0);
-          const payloads = () => inventory().filter(entry => /^namespaces\/[a-f0-9]{64}\/(?:chunks|xorbs|shards|ref-transactions|git-packs)\//.test(entry.path));
+          const payloads = () => inventory().filter(entry => /^namespaces\/[a-f0-9]{64}\/(?:chunks|xorbs|shards|ref-transactions|git-packs|lfs)\//.test(entry.path));
           const showExact = async (expected: typeof payload) => {
             await page.locator(`[role="treeitem"][data-item-path="${filename}"]`).click();
             await expect(page.getByText(expected.marker, { exact: false }).first()).toBeVisible();
@@ -205,7 +232,7 @@ for (const kind of ["crab", "lfs"] as const) {
           await page.getByRole("button", { name: "Close tab", exact: true }).click();
           // SDK payloads include decoded ranges, whose filenames are not chunk
           // hashes. Count those alongside the shard before checking exact removal.
-          const cached = inventory().filter(entry => /^namespaces\/[a-f0-9]{64}\/(?:chunks|xorbs|shards|ref-transactions|git-packs)\//.test(entry.path));
+          const cached = inventory().filter(entry => /^namespaces\/[a-f0-9]{64}\/(?:chunks|xorbs|shards|ref-transactions|git-packs|lfs)\//.test(entry.path));
           expect(cached.length).toBeGreaterThan(0);
           const retained = path.join(cache, "desktop-content", "database-query", "retained.bin");
           mkdirSync(path.dirname(retained), { recursive: true, mode: 0o700 });

@@ -3,6 +3,131 @@ use crab_sdk::remote::Snapshot;
 use crab_sdk::{ErrorKind, GitPath};
 use futures_util::TryStreamExt;
 
+pub(super) async fn verify_origin(
+    options: crab_sdk::storage::DirectStoreOptions,
+    storage: &crab_storage::Store,
+    oid: [u8; 32],
+    original: &[u8],
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let client = crab_sdk::Client::builder()
+        .direct_store(options)
+        .content_cache(
+            crab_sdk::storage::ContentCache::new(&directory.path().join("cache"), 0).unwrap(),
+        )
+        .build()
+        .unwrap();
+    let snapshot = open_snapshot(&client).await;
+    verify(&snapshot, storage, oid, original).await;
+    client.close().await.unwrap();
+}
+
+async fn open_snapshot(client: &crab_sdk::Client) -> Snapshot {
+    client
+        .open(crab_sdk::OpenOptions::remote(
+            crab_sdk::RepositoryLocator::new("repository").unwrap(),
+        ))
+        .await
+        .unwrap()
+        .remote()
+        .unwrap()
+        .snapshot(crab_sdk::Revision::branch("main").unwrap())
+        .await
+        .unwrap()
+}
+
+async fn read(snapshot: &Snapshot, range: std::ops::Range<u64>) -> crab_sdk::Result<Vec<u8>> {
+    let mut stream = snapshot
+        .open_file(GitPath::new("z-lfs").unwrap())
+        .with_options(ReadOptions::default().with_range(range).unwrap())
+        .await?;
+    let mut bytes = Vec::new();
+    let result = async {
+        while let Some(chunk) = stream.next().await? {
+            assert!(chunk.len() <= 64 * 1024);
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
+    }
+    .await;
+    stream.close().await?;
+    result
+}
+
+pub(super) async fn verify_retention(
+    options: crab_sdk::storage::DirectStoreOptions,
+    storage: &crab_storage::Store,
+    oid: [u8; 32],
+    original: &[u8],
+    cache: &std::path::Path,
+) {
+    let new_client = || {
+        crab_sdk::Client::builder()
+            .direct_store(options.clone())
+            .content_cache(crab_sdk::storage::ContentCache::new(cache, None).unwrap())
+            .build()
+            .unwrap()
+    };
+    let object = crab_lfs::LfsObjectStore::object_path_for_prefix("repository", &oid);
+    let size = original.len() as u64;
+    let first = new_client();
+    assert_eq!(
+        read(&open_snapshot(&first).await, 0..size).await.unwrap(),
+        original
+    );
+    first.close().await.unwrap();
+    storage.delete(&object).await.unwrap();
+    let restarted = new_client();
+    let snapshot = open_snapshot(&restarted).await;
+    for range in [0..size, 65530..65547, size..size] {
+        assert_eq!(
+            read(&snapshot, range.clone()).await.unwrap(),
+            original[range.start as usize..range.end as usize]
+        );
+    }
+    restarted.close().await.unwrap();
+
+    let oid_hex = crab_git::lfs_pointer::hex_encode(&oid);
+    let namespace = std::fs::read_dir(cache.join("namespaces"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let retained = namespace.join("lfs").join(&oid_hex[..2]).join(&oid_hex);
+    std::fs::write(&retained, vec![0; original.len()]).unwrap();
+    storage
+        .put_overwrite(&object, bytes::Bytes::copy_from_slice(original))
+        .await
+        .unwrap();
+    let repaired = new_client();
+    assert_eq!(
+        read(&open_snapshot(&repaired).await, 0..size)
+            .await
+            .unwrap(),
+        original
+    );
+    repaired.close().await.unwrap();
+    assert_eq!(std::fs::read(&retained).unwrap(), original);
+
+    let catalog = crab_cache::CacheCatalog::new(cache.to_owned(), None);
+    catalog.set_retention_budget(Some(0)).await.unwrap();
+    catalog.maintain().await.unwrap();
+    assert!(!retained.exists());
+    let disabled = new_client();
+    assert_eq!(
+        read(&open_snapshot(&disabled).await, 0..size)
+            .await
+            .unwrap(),
+        original
+    );
+    disabled.close().await.unwrap();
+    assert!(
+        !retained.exists(),
+        "zero root budget must not retain LFS reads"
+    );
+}
+
 pub(super) async fn verify(
     snapshot: &Snapshot,
     storage: &crab_storage::Store,

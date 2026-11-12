@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use crate::remote_error::{consumer_error, metadata_kind, read_error};
 use crate::{Error, ErrorKind, ReadOptions, Result};
 
-/// Explicit cache root and caller retention ceiling for Crab reconstruction.
+/// Explicit cache root and caller retention ceiling for Crab and LFS content.
 #[derive(Clone, Debug)]
 pub struct ContentCache {
     catalog: crab_cache::CacheCatalog,
@@ -52,6 +52,7 @@ pub(crate) struct ContentRuntime {
     namespace: String,
     catalog: Arc<crab_metadata::capsule_protocol::PointerCatalogLookup>,
     hydrator: OnceCell<crab_read::ShardHydrator>,
+    local: OnceCell<Option<Arc<crab_cache::LocalCache>>>,
 }
 
 impl ContentRuntime {
@@ -106,35 +107,49 @@ impl ContentRuntime {
             catalog: Arc::new(catalog),
             namespace: hash.finalize().to_hex().to_string(),
             hydrator: OnceCell::new(),
+            local: OnceCell::new(),
         }
+    }
+
+    pub(crate) async fn local_cache(&self) -> Result<Option<&Arc<crab_cache::LocalCache>>> {
+        self.local
+            .get_or_try_init(|| async {
+                self.cache
+                    .as_ref()
+                    .map(|cache| {
+                        crab_cache::LocalCache::namespaced(cache.catalog.clone(), &self.namespace)
+                            .map(Arc::new)
+                            .map_err(|source| {
+                                Error::with_source(
+                                    ErrorKind::Io,
+                                    "cannot initialize content namespace",
+                                    source,
+                                )
+                            })
+                    })
+                    .transpose()
+            })
+            .await
+            .map(Option::as_ref)
     }
 
     async fn hydrator(&self) -> Result<&crab_read::ShardHydrator> {
         self.hydrator
             .get_or_try_init(|| async {
-                let cache = self.cache.clone().ok_or_else(|| {
+                let local = self.local_cache().await?.cloned().ok_or_else(|| {
                     Error::new(
                         ErrorKind::InvalidInput,
                         "Crab reconstruction requires an explicit content cache",
                     )
                 })?;
-                let namespace = self.namespace.clone();
                 let layout = self.layout.clone();
                 // Cache initialization can touch disk; the tracked caller awaits this
                 // job rather than abandoning it when a public request is dropped.
                 tokio::task::spawn_blocking(move || {
-                    let local = crab_cache::LocalCache::namespaced(cache.catalog, &namespace)
-                        .map_err(|source| {
-                            Error::with_source(
-                                ErrorKind::Io,
-                                "cannot initialize content namespace",
-                                source,
-                            )
-                        })?;
                     let store = crab_cache_store::CachingStore::new_with_local_cache(
                         layout.store().clone(),
                         crab_cache_store::CacheConfig::default(),
-                        Arc::new(local),
+                        local,
                     )
                     .map_err(|source| {
                         Error::with_source(ErrorKind::Io, "cannot initialize content cache", source)

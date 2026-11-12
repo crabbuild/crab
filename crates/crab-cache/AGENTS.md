@@ -43,6 +43,12 @@ writer in addition to caller ceilings. Policy changes do not replace live range
 handles. Changing policy and applying maintenance are separate operations;
 products must refresh the saved policy even when maintenance fails.
 
+Complete LFS payloads use native SHA-256 in `local_cache/lfs_file.rs`. Fills
+share the root journal and policy. Captured readers hand descriptors to the LFS
+integrity owner; they must drain and release verification sources before
+finishing the cache claim. Keep this family in health, stats, verification,
+prune and explicit cleanup. Disposable retention does not grant offline pins.
+
 Unpublished reserved fills enter `catalog::pending` before payload writes.
 The journal's exact file ID and birth time, captured root, catalog writer and
 file lock must agree before recovery can unlink. Names and PIDs are never

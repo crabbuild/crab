@@ -19,7 +19,7 @@ publish = ["remote", "crab-read/hydration", "dep:crab-remote", "crab-remote/publ
 local = ["publish", "files", "crab-remote/local", "dep:dunce", "dep:toml"]
 service = ["remote", "dep:crab-auth", "dep:crab-auth-store", "dep:crab-git", "dep:uuid"]
 
-files = ["remote", "crab-read/hydration", "crab-metadata/file-index-reader", "dep:crab-lfs", "dep:crab-git", "dep:futures-util", "dep:crab-cache", "dep:crab-cache-store", "dep:crab-types"]
+files = ["remote", "crab-read/hydration", "crab-metadata/file-index-reader", "dep:crab-lfs", "dep:crab-git", "dep:futures-util", "dep:crab-cache", "dep:crab-cache-store", "dep:crab-types", "dep:tracing"]
 
 [dependencies]
 crab-remote = { workspace = true, optional = true }
@@ -45,6 +45,7 @@ blake3 = { workspace = true, optional = true }
 crab-lfs = { workspace = true, optional = true }
 crab-git = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
 crab-read = { workspace = true, optional = true }
 crab-cache = { workspace = true, optional = true }
 crab-cache-store = { workspace = true, optional = true }

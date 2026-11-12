@@ -53,6 +53,14 @@ and hash, then materialize an independent copy-on-write clone when the
 filesystem supports it, falling back to a bounded copy; they never hard-link a
 repository pack to mutable cache state.
 
+Complete LFS objects use `lfs/aa/<sha256>` and the same root catalog, budget,
+temporary journal, leases and cleanup. `begin_lfs_fill` streams and checks exact
+size/SHA-256 before publication. `open_lfs_file` captures a private descriptor;
+the consuming LFS reader must verify complete identity and delivered ranges.
+It releases its verification descriptors before `finish` retires the read.
+Neither a matching filename nor a size check establishes a verified hit.
+LFS storage is disposable retention, not an offline pin or an origin receipt.
+
 Fills reserve capacity and publish
 privately through the shared catalog. Before writing payload bytes, reserved
 files durably record their exact temporary identity before exposing a writer.

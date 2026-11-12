@@ -123,6 +123,35 @@ is persisted in the catalog; deleting the catalog resets it. Retained metadata a
 active reads can exceed this soft retention limit. Durable offline retention is
 still unimplemented.
 
+### Complete LFS disk retention
+
+SDK `ContentCache` now retains complete verified LFS bodies in its existing
+identity namespace, using native SHA-256 and the shared physical-root catalog.
+Fills reserve the declared size and use the common exact-temporary journal;
+incomplete, canceled or hash-invalid bodies never publish. Partial origin reads
+continue through the canonical LFS verifier without retaining an incomplete body.
+Cached reads use captured descriptors through that same whole-file and bounded
+block verifier. Verification drains before the cache read owner releases its
+claim. Cancellation preserves healthy cached bytes. Source key, SHA-256 and size
+jointly scope retained proofs.
+
+Native checks cover accounting, exact cleanup, corruption, caller size conflicts,
+active reads under pressure and zero retention. Real SDK integration covers a new
+client reading exact complete/ranged bytes after the origin payload is removed,
+corrupt-cache repair and zero-budget reads. Origin corruption/admission assertions
+retain cold reads with a zero-retention cache; they cannot use a warm immutable
+object as evidence about the current origin. The existing archive-close test
+caught a cached cancellation being reported as I/O; the source now preserves
+cancellation and the unchanged close assertion passes.
+
+The earlier unsigned macOS package reproduces the visible restart failure when
+only the LFS origin payload is unavailable. Packaged qualification of this new
+path is pending. This is disposable content retention, not durable offline
+selection: repository metadata reopening and protected offline versions remain
+P0 work. Local worktree/CLI readers keep their existing `.git/lfs` source and
+verification path; no second reconstruction implementation or remote receipt
+writer is introduced.
+
 The shared ownership/policy cache checks pass on macOS (234), Windows (117)
 and Linux (235), using each platform's applicable tests. The Windows run initially
 stopped before range operations because two fixtures set mtime through read-only

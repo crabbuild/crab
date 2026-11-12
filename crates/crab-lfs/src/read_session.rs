@@ -90,6 +90,38 @@ impl LfsReadSession {
         range: Range<u64>,
         cancel: &CancellationToken,
     ) -> crate::Result<Option<Bytes>> {
+        let path = crate::local::object_path(storage, oid);
+        self.read_range(path, None, oid, size, range, cancel).await
+    }
+
+    /// Read a captured file using whole-object and retained block verification.
+    ///
+    /// `key` identifies the caller's selected source in this proof cache; the
+    /// descriptor supplies bytes without reopening that path. Keep its external
+    /// cache lease until this session and its proof cache have been released.
+    pub async fn read_opened_range(
+        &self,
+        key: &Path,
+        file: File,
+        oid: &[u8; 32],
+        size: u64,
+        range: Range<u64>,
+        cancel: &CancellationToken,
+    ) -> crate::Result<Bytes> {
+        self.read_range(key.to_owned(), Some(file), oid, size, range, cancel)
+            .await?
+            .ok_or_else(|| std::io::Error::other("captured LFS source is unavailable").into())
+    }
+
+    async fn read_range(
+        &self,
+        path: std::path::PathBuf,
+        opened: Option<File>,
+        oid: &[u8; 32],
+        size: u64,
+        range: Range<u64>,
+        cancel: &CancellationToken,
+    ) -> crate::Result<Option<Bytes>> {
         if range.start > range.end || range.end > size {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -102,8 +134,7 @@ impl LfsReadSession {
             () = cancel.cancelled() => return Err(cancelled().into()),
             result = crate::object_store::origin::verification_permit() => result?,
         };
-        let path = crate::local::object_path(storage, oid);
-        let entry = self.cache()?.local(path.clone(), size)?;
+        let entry = self.cache()?.local(path.clone(), *oid, size)?;
         let oid = *oid;
         let cancel = cancel.clone();
         self.spawn_blocking(move || {
@@ -129,11 +160,12 @@ impl LfsReadSession {
                 result?;
                 return Ok(Some(Bytes::from(bytes)));
             }
-            let file = match File::open(path) {
+            let mut file = match opened.map(Ok).unwrap_or_else(|| File::open(path)) {
                 Ok(file) => file,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
                 Err(error) => return Err(error.into()),
             };
+            file.rewind()?;
             // Absence selects remote before allocating another range buffer.
             // Otherwise remote-only reads allocate and discard local output first.
             let mut bytes = range_buffer(&range)?;
@@ -296,6 +328,42 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn captured_sources_do_not_reopen_paths_or_reuse_another_oid_proof() {
+        let root = tempfile::tempdir().unwrap();
+        let key = root.path().join("source");
+        std::fs::write(&key, b"first").unwrap();
+        let captured = File::open(&key).unwrap();
+        let replacement = root.path().join("replacement");
+        std::fs::write(&replacement, b"other").unwrap();
+        #[cfg(unix)]
+        std::fs::rename(&replacement, &key).unwrap();
+        let session = LfsReadSession::default();
+        let cancel = CancellationToken::new();
+        let oid = Sha256::digest(b"first").into();
+        let bytes = session
+            .read_opened_range(&key, captured, &oid, 5, 0..5, &cancel)
+            .await
+            .unwrap();
+        assert_eq!(bytes, b"first".as_slice());
+        let wrong_oid = [0; 32];
+        let invalid = session
+            .read_opened_range(
+                &key,
+                File::open(&key).unwrap(),
+                &wrong_oid,
+                5,
+                0..5,
+                &cancel,
+            )
+            .await;
+        session.close().await;
+        assert!(matches!(
+            invalid,
+            Err(crate::LfsError::ObjectCorrupt { .. })
+        ));
+    }
+
+    #[tokio::test]
     async fn shared_proofs_survive_operation_close_until_the_cache_owner_releases_them() {
         let root = tempfile::tempdir().unwrap();
         let body = b"retained payload";
@@ -312,7 +380,7 @@ mod tests {
             .unwrap();
         first.close().await;
         std::fs::remove_file(&path).unwrap();
-        let source = Arc::downgrade(&cache.local(path, body.len() as u64).unwrap().unwrap());
+        let source = Arc::downgrade(&cache.local(path, oid, body.len() as u64).unwrap().unwrap());
         let second = LfsReadSession::new(cache.clone());
         let bytes = second
             .read_local_range(root.path(), &oid, body.len() as u64, 4..8, &cancel)

@@ -136,6 +136,16 @@ strong GET validator match. Each stream still drains its own verification jobs;
 retention never crosses storage-target or key authority. Routed/unbound sources
 retain fresh verification. Reads do not write remote receipts.
 
+An explicit `storage::ContentCache` also retains complete verified LFS reads.
+Payloads share its identity namespace, root retention budget and cleanup with
+Crab content. Later streams verify the captured cached file's complete SHA-256,
+then check bounded block proofs for delivered ranges. Closing a stream drains
+verification before releasing its cache claim. Corrupt cache may select origin
+before delivery; failures after delivery starts remain visible. Partial origin
+reads do not publish incomplete LFS bodies. This disposable cache can survive
+client/application restart but does not retain repository metadata or promise
+offline availability; pressure and explicit cleanup may evict it.
+
 With `files`, `Snapshot::file_chunks(path, start, limit)` inspects up to 512
 ordered Crab chunk occurrences through that snapshot's captured catalog.
 It returns hashes, file offsets/lengths, published xorb placement, total counts

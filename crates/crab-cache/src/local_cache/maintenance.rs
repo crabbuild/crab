@@ -7,13 +7,21 @@ use super::*;
 use crate::clean::{EntryKind, entry_kind, payload_path};
 use crate::private_fs::{FileStat, PinnedRoot, check_cancelled, with_pinned_root};
 
-const OBJECT_FAMILIES: &[&str] = &["chunks", "xorbs", "shards", "ref-transactions", "git-packs"];
+const OBJECT_FAMILIES: &[&str] = &[
+    "chunks",
+    "xorbs",
+    "shards",
+    "ref-transactions",
+    "git-packs",
+    "lfs",
+];
 const VERIFIABLE_FAMILIES: &[&str] = &[
     "chunks",
     "xorbs",
     "shards",
     "ref-transactions",
     "git-packs",
+    "lfs",
     #[cfg(feature = "xet-chunk-cache")]
     "decoded-range",
 ];
@@ -236,6 +244,7 @@ impl LocalCache {
                             "xorbs",
                             "ref-transactions",
                             "git-packs",
+                            "lfs",
                             "stages",
                             "manifests",
                         ],
@@ -252,6 +261,7 @@ impl LocalCache {
                                 Some("git-packs") => {
                                     (&mut stats.git_pack_bytes, &mut stats.git_pack_count)
                                 }
+                                Some("lfs") => (&mut stats.lfs_bytes, &mut stats.lfs_count),
                                 Some("stages") => (&mut stats.stage_bytes, &mut stats.stage_count),
                                 Some("manifests") => {
                                     if path.extension().is_some_and(|ext| ext == "json") {
@@ -348,6 +358,7 @@ fn object_kind(path: &Path) -> Option<PruneObjectKind> {
         Some("xorbs") => Some(PruneObjectKind::Xorb),
         Some("ref-transactions") => Some(PruneObjectKind::RefTransaction),
         Some("git-packs") => Some(PruneObjectKind::GitPack),
+        Some("lfs") => Some(PruneObjectKind::Lfs),
         _ => None,
     }
 }
@@ -427,6 +438,7 @@ fn evict_oldest(
             PruneObjectKind::Xorb => stats.xorbs_evicted += 1,
             PruneObjectKind::RefTransaction => stats.ref_transactions_evicted += 1,
             PruneObjectKind::GitPack => stats.git_packs_evicted += 1,
+            PruneObjectKind::Lfs => stats.lfs_objects_evicted += 1,
         }
         stats.bytes_freed = stats.bytes_freed.saturating_add(bytes);
         if options.record_entries {
@@ -485,6 +497,34 @@ fn verify_file(
             && file.metadata()?.len() == bytes
             && actual.finalize() == expected);
     }
+    if kind == PruneObjectKind::Lfs {
+        use sha2::Digest as _;
+        let expected = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| CacheError::Internal("LFS cache object has no filename".into()))?;
+        let mut hash = sha2::Sha256::new();
+        let mut buffer = vec![0; 64 * 1024];
+        let mut received = 0u64;
+        loop {
+            check_cancelled(cancel)?;
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            let Some(length) = received
+                .checked_add(read as u64)
+                .filter(|received| *received <= bytes)
+            else {
+                return Ok(false);
+            };
+            received = length;
+            hash.update(&buffer[..read]);
+        }
+        return Ok(received == bytes
+            && file.metadata()?.len() == bytes
+            && format!("{:x}", hash.finalize()) == expected);
+    }
     let expected = object_hash(path)?;
     if kind == PruneObjectKind::Xorb {
         return match super::xorb_file::verify(file, path, bytes, &expected, cancel) {
@@ -502,7 +542,7 @@ fn verify_file(
     let limit = match kind {
         PruneObjectKind::Chunk => MAX_CACHE_CHUNK_BYTES,
         PruneObjectKind::Shard => MAX_CACHE_SHARD_BYTES,
-        PruneObjectKind::RefTransaction | PruneObjectKind::GitPack => {
+        PruneObjectKind::RefTransaction | PruneObjectKind::GitPack | PruneObjectKind::Lfs => {
             return Err(CacheError::Internal(
                 "plain-Blake3 object bypassed its native hash verifier".into(),
             ));
