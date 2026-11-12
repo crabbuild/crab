@@ -31,6 +31,7 @@ export interface LeafTab {
   shell: string;
   cwd?: string;
   startupCommand?: string;
+  resolvedSessionType?: "daemon" | "in-process";
   sshRemote?: {
     profileId: string;
     hostname: string;

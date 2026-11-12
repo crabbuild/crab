@@ -260,3 +260,20 @@ test("chat composer shares one frame while preserving multiline input, attachmen
   await composer.getByRole("button", { name: "Stop agent", exact: true }).click();
   await expect(message).toBeEnabled();
 });
+
+test("view toolbars keep usable targets, keyboard actions and toggle states in narrow panels", async ({ page }) => {
+  await page.setViewportSize({ width: 380, height: 900 });
+  const toolbar = page.getByRole("toolbar", { name: "Repository files", exact: true });
+  const refresh = toolbar.getByRole("button", { name: "Refresh files", exact: true });
+  await refresh.press("Enter");
+  await expect(page.getByTestId("result")).toHaveText("Toolbar: refresh");
+  const amend = toolbar.getByRole("button", { name: "Amend commit", exact: true });
+  await amend.press("Space");
+  await expect(amend).toHaveAttribute("aria-pressed", "true");
+  await expect(toolbar.getByRole("button", { name: "Delete files", exact: true })).toBeDisabled();
+  for (const button of await toolbar.getByRole("button").all()) {
+    const box = await button.boundingBox();
+    expect(box && box.width >= 32 && box.height >= 32).toBeTruthy();
+  }
+  expect(await toolbar.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+});

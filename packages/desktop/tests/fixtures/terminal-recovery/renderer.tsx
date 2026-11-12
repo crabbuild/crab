@@ -3,6 +3,8 @@ import { createRoot } from "react-dom/client";
 import type { SshTerminalRequest } from "../../../src/views/TerminalView";
 import { TerminalKeepAlive } from "../../../src/components/TerminalKeepAlive";
 import { TerminalTab } from "../../../src/components/orchestrator/TerminalTab";
+import { ApplicationDialogs } from "../../../src/components/ApplicationDialogs";
+import { ToastManager } from "../../../src/components/ToastManager";
 import { SettingsProvider } from "../../../src/settings";
 import { StoreProvider, type OpenRepo } from "../../../src/state";
 import { PtyModeProvider } from "../../../src/lib/pty-mode-context";
@@ -21,6 +23,8 @@ function Fixture() {
     label: `${workspace}/${name}`, url: "", deferred: true,
   } as OpenRepo));
   return <div style={{ height: "100vh", display: "flex", flexDirection: "column" }}>
+    <ApplicationDialogs />
+    <ToastManager />
     <div style={{ display: "flex", gap: 16, padding: 8 }}>
       <button onClick={() => setRepo(repo === "one" ? "two" : "one")}>Switch repository</button>
       <button onClick={() => { setWorkspace(workspace === "a" ? "b" : "a"); setGeneration(value => value + 1); }}>Switch workspace</button>

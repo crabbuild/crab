@@ -10,4 +10,10 @@ Shared controls live in `src/components/ui/`. Use shadcn Button, Input, Textarea
 
 Use bundled Geist Sans for interface text and Geist Mono for code and measurements. Terminal and editor font preferences remain authoritative. Keep the desktop density: compact controls, 36px tab rows, restrained borders, and visible keyboard focus. Respect reduced motion and high-contrast settings.
 
+View toolbars have at least 44px of height with 32px action targets and 16px
+icons. Terminal controls use a 48px minimum row, visible creation and mode
+labels, and a settings row that expands on request. Wrap groups in narrow
+panels; move secondary pane actions into the shared dropdown menu. Session
+badges describe process lifetime; broadcast shows an explicit notice while active.
+
 References: [Geist colors](https://vercel.com/geist/colors), [shadcn theming](https://ui.shadcn.com/docs/theming).

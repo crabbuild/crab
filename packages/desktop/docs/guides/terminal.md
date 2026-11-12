@@ -37,11 +37,23 @@ The terminal detects the user's login shell:
 - Falls back to `/bin/zsh` (macOS) or `/bin/bash` (Linux)
 - Inherits the user's shell configuration (`.zshrc`, `.bashrc`)
 
-### Pre-Warmed Pool
+### Terminal Modes
 
-Terminals spawn instantly because the main process pre-warms 2 PTY
-shells on startup. When you open a terminal, it connects to an
-already-running shell rather than waiting for shell initialization.
+Use the mode menu beside **New terminal** to choose the lifetime of new tabs,
+splits, shell selections, and ordinary presets. Existing tabs keep their mode.
+Launch requests carrying task/agent metadata retain daemon ownership.
+
+| Mode | Owner | Closing the tab | Closing Crab |
+|------|-------|-----------------|--------------|
+| Daemon | Background terminal service | Hides the tab; session stays available in **Sessions** | Process keeps running |
+| Normal | Crab application | Terminates the process | Terminates the process |
+
+Both modes support the same terminal emulator, search, splits, clipboard,
+shell integration, bookmarks, profiles, and broadcast input. Each tab shows its
+mode. If the daemon is unavailable, select **Normal** explicitly; Crab does not
+silently change a terminal's lifetime. Shells start on demand; prewarming is disabled.
+Closing or hiding the last tab leaves its pane empty. Use **New terminal** or
+**Sessions** to open another session; closing a tab does not spawn a replacement.
 
 ### Shell Integration
 
@@ -76,8 +88,10 @@ Configurable scrollback buffer:
 
 Ordinary local terminals run in the PTY daemon. A command or agent started in
 one of these shells continues when the app closes or updates. Reopening the
-repository attaches to the same process. **New local terminal** in the context
-menu explicitly creates an ephemeral terminal; its process ends with the app.
+repository attaches to the same process. **Normal** in the toolbar mode menu or
+**New normal terminal** in the context menu creates an ephemeral terminal.
+Saved normal tabs reopen as fresh shells in their original mode, including when
+the daemon is unavailable. Saved startup commands and credentials are not replayed.
 
 Crab saves tab order, pane splits and proportions, each pane's active tab, and
 the focused pane as they change. Repository paths own this state, so switching
@@ -136,7 +150,8 @@ Quick-launch terminals with pre-configured commands:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  [+] [Split H] [Split V] [Scheme ▾] [Search] [Settings]         │
+│  [New terminal] [Daemon ▾] [Split →] [Split ↓] [Find]          │
+│                          [Sessions] [Broadcast] [Settings]    │
 ├─────────────────────────────────────────────────────────────────┤
 │  Breadcrumb: ~/project (main) $                                 │
 ├─────────────────────────────────────────────────────────────────┤
@@ -165,6 +180,15 @@ Shows:
 - Current working directory
 - Current branch (if in a git repo)
 - Shell type indicator
+
+### Toolbar
+
+The main toolbar keeps creation, pane layouts, search, and sessions visible.
+**Terminal settings** expands labelled controls for profiles, colour, fonts,
+scrollback, paste protection, scrollbars, breadcrumbs, and output export.
+Controls wrap when the terminal area narrows. Each pane's **Terminal actions**
+menu contains prompt navigation, copying output, retrying commands, and bookmarks.
+Broadcast displays a visible notice while input is sent to every open terminal.
 
 ### Status Bar
 
@@ -209,7 +233,7 @@ If a terminal session crashes:
 
 ## Integration
 
-- The Orchestrator's Terminal tab uses the same terminal component
+- Repository and task terminals use the same terminal component and controls
 - Worktree context menu → "Open terminal here" opens a terminal
   pre-cd'd to the worktree path
 - Command palette commands can execute in the terminal

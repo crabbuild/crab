@@ -27,6 +27,22 @@ it("saves an intentionally empty layout so hidden sessions do not reopen", () =>
   expect(saved?.tabs).toEqual([]);
 });
 
+it("preserves daemon and normal ownership in a mixed terminal layout", () => {
+  const tabs = ["daemon", "in-process"].map((mode, index) => ({
+    id: `terminal-${index}`, title: mode, shell: "/bin/sh",
+    resolvedSessionType: mode as "daemon" | "in-process",
+  }));
+  const leaf = createLeaf(tabs, tabs[1].id);
+  const saved = deserializeLayout(JSON.parse(JSON.stringify(captureLayout(leaf, leaf.id, () => "/repo"))));
+  expect(saved?.tabs.map(tab => tab.resolvedSessionType)).toEqual(["daemon", "in-process"]);
+});
+
+it("rejects invalid terminal ownership instead of changing its lifetime", () => {
+  const leaf = createLeaf([{ id: "local", title: "local", shell: "/bin/sh" }], "local");
+  const layout = captureLayout(leaf, leaf.id, () => "/repo");
+  expect(deserializeLayout({ ...layout, tabs: [{ ...layout.tabs[0], resolvedSessionType: "unknown" }] })).toBeNull();
+});
+
 it("persists SSH identities and remote cwd without startup commands or credentials", () => {
   const remote = { id: "ssh-id", title: "remote", shell: "ssh", cwd: "/remote/project", sshRemote: { profileId: "profile", hostname: "host" }, startupCommand: "agent" };
   const leaf = createLeaf([remote], remote.id);

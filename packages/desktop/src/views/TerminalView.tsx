@@ -1,11 +1,17 @@
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuGroup,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
   PointMenu,
 } from "@/components/ui/dropdown-menu";
@@ -34,18 +40,17 @@ import {
   ArrowUp,
   Bookmark,
   ChevronDown,
-  Circle,
   ClipboardCopy,
   Columns2,
   Command,
   Copy,
-  ChevronDown as DropdownIcon,
   EyeOff,
   FileDown,
   LayoutGrid,
   Lock,
   MoreHorizontal,
   Palette,
+  Plus,
   PanelLeftOpen,
   PanelRightOpen,
   Pin,
@@ -53,11 +58,13 @@ import {
   Radio,
   RotateCcw,
   Search,
+  Settings2,
   SendHorizonal,
   SlidersHorizontal,
   SplitSquareHorizontal,
   SplitSquareVertical,
   Terminal as TerminalIcon,
+  ShieldCheck,
   Trash2,
   Type,
   Unlock,
@@ -146,7 +153,6 @@ import {
   type SplitNode,
 } from "../lib/terminal-split-tree";
 import {
-  getScheme,
   getStoredSchemeId,
   resolveTheme,
   setStoredSchemeId,
@@ -555,6 +561,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
   const initialLeaf = createLeaf();
   const [splitTree, setSplitTree] = useState<SplitNode>(initialLeaf);
   const [activePaneId, setActivePaneId] = useState(initialLeaf.id);
+  const pendingSpawnPaneIdsRef = useRef(new Set([initialLeaf.id]));
   const [searchVisible, setSearchVisible] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchCaseSensitive, setSearchCaseSensitive] = useState(false);
@@ -566,6 +573,8 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
   } | null>(null);
   const [renamingTab, setRenamingTab] = useState<string | null>(null);
   const [broadcastMode, setBroadcastMode] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [sessionTypeOverride, setSessionTypeOverride] = useState<"daemon" | "in-process">();
   const [scrollLocked, setScrollLocked] = useState<Map<string, boolean>>(new Map());
   const [showScrollBtn, setShowScrollBtn] = useState<Map<string, boolean>>(new Map());
   const [profiles, setProfiles] = useState<TermProfile[]>(loadProfiles);
@@ -660,7 +669,9 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
 
   /** Whether the PTY daemon is ready and circuit breaker state — from PtyModeContext. */
   const { daemonReady, breakerOpen, configuredMode, loading: ptyModeLoading } = usePtyMode();
-  const requestedSessionType = defaultSessionType ?? (configuredMode === "in-process" ? "in-process" : "daemon");
+  const requestedSessionType = sessionTypeOverride ?? defaultSessionType ?? (configuredMode === "in-process" ? "in-process" : "daemon");
+  const daemonUnavailable = ptyModeLoading || !daemonReady || breakerOpen;
+  const cannotSpawn = requestedSessionType === "daemon" && daemonUnavailable;
   const requestedSessionTypeRef = useRef(requestedSessionType);
   requestedSessionTypeRef.current = requestedSessionType;
   const containerRefs = useRef<Map<string, HTMLDivElement>>(new Map());
@@ -786,7 +797,8 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
     } else {
       // A dead process cannot be resumed. Reopen its shell without rerunning
       // a saved agent command or persisting its credentials.
-      const spawned = await ptyIpc.spawn(cwd, saved.shell || undefined, undefined, undefined, undefined, requestedSessionTypeRef.current, persistenceKey);
+      const sessionType = saved.resolvedSessionType ?? requestedSessionTypeRef.current;
+      const spawned = await ptyIpc.spawn(cwd, saved.shell || undefined, undefined, undefined, undefined, sessionType, persistenceKey);
       tab = { id: spawned.id, title: saved.title, shell: saved.shell, cwd, resolvedSessionType: spawned.resolvedSessionType };
     }
     if (!restoreMountedRef.current) {
@@ -805,7 +817,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
     retryingRestoreRef.current.add(id);
     terminalsRef.current.get(id)?.xterm.reset();
     try {
-      const sessions = saved.sshRemote ? [] : await ptyIpc.listDaemonSessions(persistenceKey);
+      const sessions = saved.sshRemote || saved.resolvedSessionType === "in-process" ? [] : await ptyIpc.listDaemonSessions(persistenceKey);
       const tab = await restoreTab(saved, sessions.find(session => session.id === id));
       if (!restoreMountedRef.current) return;
       failedRestoreTabsRef.current.delete(id);
@@ -890,7 +902,9 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
         const tabs = new Map<string, TermTab>();
         for (const savedTab of wanted) {
           try {
-            if (!savedTab.sshRemote && daemon.error) throw daemon.error;
+            // Normal tabs reopen fresh shells; daemon discovery failures must
+            // not block them or change their process lifetime.
+            if (!savedTab.sshRemote && savedTab.resolvedSessionType !== "in-process" && daemon.error) throw daemon.error;
             const tab = await restoreTab(savedTab, sessionById.get(savedTab.id));
             if (!restoreMountedRef.current) return;
             tabCounter.current++;
@@ -900,23 +914,24 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
             // Offline owners keep their identities and pane membership. A
             // retry must not overwrite the saved layout with empty panes.
             failedRestoreTabsRef.current.set(savedTab.id, savedTab);
-            tabs.set(savedTab.id, { ...savedTab, resolvedSessionType: savedTab.sshRemote ? undefined : "daemon" });
+            tabs.set(savedTab.id, { ...savedTab, resolvedSessionType: savedTab.sshRemote ? undefined : savedTab.resolvedSessionType ?? "daemon" });
             queueRestoreSnapshot(pendingRestoreSnapshotsRef.current, savedTab.id, `\r\n[Cannot resume terminal: ${error instanceof Error ? error.message : String(error)}. Press Enter to retry.]\r\n`);
           }
         }
         if (!restoreMountedRef.current) return;
         if (layout) {
+          pendingSpawnPaneIdsRef.current.clear();
           const restored = restoreLayoutTree(layout, tabs);
           setSplitTree(restored.tree);
           setActivePaneId(restored.activePaneId);
-          if (layout.tabs.length === 0) suppressNextAutoSpawnRef.current = true;
         } else if (tabs.size > 0) {
+          pendingSpawnPaneIdsRef.current.clear();
           const restored = createLeaf([...tabs.values()], [...tabs.values()][0].id);
           setSplitTree(restored);
           setActivePaneId(restored.id);
         }
       } catch (error) {
-        suppressNextAutoSpawnRef.current = true;
+        pendingSpawnPaneIdsRef.current.clear();
         publishToast({ kind: "error", title: "Cannot restore terminals", body: error instanceof Error ? error.message : String(error), duration: 5000 });
       } finally {
         if (restoreMountedRef.current) setInitialRestoreComplete(true);
@@ -979,17 +994,14 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
     return () => window.clearInterval(interval);
   }, [sessionsManagerOpen, refreshDaemonSessions]);
 
-  // Auto-spawn a terminal when all tabs in the active pane are closed.
+  // Only initial opening and explicit splits request shells. Closing a tab
+  // must leave the pane empty rather than immediately replacing its process.
   const spawningRef = useRef(false);
-  const suppressNextAutoSpawnRef = useRef(false);
   useEffect(() => {
     if (!initialRestoreComplete || !visible || startupRequest || sshRequest) return;
     const activeLeaf = findLeaf(splitTree, activePaneId);
-    if (activeLeaf && activeLeaf.tabs.length === 0 && !spawningRef.current) {
-      if (suppressNextAutoSpawnRef.current) {
-        suppressNextAutoSpawnRef.current = false;
-        return;
-      }
+    if (activeLeaf && activeLeaf.tabs.length === 0 && pendingSpawnPaneIdsRef.current.has(activeLeaf.id) && !spawningRef.current) {
+      pendingSpawnPaneIdsRef.current.delete(activeLeaf.id);
       spawningRef.current = true;
       void spawnTab(activeLeaf.id).finally(() => {
         spawningRef.current = false;
@@ -1084,6 +1096,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
     try {
       const result = await ptyIpc.spawn(cwd, shellPath, extraEnv, profile?.startupCommand, profile?.agentMeta, sessionTypeOverride ?? (profile?.agentMeta ? "daemon" : requestedSessionType), persistenceKey);
       const { id, resolvedSessionType } = result;
+      pendingSpawnPaneIdsRef.current.delete(paneId);
       persistenceReadyRef.current = true;
       tabCounter.current++;
       const shellName =
@@ -1128,6 +1141,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
 
     try {
       const { terminalId } = await sshTermIpc.openTerminal(profileId, 80, 24, cwd, undefined, persistenceKey);
+      pendingSpawnPaneIdsRef.current.delete(activeLeaf.id);
       tabCounter.current++;
       const title = `ssh ${tabCounter.current}`;
       const tab: TermTab = {
@@ -1321,7 +1335,6 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
       next.add(tabId);
       return next;
     });
-    suppressNextAutoSpawnRef.current = true;
     removeTabFromLayout(paneId, tabId);
   }
 
@@ -1386,12 +1399,12 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
     const dir = direction ?? "horizontal";
     const targetLeafId = targetId ?? activePaneId;
     const newLeaf = createLeaf();
+    pendingSpawnPaneIdsRef.current.add(newLeaf.id);
     setSplitTree((prev) => {
       const newRoot = splitLeafInPlace(prev, targetLeafId, dir, newLeaf);
       return newRoot;
     });
-    // Set the new leaf as active so the auto-spawn effect picks it up
-    // and creates a terminal tab in it.
+    // The effect waits for the new pane to mount before opening its shell.
     setActivePaneId(newLeaf.id);
   }
 
@@ -1709,7 +1722,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activePaneId, splitTree, searchVisible, quickCmdOpen, visible]);
+  }, [activePaneId, splitTree, searchVisible, quickCmdOpen, visible, requestedSessionType]);
 
   function switchTab(direction: number) {
     const activeLeaf = findLeaf(splitTree, activePaneId);
@@ -2136,385 +2149,378 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
 
   return (
     <div className="flex h-full w-full min-w-0 flex-col bg-background">
-      {/* Toolbar row */}
-      <div className="flex shrink-0 items-center gap-1 border-y border-border bg-card px-2 py-1">
-        {/* Broadcast toggle */}
-        <Button
-          variant="ghost"
-          size="compact"
-          type="button"
-          onClick={() => setBroadcastMode((v) => !v)}
-          className={clsx(
-            "flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px]",
-            broadcastMode ? "bg-warning/20 text-warning" : "text-muted-foreground hover:text-foreground hover:bg-accent",
-          )}
-          title="Broadcast input to all terminals"
-        >
-          <Radio size={10} />
-          {broadcastMode && <span>Broadcast</span>}
-        </Button>
-
-        {/* Quick commands */}
-        <Button
-          variant="ghost"
-          size="compact"
-          type="button"
-          onClick={() => { setQuickCmdOpen((v) => !v); setTimeout(() => cmdInputRef.current?.focus(), 50); }}
-          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent"
-          title="Quick commands (⌘⇧R)"
-        >
-          <Command size={10} />
-        </Button>
-
-        {/* Profiles */}
-        <div className="relative">
-          <Popover open={profileMenuOpen} onOpenChange={setProfileMenuOpen}>
-            <PopoverTrigger asChild>
-              <Button
-                variant="ghost"
-                size="compact"
-                type="button"
-                className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent"
-                title="Terminal profiles"
-              >
-                <UserPlus size={10} />
-              </Button>
-            </PopoverTrigger>
-            {profileMenuOpen && (
-              <ProfileMenu
-                profiles={profiles}
-                onSelect={(p) => { setProfileMenuOpen(false); void spawnTab(activePaneId, undefined, p); }}
-                onSave={(name) => { setProfileMenuOpen(false); saveProfile(name, ""); }}
-                onDelete={(name) => { const updated = profiles.filter((p) => p.name !== name); setProfiles(updated); saveProfiles(updated); }}
-              />
-            )}
-          </Popover>
-        </div>
-
-        {/* Export */}
-        <div className="relative">
-          <DropdownMenu open={exportMenuOpen} onOpenChange={setExportMenuOpen}>
-            <DropdownMenuTrigger asChild>
-              <Button
-                variant="ghost"
-                size="compact"
-                type="button"
-                onClick={() => setExportMenuOpen((v) => !v)}
-                className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent"
-                title="Export output"
-              >
-                <FileDown size={10} />
-              </Button>
-            </DropdownMenuTrigger>
-            {exportMenuOpen && (
-              <DropdownMenuContent
-                side="bottom"
-                align="start"
-                className=" min-w-[120px] rounded border border-border bg-card py-1 "
-              >
+      <div
+        role="group"
+        aria-label="Terminal controls"
+        className="shrink-0 border-y border-border bg-card"
+      >
+        <div className="flex min-h-12 flex-wrap items-center gap-2 px-3 py-2">
+          <div
+            role="group"
+            aria-label="Create terminal"
+            className="flex items-center gap-1"
+          >
+            <Button
+              variant="default"
+              size="sm"
+              disabled={cannotSpawn || !initialRestoreComplete}
+              onClick={() => void spawnTab(activePaneId)}
+              title="New terminal (⌘T)"
+            >
+              <Plus data-icon="inline-start" /> New terminal
+            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  size="sm"
+                  aria-label="Terminal mode for new tabs and splits"
+                >
+                  {requestedSessionType === "daemon" ? (
+                    <ShieldCheck data-icon="inline-start" />
+                  ) : (
+                    <TerminalIcon data-icon="inline-start" />
+                  )}
+                  {requestedSessionType === "daemon" ? "Daemon" : "Normal"}
+                  <ChevronDown data-icon="inline-end" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-72">
                 <DropdownMenuGroup>
-                  <DropdownMenuItem
-                    onSelect={() => exportOutput("text")}
-                    className="justify-start block w-full px-3 py-1 text-left text-[11px] text-foreground hover:bg-accent"
+                  <DropdownMenuLabel>New tabs and splits</DropdownMenuLabel>
+                  <DropdownMenuRadioGroup
+                    value={requestedSessionType}
+                    onValueChange={(value) => {
+                      if (value === "daemon" || value === "in-process")
+                        setSessionTypeOverride(value);
+                    }}
                   >
-                    Plain Text
-                  </DropdownMenuItem>
-                  <DropdownMenuItem
-                    onSelect={() => exportOutput("html")}
-                    className="justify-start block w-full px-3 py-1 text-left text-[11px] text-foreground hover:bg-accent"
-                  >
-                    HTML (styled)
-                  </DropdownMenuItem>
+                    <DropdownMenuRadioItem
+                      value="daemon"
+                      disabled={daemonUnavailable}
+                    >
+                      <div className="flex flex-col gap-1">
+                        <span>Daemon terminal</span>
+                        <span className="text-muted-foreground">
+                          Keeps running after Crab closes.
+                        </span>
+                      </div>
+                    </DropdownMenuRadioItem>
+                    <DropdownMenuRadioItem value="in-process">
+                      <div className="flex flex-col gap-1">
+                        <span>Normal terminal</span>
+                        <span className="text-muted-foreground">
+                          Ends when its tab or Crab closes.
+                        </span>
+                      </div>
+                    </DropdownMenuRadioItem>
+                  </DropdownMenuRadioGroup>
                 </DropdownMenuGroup>
+                {daemonUnavailable && (
+                  <p className="px-2 py-2 text-xs text-muted-foreground">
+                    {ptyModeLoading
+                      ? "Connecting to terminal service…"
+                      : "Daemon unavailable. Normal terminals are available."}
+                  </p>
+                )}
               </DropdownMenuContent>
-            )}
-          </DropdownMenu>
-        </div>
-
-        {/* Colour scheme picker */}
-        <div className="relative">
-          <DropdownMenu open={schemeMenuOpen} onOpenChange={setSchemeMenuOpen}>
-            <DropdownMenuTrigger asChild>
-              <Button
-                variant="ghost"
-                size="compact"
-                type="button"
-                className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent"
-                title={`Terminal colour scheme (${getScheme(schemeId).name})`}
-                aria-label="Terminal colour scheme"
-              >
-                <Palette size={10} />
-              </Button>
-            </DropdownMenuTrigger>
-            {schemeMenuOpen && (
-              <SchemeMenu
-                currentId={schemeId}
-                mode={theme}
-                onSelect={(id) => {
-                setSchemeId(id);
-                setStoredSchemeId(id);
-                setSchemeMenuOpen(false);
-              }}
-              />
-            )}
-          </DropdownMenu>
-        </div>
-
-        {/* Font settings (Task 26.1) */}
-        <div className="relative">
-          <Popover open={fontMenuOpen} onOpenChange={setFontMenuOpen}>
-            <PopoverTrigger asChild>
-              <Button
-                variant="ghost"
-                size="compact"
-                type="button"
-                className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent"
-                title="Terminal font settings"
-                aria-label="Terminal font settings"
-              >
-                <Type size={10} />
-              </Button>
-            </PopoverTrigger>
-            {fontMenuOpen && (
-              <TerminalFontSettings onChange={handleFontChange} />
-            )}
-          </Popover>
-        </div>
-
-        {/* Font settings (Task 26.1) */}
-        <div className="relative">
-          <Popover
-            open={scrollbackMenuOpen}
-            onOpenChange={setScrollbackMenuOpen}
+            </DropdownMenu>
+          </div>
+          <div
+            role="group"
+            aria-label="Terminal layout"
+            className="flex items-center gap-1"
           >
-            <PopoverTrigger asChild>
-              <Button
-                variant="ghost"
-                size="compact"
-                type="button"
-                className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent"
-                title="Scrollback buffer settings"
-                aria-label="Scrollback buffer settings"
-              >
-                <SlidersHorizontal size={10} />
-              </Button>
-            </PopoverTrigger>
-            {scrollbackMenuOpen && <ScrollbackSettingsMenu />}
-          </Popover>
-        </div>
-
-        {/* Font settings (Task 26.1) */}
-        <div className="relative">
-          <Popover
-            open={pasteGuardMenuOpen}
-            onOpenChange={setPasteGuardMenuOpen}
-          >
-            <PopoverTrigger asChild>
-              <Button
-                variant="ghost"
-                size="compact"
-                type="button"
-                className={clsx(
-              "flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px]",
-              pasteGuardConfig.enabled
-                ? "text-muted-foreground hover:text-foreground hover:bg-accent"
-                : "text-warning/70 hover:text-warning hover:bg-warning/10",
-            )}
-                title={pasteGuardConfig.enabled ? "Paste protection enabled" : "Paste protection disabled"}
-                aria-label="Paste protection settings"
-              >
-                <AlertTriangle size={10} />
-              </Button>
-            </PopoverTrigger>
-            {pasteGuardMenuOpen && (
-              <PasteGuardSettingsMenu
-                config={pasteGuardConfig}
-                onChange={(updated) => {
-                setPasteGuardConfig(updated);
-                savePasteGuardConfig(updated);
-              }}
-              />
-            )}
-          </Popover>
-        </div>
-
-        {/* Scrollback settings */}
-        <div className="relative">
-          <DropdownMenu
-            open={scrollbarMenuOpen}
-            onOpenChange={setScrollbarMenuOpen}
-          >
-            <DropdownMenuTrigger asChild>
-              <Button
-                variant="ghost"
-                size="compact"
-                type="button"
-                className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent"
-                title={`Scrollbar: ${scrollbarMode}`}
-                aria-label="Scrollbar mode settings"
-              >
-                <SlidersHorizontal size={10} className="rotate-90" />
-              </Button>
-            </DropdownMenuTrigger>
-            {scrollbarMenuOpen && (
-              <ScrollbarModeMenu
-                currentMode={scrollbarMode}
-                onSelect={(mode) => {
-                setScrollbarMode(mode);
-                saveScrollbarMode(mode);
-                setScrollbarMenuOpen(false);
-              }}
-              />
-            )}
-          </DropdownMenu>
-        </div>
-
-        {/* Paste guard settings */}
-        <Button
-          variant="ghost"
-          size="compact"
-          type="button"
-          onClick={() => {
-            const next = !breadcrumbDefault;
-            setBreadcrumbDefault(next);
-            localStorage.setItem(LS_BREADCRUMB_KEY, String(next));
-            // Apply to all existing tabs that haven't been individually overridden
-            // by clearing per-tab state so they inherit the new default.
-            setBreadcrumbPerTab(new Map());
-          }}
-          className={clsx(
-            "flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px]",
-            breadcrumbDefault ? "text-primary" : "text-muted-foreground hover:text-foreground hover:bg-accent",
-          )}
-          title={breadcrumbDefault ? "Hide breadcrumb bar (all tabs)" : "Show breadcrumb bar (all tabs)"}
-          aria-label="Toggle breadcrumb bar"
-        >
-          <ChevronDown size={10} className="-rotate-90" />
-        </Button>
-
-        <Button
-          variant="ghost"
-          size="compact"
-          type="button"
-          onClick={() => setSessionsManagerOpen(true)}
-          className={clsx(
-            "flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px]",
-            backgroundDaemonCount > 0
-              ? "text-primary hover:bg-primary/10"
-              : "text-muted-foreground hover:text-foreground hover:bg-accent",
-          )}
-          title={backgroundDaemonCount > 0 ? `${backgroundDaemonCount} background daemon session${backgroundDaemonCount === 1 ? "" : "s"}` : "Terminal sessions"}
-          aria-label="Terminal sessions"
-        >
-          {sessionSidebarSide === "left" ? (
-            <PanelLeftOpen size={10} />
-          ) : (
-            <PanelRightOpen size={10} />
-          )}
-          {backgroundDaemonCount > 0 && <span>{backgroundDaemonCount}</span>}
-        </Button>
-
-        <div className="flex-1" />
-
-        {/* Breadcrumb bar toggle (global default) */}
-        {onSendErrorToAgent &&
-          (() => {
-            const activeTab = getActivePane()?.activeTab;
-            if (!activeTab) return null;
-            const failure = failedExits.get(activeTab);
-            if (!failure) return null;
-            return (
-              <div className="flex items-center gap-1.5 mr-2 text-[10px]">
-                <span className="text-destructive">
-                  Exit {failure.exitCode}
-                </span>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              disabled={cannotSpawn || !initialRestoreComplete}
+              onClick={() => splitPane("horizontal")}
+              title="Split right (⌘D)"
+            >
+              <SplitSquareHorizontal />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              disabled={cannotSpawn || !initialRestoreComplete}
+              onClick={() => splitPane("vertical")}
+              title="Split down (⌘⇧D)"
+            >
+              <SplitSquareVertical />
+            </Button>
+            <DropdownMenu open={presetMenuOpen} onOpenChange={setPresetMenuOpen}>
+              <DropdownMenuTrigger asChild>
                 <Button
                   variant="ghost"
-                  size="compact"
-                  type="button"
-                  onClick={() => sendErrorToAgent(activeTab)}
-                  className="inline-flex items-center gap-1 rounded-md border border-primary/40 bg-primary/10 px-2 py-0.5 text-primary hover:bg-primary/20 transition"
-                  title="Send the last 200 lines to the agent and ask it to fix this"
+                  size="icon-sm"
+                  aria-label="Preset layouts"
+                  disabled={cannotSpawn || !initialRestoreComplete}
                 >
-                  <SendHorizonal size={9} /> Send error to agent
+                  <LayoutGrid />
                 </Button>
-                <Button
-                  variant="ghost"
-                  size="compact"
-                  type="button"
-                  onClick={() => dismissError(activeTab)}
-                  className="rounded p-0.5 text-muted-foreground hover:text-foreground"
-                  aria-label="Dismiss exit notice"
-                >
-                  <X size={10} />
-                </Button>
-              </div>
-            );
-          })()}
-
-        {/* Failed-exit "Send error to agent" pill — surfaces when an
-            agent-owned callback is wired and a tab ended non-zero. */}
-        <Button
-          variant="ghost"
-          size="compact"
-          type="button"
-          onClick={() => splitPane("horizontal")}
-          className="flex items-center rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
-          title="Split right (⌘\)"
-        >
-          <SplitSquareHorizontal size={11} />
-        </Button>
-        <Button
-          variant="ghost"
-          size="compact"
-          type="button"
-          onClick={() => splitPane("vertical")}
-          className="flex items-center rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
-          title="Split down (⌘⇧|)"
-        >
-          <SplitSquareVertical size={11} />
-        </Button>
-
-        {/* Split buttons */}
-        <div className="relative">
-          <DropdownMenu open={presetMenuOpen} onOpenChange={setPresetMenuOpen}>
-            <DropdownMenuTrigger asChild>
-              <Button
-                variant="ghost"
-                size="compact"
-                type="button"
-                onClick={() => setPresetMenuOpen((v) => !v)}
-                className="flex items-center rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
-                title="Preset layouts"
-                aria-label="Preset layouts"
-              >
-                <LayoutGrid size={11} />
-              </Button>
-            </DropdownMenuTrigger>
-            {presetMenuOpen && (
-              <DropdownMenuContent
-                side="bottom"
-                align="end"
-                className=" min-w-[140px] rounded border border-border bg-card py-1 "
-              >
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start">
                 <DropdownMenuGroup>
+                  <DropdownMenuLabel>Arrange panes</DropdownMenuLabel>
                   {PRESET_LAYOUTS.map((preset) => (
                     <DropdownMenuItem
                       key={preset.id}
-                      onSelect={() => { applyPresetLayout(preset.cols, preset.rows); setPresetMenuOpen(false); }}
-                      className="justify-start block w-full px-3 py-1.5 text-left text-[11px] text-foreground hover:bg-accent"
+                      onSelect={() => applyPresetLayout(preset.cols, preset.rows)}
                     >
-                      <span className="font-medium">{preset.label}</span>
-                      <span className="ml-2 text-muted-foreground">
+                      {preset.label}
+                      <span className="ml-auto text-muted-foreground">
                         {preset.description}
                       </span>
                     </DropdownMenuItem>
                   ))}
                 </DropdownMenuGroup>
               </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={!getActivePane()?.activeTab}
+            onClick={() => setSearchVisible((value) => !value)}
+            aria-pressed={searchVisible}
+            title="Find in terminal (⌘F)"
+          >
+            <Search data-icon="inline-start" /> Find
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setSessionsManagerOpen((value) => !value)}
+            aria-expanded={sessionsManagerOpen}
+            aria-label="Terminal sessions"
+          >
+            <Columns2 data-icon="inline-start" /> Sessions
+            {backgroundDaemonCount > 0 && (
+              <Badge variant="secondary">{backgroundDaemonCount}</Badge>
             )}
-          </DropdownMenu>
+          </Button>
+          <div className="ml-auto flex items-center gap-1">
+            <Toggle
+              size="sm"
+              pressed={broadcastMode}
+              onPressedChange={setBroadcastMode}
+              disabled={openTerminalTabs.length < 2 && !broadcastMode}
+              title="Broadcast input to all terminals (⌘⇧B)"
+              className="[&_svg]:size-4"
+            >
+              <Radio /> <span className="sr-only">Broadcast input</span>
+            </Toggle>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              onClick={() => {
+                setQuickCmdOpen((value) => !value);
+                setTimeout(() => cmdInputRef.current?.focus(), 50);
+              }}
+              title="Quick commands (⌘⇧R)"
+              disabled={!getActivePane()?.activeTab}
+            >
+              <Command />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              onClick={() => setSettingsOpen((value) => !value)}
+              aria-expanded={settingsOpen}
+              title="Terminal settings"
+            >
+              <Settings2 />
+            </Button>
+          </div>
         </div>
+        {cannotSpawn && !ptyModeLoading && (
+          <p role="status" className="px-3 pb-2 text-xs text-muted-foreground">
+            Daemon unavailable. Choose Normal in the mode menu to open a terminal.
+          </p>
+        )}
+        {broadcastMode && (
+          <p role="status" className="px-3 pb-2 text-xs text-warning">
+            Broadcast is on. Input is sent to all {openTerminalTabs.length} open
+            terminals.
+          </p>
+        )}
+        {settingsOpen && (
+          <div
+            role="group"
+            aria-label="Terminal settings"
+            className="flex flex-wrap items-center gap-1 border-t border-border px-3 py-2"
+          >
+            <Popover open={profileMenuOpen} onOpenChange={setProfileMenuOpen}>
+              <PopoverTrigger asChild>
+                <Button variant="ghost" size="sm">
+                  <UserPlus data-icon="inline-start" /> Profiles
+                </Button>
+              </PopoverTrigger>
+              <ProfileMenu
+                profiles={profiles}
+                onSelect={(profile) => {
+                  setProfileMenuOpen(false);
+                  void spawnTab(activePaneId, undefined, profile);
+                }}
+                onSave={(name) => {
+                  setProfileMenuOpen(false);
+                  saveProfile(name, "");
+                }}
+                onDelete={(name) => {
+                  const updated = profiles.filter(
+                    (profile) => profile.name !== name,
+                  );
+                  setProfiles(updated);
+                  saveProfiles(updated);
+                }}
+              />
+            </Popover>
+            <DropdownMenu open={schemeMenuOpen} onOpenChange={setSchemeMenuOpen}>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  aria-label="Terminal colour scheme"
+                >
+                  <Palette data-icon="inline-start" /> Colour
+                </Button>
+              </DropdownMenuTrigger>
+              <SchemeMenu
+                currentId={schemeId}
+                mode={theme}
+                onSelect={(id) => {
+                  setSchemeId(id);
+                  setStoredSchemeId(id);
+                  setSchemeMenuOpen(false);
+                }}
+              />
+            </DropdownMenu>
+            <Popover open={fontMenuOpen} onOpenChange={setFontMenuOpen}>
+              <PopoverTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  aria-label="Terminal font settings"
+                >
+                  <Type data-icon="inline-start" /> Font
+                </Button>
+              </PopoverTrigger>
+              {fontMenuOpen && <TerminalFontSettings onChange={handleFontChange} />}
+            </Popover>
+            <Popover open={scrollbackMenuOpen} onOpenChange={setScrollbackMenuOpen}>
+              <PopoverTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  aria-label="Scrollback buffer settings"
+                >
+                  <SlidersHorizontal data-icon="inline-start" /> Scrollback
+                </Button>
+              </PopoverTrigger>
+              {scrollbackMenuOpen && <ScrollbackSettingsMenu />}
+            </Popover>
+            <Popover open={pasteGuardMenuOpen} onOpenChange={setPasteGuardMenuOpen}>
+              <PopoverTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  aria-label="Paste protection settings"
+                >
+                  <ShieldCheck data-icon="inline-start" /> Paste protection
+                  {!pasteGuardConfig.enabled && " off"}
+                </Button>
+              </PopoverTrigger>
+              <PasteGuardSettingsMenu
+                config={pasteGuardConfig}
+                onChange={(updated) => {
+                  setPasteGuardConfig(updated);
+                  savePasteGuardConfig(updated);
+                }}
+              />
+            </Popover>
+            <DropdownMenu
+              open={scrollbarMenuOpen}
+              onOpenChange={setScrollbarMenuOpen}
+            >
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  aria-label="Scrollbar mode settings"
+                >
+                  <SlidersHorizontal data-icon="inline-start" /> Scrollbar
+                </Button>
+              </DropdownMenuTrigger>
+              <ScrollbarModeMenu
+                currentMode={scrollbarMode}
+                onSelect={(mode) => {
+                  setScrollbarMode(mode);
+                  saveScrollbarMode(mode);
+                  setScrollbarMenuOpen(false);
+                }}
+              />
+            </DropdownMenu>
+            <Toggle
+              size="sm"
+              pressed={breadcrumbDefault}
+              className="[&_svg]:size-4"
+              onPressedChange={(next) => {
+                setBreadcrumbDefault(next);
+                localStorage.setItem(LS_BREADCRUMB_KEY, String(next));
+                setBreadcrumbPerTab(new Map());
+              }}
+              aria-label="Toggle breadcrumb bar"
+            >
+              <ChevronDown className="-rotate-90" /> Breadcrumbs
+            </Toggle>
+            <DropdownMenu open={exportMenuOpen} onOpenChange={setExportMenuOpen}>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={!getActivePane()?.activeTab}
+                >
+                  <FileDown data-icon="inline-start" /> Export output
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuGroup>
+                  <DropdownMenuItem onSelect={() => exportOutput("text")}>
+                    Plain text
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => exportOutput("html")}>
+                    HTML (styled)
+                  </DropdownMenuItem>
+                </DropdownMenuGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+        )}
+        {onSendErrorToAgent &&
+          (() => {
+            const activeTab = getActivePane()?.activeTab;
+            const failure = activeTab ? failedExits.get(activeTab) : undefined;
+            if (!activeTab || !failure) return null;
+            return (
+              <div
+                role="status"
+                className="flex flex-wrap items-center gap-2 border-t border-border px-3 py-2"
+              >
+                <Badge variant="destructive">Exit {failure.exitCode}</Badge>
+                <Button size="sm" onClick={() => sendErrorToAgent(activeTab)}>
+                  <SendHorizonal data-icon="inline-start" /> Send error to agent
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={() => dismissError(activeTab)}
+                  aria-label="Dismiss exit notice"
+                >
+                  <X />
+                </Button>
+              </div>
+            );
+          })()}
       </div>
 
       {/* Preset layouts */}
@@ -3414,196 +3420,185 @@ function TerminalPane({
           onRenameTab={onRenameTab}
           setRenamingTab={setRenamingTab}
           onCloseTab={onKillTab}
-          onOpenSessionManager={onOpenSessionManager}
-          backgroundSessionCount={backgroundSessionCount}
         />
         <PresetDropdown
-          onSelect={(cmd) => onSpawnTab(undefined, { name: cmd.name, shell: "", cwd: cmd.cwd, env: cmd.env, startupCommand: cmd.command })}
+          onSelect={(cmd) => onSpawnTab(undefined, { name: cmd.name, shell: "", cwd: cmd.cwd, env: cmd.env, startupCommand: cmd.command, agentMeta: cmd.agentMeta })}
           onSpawnPlain={() => onSpawnTab()}
         />
 
-        <div className="relative ml-auto flex items-center gap-1 pr-2">
-          {/* Tab bar */}
-          <Button
-            variant="ghost"
-            size="compact"
-            type="button"
-            onClick={() => onScrollLockToggle(!scrollLocked)}
-            className={clsx("flex items-center rounded px-1 py-0.5", scrollLocked ? "text-warning" : "text-muted-foreground hover:text-foreground hover:bg-accent")}
-            title={scrollLocked ? "Scroll locked — new output won't auto-scroll" : "Click to lock scroll"}
+        <div className="ml-auto flex shrink-0 items-center gap-1 px-1">
+          <Toggle
+            size="sm"
+            pressed={scrollLocked}
+            onPressedChange={onScrollLockToggle}
+            className="[&_svg]:size-4"
+            title={scrollLocked ? "Unlock scrolling" : "Lock scrolling"}
           >
-            {scrollLocked ? <Lock size={10} /> : <Unlock size={10} />}
-          </Button>
-
-          {/* Scroll lock */}
-          <Button
-            variant="ghost"
-            size="compact"
-            type="button"
-            onClick={() => { const si = pane.activeTab ? shellIntegrationRef.current.get(pane.activeTab) : null; if (si) si.jumpToPreviousPrompt(); }}
-            className="flex items-center rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
-            title="Previous prompt (⌘↑)"
-          >
-            <ArrowUp size={10} />
-          </Button>
-          <Button
-            variant="ghost"
-            size="compact"
-            type="button"
-            onClick={() => { const si = pane.activeTab ? shellIntegrationRef.current.get(pane.activeTab) : null; if (si) si.jumpToNextPrompt(); }}
-            className="flex items-center rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
-            title="Next prompt (⌘↓)"
-          >
-            <ArrowDown size={10} />
-          </Button>
-          <Button
-            variant="ghost"
-            size="compact"
-            type="button"
-            onClick={() => {
-            if (!pane.activeTab) return;
-            const si = shellIntegrationRef.current.get(pane.activeTab);
-            if (!si) return;
-            const marks = si.state.marks;
-            let lastExecIndex = -1;
-            for (let i = marks.length - 1; i >= 0; i--) { if (marks[i].type === "command-executed") { lastExecIndex = i; break; } }
-            if (lastExecIndex >= 0) { const text = si.selectCommandOutput(lastExecIndex); if (text) void navigator.clipboard.writeText(stripAnsiCodes(text)); }
-          }}
-            className="flex items-center rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
-            title="Copy last command output"
-          >
-            <ClipboardCopy size={10} />
-          </Button>
-          <Button
-            variant="ghost"
-            size="compact"
-            type="button"
-            onClick={() => {
-            if (!pane.activeTab) return;
-            const si = shellIntegrationRef.current.get(pane.activeTab);
-            const term = terminalsRef.current.get(pane.activeTab);
-            if (!si || !term) return;
-            const cmd = getLastCommand(term.xterm, si.state.marks);
-            if (cmd) void writeTerminalRef.current(pane.activeTab, cmd + "\r");
-          }}
-            className="flex items-center rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
-            title="Retry last command"
-          >
-            <RotateCcw size={10} />
-          </Button>
-          <Button
-            variant="ghost"
-            size="compact"
-            type="button"
-            onClick={() => {
-            if (!pane.activeTab) return;
-            const t = terminalsRef.current.get(pane.activeTab);
-            if (!t) return; t.xterm.selectAll();
-            const text = t.xterm.getSelection(); t.xterm.clearSelection();
-            if (text) void navigator.clipboard.writeText(text);
-          }}
-            className="flex items-center rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
-            title="Copy all output"
-          >
-            <Copy size={10} />
-          </Button>
-
-          {/* Per-tab breadcrumb toggle */}
-          <Button
-            variant="ghost"
-            size="compact"
-            type="button"
-            onClick={() => { if (pane.activeTab) onToggleBreadcrumb(pane.activeTab); }}
-            className={clsx(
-              "flex items-center rounded px-1 py-0.5",
-              pane.activeTab && (breadcrumbPerTab.get(pane.activeTab) ?? breadcrumbDefault)
-                ? "text-primary" : "text-muted-foreground hover:text-foreground hover:bg-accent",
-            )}
-            title={pane.activeTab && (breadcrumbPerTab.get(pane.activeTab) ?? breadcrumbDefault) ? "Hide breadcrumb (this tab)" : "Show breadcrumb (this tab)"}
-          >
-            <ChevronDown size={10} className="-rotate-90" />
-          </Button>
-
-          {/* Per-tab bookmark: add bookmark at current cursor position */}
-          <Button
-            variant="ghost"
-            size="compact"
-            type="button"
-            onClick={() => {
-            if (!pane.activeTab) return;
-            const term = terminalsRef.current.get(pane.activeTab);
-            if (!term) return;
-            const line = (term.xterm.buffer?.active?.baseY ?? 0) + (term.xterm.buffer?.active?.cursorY ?? 0);
-            let mgr = bookmarkManagersRef.current.get(pane.activeTab);
-            if (!mgr) { mgr = new BookmarkManager(); bookmarkManagersRef.current.set(pane.activeTab, mgr); }
-            mgr.add(line);
-            bumpBookmarks();
-            setBookmarksPanelOpen(true);
-          }}
-            className="flex items-center rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
-            title="Add bookmark at cursor"
-          >
-            <Bookmark size={10} />
-          </Button>
-          {/* Toggle bookmarks panel */}
-          {(() => {
-            const mgr = pane.activeTab ? bookmarkManagersRef.current.get(pane.activeTab) : null;
-            const count = mgr?.count ?? 0;
-            return count > 0 ? (
-              <Button
-                variant="ghost"
-                size="compact"
-                type="button"
-                onClick={() => setBookmarksPanelOpen((v) => !v)}
-                className={clsx("flex items-center rounded px-1 py-0.5 text-[9px]",
-                bookmarksPanelOpen ? "text-primary" : "text-muted-foreground hover:text-foreground hover:bg-accent")}
-                title={`${count} bookmark${count > 1 ? "s" : ""}`}
-              >
-                {count}
-              </Button>
-            ) : null;
-          })()}
-
-          <DropdownMenu open={shellMenuOpen} onOpenChange={onShellMenuToggle}>
+            {scrollLocked ? <Lock /> : <Unlock />}
+          </Toggle>
+          <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button
-                variant="ghost"
-                size="compact"
-                className="gap-0.5 px-1.5 py-0.5 text-muted-foreground"
-                aria-label="Select shell"
-              >
-                <TerminalIcon size={10} />
-                <DropdownIcon size={8} />
+              <Button variant="ghost" size="icon-sm" aria-label="Terminal actions">
+                <MoreHorizontal />
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
               <DropdownMenuGroup>
+                <DropdownMenuLabel>Active terminal</DropdownMenuLabel>
+                <DropdownMenuItem
+                  disabled={!pane.activeTab}
+                  onSelect={() => {
+                    if (pane.activeTab)
+                      shellIntegrationRef.current
+                        .get(pane.activeTab)
+                        ?.jumpToPreviousPrompt();
+                  }}
+                >
+                  <ArrowUp /> Previous prompt
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  disabled={!pane.activeTab}
+                  onSelect={() => {
+                    if (pane.activeTab)
+                      shellIntegrationRef.current
+                        .get(pane.activeTab)
+                        ?.jumpToNextPrompt();
+                  }}
+                >
+                  <ArrowDown /> Next prompt
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  disabled={!pane.activeTab}
+                  onSelect={() => {
+                    if (!pane.activeTab) return;
+                    const integration = shellIntegrationRef.current.get(
+                      pane.activeTab,
+                    );
+                    if (!integration) return;
+                    const index = integration.state.marks
+                      .map((mark) => mark.type)
+                      .lastIndexOf("command-executed");
+                    const text =
+                      index >= 0 ? integration.selectCommandOutput(index) : null;
+                    if (text)
+                      void navigator.clipboard.writeText(stripAnsiCodes(text));
+                  }}
+                >
+                  <ClipboardCopy /> Copy last command output
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  disabled={!pane.activeTab}
+                  onSelect={() => {
+                    if (!pane.activeTab) return;
+                    const integration = shellIntegrationRef.current.get(
+                      pane.activeTab,
+                    );
+                    const terminal = terminalsRef.current.get(pane.activeTab);
+                    if (!integration || !terminal) return;
+                    const command = getLastCommand(
+                      terminal.xterm,
+                      integration.state.marks,
+                    );
+                    if (command)
+                      void writeTerminalRef.current(pane.activeTab, command + "\r");
+                  }}
+                >
+                  <RotateCcw /> Retry last command
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  disabled={!pane.activeTab}
+                  onSelect={() => {
+                    if (!pane.activeTab) return;
+                    const terminal = terminalsRef.current.get(pane.activeTab);
+                    if (!terminal) return;
+                    terminal.xterm.selectAll();
+                    const text = terminal.xterm.getSelection();
+                    terminal.xterm.clearSelection();
+                    if (text) void navigator.clipboard.writeText(text);
+                  }}
+                >
+                  <Copy /> Copy all output
+                </DropdownMenuItem>
+              </DropdownMenuGroup>
+              <DropdownMenuSeparator />
+              <DropdownMenuGroup>
+                <DropdownMenuCheckboxItem
+                  checked={
+                    pane.activeTab
+                      ? (breadcrumbPerTab.get(pane.activeTab) ?? breadcrumbDefault)
+                      : breadcrumbDefault
+                  }
+                  disabled={!pane.activeTab}
+                  onCheckedChange={() => {
+                    if (pane.activeTab) onToggleBreadcrumb(pane.activeTab);
+                  }}
+                >
+                  Show breadcrumbs
+                </DropdownMenuCheckboxItem>
+                <DropdownMenuItem
+                  disabled={!pane.activeTab}
+                  onSelect={() => {
+                    if (!pane.activeTab) return;
+                    const terminal = terminalsRef.current.get(pane.activeTab);
+                    if (!terminal) return;
+                    const line =
+                      terminal.xterm.buffer.active.baseY +
+                      terminal.xterm.buffer.active.cursorY;
+                    let manager = bookmarkManagersRef.current.get(pane.activeTab);
+                    if (!manager) {
+                      manager = new BookmarkManager();
+                      bookmarkManagersRef.current.set(pane.activeTab, manager);
+                    }
+                    manager.add(line);
+                    bumpBookmarks();
+                    setBookmarksPanelOpen(true);
+                  }}
+                >
+                  <Bookmark /> Add bookmark at cursor
+                </DropdownMenuItem>
+                <DropdownMenuCheckboxItem
+                  checked={bookmarksPanelOpen}
+                  onCheckedChange={setBookmarksPanelOpen}
+                  disabled={
+                    !pane.activeTab ||
+                    !bookmarkManagersRef.current.get(pane.activeTab)?.count
+                  }
+                >
+                  Show bookmarks
+                </DropdownMenuCheckboxItem>
+              </DropdownMenuGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
+          <DropdownMenu open={shellMenuOpen} onOpenChange={onShellMenuToggle}>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="icon-sm" aria-label="Select shell">
+                <TerminalIcon />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuGroup>
+                <DropdownMenuLabel>New terminal with shell</DropdownMenuLabel>
                 {availableShells.map((shell) => (
-                  <DropdownMenuItem
-                    key={shell}
-                    onSelect={() => onSpawnTab(shell)}
-                  >
+                  <DropdownMenuItem key={shell} onSelect={() => onSpawnTab(shell)}>
                     {shell.split("/").pop()}
-                    <span className="ml-2 text-muted-foreground">{shell}</span>
+                    <span className="ml-auto text-muted-foreground">{shell}</span>
                   </DropdownMenuItem>
                 ))}
               </DropdownMenuGroup>
             </DropdownMenuContent>
           </DropdownMenu>
-
           {onClose && (
             <Button
               variant="ghost"
-              size="compact"
-              type="button"
+              size="icon-sm"
               onClick={onClose}
-              className="flex items-center rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-destructive"
               title="Close pane"
             >
-              <X size={12} />
+              <X />
             </Button>
           )}
         </div>
+
       </div>
 
       {/* Breadcrumb bar — shows tracked cwd above terminal viewport (per-tab toggle) */}
@@ -3808,8 +3803,6 @@ function TerminalTabStrip({
   onRenameTab,
   setRenamingTab,
   onCloseTab,
-  onOpenSessionManager,
-  backgroundSessionCount,
 }: {
   tabs: TermTab[];
   activeTab: string | null;
@@ -3821,8 +3814,6 @@ function TerminalTabStrip({
   onRenameTab: (tabId: string, newTitle: string) => void;
   setRenamingTab: (id: string | null) => void;
   onCloseTab: (tabId: string) => void;
-  onOpenSessionManager: () => void;
-  backgroundSessionCount: number;
 }) {
   const scrollerRef = useRef<HTMLDivElement>(null);
 
@@ -3852,12 +3843,13 @@ function TerminalTabStrip({
               data-tab-id={t.id}
               onClick={() => onSetActiveTab(t.id)}
               className={clsx(
-                "group flex h-7 min-w-[116px] max-w-[190px] shrink-0 cursor-pointer items-center gap-1 border-r border-border px-2 text-[11px]",
+                "group flex h-9 min-w-[160px] max-w-[240px] shrink-0 cursor-pointer items-center gap-1 border-r border-border px-2 text-[11px]",
                 activeTab === t.id
                   ? "bg-background text-foreground"
                   : "text-muted-foreground hover:bg-accent hover:text-foreground",
               )}
-              title={isDaemon ? "Daemon terminal - survives app restart" : sType === "in-process" ? "Local in-process terminal" : undefined}
+              data-session-type={t.sshRemote ? "ssh" : sType}
+              title={isDaemon ? "Daemon terminal — keeps running after Crab closes" : sType === "in-process" ? "Normal terminal — ends when its tab or Crab closes" : undefined}
             >
               {activeTab !== t.id && tabBadges.has(t.id) && (
                 <span
@@ -3868,9 +3860,7 @@ function TerminalTabStrip({
                   aria-label={tabBadges.get(t.id) === "success" ? "Command succeeded" : "Command failed"}
                 />
               )}
-              {isDaemon && (
-                <Circle size={7} className="shrink-0 fill-primary text-primary" aria-label="Daemon terminal" />
-              )}
+              {sType && <Badge variant="outline" className="shrink-0 px-1.5">{isDaemon ? "Daemon" : "Normal"}</Badge>}
               {t.sshRemote && (
                 <span
                   className="inline-flex max-w-[80px] shrink-0 items-center truncate rounded px-1 py-0.5 text-[9px] font-medium text-foreground"
@@ -3910,44 +3900,29 @@ function TerminalTabStrip({
                   onDoubleClick={() => setRenamingTab(t.id)}
                   className="justify-start min-w-0 flex-1 truncate text-left"
                   title="Double-click to rename"
+                  aria-pressed={activeTab === t.id}
                 >
                   {t.title}
                 </Button>
               )}
               <Button
                 variant="ghost"
-                size="compact"
+                size="icon-sm"
                 type="button"
                 onClick={(e) => { e.stopPropagation(); onCloseTab(t.id); }}
                 className={clsx(
-                  "shrink-0 opacity-0 transition group-hover:opacity-100",
+                  "shrink-0 opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100",
                   isDaemon ? "hover:text-primary" : "hover:text-destructive",
                 )}
                 aria-label={isDaemon ? "Hide daemon terminal" : "Close terminal"}
                 title={isDaemon ? "Hide tab - session keeps running" : "Close terminal"}
               >
-                {isDaemon ? <EyeOff size={10} /> : <X size={10} />}
+                {isDaemon ? <EyeOff /> : <X />}
               </Button>
             </div>
           );
         })}
       </div>
-      <Button
-        variant="ghost"
-        size="compact"
-        type="button"
-        onClick={onOpenSessionManager}
-        className={clsx(
-          "flex h-7 shrink-0 items-center gap-1 border-l border-border px-2 text-[10px]",
-          backgroundSessionCount > 0
-            ? "text-primary hover:bg-primary/10"
-            : "text-muted-foreground hover:bg-accent hover:text-foreground",
-        )}
-        title="Open terminal session manager"
-        aria-label="Open terminal session manager"
-      >
-        <MoreHorizontal size={12} />
-      </Button>
     </div>
   );
 }
@@ -4736,7 +4711,7 @@ function ContextMenu({
     { label: "Rename Tab", action: "rename", shortcut: "⌘⇧N" },
     { label: "---", action: "" },
     { label: "New daemon terminal", action: "newDaemonTerminal", shortcut: "", disabled: daemonDisabled, tooltip: daemonTooltip },
-    { label: "New in-process terminal", action: "newLocalTerminal", shortcut: "⌘T" },
+    { label: "New normal terminal", action: "newLocalTerminal" },
     { label: "---", action: "" },
     { label: "Split Right", action: "splitRight", shortcut: "⌘D" },
     { label: "Split Down", action: "splitDown", shortcut: "⌘⇧D" },
@@ -4751,7 +4726,7 @@ function ContextMenu({
     <PointMenu position={{ x, y }} onClose={onClose}>
       {items.map((item, i) =>
         item.label === "---" ? (
-        <div key={i} className="my-1 border-t border-border" />
+        <DropdownMenuSeparator key={i} />
       ) : (
           <DropdownMenuItem
             key={item.action}
