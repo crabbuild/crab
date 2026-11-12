@@ -37,14 +37,11 @@ pub(crate) async fn output(
 }
 
 fn git_command(root: &Path, args: &[&str]) -> Result<std::process::Command> {
-    let mut command = std::process::Command::new("git");
-    // Captured reads must not refresh index stats during an explicit mutation.
+    let mut command = crate::shellout::git_command()?.into_std();
     command
         .arg("--literal-pathspecs")
         .args(args)
         .current_dir(root)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     // A captured repository owns its physical Git paths. Ambient helper-relative
@@ -64,9 +61,6 @@ fn git_command(root: &Path, args: &[&str]) -> Result<std::process::Command> {
         "GIT_CONFIG",
     ] {
         command.env_remove(name);
-    }
-    if let Some(connection) = crate::storage_auth::current() {
-        connection.options()?.configure_command(&mut command)?;
     }
     Ok(command)
 }

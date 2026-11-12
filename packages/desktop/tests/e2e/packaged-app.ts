@@ -65,7 +65,11 @@ export function packagedExecutable(): string {
 export async function call(page: Page, method: string, params: unknown): Promise<Record<string, unknown>> {
   return page.evaluate(async ({ method, params }) => {
     const bridge = (window as unknown as { crab: { rpc: (method: string, params: unknown) => Promise<Record<string, unknown>> } }).crab;
-    return bridge.rpc(method, params);
+    try { return await bridge.rpc(method, params); }
+    catch (error) {
+      const detail = error as { code?: unknown; message?: unknown } | null;
+      throw new Error(`${method} failed (${String(detail?.code ?? "unknown")}): ${String(detail?.message ?? error)}`);
+    }
   }, { method, params });
 }
 

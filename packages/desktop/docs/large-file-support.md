@@ -245,12 +245,50 @@ handle. HTTP completion now uses journaled `responses/` scratch through final
 close, retaining its existing stream/reservation ownership. Unknown and replaced
 entries remain protected; no compatibility reader or runtime option is added.
 
-The local combined-feature cache checks pass 60 catalog, 46 private-filesystem
-and five HTTP completion cases, plus strict Clippy. The later empty-identity
-flush also repeats the catalog checks. Exact-source Windows/Linux native tests,
-the rebuilt package, unchanged syscall-order assertions and real directory-sync
-failure/repair proof are in progress. Physical drive power-loss behavior and
-other filesystems remain separate qualification profiles.
+The local combined-feature cache checks pass 60 catalog, 46 private-filesystem,
+five HTTP completion and four Git-pack cases, plus strict Clippy. The
+[exact-source native probe](https://github.com/crabbuild/crab/actions/runs/43183402196)
+passes 239 applicable Linux and 120 Windows checks; Windows HTTP-body cases
+are gated out, while the shared scratch-lifetime case runs on both targets.
+The rebuilt unsigned macOS package matches all 1,716 frozen native inputs,
+869 renderer/Electron assets and its local/SSH runtime pair.
+
+The unchanged ordering assertions now observe parent flushes after both decoded-
+range renames, with no pending records left. A real post-rename directory-sync
+fault retains recovery records while validated origin reads still succeed.
+Settings cleanup displays the I/O error without a success message. Removing the
+fault permits cleanup and an exact SHA-256 reread, retires pending records and
+produces zero origin writes. A failed cleanup can already have unlinked files;
+the retry reports its actual remaining inventory rather than claiming rollback.
+All twelve canonical SDK interruption, cleanup, budget and content-error cases
+pass on this package. Its first selected-identity SSH run fails at the Git diff
+after nested hydration with an unserialized RPC error. A passive diagnostic
+repeat passes; the original failure remains unexplained and does not qualify
+as fixed. A subsequent canonical repeat collides with `index.lock` during a
+fixture mutation; a trace repeat also exceeds the unchanged five-second
+tracking-completion deadline. Passing repeats do not close those failures.
+Physical drive power-loss behavior and other filesystems remain separate
+qualification profiles.
+
+### Read-only Git inspection
+
+The SSH trace identifies native Git diffs refreshing the real index even with
+`GIT_OPTIONAL_LOCKS=0`. Git 2.50's
+[diff implementation](https://github.com/git/git/blob/v2.50.1/builtin/diff.c)
+does not consult that flag before its automatic refresh. An isolated real-Git
+probe returns an empty patch while changing index bytes; disabling
+[`diff.autoRefreshIndex`](https://git-scm.com/docs/diff-config) preserves both
+the empty patch and the index. The native caller regression fails before the
+fix and passes afterward, including an explicitly enabled repository setting.
+
+The shared native Git command builder disables automatic diff refresh while
+retaining mandatory mutation locks. Captured reads now reuse that builder and
+its scoped credentials instead of duplicating command policy. Task comparisons
+permit stat refresh only in their private index, keeping raw filenames consistent
+with patches; checkpoint comparisons use staged or committed content. The focused
+command/credential cases pass. New-package qualification
+remains required; this closes the proven index-mutation defect without claiming
+the unexplained RPC or tracking timing failures are fixed.
 
 ### Intel SFTP qualification boundary
 

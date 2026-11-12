@@ -108,8 +108,9 @@ allocation-boundary probe observes one such file with zero logical bytes and
 zero allocated payload blocks. Its reservation is retired by retry, exact
 source reads succeed, and cleanup preserves the unrecorded inode. This is
 bounded process-death evidence, not cross-platform or power-loss qualification.
-Anonymous streams
-unlink before writing and keep their existing descriptor lifetime. Packaged
+HTTP response streams journal their exact scratch identity before writing and
+retain that authority through final descriptor close. Unix unlinks the name
+before writing; Windows deletion can remain pending while the stream is open. Packaged
 process-death recovery has bounded macOS proof, including exact source bytes and
 actual orphan removal. Focused native cache checks pass on Windows and Linux;
 packaged cross-platform qualification remains required. This does not establish
@@ -416,8 +417,14 @@ through that lifetime; cleanup recognizes this directory without treating raw
 responses as immutable object payloads. Unrecorded/replaced files stay retained.
 
 A packaged macOS trace reproduces the earlier gap: two decoded-range renames
-had no corresponding parent flush after their journals were retired. Updated
-package ordering, failure/retry and cross-platform native proof are in progress.
+had no corresponding parent flush after their journals were retired. The same
+assertions pass on the rebuilt package: both captured parents flush before
+journal retirement. Injected post-rename directory-sync failures retain pending
+records, and Settings cleanup shows the I/O error without reporting success.
+After fault removal, cleanup retires the records and an exact-content read
+succeeds with no origin writes. Exact-source focused native checks pass on
+[Linux and Windows](https://github.com/crabbuild/crab/actions/runs/43183402196);
+Windows HTTP-body cases are gated out, while the shared scratch-lifetime case runs.
 These checks do not establish physical drive power-loss behavior.
 The macOS sync-image probe replays the last successful flush and finds the exact
 pending identity before the first payload write; its unchanged assertion fails
