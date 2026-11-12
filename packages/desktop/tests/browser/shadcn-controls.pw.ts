@@ -13,7 +13,10 @@ test("select typeahead is scoped and preserves an empty selection", async ({
     exact: true,
   });
   await trigger.click();
+  await expect(page.getByRole("option", { name: "One", exact: true })).toBeFocused();
   await page.keyboard.press("n");
+  // Radix defers typeahead focus; Enter selects the currently focused item.
+  await expect(page.getByRole("option", { name: "Next", exact: true })).toBeFocused();
   await page.keyboard.press("Enter");
   await expect(trigger).toHaveText("Next");
   await expect(page.getByTestId("shortcut")).toHaveText(
