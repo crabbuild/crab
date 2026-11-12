@@ -60,7 +60,7 @@ impl LocalCache {
         destination: &Path,
     ) -> Result<bool> {
         let path = self.git_pack_path(hash);
-        let Ok((entry, mut input)) = PayloadRead::open(&self.root, &path).await else {
+        let Ok((entry, mut input)) = PayloadRead::open(self.catalog.root(), &path).await else {
             return Ok(false);
         };
         // A conflicting caller length is not proof of cached corruption. The

@@ -43,7 +43,7 @@ use crate::{CacheError, Result};
 
 #[path = "platform/cleanup.rs"]
 mod cleanup;
-pub(super) use cleanup::{clean, clean_namespaces};
+pub(super) use cleanup::clean;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const SHARE_PINNED: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;

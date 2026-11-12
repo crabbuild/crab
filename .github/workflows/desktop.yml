@@ -1,4 +1,4 @@
-name: Desktop cache recovery probe
+name: Desktop shared cache ownership probe
 on:
   workflow_dispatch:
 permissions:
@@ -27,12 +27,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.0
-      - name: Test durable cache fill ownership
+      - name: Test shared root cache ownership
         run: |
-          cargo test --locked -p crab-cache --lib --features local-cache,xet-chunk-cache catalog::
-      - name: Test private filesystem ownership
-        run: |
-          cargo test --locked -p crab-cache --lib --features local-cache,xet-chunk-cache private_fs::platform::tests
-      - name: Test namespace cleanup
-        run: |
-          cargo test --locked -p crab-cache --lib --features local-cache,xet-chunk-cache namespace_
+          for filter in catalog:: local_cache::tests xet_chunk_cache::tests clean:: private_fs::platform:: health:: cache_client::completed_body::tests; do
+            cargo test --locked -p crab-cache --lib --features local-cache,xet-chunk-cache,remote-client "$filter"
+          done

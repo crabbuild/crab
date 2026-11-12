@@ -22,6 +22,11 @@ pub(crate) struct EntryStat {
 
 pub(crate) struct PinnedRoot(platform::Directory);
 
+#[cfg(feature = "xet-chunk-cache")]
+mod catalog_directory;
+#[cfg(feature = "xet-chunk-cache")]
+pub(crate) use catalog_directory::CatalogDirectory;
+
 #[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub(crate) struct FileIdentity {
     volume: u64,
@@ -137,12 +142,54 @@ pub(crate) fn open_database(
 }
 
 impl PinnedRoot {
-    pub(crate) fn clean_namespaces(
+    #[cfg(feature = "local-cache")]
+    pub(crate) fn with_subdirectory<T: Default>(
         &self,
-        dry_run: bool,
-        cancel: &tokio_util::sync::CancellationToken,
-    ) -> Result<crate::CacheCleanReport> {
-        platform::clean_namespaces(&self.0, dry_run, cancel)
+        relative: &Path,
+        operation: impl FnOnce(&Self) -> Result<T>,
+    ) -> Result<T> {
+        if relative.as_os_str().is_empty() {
+            return operation(self);
+        }
+        match self.subdirectory(relative, false) {
+            Ok(directory) => operation(&directory),
+            Err(CacheError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(T::default())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(crate) fn subdirectory(&self, relative: &Path, create: bool) -> Result<Self> {
+        #[cfg(any(unix, windows))]
+        {
+            // Descend from the captured owner. Reopening an ambient namespace
+            // after a parent move could bind its files to a different catalog.
+            let mut directory = None;
+            for component in relative.components() {
+                let std::path::Component::Normal(name) = component else {
+                    return Err(CacheError::UnsafeRoot {
+                        path: relative.display().to_string(),
+                        reason: "cache scope contains an unsafe component".into(),
+                    });
+                };
+                let parent = directory.as_ref().unwrap_or(&self.0);
+                directory = Some(parent.child(name, create)?);
+            }
+            directory.map(Self).ok_or_else(|| CacheError::UnsafeRoot {
+                path: relative.display().to_string(),
+                reason: "cache subdirectory has no component".into(),
+            })
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (relative, create);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "private cache directories require Unix or Windows",
+            )
+            .into())
+        }
     }
 
     pub(crate) fn clean(
@@ -441,7 +488,7 @@ mod platform {
     use crate::{CacheError, Result};
 
     mod cleanup;
-    pub(super) use cleanup::{clean, clean_namespaces};
+    pub(super) use cleanup::clean;
     mod database;
     mod scan;
     pub(crate) use database::Database;
@@ -1475,14 +1522,6 @@ mod platform {
         _dry_run: bool,
         _cancel: &tokio_util::sync::CancellationToken,
         _remove: &mut super::RemovePayload<'_>,
-    ) -> Result<crate::CacheCleanReport> {
-        Err(unsupported(Path::new("cache")))
-    }
-
-    pub(super) fn clean_namespaces(
-        _root: &Directory,
-        _dry_run: bool,
-        _cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<crate::CacheCleanReport> {
         Err(unsupported(Path::new("cache")))
     }

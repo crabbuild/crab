@@ -7,6 +7,8 @@ import { createHash } from "node:crypto";
 import verifyNative from "./verify-native.cjs";
 import configureUpdater from "./configure-updater.cjs";
 import { createRequire } from "node:module";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 
 const require = createRequire(import.meta.url);
@@ -58,3 +60,22 @@ for (const platform of [Platform.MAC, Platform.WINDOWS, Platform.LINUX]) {
     });
   }
 }
+
+test("plain Node SSH sessions do not initialize Electron power APIs", () => {
+  const manager = fileURLToPath(new URL("../dist-electron/ssh-manager.cjs", import.meta.url));
+  const electron = require.resolve("electron");
+  // Electron's Node entry can synchronously install its binary. Observe the
+  // real compiled constructor without making this regression download it.
+  execFileSync(process.execPath, ["-e", `
+    const assert = require("node:assert/strict");
+    let reads = 0;
+    const exports = Object.defineProperty({}, "powerMonitor", { get() {
+      reads += 1;
+      throw new Error("Electron API unavailable in plain Node");
+    } });
+    require.cache[process.argv[2]] = { exports, loaded: true };
+    const { SshSessionManager } = require(process.argv[1]);
+    new SshSessionManager(async () => {});
+    assert.equal(reads, 0);
+  `, manager, electron], { env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" } });
+});

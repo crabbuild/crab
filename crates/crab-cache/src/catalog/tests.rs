@@ -1,6 +1,8 @@
 use super::*;
 use crate::ensure_private_cache_directory;
 
+mod policy;
+
 fn open_catalog(root: &Path) -> Result<Database> {
     super::open_catalog(&PinnedRoot::create(root)?, &root.join(CATALOG_FILE))
 }
@@ -892,7 +894,12 @@ async fn dead_fills_are_reclaimed_without_removing_unrecorded_temporaries() {
         use tokio::io::AsyncWriteExt as _;
         let root = PathBuf::from(root);
         let hash = crab_xet::hash::compute_data_hash(b"content").hex();
-        let destination = root.join("shards").join(&hash[..2]).join(hash);
+        let payload_root = if std::env::var_os("CRAB_TEST_DEAD_FILL_NAMESPACE").is_some() {
+            root.join("namespaces").join("a".repeat(64))
+        } else {
+            root.clone()
+        };
+        let destination = payload_root.join("shards").join(&hash[..2]).join(hash);
         let catalog = CacheCatalog::new(root.clone(), 1024 * 1024);
         let pending = catalog
             .reserve(&destination, 7)
@@ -916,7 +923,9 @@ async fn dead_fills_are_reclaimed_without_removing_unrecorded_temporaries() {
                     .starts_with(".tmp-")
             })
             .unwrap();
-        std::fs::write(root.with_extension("ready"), temporary.to_str().unwrap()).unwrap();
+        let signal = root.with_extension("pending");
+        std::fs::write(&signal, temporary.to_str().unwrap()).unwrap();
+        std::fs::rename(signal, root.with_extension("ready")).unwrap();
         std::future::pending::<()>().await;
         drop(pending);
         return;
@@ -934,6 +943,12 @@ async fn dead_fills_are_reclaimed_without_removing_unrecorded_temporaries() {
         ("maintain", false),
         ("clean", true),
         ("maintain", true),
+        ("admit-bounded", false),
+        ("admit-bounded", true),
+        ("admit-unlimited", false),
+        ("admit-unlimited", true),
+        ("admit-zero", false),
+        ("admit-zero", true),
     ] {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("cache");
@@ -944,6 +959,7 @@ async fn dead_fills_are_reclaimed_without_removing_unrecorded_temporaries() {
                     "catalog::tests::dead_fills_are_reclaimed_without_removing_unrecorded_temporaries",
                 ])
                 .env(CHILD_ROOT, &root)
+                .envs(operation.starts_with("admit-").then_some(("CRAB_TEST_DEAD_FILL_NAMESPACE", "1")))
                 .stdout(std::process::Stdio::null())
                 .spawn()
                 .unwrap(),
@@ -959,6 +975,7 @@ async fn dead_fills_are_reclaimed_without_removing_unrecorded_temporaries() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         let temporary = PathBuf::from(std::fs::read_to_string(ready).unwrap());
+        assert!(temporary.is_absolute() && temporary.starts_with(&root));
         let foreign = temporary.with_file_name(".tmp-unrecorded");
         std::fs::write(&foreign, b"retain").unwrap();
         #[cfg(unix)]
@@ -968,6 +985,12 @@ async fn dead_fills_are_reclaimed_without_removing_unrecorded_temporaries() {
         }
         let cancel = tokio_util::sync::CancellationToken::new();
         crate::clean_cache(&root, false, &cancel).await.unwrap();
+        let live = CacheCatalog::new(root.clone(), None)
+            .reserve(&root.join("live-sibling"), 1)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(live);
         assert_eq!(std::fs::read(&temporary).unwrap(), b"content");
         child.0.kill().unwrap();
         child.0.wait().unwrap();
@@ -989,11 +1012,20 @@ async fn dead_fills_are_reclaimed_without_removing_unrecorded_temporaries() {
         assert_eq!(CacheCatalog::read_only_stats(&root).unwrap(), before);
         if operation == "clean" {
             crate::clean_cache(&root, false, &cancel).await.unwrap();
-        } else {
+        } else if operation == "maintain" {
             CacheCatalog::new(root.clone(), 1024 * 1024)
                 .maintain()
                 .await
                 .unwrap();
+        } else {
+            let ceiling = (operation == "admit-bounded").then_some(1024 * 1024);
+            let catalog = CacheCatalog::new(root.clone(), ceiling);
+            if operation == "admit-zero" {
+                catalog.set_retention_budget(Some(0)).await.unwrap();
+            }
+            let next = catalog.reserve(&root.join("next-fill"), 1).await.unwrap();
+            assert_eq!(next.is_some(), operation != "admit-zero");
+            drop(next);
         }
         if replaced {
             assert_eq!(std::fs::read(&temporary).unwrap(), b"replacement");
@@ -1081,7 +1113,8 @@ async fn range_writer_keeps_reservation_until_registration() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("cache");
     require_reservation_at_registration(&root);
-    let handle = crate::XetChunkCacheHandle::open(root.join("chunks"), 1024 * 1024).unwrap();
+    let range_catalog = crate::CacheCatalog::new(root.clone(), 1024 * 1024);
+    let handle = crate::XetChunkCacheHandle::open(root.join("chunks"), range_catalog).unwrap();
     let key = Key {
         prefix: "repo".to_owned(),
         hash: Default::default(),

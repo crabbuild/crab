@@ -70,7 +70,7 @@ owners. Missing/corrupt disposable indexes do not require repair before safe
 payload cleanup; unavailable accounting emits a warning. Commit failure can
 still leave an overcharged catalog and requires later reconciliation.
 Standalone private range directories remain usable without a private parent;
-only a captured private parent may supply a catalog. Windows qualification,
+only a captured private parent may supply a catalog. Packaged Windows qualification,
 allocation-before-record and power-loss recovery, side-file ownership, and
 complete byte accounting remain open.
 
@@ -82,6 +82,11 @@ fallible. A completed rename or cancellation with proven absence retires its
 journal. Failed cleanup retains the record until recovery observes absence or
 conditionally removes the same object. Descriptor-bound live cleanup and
 publication also reject a substituted temporary name.
+
+Reservation teardown retains its payload lease through SQL owner retirement,
+then closes that handle before checking temporary absence. Windows
+[defers deletion until all file-object handles close](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/ns-ntddk-_file_disposition_information);
+checking earlier leaves a stale journal after successful cancellation.
 
 Explicit cleanup and ordinary maintenance share that journal authority. A
 temporary-looking name or dead PID alone never authorizes deletion. Recovery
@@ -95,8 +100,10 @@ preserving the shipped payload-cleanup-without-a-usable-index contract.
 Creation interrupted before identity registration can still leave empty,
 unclaimed files; recovery does not guess their ownership. Anonymous streams
 unlink before writing and keep their existing descriptor lifetime. Packaged
-process-death and cross-platform qualification of the new journal remain
-required; this does not establish power-loss or allocation-before-record recovery.
+process-death recovery has bounded macOS proof, including exact source bytes and
+actual orphan removal. Focused native cache checks pass on Windows and Linux;
+packaged cross-platform qualification remains required. This does not establish
+power-loss or allocation-before-record recovery.
 
 ## Read repair and file identity
 

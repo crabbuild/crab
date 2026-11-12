@@ -181,25 +181,22 @@ export class SshSessionManager extends EventEmitter {
    * On suspend, record the timestamp. On resume, check all active
    * connections for health and trigger reconnection for stale ones.
    *
-   * Safe to call in non-Electron environments (e.g., tests) — uses
-   * try/catch around the electron import.
+   * Only Electron's main process owns power events.
    */
   private setupPowerMonitor(): void {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const { powerMonitor } = require("electron") as typeof import("electron");
+    // Under Node, Electron's package entry can synchronously download its
+    // runtime. Transport-only owners must never initialize that entry.
+    if (process.type !== "browser") return;
+    const { powerMonitor } = require("electron") as typeof import("electron");
 
-      powerMonitor.on("suspend", () => {
-        this._suspendedAt = Date.now();
-      });
+    powerMonitor.on("suspend", () => {
+      this._suspendedAt = Date.now();
+    });
 
-      powerMonitor.on("resume", () => {
-        this._suspendedAt = null;
-        this.checkAllConnectionsHealth();
-      });
-    } catch {
-      // Not running in Electron (e.g., unit tests) — skip power monitor setup
-    }
+    powerMonitor.on("resume", () => {
+      this._suspendedAt = null;
+      this.checkAllConnectionsHealth();
+    });
   }
 
   /**

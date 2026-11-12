@@ -502,3 +502,45 @@ async fn malformed_catalog_totals_preserve_independent_payload_health() {
         assert_eq!(std::fs::read(root.join(".catalog.sqlite")).unwrap(), before);
     }
 }
+
+#[cfg(feature = "local-cache")]
+#[tokio::test]
+async fn inspection_reports_shared_policy_and_unknown_corrupt_policy_without_writes() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("cache");
+    let catalog = CacheCatalog::new(root.clone(), None);
+    catalog.set_retention_budget(Some(4096)).await.unwrap();
+    for (caller, expected) in [(None, 4096), (Some(2048), 2048)] {
+        let before = tree_snapshot(&root);
+        let report = inspect_cache(&root, caller, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            (report.budget_available, report.budget_bytes),
+            (true, Some(expected))
+        );
+        assert_eq!(tree_snapshot(&root), before);
+    }
+    let pinned = PinnedRoot::open(&root).unwrap();
+    let database = pinned
+        .open_database(
+            Path::new(".catalog.sqlite"),
+            crate::private_fs::DatabaseMode::ReadWrite,
+            std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+    database
+        .execute(
+            "UPDATE catalog_meta SET value = 'invalid' WHERE key = 'retention_budget_bytes'",
+            [],
+        )
+        .unwrap();
+    drop(database);
+    let before = tree_snapshot(&root);
+    let report = inspect_cache(&root, None, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!((report.budget_available, report.over_budget), (false, None));
+    assert!(matches!(report.catalog, CacheCatalogHealth::Unavailable));
+    assert_eq!(tree_snapshot(&root), before);
+}
