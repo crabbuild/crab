@@ -15,6 +15,7 @@ use crate::private_fs::open_database;
 use crate::private_fs::{Database, DatabaseLease, DatabaseMode, PinnedRoot};
 use crate::{CacheError, Result};
 
+mod pending;
 mod removal;
 #[cfg(feature = "local-cache")]
 pub(crate) use removal::remove_file;
@@ -71,8 +72,10 @@ pub struct CacheLease {
 /// Active byte reservation covering one in-progress cache write.
 pub struct CacheReservation {
     root: Arc<PinnedRoot>,
+    catalog_path: PathBuf,
     generation: DatabaseLease,
     relative_path: PathBuf,
+    pending_path: Option<String>,
     payload_lease: Option<std::fs::File>,
     id: String,
 }
@@ -96,7 +99,7 @@ impl ReservedFile {
     fn commit_sync(self) -> Result<CacheReservation> {
         let Self {
             pending,
-            reservation,
+            mut reservation,
         } = self;
         // A fill can outlive every SQLite connection. Check the retained
         // generation in the publication worker, after all data writes finish.
@@ -104,6 +107,10 @@ impl ReservedFile {
             .generation
             .validate(&reservation.root, Path::new(CATALOG_FILE))?;
         pending.commit_sync()?;
+        if let Some(relative) = &reservation.pending_path {
+            pending::retire(&reservation, relative)?;
+        }
+        reservation.pending_path = None;
         Ok(reservation)
     }
 }
@@ -129,6 +136,8 @@ impl CacheReservation {
             .validate(&self.root, Path::new(CATALOG_FILE))?;
         let pending = self.root.pending_file(&self.relative_path)?;
         self.payload_lease = Some(pending.lease()?);
+        let record_path = pending::record(&self, &pending)?;
+        self.pending_path = Some(record_path);
         Ok(ReservedFile {
             pending,
             reservation: self,
@@ -168,6 +177,9 @@ impl Drop for CacheReservation {
     fn drop(&mut self) {
         // Fields drop after this body. Keep the payload flock through row
         // removal so explicit maintenance cannot race the registration handoff.
+        if let Err(error) = pending::release(self) {
+            tracing::warn!(operation = "release-fill", %error, "cache fill journal retained");
+        }
         remove_owner_row(
             &self.root,
             &self.generation,
@@ -489,7 +501,9 @@ impl CacheCatalog {
                 return Ok(Some(CacheReservation {
                     generation: DatabaseLease::capture(&connection),
                     root,
+                    catalog_path,
                     relative_path: PathBuf::from(relative),
+                    pending_path: None,
                     payload_lease: None,
                     id,
                 }));
@@ -554,8 +568,9 @@ impl CacheCatalog {
         let transaction = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|source| index_error(&catalog_path, source))?;
-        remove_stale_owners(&transaction, &catalog_path)?;
         let mut result = CacheMaintenanceStats::default();
+        pending::recover(root, &transaction, &catalog_path, &mut result)?;
+        remove_stale_owners(&transaction, &catalog_path)?;
         scan_catalog(root, &self.root, generation, &transaction, &mut result)?;
         transaction
             .execute(
@@ -766,8 +781,8 @@ fn catalog_schema_ready(connection: &Database, path: &Path) -> Result<bool> {
     }
     connection
         .query_row(
-            "SELECT COUNT(*) = 5 FROM sqlite_schema
-             WHERE (type = 'table' AND name IN ('cache_entries', 'reservations', 'leases', 'catalog_meta'))
+            "SELECT COUNT(*) = 6 FROM sqlite_schema
+             WHERE (type = 'table' AND name IN ('cache_entries', 'reservations', 'leases', 'catalog_meta', 'pending_files'))
                 OR (type = 'index' AND name = 'cache_entries_lru')",
             [],
             |row| row.get(0),
@@ -807,6 +822,12 @@ fn configure_catalog_schema(connection: &mut Database, path: &Path) -> Result<()
                pid INTEGER NOT NULL,
                acquired_ns INTEGER NOT NULL,
                PRIMARY KEY(relative_path, owner)
+             );
+             CREATE TABLE IF NOT EXISTS pending_files (
+               relative_path TEXT PRIMARY KEY,
+               owner TEXT NOT NULL,
+               pid INTEGER NOT NULL,
+               identity BLOB NOT NULL
              );
              CREATE TABLE IF NOT EXISTS catalog_meta (
                key TEXT PRIMARY KEY,

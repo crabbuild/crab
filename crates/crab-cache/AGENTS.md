@@ -37,6 +37,13 @@ the private read-only catalog snapshot to preserve logical leases without writes
 `clean::namespace_tests` covers catalog accounting, retained state and active
 leases; the pinned-directory replacement regression lives beside the traversal.
 
+Unpublished reserved fills enter `catalog::pending` before payload writes.
+The journal's exact file ID and birth time, captured root, catalog writer and
+file lock must agree before recovery can unlink. Names and PIDs are never
+deletion authority. Keep clean previews read-only; ordinary maintenance and
+explicit cleanup share recovery. Preserve unrecorded/replaced files and the
+payload cleanup contract when a disposable index is unavailable.
+
 ## Invariants
 
 - Xorb range resolution, identity verification, and reads share one open file. The size-aware resolver accepts caller policy but validates its returned bounds; `get_xorb_range_if_present` keeps exact-range semantics.

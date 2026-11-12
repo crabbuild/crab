@@ -25,8 +25,9 @@ their outstanding qualification limits.
 `CacheKey` distinguishes chunks, shards, xorbs, manifests, and stage entries.
 `LocalCache::new` retains payloads without a disk cap. Optional budgets use
 `None` for unlimited and `Some(bytes)` for bounded retention, including zero.
-Unlimited catalog maintenance still reconciles accounting and stale owners,
-but does not evict for capacity. Per-object validation/allocation limits,
+Unlimited catalog maintenance still reconciles accounting and stale owners
+and recovers abandoned journaled fills, but does not evict for capacity.
+Per-object validation/allocation limits,
 explicit cleanup, and corrupt-entry repair are unchanged.
 `LocalCache::get_or_fetch` coalesces fills, verifies content-addressed data
 on read and write, and atomically renames completed files. Manifest entries
@@ -46,7 +47,8 @@ publishing an independent copy-on-write clone when supported, or a bounded
 copy otherwise; cache and repository files are never hard-linked. A conflicting
 caller length is a miss, not deletion authority; hash corruption invokes
 descriptor-bound repair. Destination failures do not evict a healthy source.
-No entry is installed on a failed fill. Git semantics and visibility remain
+Failed content validation never installs an entry. Complete published bytes can
+remain if later catalog accounting fails. Git semantics and visibility remain
 outside this byte cache. Concurrent fills may duplicate work; this path does
 not yet provide per-key single-flight or remote cache-service pack retention.
 
@@ -54,7 +56,7 @@ not yet provide per-key single-flight or remote cache-service pack retention.
 
 `clean_cache` is the shared explicit cleanup boundary. It streams recognized
 payload layouts through pinned private directories, retaining unknown subtrees,
-SQLite databases and side files, profiles, and unpublished temporaries. Active
+SQLite databases and side files, profiles, and unrecorded temporaries. Active
 read descriptors and concurrent publishers are skipped using nonblocking locks.
 Reports count actual removals (or eligible files in a dry run) and separately
 count retained, busy, and unsafe entries. It does not create missing roots.
@@ -63,13 +65,38 @@ Object/range prune and verify, clean, targeted eviction, and read-side corrupt
 entry removal now share catalog row retirement. A healthy catalog's immediate
 writer transaction excludes lease/reservation changes through deletion and
 commit; declined or failed filesystem operations roll back the row deletion.
-Dry runs do not open SQLite. Busy catalogs stop removal rather than bypass
+Dry runs use private read-only SQLite snapshots. Busy catalogs stop removal rather than bypass
 owners. Missing/corrupt disposable indexes do not require repair before safe
 payload cleanup; unavailable accounting emits a warning. Commit failure can
 still leave an overcharged catalog and requires later reconciliation.
 Standalone private range directories remain usable without a private parent;
-only a captured private parent may supply a catalog. Windows support, crash
-recovery, side-file ownership, and complete byte accounting remain open.
+only a captured private parent may supply a catalog. Windows qualification,
+allocation-before-record and power-loss recovery, side-file ownership, and
+complete byte accounting remain open.
+
+Reserved object and decoded-range fills journal their relative temporary path,
+reservation owner, volume/file ID and birth time before returning a writer.
+Filesystem identity must be available; existing read-through cache write-failure
+semantics still return validated origin bytes, while explicit puts remain
+fallible. A completed rename or cancellation with proven absence retires its
+journal. Failed cleanup retains the record until recovery observes absence or
+conditionally removes the same object. Descriptor-bound live cleanup and
+publication also reject a substituted temporary name.
+
+Explicit cleanup and ordinary maintenance share that journal authority. A
+temporary-looking name or dead PID alone never authorizes deletion. Recovery
+holds the captured directory, catalog writer and nonblocking file ownership
+through identity comparison and unlink. Live fills, replaced files and unknown
+neighbors survive. Previews use read-only snapshots and perform no journal or
+owner repair; actual cleanup retires dead SQL owners, including after a process
+dies following rename. A missing or unusable journal retains temporaries while
+preserving the shipped payload-cleanup-without-a-usable-index contract.
+
+Creation interrupted before identity registration can still leave empty,
+unclaimed files; recovery does not guess their ownership. Anonymous streams
+unlink before writing and keep their existing descriptor lifetime. Packaged
+process-death and cross-platform qualification of the new journal remain
+required; this does not establish power-loss or allocation-before-record recovery.
 
 ## Read repair and file identity
 

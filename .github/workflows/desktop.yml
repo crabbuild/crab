@@ -1,30 +1,35 @@
-name: Desktop v2
+name: Desktop cache recovery probe
 on:
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: desktop-publication-probe-${{ github.ref }}
+  group: desktop-cache-recovery-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  publication:
-    name: Windows restoration and scratch ownership
-    runs-on: windows-2022
-    timeout-minutes: 180
+  recovery:
+    name: Cache ownership (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     env:
       CARGO_INCREMENTAL: 0
     defaults:
       run:
         shell: bash
-        working-directory: packages/desktop
     steps:
       - uses: actions/checkout@v4
       - name: Set isolated test directory
-        run: echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crab-restoration-test-target" >> "$GITHUB_ENV"
+        run: echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crab-cache-recovery-target" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.0
-      - name: Test captured index restoration
-        run: cargo test --release --locked -p crab-desktop-agent repository::content::restore::tests -- --test-threads=1
-      - name: Test publication workspace ownership
-        run: cargo test --release --locked -p crab-desktop-agent repository::content::workspace::tests -- --test-threads=1
+      - name: Test durable cache fill ownership
+        run: cargo test --locked -p crab-cache --lib --features local-cache,xet-chunk-cache catalog::
+      - name: Test private filesystem ownership
+        run: cargo test --locked -p crab-cache --lib --features local-cache,xet-chunk-cache private_fs::platform::tests
+      - name: Test namespace cleanup
+        run: cargo test --locked -p crab-cache --lib --features local-cache,xet-chunk-cache namespace_
