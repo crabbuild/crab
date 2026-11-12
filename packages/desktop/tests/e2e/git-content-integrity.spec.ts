@@ -1,5 +1,6 @@
 import { test, expect, _electron as electron } from "@playwright/test";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
@@ -26,6 +27,15 @@ test("captured Git text and SQLite reject wrong object bodies and recover after 
     const wrongText = "replaced incorrect row\n".repeat(512);
     expect(Buffer.byteLength(wrongText)).toBe(Buffer.byteLength(originalText));
     writeFileSync(path.join(source, "data.txt"), originalText);
+    const originalPayload = Buffer.from("original payload\n");
+    for (const [file, payload] of [["pointer.txt", originalPayload], ["replacement-pointer.txt", Buffer.from("replaced payload\n")]] as const) {
+      const oid = createHash("sha256").update(payload).digest("hex");
+      const object = path.join(source, ".git/lfs/objects", oid.slice(0, 2), oid.slice(2, 4), oid);
+      mkdirSync(path.dirname(object), { recursive: true });
+      writeFileSync(object, payload);
+      writeFileSync(path.join(source, file), `version https://git-lfs.github.com/spec/v1\noid sha256:${oid}\nsize ${payload.length}\n`);
+    }
+    const originalPointer = readFileSync(path.join(source, "pointer.txt"));
     application = await electron.launch({
       executablePath: packagedExecutable(), args: [`--user-data-dir=${path.join(root, "profile")}`],
       env: Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === "string")),
@@ -41,7 +51,7 @@ test("captured Git text and SQLite reject wrong object bodies and recover after 
         } finally { db.close(); }
       }
     }, source);
-    git(["add", "data.txt", "data.sqlite"]);
+    git(["add", "data.txt", "data.sqlite", "pointer.txt"]);
     git(["-c", "user.name=Desktop test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "captured"]);
     git(["tag", "captured"]);
     const index = readFileSync(path.join(source, ".git/index"));
@@ -49,20 +59,14 @@ test("captured Git text and SQLite reject wrong object bodies and recover after 
     expect(originalDatabase.length).toBeGreaterThan(262144);
     expect(readFileSync(path.join(source, "replacement.sqlite")).length).toBe(originalDatabase.length);
     writeFileSync(path.join(source, "replacement.txt"), wrongText);
-    const objects = ["data.txt", "data.sqlite"].map(file => {
+    const objects = ["data.txt", "data.sqlite", "pointer.txt"].map(file => {
       const oid = git(["rev-parse", `captured:${file}`]).toString().trim();
       const object = path.join(source, ".git/objects", oid.slice(0, 2), oid.slice(2));
       const original = readFileSync(object);
-      const replacement = git(["hash-object", "--no-filters", "-w", file.replace("data.", "replacement.")]);
+      const replacementFile = file === "pointer.txt" ? "replacement-pointer.txt" : file.replace("data.", "replacement.");
+      const replacement = git(["hash-object", "--no-filters", "-w", replacementFile]);
       return { file, oid, object, original, replacement: replacement.toString().trim() };
     });
-    // Replace compressed objects, preserving valid framing and captured sizes.
-    // Git cat-file itself does not authenticate these loose object bodies.
-    for (const object of objects) {
-      const replacement = path.join(source, ".git/objects", object.replacement.slice(0, 2), object.replacement.slice(2));
-      chmodSync(object.object, 0o600);
-      writeFileSync(object.object, readFileSync(replacement));
-    }
     const page = await application.firstWindow();
     await page.getByRole("button", { name: "Skip", exact: true }).click();
     await page.getByRole("button", { name: "No thanks", exact: true }).click();
@@ -71,6 +75,14 @@ test("captured Git text and SQLite reject wrong object bodies and recover after 
     await page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Files", exact: true }).click();
     await chooseSelect(page.getByRole("combobox").filter({ hasText: "HEAD (default)" }), { label: "captured" });
     const open = (file: string) => page.locator(`[role="treeitem"][data-item-path="${file}"]`).click();
+    await expect(page.locator('[role="treeitem"][data-item-path="data.txt"]')).toBeVisible();
+    // Listing already authenticates small pointer candidates. Replace objects
+    // afterward to exercise each fresh preview/query capture independently.
+    for (const object of objects) {
+      const replacement = path.join(source, ".git/objects", object.replacement.slice(0, 2), object.replacement.slice(2));
+      chmodSync(object.object, 0o600);
+      writeFileSync(object.object, readFileSync(replacement));
+    }
     await open("data.txt");
     await expect(page.getByText(/Failed to read data.txt:.*checksum differs/)).toBeVisible();
     await expect(page.getByText("replaced incorrect row", { exact: true })).toHaveCount(0);
@@ -82,15 +94,25 @@ test("captured Git text and SQLite reject wrong object bodies and recover after 
     const snapshot = path.join(cache, "desktop-content/database-query/crab-query-snapshot");
     expect([snapshot, snapshot + "-wal", snapshot + "-shm"].some(existsSync)).toBe(false);
     await page.screenshot({ path: test.info().outputPath("git-sqlite-checksum-error.png") });
+    await open("pointer.txt");
+    await expect(page.getByRole("region", { name: "File details", exact: true }).getByRole("alert").filter({ hasText: "checksum differs" })).toBeVisible();
+    await expect(call(page, "read_bytes", { repo_id: "git-integrity", path: "pointer.txt", rev: "captured", max_bytes: 1024 })).rejects.toThrow(/checksum differs/);
+    await page.screenshot({ path: test.info().outputPath("git-pointer-checksum-error.png") });
     for (const object of objects) writeFileSync(object.object, object.original);
     const close = (file: string) => page.getByRole("button", { name: file, exact: true }).locator("..").getByRole("button", { name: "Close tab", exact: true }).click();
+    await close("pointer.txt");
     await close("data.sqlite");
     await close("data.txt");
     await open("data.txt");
     const restored = await call(page, "read_bytes", { repo_id: "git-integrity", path: "data.txt", rev: "captured", max_bytes: 1024 * 1024 });
     expect(Buffer.from(String(restored.bytes_b64), "base64").toString()).toBe(originalText);
-    await expect(page.locator(".monaco-editor").first()).toBeVisible();
+    await expect(page.getByText("captured original body", { exact: true }).first()).toBeVisible();
+    await open("pointer.txt");
+    await expect(page.getByText(createHash("sha256").update(originalPayload).digest("hex"), { exact: true })).toBeVisible();
+    const restoredPointer = await call(page, "read_bytes", { repo_id: "git-integrity", path: "pointer.txt", rev: "captured", max_bytes: 1024 });
+    expect(Buffer.from(String(restoredPointer.bytes_b64), "base64")).toEqual(originalPayload);
     await open("data.sqlite");
+    await page.getByRole("button", { name: /^readings/ }).click();
     await expect(page.getByRole("cell", { name: "17", exact: true })).toBeVisible();
     const result = await call(page, "file_query", { repo_id: "git-integrity", path: "data.sqlite", rev: "captured", sql: "SELECT value FROM readings" });
     expect(result.rows).toEqual([{ value: 17 }]);
@@ -98,11 +120,16 @@ test("captured Git text and SQLite reject wrong object bodies and recover after 
     expect(readFileSync(path.join(source, ".git/index"))).toEqual(index);
     expect(readFileSync(path.join(source, "data.txt"), "utf8")).toBe(originalText);
     expect(readFileSync(path.join(source, "data.sqlite"))).toEqual(originalDatabase);
+    expect(readFileSync(path.join(source, "pointer.txt"))).toEqual(originalPointer);
     await page.screenshot({ path: test.info().outputPath("git-content-repaired.png") });
     writeFileSync(test.info().outputPath("git-integrity-proof.json"), JSON.stringify({
       textBytes: Buffer.byteLength(originalText), databaseBytes: originalDatabase.length,
       rejected: objects.map(({ file, oid }) => ({ file, oid })), repairedValue: 17, snapshotRemoved: true, indexPreserved: true,
     }, null, 2));
+  } catch (error) {
+    const page = await application?.firstWindow();
+    await page?.screenshot({ path: test.info().outputPath("git-integrity-failure.png") });
+    throw error;
   } finally {
     await application?.close();
     rmSync(root, { recursive: true, force: true });

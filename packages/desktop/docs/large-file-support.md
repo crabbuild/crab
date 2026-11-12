@@ -253,7 +253,7 @@ cover the narrower case where only the origin LFS payload is unavailable.
 
 ### Complete ordinary Git body verification
 
-Complete Git-backed reads and database snapshot copies authenticate the captured
+Complete Git-backed reads, small-pointer classification and database snapshot copies authenticate the captured
 object ID, kind, size, body terminator and EOF through the shared Git batch
 verifier. The native copier also handles restoration's pre/post-conversion proof
 using a sink. Git may return a valid compressed body under the wrong object

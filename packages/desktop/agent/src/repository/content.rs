@@ -313,14 +313,9 @@ impl FileSource {
     ) -> Result<Self> {
         let size = command::blob_size(root, &oid, &scope).await?;
         if size < crab_git::MAX_LFS_POINTER_SIZE as u64 {
-            let bytes = command::run(
-                root,
-                &["--no-replace-objects", "cat-file", "blob", &oid],
-                &scope,
-            )
-            .await?;
+            let bytes = command::blob(root, &oid, 0, size as usize, size, &scope).await?;
             if let Some((size, identity)) = pointer_metadata(&bytes) {
-                return Self::pointer(repo, root, bytes.into(), size, identity, None, scope);
+                return Self::pointer(repo, root, bytes, size, identity, None, scope);
             }
         }
         Ok(Self {

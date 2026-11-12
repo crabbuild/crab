@@ -1,5 +1,3 @@
-use std::io::Read;
-
 use super::materialize::MaterializationTarget;
 use super::publication::{IndexFile, WorkingFile};
 use super::workspace::Workspace;
@@ -47,21 +45,6 @@ impl Restoration {
         let size = command::blob_size(root, &index.oid, &scope).await?;
         if size < crab_git::MAX_LFS_POINTER_SIZE as u64 {
             let bytes = command::blob(root, &index.oid, 0, size as usize, size, &scope).await?;
-            // Authenticate the exact pointer bytes retained by the SDK reader,
-            // rather than trusting a syntactically valid but corrupt Git blob.
-            let header = format!("{} blob {size}\n", index.oid);
-            let body = Read::chain(
-                std::io::Cursor::new(header),
-                std::io::Cursor::new(bytes.as_ref()),
-            );
-            let input = Read::chain(body, std::io::Cursor::new(b"\n"));
-            crab_git::batch::visit_small_blobs(
-                input,
-                [index.oid.as_str()],
-                0,
-                &|| scope.check().is_err(),
-                |_, _| Ok(()),
-            )?;
             if let Some((size, identity)) = pointer_metadata(&bytes) {
                 let target = MaterializationTarget {
                     working,
