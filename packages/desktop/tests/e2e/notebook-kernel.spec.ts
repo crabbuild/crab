@@ -1,3 +1,4 @@
+import { chooseSelect } from "../helpers/select";
 import { test, expect, _electron as electron } from "@playwright/test";
 import { execFileSync, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -72,7 +73,10 @@ for (const end of ["disconnect", "quit"] as const) test(`local notebook executes
         writeFileSync(test.info().outputPath("installed-runtime.json"), versions);
       }
       await expect(panel.getByRole("combobox", { name: "Kernel", exact: true })).toBeVisible();
-      await panel.getByRole("combobox", { name: "Kernel", exact: true }).selectOption(name);
+      await chooseSelect(
+          panel.getByRole("combobox", { name: "Kernel", exact: true }),
+          name,
+        );
     };
     const repairNative = async () => {
       renameSync(path.join(source, ".git"), path.join(source, ".git-offline"));
@@ -121,7 +125,10 @@ for (const end of ["disconnect", "quit"] as const) test(`local notebook executes
       }
     }
     if (end === "disconnect") {
-      await panel.getByRole("combobox", { name: "Kernel", exact: true }).selectOption("delayed");
+      await chooseSelect(
+          panel.getByRole("combobox", { name: "Kernel", exact: true }),
+          "delayed",
+        );
       writeFileSync(blockReady, "blocked");
       await panel.getByRole("button", { name: "Start Local Kernel", exact: true }).click();
       const launched = () => JSON.parse(readFileSync(launchIdentity, "utf8")) as { pid: number; worker: number };
@@ -168,7 +175,10 @@ for (const end of ["disconnect", "quit"] as const) test(`local notebook executes
     if (end === "disconnect") {
       await page.keyboard.press(process.platform === "darwin" ? "Meta+," : "Control+,");
       await page.getByRole("tab", { name: "User", exact: true }).click();
-      await page.getByRole("group", { name: "Theme", exact: true }).getByRole("combobox").selectOption("light");
+      await chooseSelect(
+          page.getByRole("group", { name: "Theme", exact: true }).getByRole("combobox"),
+          "light",
+        );
       await page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Files", exact: true }).click();
       await expect(output(4)).toContainText("CRAB_COMPLETED");
     }

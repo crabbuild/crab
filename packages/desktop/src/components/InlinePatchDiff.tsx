@@ -1,12 +1,18 @@
-import { Fragment, useMemo } from "react";
+import { Button } from "@/components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import { PatchDiff } from "@pierre/diffs/react";
 import { Trash2 } from "lucide-react";
+import { Fragment, useMemo } from "react";
+import { useEffectiveTheme } from "../hooks/useEffectiveTheme";
+import { diffOptions } from "../lib/diffTheme";
+import { ParsedFile, ParsedHunk, parsePatch } from "../lib/parse-patch";
+import { isPointerPatch, PointerPatchKind } from "../lib/pointer-detection";
 import { HunkToolbar } from "./HunkToolbar";
 import { PointerFileCard } from "./PointerFileCard";
-import { diffOptions } from "../lib/diffTheme";
-import { useEffectiveTheme } from "../hooks/useEffectiveTheme";
-import { parsePatch, ParsedFile, ParsedHunk } from "../lib/parse-patch";
-import { isPointerPatch, PointerPatchKind } from "../lib/pointer-detection";
 
 export interface InlinePatchDiffAction {
   hunk: ParsedHunk;
@@ -316,7 +322,9 @@ function HunkBlock({
           className="gx-patch-diff"
         />
       </div>
-      {onDiscardLine && <LineDiscardStrip hunk={hunk} onDiscardLine={onDiscardLine} />}
+      {onDiscardLine && (
+        <LineDiscardStrip hunk={hunk} onDiscardLine={onDiscardLine} />
+      )}
     </div>
   );
 }
@@ -367,10 +375,11 @@ function LineDiscardStrip({
   if (lines.length === 0) return null;
 
   return (
-    <details className="group border-t border-border/50 bg-background text-[11px]">
-      <summary className="cursor-pointer px-3 py-1 text-muted-foreground hover:text-foreground">
+    <Collapsible className="group border-t border-border/50 bg-background text-[11px]">
+      <CollapsibleTrigger className="cursor-pointer px-3 py-1 text-muted-foreground hover:text-foreground">
         Discard individual line{lines.length === 1 ? "" : "s"} ({lines.length})
-      </summary>
+      </CollapsibleTrigger>
+      <CollapsibleContent>
       <ul className="divide-y divide-border/30">
         {lines.map((l, i) => (
           <li
@@ -389,8 +398,10 @@ function LineDiscardStrip({
             <span className="min-w-0 flex-1 truncate text-foreground">
               {l.raw}
             </span>
-            <button
-              type="button"
+            <Button
+                variant="ghost"
+                size="compact"
+                type="button"
               aria-label={`Discard line ${l.absoluteLine}`}
               title={`Discard this ${l.side === "add" ? "added" : "deleted"} line`}
               onClick={() =>
@@ -404,11 +415,12 @@ function LineDiscardStrip({
               className="opacity-0 transition group-hover/row:opacity-100 hover:text-destructive"
             >
               <Trash2 size={11} />
-            </button>
+            </Button>
           </li>
         ))}
       </ul>
-    </details>
+    </CollapsibleContent>
+    </Collapsible>
   );
 }
 

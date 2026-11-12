@@ -1,6 +1,8 @@
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import clsx from "clsx";
 import { AlertTriangle } from "lucide-react";
-import { useEffect, useId, useRef } from "react";
+import { useId, useRef } from "react";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -32,45 +34,27 @@ export function RevertCheckpointDialog({
   onConfirm,
   onCancel,
 }: RevertCheckpointDialogProps) {
-  const headingId = useId();
   const bodyId = useId();
   const cancelRef = useRef<HTMLButtonElement | null>(null);
-  const previousActive = useRef<HTMLElement | null>(null);
-
-  // Grab focus on mount, restore on unmount.
-  useEffect(() => {
-    previousActive.current = (document.activeElement as HTMLElement | null) ?? null;
-    cancelRef.current?.focus();
-    return () => {
-      previousActive.current?.focus?.();
-    };
-  }, []);
-
-  // Esc cancels.
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        onCancel();
-      }
-    };
-    window.addEventListener("keydown", handler, true);
-    return () => window.removeEventListener("keydown", handler, true);
-  }, [onCancel]);
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onCancel();
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) {
+          onCancel();
+        }
       }}
     >
-      <div
+      <DialogContent
         role="alertdialog"
-        aria-modal="true"
-        aria-labelledby={headingId}
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+    cancelRef.current?.focus();
+        }}
+        showCloseButton={false}
         aria-describedby={bodyId}
-        className="w-[28rem] max-w-[calc(100vw-2rem)] rounded-lg border border-border bg-card shadow-2xl"
+        className="block gap-0 p-0 w-[28rem] max-w-[calc(100vw-2rem)] rounded-lg border border-border bg-card shadow-2xl"
       >
         {/* Header */}
         <div className="flex items-start gap-3 border-b border-border p-4">
@@ -78,12 +62,10 @@ export function RevertCheckpointDialog({
             <AlertTriangle size={18} aria-hidden="true" />
           </div>
           <div className="min-w-0 flex-1">
-            <h2
-              id={headingId}
-              className="text-[14px] font-semibold text-foreground"
+            <DialogTitle className="text-[14px] font-semibold text-foreground"
             >
               Revert to Turn {turnNumber}?
-            </h2>
+            </DialogTitle>
             <p id={bodyId} className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
               This will revert the workspace to Turn {turnNumber}. All changes
               and chat history after this turn will be permanently lost.
@@ -93,7 +75,9 @@ export function RevertCheckpointDialog({
 
         {/* Action buttons */}
         <div className="flex items-center justify-end gap-2 p-3">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             ref={cancelRef}
             type="button"
             onClick={onCancel}
@@ -103,8 +87,10 @@ export function RevertCheckpointDialog({
             )}
           >
             Cancel
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={onConfirm}
             className={clsx(
@@ -113,9 +99,9 @@ export function RevertCheckpointDialog({
             )}
           >
             Revert
-          </button>
+          </Button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

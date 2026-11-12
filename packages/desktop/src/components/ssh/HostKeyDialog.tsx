@@ -1,3 +1,6 @@
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import clsx from "clsx";
 import { ShieldAlert, ShieldCheck, X } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
@@ -43,48 +46,14 @@ export function HostKeyDialog({
   onAccept,
   onReject,
 }: HostKeyDialogProps) {
-  const headingId = useId();
   const bodyId = useId();
   const rejectRef = useRef<HTMLButtonElement | null>(null);
-  const previousActive = useRef<HTMLElement | null>(null);
   const [confirmed, setConfirmed] = useState(false);
 
   // Reset confirmation checkbox when dialog opens or state changes.
   useEffect(() => {
     setConfirmed(false);
   }, [open, state]);
-
-  // Focus management: grab focus on mount, restore on unmount.
-  useEffect(() => {
-    if (!open) return;
-    previousActive.current = (document.activeElement as HTMLElement | null) ?? null;
-    rejectRef.current?.focus();
-    return () => {
-      previousActive.current?.focus?.();
-    };
-  }, [open]);
-
-  // Escape key rejects.
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Tab") {
-        const dialog = rejectRef.current?.closest('[role="dialog"], [role="alertdialog"]');
-        const controls = Array.from(dialog?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled)') ?? []);
-        if (controls.length) {
-          const index = controls.indexOf(document.activeElement as HTMLElement);
-          e.preventDefault(); e.stopImmediatePropagation();
-          controls[(index + (e.shiftKey ? -1 : 1) + controls.length) % controls.length].focus();
-        }
-      }
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        onReject();
-      }
-    };
-    window.addEventListener("keydown", handler, true);
-    return () => window.removeEventListener("keydown", handler, true);
-  }, [open, onReject]);
 
   if (!open) return null;
 
@@ -93,18 +62,23 @@ export function HostKeyDialog({
   const hostDisplay = port === 22 ? hostname : `${hostname}:${port}`;
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onReject();
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) {
+          if (true) onReject();
+        }
       }}
     >
-      <div
+      <DialogContent
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+    rejectRef.current?.focus();
+        }}
         role={dialogRole}
-        aria-modal="true"
-        aria-labelledby={headingId}
+        showCloseButton={false}
         aria-describedby={bodyId}
-        className="w-[32rem] max-w-[calc(100vw-2rem)] rounded-lg border border-border bg-card shadow-2xl"
+        className="block gap-0 p-0 w-[32rem] max-w-[calc(100vw-2rem)] rounded-lg border border-border bg-card shadow-2xl"
       >
         {/* Header */}
         <div className="flex items-start gap-3 border-b border-border p-4">
@@ -123,41 +97,44 @@ export function HostKeyDialog({
             )}
           </div>
           <div className="min-w-0 flex-1">
-            <h2
-              id={headingId}
-              className="text-[14px] font-semibold text-foreground"
+            <DialogTitle className="text-[14px] font-semibold text-foreground"
             >
               {isChanged ? "⚠️ Host Key Changed" : "Verify Host Key"}
-            </h2>
+            </DialogTitle>
             <p className="mt-0.5 text-[12px] text-muted-foreground">
               {hostDisplay}
             </p>
           </div>
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={onReject}
             className="shrink-0 rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground transition"
             aria-label="Close"
           >
             <X size={16} />
-          </button>
+          </Button>
         </div>
 
-        {/* Warning banner for changed state */}
+        {/* Header */}
         {isChanged && (
           <div className="mx-4 mt-4 rounded border border-destructive/40 bg-destructive/10 p-3">
             <div className="flex items-start gap-2">
               <ShieldAlert size={16} className="mt-0.5 shrink-0 text-destructive" aria-hidden="true" />
               <div className="text-[12px] leading-relaxed text-destructive">
-                <strong className="font-semibold text-destructive">Warning:</strong>{" "}
+                <strong className="font-semibold text-destructive">
+                  Warning:
+                </strong>{" "}
                 The host key for this server has changed. This could indicate a
-                man-in-the-middle attack, or the server may have been reinstalled.
+                man-in-the-middle attack, or the server may have been
+                reinstalled.
               </div>
             </div>
           </div>
         )}
 
-        {/* Body */}
+        {/* Warning banner for changed state */}
         <div id={bodyId} className="space-y-3 p-4">
           {!isChanged && (
             <p className="text-[12px] leading-relaxed text-muted-foreground">
@@ -166,7 +143,7 @@ export function HostKeyDialog({
             </p>
           )}
 
-          {/* Key type */}
+          {/* Body */}
           <div className="flex items-center gap-2">
             <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
               Key Type
@@ -176,7 +153,7 @@ export function HostKeyDialog({
             </span>
           </div>
 
-          {/* Fingerprint(s) */}
+          {/* Key type */}
           {isChanged && oldFingerprint ? (
             <div className="space-y-2">
               <div>
@@ -219,13 +196,12 @@ export function HostKeyDialog({
             </div>
           )}
 
-          {/* Confirmation checkbox for changed state */}
+          {/* ASCII art */}
           {isChanged && (
             <label className="mt-2 flex cursor-pointer items-start gap-2">
-              <input
-                type="checkbox"
+              <Checkbox
                 checked={confirmed}
-                onChange={(e) => setConfirmed(e.target.checked)}
+                onCheckedChange={(checked) => setConfirmed(checked === true)}
                 className="mt-0.5 h-4 w-4 rounded border-border accent-destructive"
               />
               <span className="text-[12px] leading-relaxed text-muted-foreground">
@@ -235,9 +211,11 @@ export function HostKeyDialog({
           )}
         </div>
 
-        {/* Footer buttons */}
+        {/* Confirmation checkbox for changed state */}
         <div className="flex items-center justify-end gap-2 border-t border-border p-3">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             ref={rejectRef}
             type="button"
             onClick={onReject}
@@ -250,9 +228,11 @@ export function HostKeyDialog({
             )}
           >
             Reject
-          </button>
+          </Button>
           {isChanged ? (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={onAccept}
               disabled={!confirmed}
@@ -265,9 +245,11 @@ export function HostKeyDialog({
               )}
             >
               I understand the risk — Accept new key
-            </button>
+            </Button>
           ) : (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={onAccept}
               className={clsx(
@@ -276,10 +258,10 @@ export function HostKeyDialog({
               )}
             >
               Accept
-            </button>
+            </Button>
           )}
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

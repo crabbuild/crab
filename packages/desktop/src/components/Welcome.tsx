@@ -1,11 +1,13 @@
-import { useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import clsx from "clsx";
 import {
   FolderOpen,
-  Layers,
   GitCommitHorizontal,
   HardDrive,
+  Layers,
 } from "lucide-react";
+import { useState } from "react";
 import { useSettings } from "../settings";
 
 interface Card {
@@ -56,13 +58,24 @@ export function Welcome() {
   const isLast = step === CARDS.length - 1;
 
   return (
-    <Backdrop>
-      <div className="relative flex w-full max-w-md flex-col items-center rounded-xl border border-border bg-card p-8 shadow-2xl">
-        <CardContent card={CARDS[step]} />
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) dismiss();
+      }}
+    >
+      <DialogContent
+        showCloseButton={false}
+        aria-describedby={undefined}
+        className="block p-0"
+      >
+        <DialogTitle className="sr-only">Welcome to Crab</DialogTitle>
+        <div className="relative flex w-full max-w-md flex-col items-center rounded-xl border border-border bg-card p-8 shadow-2xl">
+          <CardContent card={CARDS[step]} />
 
-        {/* Dot indicators */}
-        <div className="mt-6 flex gap-2">
-          {CARDS.map((_, i) => (
+          {/* Dot indicators */}
+          <div className="mt-6 flex gap-2">
+            {CARDS.map((_, i) => (
             <span
               key={i}
               className={clsx(
@@ -71,46 +84,45 @@ export function Welcome() {
               )}
             />
           ))}
-        </div>
+          </div>
 
-        {/* Navigation buttons */}
-        <div className="mt-6 flex w-full items-center justify-between">
-          <button
-            type="button"
-            onClick={dismiss}
-            className="rounded px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
-          >
-            Skip
-          </button>
-
-          {isLast ? (
-            <button
+          {/* Navigation buttons */}
+          <div className="mt-6 flex w-full items-center justify-between">
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={dismiss}
-              className="rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
+              className="rounded px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
             >
-              Get Started
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={() => setStep((s) => s + 1)}
-              className="rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
-            >
-              Next
-            </button>
-          )}
-        </div>
-      </div>
-    </Backdrop>
-  );
-}
+              Skip
+            </Button>
 
-function Backdrop({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-      {children}
-    </div>
+            {isLast ? (
+              <Button
+                variant="default"
+                size="compact"
+                type="button"
+                onClick={dismiss}
+                className="rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
+              >
+                Get Started
+              </Button>
+            ) : (
+              <Button
+                variant="default"
+                size="compact"
+                type="button"
+                onClick={() => setStep((s) => s + 1)}
+                className="rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
+              >
+                Next
+              </Button>
+            )}
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -122,7 +134,9 @@ function CardContent({ card }: { card: Card }) {
         <Icon className="h-8 w-8 text-primary" />
       </div>
       <h2 className="text-lg font-semibold text-foreground">{card.title}</h2>
-      <p className="mt-2 text-sm leading-relaxed text-muted-foreground">{card.description}</p>
+      <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
+        {card.description}
+      </p>
     </div>
   );
 }

@@ -1,14 +1,21 @@
-import { useEffect, useMemo } from "react";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Boxes, FileType, Filter, Folder, ListChecks, PackageOpen } from "lucide-react";
+import { useEffect, useMemo } from "react";
+import {
+  PrefetchProfile,
+  TrackedPattern,
+} from "../../hooks/useTrackedPatterns";
 import { HydrationEntry } from "../../ipc";
-import { TrackedPattern, PrefetchProfile } from "../../hooks/useTrackedPatterns";
+import { formatBytes } from "../../lib/format";
 import {
   Scope,
   bucketByExtension,
   bucketByPattern,
   bucketByTopFolder,
 } from "../../lib/hydrateScope";
-import { formatBytes } from "../../lib/format";
 import { CustomFilePicker } from "./CustomFilePicker";
 
 type Mode = Scope["kind"];
@@ -67,34 +74,42 @@ export function HydrateScopePicker({
 
   return (
     <div className="space-y-3">
-      <div
-        className="inline-flex flex-wrap items-center gap-px rounded-md border border-border bg-card p-0.5"
-        role="tablist"
+      <ToggleGroup
+        type="single"
+        value={scope.kind}
+        onValueChange={(value) => {
+          if (value)
+            onChange(
+              defaultScopeFor(
+                value as Parameters<typeof defaultScopeFor>[0],
+                trackedPatterns,
+                profiles,
+              ),
+            );
+        }}
         aria-label="Hydrate scope"
+        className="inline-flex flex-wrap items-center gap-px rounded-md border border-border bg-card p-0.5"
       >
         {visibleTabs.map((t) => {
           const active = scope.kind === t.id;
           const Icon = t.icon;
           return (
-            <button
+            <ToggleGroupItem
+              value={t.id}
               key={t.id}
-              type="button"
-              role="tab"
-              aria-selected={active}
               className={
                 "inline-flex items-center gap-1.5 rounded px-2.5 py-1 text-xs transition " +
                 (active
                   ? "bg-background text-foreground"
                   : "text-muted-foreground hover:text-foreground")
               }
-              onClick={() => onChange(defaultScopeFor(t.id, trackedPatterns, profiles))}
             >
               <Icon size={12} />
               {t.label}
-            </button>
+            </ToggleGroupItem>
           );
         })}
-      </div>
+      </ToggleGroup>
 
       <div className="rounded border border-border bg-background p-3">
         {scope.kind === "all" && (
@@ -232,13 +247,12 @@ function PatternList({
                 title={empty ? "No tracked files match this pattern yet" : undefined}
               >
                 <span className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
+                  <Checkbox
                     className="accent-primary"
                     checked={checked}
-                    onChange={(e) => {
+                    onCheckedChange={(checked) => {
                       const next = new Set(selSet);
-                      if (e.target.checked) next.add(b.pattern);
+                      if (checked === true) next.add(b.pattern);
                       else next.delete(b.pattern);
                       onChange(Array.from(next));
                     }}
@@ -246,8 +260,8 @@ function PatternList({
                   <code className="font-mono">{b.pattern}</code>
                 </span>
                 <span className="text-muted-foreground">
-                  {b.count.toLocaleString()} {b.count === 1 ? "file" : "files"} ·{" "}
-                  {formatBytes(b.bytes)}
+                  {b.count.toLocaleString()} {b.count === 1 ? "file" : "files"}{" "}
+                  · {formatBytes(b.bytes)}
                 </span>
               </label>
             </li>
@@ -286,7 +300,9 @@ function ExtensionList({
           const checked = selSet.has(b.ext);
           const label = b.ext === "" ? "(no extension)" : b.ext;
           return (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               key={b.ext || "__none__"}
               type="button"
               className={
@@ -306,7 +322,7 @@ function ExtensionList({
               <span className="ml-1.5 text-muted-foreground">
                 {b.count} · {formatBytes(b.bytes)}
               </span>
-            </button>
+            </Button>
           );
         })}
       </div>
@@ -350,13 +366,12 @@ function FolderList({
                 }
               >
                 <span className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
+                  <Checkbox
                     className="accent-primary"
                     checked={checked}
-                    onChange={(e) => {
+                    onCheckedChange={(checked) => {
                       const next = new Set(selSet);
-                      if (e.target.checked) next.add(b.folder);
+                      if (checked === true) next.add(b.folder);
                       else next.delete(b.folder);
                       onChange(Array.from(next));
                     }}
@@ -364,8 +379,8 @@ function FolderList({
                   <code className="font-mono">{label}</code>
                 </span>
                 <span className="text-muted-foreground">
-                  {b.count.toLocaleString()} {b.count === 1 ? "file" : "files"} ·{" "}
-                  {formatBytes(b.bytes)}
+                  {b.count.toLocaleString()} {b.count === 1 ? "file" : "files"}{" "}
+                  · {formatBytes(b.bytes)}
                 </span>
               </label>
             </li>
@@ -416,40 +431,41 @@ function ProfileList({
       <div className="mb-2 text-[11px] uppercase tracking-wider text-muted-foreground">
         Saved profiles from .crab/prefetch.toml
       </div>
-      <ul className="space-y-px">
+      <RadioGroup
+        aria-label="Hydration profile"
+        value={selected}
+        onValueChange={(value) => {
+          const profile = profiles.find((profile) => profile.name === value);
+          if (profile) onChange(profile);
+        }}
+        className="space-y-px">
         {profiles.map((p) => {
           const active = selected === p.name;
           const s = stats.get(p.name);
           return (
-            <li key={p.name}>
-              <button
-                type="button"
+            <div key={p.name}>
+              <label
                 className={
                   "flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs transition " +
                   (active ? "bg-primary/10 text-foreground" : "hover:bg-background")
                 }
-                onClick={() => onChange(p)}
               >
                 <span className="flex items-center gap-2">
-                  <input
-                    type="radio"
-                    className="accent-primary"
-                    checked={active}
-                    readOnly
-                  />
+                  <RadioGroupItem value={p.name} />
                   <code className="font-mono">{p.name}</code>
                   <span className="text-muted-foreground">
-                    {p.patterns.length} pattern{p.patterns.length === 1 ? "" : "s"}
+                    {p.patterns.length} pattern
+                    {p.patterns.length === 1 ? "" : "s"}
                   </span>
                 </span>
                 <span className="text-muted-foreground">
                   {s ? `${s.count.toLocaleString()} files · ${formatBytes(s.bytes)}` : ""}
                 </span>
-              </button>
-            </li>
+              </label>
+            </div>
           );
         })}
-      </ul>
+      </RadioGroup>
     </div>
   );
 }
@@ -464,13 +480,15 @@ function SelectAllToggle({
   onToggle: (all: boolean) => void;
 }) {
   return (
-    <button
+    <Button
+      variant="ghost"
+      size="compact"
       type="button"
       className="text-[11px] text-primary hover:underline"
       onClick={() => onToggle(!allSelected)}
     >
       {allSelected ? "Clear" : "Select all"}
-    </button>
+    </Button>
   );
 }
 

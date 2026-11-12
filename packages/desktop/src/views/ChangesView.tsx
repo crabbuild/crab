@@ -1,8 +1,14 @@
+import { Button } from "@/components/ui/button";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { repositoryTreeTheme } from "@/lib/repository-tree-theme";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useSessionScroll } from "../hooks/useSessionScroll";
-import clsx from "clsx";
+import type { GitStatus, GitStatusEntry } from "@pierre/trees";
+import {
+  FileTree as PierreFileTree,
+  useFileTree,
+  useFileTreeSelection,
+} from "@pierre/trees/react";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import clsx from "clsx";
 import {
   AlertTriangle,
   ArrowDown,
@@ -19,33 +25,29 @@ import {
   RefreshCw,
   Undo2,
 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
-import {
-  FileTree as PierreFileTree,
-  useFileTree,
-  useFileTreeSelection,
-} from "@pierre/trees/react";
-import type { GitStatus, GitStatusEntry } from "@pierre/trees";
+import { useSessionScroll } from "../hooks/useSessionScroll";
 
-import { OpenRepo } from "../state";
-import { HunkAnchor, isStaleHunkError, rpc } from "../ipc";
-import { useEffectiveTheme } from "../hooks/useEffectiveTheme";
-import { InlinePatchDiff } from "../components/InlinePatchDiff";
-import { TriStateValue } from "../components/TriStateCheckbox";
-import { ConfirmDiscardDialog } from "../components/ConfirmDiscardDialog";
-import { ViewToolbar, ToolbarAction } from "../components/ViewToolbar";
-import { ContextMenu, MenuItemDef } from "../components/ContextMenu";
-import { executeCommand, CommandContext } from "../lib/command-registry";
-import { CommitComposer } from "./CommitComposer";
-import { hunkToAnchor, lineToDiscardAnchor } from "../lib/parse-patch";
-import { deriveFileStatesFromPatches } from "../lib/file-state";
-import { countDiscardedLines, shouldConfirmDiscard } from "../lib/discard-threshold";
-import { useFileWatcher, getWatchPath } from "../hooks/useFileWatcher";
-import { useFileTransfers } from "../hooks/useFileTransfers";
-import { useSettings } from "../settings";
 import { BatchActionBar } from "../components/BatchActionBar";
-import { StagingZones } from "../components/StagingZones";
 import { CommitReadiness } from "../components/CommitReadiness";
+import { ConfirmDiscardDialog } from "../components/ConfirmDiscardDialog";
+import { ContextMenu, MenuItemDef } from "../components/ContextMenu";
+import { InlinePatchDiff } from "../components/InlinePatchDiff";
+import { StagingZones } from "../components/StagingZones";
+import { TriStateValue } from "../components/TriStateCheckbox";
+import { ToolbarAction, ViewToolbar } from "../components/ViewToolbar";
+import { useEffectiveTheme } from "../hooks/useEffectiveTheme";
+import { useFileTransfers } from "../hooks/useFileTransfers";
+import { getWatchPath, useFileWatcher } from "../hooks/useFileWatcher";
+import { HunkAnchor, isStaleHunkError, rpc } from "../ipc";
+import { CommandContext, executeCommand } from "../lib/command-registry";
+import { countDiscardedLines, shouldConfirmDiscard } from "../lib/discard-threshold";
+import { deriveFileStatesFromPatches } from "../lib/file-state";
+import { hunkToAnchor, lineToDiscardAnchor } from "../lib/parse-patch";
+import { useSettings } from "../settings";
+import { OpenRepo } from "../state";
+import { CommitComposer } from "./CommitComposer";
 
 interface Props {
   repo: OpenRepo;
@@ -82,7 +84,9 @@ const CODE_STYLE: Record<string, { label: string; cls: string }> = {
 
 function labelFor(code: string): { label: string; cls: string } {
   const trimmed = code.trim();
-  return CODE_STYLE[trimmed[0]] ?? CODE_STYLE[trimmed] ?? { label: trimmed, cls: "text-muted-foreground" };
+  return (
+    CODE_STYLE[trimmed[0]] ?? CODE_STYLE[trimmed] ?? { label: trimmed, cls: "text-muted-foreground" }
+  );
 }
 
 function codeBadge(code: string): string {
@@ -786,7 +790,7 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
     if (multiSelected.size === 0 || !fileTransfers.restore) return;
     setBatchBusy(true);
     try {
-      if (await fileTransfers.restore([...multiSelected]) === null) return;
+      if ((await fileTransfers.restore([...multiSelected])) === null) return;
       skipPatchPairEffectRef.current = true;
       refreshStatus();
       await refreshPatchPair();
@@ -886,7 +890,9 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
         <div className="text-center">
           <div className="mb-2 text-2xl text-success">✓</div>
           <div className="text-sm text-foreground">Working tree is clean</div>
-          <div className="mt-1 text-[11px] text-muted-foreground">No uncommitted changes</div>
+          <div className="mt-1 text-[11px] text-muted-foreground">
+            No uncommitted changes
+          </div>
         </div>
       </div>
     );
@@ -905,7 +911,8 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
           <GitPullRequestArrow size={12} />
           {entries ? (
             <span>
-              <strong className="text-foreground">{entries.length}</strong> change
+              <strong className="text-foreground">{entries.length}</strong>{" "}
+              change
               {entries.length === 1 ? "" : "s"}
             </span>
           ) : (
@@ -914,16 +921,22 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
           {entries && entries.length > 0 && (
             <span className="flex items-center gap-2">
               {summary.modified > 0 && (
-                <span className="text-warning">{summary.modified} modified</span>
+                <span className="text-warning">
+                  {summary.modified} modified
+                </span>
               )}
               {summary.added > 0 && (
                 <span className="text-success">{summary.added} added</span>
               )}
               {summary.untracked > 0 && (
-                <span className="text-muted-foreground">{summary.untracked} untracked</span>
+                <span className="text-muted-foreground">
+                  {summary.untracked} untracked
+                </span>
               )}
               {summary.deleted > 0 && (
-                <span className="text-destructive">{summary.deleted} deleted</span>
+                <span className="text-destructive">
+                  {summary.deleted} deleted
+                </span>
               )}
               {summary.renamed > 0 && (
                 <span className="text-primary">{summary.renamed} renamed</span>
@@ -932,38 +945,47 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
           )}
         </div>
         <div className="flex items-center gap-2">
-          <div
-            role="radiogroup"
+          <ToggleGroup
+            type="single"
+            value={mode}
+            onValueChange={(value) => {
+              if (value) setMode(value as typeof mode);
+            }}
             aria-label="View mode"
-            className="flex overflow-hidden rounded border border-border"
+            className="gap-0 overflow-hidden rounded border border-border"
           >
-            <ModeButton
-              active={mode === "zones"}
-              icon={<Layers size={11} />}
-              label="Zones"
-              onClick={() => setMode("zones")}
-            />
-            <ModeButton
-              active={mode === "list"}
-              icon={<List size={11} />}
-              label="List"
-              onClick={() => setMode("list")}
-            />
-            <ModeButton
-              active={mode === "tree"}
-              icon={<FolderTree size={11} />}
-              label="Tree"
-              onClick={() => setMode("tree")}
-            />
-          </div>
-          <button
+            <ToggleGroupItem
+              value={"zones"}
+              className="h-6 min-w-0 gap-1 rounded-none px-2 text-[11px]"
+              aria-label={"Zones" + " view"}
+            >
+              {<Layers size={11} />}Zones
+            </ToggleGroupItem>
+            <ToggleGroupItem
+              value={"list"}
+              className="h-6 min-w-0 gap-1 rounded-none px-2 text-[11px]"
+              aria-label={"List" + " view"}
+            >
+              {<List size={11} />}List
+            </ToggleGroupItem>
+            <ToggleGroupItem
+              value={"tree"}
+              className="h-6 min-w-0 gap-1 rounded-none px-2 text-[11px]"
+              aria-label={"Tree" + " view"}
+            >
+              {<FolderTree size={11} />}Tree
+            </ToggleGroupItem>
+          </ToggleGroup>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="text-muted-foreground hover:text-foreground"
             onClick={refreshStatus}
             title="Refresh"
           >
             <RefreshCw size={11} />
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -988,7 +1010,8 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
             <div ref={mergedFileListRef} className="min-h-0 flex-1 overflow-auto">
               {loading && (
                 <div className="flex items-center gap-2 p-3 text-xs text-muted-foreground">
-                  <Loader2 size={12} className="animate-spin" /> Running git status…
+                  <Loader2 size={12} className="animate-spin" /> Running git
+                  status…
                 </div>
               )}
               {error && (
@@ -1110,37 +1133,6 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
   );
 }
 
-function ModeButton({
-  active,
-  icon,
-  label,
-  onClick,
-}: {
-  active: boolean;
-  icon: React.ReactNode;
-  label: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      role="radio"
-      aria-checked={active}
-      onClick={onClick}
-      className={clsx(
-        "flex items-center gap-1 px-2 py-0.5 text-[11px] transition",
-        active
-          ? "bg-primary/20 text-foreground"
-          : "text-muted-foreground hover:bg-accent hover:text-foreground",
-      )}
-      title={`${label} view`}
-    >
-      {icon}
-      {label}
-    </button>
-  );
-}
-
 const FILE_ROW_HEIGHT = 28;
 
 function FlatList({
@@ -1253,7 +1245,9 @@ function FlatList({
               {/* Per-file action buttons — visible on hover */}
               <span className="hidden shrink-0 items-center gap-0.5 group-hover/row:flex">
                 {state !== "full" && (
-                  <button
+                  <Button
+                    variant="ghost"
+                    size="compact"
                     type="button"
                     title={`Stage ${e.path}`}
                     aria-label={`Stage ${e.path}`}
@@ -1262,10 +1256,12 @@ function FlatList({
                     className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-primary/20 hover:text-success disabled:opacity-50 disabled:cursor-not-allowed transition"
                   >
                     <Plus size={13} />
-                  </button>
+                  </Button>
                 )}
                 {state !== "empty" && (
-                  <button
+                  <Button
+                    variant="ghost"
+                    size="compact"
                     type="button"
                     title={`Unstage ${e.path}`}
                     aria-label={`Unstage ${e.path}`}
@@ -1274,9 +1270,11 @@ function FlatList({
                     className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-primary/20 hover:text-warning disabled:opacity-50 disabled:cursor-not-allowed transition"
                   >
                     <Minus size={13} />
-                  </button>
+                  </Button>
                 )}
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
                   title={`Discard changes in ${e.path}`}
                   aria-label={`Discard changes in ${e.path}`}
@@ -1285,9 +1283,11 @@ function FlatList({
                   className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-destructive/20 hover:text-destructive disabled:opacity-50 disabled:cursor-not-allowed transition"
                 >
                   <Undo2 size={13} />
-                </button>
+                </Button>
                 {onOpenFile && (
-                  <button
+                  <Button
+                    variant="ghost"
+                    size="compact"
                     type="button"
                     title={`Open file ${e.path}`}
                     aria-label={`Open file ${e.path}`}
@@ -1295,7 +1295,7 @@ function FlatList({
                     className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-primary/20 hover:text-primary transition"
                   >
                     <FileText size={13} />
-                  </button>
+                  </Button>
                 )}
               </span>
             </div>
@@ -1486,23 +1486,33 @@ function FileContentPane({
         <span className="ml-auto text-[10px] text-muted-foreground">
           {content != null && `${lines.length} lines`}
         </span>
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={onClose}
           className="ml-2 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground transition"
           title="Close file view and return to diff"
         >
           ✕
-        </button>
+        </Button>
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
-        {waiting && <p role="status" className="p-4 text-xs text-muted-foreground">Waiting for repository recovery…</p>}
+        {waiting && (
+          <p role="status" className="p-4 text-xs text-muted-foreground">
+            Waiting for repository recovery…
+          </p>
+        )}
         {!waiting && loading && (
           <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
             <Loader2 size={14} className="animate-spin" /> Loading file…
           </div>
         )}
-        {!waiting && !loading && error && <p role="alert" className="m-4 text-xs text-destructive">{error}</p>}
+        {!waiting && !loading && error && (
+          <p role="alert" className="m-4 text-xs text-destructive">
+            {error}
+          </p>
+        )}
         {!waiting && !loading && !error && content == null && (
           <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
             Unable to read file content (binary or missing).
@@ -1554,7 +1564,9 @@ function PatchPane({
         <span className="font-mono text-foreground">
           {selectedPath ?? "No file selected"}
         </span>
-        <span className="ml-auto">{stagedOnly ? "Index vs HEAD" : "Working tree vs Index"}</span>
+        <span className="ml-auto">
+          {stagedOnly ? "Index vs HEAD" : "Working tree vs Index"}
+        </span>
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
         {!selectedPath && (
@@ -1574,10 +1586,10 @@ function PatchPane({
           </div>
         )}
         {selectedPath && !loading && !error && patch != null && patch.trim().length === 0 && (
-          <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-            No changes for this file.
-          </div>
-        )}
+            <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+              No changes for this file.
+            </div>
+          )}
         {selectedPath && !loading && !error && patch != null && patch.trim().length > 0 && (
           <InlinePatchDiff
             patch={patch}
@@ -1594,7 +1606,9 @@ function PatchPane({
         )}
       </div>
       {toast && (
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={onDismissToast}
           className={clsx(
@@ -1609,7 +1623,7 @@ function PatchPane({
             {toast.text}
           </span>
           <span className="text-muted-foreground">dismiss</span>
-        </button>
+        </Button>
       )}
     </div>
   );

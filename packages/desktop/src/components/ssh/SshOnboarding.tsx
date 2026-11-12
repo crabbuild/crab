@@ -1,4 +1,5 @@
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 /**
  * SSH Onboarding — first-run detection, quick-start wizard, and
  * contextual help for SSH remote connections.
@@ -150,17 +151,19 @@ export function FirstRunBanner({
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border bg-card p-3 text-xs" role="banner" aria-label="SSH setup available">
       <div className="flex min-w-0 flex-1 items-center gap-2">
-        <span className="ssh-onboarding-banner__icon" aria-hidden="true">🔑</span>
+        <span className="ssh-onboarding-banner__icon" aria-hidden="true">
+          🔑
+        </span>
         <div className="text-muted-foreground">
           {detection.hasConfig ? (
             <p>
-              We found <strong>{detection.configHostCount} SSH hosts</strong> in your config.
-              Import them to connect to your remote servers.
+              We found <strong>{detection.configHostCount} SSH hosts</strong> in
+              your config. Import them to connect to your remote servers.
             </p>
           ) : (
             <p>
-              SSH keys detected. Connect to your remote servers for GPU training,
-              model deployment, and more.
+              SSH keys detected. Connect to your remote servers for GPU
+              training, model deployment, and more.
             </p>
           )}
         </div>
@@ -213,21 +216,38 @@ export function QuickStartWizard({
   if (!isOpen) return null;
 
   return (
-    <div className="ssh-wizard-overlay" role="dialog" aria-modal="true" aria-labelledby="ssh-wizard-title">
-      <div className="ssh-wizard">
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) onClose();
+      }}
+    >
+      <DialogContent
+        aria-describedby={undefined}
+        showCloseButton={false}
+        className={"ssh-wizard" + " p-0 gap-0"}
+      >
         <header className="ssh-wizard__header">
-          <h2 id="ssh-wizard-title">Connect to a Remote Server</h2>
+          <DialogTitle>Connect to a Remote Server</DialogTitle>
           <div className="ssh-wizard__steps" role="progressbar" aria-valuenow={step === "template" ? 1 : step === "configure" ? 2 : 3} aria-valuemin={1} aria-valuemax={3}>
-            <span className={`ssh-wizard__step ${step === "template" ? "ssh-wizard__step--active" : ""}`}>1. Choose</span>
-            <span className={`ssh-wizard__step ${step === "configure" ? "ssh-wizard__step--active" : ""}`}>2. Configure</span>
-            <span className={`ssh-wizard__step ${step === "test" ? "ssh-wizard__step--active" : ""}`}>3. Connect</span>
+            <span className={`ssh-wizard__step ${step === "template" ? "ssh-wizard__step--active" : ""}`}>
+              1. Choose
+            </span>
+            <span className={`ssh-wizard__step ${step === "configure" ? "ssh-wizard__step--active" : ""}`}>
+              2. Configure
+            </span>
+            <span className={`ssh-wizard__step ${step === "test" ? "ssh-wizard__step--active" : ""}`}>
+              3. Connect
+            </span>
           </div>
         </header>
 
         <div className="ssh-wizard__body">
           {step === "template" && (
             <div className="ssh-wizard__template-step">
-              <p>Choose a template to get started quickly, or configure manually.</p>
+              <p>
+                Choose a template to get started quickly, or configure manually.
+              </p>
             </div>
           )}
 
@@ -259,10 +279,12 @@ export function QuickStartWizard({
         </div>
 
         <footer className="ssh-wizard__footer">
-          <Button className="ssh-wizard__cancel" onClick={onClose}>Cancel</Button>
+          <Button className="ssh-wizard__cancel" onClick={onClose}>
+            Cancel
+          </Button>
         </footer>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 

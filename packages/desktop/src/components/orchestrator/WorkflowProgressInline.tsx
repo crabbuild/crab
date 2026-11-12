@@ -1,23 +1,24 @@
+import { Button } from "@/components/ui/button";
 /**
  * Workflow Progress Inline — fixed bottom panel showing workflow run
  * progress when a workflow is active for the current chat task.
  */
 
-import { useState } from "react";
 import clsx from "clsx";
 import {
+  CheckCircle2,
   ChevronDown,
   ChevronUp,
   Circle,
   Loader2,
-  Play,
   Pause,
-  CheckCircle2,
-  XCircle,
+  Play,
   SkipForward,
   UserCheck,
   Workflow,
+  XCircle,
 } from "lucide-react";
+import { useState } from "react";
 import type { AgentWorkflowRun } from "../../ipc";
 
 // ── Types ───────────────────────────────────────────────────────────────
@@ -84,9 +85,11 @@ export function WorkflowProgressInline({ runs }: Props) {
         return (
           <div key={run.id} className="border-b border-border last:border-b-0">
             {/* Header row */}
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
-              className="flex items-center gap-2 w-full px-3 py-2 text-left hover:bg-card/30 transition-colors"
+              className="justify-start flex items-center gap-2 w-full px-3 py-2 text-left hover:bg-card/30 transition-colors"
               onClick={() => setExpandedRunId(isExpanded ? null : run.id)}
             >
               <Workflow className="w-3.5 h-3.5 text-muted-foreground" />
@@ -95,9 +98,15 @@ export function WorkflowProgressInline({ runs }: Props) {
               </span>
               <span className={clsx("text-[10px] px-1.5 py-0.5 rounded border", runBadgeColor(run.status))}>
                 {run.status === "paused" ? (
-                  <><Pause className="w-2.5 h-2.5 inline mr-0.5" />Paused</>
+                  <>
+                    <Pause className="w-2.5 h-2.5 inline mr-0.5" />
+                    Paused
+                  </>
                 ) : run.status === "running" ? (
-                  <><Play className="w-2.5 h-2.5 inline mr-0.5" />Running</>
+                  <>
+                    <Play className="w-2.5 h-2.5 inline mr-0.5" />
+                    Running
+                  </>
                 ) : (
                   statusLabel(run.status)
                 )}
@@ -110,7 +119,7 @@ export function WorkflowProgressInline({ runs }: Props) {
               ) : (
                 <ChevronDown className="w-3 h-3 text-muted-foreground" />
               )}
-            </button>
+            </Button>
 
             {/* Expanded node list */}
             {isExpanded && (
@@ -128,12 +137,18 @@ export function WorkflowProgressInline({ runs }: Props) {
                       )}
                     >
                       <span className="shrink-0">
-                        {STATUS_ICONS[nodeRun.status] ?? <Circle className="w-3.5 h-3.5 text-muted-foreground" />}
+                        {STATUS_ICONS[nodeRun.status] ?? (
+                          <Circle className="w-3.5 h-3.5 text-muted-foreground" />
+                        )}
                       </span>
                       <span className="flex-1 truncate">{title}</span>
-                      <span className="text-[10px] text-muted-foreground">{statusLabel(nodeRun.status)}</span>
+                      <span className="text-[10px] text-muted-foreground">
+                        {statusLabel(nodeRun.status)}
+                      </span>
                       {nodeRun.attempt > 1 && (
-                        <span className="text-[10px] text-warning">retry #{nodeRun.attempt}</span>
+                        <span className="text-[10px] text-warning">
+                          retry #{nodeRun.attempt}
+                        </span>
                       )}
                     </div>
                   );

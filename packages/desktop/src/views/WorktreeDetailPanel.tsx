@@ -1,7 +1,13 @@
-import { NativeSelect } from "@/components/ui/native-select";
-import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
 import {
   FileDiff,
   Filter,
@@ -12,23 +18,24 @@ import {
   RefreshCw,
   X,
 } from "lucide-react";
-import { PanelGroup, Panel, PanelResizeHandle } from "react-resizable-panels";
-import { OpenRepo, useStore } from "../state";
-import {
-  rpc,
-  mainProcess,
-  DirEntry,
-  HydratedWorktreeEntry,
-  WorktreeStatus,
-  MergeStrategy,
-  OpResult,
-  onAgentEvent,
-} from "../ipc";
-import { DiffView } from "./DiffView";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { EditorPane, EditorTab } from "../components/EditorPane";
 import { FileTree } from "../components/FileTree";
-import { useHydrationStatus } from "../hooks/useHydrationStatus";
 import { useFileTransfers } from "../hooks/useFileTransfers";
+import { useHydrationStatus } from "../hooks/useHydrationStatus";
+import {
+  DirEntry,
+  HydratedWorktreeEntry,
+  MergeStrategy,
+  OpResult,
+  WorktreeStatus,
+  mainProcess,
+  onAgentEvent,
+  rpc,
+} from "../ipc";
+import { OpenRepo, useStore } from "../state";
+import { DiffView } from "./DiffView";
 
 interface Props {
   repo: OpenRepo;
@@ -298,14 +305,18 @@ export function WorktreeDetailPanel({ repo, worktree, status, onClose }: Props) 
         <span className="truncate text-[12px] font-medium text-foreground">
           {worktree.meta?.display_name || dirName(worktree.path)}
         </span>
-        <span className="font-mono text-[11px] text-muted-foreground">{branch}</span>
+        <span className="font-mono text-[11px] text-muted-foreground">
+          {branch}
+        </span>
         {status && status.dirty_count > 0 && (
           <span className="rounded bg-warning/15 px-1.5 py-0.5 text-[10px] font-medium text-warning">
             {status.dirty_count} uncommitted
           </span>
         )}
         <div className="ml-auto flex items-center gap-1">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
             onClick={fetchChanges}
@@ -313,8 +324,10 @@ export function WorktreeDetailPanel({ repo, worktree, status, onClose }: Props) 
             aria-label="Refresh changes"
           >
             <RefreshCw size={12} />
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="rounded bg-primary/15 px-2.5 py-1 text-[11px] font-medium text-primary hover:bg-primary/25 transition"
             onClick={() => setShowMergePanel(true)}
@@ -322,8 +335,10 @@ export function WorktreeDetailPanel({ repo, worktree, status, onClose }: Props) 
           >
             <GitMerge size={11} className="mr-1 inline -mt-px" />
             Merge Back
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
             onClick={onClose}
@@ -331,7 +346,7 @@ export function WorktreeDetailPanel({ repo, worktree, status, onClose }: Props) 
             aria-label="Close"
           >
             <X size={14} />
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -352,18 +367,22 @@ export function WorktreeDetailPanel({ repo, worktree, status, onClose }: Props) 
       {/* Main content: file tree + editor/diff */}
       {!showMergePanel && (
         <PanelGroup direction="horizontal" className="min-h-0 flex-1">
-          {/* Left: File tree with filter toggle */}
+          {/* Main content: file tree + editor/diff */}
           <Panel defaultSize={25} minSize={15} maxSize={45}>
             <div className="flex h-full flex-col border-r border-border">
-              {/* Tree header with filter button */}
+              {/* Left: File tree with filter toggle */}
               <div className="flex shrink-0 items-center justify-between border-b border-border px-3 py-1.5">
                 <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
                   {filterChanged ? "Changed Files" : "Files"}
                   {filterChanged && changedFiles && (
-                    <span className="ml-1 text-foreground">({changedFiles.length})</span>
+                    <span className="ml-1 text-foreground">
+                      ({changedFiles.length})
+                    </span>
                   )}
                 </span>
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
                   className={`rounded p-1 transition ${
                     filterChanged
@@ -375,7 +394,7 @@ export function WorktreeDetailPanel({ repo, worktree, status, onClose }: Props) 
                   aria-label={filterChanged ? "Show all files" : "Show only changed files"}
                 >
                   <Filter size={12} />
-                </button>
+                </Button>
               </div>
 
               {/* Tree content */}
@@ -391,10 +410,10 @@ export function WorktreeDetailPanel({ repo, worktree, status, onClose }: Props) 
                   </div>
                 )}
                 {!loading && filterChanged && changedFiles && changedFiles.length === 0 && (
-                  <div className="p-4 text-center text-[11px] text-muted-foreground">
-                    No changes detected.
-                  </div>
-                )}
+                    <div className="p-4 text-center text-[11px] text-muted-foreground">
+                      No changes detected.
+                    </div>
+                  )}
                 {wtRepo && displayEntries.length > 0 && (
                   <FileTree
                     entries={displayEntries}
@@ -442,7 +461,9 @@ export function WorktreeDetailPanel({ repo, worktree, status, onClose }: Props) 
                   <span className="text-[12px]">Click a file to open it</span>
                   {changedFiles && changedFiles.length > 0 && (
                     <span className="text-[11px] opacity-60">
-                      {changedFiles.length} file{changedFiles.length !== 1 ? "s" : ""} changed in this worktree
+                      {changedFiles.length} file
+                      {changedFiles.length !== 1 ? "s" : ""} changed in this
+                      worktree
                     </span>
                   )}
                 </div>
@@ -541,19 +562,25 @@ function MergeBackPanel({ repo, worktreeBranch, worktreeLabel, onClose, onSucces
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <GitMerge size={15} className="text-primary" />
-            <span className="text-[13px] font-medium text-foreground">Merge Back</span>
+            <span className="text-[13px] font-medium text-foreground">
+              Merge Back
+            </span>
           </div>
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
             onClick={onClose}
             aria-label="Close merge panel"
           >
             <X size={14} />
-          </button>
+          </Button>
         </div>
         <p className="mt-1 text-[11px] text-muted-foreground">
-          Integrate changes from <span className="font-mono text-foreground">{worktreeBranch}</span> into another branch.
+          Integrate changes from{" "}
+          <span className="font-mono text-foreground">{worktreeBranch}</span>{" "}
+          into another branch.
         </p>
       </div>
 
@@ -568,28 +595,46 @@ function MergeBackPanel({ repo, worktreeBranch, worktreeLabel, onClose, onSucces
             <div className="rounded-lg border border-border bg-card p-4">
               <div className="flex items-center gap-3">
                 <div className="flex-1">
-                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">From</div>
+                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
+                    From
+                  </div>
                   <div className="flex items-center gap-1.5 rounded bg-primary/10 px-2.5 py-1.5">
                     <GitBranch size={12} className="text-primary" />
-                    <span className="font-mono text-[11.5px] text-foreground">{worktreeBranch}</span>
+                    <span className="font-mono text-[11.5px] text-foreground">
+                      {worktreeBranch}
+                    </span>
                   </div>
-                  <div className="mt-1 text-[10px] text-muted-foreground">{worktreeLabel}</div>
+                  <div className="mt-1 text-[10px] text-muted-foreground">
+                    {worktreeLabel}
+                  </div>
                 </div>
                 <GitPullRequest size={18} className="shrink-0 text-muted-foreground" />
                 <div className="flex-1">
-                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">Into</div>
-                  <NativeSelect
-                    className="w-full rounded border border-border bg-background px-2.5 py-1.5 font-mono text-[11.5px] text-foreground focus-visible:outline-none focus:border-primary"
-                    value={selectedTarget}
-                    onChange={(e) => setSelectedTarget(e.target.value)}
+                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
+                    Into
+                  </div>
+                  <Select
+                    value={":" + String(selectedTarget)}
+                    onValueChange={(selectedValue) => {
+                      const value = selectedValue.slice(1);
+                      return setSelectedTarget(value);
+                    }}
                     disabled={busy}
                   >
-                    {targets.map((t) => (
-                      <option key={t.name} value={t.name}>
-                        {t.name}{t.isCurrent ? " (current)" : ""}
-                      </option>
-                    ))}
-                  </NativeSelect>
+                    <SelectTrigger className="w-full rounded border border-border bg-background px-2.5 py-1.5 font-mono text-[11.5px] text-foreground focus-visible:outline-none focus:border-primary">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        {targets.map((t) => (
+                          <SelectItem key={t.name} value={":" + String(t.name)}>
+                            {t.name}
+                            {t.isCurrent ? " (current)" : ""}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
                 </div>
               </div>
             </div>
@@ -627,7 +672,8 @@ function MergeBackPanel({ repo, worktreeBranch, worktreeLabel, onClose, onSucces
             {/* Commit message */}
             <div>
               <label className="mb-1.5 block text-[11px] font-medium text-muted-foreground">
-                Commit Message <span className="text-muted-foreground/60">(optional)</span>
+                Commit Message{" "}
+                <span className="text-muted-foreground/60">(optional)</span>
               </label>
               <Textarea
                 className="w-full rounded border border-border bg-background px-3 py-2 text-xs text-foreground placeholder:text-muted-foreground/50 focus-visible:outline-none focus:border-primary resize-none"
@@ -685,7 +731,9 @@ function StrategyButton({
   disabled?: boolean;
 }) {
   return (
-    <button
+    <Button
+      variant="ghost"
+      size="compact"
       type="button"
       className={`flex-1 rounded border px-2 py-2 text-left transition ${
         active
@@ -697,8 +745,10 @@ function StrategyButton({
       title={description}
     >
       <div className="text-[11px] font-medium">{label}</div>
-      <div className="mt-0.5 text-[9px] leading-tight opacity-70">{description}</div>
-    </button>
+      <div className="mt-0.5 text-[9px] leading-tight opacity-70">
+        {description}
+      </div>
+    </Button>
   );
 }
 

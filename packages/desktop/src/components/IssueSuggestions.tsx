@@ -1,5 +1,11 @@
+import {
+  CommandGroup,
+  CommandItem,
+  CommandList,
+  CommandPopover,
+} from "@/components/ui/command";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { rpc, ForgeIssue } from "../ipc";
+import { ForgeIssue, rpc } from "../ipc";
 
 interface Props {
   /** The repo to fetch issues from. */
@@ -133,56 +139,48 @@ export function IssueSuggestions({
   }, [anchorRef, visible, handleKeyDown]);
 
   // Dismiss on click outside.
-  useEffect(() => {
-    if (!visible) return;
-    const handleClick = (e: MouseEvent) => {
-      if (
-        containerRef.current &&
-        !containerRef.current.contains(e.target as Node) &&
-        anchorRef.current &&
-        !anchorRef.current.contains(e.target as Node)
-      ) {
-        setVisible(false);
-        setIssues([]);
-      }
-    };
-    document.addEventListener("mousedown", handleClick);
-    return () => document.removeEventListener("mousedown", handleClick);
-  }, [visible, anchorRef]);
 
   if (!visible) return null;
 
   return (
-    <div
-      ref={containerRef}
-      className="absolute z-50 mt-1 max-h-48 w-64 overflow-y-auto rounded border border-border bg-card shadow-lg"
-      role="listbox"
-      aria-label="Issue suggestions"
+    <CommandPopover
+      anchorRef={anchorRef}
+      onClose={() => setVisible(false)}
+      side="bottom"
+      value={String(selectedIndex)}
+      onValueChange={(value) => setSelectedIndex(Number(value))}
     >
-      {loading && issues.length === 0 && (
-        <div className="px-3 py-2 text-[11px] text-muted-foreground">Loading issues…</div>
-      )}
-      {!loading && issues.length === 0 && (
-        <div className="px-3 py-2 text-[11px] text-muted-foreground">No matching issues</div>
-      )}
-      {issues.map((issue, idx) => (
-        <button
-          key={issue.number}
-          type="button"
-          role="option"
-          aria-selected={idx === selectedIndex}
-          className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] transition ${
+      <CommandList ref={containerRef} className="max-h-48">
+        <CommandGroup>
+          {loading && issues.length === 0 && (
+            <div className="px-3 py-2 text-[11px] text-muted-foreground">
+              Loading issues…
+            </div>
+          )}
+          {!loading && issues.length === 0 && (
+            <div className="px-3 py-2 text-[11px] text-muted-foreground">
+              No matching issues
+            </div>
+          )}
+          {issues.map((issue, idx) => (
+            <CommandItem
+              value={String(idx)}
+              key={issue.number}
+              className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] transition ${
             idx === selectedIndex
               ? "bg-primary/20 text-foreground"
               : "text-foreground hover:bg-background"
           }`}
-          onMouseEnter={() => setSelectedIndex(idx)}
-          onClick={() => insertIssue(issue)}
-        >
-          <span className="shrink-0 font-mono text-primary">#{issue.number}</span>
-          <span className="truncate">{issue.title}</span>
-        </button>
-      ))}
-    </div>
+              onSelect={() => insertIssue(issue)}
+            >
+              <span className="shrink-0 font-mono text-primary">
+                #{issue.number}
+              </span>
+              <span className="truncate">{issue.title}</span>
+            </CommandItem>
+          ))}
+        </CommandGroup>
+      </CommandList>
+    </CommandPopover>
   );
 }

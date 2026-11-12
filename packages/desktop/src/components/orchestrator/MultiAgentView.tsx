@@ -1,19 +1,21 @@
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 /**
  * Agent conversations sharing a workspace, with independent status and chat access.
  */
 
-import { useCallback, useState } from "react";
-import {
-  Bot,
-  GitMerge,
-  Loader2,
-  Plus,
-  Activity,
-} from "lucide-react";
 import clsx from "clsx";
-import { OrchestratorTask } from "./TaskCard";
-import { AgentIcon, agentAccentBg, agentAccentColor } from "./AgentIcon";
+import { Activity, Bot, GitMerge, Loader2, Plus } from "lucide-react";
+import { useCallback, useState } from "react";
 import type { AgentSessionInfo } from "../../lib/use-agent-sessions";
+import { AgentIcon, agentAccentBg, agentAccentColor } from "./AgentIcon";
+import { OrchestratorTask } from "./TaskCard";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -57,32 +59,49 @@ export function MultiAgentView({ task, childTasks, onOpenChat, onReviewChanges, 
       <div className="flex items-center gap-2 border-b border-border px-4 py-2">
         <Bot size={13} className="text-primary" />
         <span className="text-xs font-medium text-foreground">Agents</span>
-        <span className="text-[10px] text-muted-foreground">({conversations.length})</span>
+        <span className="text-[10px] text-muted-foreground">
+          ({conversations.length})
+        </span>
         <div className="flex-1" />
         <div className="relative">
-          <button
-            type="button"
-            onClick={() => setShowAddMenu(!showAddMenu)}
-            className="flex items-center gap-1 rounded px-2 py-1 text-[10px] text-foreground hover:bg-accent"
-          >
-            <Plus size={10} /> Add agent
-          </button>
+          <DropdownMenu open={showAddMenu} onOpenChange={setShowAddMenu}>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="compact"
+                type="button"
+                onClick={() => setShowAddMenu(!showAddMenu)}
+                className="flex items-center gap-1 rounded px-2 py-1 text-[10px] text-foreground hover:bg-accent"
+              >
+                <Plus size={10} /> Add agent
+              </Button>
+            </DropdownMenuTrigger>
 
-          {showAddMenu && (
-            <div className="absolute right-0 top-full z-50 mt-1 w-[200px] rounded-md border border-border bg-card shadow-lg">
-              {PRESET_ROLES.map((preset) => (
-                <button
-                  key={preset.role}
-                  type="button"
-                  onClick={() => handleAddAgent(preset.role)}
-                  className="flex w-full flex-col px-3 py-2 text-left hover:bg-accent"
-                >
-                  <span className="text-[11px] font-medium text-foreground">{preset.label}</span>
-                  <span className="text-[9px] text-muted-foreground">{preset.description}</span>
-                </button>
-              ))}
-            </div>
-          )}
+            {showAddMenu && (
+              <DropdownMenuContent
+                side="bottom"
+                align="end"
+                className=" w-[200px] rounded-md border border-border bg-card "
+              >
+                <DropdownMenuGroup>
+                  {PRESET_ROLES.map((preset) => (
+                    <DropdownMenuItem
+                      key={preset.role}
+                      onSelect={() => handleAddAgent(preset.role)}
+                      className="justify-start flex w-full flex-col px-3 py-2 text-left hover:bg-accent"
+                    >
+                      <span className="text-[11px] font-medium text-foreground">
+                        {preset.label}
+                      </span>
+                      <span className="text-[9px] text-muted-foreground">
+                        {preset.description}
+                      </span>
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuGroup>
+              </DropdownMenuContent>
+            )}
+          </DropdownMenu>
         </div>
       </div>
 
@@ -116,20 +135,24 @@ export function MultiAgentView({ task, childTasks, onOpenChat, onReviewChanges, 
           <div className="mt-4 rounded-md border border-primary/30 bg-primary/5 p-3">
             <div className="flex items-center gap-2">
               <GitMerge size={14} className="text-primary" />
-              <span className="text-xs font-medium text-foreground">All agents finished</span>
+              <span className="text-xs font-medium text-foreground">
+                All agents finished
+              </span>
             </div>
             <p className="mt-1 text-[10px] text-muted-foreground">
-              Multiple agents worked on this task. Their changes are in the same worktree.
-              Review the diff to check for conflicts.
+              Multiple agents worked on this task. Their changes are in the same
+              worktree. Review the diff to check for conflicts.
             </p>
-            <button
+            <Button
+              variant="default"
+              size="compact"
               type="button"
               onClick={onReviewChanges}
               className="mt-2 flex items-center gap-1.5 rounded bg-primary px-3 py-1.5 text-[11px] font-medium text-primary-foreground hover:bg-primary/80 disabled:opacity-50"
             >
               <GitMerge size={11} />
               Review changes
-            </button>
+            </Button>
           </div>
         )}
       </div>
@@ -163,9 +186,11 @@ function AgentLaneRow({ task, primary, onOpenChat }: { task: OrchestratorTask; p
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
           <span className="text-[11px] font-medium text-foreground capitalize">
-            {primary ? "primary" : task.spawnedRole ?? task.title}
+            {primary ? "primary" : (task.spawnedRole ?? task.title)}
           </span>
-          <span className="text-[9px] text-muted-foreground">{task.agentName}</span>
+          <span className="text-[9px] text-muted-foreground">
+            {task.agentName}
+          </span>
         </div>
       </div>
 
@@ -173,11 +198,16 @@ function AgentLaneRow({ task, primary, onOpenChat }: { task: OrchestratorTask; p
         {running && <Loader2 size={10} className="animate-spin" />}
         {task.status}
       </div>
-      <button type="button" onClick={() => onOpenChat(task.id)}
-        aria-label={`Open ${primary ? "primary" : task.spawnedRole ?? task.title} chat`}
-        className="shrink-0 rounded px-2 py-1 text-xs text-primary hover:bg-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary">
+      <Button
+        variant="ghost"
+        size="compact"
+        type="button"
+        onClick={() => onOpenChat(task.id)}
+        aria-label={`Open ${primary ? "primary" : (task.spawnedRole ?? task.title)} chat`}
+        className="shrink-0 rounded px-2 py-1 text-xs text-primary hover:bg-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+      >
         Open chat
-      </button>
+      </Button>
     </div>
   );
 }

@@ -1,5 +1,6 @@
-import { useMemo } from "react";
+import { Button } from "@/components/ui/button";
 import { ChevronRight } from "lucide-react";
+import { useMemo } from "react";
 import { getAncestorChain, SymbolNode } from "../lib/symbol-tree";
 import { SymbolKindIcon } from "./SymbolKindIcon";
 
@@ -40,20 +41,24 @@ export function BreadcrumbBar({
           {idx > 0 && (
             <ChevronRight size={10} className="shrink-0 text-muted-foreground" />
           )}
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground transition truncate max-w-[160px]"
             title={segment}
           >
             {segment}
-          </button>
+          </Button>
         </span>
       ))}
 
       {symbolChain.map((symbol, idx) => (
         <span key={`sym-${idx}`} className="flex items-center gap-0.5">
           <ChevronRight size={10} className="shrink-0 text-muted-foreground" />
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="flex items-center gap-1 rounded px-1 py-0.5 text-foreground hover:bg-accent transition truncate max-w-[160px]"
             title={`${symbol.kind}: ${symbol.name} (line ${symbol.range.startLine + 1})`}
@@ -61,7 +66,7 @@ export function BreadcrumbBar({
           >
             <SymbolKindIcon kind={symbol.kind} size={11} />
             <span>{symbol.name}</span>
-          </button>
+          </Button>
         </span>
       ))}
     </nav>

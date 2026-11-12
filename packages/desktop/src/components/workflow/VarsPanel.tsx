@@ -1,7 +1,7 @@
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { useCallback, useState } from "react";
 import { Plus, Trash2 } from "lucide-react";
+import { useCallback, useState } from "react";
 
 interface Props {
   vars: Record<string, string>;
@@ -132,14 +132,16 @@ function VarRow({
         onChange={(e) => onValueChange(e.target.value)}
         placeholder="value"
       />
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         className="rounded p-0.5 text-muted-foreground opacity-0 hover:text-destructive group-hover:opacity-100"
         onClick={onRemove}
         title="Remove variable"
       >
         <Trash2 size={12} />
-      </button>
+      </Button>
     </div>
   );
 }

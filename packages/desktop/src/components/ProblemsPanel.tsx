@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * ProblemsPanel — bottom drawer listing all LSP diagnostics across open files.
  *
@@ -5,7 +6,6 @@
  * file and line. Shows error/warning/info counts in the header.
  */
 
-import { useCallback, useMemo } from "react";
 import {
   AlertCircle,
   AlertTriangle,
@@ -13,6 +13,7 @@ import {
   Info,
   X,
 } from "lucide-react";
+import { useCallback, useMemo } from "react";
 import {
   useAllDiagnostics,
   useTotalDiagnosticCounts,
@@ -56,7 +57,9 @@ export function ProblemsPanel({ onNavigate, onClose }: Props) {
       {/* Header */}
       <div className="flex shrink-0 items-center justify-between border-b border-border px-3 py-1.5">
         <div className="flex items-center gap-3">
-          <span className="text-[11px] font-medium text-foreground">Problems</span>
+          <span className="text-[11px] font-medium text-foreground">
+            Problems
+          </span>
           <div className="flex items-center gap-2 text-[10px]">
             {totalCounts.errors > 0 && (
               <span className="flex items-center gap-0.5 text-destructive">
@@ -78,14 +81,16 @@ export function ProblemsPanel({ onNavigate, onClose }: Props) {
             )}
           </div>
         </div>
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={onClose}
           className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground transition"
           aria-label="Close problems panel"
         >
           <X size={12} />
-        </button>
+        </Button>
       </div>
 
       {/* Content */}
@@ -146,22 +151,24 @@ function FileGroup({
           {errorCount > 0 && (
             <span className="text-destructive">{errorCount}</span>
           )}
-          {warnCount > 0 && (
-            <span className="text-warning">{warnCount}</span>
-          )}
+          {warnCount > 0 && <span className="text-warning">{warnCount}</span>}
         </div>
       </div>
 
       {/* Diagnostics */}
       {sorted.map((entry, idx) => (
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           key={`${entry.startLineNumber}-${entry.startColumn}-${idx}`}
           type="button"
           onClick={() => onClick(entry)}
-          className="flex w-full items-start gap-2 px-3 py-0.5 pl-6 text-left hover:bg-accent transition text-[11px]"
+          className="justify-start flex w-full items-start gap-2 px-3 py-0.5 pl-6 text-left hover:bg-accent transition text-[11px]"
         >
           <SeverityIcon severity={entry.severity} />
-          <span className="flex-1 text-foreground truncate">{entry.message}</span>
+          <span className="flex-1 text-foreground truncate">
+            {entry.message}
+          </span>
           <span className="shrink-0 text-muted-foreground tabular-nums text-[10px]">
             [{entry.startLineNumber}:{entry.startColumn}]
           </span>
@@ -170,7 +177,7 @@ function FileGroup({
               {entry.source}
             </span>
           )}
-        </button>
+        </Button>
       ))}
     </div>
   );
@@ -181,13 +188,21 @@ function FileGroup({
 function SeverityIcon({ severity }: { severity: number }) {
   switch (severity) {
     case 8:
-      return <AlertCircle size={11} className="shrink-0 text-destructive mt-px" />;
+      return (
+        <AlertCircle size={11} className="shrink-0 text-destructive mt-px" />
+      );
     case 4:
-      return <AlertTriangle size={11} className="shrink-0 text-warning mt-px" />;
+      return (
+        <AlertTriangle size={11} className="shrink-0 text-warning mt-px" />
+      );
     case 2:
-      return <Info size={11} className="shrink-0 text-muted-foreground mt-px" />;
+      return (
+        <Info size={11} className="shrink-0 text-muted-foreground mt-px" />
+      );
     default:
-      return <Info size={11} className="shrink-0 text-muted-foreground/50 mt-px" />;
+      return (
+        <Info size={11} className="shrink-0 text-muted-foreground/50 mt-px" />
+      );
   }
 }
 

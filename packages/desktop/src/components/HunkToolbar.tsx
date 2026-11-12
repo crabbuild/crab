@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import clsx from "clsx";
 import { Minus, Plus, Trash2 } from "lucide-react";
 
@@ -127,7 +128,9 @@ function ToolbarButton({
         ? "hover:bg-warning/15 hover:text-warning"
         : "hover:bg-destructive/15 hover:text-destructive";
   return (
-    <button
+    <Button
+      variant="ghost"
+      size="compact"
       type="button"
       onClick={onClick}
       disabled={disabled}
@@ -141,6 +144,6 @@ function ToolbarButton({
     >
       {icon}
       {!compact && <span>{label.replace(" hunk", "")}</span>}
-    </button>
+    </Button>
   );
 }

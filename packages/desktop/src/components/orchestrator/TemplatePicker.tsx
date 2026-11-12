@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import clsx from "clsx";
 
 // ── Types ───────────────────────────────────────────────────────────
@@ -56,7 +57,9 @@ export function TemplatePicker({ templates, selectedTemplate, onSelect }: Templa
         const isSelected = selectedTemplate === template.name;
 
         return (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             key={template.name}
             type="button"
             role="option"
@@ -83,7 +86,7 @@ export function TemplatePicker({ templates, selectedTemplate, onSelect }: Templa
                 {template.description}
               </span>
             )}
-          </button>
+          </Button>
         );
       })}
     </div>

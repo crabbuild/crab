@@ -1,22 +1,31 @@
-import { NativeSelect } from "@/components/ui/native-select";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 /**
  * Tool Manager Panel — package manager detection, tool installation with
  * streaming output, status indicators, sudo confirmation, and error suggestions.
  */
 
-import { useState, useCallback, useRef, useEffect } from "react";
 import {
+  AlertTriangle,
+  CheckCircle2,
+  Loader2,
   Package,
   Play,
-  Square,
-  CheckCircle2,
-  XCircle,
-  Loader2,
   ShieldAlert,
-  AlertTriangle,
+  Square,
   Terminal,
+  XCircle,
 } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -62,22 +71,26 @@ function SudoConfirmDialog({
       </div>
       <p className="text-xs text-muted-foreground text-muted-foreground">
         Installing <span className="font-mono font-medium">{tool}</span> via{" "}
-        <span className="font-mono">{manager}</span> requires sudo. The command will run with
-        elevated privileges on the remote server.
+        <span className="font-mono">{manager}</span> requires sudo. The command
+        will run with elevated privileges on the remote server.
       </p>
       <div className="flex justify-end gap-2 pt-1">
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           onClick={onCancel}
           className="px-3 py-1 text-xs text-muted-foreground text-muted-foreground hover:bg-card hover:bg-card rounded"
         >
           Cancel
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           onClick={onConfirm}
           className="px-3 py-1 text-xs bg-warning text-warning-foreground rounded hover:bg-warning"
         >
           Run with sudo
-        </button>
+        </Button>
       </div>
     </div>
   );
@@ -105,7 +118,9 @@ function OutputLog({ lines, maxLines = 1000 }: { lines: string[]; maxLines?: num
       aria-label="Installation output"
     >
       {displayLines.length === 0 ? (
-        <span className="text-muted-foreground italic">Waiting for output...</span>
+        <span className="text-muted-foreground italic">
+          Waiting for output...
+        </span>
       ) : (
         displayLines.map((line, i) => (
           <div key={i} className="whitespace-pre-wrap break-all leading-relaxed">
@@ -236,20 +251,33 @@ export function ToolManagerPanel({
                 <label htmlFor="tool-manager-select" className="text-[10px] text-muted-foreground text-muted-foreground">
                   Package Manager
                 </label>
-                <NativeSelect
-                  id="tool-manager-select"
-                  value={selectedManager}
-                  onChange={(e) => setSelectedManager(e.target.value)}
+                <Select
+                  value={":" + String(selectedManager)}
+                  onValueChange={(selectedValue) => {
+                    const value = selectedValue.slice(1);
+                    return setSelectedManager(value);
+                  }}
                   disabled={isInstalling || packageManagers.length === 0}
-                  className="w-full px-2 py-1 text-xs border border-border border-border rounded bg-background bg-card disabled:opacity-50"
                 >
-                  <option value="">Select...</option>
-                  {packageManagers.map((pm) => (
-                    <option key={pm} value={pm}>
-                      {pm}
-                    </option>
-                  ))}
-                </NativeSelect>
+                  <SelectTrigger
+                    id="tool-manager-select"
+                    className="w-full px-2 py-1 text-xs border border-border border-border rounded bg-background bg-card disabled:opacity-50"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      <SelectItem value={":" + String("")}>
+                        Select...
+                      </SelectItem>
+                      {packageManagers.map((pm) => (
+                        <SelectItem key={pm} value={":" + String(pm)}>
+                          {pm}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
               </div>
               <div>
                 <label htmlFor="tool-name-input" className="text-[10px] text-muted-foreground text-muted-foreground">
@@ -269,10 +297,9 @@ export function ToolManagerPanel({
 
             <div className="flex items-center justify-between">
               <label className="flex items-center gap-1.5 text-xs text-muted-foreground text-muted-foreground cursor-pointer">
-                <input
-                  type="checkbox"
+                <Checkbox
                   checked={useSudo}
-                  onChange={(e) => setUseSudo(e.target.checked)}
+                  onCheckedChange={(checked) => setUseSudo(checked === true)}
                   disabled={isInstalling}
                   className="w-3 h-3 rounded border-border border-border text-warning"
                 />
@@ -281,23 +308,27 @@ export function ToolManagerPanel({
 
               <div className="flex items-center gap-2">
                 {isInstalling && (
-                  <button
+                  <Button
+                    variant="ghost"
+                    size="compact"
                     type="button"
                     onClick={onCancel}
                     className="flex items-center gap-1 px-2 py-1 text-xs text-destructive text-destructive hover:bg-destructive/10 hover:bg-destructive/20 rounded"
                   >
                     <Square className="w-3 h-3" />
                     Cancel
-                  </button>
+                  </Button>
                 )}
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="submit"
                   disabled={isInstalling || !selectedManager || !toolName.trim()}
                   className="flex items-center gap-1 px-3 py-1 text-xs bg-info text-info-foreground rounded hover:bg-info disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Play className="w-3 h-3" />
                   Install
-                </button>
+                </Button>
               </div>
             </div>
           </form>
@@ -329,7 +360,9 @@ export function ToolManagerPanel({
           <section className="border border-destructive border-destructive rounded-md p-2 bg-destructive/10 bg-destructive/10 space-y-1.5">
             <div className="flex items-start gap-2">
               <AlertTriangle className="w-3.5 h-3.5 text-destructive shrink-0 mt-0.5" />
-              <p className="text-xs text-destructive text-destructive">{errorMessage}</p>
+              <p className="text-xs text-destructive text-destructive">
+                {errorMessage}
+              </p>
             </div>
             {suggestedFix && (
               <div className="pl-5">

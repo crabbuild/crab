@@ -1,4 +1,15 @@
-import { NativeSelect } from "@/components/ui/native-select";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { PopoverContent } from "@/components/ui/popover";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Slider } from "@/components/ui/slider";
 /**
  * Font configuration settings menu for the terminal.
  *
@@ -12,21 +23,20 @@ import { NativeSelect } from "@/components/ui/native-select";
 import { useEffect, useMemo, useState } from "react";
 import type { FontConfig } from "../lib/terminal-font";
 import {
-  loadFontConfig,
-  saveFontConfig,
   DEFAULT_FONT_CONFIG,
   buildFontFamily,
+  detectInstalledMonoFonts,
   fontHasKnownLigatures,
   isFontAvailable,
-  detectInstalledMonoFonts,
+  loadFontConfig,
+  saveFontConfig,
 } from "../lib/terminal-font";
 
 interface Props {
-  onClose: () => void;
   onChange: (config: FontConfig) => void;
 }
 
-export function TerminalFontSettings({ onClose, onChange }: Props) {
+export function TerminalFontSettings({ onChange }: Props) {
   const [config, setConfig] = useState<FontConfig>(loadFontConfig);
 
   // Detect installed monospace fonts once when the panel opens.
@@ -46,12 +56,6 @@ export function TerminalFontSettings({ onClose, onChange }: Props) {
     })();
     return () => { cancelled = true; };
   }, []);
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
 
   function update(partial: Partial<FontConfig>) {
     let updated = { ...config, ...partial };
@@ -87,20 +91,24 @@ export function TerminalFontSettings({ onClose, onChange }: Props) {
   const previewFontFamily = buildFontFamily(config.fontFamily);
 
   return (
-    <div
-      role="dialog"
+    <PopoverContent
+      align="start"
       aria-label="Terminal font settings"
-      className="absolute left-0 top-full z-50 mt-1 w-[300px] rounded border border-border bg-card p-3 shadow-xl"
+      className="w-[300px] p-3"
     >
       <div className="mb-3 flex items-center justify-between">
-        <span className="text-[11px] font-medium text-foreground">Font Settings</span>
-        <button
+        <span className="text-[11px] font-medium text-foreground">
+          Font Settings
+        </span>
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={reset}
           className="text-[9px] text-muted-foreground hover:text-primary"
         >
           Reset
-        </button>
+        </Button>
       </div>
 
       {/* Font family — only installed fonts shown. */}
@@ -113,24 +121,39 @@ export function TerminalFontSettings({ onClose, onChange }: Props) {
             </span>
           )}
         </label>
-        <NativeSelect
-          value={config.fontFamily}
-          onChange={(e) => update({ fontFamily: e.target.value })}
-          className="w-full rounded border border-border bg-background px-2 py-1 text-[11px] text-foreground focus:border-primary focus-visible:outline-none"
+        <Select
+          value={":" + String(config.fontFamily)}
+          onValueChange={(selectedValue) => {
+            const value = selectedValue.slice(1);
+            return update({ fontFamily: value });
+          }}
         >
-          {/* If current font isn't in the installed list, show it at top
+          <SelectTrigger aria-label="Font family" className="w-full rounded border border-border bg-background px-2 py-1 text-[11px] text-foreground focus:border-primary focus-visible:outline-none">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              {/* If current font isn't in the installed list, show it at top
               with a warning suffix so the user knows. */}
-          {!currentFontInstalled && config.fontFamily && (
-            <option value={config.fontFamily}>
-              {config.fontFamily} (not installed)
-            </option>
-          )}
-          {installedFonts === null
-            ? <option value={config.fontFamily}>{config.fontFamily}</option>
-            : installedFonts.map((f) => (
-                <option key={f} value={f}>{f}</option>
-              ))}
-        </NativeSelect>
+              {installedFonts !== null && !installedFonts.includes(config.fontFamily) && config.fontFamily && (
+                <SelectItem value={":" + String(config.fontFamily)}>
+                  {config.fontFamily}{!currentFontInstalled && " (not installed)"}
+                </SelectItem>
+              )}
+              {installedFonts === null ? (
+                <SelectItem value={":" + String(config.fontFamily)}>
+                  {config.fontFamily}
+                </SelectItem>
+              ) : (
+                installedFonts.map((f) => (
+                  <SelectItem key={f} value={":" + String(f)}>
+                    {f}
+                  </SelectItem>
+                ))
+              )}
+            </SelectGroup>
+          </SelectContent>
+        </Select>
         {!currentFontInstalled && (
           <div className="mt-1 text-[9px] text-warning">
             This font isn't installed — terminal will fall back to Menlo.
@@ -144,13 +167,14 @@ export function TerminalFontSettings({ onClose, onChange }: Props) {
           <span>Size</span>
           <span className="font-mono text-foreground">{config.fontSize}px</span>
         </label>
-        <input
-          type="range"
+        <Slider
           min={8}
           max={32}
           step={1}
-          value={config.fontSize}
-          onChange={(e) => update({ fontSize: Number(e.target.value) })}
+          value={[Number(config.fontSize)]}
+          onValueChange={([value]) =>
+            update({ fontSize: Number(String(value)) })
+          }
           className="w-full accent-primary"
         />
       </div>
@@ -161,14 +185,13 @@ export function TerminalFontSettings({ onClose, onChange }: Props) {
           <span>Weight</span>
           <span className="font-mono text-foreground">{config.fontWeight}</span>
         </label>
-        <input
-          type="range"
+        <Slider
           min={100}
           max={900}
           step={100}
-          value={config.fontWeight}
-          onChange={(e) => {
-            const w = Number(e.target.value);
+          value={[Number(config.fontWeight)]}
+          onValueChange={([value]) => {
+            const w = Number(String(value));
             // Keep bold heavier than regular by at least 200.
             const bold = Math.max(w + 200, config.fontWeightBold);
             update({ fontWeight: w, fontWeightBold: Math.min(900, bold) });
@@ -181,15 +204,18 @@ export function TerminalFontSettings({ onClose, onChange }: Props) {
       <div className="mb-2">
         <label className="mb-1 flex items-center justify-between text-[10px] text-muted-foreground">
           <span>Line Height</span>
-          <span className="font-mono text-foreground">{config.lineHeight.toFixed(2)}</span>
+          <span className="font-mono text-foreground">
+            {config.lineHeight.toFixed(2)}
+          </span>
         </label>
-        <input
-          type="range"
+        <Slider
           min={1}
           max={2}
           step={0.05}
-          value={config.lineHeight}
-          onChange={(e) => update({ lineHeight: Number(e.target.value) })}
+          value={[Number(config.lineHeight)]}
+          onValueChange={([value]) =>
+            update({ lineHeight: Number(String(value)) })
+          }
           className="w-full accent-primary"
         />
       </div>
@@ -198,15 +224,18 @@ export function TerminalFontSettings({ onClose, onChange }: Props) {
       <div className="mb-2">
         <label className="mb-1 flex items-center justify-between text-[10px] text-muted-foreground">
           <span>Letter Spacing</span>
-          <span className="font-mono text-foreground">{config.letterSpacing}px</span>
+          <span className="font-mono text-foreground">
+            {config.letterSpacing}px
+          </span>
         </label>
-        <input
-          type="range"
+        <Slider
           min={-2}
           max={5}
           step={0.5}
-          value={config.letterSpacing}
-          onChange={(e) => update({ letterSpacing: Number(e.target.value) })}
+          value={[Number(config.letterSpacing)]}
+          onValueChange={([value]) =>
+            update({ letterSpacing: Number(String(value)) })
+          }
           className="w-full accent-primary"
         />
       </div>
@@ -214,10 +243,9 @@ export function TerminalFontSettings({ onClose, onChange }: Props) {
       {/* Ligatures toggle */}
       <label className="flex cursor-pointer items-center justify-between">
         <span className="text-[11px] text-foreground">Font Ligatures</span>
-        <input
-          type="checkbox"
+        <Checkbox
           checked={config.ligatures}
-          onChange={(e) => update({ ligatures: e.target.checked })}
+          onCheckedChange={(checked) => update({ ligatures: checked === true })}
           className="h-4 w-4 rounded border-border accent-primary"
         />
       </label>
@@ -244,6 +272,6 @@ export function TerminalFontSettings({ onClose, onChange }: Props) {
       >
         <span className="opacity-70">$ </span>git log --oneline =&gt; !=
       </div>
-    </div>
+    </PopoverContent>
   );
 }

@@ -1,3 +1,6 @@
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 /**
  * Mount button component for the repo context menu.
@@ -6,8 +9,8 @@ import { Input } from "@/components/ui/input";
  * and calls the mount IPC to create a new FUSE mount.
  */
 
-import { useState } from "react";
 import { HardDrive, Loader2, X } from "lucide-react";
+import { useState } from "react";
 
 interface MountButtonProps {
   /** Repository URL or local path to mount. */
@@ -67,19 +70,34 @@ function MountDialog({ open, repo, defaultRef, onClose, onMounted }: MountDialog
   }
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50">
-      <div className="w-96 rounded-lg border border-border bg-card shadow-2xl">
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) {
+          onClose();
+        }
+      }}
+    >
+      <DialogContent
+        showCloseButton={false}
+        aria-describedby={undefined}
+        className="block gap-0 p-0 w-96 rounded-lg border border-border bg-card shadow-2xl"
+      >
         {/* Header */}
         <div className="flex items-center justify-between border-b border-border px-4 py-3">
-          <h3 className="text-sm font-semibold text-foreground">Mount Repository</h3>
-          <button
+          <DialogTitle className="text-sm font-semibold text-foreground">
+            Mount Repository
+          </DialogTitle>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground transition"
             onClick={onClose}
             aria-label="Close"
           >
             <X size={14} />
-          </button>
+          </Button>
         </div>
 
         {/* Body */}
@@ -135,14 +153,15 @@ function MountDialog({ open, repo, defaultRef, onClose, onMounted }: MountDialog
 
           {/* Read-only toggle */}
           <label className="flex items-center gap-2 cursor-pointer">
-            <input
-              type="checkbox"
+            <Checkbox
               className="rounded border-border"
               checked={readOnly}
-              onChange={(e) => setReadOnly(e.target.checked)}
+              onCheckedChange={(checked) => setReadOnly(checked === true)}
               disabled={busy}
             />
-            <span className="text-xs text-foreground">Read-only (no overlay writes)</span>
+            <span className="text-xs text-foreground">
+              Read-only (no overlay writes)
+            </span>
           </label>
 
           {/* Error */}
@@ -155,25 +174,29 @@ function MountDialog({ open, repo, defaultRef, onClose, onMounted }: MountDialog
 
         {/* Footer */}
         <div className="flex justify-end gap-2 border-t border-border px-4 py-3">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="rounded px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-accent border border-border transition"
             onClick={onClose}
             disabled={busy}
           >
             Cancel
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="default"
+            size="compact"
             type="button"
             className="rounded bg-primary px-3 py-1.5 text-xs text-primary-foreground hover:bg-primary/90 transition disabled:opacity-50"
             onClick={handleMount}
             disabled={busy || !mountpoint.trim()}
           >
             {busy ? <Loader2 size={12} className="animate-spin" /> : "Mount"}
-          </button>
+          </Button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -186,7 +209,9 @@ export function MountButton({ repo, defaultRef, onMounted }: MountButtonProps) {
 
   return (
     <>
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground hover:bg-primary/10 transition"
         onClick={() => setDialogOpen(true)}
@@ -194,7 +219,7 @@ export function MountButton({ repo, defaultRef, onMounted }: MountButtonProps) {
       >
         <HardDrive size={12} />
         <span>Mount</span>
-      </button>
+      </Button>
 
       <MountDialog
         open={dialogOpen}

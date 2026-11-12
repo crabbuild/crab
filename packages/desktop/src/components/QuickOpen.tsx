@@ -1,6 +1,13 @@
-import { Input } from "@/components/ui/input";
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+  Command as CommandRoot,
+} from "@/components/ui/command";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import clsx from "clsx";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { DirEntry } from "../ipc";
 import { FileIcon } from "./FileIcon";
 
@@ -38,60 +45,49 @@ export function QuickOpen({ entries, open, onClose, onPick }: Props) {
 
   if (!open) return null;
 
-  const commit = () => {
-    const m = matches[sel];
-    if (m) {
-      onPick(m);
-      onClose();
-    }
-  };
-
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 pt-[12vh]"
-      onClick={onClose}
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) {
+          onClose();
+        }
+      }}
     >
-      <div
-        className="w-[min(640px,92vw)] overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
+      <DialogContent
+        showCloseButton={false}
+        aria-describedby={undefined}
+        className="block gap-0 p-0 w-[min(640px,92vw)] overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <Input
-          ref={inputRef}
-          type="text"
-          value={query}
-          onChange={(e) => {
-            setQuery(e.target.value);
+        <CommandRoot
+          shouldFilter={false}
+          value={String(sel)}
+          onValueChange={(value) => setSel(Number(value))}
+        >
+          <DialogTitle className="sr-only">{"Quick Open"}</DialogTitle>
+          <CommandInput
+            ref={inputRef}
+            value={query}
+            onValueChange={(value) => {
+            setQuery(value);
             setSel(0);
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Escape") onClose();
-            else if (e.key === "ArrowDown") {
-              e.preventDefault();
-              setSel((s) => Math.min(matches.length - 1, s + 1));
-            } else if (e.key === "ArrowUp") {
-              e.preventDefault();
-              setSel((s) => Math.max(0, s - 1));
-            } else if (e.key === "Enter") {
-              e.preventDefault();
-              commit();
-            }
-          }}
+            }}
           className="w-full bg-background px-4 py-3 font-mono text-sm focus-visible:outline-none"
           placeholder="Go to file…"
           aria-label="Go to file"
         />
-        <ul role="listbox" className="max-h-[60vh] overflow-auto border-t border-border">
-          {matches.map((m, i) => (
-            <li
-              key={m.path}
-              role="option"
-              aria-selected={i === sel}
+        <CommandList className="max-h-[60vh] overflow-auto border-t border-border">
+            <CommandGroup>
+              {matches.map((m, i) => (
+            <CommandItem
+                  value={String(i)}
+                  key={m.path}
               className={clsx(
                 "flex cursor-pointer items-center gap-2 px-3 py-2 font-mono text-[12.5px]",
                 i === sel ? "bg-primary/25 text-foreground" : "text-foreground hover:bg-accent",
               )}
-              onMouseEnter={() => setSel(i)}
-              onClick={() => {
+                  onSelect={() => {
                 onPick(m);
                 onClose();
               }}
@@ -101,14 +97,18 @@ export function QuickOpen({ entries, open, onClose, onPick }: Props) {
               <span className="ml-auto truncate text-[11px] text-muted-foreground" title={m.path}>
                 {m.path}
               </span>
-            </li>
+            </CommandItem>
           ))}
           {matches.length === 0 && (
-            <li className="px-3 py-4 text-center text-xs text-muted-foreground">No matches</li>
+            <li className="px-3 py-4 text-center text-xs text-muted-foreground">
+                  No matches
+                </li>
           )}
-        </ul>
-      </div>
-    </div>
+        </CommandGroup>
+          </CommandList>
+        </CommandRoot>
+      </DialogContent>
+    </Dialog>
   );
 }
 

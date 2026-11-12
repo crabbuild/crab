@@ -1,5 +1,6 @@
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { useState, useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useSkills } from "../../state/skills-store";
 
 function ListSkeleton() {
@@ -62,7 +63,9 @@ export function SkillList() {
           </div>
         ) : (
           filtered.map((skill) => (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               key={skill.record.id}
               className={`w-full text-left px-3 py-2 border-b border-border/50 hover:bg-accent transition-colors ${
                 state.selectedSkillId === skill.record.id ? "bg-primary/10 border-l-2 border-l-primary" : ""
@@ -82,7 +85,7 @@ export function SkillList() {
               <p className="text-[11px] text-muted-foreground mt-0.5 truncate">
                 {skill.record.description}
               </p>
-            </button>
+            </Button>
           ))
         )}
       </div>

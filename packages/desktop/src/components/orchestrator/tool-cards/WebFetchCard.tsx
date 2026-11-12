@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { useCardExpanded } from "./useCardExpanded";
 /**
  * Specialized renderer for WebFetch tool calls.
@@ -10,12 +11,11 @@ import { useCardExpanded } from "./useCardExpanded";
  *   - detail (fetched content from tool_result)
  */
 
-
 import clsx from "clsx";
-import { ChevronDown, ChevronRight, Globe, ExternalLink } from "lucide-react";
+import { ChevronDown, ChevronRight, ExternalLink, Globe } from "lucide-react";
 import { Streamdown } from "streamdown";
-import type { ToolCardRendererProps } from "./types";
 import { CollapsedCardLine } from "./CollapsedCardLine";
+import type { ToolCardRendererProps } from "./types";
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -67,8 +67,12 @@ export function WebFetchCard({ event, defaultExpanded = false, collapsed: collap
     const defaultSummary = (
       <>
         <Globe size={11} className="shrink-0 text-muted-foreground" />
-        <span className="font-medium text-foreground/80">{isSearch ? "Search" : "Fetch"}</span>
-        <span className="truncate text-foreground/70">{isSearch ? query : domain || url}</span>
+        <span className="font-medium text-foreground/80">
+          {isSearch ? "Search" : "Fetch"}
+        </span>
+        <span className="truncate text-foreground/70">
+          {isSearch ? query : domain || url}
+        </span>
       </>
     );
     return (
@@ -83,7 +87,9 @@ export function WebFetchCard({ event, defaultExpanded = false, collapsed: collap
   return (
     <div className="rounded-md border border-border/40 overflow-hidden">
       {/* Header */}
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={() => hasContent && setExpanded(!expanded)}
         className={clsx(
@@ -100,12 +106,16 @@ export function WebFetchCard({ event, defaultExpanded = false, collapsed: collap
         {/* URL or query */}
         <span className="min-w-0 flex-1 flex items-center gap-1.5 truncate">
           {isSearch ? (
-            <span className="text-foreground/80 italic truncate">&ldquo;{query}&rdquo;</span>
+            <span className="text-foreground/80 italic truncate">
+              &ldquo;{query}&rdquo;
+            </span>
           ) : (
             <>
               <span className="text-foreground/80 font-medium">{domain}</span>
               {url && url !== domain && (
-                <span className="text-[9px] text-muted-foreground/60 truncate">{url}</span>
+                <span className="text-[9px] text-muted-foreground/60 truncate">
+                  {url}
+                </span>
               )}
             </>
           )}
@@ -125,12 +135,13 @@ export function WebFetchCard({ event, defaultExpanded = false, collapsed: collap
           </a>
         )}
 
-        {hasContent && (
-          expanded
-            ? <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
-            : <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
-        )}
-      </button>
+        {hasContent &&
+          (expanded ? (
+            <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
+          ) : (
+            <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
+          ))}
+      </Button>
 
       {/* Expanded: fetched content */}
       {expanded && hasContent && (

@@ -1,5 +1,12 @@
+import { Button } from "@/components/ui/button";
+import {
+  AlertCircle,
+  CheckCircle2,
+  Circle,
+  Clock,
+  Loader2,
+} from "lucide-react";
 import { useMemo } from "react";
-import { Circle, CheckCircle2, Loader2, AlertCircle, Clock } from "lucide-react";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -146,9 +153,7 @@ export function TaskGraph({ graph, onNodeClick }: Props) {
         <span>
           {done}/{total} complete
         </span>
-        {running > 0 && (
-          <span className="text-primary">{running} running</span>
-        )}
+        {running > 0 && <span className="text-primary">{running} running</span>}
         {failed > 0 && (
           <span className="text-destructive">{failed} failed</span>
         )}
@@ -170,10 +175,12 @@ export function TaskGraph({ graph, onNodeClick }: Props) {
                 )}
 
                 {/* Node card */}
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
                   onClick={() => onNodeClick?.(node.id)}
-                  className="flex items-center gap-2 rounded border border-border/60 bg-background px-2.5 py-1.5 text-left transition hover:border-primary/60 hover:bg-accent focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary"
+                  className="justify-start flex items-center gap-2 rounded border border-border/60 bg-background px-2.5 py-1.5 text-left transition hover:border-primary/60 hover:bg-accent focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary"
                   aria-label={`${node.title} — ${statusLabel(node.status)}`}
                   role="listitem"
                 >
@@ -181,7 +188,7 @@ export function TaskGraph({ graph, onNodeClick }: Props) {
                   <span className="max-w-[140px] truncate text-xs text-foreground">
                     {node.title}
                   </span>
-                </button>
+                </Button>
 
                 {/* Outgoing arrow */}
                 {colIdx < maxCol && (

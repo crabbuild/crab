@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * SyncConflictList — scrollable panel showing all unresolved sync conflicts
  * for a given sync pair, sorted by detection time (newest first).
@@ -5,8 +6,8 @@
  * that opens the ConflictResolutionDialog.
  */
 
-import { useState, useEffect, useCallback, useMemo } from "react";
 import { AlertTriangle, RefreshCw } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { SyncConflict } from "../../../electron/ssh-types";
 import {
   ConflictResolutionDialog,
@@ -91,12 +92,14 @@ export function SyncConflictList({ syncPairId }: SyncConflictListProps) {
     return (
       <div className="flex flex-col items-center justify-center py-8 gap-2">
         <p className="text-xs text-destructive">{error}</p>
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           onClick={fetchConflicts}
           className="text-xs text-primary hover:underline"
         >
           Retry
-        </button>
+        </Button>
       </div>
     );
   }
@@ -109,14 +112,16 @@ export function SyncConflictList({ syncPairId }: SyncConflictListProps) {
           <AlertTriangle className="w-4 h-4 text-warning" />
           Conflicts ({sortedConflicts.length})
         </h3>
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           onClick={fetchConflicts}
           className="p-1 text-muted-foreground hover:text-foreground hover:bg-accent rounded transition"
           aria-label="Refresh conflicts"
           title="Refresh"
         >
           <RefreshCw className="w-3.5 h-3.5" />
-        </button>
+        </Button>
       </div>
 
       {/* List */}
@@ -152,12 +157,14 @@ export function SyncConflictList({ syncPairId }: SyncConflictListProps) {
                       Detected: {formatTimestamp(conflict.detectedAt)}
                     </p>
                   </div>
-                  <button
+                  <Button
+                    variant="ghost"
+                    size="compact"
                     onClick={() => setResolvingConflict(conflict)}
                     className="shrink-0 px-2.5 py-1 text-[11px] font-medium rounded border border-primary/60 bg-primary/15 text-primary hover:bg-primary/25 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
                   >
                     Resolve
-                  </button>
+                  </Button>
                 </div>
               </li>
             ))}

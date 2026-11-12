@@ -1,3 +1,10 @@
+import { Button } from "@/components/ui/button";
+import {
+  CommandGroup,
+  CommandItem,
+  CommandList,
+  CommandPopover,
+} from "@/components/ui/command";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 /**
@@ -16,13 +23,13 @@ import { Textarea } from "@/components/ui/textarea";
  * - Real delete via `orchestrator:remove-context-file` IPC.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 import { ClipboardPaste, FileText, Pin, Search, Trash2, X } from "lucide-react";
-import { OrchestratorTask } from "./TaskCard";
-import { ResizeHandle } from "./ResizeHandle";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DirEntry, rpc } from "../../ipc";
 import { publishToast } from "../../lib/toasts";
+import { ResizeHandle } from "./ResizeHandle";
+import { OrchestratorTask } from "./TaskCard";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -184,21 +191,6 @@ export function ContextPinPanel({ task, repoId, onClose }: Props) {
   }, [fileEntries, composerName]);
 
   // Close suggestions on outside click.
-  useEffect(() => {
-    if (!showSuggestions) return;
-    const handler = (e: MouseEvent) => {
-      if (
-        suggestionsRef.current &&
-        !suggestionsRef.current.contains(e.target as Node) &&
-        inputRef.current &&
-        !inputRef.current.contains(e.target as Node)
-      ) {
-        setShowSuggestions(false);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [showSuggestions]);
 
   // ── Pick a file from autocomplete ───────────────────────────────
 
@@ -338,28 +330,34 @@ export function ContextPinPanel({ task, repoId, onClose }: Props) {
         className="flex h-full shrink-0 flex-col overflow-hidden border-l border-border bg-card"
         style={{ width }}
       >
-        {/* Header */}
+        {/* Resize handle on the left edge of the panel */}
         <div className="flex items-center gap-2 border-b border-border px-3 py-2">
           <Pin size={12} className="text-primary" />
-          <span className="flex-1 text-xs font-medium text-foreground">Pinned Context</span>
-          <span className="text-[10px] text-muted-foreground">{files.length}</span>
-          <button
+          <span className="flex-1 text-xs font-medium text-foreground">
+            Pinned Context
+          </span>
+          <span className="text-[10px] text-muted-foreground">
+            {files.length}
+          </span>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={onClose}
             className="rounded p-0.5 text-muted-foreground hover:text-foreground"
             aria-label="Close context panel"
           >
             <X size={12} />
-          </button>
+          </Button>
         </div>
 
-        {/* Description */}
+        {/* Header */}
         <div className="border-b border-border/50 px-3 py-2 text-[10px] text-muted-foreground">
           Pinned items are included in every agent prompt. Use them for specs,
           conventions, or reference snippets the agent shouldn't forget.
         </div>
 
-        {/* File list */}
+        {/* Description */}
         <div className="min-h-0 flex-1 overflow-auto">
           {loading ? (
             <div className="flex items-center justify-center py-8 text-[11px] text-muted-foreground">
@@ -368,7 +366,9 @@ export function ContextPinPanel({ task, repoId, onClose }: Props) {
           ) : files.length === 0 ? (
             <div className="flex flex-col items-center justify-center gap-2 px-4 py-8 text-center">
               <Pin size={18} className="text-muted-foreground/50" />
-              <span className="text-[11px] text-muted-foreground">No pinned context yet</span>
+              <span className="text-[11px] text-muted-foreground">
+                No pinned context yet
+              </span>
               <span className="text-[10px] text-muted-foreground/70">
                 Search for a file below or paste content to pin.
               </span>
@@ -382,8 +382,12 @@ export function ContextPinPanel({ task, repoId, onClose }: Props) {
                     <span className="flex-1 truncate text-[11px] font-medium text-foreground">
                       {file.name}
                     </span>
-                    <span className="shrink-0 text-[10px] text-muted-foreground/70">{formatSize(file.size)}</span>
-                    <button
+                    <span className="shrink-0 text-[10px] text-muted-foreground/70">
+                      {formatSize(file.size)}
+                    </span>
+                    <Button
+                      variant="ghost"
+                      size="compact"
                       type="button"
                       onClick={() => handleRemove(file.name)}
                       className="rounded p-0.5 text-muted-foreground opacity-0 transition hover:text-destructive group-hover:opacity-100 focus:opacity-100"
@@ -391,7 +395,7 @@ export function ContextPinPanel({ task, repoId, onClose }: Props) {
                       title="Unpin"
                     >
                       <Trash2 size={10} />
-                    </button>
+                    </Button>
                   </div>
                   {file.content.trim().length > 0 && (
                     <div className="mt-1 line-clamp-2 break-all font-mono text-[10px] text-muted-foreground">
@@ -407,7 +411,7 @@ export function ContextPinPanel({ task, repoId, onClose }: Props) {
 
         {/* Composer — the single entry point for adding context. */}
         <div className="shrink-0 border-t border-border bg-background/40 px-3 py-2">
-          {/* File search input with autocomplete */}
+          {/* Composer — the single entry point for adding context. */}
           <div className="relative">
             <div className="flex items-center gap-1.5 rounded border border-border bg-background px-2 py-1">
               <Search size={10} className="shrink-0 text-muted-foreground" />
@@ -438,40 +442,43 @@ export function ContextPinPanel({ task, repoId, onClose }: Props) {
 
             {/* Autocomplete dropdown */}
             {showSuggestions && suggestions.length > 0 && (
-              <div
-                ref={suggestionsRef}
-                className="absolute bottom-full left-0 right-0 z-10 mb-1 max-h-48 overflow-y-auto rounded border border-border bg-background shadow-lg"
-                role="listbox"
+              <CommandPopover
+                anchorRef={inputRef}
+                onClose={() => setShowSuggestions(false)}
+                side="top"
+                value={String(selectedSuggestion)}
+                onValueChange={(value) => setSelectedSuggestion(Number(value))}
               >
-                {suggestions.map((entry, i) => (
-                  <button
-                    key={entry.path}
-                    type="button"
-                    onClick={() => handlePickFile(entry)}
-                    onMouseEnter={() => setSelectedSuggestion(i)}
-                    className={clsx(
+                <CommandList ref={suggestionsRef} className="max-h-48">
+                  <CommandGroup>
+                    {suggestions.map((entry, i) => (
+                      <CommandItem
+                        value={String(i)}
+                        key={entry.path}
+                        onSelect={() => handlePickFile(entry)}
+                        className={clsx(
                       "flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[10px] transition",
                       i === selectedSuggestion
                         ? "bg-primary/10 text-foreground"
                         : "text-muted-foreground hover:bg-accent hover:text-foreground",
                     )}
-                    role="option"
-                    aria-selected={i === selectedSuggestion}
-                  >
-                    <FileText size={10} className="shrink-0 text-primary/70" />
-                    <span className="flex-1 truncate">
-                      <span className="font-medium text-foreground">
-                        {entry.path.split("/").pop()}
-                      </span>
-                      {entry.path.includes("/") && (
-                        <span className="ml-1 text-muted-foreground/70">
-                          {entry.path.slice(0, entry.path.lastIndexOf("/"))}
+                      >
+                        <FileText size={10} className="shrink-0 text-primary/70" />
+                        <span className="flex-1 truncate">
+                          <span className="font-medium text-foreground">
+                            {entry.path.split("/").pop()}
+                          </span>
+                          {entry.path.includes("/") && (
+                            <span className="ml-1 text-muted-foreground/70">
+                              {entry.path.slice(0, entry.path.lastIndexOf("/"))}
+                            </span>
+                          )}
                         </span>
-                      )}
-                    </span>
-                  </button>
-                ))}
-              </div>
+                      </CommandItem>
+                    ))}
+                  </CommandGroup>
+                </CommandList>
+              </CommandPopover>
             )}
           </div>
 
@@ -489,7 +496,9 @@ export function ContextPinPanel({ task, repoId, onClose }: Props) {
           {/* Actions row */}
           <div className="mt-1.5 flex items-center gap-1.5">
             <div className="flex-1" />
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={handlePasteFromClipboard}
               className="flex shrink-0 items-center gap-1 rounded px-1.5 py-1 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
@@ -497,8 +506,10 @@ export function ContextPinPanel({ task, repoId, onClose }: Props) {
               aria-label="Paste from clipboard"
             >
               <ClipboardPaste size={11} />
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="default"
+              size="compact"
               type="button"
               onClick={handlePin}
               disabled={!canPin}
@@ -506,7 +517,7 @@ export function ContextPinPanel({ task, repoId, onClose }: Props) {
               title="Pin (⌘⏎)"
             >
               {pinning ? "Pinning…" : "Pin"}
-            </button>
+            </Button>
           </div>
         </div>
       </div>

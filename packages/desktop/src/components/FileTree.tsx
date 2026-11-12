@@ -1,12 +1,27 @@
+import { Button } from "@/components/ui/button";
 import { repositoryTreeTheme } from "@/lib/repository-tree-theme";
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { FileTree as PierreFileTree, useFileTree, useFileTreeSelection } from "@pierre/trees/react";
 import type { GitStatus, GitStatusEntry } from "@pierre/trees";
 import { prepareFileTreeInput } from "@pierre/trees";
+import { FileTree as PierreFileTree, useFileTree, useFileTreeSelection } from "@pierre/trees/react";
 import clsx from "clsx";
-import { Clipboard, ClipboardPaste, Clock, Copy, Download, Edit3, ExternalLink, FileX, FilePlus, FolderOpen, FolderPlus, Scissors, Trash2 } from "lucide-react";
-import { DirEntry, HydrationEntry, mainProcess } from "../ipc";
+import {
+  Clipboard,
+  ClipboardPaste,
+  Clock,
+  Copy,
+  Download,
+  Edit3,
+  ExternalLink,
+  FilePlus,
+  FileX,
+  FolderOpen,
+  FolderPlus,
+  Scissors,
+  Trash2,
+} from "lucide-react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useEffectiveTheme } from "../hooks/useEffectiveTheme";
+import { DirEntry, HydrationEntry, mainProcess } from "../ipc";
 import { isEligible, type HydrateVerb } from "../lib/hydrateScope";
 
 // Module-level clipboard for cut/copy operations within the tree.
@@ -521,22 +536,26 @@ export const FileTree = memo(function FileTree({
           {(hydratePaths.length > 0 || dehydratePaths.length > 0) && (
             <>
               <Divider />
-              {hydratePaths.length > 0 && <MenuItem
+              {hydratePaths.length > 0 && (
+                <MenuItem
                 icon={<Download size={12} />}
                 label={isDir ? "Hydrate Subtree" : "Hydrate File"}
                 onClick={() => {
                   context.close();
                   void runHydrate(hydratePaths, "hydrate");
                 }}
-              />}
-              {dehydratePaths.length > 0 && <MenuItem
+              />
+              )}
+              {dehydratePaths.length > 0 && (
+                <MenuItem
                 icon={<FileX size={12} />}
                 label={isDir ? "Dehydrate Subtree" : "Dehydrate File"}
                 onClick={() => {
                   context.close();
                   void runHydrate(dehydratePaths, "dehydrate");
                 }}
-              />}
+              />
+              )}
             </>
           )}
 
@@ -562,7 +581,11 @@ export const FileTree = memo(function FileTree({
 
   return (
     <div className="relative min-h-0 flex-1 overflow-hidden">
-      {transferError && <div role="alert" className="px-3 py-2 text-xs text-destructive">{transferError}</div>}
+      {transferError && (
+        <div role="alert" className="px-3 py-2 text-xs text-destructive">
+          {transferError}
+        </div>
+      )}
       <SelectionHandler model={model} entryByPath={entryByPath} onOpenFile={onOpenFile} />
       <PierreFileTree
         model={model}
@@ -640,7 +663,9 @@ function MenuItem({
   onClick: () => void;
 }) {
   return (
-    <button
+    <Button
+      variant="ghost"
+      size="compact"
       type="button"
       onClick={onClick}
       className={clsx(
@@ -650,8 +675,10 @@ function MenuItem({
     >
       <span className="shrink-0 text-muted-foreground">{icon}</span>
       <span className="flex-1">{label}</span>
-      {hint && <span className="ml-3 text-[10px] text-muted-foreground">{hint}</span>}
-    </button>
+      {hint && (
+        <span className="ml-3 text-[10px] text-muted-foreground">{hint}</span>
+      )}
+    </Button>
   );
 }
 
@@ -671,14 +698,17 @@ function HydrationLegend({ byPath }: { byPath: Map<string, HydrationEntry> }) {
   return (
     <div className="flex items-center gap-3">
       <span className="flex items-center gap-1">
-        <span className="inline-block h-2 w-2 rounded-full bg-success" /> {hydrated} hydrated
+        <span className="inline-block h-2 w-2 rounded-full bg-success" />{" "}
+        {hydrated} hydrated
       </span>
       <span className="flex items-center gap-1">
-        <span className="inline-block h-2 w-2 rounded-full bg-primary/60" /> {pointer} pointer
+        <span className="inline-block h-2 w-2 rounded-full bg-primary/60" />{" "}
+        {pointer} pointer
       </span>
       {partial > 0 && (
         <span className="flex items-center gap-1">
-          <span className="inline-block h-2 w-2 rounded-full bg-warning" /> {partial} partial
+          <span className="inline-block h-2 w-2 rounded-full bg-warning" />{" "}
+          {partial} partial
         </span>
       )}
     </div>

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { Button } from "@/components/ui/button";
 import clsx from "clsx";
 import {
   AlertCircle,
@@ -16,13 +16,14 @@ import {
   Settings,
   X,
 } from "lucide-react";
-import type { Workspace, WorkspaceRepoEntry } from "../../state";
+import { useEffect, useMemo, useState } from "react";
 import {
   groupWorkspaceRepositories,
   readWorkspaceSidebarState,
   workspaceIdentity,
   workspaceRepoIdentity,
 } from "../../lib/workspace-sidebar";
+import type { Workspace, WorkspaceRepoEntry } from "../../state";
 import { ContextMenu, type MenuItemDef } from "../ContextMenu";
 
 export interface WorkspaceSidebarProps {
@@ -140,7 +141,9 @@ export function WorkspaceSidebar({
           setMenu({ x: event.clientX, y: event.clientY });
         }}
       >
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           className="shrink-0 rounded p-1 text-muted-foreground hover:text-foreground"
           aria-label={collapsed ? "Expand workspace" : "Collapse workspace"}
@@ -153,10 +156,12 @@ export function WorkspaceSidebar({
           }
         >
           {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
-          className="min-w-0 flex-1 text-left"
+          className="justify-start min-w-0 flex-1 text-left"
           onClick={onShowDashboard}
           title={
             workspace.kind === "remote"
@@ -176,8 +181,10 @@ export function WorkspaceSidebar({
               : ""}
             {workspace.rootPath}
           </span>
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           aria-label={`${workspace.name} workspace actions`}
           aria-haspopup="menu"
@@ -190,7 +197,7 @@ export function WorkspaceSidebar({
           }}
         >
           <MoreHorizontal size={14} />
-        </button>
+        </Button>
       </div>
       {!collapsed &&
         (groups.length ? (
@@ -244,14 +251,16 @@ export function WorkspaceSidebar({
               ? "No matching repositories"
               : "No repositories found"}
             {!query.trim() && onCloneRepository && (
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 className="mt-3 flex items-center gap-1 rounded border border-border px-2 py-1.5 hover:text-foreground"
                 onClick={onCloneRepository}
               >
                 <Download size={12} />
                 Clone Repository
-              </button>
+              </Button>
             )}
           </div>
         ))}
@@ -325,10 +334,12 @@ function WorkspaceRepoRow({
           setMenu({ x: event.clientX, y: event.clientY });
         }}
       >
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           aria-current={isActive ? "true" : undefined}
-          className="flex min-w-0 flex-1 items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+          className="justify-start flex min-w-0 flex-1 items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
           title={
             entry.error
               ? `${entry.absolutePath}\nError: ${entry.error}`
@@ -371,9 +382,11 @@ function WorkspaceRepoRow({
               {entry.dirtyCount}
             </span>
           )}
-        </button>
+        </Button>
         {onTogglePin && (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             aria-label={`${pinned ? "Unpin" : "Pin"} ${entry.name}`}
             title={pinned ? "Unpin repository" : "Pin repository"}
@@ -385,7 +398,7 @@ function WorkspaceRepoRow({
             )}
           >
             <Pin size={11} className={pinned ? "fill-current" : undefined} />
-          </button>
+          </Button>
         )}
       </div>
       {menu && (

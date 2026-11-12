@@ -1,17 +1,25 @@
-import { NativeSelect } from "@/components/ui/native-select";
-import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectLabel,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import clsx from "clsx";
 import { ChevronsDownUp, FilePlus, Filter, FolderPlus, Loader2, RefreshCw, Search } from "lucide-react";
-import { OpenRepo } from "../state";
-import { DirEntry, HydrationEntry, mainProcess, RefEntry, rpc } from "../ipc";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FileTree } from "../components/FileTree";
 import { TransferDropZone } from "../components/ssh/TransferDropZone";
-import { useFileWatcher, getWatchPath } from "../hooks/useFileWatcher";
-import { useSession, useActiveRepoKey } from "../lib/session-context";
-import { useRepoCapabilities } from "../hooks/useRepoCapabilities";
 import { useFileTransfers } from "../hooks/useFileTransfers";
+import { getWatchPath, useFileWatcher } from "../hooks/useFileWatcher";
+import { useRepoCapabilities } from "../hooks/useRepoCapabilities";
+import { DirEntry, HydrationEntry, mainProcess, RefEntry, rpc } from "../ipc";
+import { useActiveRepoKey, useSession } from "../lib/session-context";
+import { OpenRepo } from "../state";
 
 interface Props {
   repo: OpenRepo;
@@ -302,35 +310,49 @@ export const ExplorerView = memo(function ExplorerView({
       <div className="shrink-0 border-b border-border px-3 py-2">
         <div className="mb-2 flex items-center justify-between text-[10px] uppercase tracking-wider text-muted-foreground">
           <span>Revision</span>
-          <button type="button" className="text-muted-foreground hover:text-foreground" onClick={refresh} title="Refresh" aria-label="Refresh file tree">
+          <Button
+            variant="ghost"
+            size="compact"
+            type="button" className="text-muted-foreground hover:text-foreground" onClick={refresh} title="Refresh" aria-label="Refresh file tree">
             <RefreshCw size={11} />
-          </button>
+          </Button>
         </div>
-        <NativeSelect
-          className="mb-2 w-full rounded border border-border bg-background px-2 py-1 text-xs focus-visible:outline-none focus:border-primary"
-          value={rev ?? ""}
-          onChange={(e) => onChangeRev(e.target.value || null)}
+        <Select
+          value={":" + String(rev ?? "")}
+          onValueChange={(selectedValue) => {
+            const value = selectedValue.slice(1);
+            return onChangeRev(value || null);
+          }}
         >
-          <option value="">HEAD (default)</option>
+          <SelectTrigger className="mb-2 w-full rounded border border-border bg-background px-2 py-1 text-xs focus-visible:outline-none focus:border-primary">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              <SelectItem value={":" + String("")}>HEAD (default)</SelectItem>
           {branches.length > 0 && (
-            <optgroup label="Branches">
+            <SelectGroup>
+                  <SelectLabel>{"Branches"}</SelectLabel>
               {branches.map((r) => (
-                <option key={r.name} value={r.name}>
+                <SelectItem key={r.name} value={":" + String(r.name)}>
                   {r.name.replace(/^refs\/heads\//, "")}
-                </option>
-              ))}
-            </optgroup>
+                </SelectItem>
+                  ))}
+                </SelectGroup>
           )}
           {tags.length > 0 && (
-            <optgroup label="Tags">
+            <SelectGroup>
+                  <SelectLabel>{"Tags"}</SelectLabel>
               {tags.map((r) => (
-                <option key={r.name} value={r.name}>
+                <SelectItem key={r.name} value={":" + String(r.name)}>
                   {r.name.replace(/^refs\/tags\//, "")}
-                </option>
-              ))}
-            </optgroup>
-          )}
-        </NativeSelect>
+                </SelectItem>
+                  ))}
+                </SelectGroup>
+              )}
+            </SelectGroup>
+          </SelectContent>
+        </Select>
         <div className="relative mt-2">
           <Search size={12} className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground" />
           <Input
@@ -344,7 +366,9 @@ export const ExplorerView = memo(function ExplorerView({
         <div className="mt-2 flex items-center gap-1">
           <Filter size={10} className="shrink-0 text-muted-foreground" />
           {(["all", "tracked", "untracked"] as const).map((v) => (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               key={v}
               type="button"
               onClick={() => setTrackFilter(v)}
@@ -356,11 +380,13 @@ export const ExplorerView = memo(function ExplorerView({
               )}
             >
               {v === "all" ? "All" : v === "tracked" ? "Tracked" : "Untracked"}
-            </button>
+            </Button>
           ))}
           {/* Right-aligned action icons */}
           <div className="ml-auto flex items-center gap-0.5">
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40 disabled:pointer-events-none"
               title="New File"
@@ -372,8 +398,10 @@ export const ExplorerView = memo(function ExplorerView({
               }}
             >
               <FilePlus size={13} />
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40 disabled:pointer-events-none"
               title="New Folder"
@@ -385,8 +413,10 @@ export const ExplorerView = memo(function ExplorerView({
               }}
             >
               <FolderPlus size={13} />
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
               title="Collapse All"
@@ -394,7 +424,7 @@ export const ExplorerView = memo(function ExplorerView({
               onClick={() => setCollapseKey((k) => k + 1)}
             >
               <ChevronsDownUp size={13} />
-            </button>
+            </Button>
           </div>
         </div>
       </div>

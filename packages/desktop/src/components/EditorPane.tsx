@@ -1,42 +1,57 @@
 import { Button } from "@/components/ui/button";
-import { Component, lazy, Suspense, useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
-import type { ErrorInfo, ReactNode } from "react";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import { DropdownMenuItem, PointMenu } from "@/components/ui/dropdown-menu";
+import { Toggle } from "@/components/ui/toggle";
 import clsx from "clsx";
 import { Binary, Code2, Eye, GitCompareArrows, Loader2, Pin, X } from "lucide-react";
-import { DirEntry, mainProcess, rpc } from "../ipc";
-import { OpenRepo, repositoryKey } from "../state";
-import { fileBufferKey, useFileBuffer } from "../hooks/useFileBuffer";
-import { fileBuffers } from "../lib/file-buffer-store";
+import type { ErrorInfo, ReactNode } from "react";
+import {
+  Component,
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { Streamdown } from "streamdown";
-import { base64ToBytes, decodeText, hexDump } from "../lib/binary";
-import { previewKindFor, PreviewKind } from "../lib/preview-kind";
-import { useSetting } from "../settings";
-import { useRepoCapabilities } from "../hooks/useRepoCapabilities";
 import { useExternalFileChange } from "../hooks/useExternalFileChange";
-import { ExternalChangePrompt } from "./ExternalChangePrompt";
-import { FileInspector } from "./FileInspector";
-import { FileIcon } from "./FileIcon";
-import { CodeEditor } from "./CodeEditor";
+import { fileBufferKey, useFileBuffer } from "../hooks/useFileBuffer";
+import { useRepoCapabilities } from "../hooks/useRepoCapabilities";
+import { DirEntry, mainProcess, rpc } from "../ipc";
+import { base64ToBytes, decodeText, hexDump } from "../lib/binary";
+import { fileBuffers } from "../lib/file-buffer-store";
 import { formatBytes } from "../lib/format";
-import { ImageView } from "./previews/ImageView";
-import { MarkdownView } from "./previews/MarkdownView";
-import { JsonView } from "./previews/JsonView";
-import { CsvView } from "./previews/CsvView";
-import { ParquetView } from "./previews/ParquetView";
-import { SafetensorsView } from "./previews/SafetensorsView";
-import { NumpyView } from "./previews/NumpyView";
-import { ZipView } from "./previews/ZipView";
-import { NotebookView } from "./previews/NotebookView";
-import { PdfView } from "./previews/PdfView";
-import { MediaView } from "./previews/MediaView";
-import { GeoJsonView } from "./previews/GeoJsonView";
-import { SqliteView } from "./previews/SqliteView";
-import { OnnxView } from "./previews/OnnxView";
-import { Hdf5View } from "./previews/Hdf5View";
-import { ProtobufView } from "./previews/ProtobufView";
-const Model3dView = lazy(() => import("./previews/Model3dView").then(m => ({ default: m.Model3dView })));
-import { TorchCheckpointView } from "./previews/TorchCheckpointView";
+import { PreviewKind, previewKindFor } from "../lib/preview-kind";
+import { useSetting } from "../settings";
+import { OpenRepo, repositoryKey } from "../state";
 import { CardEditorView } from "../views/CardEditorView";
+import { CodeEditor } from "./CodeEditor";
+import { ExternalChangePrompt } from "./ExternalChangePrompt";
+import { FileIcon } from "./FileIcon";
+import { FileInspector } from "./FileInspector";
+import { CsvView } from "./previews/CsvView";
+import { GeoJsonView } from "./previews/GeoJsonView";
+import { Hdf5View } from "./previews/Hdf5View";
+import { ImageView } from "./previews/ImageView";
+import { JsonView } from "./previews/JsonView";
+import { MarkdownView } from "./previews/MarkdownView";
+import { MediaView } from "./previews/MediaView";
+import { NotebookView } from "./previews/NotebookView";
+import { NumpyView } from "./previews/NumpyView";
+import { OnnxView } from "./previews/OnnxView";
+import { ParquetView } from "./previews/ParquetView";
+import { PdfView } from "./previews/PdfView";
+import { ProtobufView } from "./previews/ProtobufView";
+import { SafetensorsView } from "./previews/SafetensorsView";
+import { SqliteView } from "./previews/SqliteView";
+import { TorchCheckpointView } from "./previews/TorchCheckpointView";
+import { ZipView } from "./previews/ZipView";
+const Model3dView = lazy(() => import("./previews/Model3dView").then(m => ({ default: m.Model3dView })));
 
 export interface EditorTab {
   key: string;
@@ -249,10 +264,16 @@ function TabPill({
           <Pin size={10} className="shrink-0 text-primary rotate-45" />
         )}
 
-        <button type="button" onClick={onActivate} className="flex items-center gap-2">
+        <Button
+          variant="ghost"
+          size="compact"
+          type="button"
+          onClick={onActivate}
+          className="flex items-center gap-2"
+        >
           {icon}
           <span>{label}</span>
-        </button>
+        </Button>
         {dirty ? (
           <span
             className="h-2.5 w-2.5 shrink-0 rounded-full bg-muted-foreground/70"
@@ -260,7 +281,9 @@ function TabPill({
             aria-label="Unsaved changes"
           />
         ) : !pinned ? (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={(e) => {
               e.stopPropagation();
@@ -271,7 +294,7 @@ function TabPill({
             title="Close"
           >
             <X size={12} />
-          </button>
+          </Button>
         ) : null}
       </div>
 
@@ -339,40 +362,7 @@ function TabPillContextMenu({
   onSplitDown?: () => void;
   onDismiss: () => void;
 }) {
-  const menuRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        onDismiss();
-      }
-    };
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onDismiss();
-    };
-    document.addEventListener("mousedown", handleClickOutside);
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      document.removeEventListener("mousedown", handleClickOutside);
-      document.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [onDismiss]);
-
   // Adjust position so the menu doesn't overflow the viewport.
-  const [pos, setPos] = useState({ x, y });
-  useEffect(() => {
-    if (!menuRef.current) return;
-    const rect = menuRef.current.getBoundingClientRect();
-    let adjustedX = x;
-    let adjustedY = y;
-    if (x + rect.width > window.innerWidth) {
-      adjustedX = window.innerWidth - rect.width - 4;
-    }
-    if (y + rect.height > window.innerHeight) {
-      adjustedY = window.innerHeight - rect.height - 4;
-    }
-    setPos({ x: adjustedX, y: adjustedY });
-  }, [x, y]);
 
   const absolutePath = repoPath ? `${repoPath}/${filePath}` : filePath;
 
@@ -394,12 +384,7 @@ function TabPillContextMenu({
   }, [repoPath, absolutePath, onDismiss]);
 
   return (
-    <div
-      ref={menuRef}
-      className="fixed z-50 min-w-[220px] rounded-md border border-border bg-card py-1 shadow-lg text-[12px]"
-      style={{ left: pos.x, top: pos.y }}
-      role="menu"
-    >
+    <PointMenu position={{ x, y }} onClose={onDismiss}>
       {/* --- Close group --- */}
       {!pinned && (
         <ContextMenuItemPane label="Close" shortcut="⌘W" onClick={onClose} />
@@ -417,27 +402,27 @@ function TabPillContextMenu({
         <ContextMenuItemPane label="Close All" shortcut="⌘K W" onClick={onCloseAll} />
       )}
 
-      {/* --- Separator --- */}
+      {/* --- Close group --- */}
       <div className="my-1 border-t border-border" role="separator" />
 
-      {/* --- Copy path group --- */}
+      {/* --- Close group --- */}
       <ContextMenuItemPane label="Copy Path" shortcut="⇧⌘C" onClick={handleCopyPath} />
       <ContextMenuItemPane label="Copy Relative Path" shortcut="⌥⇧⌘C" onClick={handleCopyRelativePath} />
 
-      {/* --- Separator --- */}
+      {/* --- Close group --- */}
       <div className="my-1 border-t border-border" role="separator" />
 
-      {/* --- Reveal --- */}
+      {/* --- Close group --- */}
       {repoPath && (
         <ContextMenuItemPane label="Reveal in Finder" shortcut="⌥⌘R" onClick={handleRevealInFinder} />
       )}
 
-      {/* --- Separator --- */}
+      {/* --- Close group --- */}
       {repoPath && (
         <div className="my-1 border-t border-border" role="separator" />
       )}
 
-      {/* --- Pin --- */}
+      {/* --- Close group --- */}
       {onPin && (
         <ContextMenuItemPane
           label={pinned ? "Unpin" : "Pin"}
@@ -451,14 +436,14 @@ function TabPillContextMenu({
         <div className="my-1 border-t border-border" role="separator" />
       )}
 
-      {/* --- Split group --- */}
+      {/* --- Separator --- */}
       {onSplit && (
         <ContextMenuItemPane label="Split Right" shortcut="⌘\\" onClick={onSplit} />
       )}
       {onSplitDown && (
         <ContextMenuItemPane label="Split Down" onClick={onSplitDown} />
       )}
-    </div>
+    </PointMenu>
   );
 }
 
@@ -474,11 +459,9 @@ function ContextMenuItemPane({
   disabled?: boolean;
 }) {
   return (
-    <button
-      type="button"
-      role="menuitem"
+    <DropdownMenuItem
       disabled={disabled}
-      onClick={onClick}
+      onSelect={onClick}
       className={clsx(
         "flex w-full items-center justify-between px-3 py-1.5 text-left transition",
         disabled
@@ -487,8 +470,12 @@ function ContextMenuItemPane({
       )}
     >
       <span>{label}</span>
-      {shortcut && <span className="ml-4 text-[10px] text-muted-foreground">{shortcut}</span>}
-    </button>
+      {shortcut && (
+        <span className="ml-4 text-[10px] text-muted-foreground">
+          {shortcut}
+        </span>
+      )}
+    </DropdownMenuItem>
   );
 }
 
@@ -497,15 +484,29 @@ function Router(props: { repo: OpenRepo; tab: EditorTab }) {
   const { repo, tab } = props;
   const pointer = tab.entry.kind === "pointer" || tab.entry.kind === "lfs";
   if (!pointer || previewKindFor(tab.path, tab.entry.kind) === "pointer") return <PreviewBody {...props} />;
-  return <div className="flex h-full min-h-0 flex-col">
-    <div className="flex shrink-0 justify-end border-b border-border px-3 py-1">
-      <Button variant="outline" type="button" className="text-xs" aria-pressed={details} onClick={() => setDetails(!details)}>
-        {details ? "Back to preview" : "File details"}
-      </Button>
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex shrink-0 justify-end border-b border-border px-3 py-1">
+        <Toggle
+          variant="default"
+          type="button"
+          className="text-xs"
+          pressed={details}
+          onClick={() => setDetails(!details)}
+        >
+          {details ? "Back to preview" : "File details"}
+        </Toggle>
+      </div>
+      <div className={clsx("min-h-0 flex-1", details && "hidden")}>
+        <PreviewBody {...props} />
+      </div>
+      {details && (
+        <div className="min-h-0 flex-1">
+          <FileInspector repo={repo} path={tab.path} rev={tab.rev} />
+        </div>
+      )}
     </div>
-    <div className={clsx("min-h-0 flex-1", details && "hidden")}><PreviewBody {...props} /></div>
-    {details && <div className="min-h-0 flex-1"><FileInspector repo={repo} path={tab.path} rev={tab.rev} /></div>}
-  </div>;
+  );
 }
 
 function PreviewBody({ repo, tab }: { repo: OpenRepo; tab: EditorTab }) {
@@ -521,12 +522,22 @@ function PreviewBody({ repo, tab }: { repo: OpenRepo; tab: EditorTab }) {
   if (kind === "card-editor") return <CardEditorView repo={repo} path={tab.path} />;
   if (kind === "text" || kind === "binary" || kind === "html") return <TextBody repo={repo} tab={tab} />;
   if (kind === "video" || kind === "audio") return <MediaView {...common} kind={kind} />;
-  if (kind === "notebook") return <NotebookView {...common} nativeSessionId={repo.native_session_id} />;
+  if (kind === "notebook")
+    return (
+      <NotebookView {...common} nativeSessionId={repo.native_session_id} />
+    );
   if (kind === "markdown" && (canEdit || (tab.rev === null && fileBuffers.snapshot(fileBufferKey(repo, tab.path)).content !== null))) return <TextBody repo={repo} tab={tab} markdown />;
   // Read-only previews must recapture after native replacement. Editors,
   // notebook kernels and media retain their existing lifecycle owners.
-  if (!repo.native_session_id) return <div role="status" className="p-4 text-xs text-muted-foreground">Waiting for repository services…</div>;
-  return <NativePreview key={repo.native_session_id} {...common} nativeSessionId={repo.native_session_id} kind={kind} entryKind={tab.entry.kind} />;
+  if (!repo.native_session_id)
+    return (
+      <div role="status" className="p-4 text-xs text-muted-foreground">
+        Waiting for repository services…
+      </div>
+    );
+  return (
+    <NativePreview key={repo.native_session_id} {...common} nativeSessionId={repo.native_session_id} kind={kind} entryKind={tab.entry.kind} />
+  );
 }
 
 type NativePreviewKind = Exclude<PreviewKind, "pointer" | "card-editor" | "text" | "binary" | "html" | "video" | "audio" | "notebook">;
@@ -550,21 +561,40 @@ function NativePreview({ kind, entryKind, nativeSessionId, ...common }: { native
   if (kind === "onnx") return <OnnxView {...common} />;
   if (kind === "hdf5") return <Hdf5View {...common} />;
   if (kind === "protobuf") return <ProtobufView {...common} />;
-  if (kind === "model3d") return <Suspense fallback={<div className="flex h-full items-center justify-center text-sm text-muted-foreground">Loading 3D viewer…</div>}><Model3dView {...common} /></Suspense>;
+  if (kind === "model3d")
+    return (
+      <Suspense
+        fallback={
+          <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+            Loading 3D viewer…
+          </div>
+        }
+      >
+        <Model3dView {...common} />
+      </Suspense>
+    );
   if (kind === "torch-checkpoint") return <TorchCheckpointView {...common} />;
   const remaining: never = kind;
   return remaining;
 }
 
 function SaveErrorNotice({ error, onRetry }: { error: string; onRetry: () => void }) {
-  return <div role="alert" className="border-b border-destructive/40 p-2 text-xs text-destructive">
-    Could not save this file. Your edits are retained until they are saved.
-    <Button variant="outline" type="button" className="ml-2" onClick={onRetry}>Retry saving</Button>
-    <details className="mt-1 text-muted-foreground">
-      <summary className="cursor-pointer">Error details</summary>
-      <p className="mt-1 break-words">{error}</p>
-    </details>
-  </div>;
+  return (
+    <div role="alert" className="border-b border-destructive/40 p-2 text-xs text-destructive">
+      Could not save this file. Your edits are retained until they are saved.
+      <Button variant="outline" type="button" className="ml-2" onClick={onRetry}>
+        Retry saving
+      </Button>
+      <Collapsible className="mt-1 text-muted-foreground">
+        <CollapsibleTrigger className="cursor-pointer">
+          Error details
+        </CollapsibleTrigger>
+        <CollapsibleContent>
+          <p className="mt-1 break-words">{error}</p>
+        </CollapsibleContent>
+      </Collapsible>
+    </div>
+  );
 }
 
 function TextBody({ repo, tab, markdown = false }: { repo: OpenRepo; tab: EditorTab; markdown?: boolean }) {
@@ -622,38 +652,110 @@ function TextBody({ repo, tab, markdown = false }: { repo: OpenRepo; tab: Editor
   // replace it with a disk read or wait for services before displaying it.
   const display = content !== null && (buffer.dirty || load.state === "loading" || load.state === "text")
     ? { state: "text" as const, text: content } : load;
-  if (display.state === "loading") return <div role="status" className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
-    <Loader2 size={14} className="animate-spin" /> {repo.native_session_id ? `Loading ${tab.path}…` : "Waiting for repository services…"}
-  </div>;
-  if (display.state === "error") return <div className="m-4 rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
-    Failed to read <code className="font-mono">{tab.path}</code>: {display.message}
-  </div>;
-  if (display.state === "truncated") return <div className="m-4 space-y-2 rounded border border-border bg-card p-4 text-sm">
-    <div className="flex items-center gap-2 font-semibold"><Binary size={14} /> File too large to preview</div>
-    <div className="text-xs text-muted-foreground">{tab.path} is {formatBytes(display.size)}. {display.reason}</div>
-  </div>;
-  if (display.state === "binary") return <div className="flex h-full flex-col">
-    <div className="border-b border-border bg-card px-3 py-1.5 text-[11px] text-muted-foreground">Binary · {formatBytes(display.size)} · showing first 4 KiB as hex</div>
-    <pre className="h-full overflow-auto bg-background p-4 font-mono text-[11.5px] leading-5 text-foreground">{hexDump(display.bytes, 4096)}</pre>
-  </div>;
+  if (display.state === "loading")
+    return (
+      <div role="status" className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
+        <Loader2 size={14} className="animate-spin" />{" "}
+        {repo.native_session_id ? `Loading ${tab.path}…` : "Waiting for repository services…"}
+      </div>
+    );
+  if (display.state === "error")
+    return (
+      <div className="m-4 rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
+        Failed to read <code className="font-mono">{tab.path}</code>:{" "}
+        {display.message}
+      </div>
+    );
+  if (display.state === "truncated")
+    return (
+      <div className="m-4 space-y-2 rounded border border-border bg-card p-4 text-sm">
+        <div className="flex items-center gap-2 font-semibold">
+          <Binary size={14} /> File too large to preview
+        </div>
+        <div className="text-xs text-muted-foreground">
+          {tab.path} is {formatBytes(display.size)}. {display.reason}
+        </div>
+      </div>
+    );
+  if (display.state === "binary")
+    return (
+      <div className="flex h-full flex-col">
+        <div className="border-b border-border bg-card px-3 py-1.5 text-[11px] text-muted-foreground">
+          Binary · {formatBytes(display.size)} · showing first 4 KiB as hex
+        </div>
+        <pre className="h-full overflow-auto bg-background p-4 font-mono text-[11.5px] leading-5 text-foreground">
+          {hexDump(display.bytes, 4096)}
+        </pre>
+      </div>
+    );
 
-  return <div className="flex h-full flex-col">
-    {buffer.restoring && <div role="status" className="border-b border-border px-3 py-1 text-[11px] text-muted-foreground">Restoring index version…</div>}
-    {buffer.error && <SaveErrorNotice error={buffer.error} onRetry={buffer.save} />}
-    {buffer.dirty && !buffer.available && <div role="status" className="border-b border-warning/30 bg-warning/10 px-3 py-1 text-[11px] text-warning">Save pending — waiting for connection</div>}
-    {showPrompt && <ExternalChangePrompt reloadError={reloadError} onReload={acceptReload} onKeepMine={keepMine} />}
-    {markdown && <div className="flex shrink-0 items-center gap-1 border-b border-border bg-card px-3 py-1">
-      <Button variant="outline" type="button" className="text-xs" aria-pressed={mode === "edit"} onClick={() => setMode("edit")}><Code2 size={12} /> Edit</Button>
-      <Button variant="outline" type="button" className="text-xs" aria-pressed={mode === "preview"} onClick={() => setMode("preview")}><Eye size={12} /> Preview</Button>
-    </div>}
-    <div className="min-h-0 flex-1">
-      {markdown && mode === "preview" ? <div className="h-full overflow-auto p-6"><Streamdown shikiTheme={["github-light", "github-dark"]}>{display.text}</Streamdown></div> :
-        <CodeEditor path={tab.path} cacheKey={JSON.stringify([repositoryKey(repo), tab.rev, tab.path])}
-          value={display.text} line={tab.line} readOnly={!canEdit}
-          onChange={canEdit ? buffer.edit : undefined} onSave={canEdit ? buffer.save : undefined} onBlur={canEdit ? buffer.save : undefined}
-          repoRoot={tab.rev === null && !repo.is_remote ? repo.path ?? undefined : undefined} />}
+  return (
+    <div className="flex h-full flex-col">
+      {buffer.restoring && (
+        <div role="status" className="border-b border-border px-3 py-1 text-[11px] text-muted-foreground">
+          Restoring index version…
+        </div>
+      )}
+      {buffer.error && (
+        <SaveErrorNotice error={buffer.error} onRetry={buffer.save} />
+      )}
+      {buffer.dirty && !buffer.available && (
+        <div role="status" className="border-b border-warning/30 bg-warning/10 px-3 py-1 text-[11px] text-warning">
+          Save pending — waiting for connection
+        </div>
+      )}
+      {showPrompt && (
+        <ExternalChangePrompt reloadError={reloadError} onReload={acceptReload} onKeepMine={keepMine} />
+      )}
+      {markdown && (
+        <div className="flex shrink-0 items-center gap-1 border-b border-border bg-card px-3 py-1">
+          <Toggle
+            variant="default"
+            type="button"
+            className="text-xs"
+            pressed={mode === "edit"}
+            onClick={() => setMode("edit")}
+          >
+            <Code2 size={12} /> Edit
+          </Toggle>
+          <Toggle
+            variant="default"
+            type="button"
+            className="text-xs"
+            pressed={mode === "preview"}
+            onClick={() => setMode("preview")}
+          >
+            <Eye size={12} /> Preview
+          </Toggle>
+        </div>
+      )}
+      <div className="min-h-0 flex-1">
+        {markdown && mode === "preview" ? (
+          <div className="h-full overflow-auto p-6">
+            <Streamdown shikiTheme={["github-light", "github-dark"]}>
+              {display.text}
+            </Streamdown>
+          </div>
+        ) : (
+          <CodeEditor
+            path={tab.path}
+            cacheKey={JSON.stringify([repositoryKey(repo), tab.rev, tab.path])}
+            value={display.text}
+            line={tab.line}
+            readOnly={!canEdit}
+            onChange={canEdit ? buffer.edit : undefined}
+            onSave={canEdit ? buffer.save : undefined}
+            onBlur={canEdit ? buffer.save : undefined}
+            repoRoot={
+              tab.rev === null && !repo.is_remote
+                ? (repo.path ?? undefined)
+                : undefined
+            }
+          />
+        )}
+      </div>
     </div>
-  </div>;
+  );
 }
 
 // ── Error boundary for the editor/preview area ──────────────────────
@@ -692,8 +794,12 @@ class EditorErrorBoundary extends Component<EBProps, EBState> {
       return (
         <div className="flex h-full items-center justify-center bg-background p-6">
           <div className="max-w-lg rounded border border-destructive/40 bg-destructive/10 p-4 text-sm">
-            <div className="mb-2 font-semibold text-destructive">Failed to render file</div>
-            <div className="mb-3 text-xs text-muted-foreground break-all">{this.props.path}</div>
+            <div className="mb-2 font-semibold text-destructive">
+              Failed to render file
+            </div>
+            <div className="mb-3 text-xs text-muted-foreground break-all">
+              {this.props.path}
+            </div>
             <pre className="text-[10px] text-destructive/80 whitespace-pre-wrap break-all max-h-[300px] overflow-auto">
               {this.state.error}
             </pre>

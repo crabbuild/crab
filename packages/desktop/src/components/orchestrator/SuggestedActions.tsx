@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import {
   Archive,
   Ban,
@@ -174,7 +175,9 @@ export function SuggestedActions(props: SuggestedActionsProps) {
       aria-label="Suggested actions"
     >
       {actions.map((action) => (
-        <button
+        <Button
+          variant="default"
+          size="compact"
           key={action.action + action.label}
           type="button"
           disabled={action.disabled}
@@ -188,7 +191,7 @@ export function SuggestedActions(props: SuggestedActionsProps) {
         >
           {action.icon}
           {action.label}
-        </button>
+        </Button>
       ))}
     </div>
   );

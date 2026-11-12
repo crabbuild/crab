@@ -10,19 +10,16 @@ for (const mode of ["light", "dark", "hc-light", "hc-dark"] as const) {
   test(`${mode}: theme colors, bundled fonts, and accessible controls`, async ({
     page,
   }) => {
-    await page.getByLabel("Theme", { exact: true }).selectOption(mode);
+    await page.getByLabel("Theme", { exact: true }).click();
+    await page
+      .getByRole("option", { name: mode, exact: true }).click();
     await expect(page.locator("html")).toHaveClass(new RegExp(`theme-${mode}`));
-    const pair = await page
-      .getByRole("button", { name: "Save stage", exact: true })
-      .evaluate((button) => {
-        const css = getComputedStyle(button);
-        return [css.backgroundColor, css.color];
-      });
     const rgb = (value: string) => `rgb(${value.replaceAll(" ", ", ")})`;
-    expect(pair).toEqual([
-      rgb(palettes[mode].primary),
-      rgb(palettes[mode]["primary-foreground"]),
-    ]);
+    // Theme changes transition control colors. Assert the settled visual state.
+    await expect.poll(() => page.getByRole("button", { name: "Save stage", exact: true }).evaluate(button => {
+      const css = getComputedStyle(button);
+      return [css.backgroundColor, css.color];
+    })).toEqual([rgb(palettes[mode].primary), rgb(palettes[mode]["primary-foreground"])]);
     await page.evaluate(() => document.fonts.ready);
     expect(
       await page.evaluate(() => document.fonts.check('13px "Geist Variable"')),
@@ -40,14 +37,15 @@ for (const mode of ["light", "dark", "hc-light", "hc-dark"] as const) {
   });
 }
 
-test("preserves field values, native selects, input refs, and form submission", async ({
+test("preserves field values, shadcn select values, input refs, and form submission", async ({
   page,
 }) => {
   await page.getByRole("button", { name: "Focus stage", exact: true }).click();
   await expect(page.getByLabel("Stage name")).toBeFocused();
   await page.getByLabel("Stage name").fill("train");
   await page.getByLabel("Command").fill("python train.py");
-  await page.getByLabel("Runner", { exact: true }).selectOption("Python");
+  await page.getByLabel("Runner", { exact: true }).click();
+  await page.getByRole("option", { name: "Python", exact: true }).click();
   await page.getByRole("button", { name: "Save stage", exact: true }).click();
   await expect(page.getByRole("status")).toHaveText(
     "train: python train.py (Python)",
@@ -97,10 +95,12 @@ test("confirmation traps focus, cancels on Escape, and restores the trigger", as
 test("theme persists through reload and follows system preference", async ({
   page,
 }) => {
-  await page.getByLabel("Theme", { exact: true }).selectOption("hc-light");
+  await page.getByLabel("Theme", { exact: true }).click();
+  await page.getByRole("option", { name: "hc-light", exact: true }).click();
   await page.reload();
   await expect(page.locator("html")).toHaveClass(/theme-hc-light/);
-  await page.getByLabel("Theme", { exact: true }).selectOption("system");
+  await page.getByLabel("Theme", { exact: true }).click();
+  await page.getByRole("option", { name: "system", exact: true }).click();
   await page.emulateMedia({ colorScheme: "dark" });
   await expect(page.locator("html")).toHaveClass(/theme-dark/);
   await page.emulateMedia({ colorScheme: "light" });

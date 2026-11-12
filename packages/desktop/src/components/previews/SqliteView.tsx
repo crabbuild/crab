@@ -1,10 +1,18 @@
-import { useCallback, useEffect, useRef, useState, useMemo, useSyncExternalStore } from "react";
+import { Button } from "@/components/ui/button";
 import clsx from "clsx";
 import { Database, Key, Table2 } from "lucide-react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { rpc } from "../../ipc";
+import { fileQuery } from "../../lib/file-query";
 import { formatBytes } from "../../lib/format";
 import { FileBrowseState, FileQueryMode, FileQueryPanel } from "./FileQueryPanel";
-import { fileQuery } from "../../lib/file-query";
 
 interface Props { repoId: string; path: string; rev: string | null; nativeSessionId: string; }
 
@@ -21,7 +29,6 @@ interface SqliteData {
   table_count: number;
   tables: SqliteTable[];
 }
-
 
 export function SqliteView({ repoId, path, rev, nativeSessionId }: Props) {
   const [data, setData] = useState<SqliteData | null>(null);
@@ -56,7 +63,10 @@ export function SqliteView({ repoId, path, rev, nativeSessionId }: Props) {
         <FileQueryMode query={query} mode={mode} />
         {data && (
           <>
-            <span><strong className="text-foreground">{data.table_count}</strong> tables</span>
+            <span>
+              <strong className="text-foreground">{data.table_count}</strong>{" "}
+              tables
+            </span>
             <span>{formatBytes(data.file_size)}</span>
           </>
         )}
@@ -66,36 +76,52 @@ export function SqliteView({ repoId, path, rev, nativeSessionId }: Props) {
 
       {/* Content */}
       {mode === "browse" ? (
-        data ? <div className="grid min-h-0 flex-1 grid-cols-[240px_1fr]">
-          {/* Table list */}
-          <aside className="min-h-0 overflow-auto border-r border-border bg-card p-2">
-            <div className="mb-2 text-[10px] uppercase tracking-wider text-muted-foreground">Tables</div>
-            <ul className="space-y-1">
-              {data.tables.map(t => (
-                <li key={t.name}>
-                  <button
-                    type="button"
-                    onClick={() => setActiveTable(t.name)}
-                    className={clsx(
+        data ? (
+          <div className="grid min-h-0 flex-1 grid-cols-[240px_1fr]">
+            {/* Table list */}
+            <aside className="min-h-0 overflow-auto border-r border-border bg-card p-2">
+              <div className="mb-2 text-[10px] uppercase tracking-wider text-muted-foreground">
+                Tables
+              </div>
+              <ul className="space-y-1">
+                {data.tables.map((t) => (
+                  <li key={t.name}>
+                    <Button
+                      variant="ghost"
+                      size="compact"
+                      type="button"
+                      onClick={() => setActiveTable(t.name)}
+                      className={clsx(
                       "flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] transition",
                       activeTable === t.name ? "bg-primary/15 text-foreground" : "text-foreground hover:bg-accent",
                     )}
-                  >
-                    <Table2 size={11} className="shrink-0 text-muted-foreground" />
-                    <span className="min-w-0 flex-1 truncate font-mono">{t.name}</span>
-                    <span className="shrink-0 text-[10px] text-muted-foreground">{t.row_count.toLocaleString()}</span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </aside>
-          {/* Data grid */}
-          <div className="min-h-0 overflow-auto bg-background">
-            {table ? <TableGrid table={table} /> : (
-              <div className="flex h-full items-center justify-center text-sm text-muted-foreground">Select a table</div>
-            )}
+                    >
+                      <Table2 size={11} className="shrink-0 text-muted-foreground" />
+                      <span className="min-w-0 flex-1 truncate font-mono">
+                        {t.name}
+                      </span>
+                      <span className="shrink-0 text-[10px] text-muted-foreground">
+                        {t.row_count.toLocaleString()}
+                      </span>
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            </aside>
+            {/* Data grid */}
+            <div className="min-h-0 overflow-auto bg-background">
+              {table ? (
+                <TableGrid table={table} />
+              ) : (
+                <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+                  Select a table
+                </div>
+              )}
+            </div>
           </div>
-        </div> : <FileBrowseState error={err} loading="Reading SQLite database…" />
+        ) : (
+          <FileBrowseState error={err} loading="Reading SQLite database…" />
+        )
       ) : (
         <div className="flex min-h-0 flex-1 flex-col">
           {err && <div role="alert" className="m-4 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">{err}</div>}
@@ -159,12 +185,16 @@ function TableGrid({ table }: { table: SqliteTable }) {
       {/* Rows */}
       <div className="min-h-0 flex-1 overflow-auto">
         {table.preview_rows.length === 0 ? (
-          <div className="p-4 text-center text-xs text-muted-foreground">Table is empty.</div>
+          <div className="p-4 text-center text-xs text-muted-foreground">
+            Table is empty.
+          </div>
         ) : (
           <table className="border-collapse font-mono text-[12px]" style={{ minWidth: "100%" }}>
             <thead className="sticky top-0 bg-card">
               <tr>
-                <th className="sticky left-0 z-10 w-[42px] min-w-[42px] border-b border-r border-border bg-card px-2 py-1 text-right text-muted-foreground whitespace-nowrap">#</th>
+                <th className="sticky left-0 z-10 w-[42px] min-w-[42px] border-b border-r border-border bg-card px-2 py-1 text-right text-muted-foreground whitespace-nowrap">
+                  #
+                </th>
                 {cols.map(c => {
                   const w = colWidths[c];
                   return (
@@ -187,7 +217,9 @@ function TableGrid({ table }: { table: SqliteTable }) {
             <tbody>
               {table.preview_rows.map((row, ri) => (
                 <tr key={ri} className="odd:bg-card/50 hover:bg-primary/5">
-                  <td className="sticky left-0 z-10 w-[42px] min-w-[42px] border-r border-border/40 bg-inherit px-2 py-1 text-right text-muted-foreground whitespace-nowrap">{ri + 1}</td>
+                  <td className="sticky left-0 z-10 w-[42px] min-w-[42px] border-r border-border/40 bg-inherit px-2 py-1 text-right text-muted-foreground whitespace-nowrap">
+                    {ri + 1}
+                  </td>
                   {cols.map(c => {
                     const w = colWidths[c];
                     return (

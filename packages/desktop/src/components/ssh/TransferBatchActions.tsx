@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * TransferBatchActions — IPC call logic for batch transfer operations.
  *
@@ -66,7 +67,9 @@ export function useBatchActions({
       // Filter to only cancellable transfers (queued, active, scheduled)
       const cancellableIds = ids.filter((id) => {
         const entry = transfers.get(id);
-        return entry && (entry.status === "queued" || entry.status === "active" || entry.status === "scheduled");
+        return (
+          entry && (entry.status === "queued" || entry.status === "active" || entry.status === "scheduled")
+        );
       });
 
       if (cancellableIds.length === 0) return;
@@ -160,7 +163,9 @@ export function useBatchActions({
       // Filter to only clearable transfers (completed, failed)
       const clearableIds = ids.filter((id) => {
         const entry = transfers.get(id);
-        return entry && (entry.status === "completed" || entry.status === "failed");
+        return (
+          entry && (entry.status === "completed" || entry.status === "failed")
+        );
       });
 
       if (clearableIds.length === 0) return;
@@ -222,17 +227,20 @@ export function BatchNotificationBanner({ notification, onDismiss }: BatchNotifi
       role="alert"
     >
       <span className="text-sm text-warning text-warning">
-        Batch {actionLabel}: {result.succeeded} succeeded, {result.failed} failed
+        Batch {actionLabel}: {result.succeeded} succeeded, {result.failed}{" "}
+        failed
       </span>
       <div className="flex-1" />
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={onDismiss}
         className="text-xs text-warning text-warning hover:text-warning hover:text-warning font-medium"
         aria-label="Dismiss notification"
       >
         Dismiss
-      </button>
+      </Button>
     </div>
   );
 }

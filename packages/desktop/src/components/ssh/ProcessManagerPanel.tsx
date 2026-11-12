@@ -1,23 +1,24 @@
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 /**
  * Process Manager Panel — displays remote processes with filtering,
  * signal controls, memory warning highlights, and connection error state.
  */
 
-import { useState, useMemo, useCallback } from "react";
+import clsx from "clsx";
 import {
   Activity,
+  AlertTriangle,
+  Clock,
   Cpu,
   MemoryStick,
-  User,
-  Clock,
-  AlertTriangle,
-  XCircle,
-  Skull,
-  WifiOff,
   Search,
+  Skull,
+  User,
+  WifiOff,
+  XCircle,
 } from "lucide-react";
-import clsx from "clsx";
+import { useCallback, useMemo, useState } from "react";
 import type { RemoteProcess } from "../../../electron/ssh-types";
 
 // ── Types ────────────────────────────────────────────────────────
@@ -131,7 +132,9 @@ export function ProcessManagerPanel({
           <Activity className="w-4 h-4" />
           Processes ({filteredProcesses.length})
         </h3>
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           onClick={() => setShowFilters(!showFilters)}
           className={clsx(
             "flex items-center gap-1 px-2 py-1 text-xs rounded",
@@ -143,7 +146,7 @@ export function ProcessManagerPanel({
         >
           <Search className="w-3 h-3" />
           Filter
-        </button>
+        </Button>
       </div>
 
       {/* Filters */}
@@ -286,22 +289,26 @@ function ProcessRow({
 
       {/* Signal buttons */}
       <div className="flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           onClick={() => onSignal(proc.pid, "SIGTERM")}
           className="p-1 text-warning text-warning hover:bg-warning/10 hover:bg-warning/20 rounded"
           aria-label={`Send SIGTERM to ${proc.name}`}
           title="SIGTERM (graceful)"
         >
           <XCircle className="w-3.5 h-3.5" />
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           onClick={() => onSignal(proc.pid, "SIGKILL")}
           className="p-1 text-destructive text-destructive hover:bg-destructive/10 hover:bg-destructive/20 rounded"
           aria-label={`Send SIGKILL to ${proc.name}`}
           title="SIGKILL (force)"
         >
           <Skull className="w-3.5 h-3.5" />
-        </button>
+        </Button>
       </div>
     </li>
   );

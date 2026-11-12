@@ -1,6 +1,7 @@
-import { useCallback, useEffect } from "react";
+import { Button } from "@/components/ui/button";
 import clsx from "clsx";
 import { X } from "lucide-react";
+import { useCallback, useEffect } from "react";
 import type { WorkspaceRepoEntry } from "../../state";
 
 export interface TabBarProps {
@@ -73,7 +74,9 @@ export function TabBar({ tabs, activeRelativePath, onSelect, onClose }: TabBarPr
             )}
 
             {/* Close button — visible on hover */}
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className={clsx(
                 "ml-0.5 shrink-0 rounded p-0.5 transition",
@@ -88,7 +91,7 @@ export function TabBar({ tabs, activeRelativePath, onSelect, onClose }: TabBarPr
               title="Close tab"
             >
               <X size={11} />
-            </button>
+            </Button>
           </div>
         );
       })}

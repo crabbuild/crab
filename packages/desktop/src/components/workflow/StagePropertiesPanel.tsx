@@ -1,7 +1,15 @@
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
-import { NativeSelect } from "@/components/ui/native-select";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { useCallback, useState } from "react";
 import clsx from "clsx";
 import {
   ChevronDown,
@@ -13,17 +21,18 @@ import {
   Trash2,
   X,
 } from "lucide-react";
+import { useCallback, useState } from "react";
+import { mainProcess } from "../../ipc";
 import {
-  WorkflowStage,
   CmdKind,
-  StageRunState,
+  ConditionSpec,
+  OutKind,
   StageDep,
   StageOut,
-  OutKind,
-  ConditionSpec,
+  StageRunState,
+  WorkflowStage,
 } from "../../lib/workflow-types";
 import { ConditionBuilder } from "./ConditionBuilder";
-import { mainProcess } from "../../ipc";
 
 interface Props {
   stage: WorkflowStage;
@@ -132,7 +141,9 @@ export function StagePropertiesPanel({
             if (e.key === "Enter") (e.target as HTMLInputElement).blur();
           }}
         />
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
           onClick={onRun}
@@ -140,23 +151,27 @@ export function StagePropertiesPanel({
           title="Run this stage"
         >
           <Play size={14} />
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-destructive"
           onClick={onDelete}
           title="Delete stage"
         >
           <Trash2 size={14} />
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
           onClick={onClose}
           title="Close"
         >
           <X size={14} />
-        </button>
+        </Button>
       </div>
 
       {/* Run status */}
@@ -173,7 +188,9 @@ export function StagePropertiesPanel({
                 runStatus.status === "pending" && "bg-muted-foreground",
               )}
             />
-            <span className="text-muted-foreground capitalize">{runStatus.status}</span>
+            <span className="text-muted-foreground capitalize">
+              {runStatus.status}
+            </span>
             {runStatus.duration_ms != null && (
               <span className="ml-auto text-muted-foreground">
                 {(runStatus.duration_ms / 1000).toFixed(1)}s
@@ -191,7 +208,12 @@ export function StagePropertiesPanel({
       {/* Scrollable content */}
       <div className="flex-1 overflow-y-auto">
         {/* Command section */}
-        {Boolean(stage.foreach || stage.matrix) && <p className="px-3 py-2 text-xs text-muted-foreground">{stage.foreach ? "Foreach" : "Matrix"} template. Changes apply to every execution. Use Edit YAML to change iterations or axes.</p>}
+        {Boolean(stage.foreach || stage.matrix) && (
+          <p className="px-3 py-2 text-xs text-muted-foreground">
+            {stage.foreach ? "Foreach" : "Matrix"} template. Changes apply to
+            every execution. Use Edit YAML to change iterations or axes.
+          </p>
+        )}
         <Section
           id="command"
           label="Command"
@@ -202,17 +224,29 @@ export function StagePropertiesPanel({
             <div className="text-[10px] text-muted-foreground/80">
               The shell command or program this stage executes when run.
             </div>
-            <NativeSelect
-              className="w-full text-xs"
-              value={stage.cmd.kind}
-              onChange={(e) =>
-                onUpdate({ ...stage, cmd: { ...stage.cmd, kind: e.target.value as CmdKind } })
-              }
+            <Select
+              value={":" + String(stage.cmd.kind)}
+              onValueChange={(selectedValue) => {
+                const value = selectedValue.slice(1);
+                return onUpdate({
+                  ...stage,
+                  cmd: { ...stage.cmd, kind: value as CmdKind },
+                });
+              }}
             >
-              <option value="shell">Shell</option>
-              <option value="argv">Argv</option>
-              <option value="shell_list">Shell commands</option>
-            </NativeSelect>
+              <SelectTrigger className="w-full text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  <SelectItem value={":" + String("shell")}>Shell</SelectItem>
+                  <SelectItem value={":" + String("argv")}>Argv</SelectItem>
+                  <SelectItem value={":" + String("shell_list")}>
+                    Shell commands
+                  </SelectItem>
+                </SelectGroup>
+              </SelectContent>
+            </Select>
             <Textarea
               aria-label="Stage command"
               className="w-full resize-y font-mono text-xs"
@@ -240,7 +274,8 @@ export function StagePropertiesPanel({
         >
           <div className="space-y-1">
             <div className="mb-2 text-[10px] text-muted-foreground/80">
-              Files or stage outputs this stage needs before it can run. The stage is re-executed when any dependency changes.
+              Files or stage outputs this stage needs before it can run. The
+              stage is re-executed when any dependency changes.
             </div>
             {stage.deps.map((dep, i) => (
               <div key={i} className="group flex items-center gap-1">
@@ -250,14 +285,16 @@ export function StagePropertiesPanel({
                 <span className="flex-1 truncate font-mono text-xs text-foreground">
                   {dep.value}
                 </span>
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
                   aria-label={`Remove dependency ${dep.value}`}
                   className="rounded p-1 opacity-0 focus:opacity-100 group-hover:opacity-100"
                   onClick={() => removeDep(i)}
                 >
                   <X size={12} className="text-muted-foreground hover:text-destructive" />
-                </button>
+                </Button>
               </div>
             ))}
             {stage.deps.length === 0 && (
@@ -268,25 +305,51 @@ export function StagePropertiesPanel({
             {workflowOutputs.length > 0 && (
               <label className="block pt-2 text-xs text-muted-foreground">
                 Use a workflow output
-                <NativeSelect aria-label="Use a workflow output" className="mt-1 w-full text-xs" value="" onChange={event => {
-                  if (!event.target.value) return;
-                  const dep: StageDep = { kind: "path", value: event.target.value };
-                  if (!stage.deps.some(existing => existing.kind === "path" && existing.value === dep.value)) onUpdate({ ...stage, deps: [...stage.deps, dep] });
-                }}>
-                  <option value="">Choose an upstream output…</option>
-                  {workflowOutputs.map(output => <option key={`${output.file}:${output.stage}:${output.path}`} value={output.path}>{output.file} · {output.stage} → {output.path}</option>)}
-                </NativeSelect>
+                <Select
+                  value={":" + String("")}
+                  onValueChange={(selectedValue) => {
+                    const value = selectedValue.slice(1);
+                    if (!value) return;
+                    const dep: StageDep = { kind: "path", value: value };
+                    if (!stage.deps.some(existing => existing.kind === "path" && existing.value === dep.value)) onUpdate({ ...stage, deps: [...stage.deps, dep] });
+                  }}
+                >
+                  <SelectTrigger
+                    aria-label="Use a workflow output"
+                    className="mt-1 w-full text-xs"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      <SelectItem value={":" + String("")}>
+                        Choose an upstream output…
+                      </SelectItem>
+                      {workflowOutputs.map((output) => (
+                        <SelectItem
+                          key={`${output.file}:${output.stage}:${output.path}`}
+                          value={":" + String(output.path)}
+                        >
+                          {output.file} · {output.stage} → {output.path}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
               </label>
             )}
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className="text-xs text-primary hover:underline"
               onClick={addDep}
             >
               + Add dependency
-            </button>
+            </Button>
             <div className="mt-1 text-[10px] text-muted-foreground/60">
-              Tip: Drag a connection from another stage on the canvas to add a stage dependency visually.
+              Tip: Drag a connection from another stage on the canvas to add a
+              stage dependency visually.
             </div>
           </div>
         </Section>
@@ -300,7 +363,8 @@ export function StagePropertiesPanel({
         >
           <div className="space-y-1">
             <div className="mb-2 text-[10px] text-muted-foreground/80">
-              Files or directories produced by this stage. Outputs are tracked for caching and can be used as dependencies by downstream stages.
+              Files or directories produced by this stage. Outputs are tracked
+              for caching and can be used as dependencies by downstream stages.
             </div>
             {stage.outs.map((out, i) => (
               <div key={i} className="group flex items-center gap-1">
@@ -310,27 +374,32 @@ export function StagePropertiesPanel({
                 <span className="flex-1 truncate font-mono text-xs text-foreground">
                   {out.path}
                 </span>
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
                   className="opacity-0 group-hover:opacity-100"
                   onClick={() => removeOut(i)}
                 >
                   <X size={12} className="text-muted-foreground hover:text-destructive" />
-                </button>
+                </Button>
               </div>
             ))}
             {stage.outs.length === 0 && (
               <div className="rounded bg-background/50 px-2 py-1.5 text-[10px] text-muted-foreground/60 italic">
-                No outputs declared. Other stages cannot depend on this stage's results.
+                No outputs declared. Other stages cannot depend on this stage's
+                results.
               </div>
             )}
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className="text-xs text-primary hover:underline"
               onClick={addOut}
             >
               + Add output
-            </button>
+            </Button>
             <div className="mt-1 text-[10px] text-muted-foreground/60">
               Outputs are hashed to determine if the stage needs re-running.
             </div>
@@ -346,36 +415,45 @@ export function StagePropertiesPanel({
         >
           <div className="space-y-1">
             <div className="mb-2 text-[10px] text-muted-foreground/80">
-              Configuration values (from params files) that affect this stage. Changes to tracked parameters trigger re-execution.
+              Configuration values (from params files) that affect this stage.
+              Changes to tracked parameters trigger re-execution.
             </div>
             {stage.params.map((param, i) => (
               <div key={i} className="group flex items-center gap-1">
                 <span className="flex-1 truncate font-mono text-xs text-foreground">
                   {typeof param === "string" ? param : JSON.stringify(param)}
                 </span>
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
                   className="opacity-0 group-hover:opacity-100"
                   onClick={() => removeParam(i)}
                 >
                   <X size={12} className="text-muted-foreground hover:text-destructive" />
-                </button>
+                </Button>
               </div>
             ))}
             {stage.params.length === 0 && (
               <div className="rounded bg-background/50 px-2 py-1.5 text-[10px] text-muted-foreground/60 italic">
-                No parameters tracked. Hyperparameter changes won't trigger re-runs.
+                No parameters tracked. Hyperparameter changes won't trigger
+                re-runs.
               </div>
             )}
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className="text-xs text-primary hover:underline"
               onClick={addParam}
             >
               + Add parameter
-            </button>
+            </Button>
             <div className="mt-1 text-[10px] text-muted-foreground/60">
-              Use dotted paths like <code className="rounded bg-background px-0.5">model.lr</code> or <code className="rounded bg-background px-0.5">train.epochs</code>.
+              Use dotted paths like{" "}
+              <code className="rounded bg-background px-0.5">model.lr</code> or{" "}
+              <code className="rounded bg-background px-0.5">train.epochs</code>
+              .
             </div>
           </div>
         </Section>
@@ -389,28 +467,28 @@ export function StagePropertiesPanel({
         >
           <div className="space-y-2">
             <div className="text-[10px] text-muted-foreground/80">
-              Execution behavior flags that control how this stage is cached and run.
+              Execution behavior flags that control how this stage is cached and
+              run.
             </div>
             <label className="flex items-center gap-2 text-xs text-foreground">
-              <input
-                type="checkbox"
+              <Checkbox
                 checked={stage.nondeterministic ?? false}
-                onChange={(e) =>
-                  onUpdate({ ...stage, nondeterministic: e.target.checked })
+                onCheckedChange={(checked) =>
+                  onUpdate({ ...stage, nondeterministic: checked === true })
                 }
                 className="rounded border-border"
               />
               Nondeterministic
             </label>
             <div className="ml-5 -mt-1 text-[10px] text-muted-foreground/60">
-              Output may differ between runs even with same inputs (e.g. random seeds).
+              Output may differ between runs even with same inputs (e.g. random
+              seeds).
             </div>
             <label className="flex items-center gap-2 text-xs text-foreground">
-              <input
-                type="checkbox"
+              <Checkbox
                 checked={stage.hermetic ?? false}
-                onChange={(e) =>
-                  onUpdate({ ...stage, hermetic: e.target.checked })
+                onCheckedChange={(checked) =>
+                  onUpdate({ ...stage, hermetic: checked === true })
                 }
                 className="rounded border-border"
               />
@@ -420,11 +498,10 @@ export function StagePropertiesPanel({
               Stage only accesses declared deps/outs. Enables stricter caching.
             </div>
             <label className="flex items-center gap-2 text-xs text-foreground">
-              <input
-                type="checkbox"
+              <Checkbox
                 checked={stage.side_effects ?? false}
-                onChange={(e) =>
-                  onUpdate({ ...stage, side_effects: e.target.checked })
+                onCheckedChange={(checked) =>
+                  onUpdate({ ...stage, side_effects: checked === true })
                 }
                 className="rounded border-border"
               />
@@ -435,7 +512,9 @@ export function StagePropertiesPanel({
             </div>
             {stage.timeout !== undefined && (
               <div>
-                <label className="text-[10px] text-muted-foreground">Timeout</label>
+                <label className="text-[10px] text-muted-foreground">
+                  Timeout
+                </label>
                 <Input
                   type="text"
                   className="w-full text-xs"
@@ -458,11 +537,10 @@ export function StagePropertiesPanel({
           onToggle={toggleSection}
         >
           <label className="flex items-center gap-2 text-xs text-foreground">
-            <input
-              type="checkbox"
+            <Checkbox
               checked={stage.frozen ?? false}
-              onChange={(e) =>
-                onUpdate({ ...stage, frozen: e.target.checked })
+              onCheckedChange={(checked) =>
+                onUpdate({ ...stage, frozen: checked === true })
               }
               className="rounded border-border"
             />
@@ -506,7 +584,8 @@ export function StagePropertiesPanel({
           onToggle={toggleSection}
         >
           <div className="mb-2 text-[10px] text-muted-foreground/80">
-            Optional guard that determines whether this stage should run. If the condition evaluates to false, the stage is skipped.
+            Optional guard that determines whether this stage should run. If the
+            condition evaluates to false, the stage is skipped.
           </div>
           <ConditionBuilder
             condition={stage.condition}
@@ -524,7 +603,8 @@ export function StagePropertiesPanel({
           onToggle={toggleSection}
         >
           <div className="mb-2 text-[10px] text-muted-foreground/80">
-            A human-readable note explaining what this stage does. Shown in status reports and documentation.
+            A human-readable note explaining what this stage does. Shown in
+            status reports and documentation.
           </div>
           <Textarea
             className="w-full resize-y text-xs"
@@ -545,7 +625,8 @@ export function StagePropertiesPanel({
           onToggle={toggleSection}
         >
           <div className="mb-2 text-[10px] text-muted-foreground/80">
-            Custom key-value pairs for tagging or categorizing this stage. Metadata does not affect execution.
+            Custom key-value pairs for tagging or categorizing this stage.
+            Metadata does not affect execution.
           </div>
           <MetadataEditor
             meta={(stage.meta as Record<string, string>) ?? {}}
@@ -627,22 +708,26 @@ function MetadataEditor({
             onChange={(e) => handleValueChange(key, e.target.value)}
             placeholder="value"
           />
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="rounded p-0.5 text-muted-foreground opacity-0 hover:text-destructive group-hover:opacity-100"
             onClick={() => handleRemove(key)}
           >
             <X size={12} />
-          </button>
+          </Button>
         </div>
       ))}
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         className="flex items-center gap-1 text-xs text-primary hover:underline"
         onClick={handleAdd}
       >
         <Plus size={12} /> Add metadata
-      </button>
+      </Button>
     </div>
   );
 }
@@ -662,14 +747,16 @@ function Section({
 }) {
   return (
     <div className="border-b border-border">
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
-        className="flex w-full items-center gap-1 px-3 py-2 text-left text-xs font-medium text-foreground hover:bg-accent"
+        className="justify-start flex w-full items-center gap-1 px-3 py-2 text-left text-xs font-medium text-foreground hover:bg-accent"
         onClick={() => onToggle(id)}
       >
         {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
         {label}
-      </button>
+      </Button>
       {expanded && <div className="px-3 pb-3">{children}</div>}
     </div>
   );

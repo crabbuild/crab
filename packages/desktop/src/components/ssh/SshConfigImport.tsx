@@ -1,3 +1,6 @@
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 /**
  * SSH Config Import Dialog — allows selective import of hosts from
  * ~/.ssh/config into Crab Desktop connection profiles.
@@ -6,7 +9,6 @@
  * imported, and previews what each import will create.
  */
 
-import { useCallback, useEffect, useId, useRef, useState } from "react";
 import clsx from "clsx";
 import {
   Check,
@@ -19,6 +21,7 @@ import {
   Shield,
   X,
 } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -63,7 +66,6 @@ export function SshConfigImport({
   onImport,
   existingProfiles,
 }: SshConfigImportProps) {
-  const titleId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
   const [hosts, setHosts] = useState<ImportableHost[]>([]);
   const [loading, setLoading] = useState(false);
@@ -81,17 +83,6 @@ export function SshConfigImport({
   }, [isOpen]);
 
   // Escape to close
-  useEffect(() => {
-    if (!isOpen) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        onClose();
-      }
-    };
-    window.addEventListener("keydown", handler, true);
-    return () => window.removeEventListener("keydown", handler, true);
-  }, [isOpen, onClose]);
 
   // Load SSH config when dialog opens
   const loadConfig = useCallback(async () => {
@@ -210,20 +201,20 @@ export function SshConfigImport({
   if (!isOpen) return null;
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) {
+          onClose();
+        }
       }}
-      role="presentation"
     >
-      <div
+      <DialogContent
+        showCloseButton={false}
+        aria-describedby={undefined}
         ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
         tabIndex={-1}
-        className="relative flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-border bg-background shadow-2xl"
+        className="block gap-0 p-0 flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-border bg-background shadow-2xl"
       >
         {/* Header */}
         <div className="flex shrink-0 items-start gap-3 border-b border-border p-5">
@@ -231,12 +222,9 @@ export function SshConfigImport({
             <FileDown size={18} aria-hidden="true" />
           </div>
           <div className="min-w-0 flex-1">
-            <h2
-              id={titleId}
-              className="text-sm font-semibold text-foreground"
-            >
+            <DialogTitle className="text-sm font-semibold text-foreground">
               Import from SSH Config
-            </h2>
+            </DialogTitle>
             <p className="mt-0.5 text-xs text-muted-foreground">
               Select hosts from{" "}
               <code className="rounded bg-background px-1 py-0.5 font-mono text-[11px]">
@@ -245,14 +233,16 @@ export function SshConfigImport({
               to import as connection profiles.
             </p>
           </div>
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={onClose}
             className="shrink-0 rounded p-1 text-muted-foreground transition hover:bg-accent hover:text-foreground"
             aria-label="Close dialog"
           >
             <X size={16} />
-          </button>
+          </Button>
         </div>
 
         {/* Body */}
@@ -335,7 +325,9 @@ export function SshConfigImport({
             <>
               {/* Select all / Deselect all controls */}
               <div className="mb-3 flex items-center gap-3">
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
                   className="text-xs font-medium text-primary hover:underline disabled:text-muted-foreground disabled:no-underline"
                   onClick={selectAll}
@@ -343,8 +335,10 @@ export function SshConfigImport({
                   aria-label="Select all importable hosts"
                 >
                   Select All
-                </button>
-                <button
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
                   className="text-xs font-medium text-primary hover:underline disabled:text-muted-foreground disabled:no-underline"
                   onClick={deselectAll}
@@ -352,7 +346,7 @@ export function SshConfigImport({
                   aria-label="Deselect all hosts"
                 >
                   Deselect All
-                </button>
+                </Button>
                 <span className="ml-auto text-[11px] text-muted-foreground">
                   {selectedCount} of {importableCount} selected
                 </span>
@@ -379,7 +373,9 @@ export function SshConfigImport({
 
         {/* Footer */}
         <div className="flex shrink-0 items-center gap-2 border-t border-border p-4">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className={clsx(
               "flex items-center gap-1.5 rounded border border-border px-3 py-1.5 text-xs text-foreground transition",
@@ -394,9 +390,11 @@ export function SshConfigImport({
               className={loading ? "animate-spin" : ""}
             />
             Refresh
-          </button>
+          </Button>
           <div className="flex-1" />
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className={clsx(
               "rounded border border-border px-3 py-1.5 text-xs text-foreground transition",
@@ -405,9 +403,11 @@ export function SshConfigImport({
             onClick={onClose}
           >
             {importResult ? "Done" : "Cancel"}
-          </button>
+          </Button>
           {!importResult && (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className={clsx(
                 "flex items-center gap-1.5 rounded border px-3 py-1.5 text-xs font-medium transition",
@@ -426,11 +426,11 @@ export function SshConfigImport({
                 <FileDown size={12} />
               )}
               Import Selected{selectedCount > 0 ? ` (${selectedCount})` : ""}
-            </button>
+            </Button>
           )}
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -460,10 +460,9 @@ function HostEntry({
     >
       {/* Main row */}
       <div className="flex items-center gap-3 px-3 py-2.5">
-        <input
-          type="checkbox"
+        <Checkbox
           checked={host.selected}
-          onChange={onToggle}
+          onCheckedChange={onToggle}
           disabled={host.alreadyImported}
           className="h-4 w-4 shrink-0 rounded border-border accent-primary"
           aria-label={`${host.alreadyImported ? "Already imported" : "Select"} ${host.alias}`}
@@ -496,13 +495,17 @@ function HostEntry({
               {authMethod}
             </span>
             {host.proxyJump && (
-              <span className="text-muted-foreground">via {host.proxyJump}</span>
+              <span className="text-muted-foreground">
+                via {host.proxyJump}
+              </span>
             )}
           </div>
         </div>
 
         {/* Preview toggle */}
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={onTogglePreview}
           className="shrink-0 rounded p-1 text-muted-foreground transition hover:bg-accent hover:text-foreground"
@@ -514,7 +517,7 @@ function HostEntry({
           ) : (
             <ChevronRight size={14} />
           )}
-        </button>
+        </Button>
       </div>
 
       {/* Preview panel */}

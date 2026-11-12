@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { useCardExpanded } from "./useCardExpanded";
 /**
  * Specialized renderer for Agent/subagent tool calls (Claude Code protocol).
@@ -14,21 +15,20 @@ import { useCardExpanded } from "./useCardExpanded";
  *   - No detail → spawned (still working, or historical with no result captured)
  */
 
-
 import clsx from "clsx";
 import {
+  ArrowRight,
+  Bot,
+  CheckCircle2,
   ChevronDown,
   ChevronRight,
-  Bot,
   Send,
-  Users,
   UserMinus,
-  ArrowRight,
-  CheckCircle2,
+  Users,
 } from "lucide-react";
 import { Streamdown } from "streamdown";
-import type { ToolCardRendererProps } from "./types";
 import { CollapsedCardLine } from "./CollapsedCardLine";
+import type { ToolCardRendererProps } from "./types";
 
 // ── Component ───────────────────────────────────────────────────────
 
@@ -90,7 +90,9 @@ export function AgentCard({ event, defaultExpanded = false, collapsed: collapsed
         <Icon size={11} className="shrink-0 text-info" />
         <span className="font-medium text-foreground/80">{label}</span>
         <span className="truncate text-foreground/70">{summary}</span>
-        <span className={clsx("shrink-0 text-[9px] font-medium", statusColor)}>{statusLabel}</span>
+        <span className={clsx("shrink-0 text-[9px] font-medium", statusColor)}>
+          {statusLabel}
+        </span>
       </>
     );
     return (
@@ -104,7 +106,9 @@ export function AgentCard({ event, defaultExpanded = false, collapsed: collapsed
 
   return (
     <div className="rounded-md border border-border/40 overflow-hidden">
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={() => canExpand && setExpanded(!expanded)}
         className={clsx(
@@ -114,8 +118,12 @@ export function AgentCard({ event, defaultExpanded = false, collapsed: collapsed
         )}
       >
         <Icon size={12} className="text-info shrink-0" />
-        <span className="shrink-0 font-medium text-muted-foreground">{label}</span>
-        <span className="min-w-0 flex-1 truncate text-foreground/80">{summary}</span>
+        <span className="shrink-0 font-medium text-muted-foreground">
+          {label}
+        </span>
+        <span className="min-w-0 flex-1 truncate text-foreground/80">
+          {summary}
+        </span>
 
         <span className={clsx(
           "shrink-0 inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[9px] font-medium border",
@@ -129,18 +137,21 @@ export function AgentCard({ event, defaultExpanded = false, collapsed: collapsed
           {statusLabel}
         </span>
 
-        {canExpand && (
-          expanded
-            ? <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
-            : <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
-        )}
-      </button>
+        {canExpand &&
+          (expanded ? (
+            <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
+          ) : (
+            <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
+          ))}
+      </Button>
 
       {expanded && canExpand && (
         <div className="border-t border-border/30 max-h-[300px] overflow-auto px-2.5 py-2 space-y-2">
           {prompt.length > 80 && (
             <div>
-              <span className="text-[9px] font-medium text-muted-foreground uppercase tracking-wider">Prompt</span>
+              <span className="text-[9px] font-medium text-muted-foreground uppercase tracking-wider">
+                Prompt
+              </span>
               <p className="mt-0.5 text-[10px] leading-relaxed text-foreground/70 whitespace-pre-wrap">
                 {prompt}
               </p>
@@ -148,7 +159,9 @@ export function AgentCard({ event, defaultExpanded = false, collapsed: collapsed
           )}
           {hasOutput && (
             <div>
-              <span className="text-[9px] font-medium text-muted-foreground uppercase tracking-wider">Result</span>
+              <span className="text-[9px] font-medium text-muted-foreground uppercase tracking-wider">
+                Result
+              </span>
               <div className="mt-0.5">
                 <AgentTextContent text={output.length > 5000 ? output.slice(0, 5000) + "\n\n… (truncated)" : output} />
               </div>

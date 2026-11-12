@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import clsx from "clsx";
 import { FileCode2, Minus, Plus, Trash2 } from "lucide-react";
 import { PointerPatchKind, pointerKindLabel } from "../lib/pointer-detection";
@@ -77,7 +78,8 @@ export function PointerFileCard({
             </span>
           </div>
           <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
-            This change has whole-file actions. Discard restores the index version after confirmation.
+            This change has whole-file actions. Discard restores the index
+            version after confirmation.
           </p>
         </div>
       </div>
@@ -134,7 +136,9 @@ function CardButton({
         ? "hover:bg-warning/15 hover:text-warning"
         : "hover:bg-destructive/15 hover:text-destructive";
   return (
-    <button
+    <Button
+      variant="ghost"
+      size="compact"
       type="button"
       onClick={onClick}
       disabled={disabled}
@@ -149,6 +153,6 @@ function CardButton({
     >
       {icon}
       <span>{label}</span>
-    </button>
+    </Button>
   );
 }

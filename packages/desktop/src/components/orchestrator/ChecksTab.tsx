@@ -1,10 +1,10 @@
+import { Button } from "@/components/ui/button";
 /**
  * Checks Tab — Fifth workspace tab aggregating merge readiness signals.
  *
  * Sections: Git status, PR info, CI checks, comments, todos, merge button.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
 import clsx from "clsx";
 import {
   AlertTriangle,
@@ -22,6 +22,7 @@ import {
   Sparkles,
   XCircle,
 } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { OrchestratorTask } from "./TaskCard";
 import { TodoItem, TodoList } from "./TodoList";
 
@@ -224,27 +225,33 @@ export function ChecksTab({
         <Section title="CI Checks" icon={<CheckCircle2 size={13} />}>
           {checksData ? (
             checksData.checks.length === 0 ? (
-              <p className="text-xs text-muted-foreground">No CI checks configured</p>
+              <p className="text-xs text-muted-foreground">
+                No CI checks configured
+              </p>
             ) : (
               <div className="space-y-1.5">
                 {checksData.checks.map((check) => (
                   <div key={check.name} className="flex items-center gap-2">
                     <CheckStatusIcon status={check.status} />
-                    <span className="flex-1 truncate text-xs text-foreground">{check.name}</span>
+                    <span className="flex-1 truncate text-xs text-foreground">
+                      {check.name}
+                    </span>
                     {check.durationMs != null && (
                       <span className="text-[10px] text-muted-foreground">
                         {formatDuration(check.durationMs)}
                       </span>
                     )}
                     {check.status === "fail" && onFixWithAgent && (
-                      <button
+                      <Button
+                        variant="ghost"
+                        size="compact"
                         type="button"
                         onClick={() => onFixWithAgent(check.name, check.output ?? "")}
                         className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-primary hover:bg-primary/10 transition"
                         aria-label={`Fix ${check.name} with agent`}
                       >
                         <Sparkles size={10} /> Fix
-                      </button>
+                      </Button>
                     )}
                     {check.url && (
                       <a
@@ -271,19 +278,26 @@ export function ChecksTab({
         {/* Comments Section */}
         <Section title="Comments" icon={<MessageSquare size={13} />}>
           {unresolvedComments.length === 0 ? (
-            <p className="text-xs text-muted-foreground">No unresolved comments</p>
+            <p className="text-xs text-muted-foreground">
+              No unresolved comments
+            </p>
           ) : (
             <div className="space-y-1.5">
               <p className="text-xs text-warning">
-                {unresolvedComments.length} unresolved comment{unresolvedComments.length !== 1 ? "s" : ""}
+                {unresolvedComments.length} unresolved comment
+                {unresolvedComments.length !== 1 ? "s" : ""}
               </p>
               {unresolvedComments.slice(0, 5).map((comment) => (
                 <div key={comment.id} className="rounded border border-border/50 bg-background px-2 py-1.5">
                   <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
-                    {comment.path && <span className="font-mono">{comment.path}</span>}
+                    {comment.path && (
+                      <span className="font-mono">{comment.path}</span>
+                    )}
                     {comment.line && <span>:{comment.line}</span>}
                   </div>
-                  <p className="mt-0.5 text-xs text-foreground line-clamp-2">{comment.body}</p>
+                  <p className="mt-0.5 text-xs text-foreground line-clamp-2">
+                    {comment.body}
+                  </p>
                 </div>
               ))}
               {unresolvedComments.length > 5 && (
@@ -303,7 +317,8 @@ export function ChecksTab({
             <div>
               {incompleteTodos.length > 0 && (
                 <p className="mb-2 text-xs text-warning">
-                  {incompleteTodos.length} incomplete todo{incompleteTodos.length !== 1 ? "s" : ""}
+                  {incompleteTodos.length} incomplete todo
+                  {incompleteTodos.length !== 1 ? "s" : ""}
                 </p>
               )}
               {onToggleTodo && onAddTodo && onRemoveTodo && (
@@ -324,7 +339,9 @@ export function ChecksTab({
       {/* Merge button + refresh */}
       <div className="shrink-0 border-t border-border bg-card px-4 py-3">
         <div className="flex items-center gap-2">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={handleMerge}
             disabled={!canMerge || merging}
@@ -342,8 +359,10 @@ export function ChecksTab({
               <GitMerge size={13} />
             )}
             {canMerge ? "Merge PR" : "Merge blocked"}
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={fetchChecks}
             disabled={loading}
@@ -351,15 +370,23 @@ export function ChecksTab({
             aria-label="Refresh checks"
           >
             <RefreshCw size={12} className={loading ? "animate-spin" : ""} />
-          </button>
+          </Button>
         </div>
         {!canMerge && (
           <div className="mt-2 space-y-1">
             {hasConflicts && <BlockerLine text="Conflicts must be resolved" />}
-            {failingChecks.length > 0 && <BlockerLine text={`${failingChecks.length} CI check(s) failing`} />}
-            {pendingChecks.length > 0 && <BlockerLine text={`${pendingChecks.length} CI check(s) pending`} />}
-            {unresolvedComments.length > 0 && <BlockerLine text={`${unresolvedComments.length} unresolved comment(s)`} />}
-            {incompleteTodos.length > 0 && <BlockerLine text={`${incompleteTodos.length} incomplete todo(s)`} />}
+            {failingChecks.length > 0 && (
+              <BlockerLine text={`${failingChecks.length} CI check(s) failing`} />
+            )}
+            {pendingChecks.length > 0 && (
+              <BlockerLine text={`${pendingChecks.length} CI check(s) pending`} />
+            )}
+            {unresolvedComments.length > 0 && (
+              <BlockerLine text={`${unresolvedComments.length} unresolved comment(s)`} />
+            )}
+            {incompleteTodos.length > 0 && (
+              <BlockerLine text={`${incompleteTodos.length} incomplete todo(s)`} />
+            )}
             {!prMetadata && <BlockerLine text="No PR created yet" />}
           </div>
         )}
@@ -392,7 +419,9 @@ function StatusRow({ ok, neutral, label }: { ok: boolean; neutral?: boolean; lab
       ) : (
         <XCircle size={11} className="text-destructive" />
       )}
-      <span className={ok || neutral ? "text-foreground" : "text-destructive"}>{label}</span>
+      <span className={ok || neutral ? "text-foreground" : "text-destructive"}>
+        {label}
+      </span>
     </div>
   );
 }
@@ -404,7 +433,9 @@ function CheckStatusIcon({ status }: { status: CICheck["status"] }) {
     case "fail":
       return <XCircle size={12} className="text-destructive shrink-0" />;
     case "pending":
-      return <Loader2 size={12} className="text-warning animate-spin shrink-0" />;
+      return (
+        <Loader2 size={12} className="text-warning animate-spin shrink-0" />
+      );
     case "queued":
       return <Clock size={12} className="text-muted-foreground shrink-0" />;
   }

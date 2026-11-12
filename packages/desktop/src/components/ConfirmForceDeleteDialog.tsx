@@ -1,7 +1,9 @@
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import clsx from "clsx";
 import { AlertTriangle } from "lucide-react";
-import { useEffect, useId, useRef, useState } from "react";
+import { useId, useRef, useState } from "react";
 
 /**
  * Typed confirmation dialog for force-deleting an unmerged branch.
@@ -25,65 +27,48 @@ export function ConfirmForceDeleteDialog({
   onConfirm,
   onCancel,
 }: ConfirmForceDeleteDialogProps) {
-  const headingId = useId();
   const bodyId = useId();
   const cancelRef = useRef<HTMLButtonElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
-  const previousActive = useRef<HTMLElement | null>(null);
+
   const [typedValue, setTypedValue] = useState("");
 
   const matches = typedValue === branchName;
 
-  // Grab focus on mount (cancel button), restore on unmount.
-  useEffect(() => {
-    previousActive.current = (document.activeElement as HTMLElement | null) ?? null;
-    // Focus the input so the user can start typing immediately.
-    inputRef.current?.focus();
-    return () => {
-      previousActive.current?.focus?.();
-    };
-  }, []);
-
-  // Esc cancels.
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        onCancel();
-      }
-    };
-    window.addEventListener("keydown", handler, true);
-    return () => window.removeEventListener("keydown", handler, true);
-  }, [onCancel]);
-
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onCancel();
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) {
+          onCancel();
+        }
       }}
     >
-      <div
+      <DialogContent
         role="alertdialog"
-        aria-modal="true"
-        aria-labelledby={headingId}
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          inputRef.current?.focus();
+        }}
+        showCloseButton={false}
         aria-describedby={bodyId}
-        className="w-[28rem] max-w-[calc(100vw-2rem)] rounded-lg border border-border bg-card shadow-2xl"
+        className="block gap-0 p-0 w-[28rem] max-w-[calc(100vw-2rem)] rounded-lg border border-border bg-card shadow-2xl"
       >
         <div className="flex items-start gap-3 border-b border-border p-4">
           <div className="mt-0.5 shrink-0 rounded bg-destructive/15 p-2 text-destructive">
             <AlertTriangle size={18} aria-hidden="true" />
           </div>
           <div className="min-w-0 flex-1">
-            <h2
-              id={headingId}
-              className="text-[14px] font-semibold text-foreground"
-            >
+            <DialogTitle className="text-[14px] font-semibold text-foreground">
               Force delete unmerged branch?
-            </h2>
+            </DialogTitle>
             <p id={bodyId} className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
-              Branch <code className="rounded bg-background px-1 font-mono text-foreground">{branchName}</code> is
-              not fully merged. Deleting it will lose commits not reachable from any other branch.
+              Branch{" "}
+              <code className="rounded bg-background px-1 font-mono text-foreground">
+                {branchName}
+              </code>{" "}
+              is not fully merged. Deleting it will lose commits not reachable
+              from any other branch.
             </p>
           </div>
         </div>
@@ -113,7 +98,9 @@ export function ConfirmForceDeleteDialog({
         </div>
 
         <div className="flex items-center justify-end gap-2 p-3">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             ref={cancelRef}
             type="button"
             onClick={onCancel}
@@ -123,8 +110,10 @@ export function ConfirmForceDeleteDialog({
             )}
           >
             Cancel
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={onConfirm}
             disabled={!matches}
@@ -138,9 +127,9 @@ export function ConfirmForceDeleteDialog({
             aria-label="Force delete"
           >
             Force delete
-          </button>
+          </Button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

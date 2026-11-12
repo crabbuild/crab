@@ -18,7 +18,7 @@ export interface SubOption {
   description?: string;
   /**
    * When true, the command ends with a placeholder that requires user input.
-   * The UI should show an inline input field before executing.
+   * The UI prompts for a value before executing.
    * Trailing space in `command` is the convention for "needs input".
    */
   needsInput?: boolean;

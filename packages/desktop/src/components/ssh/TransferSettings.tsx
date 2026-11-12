@@ -1,4 +1,5 @@
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 /**
  * TransferSettings — bandwidth limit, compression toggle, and adaptive
  * throttling configuration panel.
@@ -7,9 +8,9 @@ import { Input } from "@/components/ui/input";
  * updating at intervals <= 1 second.
  */
 
-import { useState, useCallback, useEffect, useRef } from "react";
-import { Gauge, Zap, Activity, Settings2 } from "lucide-react";
 import clsx from "clsx";
+import { Activity, Gauge, Settings2, Zap } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { formatSpeed } from "./TransferProgressBar";
 
 // ── Types ────────────────────────────────────────────────────────
@@ -141,7 +142,7 @@ export function TransferSettings({
 
   return (
     <div className="flex flex-col gap-4 p-4" role="region" aria-label="Transfer settings">
-      {/* Header with current stats */}
+      {/* Bandwidth limit input */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Settings2 className="w-4 h-4 text-muted-foreground text-muted-foreground" />
@@ -151,7 +152,8 @@ export function TransferSettings({
         </div>
         <div className="flex items-center gap-3 text-xs text-muted-foreground text-muted-foreground">
           <span>
-            Limit: {bandwidthLimit === 0 ? "Unlimited" : `${bandwidthLimit.toLocaleString()} KB/s`}
+            Limit:{" "}
+            {bandwidthLimit === 0 ? "Unlimited" : `${bandwidthLimit.toLocaleString()} KB/s`}
           </span>
           <span className="text-muted-foreground text-muted-foreground">·</span>
           <span>Actual: {formatSpeed(actualThroughput)}</span>
@@ -200,11 +202,12 @@ export function TransferSettings({
           </p>
         )}
         <p className="text-xs text-muted-foreground text-muted-foreground">
-          Range: {MIN_BANDWIDTH}–{MAX_BANDWIDTH.toLocaleString()} KB/s. Enter 0 or leave empty for unlimited.
+          Range: {MIN_BANDWIDTH}–{MAX_BANDWIDTH.toLocaleString()} KB/s. Enter 0
+          or leave empty for unlimited.
         </p>
       </div>
 
-      {/* Compression toggle */}
+      {/* Adaptive throttling toggle */}
       <div className="flex items-center justify-between py-2 border-t border-border border-border">
         <div className="flex items-center gap-2">
           <Zap size={14} className="text-muted-foreground text-muted-foreground" />
@@ -217,26 +220,10 @@ export function TransferSettings({
             </p>
           </div>
         </div>
-        <button
-          type="button"
-          role="switch"
-          aria-checked={compressionEnabled}
-          onClick={toggleCompression}
-          className={clsx(
-            "relative inline-flex h-5 w-9 shrink-0 rounded-full transition-colors",
-            "focus:outline-none focus:ring-2 focus:ring-info focus:ring-offset-1",
-            compressionEnabled
-              ? "bg-info bg-info"
-              : "bg-card bg-accent",
-          )}
-        >
-          <span
-            className={clsx(
-              "inline-block h-4 w-4 rounded-full bg-background shadow transform transition-transform mt-0.5",
-              compressionEnabled ? "translate-x-4 ml-0.5" : "translate-x-0.5",
-            )}
-          />
-        </button>
+        <Switch
+          checked={compressionEnabled}
+          onCheckedChange={toggleCompression}
+        />
       </div>
 
       {/* Adaptive throttling toggle */}
@@ -252,26 +239,7 @@ export function TransferSettings({
             </p>
           </div>
         </div>
-        <button
-          type="button"
-          role="switch"
-          aria-checked={adaptiveThrottling}
-          onClick={toggleAdaptive}
-          className={clsx(
-            "relative inline-flex h-5 w-9 shrink-0 rounded-full transition-colors",
-            "focus:outline-none focus:ring-2 focus:ring-info focus:ring-offset-1",
-            adaptiveThrottling
-              ? "bg-info bg-info"
-              : "bg-card bg-accent",
-          )}
-        >
-          <span
-            className={clsx(
-              "inline-block h-4 w-4 rounded-full bg-background shadow transform transition-transform mt-0.5",
-              adaptiveThrottling ? "translate-x-4 ml-0.5" : "translate-x-0.5",
-            )}
-          />
-        </button>
+        <Switch checked={adaptiveThrottling} onCheckedChange={toggleAdaptive} />
       </div>
     </div>
   );

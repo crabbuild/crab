@@ -1,4 +1,4 @@
-import { useEffect,useMemo,useState,useCallback } from "react";
+import { Button } from "@/components/ui/button";
 import {
 Activity,
 BarChart3,
@@ -10,13 +10,14 @@ Layers,
 Loader2,
 Users,
 } from "lucide-react";
-import { OpenRepo } from "../state";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { DashboardRemoteSection } from "../components/ssh/DashboardRemoteSection";
+import { useCachedMetric } from "../hooks/useCachedMetric";
+import { useHydrationStatus } from "../hooks/useHydrationStatus";
+import { useIsMobile } from "../hooks/useIsMobile";
 import { BranchHealthResult,CodeFrequencyResult,CommitFrequencyBucket,CommitFrequencyResult,CommitRow,DedupSavingsResult,HydrationSummary,PulseResult,RefEntry,ReleaseTimelineResult,RepoSummary,rpc } from "../ipc";
 import { formatBytes } from "../lib/format";
-import { useHydrationStatus } from "../hooks/useHydrationStatus";
-import { useCachedMetric } from "../hooks/useCachedMetric";
-import { useIsMobile } from "../hooks/useIsMobile";
-import { DashboardRemoteSection } from "../components/ssh/DashboardRemoteSection";
+import { OpenRepo } from "../state";
 
 interface Props {
   repo: OpenRepo;
@@ -45,7 +46,10 @@ export function DashboardView({ repo, onSelectCommit, onSelectBranch }: Props) {
   // An old summary must not enable metric reads against a replacement owner
   // before its own commit count and repository admission are known.
   const [summarySource, setSummarySource] = useState<{ session: OpenRepo["native_session_id"]; value: RepoSummary } | null>(null);
-  const summary = summarySource?.session === repo.native_session_id ? summarySource?.value ?? null : null;
+  const summary =
+    summarySource?.session === repo.native_session_id
+      ? (summarySource?.value ?? null)
+      : null;
   const [commits, setCommits] = useState<CommitRow[] | null>(null);
   const [activity, setActivity] = useState<ActivityDay[] | null>(null);
   const [contributors, setContributors] = useState<Contributor[] | null>(null);
@@ -202,9 +206,13 @@ export function DashboardView({ repo, onSelectCommit, onSelectBranch }: Props) {
       <div className="mx-auto max-w-6xl space-y-6">
         {/* Header */}
         <div>
-          <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Repository</div>
+          <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+            Repository
+          </div>
           <h1 className="mt-1 text-xl font-semibold">{repo.label}</h1>
-          <div className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">{repo.url || repo.path}</div>
+          <div className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">
+            {repo.url || repo.path}
+          </div>
         </div>
 
         {/* Deferred repo: show a gentle "connecting" state instead of
@@ -221,97 +229,99 @@ export function DashboardView({ repo, onSelectCommit, onSelectBranch }: Props) {
           </div>
         ) : (
           <>
-        {err && (
-          <div className="flex items-center gap-2 rounded border border-warning/30 bg-warning/5 px-3 py-2 text-[11px] text-muted-foreground">
-            <span className="min-w-0 flex-1 truncate">Unable to load some repository data</span>
-            <button
-              type="button"
-              onClick={() => setErr(null)}
-              className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground transition"
-              aria-label="Dismiss"
-            >
-              ✕
-            </button>
-          </div>
-        )}
+            {err && (
+              <div className="flex items-center gap-2 rounded border border-warning/30 bg-warning/5 px-3 py-2 text-[11px] text-muted-foreground">
+                <span className="min-w-0 flex-1 truncate">
+                  Unable to load some repository data
+                </span>
+                <Button
+                  variant="ghost"
+                  size="compact"
+                  type="button"
+                  onClick={() => setErr(null)}
+                  className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground transition"
+                  aria-label="Dismiss"
+                >
+                  ✕
+                </Button>
+              </div>
+            )}
 
-        {/* Key stats — no section header (they ARE the header) */}
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-          <StatCard icon={<Layers size={14} />} label="Files" value={summary ? summary.total_files.toLocaleString() : "…"} />
-          <StatCard icon={<HardDrive size={14} />} label="Logical size" value={summary ? formatBytes(Number(summary.total_bytes)) : "…"} />
-          <StatCard
+            {/* Key stats — no section header (they ARE the header) */}
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+              <StatCard icon={<Layers size={14} />} label="Files" value={summary ? summary.total_files.toLocaleString() : "…"} />
+              <StatCard icon={<HardDrive size={14} />} label="Logical size" value={summary ? formatBytes(Number(summary.total_bytes)) : "…"} />
+              <StatCard
             icon={<Database size={14} />}
             label="Pointer files"
             value={summary ? (summary.total_pointers + summary.total_lfs).toLocaleString() : "…"}
             hint={summary ? `${summary.total_pointers} crab · ${summary.total_lfs} lfs` : undefined}
           />
-          <StatCard
+              <StatCard
             icon={<BarChart3 size={14} />}
             label="Hydration"
             value={hydration.summary ? `${pctHydrated(hydration.summary)}%` : "–"}
             hint={hydration.summary ? `${hydration.summary.hydrated} / ${hydration.summary.total_tracked}` : undefined}
           />
-          <StatCard
+              <StatCard
             icon={<Activity size={14} />}
             label="This week"
             value={pulse ? `${pulse.commits} commits` : "…"}
             hint={pulse ? `${pulse.authors} authors · ${pulse.files_changed} files · +${pulse.insertions} -${pulse.deletions}` : undefined}
             muted={pulse != null && pulse.commits === 0 && pulse.authors === 0}
           />
-        </div>
+            </div>
 
-        {/* Activity section */}
-        <DashboardSection label="Activity" collapsible storageKey="crab.dashboard.section.activityExpanded">
-          <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[1fr_300px]">
-            <ActivityHeatmap days={activity} />
-            <ContributorsCard contributors={contributors} />
-          </div>
-          <div className="mt-4">
-            <CommitFrequencyChart
+            {/* Activity section */}
+            <DashboardSection label="Activity" collapsible storageKey="crab.dashboard.section.activityExpanded">
+              <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[1fr_300px]">
+                <ActivityHeatmap days={activity} />
+                <ContributorsCard contributors={contributors} />
+              </div>
+              <div className="mt-4">
+                <CommitFrequencyChart
               data={commitFreq}
               granularity={commitFreqGranularity}
               onGranularityChange={setCommitFreqGranularity}
               maxPoints={isMobile ? 60 : undefined}
             />
-          </div>
-          <div className="mt-4">
-            <CodeFrequencyChart data={cachedCodeFreq.data} maxPoints={isMobile ? 60 : undefined} />
-          </div>
-        </DashboardSection>
-
-        {/* Code section */}
-        <DashboardSection label="Code" collapsible storageKey="crab.dashboard.section.codeExpanded">
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-            <BranchesCard refs={refs} branchHealth={branchHealth} onSelectBranch={onSelectBranch} />
-            <ExtensionsCard summary={summary} />
-          </div>
-          <ReleaseTimeline data={releaseTimeline} onSelectTag={onSelectBranch} />
-        </DashboardSection>
-
-        {/* Storage section */}
-        {(hydration.summary || dedupSavings || summary) && (
-          <DashboardSection label="Storage" collapsible storageKey="crab.dashboard.section.storageExpanded">
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-              <DedupCard data={dedupSavings} />
-              <PointerBreakdownCard summary={summary} />
-            </div>
-            {hydration.summary && (
-              <div className="mt-4">
-                <HydrationCard summary={hydration.summary} />
               </div>
+              <div className="mt-4">
+                <CodeFrequencyChart data={cachedCodeFreq.data} maxPoints={isMobile ? 60 : undefined} />
+              </div>
+            </DashboardSection>
+
+            {/* Code section */}
+            <DashboardSection label="Code" collapsible storageKey="crab.dashboard.section.codeExpanded">
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <BranchesCard refs={refs} branchHealth={branchHealth} onSelectBranch={onSelectBranch} />
+                <ExtensionsCard summary={summary} />
+              </div>
+              <ReleaseTimeline data={releaseTimeline} onSelectTag={onSelectBranch} />
+            </DashboardSection>
+
+            {/* Storage section */}
+            {(hydration.summary || dedupSavings || summary) && (
+              <DashboardSection label="Storage" collapsible storageKey="crab.dashboard.section.storageExpanded">
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                  <DedupCard data={dedupSavings} />
+                  <PointerBreakdownCard summary={summary} />
+                </div>
+                {hydration.summary && (
+                  <div className="mt-4">
+                    <HydrationCard summary={hydration.summary} />
+                  </div>
+                )}
+              </DashboardSection>
             )}
-          </DashboardSection>
-        )}
 
-        {/* Remote Servers section — only visible when SSH connections exist */}
-        <DashboardRemoteSection />
+            {/* History section */}
+            <DashboardRemoteSection />
 
-        {/* History section */}
-        <DashboardSection label="History" collapsible storageKey="crab.dashboard.section.historyExpanded">
-          <RecentCommitsCard commits={commits} onSelect={onSelectCommit} />
-        </DashboardSection>
-
-
+            {/* History section */}
+            <DashboardSection label="History" collapsible storageKey="crab.dashboard.section.historyExpanded">
+              <RecentCommitsCard commits={commits} onSelect={onSelectCommit} />
+            </DashboardSection>
           </>
         )}
       </div>
@@ -381,7 +391,9 @@ function DashboardSection({
 
   return (
     <div className="pt-4 pb-2">
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={toggle}
         className="flex w-full items-center gap-2 mb-3 cursor-pointer group"
@@ -395,7 +407,7 @@ function DashboardSection({
           {label}
         </span>
         <div className="h-px flex-1 bg-border/50" />
-      </button>
+      </Button>
       <div
         id={`section-${label.toLowerCase()}`}
         className="overflow-hidden transition-[max-height,opacity] duration-200 ease-in-out"
@@ -410,13 +422,17 @@ function DashboardSection({
   );
 }
 
-
 function StatCard({ icon, label, value, hint, muted }: { icon: React.ReactNode; label: string; value: string; hint?: string; muted?: boolean }) {
   return (
     <div className={`rounded-lg border border-border bg-card p-3${muted ? " opacity-50" : ""}`}>
-      <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">{icon}{label}</div>
+      <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+        {icon}
+        {label}
+      </div>
       <div className="mt-1.5 font-mono text-xl text-foreground">{value}</div>
-      {hint && <div className="mt-0.5 text-[10px] text-muted-foreground">{hint}</div>}
+      {hint && (
+        <div className="mt-0.5 text-[10px] text-muted-foreground">{hint}</div>
+      )}
     </div>
   );
 }
@@ -665,7 +681,9 @@ function ContributorsCard({ contributors }: { contributors: Contributor[] | null
           <Users size={12} /> Top 5 contributors
         </div>
         {contributors && (
-          <span className="text-[10px] text-muted-foreground">{contributors.length} total</span>
+          <span className="text-[10px] text-muted-foreground">
+            {contributors.length} total
+          </span>
         )}
       </div>
       {!contributors ? (
@@ -673,7 +691,9 @@ function ContributorsCard({ contributors }: { contributors: Contributor[] | null
           <Loader2 size={12} className="animate-spin" /> Loading…
         </div>
       ) : contributors.length === 0 ? (
-        <div className="text-xs text-muted-foreground">No contributor data.</div>
+        <div className="text-xs text-muted-foreground">
+          No contributor data.
+        </div>
       ) : (
         <ul className="space-y-1.5">
           {contributors.slice(0, 5).map((c, i) => (
@@ -819,10 +839,14 @@ function CommitFrequencyChart({
     >
       {/* Header with title and granularity toggle */}
       <div className="mb-3 flex items-center justify-between">
-        <div className="text-[11px] font-medium text-muted-foreground">Commit frequency</div>
+        <div className="text-[11px] font-medium text-muted-foreground">
+          Commit frequency
+        </div>
         <div className="flex gap-0.5 rounded bg-background p-0.5">
           {granularityOptions.map((g) => (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               key={g}
               type="button"
               onClick={() => onGranularityChange(g)}
@@ -833,7 +857,7 @@ function CommitFrequencyChart({
               }`}
             >
               {g === "day" ? "Day" : g === "week" ? "Week" : "Month"}
-            </button>
+            </Button>
           ))}
         </div>
       </div>
@@ -891,7 +915,7 @@ function CommitFrequencyChart({
         </div>
       )}
 
-      {/* Visually-hidden data table for screen readers */}
+      {/* X-axis month labels */}
       {data && buckets.length > 0 && (
         <table className="sr-only">
           <caption>Commit frequency data</caption>
@@ -904,7 +928,10 @@ function CommitFrequencyChart({
           <tbody>
             {buckets.map((b) => (
               <tr key={b.period_start}>
-                <td>{new Date(b.period_start).toLocaleDateString()} – {new Date(b.period_end).toLocaleDateString()}</td>
+                <td>
+                  {new Date(b.period_start).toLocaleDateString()} –{' '}
+                  {new Date(b.period_end).toLocaleDateString()}
+                </td>
                 <td>{b.count}</td>
               </tr>
             ))}
@@ -1069,7 +1096,9 @@ function CodeFrequencyChart({ data, maxPoints }: { data: CodeFrequencyResult | n
       className="rounded-lg border border-border bg-card p-4"
       aria-label={`Code frequency: +${totalAdd} −${totalDel} over ${data?.weeks.length ?? 0} weeks`}
     >
-      <div className="mb-3 text-[11px] font-medium text-muted-foreground">Code frequency</div>
+      <div className="mb-3 text-[11px] font-medium text-muted-foreground">
+        Code frequency
+      </div>
 
       {!data ? (
         <AreaChartSkeleton />
@@ -1159,13 +1188,15 @@ function CodeFrequencyChart({ data, maxPoints }: { data: CodeFrequencyResult | n
             )}
           </svg>
 
-          {/* X-axis month labels */}
+          {/* Hover indicator line */}
           <div className="relative mt-1 h-4">
             {monthLabels.map((m) => (
               <span
                 key={`${m.index}-${m.label}`}
                 className="absolute text-[9px] text-muted-foreground"
-                style={{ left: `${(m.index / Math.max((limitedWeeks.length - 1), 1)) * 100}%` }}
+                style={{
+                  left: `${(m.index / Math.max(limitedWeeks.length - 1, 1)) * 100}%`,
+                }}
               >
                 {m.label}
               </span>
@@ -1174,7 +1205,7 @@ function CodeFrequencyChart({ data, maxPoints }: { data: CodeFrequencyResult | n
         </div>
       )}
 
-      {/* Visually-hidden data table for screen readers */}
+      {/* X-axis month labels */}
       {data && data.weeks.length > 0 && (
         <table className="sr-only">
           <caption>Code frequency data</caption>
@@ -1197,7 +1228,7 @@ function CodeFrequencyChart({ data, maxPoints }: { data: CodeFrequencyResult | n
         </table>
       )}
 
-      {/* Tooltip (announced via aria-live) */}
+      {/* Visually-hidden data table for screen readers */}
       <div aria-live="polite" className="sr-only">
         {tooltip ? tooltip.text : ""}
       </div>
@@ -1270,12 +1301,14 @@ function BranchesCard({ refs, branchHealth, onSelectBranch }: { refs: RefEntry[]
                 Branches ({totalBranches})
               </div>
               <div className="flex flex-wrap gap-1">
-                {branches.map(b => {
+                {branches.map((b) => {
                   const health = staleMap.get(b.name);
                   const isStale = health?.is_stale ?? false;
                   const days = health ? daysAgo(health.last_commit_date) : 0;
                   return (
-                    <button
+                    <Button
+                      variant="ghost"
+                      size="compact"
                       key={b.name}
                       type="button"
                       className="relative inline-flex items-center max-w-[140px] truncate rounded-full border border-success/40 bg-background px-2 py-[2px] font-mono text-[10px] text-success hover:bg-success/10 hover:border-success/70 transition-colors cursor-pointer"
@@ -1285,8 +1318,10 @@ function BranchesCard({ refs, branchHealth, onSelectBranch }: { refs: RefEntry[]
                       {isStale && (
                         <span className="mr-1 inline-block h-[6px] w-[6px] rounded-full bg-warning shrink-0" />
                       )}
-                      <span className="truncate">{b.name.replace(/^refs\/heads\//, "")}</span>
-                    </button>
+                      <span className="truncate">
+                        {b.name.replace(/^refs\/heads\//, "")}
+                      </span>
+                    </Button>
                   );
                 })}
               </div>
@@ -1298,8 +1333,10 @@ function BranchesCard({ refs, branchHealth, onSelectBranch }: { refs: RefEntry[]
                 Tags ({(refs ?? []).filter(r => r.kind === "tag").length})
               </div>
               <div className="flex flex-wrap gap-1">
-                {tags.map(t => (
-                  <button
+                {tags.map((t) => (
+                  <Button
+                    variant="ghost"
+                    size="compact"
                     key={t.name}
                     type="button"
                     className="inline-block max-w-[140px] truncate rounded-full border border-warning/40 bg-background px-2 py-[2px] font-mono text-[10px] text-warning hover:bg-warning/10 hover:border-warning/70 transition-colors cursor-pointer"
@@ -1307,7 +1344,7 @@ function BranchesCard({ refs, branchHealth, onSelectBranch }: { refs: RefEntry[]
                     onClick={() => onSelectBranch?.(t.name)}
                   >
                     🏷 {t.name.replace(/^refs\/tags\//, "")}
-                  </button>
+                  </Button>
                 ))}
               </div>
             </div>
@@ -1338,7 +1375,9 @@ function ExtensionsCard({ summary }: { summary: RepoSummary | null }) {
               : 0;
             return (
               <li key={e.ext} className="flex items-center gap-2">
-                <span className="w-12 shrink-0 font-mono text-foreground">.{e.ext || "—"}</span>
+                <span className="w-12 shrink-0 font-mono text-foreground">
+                  .{e.ext || "—"}
+                </span>
                 <div className="min-w-0 flex-1">
                   <div className="h-1.5 rounded-full bg-border/40">
                     <div
@@ -1347,7 +1386,9 @@ function ExtensionsCard({ summary }: { summary: RepoSummary | null }) {
                     />
                   </div>
                 </div>
-                <span className="w-8 shrink-0 text-right text-[10px] text-muted-foreground">{pct}%</span>
+                <span className="w-8 shrink-0 text-right text-[10px] text-muted-foreground">
+                  {pct}%
+                </span>
                 <span className="w-14 shrink-0 text-right text-[10px] text-muted-foreground">
                   {formatBytes(Number(e.bytes))}
                 </span>
@@ -1367,11 +1408,12 @@ function ExtensionsCard({ summary }: { summary: RepoSummary | null }) {
  * - No large files: green "all files under 1 MB" badge
  */
 function DedupCard({ data }: { data: DedupSavingsResult | null }) {
-
   if (!data) {
     return (
       <div className="rounded-lg border border-border bg-card p-4">
-        <div className="mb-2 text-[11px] font-medium text-muted-foreground">Dedup savings</div>
+        <div className="mb-2 text-[11px] font-medium text-muted-foreground">
+          Dedup savings
+        </div>
         <StatTileSkeleton />
       </div>
     );
@@ -1402,7 +1444,9 @@ function DedupSavingsCard({ data }: { data: DedupSavingsResult }) {
 
   return (
     <div className={`rounded-lg border bg-card p-4 ${hasSavings ? "border-success/40" : "border-border"}`}>
-      <div className="mb-3 text-[11px] font-medium text-muted-foreground">Dedup savings</div>
+      <div className="mb-3 text-[11px] font-medium text-muted-foreground">
+        Dedup savings
+      </div>
 
       {/* Hero stat */}
       <div className="mb-3 text-center">
@@ -1410,7 +1454,7 @@ function DedupSavingsCard({ data }: { data: DedupSavingsResult }) {
         <span className="ml-1 text-sm text-muted-foreground">saved</span>
       </div>
 
-      {/* Progress bar: filled = stored/logical */}
+      {/* Hero stat */}
       <div className="mb-3">
         <div className="flex h-2.5 overflow-hidden rounded-full bg-background">
           <div
@@ -1425,7 +1469,7 @@ function DedupSavingsCard({ data }: { data: DedupSavingsResult }) {
         </div>
       </div>
 
-      {/* Secondary stats */}
+      {/* Progress bar: filled = stored/logical */}
       <div className="flex gap-4 text-[11px] text-muted-foreground">
         <span>{data.chunk_reuse_count.toLocaleString()} chunks reused</span>
         <span>{data.compression_ratio.toFixed(1)}x compression</span>
@@ -1458,32 +1502,43 @@ function DedupOnboardingCard({
       <ul className="mb-3 space-y-1">
         {largeFiles.map((f) => (
           <li key={f.path} className="flex items-center gap-2 text-[11px]">
-            <span className="min-w-0 flex-1 truncate font-mono text-muted-foreground">{f.path}</span>
-            <span className="shrink-0 text-foreground">{formatBytes(f.size)}</span>
+            <span className="min-w-0 flex-1 truncate font-mono text-muted-foreground">
+              {f.path}
+            </span>
+            <span className="shrink-0 text-foreground">
+              {formatBytes(f.size)}
+            </span>
           </li>
         ))}
       </ul>
 
-      {/* Estimated savings */}
+      {/* File list */}
       {estimatedPct > 0 && (
         <div className="mb-3 text-[11px] text-muted-foreground">
-          Estimated savings: <span className="text-success font-medium">{estimatedPct}%</span>
+          Estimated savings:{' '}
+          <span className="text-success font-medium">{estimatedPct}%</span>
         </div>
       )}
 
-      {/* Suggested rules */}
+      {/* Estimated savings */}
       {suggestedRules.length > 0 && (
         <div className="mb-3">
-          <div className="text-[10px] text-muted-foreground mb-1">Suggested rules:</div>
+          <div className="text-[10px] text-muted-foreground mb-1">
+            Suggested rules:
+          </div>
           <pre className="rounded bg-background px-2 py-1.5 text-[10px] font-mono text-foreground overflow-x-auto">
             {suggestedRules.join("\n")}
           </pre>
         </div>
       )}
 
-      {/* CTA — informational since crab init is required first */}
+      {/* Suggested rules */}
       <div className="text-[10px] text-muted-foreground">
-        Run <code className="rounded bg-background px-1 py-0.5 font-mono text-foreground">crab add</code> in the terminal to start tracking these files.
+        Run{' '}
+        <code className="rounded bg-background px-1 py-0.5 font-mono text-foreground">
+          crab add
+        </code>{' '}
+        in the terminal to start tracking these files.
       </div>
     </div>
   );
@@ -1495,7 +1550,9 @@ function DedupOnboardingCard({
 function DedupNoLargeFilesCard() {
   return (
     <div className="rounded-lg border border-border bg-card p-4">
-      <div className="mb-2 text-[11px] font-medium text-muted-foreground">Dedup savings</div>
+      <div className="mb-2 text-[11px] font-medium text-muted-foreground">
+        Dedup savings
+      </div>
       <div className="flex items-center gap-2">
         <span className="inline-flex items-center gap-1.5 rounded-full bg-success/10 border border-success/30 px-3 py-1 text-[11px] font-medium text-success">
           All files under 1 MB ✓
@@ -1515,7 +1572,9 @@ function PointerBreakdownCard({ summary }: { summary: RepoSummary | null }) {
   if (!summary) {
     return (
       <div className="rounded-lg border border-border bg-card p-4">
-        <div className="mb-2 text-[11px] font-medium text-muted-foreground">Pointer breakdown</div>
+        <div className="mb-2 text-[11px] font-medium text-muted-foreground">
+          Pointer breakdown
+        </div>
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <Loader2 size={12} className="animate-spin" /> Loading…
         </div>
@@ -1532,7 +1591,9 @@ function PointerBreakdownCard({ summary }: { summary: RepoSummary | null }) {
   if (crabCount === 0 && lfsCount === 0) {
     return (
       <div className="rounded-lg border border-border bg-card p-4">
-        <div className="mb-2 text-[11px] font-medium text-muted-foreground">Pointer breakdown</div>
+        <div className="mb-2 text-[11px] font-medium text-muted-foreground">
+          Pointer breakdown
+        </div>
         <div className="flex items-center gap-2">
           <span className="inline-flex items-center gap-1.5 rounded-full bg-muted-foreground/10 border border-border px-3 py-1 text-[11px] text-muted-foreground">
             All files tracked by git
@@ -1546,7 +1607,9 @@ function PointerBreakdownCard({ summary }: { summary: RepoSummary | null }) {
   if (crabCount === 0 && gitCount === 0 && lfsCount > 0) {
     return (
       <div className="rounded-lg border border-border bg-card p-4">
-        <div className="mb-2 text-[11px] font-medium text-muted-foreground">Pointer breakdown</div>
+        <div className="mb-2 text-[11px] font-medium text-muted-foreground">
+          Pointer breakdown
+        </div>
         <div className="mb-3 flex items-center gap-2">
           <span className="inline-flex items-center gap-1.5 rounded-full bg-thinking/10 border border-thinking/30 px-3 py-1 text-[11px] text-thinking">
             {lfsCount} LFS file{lfsCount === 1 ? "" : "s"}
@@ -1570,7 +1633,9 @@ function PointerBreakdownCard({ summary }: { summary: RepoSummary | null }) {
 
   return (
     <div className="rounded-lg border border-border bg-card p-4">
-      <div className="mb-3 text-[11px] font-medium text-muted-foreground">Pointer breakdown</div>
+      <div className="mb-3 text-[11px] font-medium text-muted-foreground">
+        Pointer breakdown
+      </div>
 
       {/* Stacked horizontal bar */}
       <div className="mb-3 flex h-4 overflow-hidden rounded-full bg-background">
@@ -1581,7 +1646,9 @@ function PointerBreakdownCard({ summary }: { summary: RepoSummary | null }) {
             title={`Git: ${gitCount} files`}
           >
             {gitPct > 5 && (
-              <span className="text-[8px] font-medium text-foreground/70">{Math.round(gitPct)}%</span>
+              <span className="text-[8px] font-medium text-foreground/70">
+                {Math.round(gitPct)}%
+              </span>
             )}
           </div>
         )}
@@ -1592,7 +1659,9 @@ function PointerBreakdownCard({ summary }: { summary: RepoSummary | null }) {
             title={`Crab: ${crabCount} files`}
           >
             {crabPct > 5 && (
-              <span className="text-[8px] font-medium text-foreground/90">{Math.round(crabPct)}%</span>
+              <span className="text-[8px] font-medium text-foreground/90">
+                {Math.round(crabPct)}%
+              </span>
             )}
           </div>
         )}
@@ -1603,7 +1672,9 @@ function PointerBreakdownCard({ summary }: { summary: RepoSummary | null }) {
             title={`LFS: ${lfsCount} files`}
           >
             {lfsPct > 5 && (
-              <span className="text-[8px] font-medium text-foreground/90">{Math.round(lfsPct)}%</span>
+              <span className="text-[8px] font-medium text-foreground/90">
+                {Math.round(lfsPct)}%
+              </span>
             )}
           </div>
         )}
@@ -1643,8 +1714,12 @@ function HydrationCard({ summary }: { summary: HydrationSummary }) {
       <div className="mt-2 flex flex-wrap gap-3 text-[10px] text-muted-foreground">
         <Legend color="bg-success" label={`Hydrated ${summary.hydrated}`} />
         <Legend color="bg-primary/50" label={`Pointer ${summary.pointer}`} />
-        {summary.partial > 0 && <Legend color="bg-warning" label={`Partial ${summary.partial}`} />}
-        {summary.missing > 0 && <Legend color="bg-destructive" label={`Missing ${summary.missing}`} />}
+        {summary.partial > 0 && (
+          <Legend color="bg-warning" label={`Partial ${summary.partial}`} />
+        )}
+        {summary.missing > 0 && (
+          <Legend color="bg-destructive" label={`Missing ${summary.missing}`} />
+        )}
       </div>
     </div>
   );
@@ -1653,37 +1728,55 @@ function HydrationCard({ summary }: { summary: HydrationSummary }) {
 function RecentCommitsCard({ commits, onSelect }: { commits: CommitRow[] | null; onSelect?: (sha: string) => void }) {
   return (
     <div className="rounded-lg border border-border bg-card p-4">
-      <div className="mb-3 text-[11px] text-muted-foreground">Recent commits</div>
+      <div className="mb-3 text-[11px] text-muted-foreground">
+        Recent commits
+      </div>
       {commits == null ? (
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <Loader2 size={12} className="animate-spin" /> Loading…
         </div>
       ) : commits.length === 0 ? (
-        <div className="text-xs text-muted-foreground">No commit history available.</div>
+        <div className="text-xs text-muted-foreground">
+          No commit history available.
+        </div>
       ) : (
         <ul className="space-y-0.5 text-[12px]">
           {commits.slice(0, 10).map((c) => (
             <li key={c.sha}>
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 onClick={() => onSelect?.(c.sha)}
-                className="flex w-full items-center gap-3 rounded px-2 py-1.5 text-left transition hover:bg-accent"
+                className="justify-start flex w-full items-center gap-3 rounded px-2 py-1.5 text-left transition hover:bg-accent"
               >
                 <AuthorDot name={c.author} />
-                <code className="shrink-0 font-mono text-[11px] text-muted-foreground">{c.sha.slice(0, 7)}</code>
+                <code className="shrink-0 font-mono text-[11px] text-muted-foreground">
+                  {c.sha.slice(0, 7)}
+                </code>
                 <span className="min-w-0 flex-1 truncate">{c.subject}</span>
                 {c.insertions != null && (
-                  <span className="shrink-0 font-mono text-[11px] text-success">+{c.insertions}</span>
+                  <span className="shrink-0 font-mono text-[11px] text-success">
+                    +{c.insertions}
+                  </span>
                 )}
                 {c.deletions != null && (
-                  <span className="shrink-0 font-mono text-[11px] text-destructive">−{c.deletions}</span>
+                  <span className="shrink-0 font-mono text-[11px] text-destructive">
+                    −{c.deletions}
+                  </span>
                 )}
                 {c.files_changed != null && (
-                  <span className="shrink-0 text-[11px] text-muted-foreground">· {c.files_changed} file{c.files_changed === 1 ? "" : "s"}</span>
+                  <span className="shrink-0 text-[11px] text-muted-foreground">
+                    · {c.files_changed} file{c.files_changed === 1 ? "" : "s"}
+                  </span>
                 )}
-                <span className="shrink-0 text-[11px] text-muted-foreground">{c.author}</span>
-                <span className="shrink-0 text-[11px] text-muted-foreground">{formatRelDate(c.date)}</span>
-              </button>
+                <span className="shrink-0 text-[11px] text-muted-foreground">
+                  {c.author}
+                </span>
+                <span className="shrink-0 text-[11px] text-muted-foreground">
+                  {formatRelDate(c.date)}
+                </span>
+              </Button>
             </li>
           ))}
         </ul>
@@ -1711,7 +1804,9 @@ function ReleaseTimeline({ data, onSelectTag }: { data: ReleaseTimelineResult | 
   if (!data) {
     return (
       <div className="mt-4 rounded-lg border border-border bg-card p-4">
-        <div className="mb-3 text-[11px] font-medium text-muted-foreground">Release timeline</div>
+        <div className="mb-3 text-[11px] font-medium text-muted-foreground">
+          Release timeline
+        </div>
         <TimelineSkeleton />
       </div>
     );
@@ -1729,14 +1824,20 @@ function ReleaseTimeline({ data, onSelectTag }: { data: ReleaseTimelineResult | 
       aria-label={`Release timeline: ${data.tags.length} releases`}
     >
       <div className="mb-3 flex items-center justify-between">
-        <div className="text-[11px] font-medium text-muted-foreground">Release timeline</div>
-        <span className="text-[10px] text-muted-foreground">{data.tags.length} releases</span>
+        <div className="text-[11px] font-medium text-muted-foreground">
+          Release timeline
+        </div>
+        <span className="text-[10px] text-muted-foreground">
+          {data.tags.length} releases
+        </span>
       </div>
       <div className="flex flex-wrap gap-2">
         {tags.map((t, i) => {
           const isLatest = i === 0;
           return (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               key={t.name}
               type="button"
               onClick={() => onSelectTag?.(t.name)}
@@ -1749,7 +1850,7 @@ function ReleaseTimeline({ data, onSelectTag }: { data: ReleaseTimelineResult | 
             >
               <span className={`w-2 h-2 rounded-full ${isLatest ? "bg-primary" : "bg-muted-foreground/50"}`} />
               {t.name}
-            </button>
+            </Button>
           );
         })}
         {data.tags.length > 10 && (
@@ -1764,7 +1865,6 @@ function ReleaseTimeline({ data, onSelectTag }: { data: ReleaseTimelineResult | 
 
 // ---- Size History Chart ----
 
-
 /** Format a git ISO date string for display in tooltips. */
 function formatTagDate(dateStr: string): string {
   try {
@@ -1775,8 +1875,6 @@ function formatTagDate(dateStr: string): string {
     return dateStr;
   }
 }
-
-
 
 function AuthorDot({ name }: { name: string }) {
   const initial = (name.trim()[0] ?? "?").toUpperCase();

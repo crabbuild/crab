@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { useCardExpanded } from "./useCardExpanded";
 /**
  * Specialized renderer for Codex `imageView` items.
@@ -13,17 +14,17 @@ import { useCardExpanded } from "./useCardExpanded";
  *     worktree root, read from `HunkActionsContext`.
  */
 
-import { useEffect, useState } from "react";
 import {
+  AlertTriangle,
   ChevronDown,
   ChevronRight,
-  Image as ImageIcon,
   ExternalLink,
-  AlertTriangle,
+  Image as ImageIcon,
 } from "lucide-react";
-import type { ToolCardRendererProps } from "./types";
+import { useEffect, useState } from "react";
 import { CollapsedCardLine } from "./CollapsedCardLine";
 import { useHunkActions } from "./HunkActionsContext";
+import type { ToolCardRendererProps } from "./types";
 
 const SUPPORTED_EXT = new Set([
   ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".ico", ".avif",
@@ -103,13 +104,17 @@ export function ImageViewCard({ event, defaultExpanded = true, collapsed: collap
 
   return (
     <div className="rounded-md border border-border/40 overflow-hidden">
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={() => setExpanded(!expanded)}
-        className="flex w-full items-center gap-2 px-2.5 py-1.5 text-[10px] text-left hover:bg-accent transition cursor-pointer"
+        className="justify-start flex w-full items-center gap-2 px-2.5 py-1.5 text-[10px] text-left hover:bg-accent transition cursor-pointer"
       >
         <ImageIcon size={11} className="shrink-0 text-muted-foreground" />
-        <span className="shrink-0 font-medium text-muted-foreground">Image</span>
+        <span className="shrink-0 font-medium text-muted-foreground">
+          Image
+        </span>
         <span className="min-w-0 flex-1 truncate">
           <span className="text-foreground/90 font-medium">{shortPath}</span>
         </span>
@@ -128,16 +133,19 @@ export function ImageViewCard({ event, defaultExpanded = true, collapsed: collap
             <ExternalLink size={9} />
           </a>
         )}
-        {expanded
-          ? <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
-          : <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />}
-      </button>
+        {expanded ? (
+          <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
+        ) : (
+          <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
+        )}
+      </Button>
 
       {expanded && (
         <div className="border-t border-border/30 px-2.5 py-2 bg-background/30">
           {!isSupportedFormat ? (
             <p className="text-[10px] text-muted-foreground italic">
-              Unsupported format — only PNG, JPEG, GIF, WebP, SVG, BMP, ICO, AVIF render inline.
+              Unsupported format — only PNG, JPEG, GIF, WebP, SVG, BMP, ICO,
+              AVIF render inline.
             </p>
           ) : !ctx?.worktreePath && !rawPath.startsWith("/") ? (
             <p className="text-[10px] text-muted-foreground italic">
@@ -155,7 +163,9 @@ export function ImageViewCard({ event, defaultExpanded = true, collapsed: collap
             />
           ) : null}
           {canRender && rawPath && (
-            <p className="mt-1.5 truncate font-mono text-[9px] text-muted-foreground/70">{rawPath}</p>
+            <p className="mt-1.5 truncate font-mono text-[9px] text-muted-foreground/70">
+              {rawPath}
+            </p>
           )}
         </div>
       )}

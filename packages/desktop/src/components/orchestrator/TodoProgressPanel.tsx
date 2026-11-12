@@ -1,14 +1,15 @@
-import { useState } from "react";
+import { Button } from "@/components/ui/button";
 import clsx from "clsx";
 import {
+  ArrowUp,
   Check,
   ChevronDown,
   ChevronUp,
   Circle,
   ListTodo,
   Loader2,
-  ArrowUp,
 } from "lucide-react";
+import { useState } from "react";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -162,10 +163,12 @@ export function TodoProgressPanel({ input, previousInput }: TodoProgressPanelPro
   return (
     <div className="shrink-0 border-t border-border bg-background">
       {/* Header — always visible */}
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={() => setExpanded(!expanded)}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-accent transition cursor-pointer"
+        className="justify-start flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-accent transition cursor-pointer"
       >
         <ListTodo size={12} className="text-warning shrink-0" />
         <span className="text-[11px] font-medium text-foreground">Todos</span>
@@ -201,22 +204,25 @@ export function TodoProgressPanel({ input, previousInput }: TodoProgressPanelPro
           {completed}/{total}
         </span>
 
-        {expanded
-          ? <ChevronDown size={11} className="shrink-0 text-muted-foreground/60" />
-          : <ChevronUp size={11} className="shrink-0 text-muted-foreground/60" />
-        }
-      </button>
+        {expanded ? (
+          <ChevronDown size={11} className="shrink-0 text-muted-foreground/60" />
+        ) : (
+          <ChevronUp size={11} className="shrink-0 text-muted-foreground/60" />
+        )}
+      </Button>
 
       {/* Expanded content */}
       {expanded && (
         <div className="border-t border-border/30 px-3 py-2 space-y-2 max-h-[200px] overflow-auto">
-          {/* Progress bar */}
+          {/* Expanded content */}
           <ProgressBar completed={completed} total={total} />
 
-          {/* Delta section (what changed this call) */}
+          {/* Progress bar */}
           {hasDeltas && (
             <div className="space-y-1 mb-2">
-              <span className="text-[9px] font-medium text-muted-foreground uppercase tracking-wider">Changes</span>
+              <span className="text-[9px] font-medium text-muted-foreground uppercase tracking-wider">
+                Changes
+              </span>
               {todos.map((item) => {
                 const key = item.id ?? item.content;
                 const delta = changed.get(key);
@@ -227,15 +233,22 @@ export function TodoProgressPanel({ input, previousInput }: TodoProgressPanelPro
                     {isAdded ? (
                       <>
                         <span className="text-success">+</span>
-                        <span className="flex-1 truncate text-foreground">{item.content}</span>
-                        <span className="text-[9px] text-success/70 italic">new</span>
+                        <span className="flex-1 truncate text-foreground">
+                          {item.content}
+                        </span>
+                        <span className="text-[9px] text-success/70 italic">
+                          new
+                        </span>
                       </>
                     ) : (
                       <>
                         <ArrowUp size={9} className="text-primary shrink-0" />
-                        <span className="flex-1 truncate text-foreground">{item.content}</span>
+                        <span className="flex-1 truncate text-foreground">
+                          {item.content}
+                        </span>
                         <span className="text-[9px] text-muted-foreground">
-                          {delta!.from} → <span className="text-primary">{delta!.to}</span>
+                          {delta!.from} →{" "}
+                          <span className="text-primary">{delta!.to}</span>
                         </span>
                       </>
                     )}

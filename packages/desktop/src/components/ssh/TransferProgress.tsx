@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Transfer Progress Panel — floating panel (bottom-right) showing
  * active file transfers with progress bars, speed, ETA, and cancel.
@@ -72,21 +73,29 @@ export function TransferProgress({
       <header className="ssh-transfer-panel__header">
         <h3 className="ssh-transfer-panel__title">
           Transfers
-          {activeCount > 0 && <span className="ssh-transfer-panel__badge">{activeCount}</span>}
+          {activeCount > 0 && (
+            <span className="ssh-transfer-panel__badge">{activeCount}</span>
+          )}
         </h3>
         <div className="ssh-transfer-panel__summary">
           {activeCount > 0 && <span>{activeCount} active</span>}
           {completedCount > 0 && <span>{completedCount} done</span>}
-          {failedCount > 0 && <span className="ssh-transfer-panel__failed">{failedCount} failed</span>}
+          {failedCount > 0 && (
+            <span className="ssh-transfer-panel__failed">
+              {failedCount} failed
+            </span>
+          )}
         </div>
         {transfers.length > 0 && (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             className="ssh-transfer-panel__dismiss-all"
             onClick={onDismissAll}
             aria-label="Dismiss all completed transfers"
           >
             Clear
-          </button>
+          </Button>
         )}
       </header>
 
@@ -122,13 +131,15 @@ export function TransferProgress({
                     {formatSpeed(transfer.speed)} · {formatEta(transfer.eta)}
                   </span>
                 </div>
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   className="ssh-transfer-item__cancel"
                   onClick={() => onCancel(transfer.id)}
                   aria-label={`Cancel transfer of ${getFileName(transfer.localPath)}`}
                 >
                   ✕
-                </button>
+                </Button>
               </>
             )}
 
@@ -137,13 +148,15 @@ export function TransferProgress({
             )}
 
             {transfer.status === "completed" && (
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 className="ssh-transfer-item__dismiss"
                 onClick={() => onDismiss(transfer.id)}
                 aria-label="Dismiss"
               >
                 ✓
-              </button>
+              </Button>
             )}
 
             {transfer.status === "failed" && (
@@ -151,13 +164,15 @@ export function TransferProgress({
                 <span className="ssh-transfer-item__error-msg" title={transfer.error}>
                   {transfer.error ?? "Failed"}
                 </span>
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   className="ssh-transfer-item__retry"
                   onClick={() => onRetry(transfer.id)}
                   aria-label="Retry transfer"
                 >
                   Retry
-                </button>
+                </Button>
               </div>
             )}
 

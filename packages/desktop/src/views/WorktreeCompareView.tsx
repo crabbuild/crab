@@ -1,8 +1,14 @@
+import { Button } from "@/components/ui/button";
+import {
+  ChevronRight,
+  FileText,
+  GitCompareArrows,
+  Loader2,
+} from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { GitCompareArrows, Loader2, ChevronRight, FileText } from "lucide-react";
-import { PanelGroup, Panel, PanelResizeHandle } from "react-resizable-panels";
-import { OpenRepo } from "../state";
+import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { rpc } from "../ipc";
+import { OpenRepo } from "../state";
 import { DiffView } from "./DiffView";
 
 interface Props {
@@ -103,14 +109,16 @@ export function WorktreeCompareView({
           </span>
         )}
         {onClose && (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="ml-auto rounded px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
             onClick={onClose}
             aria-label="Close comparison"
           >
             Close
-          </button>
+          </Button>
         )}
       </div>
 
@@ -128,7 +136,8 @@ export function WorktreeCompareView({
         )}
         {!loading && !error && files && files.length === 0 && (
           <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
-            <GitCompareArrows size={14} /> No differences between these branches.
+            <GitCompareArrows size={14} /> No differences between these
+            branches.
           </div>
         )}
         {!loading && !error && files && files.length > 0 && (
@@ -140,7 +149,9 @@ export function WorktreeCompareView({
                   Changed Files
                 </div>
                 {files.map((file) => (
-                  <button
+                  <Button
+                    variant="ghost"
+                    size="compact"
                     key={file.path}
                     type="button"
                     className={`flex w-full items-center gap-2 px-2 py-1.5 text-left text-[11px] transition ${
@@ -156,7 +167,7 @@ export function WorktreeCompareView({
                     <span className="truncate font-mono">
                       {file.path.split("/").pop() ?? file.path}
                     </span>
-                  </button>
+                  </Button>
                 ))}
               </div>
             </Panel>

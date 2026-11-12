@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { useCardExpanded } from "./useCardExpanded";
 /**
  * Specialized renderer for LSP (Language Server Protocol) tool calls.
@@ -7,12 +8,17 @@ import { useCardExpanded } from "./useCardExpanded";
  * contains JSON (common for LSP responses).
  */
 
-
 import clsx from "clsx";
-import { ChevronDown, ChevronRight, Braces, AlertTriangle, Info } from "lucide-react";
-import type { ToolCardRendererProps } from "./types";
+import {
+  AlertTriangle,
+  Braces,
+  ChevronDown,
+  ChevronRight,
+  Info,
+} from "lucide-react";
 import { CollapsedCardLine } from "./CollapsedCardLine";
 import { ShikiPreview } from "./ShikiPreview";
+import type { ToolCardRendererProps } from "./types";
 
 // ── Component ───────────────────────────────────────────────────────
 
@@ -42,8 +48,14 @@ export function LSPCard({ event, defaultExpanded = false, collapsed: collapsedPr
         <Braces size={11} className="shrink-0 text-muted-foreground" />
         <span className="font-medium text-foreground/80">LSP</span>
         <span className="text-[9px] text-muted-foreground">{operation}</span>
-        {symbol && <code className="font-mono text-foreground/70 truncate">{symbol}</code>}
-        {!symbol && shortPath && <span className="truncate text-foreground/70">{shortPath}</span>}
+        {symbol && (
+          <code className="font-mono text-foreground/70 truncate">
+            {symbol}
+          </code>
+        )}
+        {!symbol && shortPath && (
+          <span className="truncate text-foreground/70">{shortPath}</span>
+        )}
         {hasDiagnostics && (
           <span className="shrink-0 flex items-center gap-0.5 text-[9px] text-warning">
             <AlertTriangle size={9} /> {diagnostics.length}
@@ -62,7 +74,9 @@ export function LSPCard({ event, defaultExpanded = false, collapsed: collapsedPr
 
   return (
     <div className="rounded-md border border-border/40 overflow-hidden">
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={() => (hasOutput || hasDiagnostics) && setExpanded(!expanded)}
         className={clsx(
@@ -85,7 +99,9 @@ export function LSPCard({ event, defaultExpanded = false, collapsed: collapsedPr
             <code className="font-mono text-foreground/80">{symbol}</code>
           )}
           {shortPath && (
-            <span className="text-[9px] text-muted-foreground/60 truncate">{shortPath}</span>
+            <span className="text-[9px] text-muted-foreground/60 truncate">
+              {shortPath}
+            </span>
           )}
         </span>
 
@@ -97,12 +113,13 @@ export function LSPCard({ event, defaultExpanded = false, collapsed: collapsedPr
           </span>
         )}
 
-        {(hasOutput || hasDiagnostics) && (
-          expanded
-            ? <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
-            : <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
-        )}
-      </button>
+        {(hasOutput || hasDiagnostics) &&
+          (expanded ? (
+            <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
+          ) : (
+            <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
+          ))}
+      </Button>
 
       {expanded && (hasOutput || hasDiagnostics) && (
         <div className="border-t border-border/30 max-h-[250px] overflow-auto">
@@ -112,9 +129,13 @@ export function LSPCard({ event, defaultExpanded = false, collapsed: collapsedPr
               {diagnostics.map((diag, idx) => (
                 <div key={idx} className="flex items-start gap-1.5 text-[10px]">
                   <DiagnosticIcon severity={diag.severity} />
-                  <span className="flex-1 text-foreground/70">{diag.message}</span>
+                  <span className="flex-1 text-foreground/70">
+                    {diag.message}
+                  </span>
                   {diag.line && (
-                    <span className="shrink-0 text-[9px] text-muted-foreground font-mono">L{diag.line}</span>
+                    <span className="shrink-0 text-[9px] text-muted-foreground font-mono">
+                      L{diag.line}
+                    </span>
                   )}
                 </div>
               ))}
@@ -122,9 +143,7 @@ export function LSPCard({ event, defaultExpanded = false, collapsed: collapsedPr
           )}
 
           {/* Raw output */}
-          {hasOutput && !hasDiagnostics && (
-            <LspOutput output={output} />
-          )}
+          {hasOutput && !hasDiagnostics && <LspOutput output={output} />}
         </div>
       )}
     </div>
@@ -179,9 +198,13 @@ function parseDiagnostics(output: string): Diagnostic[] {
 function DiagnosticIcon({ severity }: { severity: Diagnostic["severity"] }) {
   switch (severity) {
     case "error":
-      return <AlertTriangle size={10} className="text-destructive shrink-0 mt-0.5" />;
+      return (
+        <AlertTriangle size={10} className="text-destructive shrink-0 mt-0.5" />
+      );
     case "warning":
-      return <AlertTriangle size={10} className="text-warning shrink-0 mt-0.5" />;
+      return (
+        <AlertTriangle size={10} className="text-warning shrink-0 mt-0.5" />
+      );
     default:
       return <Info size={10} className="text-info shrink-0 mt-0.5" />;
   }
@@ -205,10 +228,14 @@ function LspOutput({ output }: { output: string }) {
       const display = pretty.length > LSP_OUTPUT_LIMIT
         ? pretty.slice(0, LSP_OUTPUT_LIMIT) + "\n… (truncated)"
         : pretty;
-      return <ShikiPreview code={display} lang="json" className="[&_pre]:!py-2 [&_pre]:!px-2.5" />;
+      return (
+        <ShikiPreview code={display} lang="json" className="[&_pre]:!py-2 [&_pre]:!px-2.5" />
+      );
     } catch {
       // Partial JSON — still try to highlight.
-      return <ShikiPreview code={text} lang="json" className="[&_pre]:!py-2 [&_pre]:!px-2.5" />;
+      return (
+        <ShikiPreview code={text} lang="json" className="[&_pre]:!py-2 [&_pre]:!px-2.5" />
+      );
     }
   }
 

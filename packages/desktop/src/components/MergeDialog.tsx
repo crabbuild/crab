@@ -1,7 +1,10 @@
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import clsx from "clsx";
 import { GitMerge, Loader2 } from "lucide-react";
-import { useEffect, useId, useRef, useState } from "react";
+import { useId, useRef, useState } from "react";
 import { MergeStrategy, rpc } from "../ipc";
 
 /**
@@ -39,10 +42,8 @@ export function MergeDialog({
   onConflicts,
   onCancel,
 }: MergeDialogProps) {
-  const headingId = useId();
   const bodyId = useId();
   const cancelRef = useRef<HTMLButtonElement | null>(null);
-  const previousActive = useRef<HTMLElement | null>(null);
 
   const [strategy, setStrategy] = useState<MergeStrategy>("MergeCommit");
   const [message, setMessage] = useState(
@@ -50,27 +51,6 @@ export function MergeDialog({
   );
   const [merging, setMerging] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  // Focus management: grab focus on mount, restore on unmount.
-  useEffect(() => {
-    previousActive.current = (document.activeElement as HTMLElement | null) ?? null;
-    cancelRef.current?.focus();
-    return () => {
-      previousActive.current?.focus?.();
-    };
-  }, []);
-
-  // Esc cancels.
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        onCancel();
-      }
-    };
-    window.addEventListener("keydown", handler, true);
-    return () => window.removeEventListener("keydown", handler, true);
-  }, [onCancel]);
 
   async function handleMerge() {
     setMerging(true);
@@ -96,18 +76,21 @@ export function MergeDialog({
   }
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onCancel();
-      }}
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) {
+          onCancel();
+      }}}
     >
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={headingId}
+      <DialogContent
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          cancelRef.current?.focus();
+        }}
+        showCloseButton={false}
         aria-describedby={bodyId}
-        className="w-[30rem] max-w-[calc(100vw-2rem)] rounded-lg border border-border bg-card shadow-2xl"
+        className="block gap-0 p-0 w-[30rem] max-w-[calc(100vw-2rem)] rounded-lg border border-border bg-card shadow-2xl"
       >
         {/* Header */}
         <div className="flex items-start gap-3 border-b border-border p-4">
@@ -115,12 +98,10 @@ export function MergeDialog({
             <GitMerge size={18} aria-hidden="true" />
           </div>
           <div className="min-w-0 flex-1">
-            <h2
-              id={headingId}
-              className="text-[14px] font-semibold text-foreground"
+            <DialogTitle className="text-[14px] font-semibold text-foreground"
             >
               Merge branch
-            </h2>
+            </DialogTitle>
             <p id={bodyId} className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
               Merge{" "}
               <code className="rounded bg-background px-1 font-mono text-foreground">
@@ -161,26 +142,37 @@ export function MergeDialog({
             <legend className="text-[11px] font-medium text-muted-foreground">
               Strategy
             </legend>
-            <div className="mt-1.5 flex gap-2">
-              <StrategyOption
+            <ToggleGroup
+              type="single"
+              value={strategy}
+              onValueChange={(value) => {
+                if (value) setStrategy(value as MergeStrategy);
+              }}
+              aria-label="Merge strategy"
+              className="mt-1.5 justify-start gap-2"
+            >
+              <ToggleGroupItem
                 value="MergeCommit"
-                label="Merge commit"
-                selected={strategy}
-                onChange={setStrategy}
-              />
-              <StrategyOption
+                variant="outline"
+                className="h-7 text-xs"
+              >
+                Merge commit
+              </ToggleGroupItem>
+              <ToggleGroupItem
                 value="Squash"
-                label="Squash"
-                selected={strategy}
-                onChange={setStrategy}
-              />
-              <StrategyOption
+                variant="outline"
+                className="h-7 text-xs"
+              >
+                Squash
+              </ToggleGroupItem>
+              <ToggleGroupItem
                 value="FastForwardOnly"
-                label="Fast-forward only"
-                selected={strategy}
-                onChange={setStrategy}
-              />
-            </div>
+                variant="outline"
+                className="h-7 text-xs"
+              >
+                Fast-forward only
+              </ToggleGroupItem>
+            </ToggleGroup>
           </fieldset>
 
           {/* Commit message */}
@@ -219,7 +211,9 @@ export function MergeDialog({
 
         {/* Footer */}
         <div className="flex items-center justify-end gap-2 p-3">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             ref={cancelRef}
             type="button"
             onClick={onCancel}
@@ -231,8 +225,10 @@ export function MergeDialog({
             )}
           >
             Cancel
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={handleMerge}
             disabled={merging}
@@ -244,41 +240,9 @@ export function MergeDialog({
           >
             {merging && <Loader2 size={12} className="animate-spin" />}
             Merge
-          </button>
+          </Button>
         </div>
-      </div>
-    </div>
-  );
-}
-
-// ── Strategy radio option ──────────────────────────────────────────
-
-function StrategyOption({
-  value,
-  label,
-  selected,
-  onChange,
-}: {
-  value: MergeStrategy;
-  label: string;
-  selected: MergeStrategy;
-  onChange: (v: MergeStrategy) => void;
-}) {
-  const isSelected = selected === value;
-  return (
-    <button
-      type="button"
-      role="radio"
-      aria-checked={isSelected}
-      onClick={() => onChange(value)}
-      className={clsx(
-        "rounded border px-2.5 py-1 text-[11px] transition",
-        isSelected
-          ? "border-primary bg-primary/15 font-medium text-primary"
-          : "border-border bg-card text-muted-foreground hover:border-primary/40 hover:text-foreground",
-      )}
-    >
-      {label}
-    </button>
+      </DialogContent>
+    </Dialog>
   );
 }

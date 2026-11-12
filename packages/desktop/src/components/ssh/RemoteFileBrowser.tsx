@@ -1,4 +1,5 @@
 import { Button } from "@/components/ui/button";
+import { DropdownMenuItem, PointMenu } from "@/components/ui/dropdown-menu";
 /**
  * Remote file browser component — Finder-like experience.
  *
@@ -6,7 +7,7 @@ import { Button } from "@/components/ui/button";
  * back/forward history, context menu actions, loading/error/empty states.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import clsx from "clsx";
 import {
   ArrowLeft,
   ArrowRight,
@@ -22,14 +23,14 @@ import {
   Loader2,
   Lock,
   MoreVertical,
+  PanelLeft,
   RefreshCw,
   Terminal,
   Trash2,
-  PanelLeft,
 } from "lucide-react";
-import clsx from "clsx";
-import { FileSyncStatus, SyncStatusIcon } from "./SyncStatusIcon";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SyncPairStatusBadge } from "./SyncPairStatusBadge";
+import { FileSyncStatus, SyncStatusIcon } from "./SyncStatusIcon";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -269,12 +270,6 @@ export function RemoteFileBrowser({
   }, []);
 
   // Close context menu on click outside
-  useEffect(() => {
-    if (!contextMenu) return;
-    const handler = () => setContextMenu(null);
-    document.addEventListener("click", handler);
-    return () => document.removeEventListener("click", handler);
-  }, [contextMenu]);
 
   // Tree expand/collapse
   const handleTreeToggle = useCallback(async (nodePath: string) => {
@@ -434,16 +429,24 @@ export function RemoteFileBrowser({
       <div className="flex items-center gap-0.5 px-3 py-1.5 text-xs text-muted-foreground overflow-x-auto border-b border-border bg-background scrollbar-none">
         {segments.map((seg, i) => (
           <span key={seg.path} className="flex items-center gap-0.5 shrink-0">
-            {i > 0 && <ChevronRight className="w-3 h-3 text-muted-foreground/50" />}
-            <button
+            {i > 0 && (
+              <ChevronRight className="w-3 h-3 text-muted-foreground/50" />
+            )}
+            <Button
+              variant="ghost"
+              size="compact"
               onClick={() => handleNavigate(seg.path)}
               className={clsx(
                 "px-1 py-0.5 rounded hover:bg-accent hover:text-foreground transition-colors truncate max-w-[140px]",
                 i === segments.length - 1 ? "font-medium text-foreground" : "text-muted-foreground",
               )}
             >
-              {seg.label === "/" ? <Home className="w-3 h-3 inline" /> : seg.label}
-            </button>
+              {seg.label === "/" ? (
+                <Home className="w-3 h-3 inline" />
+              ) : (
+                seg.label
+              )}
+            </Button>
           </span>
         ))}
       </div>
@@ -453,16 +456,18 @@ export function RemoteFileBrowser({
         <div className="flex items-center gap-2 px-3 py-1.5 bg-primary/10 border-b border-primary/20">
           <FolderGit2 className="w-4 h-4 text-primary" />
           <span className="text-xs text-primary">Git repository detected</span>
-          <button
+          <Button
+            variant="default"
+            size="compact"
             onClick={handleOpenRepo}
             className="ml-auto text-xs px-2 py-0.5 rounded bg-primary text-primary-foreground hover:bg-primary-hover transition-colors"
           >
             Open Repo
-          </button>
+          </Button>
         </div>
       )}
 
-      {/* Main content area */}
+      {/* Tree sidebar */}
       <div className="flex flex-1 overflow-hidden">
         {/* Tree sidebar */}
         {showTree && (
@@ -482,13 +487,15 @@ export function RemoteFileBrowser({
           </div>
         )}
 
-        {/* File listing */}
+        {/* Loading state */}
         <div className="flex-1 overflow-y-auto" role="grid" aria-label="Remote file browser">
           {/* Loading state */}
           {loading && (
             <div className="flex flex-col items-center justify-center py-12 gap-2">
               <Loader2 className="w-6 h-6 animate-spin text-primary" />
-              <span className="text-sm text-muted-foreground">Loading directory...</span>
+              <span className="text-sm text-muted-foreground">
+                Loading directory...
+              </span>
             </div>
           )}
 
@@ -496,7 +503,9 @@ export function RemoteFileBrowser({
           {error && !loading && (
             <div className="flex flex-col items-center justify-center py-12 gap-3">
               <Lock className="w-8 h-8 text-destructive" />
-              <p className="text-sm text-destructive max-w-xs text-center">{error}</p>
+              <p className="text-sm text-destructive max-w-xs text-center">
+                {error}
+              </p>
               <Button variant="default"
                 onClick={handleRefresh}
                 className="text-xs"
@@ -507,18 +516,20 @@ export function RemoteFileBrowser({
             </div>
           )}
 
-          {/* Empty state */}
+          {/* List view */}
           {!loading && !error && sortedEntries.length === 0 && (
             <div className="flex flex-col items-center justify-center py-12 gap-2">
               <FolderOpen className="w-8 h-8 text-muted-foreground/50" />
-              <span className="text-sm text-muted-foreground">This directory is empty</span>
+              <span className="text-sm text-muted-foreground">
+                This directory is empty
+              </span>
             </div>
           )}
 
           {/* List view */}
           {!loading && !error && sortedEntries.length > 0 && viewMode === "list" && (
-            <div className="divide-y divide-border/30">
-              {sortedEntries.map((entry) => (
+              <div className="divide-y divide-border/30">
+                {sortedEntries.map((entry) => (
                 <FileEntryRow
                   key={entry.path}
                   entry={entry}
@@ -528,13 +539,13 @@ export function RemoteFileBrowser({
                   onAction={(e) => handleContextMenu(e, entry)}
                 />
               ))}
-            </div>
-          )}
+              </div>
+            )}
 
           {/* Grid view */}
           {!loading && !error && sortedEntries.length > 0 && viewMode === "grid" && (
-            <div className="grid grid-cols-[repeat(auto-fill,minmax(100px,1fr))] gap-2 p-3">
-              {sortedEntries.map((entry) => (
+              <div className="grid grid-cols-[repeat(auto-fill,minmax(100px,1fr))] gap-2 p-3">
+                {sortedEntries.map((entry) => (
                 <FileEntryCard
                   key={entry.path}
                   entry={entry}
@@ -542,8 +553,8 @@ export function RemoteFileBrowser({
                   onContextMenu={(e) => handleContextMenu(e, entry)}
                 />
               ))}
-            </div>
-          )}
+              </div>
+            )}
         </div>
       </div>
 
@@ -587,7 +598,9 @@ function TreeNodeRow({ node, depth, currentPath, onToggle, onNavigate }: TreeNod
         )}
         style={{ paddingLeft: `${depth * 12 + 8}px` }}
       >
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           onClick={() => onToggle(node.path)}
           className="shrink-0 w-4 h-4 flex items-center justify-center"
           aria-label={node.expanded ? "Collapse" : "Expand"}
@@ -602,8 +615,10 @@ function TreeNodeRow({ node, depth, currentPath, onToggle, onNavigate }: TreeNod
               )}
             />
           )}
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           onClick={() => onNavigate(node.path)}
           className="flex items-center gap-1 flex-1 truncate"
         >
@@ -613,7 +628,7 @@ function TreeNodeRow({ node, depth, currentPath, onToggle, onNavigate }: TreeNod
             <Folder className="w-3.5 h-3.5 text-primary shrink-0" />
           )}
           <span className="truncate">{node.name}</span>
-        </button>
+        </Button>
       </div>
       {node.expanded && node.children && node.children.map((child) => (
         <TreeNodeRow
@@ -644,7 +659,9 @@ function FileEntryRow({ entry, syncStatus, onClick, onContextMenu, onAction }: F
   const isDir = entry.kind === "dir";
 
   return (
-    <button
+    <Button
+      variant="ghost"
+      size="compact"
       className={clsx(
         "flex items-center gap-2.5 w-full px-3 py-1.5 text-left text-sm group",
         "hover:bg-accent transition-colors",
@@ -674,7 +691,7 @@ function FileEntryRow({ entry, syncStatus, onClick, onContextMenu, onAction }: F
       >
         <MoreVertical className="w-3.5 h-3.5" />
       </Button>
-    </button>
+    </Button>
   );
 }
 
@@ -691,7 +708,9 @@ function FileEntryCard({ entry, onClick, onContextMenu }: FileEntryCardProps) {
   const isDir = entry.kind === "dir";
 
   return (
-    <button
+    <Button
+      variant="ghost"
+      size="compact"
       className={clsx(
         "flex flex-col items-center gap-1.5 p-3 rounded-lg text-center",
         "hover:bg-accent transition-colors cursor-pointer",
@@ -706,11 +725,15 @@ function FileEntryCard({ entry, onClick, onContextMenu }: FileEntryCardProps) {
       ) : (
         <File className="w-10 h-10 text-muted-foreground" />
       )}
-      <span className="text-xs text-foreground truncate w-full leading-tight">{name}</span>
+      <span className="text-xs text-foreground truncate w-full leading-tight">
+        {name}
+      </span>
       {entry.size != null && !isDir && (
-        <span className="text-[10px] text-muted-foreground tabular-nums">{formatSize(entry.size)}</span>
+        <span className="text-[10px] text-muted-foreground tabular-nums">
+          {formatSize(entry.size)}
+        </span>
       )}
-    </button>
+    </Button>
   );
 }
 
@@ -728,27 +751,12 @@ interface ContextMenuProps {
 }
 
 function ContextMenu({ x, y, entry, onOpenTerminal, onSetupSync, onDownload, onDelete, onClose }: ContextMenuProps) {
-  const menuRef = useRef<HTMLDivElement>(null);
   const isDir = entry.kind === "dir";
 
   // Adjust position to stay within viewport
-  const [pos, setPos] = useState({ x, y });
-  useEffect(() => {
-    if (menuRef.current) {
-      const rect = menuRef.current.getBoundingClientRect();
-      const newX = x + rect.width > window.innerWidth ? x - rect.width : x;
-      const newY = y + rect.height > window.innerHeight ? y - rect.height : y;
-      setPos({ x: Math.max(0, newX), y: Math.max(0, newY) });
-    }
-  }, [x, y]);
 
   return (
-    <div
-      ref={menuRef}
-      className="fixed z-50 min-w-[160px] rounded-lg border border-border bg-card shadow-lg py-1"
-      style={{ left: pos.x, top: pos.y }}
-      role="menu"
-    >
+    <PointMenu position={{ x, y }} onClose={onClose}>
       {isDir && onOpenTerminal && (
         <ContextMenuItem
           icon={<Terminal className="w-3.5 h-3.5" />}
@@ -778,7 +786,7 @@ function ContextMenu({ x, y, entry, onOpenTerminal, onSetupSync, onDownload, onD
         danger
         onClick={() => { onDelete(); onClose(); }}
       />
-    </div>
+    </PointMenu>
   );
 }
 
@@ -794,18 +802,17 @@ function ContextMenuItem({
   onClick: () => void;
 }) {
   return (
-    <button
+    <DropdownMenuItem
       className={clsx(
         "flex items-center gap-2 w-full px-3 py-1.5 text-xs text-left transition-colors",
         danger
           ? "text-destructive hover:bg-destructive/10"
           : "text-foreground hover:bg-accent",
       )}
-      onClick={onClick}
-      role="menuitem"
+      onSelect={onClick}
     >
       {icon}
       {label}
-    </button>
+    </DropdownMenuItem>
   );
 }

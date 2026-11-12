@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * CommandSessionCard — renders Codex `command/exec` session output.
  *
@@ -13,24 +14,24 @@
  * running spinner stops.
  */
 
-import { memo, useState, useEffect, useRef, useCallback } from "react";
 import clsx from "clsx";
 import {
-  Terminal,
+  Check,
   ChevronDown,
   ChevronRight,
   Copy,
-  Check,
   Loader2,
+  Terminal,
   XCircle,
 } from "lucide-react";
-import type { ToolCardRendererProps } from "./types";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import type { AgentEvent } from "../../../../electron/orchestrator-adapters";
+import { AnsiText } from "../../../lib/ansi-text";
+import { CollapsedCardLine } from "./CollapsedCardLine";
+import type { ToolCardRendererProps } from "./types";
+import { useCardExpanded } from "./useCardExpanded";
 
 type Props = Omit<ToolCardRendererProps, "event"> & { event: AgentEvent };
-import { CollapsedCardLine } from "./CollapsedCardLine";
-import { useCardExpanded } from "./useCardExpanded";
-import { AnsiText } from "../../../lib/ansi-text";
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -134,7 +135,9 @@ export function CommandSessionCard({
           : "border-destructive/30 bg-destructive/5",
     )}>
       {/* Header */}
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={hasOutput ? toggle : undefined}
         className={clsx(
@@ -179,22 +182,30 @@ export function CommandSessionCard({
 
         {/* Copy button (visible on hover) */}
         {hasOutput && (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={(e) => { e.stopPropagation(); handleCopy(); }}
             className="shrink-0 opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground transition p-0.5"
             aria-label="Copy output"
           >
-            {copied ? <Check size={9} className="text-success" /> : <Copy size={9} />}
-          </button>
+            {copied ? (
+              <Check size={9} className="text-success" />
+            ) : (
+              <Copy size={9} />
+            )}
+          </Button>
         )}
 
         {hasOutput && (
           expanded
-            ? <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
-            : <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
-        )}
-      </button>
+            ? (
+            <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
+          ) : (
+            <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
+        ))}
+      </Button>
 
       {/* Expanded: terminal output */}
       {expanded && hasOutput && (
@@ -204,7 +215,8 @@ export function CommandSessionCard({
           </pre>
           {truncated && (
             <div className="mt-1 text-[9px] text-muted-foreground italic">
-              ... output truncated ({Math.round(accumulated.length / 1024)}KB total)
+              ... output truncated ({Math.round(accumulated.length / 1024)}KB
+              total)
             </div>
           )}
         </div>

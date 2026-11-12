@@ -1,5 +1,4 @@
 import { Button } from "@/components/ui/button";
-import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   ChevronRight,
@@ -11,9 +10,10 @@ import {
   Loader2,
   RefreshCw,
 } from "lucide-react";
-import { PanelGroup, Panel, PanelResizeHandle } from "react-resizable-panels";
-import { OpenRepo, useStore, WorkspaceRepoEntry } from "../state";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { rpc } from "../ipc";
+import { OpenRepo, useStore, WorkspaceRepoEntry } from "../state";
 import { DiffView } from "./DiffView";
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -223,11 +223,14 @@ export function CrossRepoBranchCompareView({ base, head, onClose }: Props) {
         </span>
         {compareState.phase === "ready" && (
           <span className="text-[10px] text-muted-foreground">
-            {compareState.files.length} file{compareState.files.length !== 1 ? "s" : ""} changed
+            {compareState.files.length} file
+            {compareState.files.length !== 1 ? "s" : ""} changed
           </span>
         )}
         <div className="ml-auto flex items-center gap-2">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="flex items-center gap-1 rounded px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
             onClick={() => void fetchComparison()}
@@ -235,16 +238,18 @@ export function CrossRepoBranchCompareView({ base, head, onClose }: Props) {
             aria-label="Refresh comparison"
           >
             <RefreshCw size={11} /> Refresh
-          </button>
+          </Button>
           {onClose && (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className="rounded px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
               onClick={onClose}
               aria-label="Close comparison"
             >
               Close
-            </button>
+            </Button>
           )}
         </div>
       </div>
@@ -253,7 +258,8 @@ export function CrossRepoBranchCompareView({ base, head, onClose }: Props) {
       <div className="min-h-0 flex-1">
         {compareState.phase === "loading" && (
           <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
-            <Loader2 size={14} className="animate-spin" /> Comparing branches across repos…
+            <Loader2 size={14} className="animate-spin" /> Comparing branches
+            across repos…
           </div>
         )}
         {compareState.phase === "error" && (
@@ -265,7 +271,8 @@ export function CrossRepoBranchCompareView({ base, head, onClose }: Props) {
         )}
         {compareState.phase === "ready" && compareState.files.length === 0 && (
           <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
-            <GitCompareArrows size={14} /> No differences between these branches.
+            <GitCompareArrows size={14} /> No differences between these
+            branches.
           </div>
         )}
         {compareState.phase === "ready" && compareState.files.length > 0 && (
@@ -277,7 +284,9 @@ export function CrossRepoBranchCompareView({ base, head, onClose }: Props) {
                   Changed Files
                 </div>
                 {compareState.files.map((file) => (
-                  <button
+                  <Button
+                    variant="ghost"
+                    size="compact"
                     key={file.path}
                     type="button"
                     className={`flex w-full items-center gap-2 px-2 py-1.5 text-left text-[11px] transition ${
@@ -293,7 +302,7 @@ export function CrossRepoBranchCompareView({ base, head, onClose }: Props) {
                     <span className="truncate font-mono">
                       {file.path.split("/").pop() ?? file.path}
                     </span>
-                  </button>
+                  </Button>
                 ))}
               </div>
             </Panel>

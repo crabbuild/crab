@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Quick-attach chips rendered inline above the chat composer.
  *
@@ -16,7 +17,7 @@
  * hides lower-priority chips behind a "+N more" overflow indicator.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import clsx from "clsx";
 import {
   Clipboard,
   FileCode,
@@ -25,16 +26,16 @@ import {
   Loader2,
   Terminal,
 } from "lucide-react";
-import clsx from "clsx";
-import type { ChatAttachment } from "./ChatInput";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { rpc } from "../../ipc";
 import {
   listTerminals,
   subscribe as subscribeTerminals,
   terminalTail,
   type TerminalSession,
 } from "../../lib/terminal-registry";
-import { rpc } from "../../ipc";
 import { publishToast } from "../../lib/toasts";
+import type { ChatAttachment } from "./ChatInput";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -259,7 +260,11 @@ export function QuickAttachBar({
     if (taskId) {
       result.push({
         key: "diff",
-        icon: diffLoading ? <Loader2 size={10} className="animate-spin" /> : <GitCommit size={10} />,
+        icon: diffLoading ? (
+          <Loader2 size={10} className="animate-spin" />
+        ) : (
+          <GitCommit size={10} />
+        ),
         label: "Diff vs HEAD",
         title: "Attach working-tree changes as a diff",
         onClick: attachDiff,
@@ -383,7 +388,9 @@ function Chip({
   disabled?: boolean;
 }) {
   return (
-    <button
+    <Button
+      variant="ghost"
+      size="compact"
       type="button"
       data-chip
       onClick={onClick}
@@ -398,6 +405,6 @@ function Chip({
     >
       {icon}
       <span className="truncate">{label}</span>
-    </button>
+    </Button>
   );
 }

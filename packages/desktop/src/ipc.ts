@@ -1,17 +1,18 @@
 import { OP_CANCELLED_RPC_CODE } from "../electron/rpc-transport";
 import type { FileTransferActivity, FileTransferSource, ProgressTransfer } from "../electron/file-transfers";
-export type { ProgressTransfer } from "../electron/file-transfers";
 import type { DeployProgress } from "../electron/ssh-deployer";
 import type { KnownHost } from "../electron/ssh-known-hosts";
-import type { StorageConnectionInfo, StorageConnectionInput, StorageConnectionStatus } from "../electron/storage-connection-types";
 import { parseRepoId } from "../electron/ssh-types";
+import type { StorageConnectionInfo, StorageConnectionInput, StorageConnectionStatus } from "../electron/storage-connection-types";
+import { requestConfirmation, requestPrompt } from "./lib/application-dialogs";
+export type { ProgressTransfer } from "../electron/file-transfers";
 // Typed wrapper around the `window.crab` bridge exposed by
 // `electron/preload.ts`. Centralising the types here keeps components
 // free of `unknown` assertions and makes the agent's RPC surface
 // self-documenting.
 
-import type { CapabilitySet } from "../electron/repo-capabilities";
 import type { JupyterRuntime, KernelExecution, KernelOutput, KernelSpec, KernelStatus, KernelTarget } from "../electron/jupyter-types";
+import type { CapabilitySet } from "../electron/repo-capabilities";
 
 export interface RepoHandle {
   repo_id: string;
@@ -1123,8 +1124,6 @@ declare global {
       // Repo capabilities
       getCapabilities: (repoId: string) => Promise<CapabilitySet>;
       // Dialogs (prompt/confirm replacements for sandboxed renderer)
-      dialogPrompt: (message: string, defaultValue?: string) => Promise<string | null>;
-      dialogConfirm: (message: string) => Promise<boolean>;
       // Terminal — object-based API
       termSpawn: {
         // New object-based overload
@@ -3019,10 +3018,8 @@ export const mainProcess = {
   // Repo capabilities
   getCapabilities: (repoId: string) => window.crab.getCapabilities(repoId),
   // Dialogs (prompt/confirm replacements for sandboxed renderer)
-  dialogPrompt: (message: string, defaultValue?: string) =>
-    window.crab.dialogPrompt(message, defaultValue),
-  dialogConfirm: (message: string) =>
-    window.crab.dialogConfirm(message),
+  dialogPrompt: requestPrompt,
+  dialogConfirm: requestConfirmation,
   // PTY daemon diagnostics and upgrade
   daemonDiagnostics: () => window.crab.daemonDiagnostics(),
   daemonRestart: () => window.crab.daemonRestart(),

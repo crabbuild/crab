@@ -1,16 +1,13 @@
 import { Button } from "@/components/ui/button";
-import { useCallback, useEffect, forwardRef, useImperativeHandle, useMemo, useRef, useState } from "react";
-import clsx from "clsx";
-import { SafePatchDiff } from "../components/SafePatchDiff";
-import { LargeFileDiffView } from "../components/LargeFileDiffView";
-import { NotebookDiffView } from "../components/NotebookDiffView";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { repositoryTreeTheme } from "@/lib/repository-tree-theme";
+import type { GitStatus, GitStatusEntry } from "@pierre/trees";
 import {
   FileTree as PierreFileTree,
   useFileTree,
   useFileTreeSelection,
 } from "@pierre/trees/react";
-import type { GitStatus, GitStatusEntry } from "@pierre/trees";
-import { repositoryTreeTheme } from "@/lib/repository-tree-theme";
+import clsx from "clsx";
 import {
   ChevronLeft,
   ChevronRight,
@@ -22,11 +19,31 @@ import {
   Loader2,
   ScrollText,
 } from "lucide-react";
-import { DirEntry } from "../ipc";
-import { OpenRepo } from "../state";
-import { CommitChanges, CommitFileChange, CommitRow, rpc, fileDiffCancellable, type FileComparison, type DiffVersion } from "../ipc";
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { LargeFileDiffView } from "../components/LargeFileDiffView";
+import { NotebookDiffView } from "../components/NotebookDiffView";
+import { SafePatchDiff } from "../components/SafePatchDiff";
 import { useEffectiveTheme } from "../hooks/useEffectiveTheme";
+import {
+  CommitChanges,
+  CommitFileChange,
+  CommitRow,
+  DirEntry,
+  fileDiffCancellable,
+  rpc,
+  type DiffVersion,
+  type FileComparison,
+} from "../ipc";
 import { diffOptions } from "../lib/diffTheme";
+import { OpenRepo } from "../state";
 
 interface FilePatchState {
   result: FileComparison | null;
@@ -193,10 +210,16 @@ export function CommitDetailView({
       <div className="shrink-0 border-b border-border bg-card px-4 py-3">
         <div className="flex items-center justify-between gap-4">
           <div className="min-w-0">
-            <div className="truncate text-sm font-semibold">{changes.commit.subject}</div>
+            <div className="truncate text-sm font-semibold">
+              {changes.commit.subject}
+            </div>
             <div className="mt-0.5 flex items-center gap-2 text-[11px] text-muted-foreground">
-              <code className="font-mono">{changes.commit.sha.slice(0, 12)}</code>
-              <button
+              <code className="font-mono">
+                {changes.commit.sha.slice(0, 12)}
+              </code>
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 className="text-muted-foreground hover:text-foreground"
                 onClick={() => void navigator.clipboard.writeText(changes.commit.sha)}
@@ -204,12 +227,13 @@ export function CommitDetailView({
                 aria-label="Copy sha"
               >
                 <Copy size={11} />
-              </button>
+              </Button>
               <span>· {changes.commit.author}</span>
               <span>· {new Date(changes.commit.date).toLocaleString()}</span>
               {changes.is_merge && (
                 <span className="chip text-primary">
-                  <GitMerge size={10} /> merge · {changes.commit.parents.length} parents
+                  <GitMerge size={10} /> merge · {changes.commit.parents.length}{" "}
+                  parents
                 </span>
               )}
             </div>
@@ -237,49 +261,58 @@ export function CommitDetailView({
         </div>
         <div className="mt-2 flex items-center gap-3 text-[12px] text-foreground">
           <span>
-            <strong>{changes.entries.length}</strong> file{changes.entries.length === 1 ? "" : "s"} changed
+            <strong>{changes.entries.length}</strong> file
+            {changes.entries.length === 1 ? "" : "s"} changed
             {" · "}
             <span className="font-semibold text-success">
               +{changes.entries.reduce((s, e) => s + e.additions, 0)}
-            </span>
-            {" "}
+            </span>{" "}
             <span className="font-semibold text-destructive">
               −{changes.entries.reduce((s, e) => s + e.deletions, 0)}
             </span>
           </span>
-          <div
-            role="radiogroup"
+          <ToggleGroup
+            type="single"
+            value={viewMode}
+            onValueChange={(value) => {
+              if (value) setViewMode(value as typeof viewMode);
+            }}
             aria-label="Files view"
-            className="flex overflow-hidden rounded border border-border"
+            className="gap-0 overflow-hidden rounded border border-border"
           >
-            <ModeButton
-              active={viewMode === "list"}
-              icon={<List size={11} />}
-              label="List"
-              onClick={() => setViewMode("list")}
-            />
-            <ModeButton
-              active={viewMode === "tree"}
-              icon={<FolderTree size={11} />}
-              label="Tree"
-              onClick={() => setViewMode("tree")}
-            />
-            <ModeButton
-              active={viewMode === "unified"}
-              icon={<ScrollText size={11} />}
-              label="Unified"
-              onClick={() => setViewMode("unified")}
-            />
-          </div>
+            <ToggleGroupItem
+              value={"list"}
+              className="h-6 min-w-0 gap-1 rounded-none px-2 text-[11px]"
+              aria-label={"List" + " view"}
+            >
+              {<List size={11} />}List
+            </ToggleGroupItem>
+            <ToggleGroupItem
+              value={"tree"}
+              className="h-6 min-w-0 gap-1 rounded-none px-2 text-[11px]"
+              aria-label={"Tree" + " view"}
+            >
+              {<FolderTree size={11} />}Tree
+            </ToggleGroupItem>
+            <ToggleGroupItem
+              value={"unified"}
+              className="h-6 min-w-0 gap-1 rounded-none px-2 text-[11px]"
+              aria-label={"Unified" + " view"}
+            >
+              {<ScrollText size={11} />}Unified
+            </ToggleGroupItem>
+          </ToggleGroup>
           {onOpenFileAtRev && activeFile && (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className="ml-auto text-muted-foreground hover:text-foreground"
               onClick={openActiveFileAsTab}
               title={`Open ${activeFile} at ${selectedSha.slice(0, 7)} as a tab`}
             >
               Open as tab
-            </button>
+            </Button>
           )}
         </div>
       </div>
@@ -329,37 +362,6 @@ export function CommitDetailView({
   );
 }
 
-function ModeButton({
-  active,
-  icon,
-  label,
-  onClick,
-}: {
-  active: boolean;
-  icon: React.ReactNode;
-  label: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      role="radio"
-      aria-checked={active}
-      onClick={onClick}
-      className={clsx(
-        "flex items-center gap-1 px-2 py-0.5 text-[11px] transition",
-        active
-          ? "bg-primary/20 text-foreground"
-          : "text-muted-foreground hover:bg-accent hover:text-foreground",
-      )}
-      title={`${label} view`}
-    >
-      {icon}
-      {label}
-    </button>
-  );
-}
-
 function FileList({
   entries,
   active,
@@ -376,7 +378,9 @@ function FileList({
           const isActive = e.path === active;
           return (
             <li key={e.path}>
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 onClick={() => onSelect(e.path)}
                 className={clsx(
@@ -404,7 +408,9 @@ function FileList({
                     {e.deletions > 0 && (
                       <span className="text-destructive">−{e.deletions}</span>
                     )}
-                    {e.status === "renamed" && <span className="chip text-[9px]">rn</span>}
+                    {e.status === "renamed" && (
+                      <span className="chip text-[9px]">rn</span>
+                    )}
                   </div>
                   {e.path.includes("/") && (
                     <div className="truncate text-[10px] text-muted-foreground">
@@ -412,7 +418,7 @@ function FileList({
                     </div>
                   )}
                 </div>
-              </button>
+              </Button>
             </li>
           );
         })}
@@ -545,7 +551,9 @@ function UnifiedFileNav({
           const state = patches.get(e.path);
           return (
             <li key={e.path}>
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 onClick={() => onSelect(e.path)}
                 className={clsx(
@@ -567,9 +575,11 @@ function UnifiedFileNav({
                   {e.deletions > 0 && (
                     <span className="text-destructive">−{e.deletions}</span>
                   )}
-                  {state?.loading && <Loader2 size={9} className="animate-spin text-muted-foreground" />}
+                  {state?.loading && (
+                    <Loader2 size={9} className="animate-spin text-muted-foreground" />
+                  )}
                 </span>
-              </button>
+              </Button>
             </li>
           );
         })}
@@ -687,7 +697,9 @@ const AllDiffsPane = forwardRef<
             className="border-b border-border"
           >
             {/* Sticky file header — click to focus this file */}
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={() => onSelectFile(entry.path)}
               className={clsx(
@@ -703,16 +715,20 @@ const AllDiffsPane = forwardRef<
               </span>
               <span className="flex items-center gap-2 text-[10px] text-muted-foreground">
                 {entry.additions > 0 && (
-                  <span className="font-semibold text-success">+{entry.additions}</span>
+                  <span className="font-semibold text-success">
+                    +{entry.additions}
+                  </span>
                 )}
                 {entry.deletions > 0 && (
-                  <span className="font-semibold text-destructive">−{entry.deletions}</span>
+                  <span className="font-semibold text-destructive">
+                    −{entry.deletions}
+                  </span>
                 )}
                 {entry.status === "renamed" && entry.old_path && (
                   <span className="chip text-[9px]">← {entry.old_path}</span>
                 )}
               </span>
-            </button>
+            </Button>
 
             {/* Diff content */}
             {state?.loading ? (
@@ -729,8 +745,12 @@ const AllDiffsPane = forwardRef<
               <NotebookDiffView data={state.result} />
             ) : state?.result?.kind === "git" ? (
               state.result.patch.trim().length === 0 ? (
-                <p className="px-4 py-6 text-xs text-muted-foreground">No changes for this file.</p>
-              ) : <SafePatchDiff patch={state.result.patch} options={diffOptions(theme)} />
+                <p className="px-4 py-6 text-xs text-muted-foreground">
+                  No changes for this file.
+                </p>
+              ) : (
+                <SafePatchDiff patch={state.result.patch} options={diffOptions(theme)} />
+              )
             ) : null}
           </div>
         );
@@ -738,7 +758,6 @@ const AllDiffsPane = forwardRef<
     </div>
   );
 });
-
 
 // Duplicate of the helper in ChangesView — small enough that the
 // copy is cheaper than a shared module while the tree-theming

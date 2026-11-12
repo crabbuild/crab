@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Terminal crash recovery banner.
  *
@@ -75,18 +76,18 @@ export function TerminalCrashBanner({
         <p className="text-sm text-destructive font-medium">
           Terminal session ended unexpectedly
         </p>
-        <p className="text-xs text-destructive/80 mt-0.5">
-          {message}
-        </p>
+        <p className="text-xs text-destructive/80 mt-0.5">{message}</p>
       </div>
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         onClick={onRestart}
         disabled={restarting}
         className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded bg-destructive/20 text-destructive hover:bg-destructive/30 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
       >
         <RotateCcw className={`w-3 h-3 ${restarting ? "animate-spin" : ""}`} />
         {restarting ? "Restarting..." : "Restart Session"}
-      </button>
+      </Button>
     </div>
   );
 }

@@ -1,6 +1,8 @@
+import { Button } from "@/components/ui/button";
+import { Toggle } from "@/components/ui/toggle";
+import clsx from "clsx";
 import type { LucideIcon } from "lucide-react";
 import { Loader2 } from "lucide-react";
-import clsx from "clsx";
 
 export interface ToolbarAction {
   id: string;
@@ -66,26 +68,40 @@ function ActionButton({
 
   const tooltip = shortcut ? `${label} (${shortcut})` : label;
 
+  const className = clsx(
+    "h-6 w-6 min-w-0 rounded p-0 text-muted-foreground",
+    active && "text-foreground",
+  );
+  const icon = loading ? (
+        <Loader2 size={14} className="animate-spin" />
+      ) : (
+        <ActionIcon size={14} />
+      );
+  if (active !== undefined)
+    return (
+    <Toggle
+        title={tooltip}
+      aria-label={tooltip}
+      disabled={disabled || loading}
+        pressed={active}
+        onPressedChange={() => onAction(id)}
+        className={className}
+      >
+        {icon}
+      </Toggle>
+    );
   return (
-    <button
+    <Button
+      variant="ghost"
+      size="compact"
       type="button"
       title={tooltip}
       aria-label={tooltip}
       disabled={disabled || loading}
       onClick={() => onAction(id)}
-      className={clsx(
-        "flex h-6 w-6 items-center justify-center rounded text-muted-foreground transition-colors",
-        "hover:bg-primary/20 hover:text-foreground",
-        active && "bg-primary/20 text-foreground",
-        disabled && "cursor-not-allowed opacity-50 hover:bg-transparent hover:text-muted-foreground",
-        loading && "cursor-not-allowed opacity-50",
-      )}
+      className={className}
     >
-      {loading ? (
-        <Loader2 size={14} className="animate-spin" />
-      ) : (
-        <ActionIcon size={14} />
-      )}
-    </button>
+      {icon}
+    </Button>
   );
 }

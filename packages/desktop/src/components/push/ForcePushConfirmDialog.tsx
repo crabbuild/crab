@@ -1,7 +1,8 @@
-import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { useState } from "react";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { AlertOctagon, Loader2 } from "lucide-react";
+import { useState } from "react";
 
 interface Props {
   open: boolean;
@@ -42,21 +43,29 @@ export function ForcePushConfirmDialog({
   const matches = typed.trim() === remoteName;
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
-      onClick={onCancel}
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) {onCancel();
+        }
+      }}
     >
-      <div
-        className="w-[min(540px,92vw)] rounded-lg border border-destructive/40 bg-card p-5 shadow-2xl"
+      <DialogContent
+        showCloseButton={false}
+        aria-describedby={undefined}
+        className="block gap-0 p-0 w-[min(540px,92vw)] rounded-lg border border-destructive/40 bg-card p-5 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
+        <DialogTitle className="sr-only">
+          {"Force Push Confirm Dialog"}
+        </DialogTitle>
         <div className="mb-3 flex items-center gap-2 text-base font-semibold text-destructive">
           <AlertOctagon size={16} />
           Force push?
         </div>
         <p className="mb-3 text-sm text-muted-foreground">
-          Force pushing rewrites history on the remote. Anyone else with this branch
-          checked out will see their work diverge.
+          Force pushing rewrites history on the remote. Anyone else with this
+          branch checked out will see their work diverge.
         </p>
 
         <div className="mb-4 space-y-1.5 rounded border border-border bg-background p-3 text-sm">
@@ -74,7 +83,8 @@ export function ForcePushConfirmDialog({
         </div>
 
         <label className="mb-3 block text-xs text-muted-foreground">
-          Type <code className="font-mono text-foreground">{remoteName}</code> to confirm:
+          Type <code className="font-mono text-foreground">{remoteName}</code>{" "}
+          to confirm:
           <Input
             type="text"
             value={typed}
@@ -110,8 +120,8 @@ export function ForcePushConfirmDialog({
             )}
           </Button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 

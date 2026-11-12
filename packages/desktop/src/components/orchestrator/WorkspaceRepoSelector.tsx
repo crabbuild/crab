@@ -1,7 +1,14 @@
-import { NativeSelect } from "@/components/ui/native-select";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { AlertCircle, GitBranch } from "lucide-react";
 import { useEffect, useMemo } from "react";
-import { GitBranch, AlertCircle } from "lucide-react";
-import { useStore, WorkspaceRepoEntry, getActiveWorkspace } from "../../state";
+import { getActiveWorkspace, useStore, WorkspaceRepoEntry } from "../../state";
 
 interface Props {
   /** Currently selected repo relative path. */
@@ -63,9 +70,7 @@ export function WorkspaceRepoSelector({ selectedRepoPath, onSelect }: Props) {
             </span>
           )}
           {repo.dirtyCount != null && repo.dirtyCount > 0 && (
-            <span className="text-warning">
-              {repo.dirtyCount} uncommitted
-            </span>
+            <span className="text-warning">{repo.dirtyCount} uncommitted</span>
           )}
           {repo.error && (
             <span className="flex items-center gap-1 text-destructive">
@@ -84,26 +89,40 @@ export function WorkspaceRepoSelector({ selectedRepoPath, onSelect }: Props) {
         Target repository
       </label>
       <div className="relative">
-        <NativeSelect
-          className="w-full appearance-none rounded-md border border-border bg-background px-3 py-1.5 pr-8 text-xs text-foreground focus:border-primary focus:outline-none"
-          value={selectedRepoPath ?? ""}
-          onChange={(e) => onSelect(e.target.value)}
-          aria-label="Select target repository"
+        <Select
+          value={":" + String(selectedRepoPath ?? "")}
+          onValueChange={(selectedValue) => {
+            const value = selectedValue.slice(1);
+            return onSelect(value);
+          }}
         >
-          <option value="" disabled>
-            Select a repository…
-          </option>
-          {repos.map((repo) => (
-            <option key={repo.relativePath} value={repo.relativePath}>
-              {repo.name}
-              {repo.branch ? ` (${repo.branch})` : ""}
-              {repo.dirtyCount && repo.dirtyCount > 0
+          <SelectTrigger
+            className="w-full appearance-none rounded-md border border-border bg-background px-3 py-1.5 pr-8 text-xs text-foreground focus:border-primary focus:outline-none"
+            aria-label="Select target repository"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              <SelectItem disabled value={":" + String("")}>
+                Select a repository…
+              </SelectItem>
+              {repos.map((repo) => (
+                <SelectItem
+                  key={repo.relativePath}
+                  value={":" + String(repo.relativePath)}
+                >
+                  {repo.name}
+                  {repo.branch ? ` (${repo.branch})` : ""}
+                  {repo.dirtyCount && repo.dirtyCount > 0
                 ? ` • ${repo.dirtyCount} changed`
                 : ""}
-              {repo.error ? " ⚠" : ""}
-            </option>
-          ))}
-        </NativeSelect>
+                  {repo.error ? " ⚠" : ""}
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          </SelectContent>
+        </Select>
         {/* Chevron indicator */}
         <div className="pointer-events-none absolute inset-y-0 right-2 flex items-center text-muted-foreground">
           <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
@@ -139,9 +158,7 @@ function SelectedRepoStatus({
         </span>
       )}
       {entry.dirtyCount != null && entry.dirtyCount > 0 && (
-        <span className="text-warning">
-          {entry.dirtyCount} uncommitted
-        </span>
+        <span className="text-warning">{entry.dirtyCount} uncommitted</span>
       )}
       {entry.error && (
         <span className="flex items-center gap-1 text-destructive">

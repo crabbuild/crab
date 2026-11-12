@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Inline banner shown when a file open in the editor has been modified
  * externally (on disk or on the remote host) while the editor buffer
@@ -23,20 +24,24 @@ export function ExternalChangePrompt({ reloadError, onReload, onKeepMine }: Prop
         {reloadError ? `Could not reload the changed file: ${reloadError}` : "File changed externally. Your unsaved changes may conflict."}
       </span>
       <div className="ml-auto flex items-center gap-2">
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           className="rounded bg-warning/20 px-2 py-0.5 text-[11px] font-medium text-warning hover:bg-warning/30 transition"
           onClick={onReload}
         >
           {reloadError ? "Retry reload" : "Reload"}
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           className="rounded bg-card px-2 py-0.5 text-[11px] font-medium text-muted-foreground hover:text-foreground hover:bg-accent transition"
           onClick={onKeepMine}
         >
           Keep Mine
-        </button>
+        </Button>
       </div>
     </div>
   );

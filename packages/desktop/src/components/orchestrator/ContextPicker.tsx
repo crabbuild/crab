@@ -1,5 +1,10 @@
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { Toggle } from "@/components/ui/toggle";
+import { requestConfirmation } from "@/lib/application-dialogs";
 /**
  * ContextPicker — unified context attachment dialog for the chat composer.
  *
@@ -16,14 +21,6 @@ import { Textarea } from "@/components/ui/textarea";
  * selects, Esc dismisses, `/` jumps between kinds.
  */
 
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
-import { createPortal } from "react-dom";
 import clsx from "clsx";
 import {
   AtSign,
@@ -43,7 +40,15 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { DirEntry, rpc, CommitRow } from "../../ipc";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { createPortal } from "react-dom";
+import { CommitRow, DirEntry, rpc } from "../../ipc";
 import {
   Instruction,
   createInstruction,
@@ -136,38 +141,32 @@ export function ContextPicker({ open, initialKind = "instruction", initialQuery 
   }, [open, initialKind, initialQuery]);
 
   // Global key handling (Esc closes).
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        onClose();
-      }
-    };
-    document.addEventListener("keydown", handler);
-    return () => document.removeEventListener("keydown", handler);
-  }, [open, onClose]);
 
   if (!open) return null;
 
   return createPortal(
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 pt-[8vh]"
-      onClick={onClose}
-      role="dialog"
-      aria-modal="true"
-      aria-label="Add context"
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) {
+          onClose();
+        }
+      }}
     >
-      <div
-        className="flex h-[78vh] w-[min(680px,94vw)] flex-col overflow-hidden rounded-lg border border-border bg-background shadow-2xl"
+      <DialogContent
+        showCloseButton={false}
+        aria-describedby={undefined}
+        className="block gap-0 p-0 flex h-[78vh] w-[min(680px,94vw)] flex-col overflow-hidden rounded-lg border border-border bg-background shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
+        <DialogTitle className="sr-only">{"Add context"}</DialogTitle>
         {/* Kind tabs */}
         <div className="flex shrink-0 items-center gap-0.5 overflow-x-auto border-b border-border px-2 py-1">
           {KINDS.map((k) => {
             const active = k.kind === kind;
             return (
-              <button
+              <Toggle
+                size="sm"
                 key={k.kind}
                 type="button"
                 onClick={() => {
@@ -181,22 +180,24 @@ export function ContextPicker({ open, initialKind = "instruction", initialQuery 
                     : "text-muted-foreground hover:bg-accent hover:text-foreground",
                 )}
                 title={k.description}
-                aria-pressed={active}
+                pressed={active}
               >
                 <k.Icon size={12} />
                 {k.label}
-              </button>
+              </Toggle>
             );
           })}
           <div className="flex-1" />
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={onClose}
             className="rounded p-1 text-muted-foreground hover:text-foreground"
             aria-label="Close"
           >
             <X size={14} />
-          </button>
+          </Button>
         </div>
 
         {/* Kind-specific panel */}
@@ -356,8 +357,8 @@ export function ContextPicker({ open, initialKind = "instruction", initialQuery 
             />
           )}
         </div>
-      </div>
-    </div>,
+      </DialogContent>
+    </Dialog>,
     document.body,
   );
 }
@@ -502,7 +503,9 @@ interface ListItemProps {
 
 function ListItem({ active, onMouseEnter, onClick, leading, primary, badge, secondary, trailing }: ListItemProps) {
   return (
-    <button
+    <Button
+      variant="ghost"
+      size="compact"
       type="button"
       role="option"
       aria-selected={active}
@@ -523,10 +526,12 @@ function ListItem({ active, onMouseEnter, onClick, leading, primary, badge, seco
         )}
       </span>
       {secondary && (
-        <span className="shrink-0 truncate text-[10px] text-muted-foreground max-w-[40%]">{secondary}</span>
+        <span className="shrink-0 truncate text-[10px] text-muted-foreground max-w-[40%]">
+          {secondary}
+        </span>
       )}
       {trailing && <span className="shrink-0">{trailing}</span>}
-    </button>
+    </Button>
   );
 }
 
@@ -585,13 +590,15 @@ function InstructionPanel({
         placeholder="Search instructions…"
         inputRef={inputRef}
         right={
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={() => setCreating(true)}
             className="flex items-center gap-1 rounded border border-border bg-card px-2 py-0.5 text-[10px] text-foreground hover:bg-accent"
           >
             <Plus size={10} /> New
-          </button>
+          </Button>
         }
       />
       <div
@@ -615,7 +622,13 @@ function InstructionPanel({
               active={i === sel}
               onMouseEnter={() => setSel(i)}
               onClick={() => onPick(ins)}
-              leading={ins.pinned ? <Pin size={12} className="text-primary" /> : <Sparkles size={12} />}
+              leading={
+                ins.pinned ? (
+                  <Pin size={12} className="text-primary" />
+                ) : (
+                  <Sparkles size={12} />
+                )
+              }
               primary={ins.title}
               badge={ins.category}
             />
@@ -632,8 +645,8 @@ function InstructionPanel({
               />
               <IconAction
                 label="Delete"
-                onClick={() => {
-                  if (window.confirm(`Delete "${ins.title}"?`)) {
+                onClick={async () => {
+                  if (await requestConfirmation(`Delete "${ins.title}"?`)) {
                     deleteInstruction(ins.id);
                     refresh();
                   }
@@ -689,14 +702,16 @@ function InstructionEditor({
         <span className="text-[11px] font-semibold text-foreground">
           {initial ? "Edit instruction" : "New instruction"}
         </span>
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={onCancel}
           className="rounded p-0.5 text-muted-foreground hover:text-foreground"
           aria-label="Cancel"
         >
           <X size={12} />
-        </button>
+        </Button>
       </div>
       <div className="flex gap-2">
         <Input
@@ -721,30 +736,33 @@ function InstructionEditor({
       />
       <div className="flex items-center justify-between">
         <label className="flex items-center gap-1.5 text-[11px] text-foreground">
-          <input
-            type="checkbox"
+          <Checkbox
             checked={pinned}
-            onChange={(e) => setPinned(e.target.checked)}
+            onCheckedChange={(checked) => setPinned(checked === true)}
             className="h-3 w-3 accent-primary"
           />
           Pin to top
         </label>
         <div className="flex gap-2">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={onCancel}
             className="rounded px-3 py-1 text-[11px] text-muted-foreground hover:text-foreground"
           >
             Cancel
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="default"
+            size="compact"
             type="button"
             disabled={!canSave}
             onClick={() => onSave({ title: title.trim(), body: body.trim(), category: category.trim() || undefined, pinned })}
             className="rounded bg-primary px-3 py-1 text-[11px] font-medium text-primary-foreground hover:bg-primary-hover disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {initial ? "Save" : "Create"}
-          </button>
+          </Button>
         </div>
       </div>
     </div>
@@ -796,7 +814,9 @@ function FileOrFolderPanel({
   const filtered = useMemo(() => {
     if (!entries) return [];
     const pool = entries.filter((e) =>
-      mode === "folder" ? e.kind === "dir" : (e.kind !== "dir" && e.kind !== "submodule"),
+      mode === "folder"
+        ? e.kind === "dir"
+        : e.kind !== "dir" && e.kind !== "submodule",
     );
     if (!query.trim()) return pool;
     return fuzzyRankPath(pool, query.trim().toLowerCase());
@@ -826,10 +846,20 @@ function FileOrFolderPanel({
             body="Open a repo to browse its files and folders."
           />
         )}
-        {loading && <div className="p-6 text-center text-xs text-muted-foreground">Loading…</div>}
-        {error && <div className="p-6 text-center text-xs text-destructive">{error}</div>}
+        {loading && (
+          <div className="p-6 text-center text-xs text-muted-foreground">
+            Loading…
+          </div>
+        )}
+        {error && (
+          <div className="p-6 text-center text-xs text-destructive">
+            {error}
+          </div>
+        )}
         {!loading && !error && repoId && filtered.length === 0 && (
-          <div className="p-6 text-center text-xs text-muted-foreground">No matches</div>
+          <div className="p-6 text-center text-xs text-muted-foreground">
+            No matches
+          </div>
         )}
         {visible.map((entry, i) => (
           <ListItem
@@ -837,7 +867,13 @@ function FileOrFolderPanel({
             active={i === sel}
             onMouseEnter={() => setSel(i)}
             onClick={() => onPick(entry)}
-            leading={mode === "folder" ? <FolderOpen size={12} /> : <FileText size={12} />}
+            leading={
+              mode === "folder" ? (
+                <FolderOpen size={12} />
+              ) : (
+                <FileText size={12} />
+              )
+            }
             primary={entry.path.split("/").pop() ?? entry.path}
             secondary={entry.path.includes("/") ? entry.path.slice(0, entry.path.lastIndexOf("/")) : ""}
           />
@@ -901,7 +937,9 @@ function UrlPanel({
             Attach a web URL
           </div>
           <p className="text-[11px] text-muted-foreground">
-            The agent will fetch and read the page when it works on this message. Handy for docs, API references, blog posts, and issue trackers.
+            The agent will fetch and read the page when it works on this
+            message. Handy for docs, API references, blog posts, and issue
+            trackers.
           </p>
           {query.trim() && (
             <div className="mt-2 rounded border border-border bg-background px-2 py-1 text-[11px] text-muted-foreground font-mono break-all">
@@ -911,14 +949,16 @@ function UrlPanel({
         </div>
       </div>
       <div className="flex shrink-0 justify-end gap-2 border-t border-border p-2">
-        <button
+        <Button
+          variant="default"
+          size="compact"
           type="button"
           onClick={submit}
           disabled={!query.trim()}
           className="rounded bg-primary px-3 py-1 text-[11px] font-medium text-primary-foreground hover:bg-primary-hover disabled:opacity-50 disabled:cursor-not-allowed"
         >
           Attach URL
-        </button>
+        </Button>
       </div>
     </div>
   );
@@ -1034,11 +1074,23 @@ function CommitPanel({
         onKeyDown={(e) => onKeyDown(e, () => filtered[sel] && onPick(filtered[sel]))}
         className="min-h-0 flex-1 overflow-y-auto"
       >
-        {!repoId && <EmptyState icon={<GitCommit size={18} />} title="No repository open" body="Open a repo to browse its commits." />}
-        {loading && <div className="p-6 text-center text-xs text-muted-foreground">Loading commits…</div>}
-        {error && <div className="p-6 text-center text-xs text-destructive">{error}</div>}
+        {!repoId && (
+          <EmptyState icon={<GitCommit size={18} />} title="No repository open" body="Open a repo to browse its commits." />
+        )}
+        {loading && (
+          <div className="p-6 text-center text-xs text-muted-foreground">
+            Loading commits…
+          </div>
+        )}
+        {error && (
+          <div className="p-6 text-center text-xs text-destructive">
+            {error}
+          </div>
+        )}
         {!loading && !error && repoId && filtered.length === 0 && (
-          <div className="p-6 text-center text-xs text-muted-foreground">No matches</div>
+          <div className="p-6 text-center text-xs text-muted-foreground">
+            No matches
+          </div>
         )}
         {visible.map((c, i) => (
           <ListItem
@@ -1130,14 +1182,16 @@ function TerminalPanel({
               secondary={s.active ? `${humanBytes(s.buffer.length)} · live` : `${humanBytes(s.buffer.length)} · closed`}
             />
             {onPickFullLog && (
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 onClick={(e) => { e.stopPropagation(); onPickFullLog(s); }}
                 className="absolute right-2 top-1/2 -translate-y-1/2 hidden group-hover:flex items-center gap-1 px-2 py-0.5 rounded text-[10px] bg-secondary hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
                 title="Attach full session log from disk"
               >
                 <FileText size={10} />
                 Full log
-              </button>
+              </Button>
             )}
           </div>
         ))}
@@ -1200,19 +1254,23 @@ function SkillPanel({
         placeholder="Search installed skills…"
         inputRef={inputRef}
         right={
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={() => setShowInstaller((v) => !v)}
             className="flex items-center gap-1 rounded border border-border bg-card px-2 py-0.5 text-[10px] text-foreground hover:bg-accent"
           >
             <Plus size={10} /> Install
-          </button>
+          </Button>
         }
       />
 
       {showInstaller && (
         <div className="shrink-0 border-b border-border bg-background p-3 space-y-2">
-          <div className="text-[11px] font-semibold text-foreground">Install skill from GitHub</div>
+          <div className="text-[11px] font-semibold text-foreground">
+            Install skill from GitHub
+          </div>
           <Input
             value={installUrl}
             onChange={(e) => setInstallUrl(e.target.value)}
@@ -1221,26 +1279,34 @@ function SkillPanel({
             className="w-full rounded border border-border bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground font-mono focus:border-primary focus:outline-none"
           />
           <p className="text-[10px] text-muted-foreground">
-            Paste a GitHub URL pointing at a <code className="font-mono text-foreground">SKILL.md</code> (or any markdown).
-            Also accepts <code className="font-mono">owner/repo/path/SKILL.md</code>.
+            Paste a GitHub URL pointing at a{" "}
+            <code className="font-mono text-foreground">SKILL.md</code> (or any
+            markdown). Also accepts{" "}
+            <code className="font-mono">owner/repo/path/SKILL.md</code>.
           </p>
-          {installError && <div className="text-[11px] text-destructive">{installError}</div>}
+          {installError && (
+            <div className="text-[11px] text-destructive">{installError}</div>
+          )}
           <div className="flex justify-end gap-2">
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={() => { setShowInstaller(false); setInstallError(null); }}
               className="rounded px-2 py-1 text-[10px] text-muted-foreground hover:text-foreground"
             >
               Cancel
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="default"
+              size="compact"
               type="button"
               onClick={handleInstall}
               disabled={installing || !installUrl.trim()}
               className="rounded bg-primary px-3 py-1 text-[10px] font-medium text-primary-foreground hover:bg-primary-hover disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {installing ? "Installing…" : "Install"}
-            </button>
+            </Button>
           </div>
         </div>
       )}
@@ -1285,8 +1351,8 @@ function SkillPanel({
               />
               <IconAction
                 label="Remove"
-                onClick={() => {
-                  if (window.confirm(`Remove skill "${s.name}"?`)) {
+                onClick={async () => {
+                  if (await requestConfirmation(`Remove skill "${s.name}"?`)) {
                     removeSkill(s.id);
                     refresh();
                   }
@@ -1317,7 +1383,9 @@ function IconAction({
   danger?: boolean;
 }) {
   return (
-    <button
+    <Button
+      variant="ghost"
+      size="compact"
       type="button"
       onClick={(e) => { e.stopPropagation(); onClick(); }}
       title={label}
@@ -1330,7 +1398,7 @@ function IconAction({
       )}
     >
       {icon}
-    </button>
+    </Button>
   );
 }
 
@@ -1349,15 +1417,21 @@ function EmptyState({
     <div className="flex flex-col items-center justify-center gap-2 px-6 py-10 text-center">
       <div className="text-muted-foreground/60">{icon}</div>
       <div className="text-xs font-medium text-foreground">{title}</div>
-      {body && <p className="max-w-[320px] text-[11px] leading-relaxed text-muted-foreground">{body}</p>}
+      {body && (
+        <p className="max-w-[320px] text-[11px] leading-relaxed text-muted-foreground">
+          {body}
+        </p>
+      )}
       {action && (
-        <button
+        <Button
+          variant="default"
+          size="compact"
           type="button"
           onClick={action.onClick}
           className="mt-2 rounded bg-primary px-3 py-1 text-[11px] font-medium text-primary-foreground hover:bg-primary-hover"
         >
           {action.label}
-        </button>
+        </Button>
       )}
     </div>
   );

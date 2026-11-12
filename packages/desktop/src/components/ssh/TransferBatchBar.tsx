@@ -1,18 +1,19 @@
+import { Button } from "@/components/ui/button";
 /**
  * TransferBatchBar — summary bar displayed when 2+ transfers are selected.
  * Shows selection count, aggregate size, and batch action buttons that
  * enable/disable based on the statuses of selected transfers.
  */
 
-import { useMemo } from "react";
-import { XCircle, RotateCcw, Trash2, X } from "lucide-react";
 import clsx from "clsx";
+import { RotateCcw, Trash2, X, XCircle } from "lucide-react";
+import { useMemo } from "react";
 import type { TransferEntry } from "../../../electron/ssh-types";
-import { formatBytes } from "./TransferProgressBar";
 import {
-  getEnabledBatchActions,
   computeSelectedSize,
+  getEnabledBatchActions,
 } from "../../hooks/useTransferSelection";
+import { formatBytes } from "./TransferProgressBar";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -102,7 +103,9 @@ export function TransferBatchBar({
       </div>
 
       {/* Deselect button */}
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={onDeselectAll}
         className="ml-1 p-1 rounded hover:bg-info/10 hover:bg-info/40 text-info text-info"
@@ -110,7 +113,7 @@ export function TransferBatchBar({
         title="Deselect all"
       >
         <X size={14} />
-      </button>
+      </Button>
     </div>
   );
 }
@@ -147,7 +150,9 @@ function BatchButton({ icon, label, disabled, onClick, variant }: BatchButtonPro
   const classes = VARIANT_CLASSES[variant];
 
   return (
-    <button
+    <Button
+      variant="ghost"
+      size="compact"
       type="button"
       disabled={disabled}
       onClick={onClick}
@@ -160,7 +165,7 @@ function BatchButton({ icon, label, disabled, onClick, variant }: BatchButtonPro
     >
       {icon}
       <span>{label}</span>
-    </button>
+    </Button>
   );
 }
 

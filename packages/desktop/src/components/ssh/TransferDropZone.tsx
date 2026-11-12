@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * TransferDropZone — drag-and-drop overlay for uploading files to a remote directory.
  *
@@ -7,9 +8,9 @@
  * Handles permission-denied errors with user notification.
  */
 
-import { useState, useCallback, useRef, useEffect } from "react";
-import { Upload, FolderUp, AlertCircle } from "lucide-react";
 import clsx from "clsx";
+import { AlertCircle, FolderUp, Upload } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -267,7 +268,8 @@ export function TransferDropZone({
                 {remoteDir}
               </p>
               <p className="text-xs text-muted-foreground text-muted-foreground mt-1">
-                Up to {MAX_FILES_PER_DROP} files · Folders supported (max depth {MAX_FOLDER_DEPTH})
+                Up to {MAX_FILES_PER_DROP} files · Folders supported (max depth{" "}
+                {MAX_FOLDER_DEPTH})
               </p>
             </div>
           )}
@@ -296,14 +298,16 @@ export function TransferDropZone({
               </p>
             )}
           </div>
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={dismissError}
             className="shrink-0 text-destructive hover:text-destructive hover:text-destructive"
             aria-label="Dismiss error"
           >
             ×
-          </button>
+          </Button>
         </div>
       )}
     </div>

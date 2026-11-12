@@ -1,16 +1,17 @@
-import { useState } from "react";
+import { Button } from "@/components/ui/button";
 import clsx from "clsx";
 import {
   ChevronDown,
   ChevronRight,
-  FileText,
   FilePen,
+  FileText,
   Globe,
   ListTodo,
   Search,
   Terminal,
   Wrench,
 } from "lucide-react";
+import { useState } from "react";
 import { ShikiPreview } from "./tool-cards/ShikiPreview";
 
 // ── Types ───────────────────────────────────────────────────────────
@@ -75,7 +76,9 @@ export function ToolCard({ tool, summary, input, detail, defaultExpanded = false
 
   return (
     <div className="rounded-md border border-border/40 overflow-hidden">
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={() => hasExpandableContent && setExpanded(!expanded)}
         className={clsx(
@@ -86,14 +89,19 @@ export function ToolCard({ tool, summary, input, detail, defaultExpanded = false
         aria-expanded={hasExpandableContent ? expanded : undefined}
       >
         {icon}
-        <span className="shrink-0 font-medium text-muted-foreground">{label}</span>
-        <span className="min-w-0 flex-1 truncate font-mono text-foreground/80">{summary}</span>
-        {hasExpandableContent && (
-          expanded
-            ? <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
-            : <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
-        )}
-      </button>
+        <span className="shrink-0 font-medium text-muted-foreground">
+          {label}
+        </span>
+        <span className="min-w-0 flex-1 truncate font-mono text-foreground/80">
+          {summary}
+        </span>
+        {hasExpandableContent &&
+          (expanded ? (
+            <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
+          ) : (
+            <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
+          ))}
+      </Button>
       {expanded && hasExpandableContent && (
         <div className="border-t border-border/30 space-y-0">
           {input != null && (
@@ -135,10 +143,14 @@ function GenericDetailRenderer({ detail }: { detail: string }) {
       const display = pretty.length > DETAIL_TRUNCATION_LIMIT
         ? pretty.slice(0, DETAIL_TRUNCATION_LIMIT) + "\n… (truncated)"
         : pretty;
-      return <ShikiPreview code={display} lang="json" className="[&_pre]:!py-2 [&_pre]:!px-2.5" />;
+      return (
+        <ShikiPreview code={display} lang="json" className="[&_pre]:!py-2 [&_pre]:!px-2.5" />
+      );
     } catch {
       // Partial JSON — still highlight.
-      return <ShikiPreview code={text} lang="json" className="[&_pre]:!py-2 [&_pre]:!px-2.5" />;
+      return (
+        <ShikiPreview code={text} lang="json" className="[&_pre]:!py-2 [&_pre]:!px-2.5" />
+      );
     }
   }
 

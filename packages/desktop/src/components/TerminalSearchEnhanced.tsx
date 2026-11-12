@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 /**
  * Enhanced terminal search bar with:
@@ -6,20 +7,20 @@ import { Input } from "@/components/ui/input";
  * - Semantic output filtering (Task 27.3)
  */
 
-import { useState } from "react";
+import clsx from "clsx";
 import {
-  Search,
-  ChevronUp,
-  ChevronDown,
-  X,
-  Replace,
-  Clock,
   AlertCircle,
   AlertTriangle,
+  ChevronDown,
+  ChevronUp,
+  Clock,
   FileText,
   Link,
+  Replace,
+  Search,
+  X,
 } from "lucide-react";
-import clsx from "clsx";
+import { useState } from "react";
 import type { SemanticFilter } from "../lib/terminal-ux-enhancements";
 
 interface Props {
@@ -94,7 +95,9 @@ export function TerminalSearchEnhanced({
         />
 
         {/* Toggle buttons */}
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={() => onCaseSensitiveChange(!caseSensitive)}
           className={clsx(
@@ -104,8 +107,10 @@ export function TerminalSearchEnhanced({
           title="Match case"
         >
           Aa
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={() => onRegexChange(!regex)}
           className={clsx(
@@ -115,11 +120,13 @@ export function TerminalSearchEnhanced({
           title="Use regex"
         >
           .*
-        </button>
+        </Button>
 
         {/* Replace toggle */}
         {onReplace && (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={() => setShowReplace(!showReplace)}
             className={clsx(
@@ -129,12 +136,14 @@ export function TerminalSearchEnhanced({
             title="Find and Replace"
           >
             <Replace size={12} />
-          </button>
+          </Button>
         )}
 
         {/* Time filter toggle */}
         {onTimeFilter && (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={() => setShowTimeFilter(!showTimeFilter)}
             className={clsx(
@@ -144,19 +153,28 @@ export function TerminalSearchEnhanced({
             title="Filter by time"
           >
             <Clock size={12} />
-          </button>
+          </Button>
         )}
 
         {/* Navigation */}
-        <button type="button" onClick={onPrev} className="text-muted-foreground hover:text-foreground" title="Previous (Shift+Enter)">
+        <Button
+          variant="ghost"
+          size="compact"
+          type="button" onClick={onPrev} className="text-muted-foreground hover:text-foreground" title="Previous (Shift+Enter)">
           <ChevronUp size={14} />
-        </button>
-        <button type="button" onClick={onNext} className="text-muted-foreground hover:text-foreground" title="Next (Enter)">
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
+          type="button" onClick={onNext} className="text-muted-foreground hover:text-foreground" title="Next (Enter)">
           <ChevronDown size={14} />
-        </button>
-        <button type="button" onClick={onClose} className="text-muted-foreground hover:text-foreground" title="Close (Esc)">
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
+          type="button" onClick={onClose} className="text-muted-foreground hover:text-foreground" title="Close (Esc)">
           <X size={14} />
-        </button>
+        </Button>
       </div>
 
       {/* Replace row (Task 26.3) */}
@@ -174,23 +192,27 @@ export function TerminalSearchEnhanced({
             placeholder="Replace with…"
             className="flex-1 bg-transparent text-[12px] text-foreground placeholder:text-muted-foreground outline-none"
           />
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={() => onReplace(replacement)}
             className="rounded px-2 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent"
             title="Replace next"
           >
             Replace
-          </button>
+          </Button>
           {onReplaceAll && (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={() => onReplaceAll(replacement)}
               className="rounded px-2 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent"
               title="Replace all"
             >
               All
-            </button>
+            </Button>
           )}
         </div>
       )}
@@ -200,7 +222,9 @@ export function TerminalSearchEnhanced({
         <div className="mt-1.5 flex items-center gap-1.5 pl-5">
           <span className="text-[10px] text-muted-foreground">Show last:</span>
           {TIME_PRESETS.map((preset) => (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               key={preset.minutes}
               type="button"
               onClick={() => onTimeFilter(activeTimeFilter === preset.minutes ? null : preset.minutes)}
@@ -212,17 +236,19 @@ export function TerminalSearchEnhanced({
               )}
             >
               {preset.label}
-            </button>
+            </Button>
           ))}
           {activeTimeFilter && (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={() => onTimeFilter(null)}
               className="rounded px-1.5 py-0.5 text-[9px] text-muted-foreground hover:text-destructive"
               title="Clear time filter"
             >
               ✕
-            </button>
+            </Button>
           )}
         </div>
       )}
@@ -279,7 +305,9 @@ function FilterButton({
   color: string;
 }) {
   return (
-    <button
+    <Button
+      variant="ghost"
+      size="compact"
       type="button"
       onClick={onClick}
       className={clsx(
@@ -292,6 +320,6 @@ function FilterButton({
     >
       {icon}
       <span>{label}</span>
-    </button>
+    </Button>
   );
 }

@@ -1,6 +1,9 @@
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Textarea } from "@/components/ui/textarea";
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { FileText, Loader2, Send, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import type { PendingComment, Verdict } from "../../review/types";
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -121,35 +124,40 @@ export function ReviewSubmissionDialog({
   if (!open) return null;
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="review-dialog-title"
-      onKeyDown={handleKeyDown}
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) onClose();
+      }}
     >
       {/* Backdrop */}
-      <div
-        className="absolute inset-0 bg-black/60"
-        onClick={onClose}
-        aria-hidden="true"
-      />
 
       {/* Dialog panel */}
-      <div className="relative z-10 flex max-h-[80vh] w-full max-w-lg flex-col rounded-lg border border-border bg-card shadow-xl">
-        {/* Header */}
-        <div className="flex items-center justify-between border-b border-border px-4 py-3">
-          <h2 id="review-dialog-title" className="text-sm font-semibold text-foreground">
+      <DialogContent
+        aria-describedby={undefined}
+        showCloseButton={false}
+        className={
+          "flex max-h-[80vh] w-full max-w-lg flex-col rounded-lg border border-border bg-card shadow-xl" +
+          " p-0 gap-0"
+        }
+        onKeyDown={handleKeyDown}
+    >
+      {/* Header */}
+      <div
+        className="flex items-center justify-between border-b border-border px-4 py-3">
+          <DialogTitle className="text-sm font-semibold text-foreground">
             Submit Review
-          </h2>
-          <button
+          </DialogTitle>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
             onClick={onClose}
             aria-label="Close dialog"
           >
             <X size={14} />
-          </button>
+          </Button>
         </div>
 
         {/* Scrollable content */}
@@ -202,7 +210,9 @@ export function ReviewSubmissionDialog({
                               {truncate(comment.body, 100)}
                             </span>
                           </div>
-                          <button
+                          <Button
+                            variant="ghost"
+                            size="compact"
                             type="button"
                             className="shrink-0 inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
                             onClick={() => onRemoveComment(comment.id)}
@@ -211,7 +221,7 @@ export function ReviewSubmissionDialog({
                           >
                             <X size={9} />
                             remove
-                          </button>
+                          </Button>
                         </div>
                       ))}
                     </div>
@@ -223,29 +233,29 @@ export function ReviewSubmissionDialog({
 
           {/* Verdict radio buttons */}
           <div>
-            <h3 className="mb-2 text-[11px] font-medium text-muted-foreground">Verdict</h3>
+            <h3 className="mb-2 text-[11px] font-medium text-muted-foreground">
+              Verdict
+            </h3>
             <div className="flex items-center gap-4">
               {VERDICT_OPTIONS.map(({ value, label }) => {
                 const disabled =
                   submitting || (isAuthor && (value === "approve" || value === "request_changes"));
                 return (
-                  <label
+                  <RadioGroup
+                    value={verdict}
+                    onValueChange={(next) => setVerdict(next as typeof verdict)}
                     key={value}
                     className={`inline-flex items-center gap-1.5 text-[11px] ${
                       disabled ? "cursor-not-allowed opacity-50" : "cursor-pointer"
                     }`}
                   >
-                    <input
-                      type="radio"
-                      name="verdict"
+                    <RadioGroupItem
                       value={value}
-                      checked={verdict === value}
-                      onChange={() => setVerdict(value)}
                       disabled={disabled}
                       className="accent-primary"
                     />
                     <span className="text-foreground">{label}</span>
-                  </label>
+                  </RadioGroup>
                 );
               })}
             </div>
@@ -259,14 +269,14 @@ export function ReviewSubmissionDialog({
 
         {/* Footer */}
         <div className="border-t border-border px-4 py-3">
-          {/* Error message */}
+          {/* Footer */}
           {error && (
             <p className="mb-2 text-[10px] text-destructive" role="alert">
               {error}
             </p>
           )}
 
-          {/* Validation hint */}
+          {/* Error message */}
           {!canSubmit && (
             <p className="mb-2 text-[10px] text-warning" role="alert">
               A review body or at least one comment is required.
@@ -275,18 +285,23 @@ export function ReviewSubmissionDialog({
 
           <div className="flex items-center justify-between">
             <span className="text-[9px] text-muted-foreground">
-              {navigator.platform?.includes("Mac") ? "⌘" : "Ctrl"}+Enter to submit
+              {navigator.platform?.includes("Mac") ? "⌘" : "Ctrl"}+Enter to
+              submit
             </span>
             <div className="flex items-center gap-2">
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 className="rounded px-3 py-1.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
                 onClick={onClose}
                 disabled={submitting}
               >
                 Cancel
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="default"
+                size="compact"
                 type="button"
                 className="inline-flex items-center gap-1.5 rounded bg-primary px-3 py-1.5 text-[11px] font-medium text-primary-foreground hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
                 disabled={!canSubmit || submitting}
@@ -299,11 +314,11 @@ export function ReviewSubmissionDialog({
                   <Send size={12} />
                 )}
                 {submitting ? "Submitting…" : "Submit Review"}
-              </button>
+              </Button>
             </div>
           </div>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

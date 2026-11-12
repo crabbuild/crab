@@ -1,6 +1,8 @@
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { useCallback, useEffect, useRef, useState } from "react";
 import { Plus, RefreshCw, Trash2, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { Workspace, WorkspaceConfig } from "../../state";
 
 export interface WorkspaceSettingsProps {
@@ -102,32 +104,38 @@ export function WorkspaceSettings({ workspace, onClose }: WorkspaceSettingsProps
   }, [depth, excludePatterns, removedRepos]);
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center pt-[10vh]"
-      onClick={onClose}
-      role="dialog"
-      aria-modal="true"
-      aria-label="Workspace Settings"
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) onClose();
+      }}
     >
       {/* Backdrop */}
-      <div className="absolute inset-0 bg-black/40" />
 
       {/* Modal */}
-      <div
-        className="relative w-full max-w-lg rounded-lg border border-border bg-background shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
+      <DialogContent
+        aria-describedby={undefined}
+        showCloseButton={false}
+        className={
+          "w-full max-w-lg rounded-lg border border-border bg-background shadow-2xl" +
+          " p-0 gap-0"
+        }
       >
         {/* Header */}
         <div className="flex items-center justify-between border-b border-border px-4 py-3">
-          <h2 className="text-sm font-semibold text-foreground">Workspace Settings</h2>
-          <button
+          <DialogTitle className="text-sm font-semibold text-foreground">
+            Workspace Settings
+          </DialogTitle>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="rounded p-1 text-muted-foreground hover:text-foreground hover:bg-accent transition"
             onClick={onClose}
             aria-label="Close settings"
           >
             <X size={14} />
-          </button>
+          </Button>
         </div>
 
         {/* Body */}
@@ -176,15 +184,19 @@ export function WorkspaceSettings({ workspace, onClose }: WorkspaceSettingsProps
                   key={pattern}
                   className="flex items-center gap-2 rounded border border-border bg-background px-2 py-1.5"
                 >
-                  <code className="flex-1 text-xs text-foreground">{pattern}</code>
-                  <button
+                  <code className="flex-1 text-xs text-foreground">
+                    {pattern}
+                  </code>
+                  <Button
+                    variant="ghost"
+                    size="compact"
                     type="button"
                     className="shrink-0 rounded p-0.5 text-muted-foreground hover:text-destructive transition"
                     onClick={() => removePattern(pattern)}
                     aria-label={`Remove pattern ${pattern}`}
                   >
                     <Trash2 size={12} />
-                  </button>
+                  </Button>
                 </div>
               ))}
             </div>
@@ -203,14 +215,16 @@ export function WorkspaceSettings({ workspace, onClose }: WorkspaceSettingsProps
                 className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground outline-none focus:border-primary transition"
                 aria-label="New exclude pattern"
               />
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 className="flex items-center gap-1 rounded border border-border px-2 py-1.5 text-xs text-foreground hover:bg-accent transition"
                 onClick={addPattern}
                 disabled={!newPattern.trim()}
               >
                 <Plus size={12} /> Add
-              </button>
+              </Button>
             </div>
           </div>
 
@@ -221,7 +235,8 @@ export function WorkspaceSettings({ workspace, onClose }: WorkspaceSettingsProps
                 Excluded Repositories
               </label>
               <p className="text-[10px] text-muted-foreground mb-2">
-                These repos were manually removed from the workspace. Click to re-include.
+                These repos were manually removed from the workspace. Click to
+                re-include.
               </p>
               <div className="space-y-1">
                 {removedRepos.map((repoPath) => (
@@ -232,14 +247,16 @@ export function WorkspaceSettings({ workspace, onClose }: WorkspaceSettingsProps
                     <code className="flex-1 text-xs text-foreground truncate">
                       {repoPath}
                     </code>
-                    <button
+                    <Button
+                      variant="ghost"
+                      size="compact"
                       type="button"
                       className="shrink-0 rounded px-2 py-0.5 text-[10px] font-medium text-primary hover:bg-primary/10 transition"
                       onClick={() => reIncludeRepo(repoPath)}
                       aria-label={`Re-include ${repoPath}`}
                     >
                       Re-include
-                    </button>
+                    </Button>
                   </div>
                 ))}
               </div>
@@ -249,33 +266,39 @@ export function WorkspaceSettings({ workspace, onClose }: WorkspaceSettingsProps
 
         {/* Footer */}
         <div className="flex items-center justify-between border-t border-border px-4 py-3">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="flex items-center gap-1.5 rounded border border-border px-3 py-1.5 text-xs text-foreground hover:bg-accent transition"
             onClick={handleRescan}
             disabled={saving}
           >
             <RefreshCw size={12} /> Re-scan
-          </button>
+          </Button>
           <div className="flex items-center gap-2">
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className="rounded px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-accent transition"
               onClick={onClose}
             >
               Cancel
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="default"
+              size="compact"
               type="button"
               className="rounded bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 transition disabled:opacity-50"
               onClick={handleSave}
               disabled={saving}
             >
               {saving ? "Saving…" : "Save"}
-            </button>
+            </Button>
           </div>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

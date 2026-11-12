@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { Check, Circle, Loader2, XCircle } from "lucide-react";
 
 // ── Types ───────────────────────────────────────────────────────────
@@ -214,25 +215,29 @@ export function PipelineStepper({ state, onApprove, onAbort }: Props) {
               <span className="text-[10px] text-muted-foreground">
                 Waiting for approval: {getStageLabel(currentStage.type)}
               </span>
-              <button
+              <Button
+                variant="default"
+                size="compact"
                 type="button"
                 onClick={() => onApprove?.(currentStageIndex)}
                 className="rounded bg-primary px-2.5 py-1 text-[10px] font-medium text-primary-foreground transition hover:bg-primary-hover"
                 aria-label={`Approve ${getStageLabel(currentStage.type)} stage`}
               >
                 Approve
-              </button>
+              </Button>
             </>
           )}
           {onAbort && (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={onAbort}
               className="ml-auto rounded border border-border px-2.5 py-1 text-[10px] text-muted-foreground transition hover:border-destructive/60 hover:text-destructive"
               aria-label="Abort pipeline"
             >
               Abort
-            </button>
+            </Button>
           )}
         </div>
       )}

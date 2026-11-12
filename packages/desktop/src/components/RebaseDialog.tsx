@@ -1,6 +1,8 @@
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import clsx from "clsx";
 import { GitBranch, Loader2 } from "lucide-react";
-import { useEffect, useId, useRef, useState } from "react";
+import { useId, useRef, useState } from "react";
 import { rpc } from "../ipc";
 
 /**
@@ -39,34 +41,10 @@ export function RebaseDialog({
   onConflicts,
   onCancel,
 }: RebaseDialogProps) {
-  const headingId = useId();
   const bodyId = useId();
   const cancelRef = useRef<HTMLButtonElement | null>(null);
-  const previousActive = useRef<HTMLElement | null>(null);
-
   const [rebasing, setRebasing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  // Focus management: grab focus on mount, restore on unmount.
-  useEffect(() => {
-    previousActive.current = (document.activeElement as HTMLElement | null) ?? null;
-    cancelRef.current?.focus();
-    return () => {
-      previousActive.current?.focus?.();
-    };
-  }, []);
-
-  // Esc cancels.
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        onCancel();
-      }
-    };
-    window.addEventListener("keydown", handler, true);
-    return () => window.removeEventListener("keydown", handler, true);
-  }, [onCancel]);
 
   async function handleRebase() {
     setRebasing(true);
@@ -90,18 +68,22 @@ export function RebaseDialog({
   }
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onCancel();
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) {
+          onCancel();
+        }
       }}
     >
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={headingId}
+      <DialogContent
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          cancelRef.current?.focus();
+        }}
+        showCloseButton={false}
         aria-describedby={bodyId}
-        className="w-[28rem] max-w-[calc(100vw-2rem)] rounded-lg border border-border bg-card shadow-2xl"
+        className="block gap-0 p-0 w-[28rem] max-w-[calc(100vw-2rem)] rounded-lg border border-border bg-card shadow-2xl"
       >
         {/* Header */}
         <div className="flex items-start gap-3 border-b border-border p-4">
@@ -109,12 +91,10 @@ export function RebaseDialog({
             <GitBranch size={18} aria-hidden="true" />
           </div>
           <div className="min-w-0 flex-1">
-            <h2
-              id={headingId}
-              className="text-[14px] font-semibold text-foreground"
+            <DialogTitle className="text-[14px] font-semibold text-foreground"
             >
               Rebase branch
-            </h2>
+            </DialogTitle>
             <p id={bodyId} className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
               Rebase{" "}
               <code className="rounded bg-background px-1 font-mono text-foreground">
@@ -160,7 +140,9 @@ export function RebaseDialog({
 
         {/* Footer */}
         <div className="flex items-center justify-end gap-2 p-3">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             ref={cancelRef}
             type="button"
             onClick={onCancel}
@@ -172,8 +154,10 @@ export function RebaseDialog({
             )}
           >
             Cancel
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={handleRebase}
             disabled={rebasing}
@@ -185,9 +169,9 @@ export function RebaseDialog({
           >
             {rebasing && <Loader2 size={12} className="animate-spin" />}
             Start Rebase
-          </button>
+          </Button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

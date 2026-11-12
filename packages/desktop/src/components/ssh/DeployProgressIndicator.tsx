@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import type { DeployProgress as ProgressValue } from "../../../electron/ssh-deployer";
 /**
  * DeployProgressIndicator — self-contained component that listens for
@@ -6,8 +7,8 @@ import type { DeployProgress as ProgressValue } from "../../../electron/ssh-depl
  * warning banner when the agent cannot be deployed.
  */
 
-import { useState, useEffect, useCallback } from "react";
 import { AlertTriangle, X } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
 import { DeployProgress } from "./DeployProgress";
 
 // ── Types ────────────────────────────────────────────────────────
@@ -107,13 +108,15 @@ export function DeployProgressIndicator({ profileId }: DeployProgressIndicatorPr
               {currentUnavailable.message}
             </p>
           </div>
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             onClick={handleDismissWarning}
             className="shrink-0 rounded p-0.5 text-warning hover:text-warning hover:text-warning"
             aria-label="Dismiss warning"
           >
             <X className="h-3.5 w-3.5" />
-          </button>
+          </Button>
         </div>
       )}
     </div>

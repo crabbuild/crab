@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Dashboard section showing remote server metrics for connected SSH
  * connections. Displays per-server: compact health, hydration stats,
@@ -7,21 +8,21 @@
  * Embedded in DashboardView as a "Remote Servers" section.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
 import clsx from "clsx";
 import {
   ChevronDown,
   ChevronRight,
-  Cloud,
   Clock,
+  Cloud,
   Droplets,
   Loader2,
   Monitor,
   Signal,
 } from "lucide-react";
-import { useStore, SshConnectionState } from "../../state";
-import { SystemHealth, type SystemHealthData } from "./SystemHealth";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { rpc } from "../../ipc";
+import { SshConnectionState, useStore } from "../../state";
+import { SystemHealth, type SystemHealthData } from "./SystemHealth";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -189,10 +190,12 @@ function ServerCard({ profileId, connection }: ServerCardProps) {
       aria-label={`Remote server: ${hostname}`}
     >
       {/* Header — always visible */}
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={() => setExpanded(!expanded)}
-        className="flex w-full items-center gap-3 p-3 text-left hover:bg-accent transition-colors cursor-pointer"
+        className="justify-start flex w-full items-center gap-3 p-3 text-left hover:bg-accent transition-colors cursor-pointer"
         aria-expanded={expanded}
         aria-controls={`server-detail-${profileId}`}
       >
@@ -244,7 +247,7 @@ function ServerCard({ profileId, connection }: ServerCardProps) {
         ) : (
           <ChevronRight size={14} className="shrink-0 text-muted-foreground" aria-hidden="true" />
         )}
-      </button>
+      </Button>
 
       {/* Expanded detail */}
       {expanded && (
@@ -301,28 +304,37 @@ function ServerCard({ profileId, connection }: ServerCardProps) {
           {/* Connection info */}
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
             {connection.health?.uptime != null && formatUptime(connection.health.uptime) && (
-              <span className="flex items-center gap-1">
-                <Clock size={10} aria-hidden="true" />
-                Uptime: {formatUptime(connection.health.uptime)}
-              </span>
-            )}
+                <span className="flex items-center gap-1">
+                  <Clock size={10} aria-hidden="true" />
+                  Uptime: {formatUptime(connection.health.uptime)}
+                </span>
+              )}
             {connection.bandwidth && (connection.bandwidth.bytesIn > 0 || connection.bandwidth.bytesOut > 0) && (
-              <span className="font-mono" aria-label={`Bandwidth: ${formatBytes(connection.bandwidth.bytesOut)} sent, ${formatBytes(connection.bandwidth.bytesIn)} received`}>
-                ↑ {formatBytes(connection.bandwidth.bytesOut)} ↓ {formatBytes(connection.bandwidth.bytesIn)}
-              </span>
-            )}
+                <span className="font-mono" aria-label={`Bandwidth: ${formatBytes(connection.bandwidth.bytesOut)} sent, ${formatBytes(connection.bandwidth.bytesIn)} received`}>
+                  ↑ {formatBytes(connection.bandwidth.bytesOut)} ↓{" "}
+                  {formatBytes(connection.bandwidth.bytesIn)}
+                </span>
+              )}
             {connection.serverInfo?.agentVersion && (
               <span>Agent v{connection.serverInfo.agentVersion}</span>
             )}
             {connection.openRepos.length > 0 && (
-              <span>{connection.openRepos.length} repo{connection.openRepos.length !== 1 ? "s" : ""} open</span>
+              <span>
+                {connection.openRepos.length} repo
+                {connection.openRepos.length !== 1 ? "s" : ""} open
+              </span>
             )}
             {connection.terminals.length > 0 && (
-              <span>{connection.terminals.length} terminal{connection.terminals.length !== 1 ? "s" : ""}</span>
+              <span>
+                {connection.terminals.length} terminal
+                {connection.terminals.length !== 1 ? "s" : ""}
+              </span>
             )}
             {connection.portForwards.filter((f) => f.status === "active").length > 0 && (
               <span>
-                {connection.portForwards.filter((f) => f.status === "active").length} port forward{connection.portForwards.filter((f) => f.status === "active").length !== 1 ? "s" : ""}
+                {connection.portForwards.filter((f) => f.status === "active").length}{" "}
+                port forward
+                {connection.portForwards.filter((f) => f.status === "active").length !== 1 ? "s" : ""}
               </span>
             )}
           </div>
@@ -416,7 +428,9 @@ export function DashboardRemoteSection({
 
   return (
     <div className="pt-4 pb-2">
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={toggle}
         className="flex w-full items-center gap-2 mb-3 cursor-pointer group"
@@ -440,7 +454,7 @@ export function DashboardRemoteSection({
           ({connections.length})
         </span>
         <div className="h-px flex-1 bg-border/50" />
-      </button>
+      </Button>
       <div
         id="section-remote-servers"
         className="overflow-hidden transition-[max-height,opacity] duration-200 ease-in-out"

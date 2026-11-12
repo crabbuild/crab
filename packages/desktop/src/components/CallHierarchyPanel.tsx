@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * CallHierarchyPanel — incoming / outgoing calls for a function.
  *
@@ -12,23 +13,23 @@
  *   3. Users can toggle direction (incoming ↔ outgoing) in the panel.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
 import clsx from "clsx";
 import { ArrowDownCircle, ArrowUpCircle, ChevronDown, ChevronRight, Loader2, X } from "lucide-react";
-import type {
-  LspCallHierarchyItem,
-  LspCallHierarchyIncomingCall,
-  LspCallHierarchyOutgoingCall,
-} from "../lib/lsp-types";
-import type { LspClient } from "../lib/lsp-client";
-import { SymbolKindIcon } from "./SymbolKindIcon";
-import { lspSymbolKindToSymbolKind } from "../lib/lsp-symbol-kind";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   callHierarchyItemKey,
   dedupCallHierarchyCycles,
   mapCallHierarchyTree,
   type CallHierarchyNode as NodeState,
 } from "../lib/call-hierarchy-tree";
+import type { LspClient } from "../lib/lsp-client";
+import { lspSymbolKindToSymbolKind } from "../lib/lsp-symbol-kind";
+import type {
+  LspCallHierarchyIncomingCall,
+  LspCallHierarchyItem,
+  LspCallHierarchyOutgoingCall,
+} from "../lib/lsp-types";
+import { SymbolKindIcon } from "./SymbolKindIcon";
 
 export type CallHierarchyDirection = "incoming" | "outgoing";
 
@@ -184,7 +185,9 @@ export function CallHierarchyPanel({
           {title}
         </span>
         <div className="flex items-center gap-1">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={() => onDirectionChange(direction === "incoming" ? "outgoing" : "incoming")}
             className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
@@ -196,22 +199,26 @@ export function CallHierarchyPanel({
               <ArrowDownCircle size={10} />
             )}
             {direction === "incoming" ? "Incoming" : "Outgoing"}
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={onClose}
             className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
             aria-label="Close call hierarchy panel"
           >
             <X size={12} />
-          </button>
+          </Button>
         </div>
       </div>
 
       {/* Tree */}
       <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
         {nodes.length === 0 ? (
-          <div className="px-3 py-4 text-xs text-muted-foreground">No results.</div>
+          <div className="px-3 py-4 text-xs text-muted-foreground">
+            No results.
+          </div>
         ) : (
           <TreeNodes
             nodes={nodes}
@@ -276,7 +283,9 @@ function TreeNode({
 
   return (
     <>
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={(e) => {
           // Shift-click jumps directly; plain click toggles.
@@ -287,7 +296,7 @@ function TreeNode({
           }
         }}
         onDoubleClick={() => onNavigate(item.uri, item.selectionRange.start.line + 1, item.selectionRange.start.character + 1)}
-        className="flex w-full items-center gap-1 px-3 py-1 text-left text-xs hover:bg-accent"
+        className="justify-start flex w-full items-center gap-1 px-3 py-1 text-left text-xs hover:bg-accent"
         style={{ paddingLeft: `${12 + depth * 12}px` }}
       >
         <span className="shrink-0 text-muted-foreground">
@@ -302,20 +311,26 @@ function TreeNode({
           )}
         </span>
         <SymbolKindIcon kind={lspSymbolKindToSymbolKind(item.kind)} size={11} />
-        <span className="truncate font-medium text-foreground">{item.name}</span>
+        <span className="truncate font-medium text-foreground">
+          {item.name}
+        </span>
         {item.detail && (
-          <span className="shrink-0 truncate text-[10px] text-muted-foreground">{item.detail}</span>
+          <span className="shrink-0 truncate text-[10px] text-muted-foreground">
+            {item.detail}
+          </span>
         )}
         <span className="ml-auto shrink-0 truncate text-[10px] text-muted-foreground/70">
           {displayPath(item.uri)}
         </span>
-      </button>
+      </Button>
 
       {/* Call sites (the specific lines where THIS item appears in the caller). */}
       {expanded && callSites.length > 0 && (
         <div>
           {callSites.map((site, idx) => (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               key={`${node.path}-site-${idx}`}
               type="button"
               onClick={() =>
@@ -327,9 +342,10 @@ function TreeNode({
               style={{ paddingLeft: `${36 + depth * 12}px` }}
             >
               <span>
-                {direction === "incoming" ? "called at" : "calls at"} line {site.startLine + 1}
+                {direction === "incoming" ? "called at" : "calls at"} line{" "}
+                {site.startLine + 1}
               </span>
-            </button>
+            </Button>
           ))}
         </div>
       )}

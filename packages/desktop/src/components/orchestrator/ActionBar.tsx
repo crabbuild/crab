@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import {
 Check,
 MessageSquare,
@@ -123,13 +124,15 @@ function ActionButton({
         : "border border-border text-foreground hover:bg-accent";
 
   return (
-    <button
+    <Button
+      variant="ghost"
+      size="compact"
       type="button"
       onClick={onClick}
       className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition ${cls}`}
     >
       {icon}
       {label}
-    </button>
+    </Button>
   );
 }

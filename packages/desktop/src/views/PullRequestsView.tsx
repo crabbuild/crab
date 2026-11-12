@@ -1,6 +1,5 @@
 import { Button } from "@/components/ui/button";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { useSessionScroll } from "../hooks/useSessionScroll";
+import { requestPrompt } from "@/lib/application-dialogs";
 import clsx from "clsx";
 import {
   Check,
@@ -15,11 +14,13 @@ import {
   RefreshCw,
   Settings,
 } from "lucide-react";
-import { OpenRepo } from "../state";
-import { PullRequestEntry, PullRequestStatus, rpc } from "../ipc";
-import { ViewToolbar, ToolbarAction } from "../components/ViewToolbar";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ContextMenu, MenuItemDef } from "../components/ContextMenu";
-import { executeCommand, CommandContext } from "../lib/command-registry";
+import { ToolbarAction, ViewToolbar } from "../components/ViewToolbar";
+import { useSessionScroll } from "../hooks/useSessionScroll";
+import { PullRequestEntry, PullRequestStatus, rpc } from "../ipc";
+import { CommandContext, executeCommand } from "../lib/command-registry";
+import { OpenRepo } from "../state";
 
 interface Props {
   repo: OpenRepo;
@@ -101,16 +102,18 @@ function PrSection({ title, prs, defaultOpen = true, onSelectPr, onContextMenu }
 
   return (
     <div className="mb-1">
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center gap-1 px-3 py-1.5 text-left text-[11px] font-medium uppercase tracking-wider text-muted-foreground hover:text-foreground"
+        className="justify-start flex w-full items-center gap-1 px-3 py-1.5 text-left text-[11px] font-medium uppercase tracking-wider text-muted-foreground hover:text-foreground"
         aria-expanded={open}
       >
         {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
         {title}
         <span className="ml-auto text-[10px] tabular-nums">{prs.length}</span>
-      </button>
+      </Button>
       {open && (
         <ul role="listbox" aria-label={title} className="space-y-0.5 px-2">
           {prs.length === 0 && (
@@ -240,9 +243,9 @@ export function PullRequestsView({ repo, onNavigateToSettings, onSelectPr }: Pro
   );
 
   const handleToolbarAction = useCallback(
-    (actionId: string) => {
+    async (actionId: string) => {
       if (actionId === "pr.create") {
-        const title = window.prompt("Pull request title:");
+        const title = await requestPrompt("Pull request title:");
         if (!title?.trim()) return;
         void executeCommand(actionId, commandContext, title.trim());
       } else {
@@ -376,7 +379,9 @@ export function PullRequestsView({ repo, onNavigateToSettings, onSelectPr }: Pro
         actions={toolbarActions}
         onAction={handleToolbarAction}
         trailing={
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={() => void fetchPrs()}
             className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-primary/20 hover:text-foreground"
@@ -384,7 +389,7 @@ export function PullRequestsView({ repo, onNavigateToSettings, onSelectPr }: Pro
             disabled={loading}
           >
             <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
-          </button>
+          </Button>
         }
       />
       <div ref={scrollRef} className="flex-1 overflow-auto py-1">

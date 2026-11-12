@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * ReferencesPanel — bottom drawer component listing LSP reference results.
  *
@@ -5,8 +6,8 @@
  * Clicking a reference navigates to that file and line.
  */
 
-import { useCallback, useMemo } from "react";
 import { FileText, X } from "lucide-react";
+import { useCallback, useMemo } from "react";
 
 export interface ReferenceItem {
   uri: string;
@@ -55,15 +56,19 @@ export function ReferencesPanel({ references, onNavigate, onClose, title }: Prop
     <div className="flex flex-col border-t border-border bg-card max-h-[240px]">
       {/* Header */}
       <div className="flex shrink-0 items-center justify-between border-b border-border px-3 py-1.5">
-        <span className="text-[11px] font-medium text-foreground">{displayTitle}</span>
-        <button
+        <span className="text-[11px] font-medium text-foreground">
+          {displayTitle}
+        </span>
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={onClose}
           className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground transition"
           aria-label="Close references panel"
         >
           <X size={12} />
-        </button>
+        </Button>
       </div>
 
       {/* Results list */}
@@ -85,11 +90,13 @@ export function ReferencesPanel({ references, onNavigate, onClose, title }: Prop
 
               {/* References in this file */}
               {refs.map((ref, idx) => (
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   key={`${ref.line}-${ref.character}-${idx}`}
                   type="button"
                   onClick={() => handleClick(ref.uri, ref.line)}
-                  className="flex w-full items-baseline gap-2 px-3 py-0.5 text-left hover:bg-accent transition text-[11px]"
+                  className="justify-start flex w-full items-baseline gap-2 px-3 py-0.5 text-left hover:bg-accent transition text-[11px]"
                 >
                   <span className="shrink-0 text-primary tabular-nums w-8 text-right">
                     {ref.line}
@@ -97,7 +104,7 @@ export function ReferencesPanel({ references, onNavigate, onClose, title }: Prop
                   <span className="text-foreground truncate font-mono text-[10.5px]">
                     {ref.preview ?? `Line ${ref.line}`}
                   </span>
-                </button>
+                </Button>
               ))}
             </div>
           );

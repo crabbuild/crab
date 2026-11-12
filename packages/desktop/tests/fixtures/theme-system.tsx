@@ -4,7 +4,14 @@ import { Plus } from "lucide-react";
 import { Button } from "../../src/components/ui/button";
 import { Input } from "../../src/components/ui/input";
 import { Textarea } from "../../src/components/ui/textarea";
-import { NativeSelect } from "../../src/components/ui/native-select";
+import {
+  Select,
+  SelectTrigger,
+  SelectValue,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+} from "../../src/components/ui/select";
 import { Tabs, TabsContent } from "../../src/components/ui/tabs";
 import {
   WorkflowTabs,
@@ -42,19 +49,26 @@ function Fixture() {
         <h1 className="text-lg font-semibold">Crab desktop theme</h1>
         <div className="flex items-center gap-3 text-muted-foreground">
           <label htmlFor="theme">Theme</label>
-          <NativeSelect
-            id="theme"
+          <Select
             value={settings.theme}
-            onChange={(event) =>
-              update("theme", event.target.value as Settings["theme"])
+            onValueChange={(value) =>
+              update("theme", value as Settings["theme"])
             }
           >
-            {(["light", "dark", "hc-light", "hc-dark", "system"] as const).map(
+            <SelectTrigger id="theme" aria-label="Theme">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                {(["light", "dark", "hc-light", "hc-dark", "system"] as const).map(
               (mode) => (
-                <option key={mode}>{mode}</option>
-              ),
-            )}
-          </NativeSelect>
+                <SelectItem key={mode} value={mode}>
+                    {mode}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
         </div>
       </header>
       <section
@@ -108,14 +122,17 @@ function Fixture() {
                 <label htmlFor="runner" className="block">
                   Runner
                 </label>
-                <NativeSelect
-                  id="runner"
-                  name="runner"
-                  className="block w-full"
-                >
-                  <option>Shell</option>
-                  <option>Python</option>
-                </NativeSelect>
+                <Select name="runner" defaultValue="Shell">
+                  <SelectTrigger id="runner" aria-label="Runner">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      <SelectItem value="Shell">Shell</SelectItem>
+                      <SelectItem value="Python">Python</SelectItem>
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 <Button type="submit" variant="default">

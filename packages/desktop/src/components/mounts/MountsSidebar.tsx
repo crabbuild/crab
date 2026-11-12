@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Sidebar section showing active VFS mounts with status indicators.
  *
@@ -9,7 +10,6 @@
  * - One-click unmount button
  */
 
-import { useCallback, useEffect, useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -17,6 +17,7 @@ import {
   RefreshCw,
   X,
 } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
 
 /** Mount info as returned by the coordinator list operation. */
 interface MountEntry {
@@ -102,7 +103,9 @@ export function MountsSidebar({ onSelectMount, selectedMountpoint }: MountsSideb
 
   return (
     <div>
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         className="flex w-full items-center gap-1 px-3 pt-2 pb-1 text-[11px] uppercase tracking-wider text-muted-foreground hover:text-foreground transition"
         onClick={() => setCollapsed((v) => !v)}
@@ -113,9 +116,13 @@ export function MountsSidebar({ onSelectMount, selectedMountpoint }: MountsSideb
         <HardDrive size={11} className="mr-0.5" />
         <span>Mounts</span>
         {mounts.length > 0 && (
-          <span className="ml-auto text-[10px] text-muted-foreground">{mounts.length}</span>
+          <span className="ml-auto text-[10px] text-muted-foreground">
+            {mounts.length}
+          </span>
         )}
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           className="ml-1 rounded p-0.5 text-muted-foreground hover:text-foreground hover:bg-accent transition"
           onClick={(e) => { e.stopPropagation(); fetchMounts(); }}
@@ -123,8 +130,8 @@ export function MountsSidebar({ onSelectMount, selectedMountpoint }: MountsSideb
           aria-label="Refresh mounts"
         >
           <RefreshCw size={10} className={loading ? "animate-spin" : ""} />
-        </button>
-      </button>
+        </Button>
+      </Button>
 
       {!collapsed && (
         <div className="mt-1 pl-3 pr-2">
@@ -135,7 +142,9 @@ export function MountsSidebar({ onSelectMount, selectedMountpoint }: MountsSideb
           )}
 
           {mounts.length === 0 && !error && (
-            <div className="px-2 py-2 text-[11px] text-muted-foreground">No active mounts</div>
+            <div className="px-2 py-2 text-[11px] text-muted-foreground">
+              No active mounts
+            </div>
           )}
 
           <ul className="space-y-0.5">
@@ -198,13 +207,17 @@ function MountEntryRow({ mount, isSelected, onSelect, onUnmount }: MountEntryRow
       <div className="min-w-0 flex-1">
         <div className="truncate text-xs font-medium">{displayName}</div>
         <div className="truncate text-[10px] text-muted-foreground">
-          {mount.ref !== "HEAD" ? mount.ref : ""}{mount.ref !== "HEAD" && mount.read_only ? " · " : ""}{mount.read_only ? "read-only" : ""}
+          {mount.ref !== "HEAD" ? mount.ref : ""}
+          {mount.ref !== "HEAD" && mount.read_only ? " · " : ""}
+          {mount.read_only ? "read-only" : ""}
         </div>
       </div>
 
       {/* Unmount button (visible on hover) */}
       {hovered && (
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           className="shrink-0 rounded p-0.5 text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition"
           onClick={(e) => { e.stopPropagation(); onUnmount(); }}
@@ -212,7 +225,7 @@ function MountEntryRow({ mount, isSelected, onSelect, onUnmount }: MountEntryRow
           aria-label={`Unmount ${displayName}`}
         >
           <X size={12} />
-        </button>
+        </Button>
       )}
     </li>
   );

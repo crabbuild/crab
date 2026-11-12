@@ -1,17 +1,25 @@
-import { Input } from "@/components/ui/input";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Search, ChevronLeft } from "lucide-react";
-import clsx from "clsx";
+import { Button } from "@/components/ui/button";
 import {
-  filterCommands,
-  executeCommand,
-  useCommands,
-} from "../lib/command-registry";
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+  Command as CommandRoot,
+} from "@/components/ui/command";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import clsx from "clsx";
+import { ChevronLeft } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   Command,
   CommandContext,
   CommandResult,
   PromptConfig,
+} from "../lib/command-registry";
+import {
+  executeCommand,
+  filterCommands,
+  useCommands,
 } from "../lib/command-registry";
 
 export interface CommandPaletteProps {
@@ -53,25 +61,15 @@ export function CommandPalette({
 
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
-  const previousFocusRef = useRef<HTMLElement | null>(null);
 
   // Subscribe to registry changes so the list updates if commands are registered/unregistered.
   useCommands();
 
-  // Capture the previously focused element when the palette opens.
+  // Reset command search when the palette opens.
   useEffect(() => {
     if (open) {
-      previousFocusRef.current = document.activeElement as HTMLElement | null;
       setMode({ kind: "commands", query: "", selectedIndex: 0 });
       requestAnimationFrame(() => inputRef.current?.focus());
-    }
-  }, [open]);
-
-  // Restore focus to the previously focused element on close.
-  useEffect(() => {
-    if (!open && previousFocusRef.current) {
-      previousFocusRef.current.focus();
-      previousFocusRef.current = null;
     }
   }, [open]);
 
@@ -97,16 +95,6 @@ export function CommandPalette({
     }
     return [];
   }, [mode]);
-
-  // The total number of items in the current list (for navigation bounds).
-  const itemCount = useMemo(() => {
-    if (mode.kind === "commands") return results.length;
-    if (mode.kind === "prompt" && mode.promptConfig.kind === "choice") {
-      return promptChoices.length;
-    }
-    // For free-text prompts (branch, commit, ref), there's no list to navigate.
-    return 0;
-  }, [mode, results.length, promptChoices.length]);
 
   // Keep selected index in bounds when results change.
   useEffect(() => {
@@ -188,58 +176,15 @@ export function CommandPalette({
   );
 
   const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent) => {
-      switch (e.key) {
-        case "Escape":
-          e.preventDefault();
-          if (mode.kind === "prompt") {
-            // Return to command list from prompt mode.
-            setMode({ kind: "commands", query: "", selectedIndex: 0 });
-          } else {
-            handleClose();
-          }
-          break;
-
-        case "ArrowDown":
-          e.preventDefault();
-          setMode((prev) => ({
-            ...prev,
-            selectedIndex: Math.min(prev.selectedIndex + 1, Math.max(0, itemCount - 1)),
-          }));
-          break;
-
-        case "ArrowUp":
-          e.preventDefault();
-          setMode((prev) => ({
-            ...prev,
-            selectedIndex: Math.max(prev.selectedIndex - 1, 0),
-          }));
-          break;
-
-        case "Enter":
-          e.preventDefault();
-          if (mode.kind === "commands") {
-            const cmd = results[mode.selectedIndex];
-            if (cmd && cmd.isEnabled(context)) {
-              selectCommand(cmd);
-            }
-          } else if (mode.kind === "prompt") {
-            if (mode.promptConfig.kind === "choice") {
-              const choice = promptChoices[mode.selectedIndex];
-              if (choice) {
-                submitPrompt(choice.value);
-              }
-            } else {
-              // Free-text prompt (branch, commit, ref) — submit the query as input.
-              if (mode.query.trim()) {
-                submitPrompt(mode.query.trim());
-              }
-            }
-          }
-          break;
+    (event: React.KeyboardEvent) => {
+      if (
+        event.key === "Enter" &&
+        mode.kind === "prompt" && mode.promptConfig.kind !== "choice") {
+        event.preventDefault();
+        if (mode.query.trim()) submitPrompt(mode.query.trim());
       }
     },
-    [mode, itemCount, results, context, selectCommand, promptChoices, submitPrompt, handleClose],
+    [mode, submitPrompt],
   );
 
   const handleQueryChange = useCallback((value: string) => {
@@ -252,83 +197,85 @@ export function CommandPalette({
     mode.kind === "prompt" ? mode.promptConfig.placeholder : "Run command…";
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center pt-[12vh]"
-      onClick={handleClose}
-      role="presentation"
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) handleClose();
+      }}
     >
       {/* Backdrop */}
-      <div className="absolute inset-0 bg-black/50" aria-hidden="true" />
 
       {/* Palette container */}
-      <div
-        className="relative z-10 flex w-full max-w-lg flex-col overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-        onKeyDown={handleKeyDown}
-        role="dialog"
-        aria-label="Command palette"
-        aria-modal="true"
+      <DialogContent
+        onEscapeKeyDown={(event) => {
+          if (mode.kind === "prompt") {
+            event.preventDefault();
+            setMode({ kind: "commands", query: "", selectedIndex: 0 });
+          }
+        }}
+        showCloseButton={false}
+        aria-describedby={undefined}
+        className={
+          "flex w-full max-w-lg flex-col overflow-hidden rounded-lg border border-border bg-card shadow-2xl" +
+          " p-0 gap-0"
+        }
       >
+        <DialogTitle className="sr-only">Command palette</DialogTitle>
+        <CommandRoot
+          shouldFilter={false}
+          value={String(mode.selectedIndex)}
+          onValueChange={(value) =>
+            setMode((prev) => ({ ...prev, selectedIndex: Number(value) }))}
+        onKeyDown={handleKeyDown}
+        >
         {/* Search input */}
         <div className="flex items-center gap-2 border-b border-border px-3 py-2">
           {mode.kind === "prompt" && (
-            <button
-              type="button"
+            <Button
+                variant="ghost"
+                size="compact"
+                type="button"
               className="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
               onClick={() => setMode({ kind: "commands", query: "", selectedIndex: 0 })}
               aria-label="Back to commands"
             >
               <ChevronLeft size={16} />
-            </button>
-          )}
-          <Search size={16} className="shrink-0 text-muted-foreground" aria-hidden="true" />
-          <Input
-            ref={inputRef}
-            type="text"
-            className="flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none"
+            </Button>
+            )}
+
+            <CommandInput
+              ref={inputRef}
+              className="flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none"
             placeholder={placeholder}
             value={mode.query}
-            onChange={(e) => handleQueryChange(e.target.value)}
+              onValueChange={(value) => handleQueryChange(value)}
             aria-label={placeholder}
-            aria-activedescendant={
-              mode.kind === "commands" && results[mode.selectedIndex]
-                ? `palette-item-${results[mode.selectedIndex].id}`
-                : mode.kind === "prompt" && promptChoices[mode.selectedIndex]
-                  ? `palette-choice-${mode.selectedIndex}`
-                  : undefined
-            }
-            role="combobox"
-            aria-expanded="true"
-            aria-controls="palette-results"
-            aria-autocomplete="list"
-          />
+            />
         </div>
 
         {/* Results list */}
-        <div
-          ref={listRef}
+        <CommandList
+            ref={listRef}
           id="palette-results"
           className="max-h-[320px] overflow-y-auto py-1"
-          role="listbox"
-        >
+          >
+            <CommandGroup>
           {mode.kind === "commands" && (
             <>
               {results.length === 0 ? (
                 <div className="px-3 py-4 text-center text-sm text-muted-foreground">
-                  No matching commands
-                </div>
+                      No matching commands
+                    </div>
               ) : (
                 results.map((cmd, idx) => {
                   const isSelected = idx === mode.selectedIndex;
                   const isDisabled = !cmd.isEnabled(context);
                   return (
-                    <div
-                      key={cmd.id}
-                      id={`palette-item-${cmd.id}`}
-                      data-idx={idx}
-                      role="option"
-                      aria-selected={isSelected}
-                      aria-disabled={isDisabled}
+                    <CommandItem
+                          value={String(idx)}
+                          key={cmd.id}
+                          data-idx={idx}
+                          disabled={isDisabled}
                       className={clsx(
                         "flex cursor-pointer items-center gap-2 px-3 py-1.5 text-sm",
                         isDisabled && "opacity-50 cursor-default",
@@ -336,13 +283,10 @@ export function CommandPalette({
                           ? "bg-primary/15 text-foreground"
                           : "text-foreground/80 hover:bg-accent",
                       )}
-                      onClick={() => {
+                          onSelect={() => {
                         if (!isDisabled) selectCommand(cmd);
                       }}
-                      onMouseEnter={() =>
-                        setMode((prev) => ({ ...prev, selectedIndex: idx }))
-                      }
-                    >
+                        >
                       {cmd.icon && (
                         <cmd.icon size={14} className="shrink-0 text-muted-foreground" aria-hidden="true" />
                       )}
@@ -357,7 +301,7 @@ export function CommandPalette({
                           </span>
                         )}
                       </span>
-                    </div>
+                    </CommandItem>
                   );
                 })
               )}
@@ -368,31 +312,27 @@ export function CommandPalette({
             <>
               {promptChoices.length === 0 ? (
                 <div className="px-3 py-4 text-center text-sm text-muted-foreground">
-                  No matching options
-                </div>
+                        No matching options
+                      </div>
               ) : (
                 promptChoices.map((choice, idx) => {
                   const isSelected = idx === mode.selectedIndex;
                   return (
-                    <div
-                      key={choice.value}
-                      id={`palette-choice-${idx}`}
-                      data-idx={idx}
-                      role="option"
-                      aria-selected={isSelected}
+                    <CommandItem
+                            value={String(idx)}
+                            key={choice.value}
+                            data-idx={idx}
                       className={clsx(
                         "flex cursor-pointer items-center gap-2 px-3 py-1.5 text-sm",
                         isSelected
                           ? "bg-primary/15 text-foreground"
                           : "text-foreground/80 hover:bg-accent",
                       )}
-                      onClick={() => submitPrompt(choice.value)}
-                      onMouseEnter={() =>
-                        setMode((prev) => ({ ...prev, selectedIndex: idx }))
+                            onSelect={() => submitPrompt(choice.value)
                       }
                     >
                       <span className="truncate">{choice.label}</span>
-                    </div>
+                    </CommandItem>
                   );
                 })
               )}
@@ -401,11 +341,14 @@ export function CommandPalette({
 
           {mode.kind === "prompt" && mode.promptConfig.kind !== "choice" && (
             <div className="px-3 py-3 text-xs text-muted-foreground">
-              Type a value and press Enter to confirm, or Escape to go back.
-            </div>
+                    Type a value and press Enter to confirm, or Escape to go
+                    back.
+                  </div>
           )}
-        </div>
-      </div>
-    </div>
+        </CommandGroup>
+          </CommandList>
+        </CommandRoot>
+      </DialogContent>
+    </Dialog>
   );
 }

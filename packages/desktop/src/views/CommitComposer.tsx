@@ -1,15 +1,17 @@
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import clsx from "clsx";
 import { AlertTriangle, FileCode2, GitCommitHorizontal, HardDrive, Loader2, Sparkles } from "lucide-react";
-import { OpenRepo } from "../state";
-import { DirEntry, rpc } from "../ipc";
-import { useSetting, useSettings } from "../settings";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { ConventionalSubject } from "../components/ConventionalSubject";
-import { formatBytes } from "../lib/format";
 import { IssueSuggestions } from "../components/IssueSuggestions";
+import { DirEntry, rpc } from "../ipc";
 import { getConfiguredGenerator } from "../lib/commit-message-generator";
+import { formatBytes } from "../lib/format";
+import { useSetting, useSettings } from "../settings";
+import { OpenRepo } from "../state";
 // Side-effect imports: register generators on load
 import "../lib/local-llama-generator";
 import "../lib/openai-compatible-generator";
@@ -401,10 +403,9 @@ export function CommitComposer({ repo, hasStaged, stagedPaths, onCommitSuccess }
       <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-2">
         <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5">
           <label className="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[11px] text-muted-foreground">
-            <input
-              type="checkbox"
+            <Checkbox
               checked={draft.amend}
-              onChange={() => dispatch({ type: "toggle-amend" })}
+              onCheckedChange={() => dispatch({ type: "toggle-amend" })}
               className="accent-primary"
             />
             Amend
@@ -413,10 +414,9 @@ export function CommitComposer({ repo, hasStaged, stagedPaths, onCommitSuccess }
             className="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[11px] text-muted-foreground"
             title="Add Signed-off-by trailer"
           >
-            <input
-              type="checkbox"
+            <Checkbox
               checked={draft.signOff}
-              onChange={() => dispatch({ type: "toggle-sign-off" })}
+              onCheckedChange={() => dispatch({ type: "toggle-sign-off" })}
               className="accent-primary"
             />
             Sign-off
@@ -432,11 +432,10 @@ export function CommitComposer({ repo, hasStaged, stagedPaths, onCommitSuccess }
                 : "No signing key configured (set user.signingkey in git config)"
             }
           >
-            <input
-              type="checkbox"
+            <Checkbox
               checked={draft.sign}
               disabled={!signingAvailable}
-              onChange={() => dispatch({ type: "toggle-sign" })}
+              onCheckedChange={() => dispatch({ type: "toggle-sign" })}
               className="accent-primary"
             />
             Sign
@@ -444,7 +443,9 @@ export function CommitComposer({ repo, hasStaged, stagedPaths, onCommitSuccess }
         </div>
         <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-2">
           {generator && (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               disabled={suggesting || !hasStaged}
               onClick={() => void handleSuggest()}
@@ -463,9 +464,11 @@ export function CommitComposer({ repo, hasStaged, stagedPaths, onCommitSuccess }
                 <Sparkles size={12} />
               )}
               Suggest
-            </button>
+            </Button>
           )}
-          <button
+          <Button
+            variant="default"
+            size="compact"
             type="button"
             disabled={commitDisabled}
             onClick={() => void handleCommit()}
@@ -484,27 +487,30 @@ export function CommitComposer({ repo, hasStaged, stagedPaths, onCommitSuccess }
               <GitCommitHorizontal size={12} />
             )}
             {draft.amend ? "Amend" : "Commit"}
-          </button>
+          </Button>
         </div>
       </div>
       {/* Notebook output stripping indicator */}
       {stagedNotebooks.length > 0 && stripNotebookOutputs && (
         <div className="mt-1.5 flex items-center gap-1.5 rounded bg-primary/10 px-2 py-1 text-[11px] text-primary">
           <FileCode2 size={11} />
-          Outputs will be stripped from {stagedNotebooks.length} notebook{stagedNotebooks.length > 1 ? "s" : ""}
+          Outputs will be stripped from {stagedNotebooks.length} notebook
+          {stagedNotebooks.length > 1 ? "s" : ""}
         </div>
       )}
       {stagedNotebooks.length > 0 && !stripNotebookOutputs && (
         <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-muted-foreground">
           <FileCode2 size={11} />
           <span>Tip: </span>
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="underline decoration-dotted hover:text-foreground"
             onClick={() => update("stripNotebookOutputs", true)}
           >
             Strip notebook outputs
-          </button>
+          </Button>
           <span> before commit</span>
         </div>
       )}
@@ -513,7 +519,8 @@ export function CommitComposer({ repo, hasStaged, stagedPaths, onCommitSuccess }
         <div className="mt-1.5 rounded border border-warning/40 bg-warning/10 px-2 py-1.5">
           <div className="flex items-center gap-1.5 text-[11px] font-medium text-warning">
             <HardDrive size={11} />
-            {largeFiles.length} file{largeFiles.length > 1 ? "s" : ""} &gt; {largeFileThresholdMb} MB not tracked by Crab
+            {largeFiles.length} file{largeFiles.length > 1 ? "s" : ""} &gt;{" "}
+            {largeFileThresholdMb} MB not tracked by Crab
           </div>
           <ul className="mt-1 space-y-0.5 text-[10px] text-warning/80">
             {largeFiles.map((f) => (
@@ -523,20 +530,26 @@ export function CommitComposer({ repo, hasStaged, stagedPaths, onCommitSuccess }
             ))}
           </ul>
           <div className="mt-1.5 flex items-center gap-2">
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               disabled={trackingInProgress}
               onClick={() => void handleTrackWithCrab()}
               className="rounded bg-warning/15 px-2 py-0.5 text-[10px] font-medium text-warning transition hover:bg-warning/25 disabled:opacity-50"
             >
               {trackingInProgress ? "Tracking…" : "Track with Crab"}
-            </button>
-            <span className="text-[10px] text-warning/60">or commit anyway</span>
+            </Button>
+            <span className="text-[10px] text-warning/60">
+              or commit anyway
+            </span>
           </div>
         </div>
       )}
       {toast && (
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={() => setToast(null)}
           className={clsx(
@@ -550,7 +563,7 @@ export function CommitComposer({ repo, hasStaged, stagedPaths, onCommitSuccess }
             {toast.kind === "error" && <AlertTriangle size={10} />}
             {toast.text}
           </span>
-        </button>
+        </Button>
       )}
     </div>
   );

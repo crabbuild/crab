@@ -1,7 +1,9 @@
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import clsx from "clsx";
 import { AlertTriangle, Trash2 } from "lucide-react";
-import { useEffect, useId, useRef, useState } from "react";
+import { useId, useRef, useState } from "react";
 
 /**
  * Confirmation dialog for removing a worktree.
@@ -32,55 +34,38 @@ export function WorktreeRemoveConfirmDialog({
   onConfirm,
   onCancel,
 }: WorktreeRemoveConfirmDialogProps) {
-  const headingId = useId();
   const bodyId = useId();
   const inputRef = useRef<HTMLInputElement | null>(null);
   const cancelRef = useRef<HTMLButtonElement | null>(null);
-  const previousActive = useRef<HTMLElement | null>(null);
+
   const [typedValue, setTypedValue] = useState("");
 
   const isDirty = dirtyCount > 0;
   const confirmWord = "REMOVE";
   const matches = typedValue === confirmWord;
 
-  // Grab focus on mount, restore on unmount.
-  useEffect(() => {
-    previousActive.current = (document.activeElement as HTMLElement | null) ?? null;
-    if (isDirty) {
+  return (
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) {
+          onCancel();
+        }
+      }}
+    >
+      <DialogContent
+        role="alertdialog"
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          if (isDirty) {
       inputRef.current?.focus();
     } else {
       cancelRef.current?.focus();
     }
-    return () => {
-      previousActive.current?.focus?.();
-    };
-  }, [isDirty]);
-
-  // Esc cancels.
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        onCancel();
-      }
-    };
-    window.addEventListener("keydown", handler, true);
-    return () => window.removeEventListener("keydown", handler, true);
-  }, [onCancel]);
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onCancel();
-      }}
-    >
-      <div
-        role="alertdialog"
-        aria-modal="true"
-        aria-labelledby={headingId}
+        }}
+        showCloseButton={false}
         aria-describedby={bodyId}
-        className="w-[28rem] max-w-[calc(100vw-2rem)] rounded-lg border border-border bg-card shadow-2xl"
+        className="block gap-0 p-0 w-[28rem] max-w-[calc(100vw-2rem)] rounded-lg border border-border bg-card shadow-2xl"
       >
         {/* Header */}
         <div className="flex items-start gap-3 border-b border-border p-4">
@@ -99,12 +84,9 @@ export function WorktreeRemoveConfirmDialog({
             )}
           </div>
           <div className="min-w-0 flex-1">
-            <h2
-              id={headingId}
-              className="text-[14px] font-semibold text-foreground"
-            >
+            <DialogTitle className="text-[14px] font-semibold text-foreground">
               {isDirty ? "Force remove worktree with uncommitted changes?" : "Remove worktree?"}
-            </h2>
+            </DialogTitle>
             <p id={bodyId} className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
               {isDirty ? (
                 <>
@@ -134,14 +116,20 @@ export function WorktreeRemoveConfirmDialog({
         {/* Path display */}
         <div className="border-b border-border px-4 py-2">
           <span className="text-[11px] text-muted-foreground">Path: </span>
-          <code className="font-mono text-[11px] text-foreground">{worktreePath}</code>
+          <code className="font-mono text-[11px] text-foreground">
+            {worktreePath}
+          </code>
         </div>
 
         {/* Typed confirmation for dirty worktrees */}
         {isDirty && (
           <div className="border-b border-border px-4 py-3">
             <label className="block text-[12px] text-muted-foreground">
-              Type <code className="rounded bg-background px-1 font-mono font-semibold text-destructive">REMOVE</code> to confirm force removal:
+              Type{" "}
+              <code className="rounded bg-background px-1 font-mono font-semibold text-destructive">
+                REMOVE
+              </code>{" "}
+              to confirm force removal:
             </label>
             <Input
               ref={inputRef}
@@ -166,7 +154,9 @@ export function WorktreeRemoveConfirmDialog({
 
         {/* Action buttons */}
         <div className="flex items-center justify-end gap-2 p-3">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             ref={cancelRef}
             type="button"
             onClick={onCancel}
@@ -176,9 +166,11 @@ export function WorktreeRemoveConfirmDialog({
             )}
           >
             Cancel
-          </button>
+          </Button>
           {isDirty ? (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={() => onConfirm(true)}
               disabled={!matches}
@@ -192,9 +184,11 @@ export function WorktreeRemoveConfirmDialog({
               aria-label="Force Remove"
             >
               Force Remove
-            </button>
+            </Button>
           ) : (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={() => onConfirm(false)}
               className={clsx(
@@ -204,10 +198,10 @@ export function WorktreeRemoveConfirmDialog({
               aria-label="Remove"
             >
               Remove
-            </button>
+            </Button>
           )}
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

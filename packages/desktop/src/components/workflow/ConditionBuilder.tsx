@@ -1,5 +1,12 @@
-import { NativeSelect } from "@/components/ui/native-select";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { useCallback } from "react";
 import type { ConditionSpec } from "../../lib/workflow-types";
 
@@ -33,16 +40,29 @@ export function ConditionBuilder({ condition, onChange }: Props) {
 
   return (
     <div className="space-y-2">
-      <NativeSelect
-        className="w-full text-xs"
-        value={condition?.kind ?? "none"}
-        onChange={(e) => handleKindChange(e.target.value)}
+      <Select
+        value={":" + String(condition?.kind ?? "none")}
+        onValueChange={(selectedValue) => {
+          const value = selectedValue.slice(1);
+          return handleKindChange(value);
+        }}
       >
-        <option value="none">No condition</option>
-        <option value="env">Environment variable</option>
-        <option value="file_exists">File exists</option>
-        <option value="expr">Expression</option>
-      </NativeSelect>
+        <SelectTrigger className="w-full text-xs">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectGroup>
+            <SelectItem value={":" + String("none")}>No condition</SelectItem>
+            <SelectItem value={":" + String("env")}>
+              Environment variable
+            </SelectItem>
+            <SelectItem value={":" + String("file_exists")}>
+              File exists
+            </SelectItem>
+            <SelectItem value={":" + String("expr")}>Expression</SelectItem>
+          </SelectGroup>
+        </SelectContent>
+      </Select>
 
       {condition && (
         <Input

@@ -1,13 +1,15 @@
+import { Button } from "@/components/ui/button";
+import { Popover, PopoverTrigger } from "@/components/ui/popover";
+import clsx from "clsx";
 import { Cloud, HardDrive, Loader2, RefreshCw, Wifi, WifiOff } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { HydrationSummary, rpc } from "../ipc";
 import { formatBytes } from "../lib/format";
 import { useActiveRepo } from "../state";
-import { SidecarChips } from "./SidecarChips";
-import { TaskListPopover } from "./TaskListPopover";
 import { RemoteManagerPopover } from "./RemoteManagerPopover";
+import { SidecarChips } from "./SidecarChips";
 import { StatusBarToolbar } from "./StatusBarToolbar";
-import { useCallback, useEffect, useRef, useState } from "react";
-import clsx from "clsx";
+import { TaskListPopover } from "./TaskListPopover";
 
 interface Props {
   summary: HydrationSummary | null;
@@ -52,10 +54,12 @@ export function StatusBar({ summary, loading, error, onRefresh, onOpenStorageCon
           <>
             <HydrationProgress summary={summary} />
             <span className="flex items-center gap-1">
-              <HardDrive size={11} /> {formatBytes(Number(summary.on_disk_bytes))} on disk
+              <HardDrive size={11} />{" "}
+              {formatBytes(Number(summary.on_disk_bytes))} on disk
             </span>
             <span className="flex items-center gap-1">
-              <Cloud size={11} /> {formatBytes(Number(summary.logical_bytes))} logical
+              <Cloud size={11} /> {formatBytes(Number(summary.logical_bytes))}{" "}
+              logical
             </span>
           </>
         ) : loading ? (
@@ -63,7 +67,9 @@ export function StatusBar({ summary, loading, error, onRefresh, onOpenStorageCon
             <Loader2 size={11} className="animate-spin" /> Checking hydration…
           </span>
         ) : (
-          <span title={error ?? undefined}>{error ? "File status unavailable" : "No hydration data"}</span>
+          <span title={error ?? undefined}>
+            {error ? "File status unavailable" : "No hydration data"}
+          </span>
         )}
       </div>
       <div className="flex items-center gap-3">
@@ -83,14 +89,16 @@ export function StatusBar({ summary, loading, error, onRefresh, onOpenStorageCon
         />
         <RemoteStatusChip onClick={onOpenStorageConfig} />
         <SidecarChips />
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={onRefresh}
           className="flex items-center gap-1 hover:text-foreground"
           title="Refresh hydration status"
         >
           <RefreshCw size={11} />
-        </button>
+        </Button>
       </div>
     </div>
   );
@@ -111,8 +119,13 @@ function HydrationProgress({ summary }: { summary: HydrationSummary }) {
         />
       </span>
       <span className="tabular-nums">
-        <strong className="text-foreground">{summary.hydrated.toLocaleString()}</strong>
-        <span className="text-muted-foreground"> / {total.toLocaleString()} hydrated</span>
+        <strong className="text-foreground">
+          {summary.hydrated.toLocaleString()}
+        </strong>
+        <span className="text-muted-foreground">
+          {" "}
+          / {total.toLocaleString()} hydrated
+        </span>
       </span>
       {summary.partial > 0 && (
         <span className="text-warning">· {summary.partial} partial</span>
@@ -199,22 +212,26 @@ function RemoteStatusChip({ onClick: _onClick }: { onClick?: () => void }) {
 
   return (
     <div className="relative">
-      <button
-        type="button"
-        className="flex items-center gap-1 hover:text-foreground"
-        onClick={() => setPopoverOpen(!popoverOpen)}
-        title={label}
-      >
-        <span className={clsx("inline-block h-2 w-2 rounded-full", dotColor)} />
-        {status === "connected" ? (
+      <Popover open={popoverOpen} onOpenChange={setPopoverOpen}>
+        <PopoverTrigger asChild>
+          <Button
+            variant="ghost"
+            size="compact"
+            type="button"
+            className="flex items-center gap-1 hover:text-foreground"
+            title={label}
+          >
+            <span className={clsx("inline-block h-2 w-2 rounded-full", dotColor)} />
+            {status === "connected" ? (
           <Wifi size={11} className="text-success" />
         ) : status === "failed" ? (
           <WifiOff size={11} className="text-destructive" />
         ) : (
           <Cloud size={11} />
         )}
-      </button>
-      <RemoteManagerPopover
+          </Button>
+        </PopoverTrigger>{" "}
+        <RemoteManagerPopover
         open={popoverOpen}
         onClose={() => setPopoverOpen(false)}
         onPushTo={(remoteName) => {
@@ -226,6 +243,7 @@ function RemoteStatusChip({ onClick: _onClick }: { onClick?: () => void }) {
           );
         }}
       />
+      </Popover>
     </div>
   );
 }

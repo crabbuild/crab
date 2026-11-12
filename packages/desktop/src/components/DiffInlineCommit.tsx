@@ -1,7 +1,8 @@
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { useCallback, useRef, useState } from "react";
-import { Check, GitCommitHorizontal, Loader2, X } from "lucide-react";
 import clsx from "clsx";
+import { Check, GitCommitHorizontal, Loader2, X } from "lucide-react";
+import { useCallback, useRef, useState } from "react";
 import type { CommandContext } from "../lib/command-registry";
 import { executeCommand } from "../lib/command-registry";
 
@@ -109,7 +110,9 @@ export function DiffInlineCommit({
     >
       {activeScope === null ? (
         <>
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={() => handleCommitClick("file")}
             className={clsx(
@@ -121,10 +124,12 @@ export function DiffInlineCommit({
           >
             <GitCommitHorizontal size={12} />
             <span>Commit this file</span>
-          </button>
+          </Button>
 
           {hasSelectedHunks && (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={() => handleCommitClick("hunks")}
               className={clsx(
@@ -136,7 +141,7 @@ export function DiffInlineCommit({
             >
               <Check size={12} />
               <span>Commit selected hunks</span>
-            </button>
+            </Button>
           )}
         </>
       ) : (
@@ -161,7 +166,9 @@ export function DiffInlineCommit({
             )}
             aria-label="Commit message"
           />
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={() => void handleSubmit()}
             disabled={!message.trim() || loading}
@@ -178,8 +185,10 @@ export function DiffInlineCommit({
             ) : (
               <Check size={12} />
             )}
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={handleCancel}
             disabled={loading}
@@ -192,7 +201,7 @@ export function DiffInlineCommit({
             )}
           >
             <X size={12} />
-          </button>
+          </Button>
         </div>
       )}
     </div>

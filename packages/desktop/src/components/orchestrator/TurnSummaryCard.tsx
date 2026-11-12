@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Turn-level summary card rendered at the bottom of a completed Turn
  * when the agent edited at least one file.
@@ -8,28 +9,28 @@
  * Each file row expands inline to a <UnifiedDiff> of that file's diff.
  */
 
-import { useState, useCallback, useMemo } from "react";
 import {
   ChevronDown,
   ChevronRight,
   Eye,
   FileText,
   SearchCheck,
-  ThumbsUp,
   ThumbsDown,
+  ThumbsUp,
   Undo2,
 } from "lucide-react";
-import type { Turn } from "../../lib/turn-derivation";
+import { useCallback, useMemo, useState } from "react";
 import type { AgentEvent } from "../../../electron/orchestrator-adapters";
+import {
+  isPartialDiff,
+  isUnifiedDiff,
+  synthesizeUnifiedDiff,
+} from "../../lib/codex-diff";
+import { publishToast } from "../../lib/toasts";
+import type { Turn } from "../../lib/turn-derivation";
 import { parseDiffStats } from "../../lib/unified-diff-stats";
 import { UnifiedDiff } from "./UnifiedDiff";
 import { useHunkActions } from "./tool-cards/HunkActionsContext";
-import { publishToast } from "../../lib/toasts";
-import {
-  isUnifiedDiff,
-  isPartialDiff,
-  synthesizeUnifiedDiff,
-} from "../../lib/codex-diff";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -238,7 +239,7 @@ export function TurnSummaryCard({ turn, onReview, onAgentReview, onFeedback, tas
           Edited {turn.fileEditCount} file{turn.fileEditCount !== 1 ? "s" : ""}
         </span>
 
-        {/* Aggregate +X −Y */}
+        {/* Header */}
         {(turn.totalAdded > 0 || turn.totalRemoved > 0) && (
           <span className="flex items-center gap-1.5 text-[10px] font-mono">
             {turn.totalAdded > 0 && (
@@ -258,7 +259,9 @@ export function TurnSummaryCard({ turn, onReview, onAgentReview, onFeedback, tas
             <Undo2 size={10} /> Reverted
           </span>
         ) : (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             disabled={undoState === "reverting" || !hunkContext?.taskId}
             onClick={() => void handleUndo()}
@@ -267,35 +270,43 @@ export function TurnSummaryCard({ turn, onReview, onAgentReview, onFeedback, tas
           >
             <Undo2 size={10} />
             Undo
-          </button>
+          </Button>
         )}
 
         {/* Feedback buttons */}
         {!feedbackSent ? (
           <>
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={() => handleFeedback(4)}
               className="inline-flex items-center gap-1 rounded border border-success/30 bg-success/5 px-1.5 py-0.5 text-[10px] text-success hover:bg-success/15 transition"
               title="Good result"
             >
               <ThumbsUp size={10} />
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={() => handleFeedback(1)}
               className="inline-flex items-center gap-1 rounded border border-destructive/30 bg-destructive/5 px-1.5 py-0.5 text-[10px] text-destructive hover:bg-destructive/15 transition"
               title="Needs improvement"
             >
               <ThumbsDown size={10} />
-            </button>
+            </Button>
           </>
         ) : (
-          <span className="text-[10px] text-muted-foreground italic">Thanks!</span>
+          <span className="text-[10px] text-muted-foreground italic">
+            Thanks!
+          </span>
         )}
 
         {/* Agent Review button — triggers codex review mode */}
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={handleAgentReview}
           className="inline-flex items-center gap-1 rounded border border-info/30 bg-info/5 px-1.5 py-0.5 text-[10px] text-info hover:bg-info/15 transition"
@@ -303,10 +314,12 @@ export function TurnSummaryCard({ turn, onReview, onAgentReview, onFeedback, tas
         >
           <SearchCheck size={10} />
           Agent Review
-        </button>
+        </Button>
 
         {/* Review button — opens Diff tab */}
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={handleReview}
           className="inline-flex items-center gap-1 rounded border border-primary/30 bg-primary/5 px-1.5 py-0.5 text-[10px] text-primary hover:bg-primary/15 transition"
@@ -314,7 +327,7 @@ export function TurnSummaryCard({ turn, onReview, onAgentReview, onFeedback, tas
         >
           <Eye size={10} />
           Review
-        </button>
+        </Button>
       </div>
 
       {/* File list */}
@@ -332,14 +345,16 @@ export function TurnSummaryCard({ turn, onReview, onAgentReview, onFeedback, tas
 
         {/* "Show N more files" disclosure */}
         {hiddenCount > 0 && !showAll && (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={() => setShowAll(true)}
             className="flex w-full items-center gap-1.5 px-3 py-1.5 text-[10px] text-primary hover:bg-accent transition"
           >
             <ChevronRight size={9} />
             Show {hiddenCount} more file{hiddenCount !== 1 ? "s" : ""} ›
-          </button>
+          </Button>
         )}
       </div>
     </div>
@@ -373,16 +388,19 @@ function FileRow({
 
   return (
     <div className="border-t border-border/20 first:border-t-0">
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={onToggle}
-        className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-accent transition"
+        className="justify-start flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-accent transition"
         aria-expanded={expanded}
       >
-        {expanded
-          ? <ChevronDown size={9} className="shrink-0 text-muted-foreground/60" />
-          : <ChevronRight size={9} className="shrink-0 text-muted-foreground/60" />
-        }
+        {expanded ? (
+          <ChevronDown size={9} className="shrink-0 text-muted-foreground/60" />
+        ) : (
+          <ChevronRight size={9} className="shrink-0 text-muted-foreground/60" />
+        )}
 
         {/* File name */}
         <span className="min-w-0 flex-1 flex items-baseline gap-1 truncate">
@@ -390,7 +408,9 @@ function FileRow({
             {short}
           </span>
           {dir && (
-            <span className="text-[9px] text-muted-foreground/60 truncate">{dir}</span>
+            <span className="text-[9px] text-muted-foreground/60 truncate">
+              {dir}
+            </span>
           )}
         </span>
 
@@ -405,7 +425,7 @@ function FileRow({
             )}
           </span>
         )}
-      </button>
+      </Button>
 
       {/* Inline diff expansion */}
       {expanded && preparedDiff && (

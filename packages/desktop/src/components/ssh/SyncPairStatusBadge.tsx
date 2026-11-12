@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Displays the sync pair status (active/paused/error) in the file browser
  * toolbar when the current directory is within an active sync pair.
@@ -5,9 +6,9 @@
  * When in error state, displays the error message and a Retry button.
  */
 
-import { useCallback, useEffect, useState } from "react";
-import { AlertTriangle, Circle, Pause, RotateCw } from "lucide-react";
 import clsx from "clsx";
+import { AlertTriangle, Circle, Pause, RotateCw } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
 
 export type SyncPairStatus = "active" | "paused" | "error";
 
@@ -141,9 +142,7 @@ export function SyncPairStatusBadge({ profileId, currentPath }: SyncPairStatusBa
       (payload: { syncPairId: string; error: string }) => {
         if (payload.syncPairId === pairInfo.syncPairId) {
           setErrorMessage(payload.error);
-          setPairInfo((prev) =>
-            prev ? { ...prev, status: "error" } : prev,
-          );
+          setPairInfo((prev) => (prev ? { ...prev, status: "error" } : prev));
         }
       },
     );
@@ -219,7 +218,9 @@ export function SyncPairStatusBadge({ profileId, currentPath }: SyncPairStatusBa
 
         {/* Retry button for error state */}
         {pairInfo.status === "error" && (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={handleRetry}
             disabled={retrying}
@@ -235,7 +236,7 @@ export function SyncPairStatusBadge({ profileId, currentPath }: SyncPairStatusBa
               aria-hidden="true"
             />
             {retrying ? "Retrying…" : "Retry"}
-          </button>
+          </Button>
         )}
 
         {/* Conflict badge */}

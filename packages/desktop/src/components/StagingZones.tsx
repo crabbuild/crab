@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Two-zone staging layout for the Changes view.
  *
@@ -12,9 +13,7 @@
  * - Per-file action buttons on hover: Stage/Unstage, Discard, Open File
  * - Collapsible sections for focus
  */
-import { useCallback, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
-import { PanelGroup, Panel, PanelResizeHandle } from "react-resizable-panels";
 import {
   ArrowDown,
   ArrowUp,
@@ -26,6 +25,8 @@ import {
   Plus,
   Undo2,
 } from "lucide-react";
+import { useCallback, useMemo, useRef, useState } from "react";
+import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import type { TriStateValue } from "./TriStateCheckbox";
 
 interface StatusEntry {
@@ -297,11 +298,13 @@ function ZoneSection({
       onDragLeave={onDragLeave}
       onDrop={(e) => onDrop(e, zone)}
     >
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={onToggleCollapse}
         aria-expanded={!collapsed}
-        className="grid shrink-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-2 gap-y-0.5 px-3 py-1.5 text-left hover:bg-accent transition"
+        className="justify-start grid shrink-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-2 gap-y-0.5 px-3 py-1.5 text-left hover:bg-accent transition"
       >
         {collapsed ? (
           <ChevronRight size={12} className="text-muted-foreground" />
@@ -314,9 +317,13 @@ function ZoneSection({
         <span className="rounded-full bg-accent px-1.5 text-[10px] tabular-nums text-muted-foreground">
           {count}
         </span>
-        <span className="col-span-2 col-start-2 text-[10px] leading-snug text-muted-foreground">{subtitle}</span>
-      </button>
-      {!collapsed && <div className="min-h-0 flex-1 overflow-auto">{children}</div>}
+        <span className="col-span-2 col-start-2 text-[10px] leading-snug text-muted-foreground">
+          {subtitle}
+        </span>
+      </Button>
+      {!collapsed && (
+        <div className="min-h-0 flex-1 overflow-auto">{children}</div>
+      )}
     </div>
   );
 }
@@ -415,15 +422,17 @@ function FileRow({
         {fileName}
       </span>
 
-      {/* Directory path (hidden on hover to make room for actions) */}
+      {/* File name */}
       <span className="shrink-0 text-[10px] text-muted-foreground group-hover/row:hidden">
         {dirPath}
       </span>
 
-      {/* Hover action buttons */}
+      {/* Directory path (hidden on hover to make room for actions) */}
       <span className="hidden shrink-0 items-center gap-0.5 group-hover/row:flex">
         {zone === "working" && (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             title={`Stage ${entry.path}`}
             aria-label={`Stage ${entry.path}`}
@@ -432,10 +441,12 @@ function FileRow({
             className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-success/20 hover:text-success disabled:opacity-50 transition"
           >
             <Plus size={12} />
-          </button>
+          </Button>
         )}
         {zone === "staged" && (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             title={`Unstage ${entry.path}`}
             aria-label={`Unstage ${entry.path}`}
@@ -444,10 +455,12 @@ function FileRow({
             className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-warning/20 hover:text-warning disabled:opacity-50 transition"
           >
             <Minus size={12} />
-          </button>
+          </Button>
         )}
         {zone === "working" && (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             title={`Discard changes in ${entry.path}`}
             aria-label={`Discard changes in ${entry.path}`}
@@ -456,10 +469,12 @@ function FileRow({
             className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-destructive/20 hover:text-destructive disabled:opacity-50 transition"
           >
             <Undo2 size={12} />
-          </button>
+          </Button>
         )}
         {onOpenFile && (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             title={`Open file ${entry.path}`}
             aria-label={`Open file ${entry.path}`}
@@ -467,7 +482,7 @@ function FileRow({
             className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-primary/20 hover:text-primary transition"
           >
             <FileText size={12} />
-          </button>
+          </Button>
         )}
       </span>
     </div>

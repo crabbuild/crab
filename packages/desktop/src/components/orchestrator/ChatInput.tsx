@@ -1,14 +1,19 @@
-import { Textarea } from "@/components/ui/textarea";
+import type { ButtonProps } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
 import {
-  forwardRef,
-  useCallback,
-  useEffect,
-  useImperativeHandle,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuPortal,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Toggle } from "@/components/ui/toggle";
 import clsx from "clsx";
 import {
   AtSign,
@@ -16,7 +21,6 @@ import {
   Bot,
   Brain,
   Check,
-  ChevronRight,
   ClipboardList,
   FileText,
   FolderOpen,
@@ -33,14 +37,28 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { SlashCommandDropdown, SlashCommand } from "./SlashCommandDropdown";
-import { ContextPicker, ContextKind, ContextPickerResult } from "./ContextPicker";
-import { AtContextDropdown, AtContextItem } from "./AtContextDropdown";
-import { FileMentionDropdown, FileMatch } from "./FileMentionDropdown";
-import { QuickAttachBar } from "./QuickAttachBar";
-import { intelligenceLabel } from "./model-catalog";
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { AgentWorkflowDefinition, DirEntry, rpc } from "../../ipc";
 import { AgentIcon, agentAccentColor } from "./AgentIcon";
-import { AgentWorkflowDefinition, rpc, DirEntry } from "../../ipc";
+import { AtContextDropdown, AtContextItem } from "./AtContextDropdown";
+import {
+  ContextKind,
+  ContextPicker,
+  ContextPickerResult,
+} from "./ContextPicker";
+import { FileMatch, FileMentionDropdown } from "./FileMentionDropdown";
+import { QuickAttachBar } from "./QuickAttachBar";
+import { SlashCommand, SlashCommandDropdown } from "./SlashCommandDropdown";
+import { intelligenceLabel } from "./model-catalog";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -250,16 +268,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
   }));
 
   // Close popover menus on outside click.
-  useEffect(() => {
-    if (!openMenu) return;
-    const handler = (e: MouseEvent) => {
-      if (!containerRef.current?.contains(e.target as Node)) {
-        setOpenMenu(null);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [openMenu]);
 
   // Auto-grow textarea up to ~8 rows.
   useEffect(() => {
@@ -610,6 +618,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
     >
       {/* Slash command dropdown (positioned above the input group) */}
       <SlashCommandDropdown
+        anchorRef={textareaRef}
         commands={slashCommands}
         filter={slashFilter}
         onSelect={handleSlashSelectInner}
@@ -619,6 +628,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
 
       {/* Inline @ context dropdown (Cursor-style typeahead). */}
       <AtContextDropdown
+        anchorRef={textareaRef}
         filter={atFilter}
         visible={showAt}
         repoId={repoId}
@@ -640,6 +650,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
 
       {/* File mention dropdown (`#file.ts` typeahead). */}
       <FileMentionDropdown
+        anchorRef={textareaRef}
         matches={fileMatches}
         loading={repoEntriesLoading}
         onSelect={handleFileMentionSelect}
@@ -679,15 +690,19 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
 
       {/* Toolbar */}
       <div className="flex items-center gap-1 px-2 pb-2 pt-1">
-        {/* Left cluster: agent, @, + */}
-        <IconButton
-          ariaLabel="Select AI agent"
-          title={selectedAgent ? `Agent: ${selectedAgent.name}` : "Select agent"}
-          active={openMenu === "agent"}
-          onClick={() => setOpenMenu(openMenu === "agent" ? null : "agent")}
-          disabled={agents.length === 0}
+        {/* Toolbar */}
+        <DropdownMenu
+          open={openMenu === "agent"}
+          onOpenChange={(open) => setOpenMenu(open ? "agent" : null)}
         >
-          {selectedAgent ? (
+          <DropdownMenuTrigger asChild>
+            <IconButton
+              ariaLabel="Select AI agent"
+              title={selectedAgent ? `Agent: ${selectedAgent.name}` : "Select agent"}
+              active={openMenu === "agent"}
+              disabled={agents.length === 0}
+            >
+              {selectedAgent ? (
             <AgentIcon
               agentName={selectedAgent.type}
               size={13}
@@ -696,52 +711,201 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
           ) : (
             <Bot size={13} />
           )}
-          {selectedAgent && (
-            <span className="text-[10px] font-medium text-foreground/90">{shortAgentLabel(selectedAgent.name)}</span>
+              {selectedAgent && (
+                <span className="text-[10px] font-medium text-foreground/90">
+                  {shortAgentLabel(selectedAgent.name)}
+                </span>
+              )}
+            </IconButton>
+          </DropdownMenuTrigger>
+          {openMenu === "agent" && (
+            <PopoverMenu anchor="left" onClose={() => setOpenMenu(null)}>
+              <MenuHeader label="Agent" />
+              {agents.filter((a) => a.available).map((a) => (
+            <MenuItem
+              key={a.type}
+              active={a.type === agentType}
+              onClick={() => {
+                onAgentChange(a.type);
+                setOpenMenu(null);
+              }}
+              icon={<AgentIcon agentName={a.type} size={12} className={agentAccentColor(a.type)} />}
+              label={a.name}
+            />
+          ))}
+              {agents.filter((a) => a.available).length === 0 && (
+                <div className="px-3 py-2 text-[10px] text-muted-foreground">
+                  No agents installed.
+                </div>
+              )}
+              {/* Right cluster: model, mode, send */}
+              <div className="my-1 border-t border-border/50" />
+              <MenuItem
+            icon={<Plus size={12} className="text-muted-foreground" />}
+            label="Add Agent…"
+            onClick={() => {
+              setOpenMenu(null);
+              onOpenAgentManager?.();
+            }}
+          />
+            </PopoverMenu>
           )}
-        </IconButton>
+        </DropdownMenu>
 
-        <IconButton
-          ariaLabel="Add context"
-          title="Add context (files, URLs, commits, skills)"
-          active={openMenu === "context"}
-          onClick={() => setOpenMenu(openMenu === "context" ? null : "context")}
+        <DropdownMenu
+          open={openMenu === "context"}
+          onOpenChange={(open) => setOpenMenu(open ? "context" : null)}
         >
-          <AtSign size={13} />
-        </IconButton>
+          <DropdownMenuTrigger asChild>
+            <IconButton
+              ariaLabel="Add context"
+              title="Add context (files, URLs, commits, skills)"
+              active={openMenu === "context"}
+            >
+              <AtSign size={13} />
+            </IconButton>
+          </DropdownMenuTrigger>
+          {openMenu === "context" && (
+            <PopoverMenu anchor="left" onClose={() => setOpenMenu(null)}>
+              <MenuHeader label="Add context" />
+              <MenuItem
+            icon={<Bookmark size={12} />}
+            label="Instructions"
+            hint="Saved prompts"
+            onClick={() => { setOpenMenu(null); setPickerKind("instruction"); }}
+          />
+              <MenuItem
+            icon={<FileText size={12} />}
+            label="Files"
+            hint="Search & select"
+            onClick={() => { setOpenMenu(null); setPickerKind("file"); }}
+          />
+              <MenuItem
+            icon={<FolderOpen size={12} />}
+            label="Folders"
+            hint="Search & select"
+            onClick={() => { setOpenMenu(null); setPickerKind("folder"); }}
+          />
+              <MenuItem
+            icon={<Link2 size={12} />}
+            label="URL"
+            hint="Paste link"
+            onClick={() => { setOpenMenu(null); setPickerKind("url"); }}
+          />
+              <MenuItem
+            icon={<GitCommit size={12} />}
+            label="Commit"
+            hint="Search history"
+            onClick={() => { setOpenMenu(null); setPickerKind("commit"); }}
+          />
+              <MenuItem
+            icon={<Terminal size={12} />}
+            label="Terminal output"
+            hint="From sessions"
+            onClick={() => { setOpenMenu(null); setPickerKind("terminal"); }}
+          />
+              <MenuItem
+            icon={<Brain size={12} />}
+            label="Skills"
+            hint="Install & manage"
+            onClick={() => { setOpenMenu(null); setPickerKind("skill"); }}
+          />
+            </PopoverMenu>
+          )}
+        </DropdownMenu>
 
-        <IconButton
-          ariaLabel="Attach file"
-          title="Attach files, images, or documents"
-          active={openMenu === "attach"}
-          onClick={() => setOpenMenu(openMenu === "attach" ? null : "attach")}
+        <DropdownMenu
+          open={openMenu === "attach"}
+          onOpenChange={(open) => setOpenMenu(open ? "attach" : null)}
         >
-          <Plus size={13} />
-        </IconButton>
+          <DropdownMenuTrigger asChild>
+            <IconButton
+              ariaLabel="Attach file"
+              title="Attach files, images, or documents"
+              active={openMenu === "attach"}
+            >
+              <Plus size={13} />
+            </IconButton>
+          </DropdownMenuTrigger>
+          {openMenu === "attach" && (
+            <PopoverMenu anchor="left" onClose={() => setOpenMenu(null)}>
+              <MenuHeader label="Attach" />
+              <MenuItem
+            icon={<FolderOpen size={12} />}
+            label="File"
+            hint="From workspace"
+            onClick={() => {
+              setOpenMenu(null);
+              addFilesFromPicker("file");
+            }}
+          />
+              <MenuItem
+            icon={<ImageIcon size={12} />}
+            label="Image"
+            hint="PNG, JPG, SVG"
+            onClick={() => {
+              setOpenMenu(null);
+              imageInputRef.current?.click();
+            }}
+          />
+              <MenuItem
+            icon={<FileText size={12} />}
+            label="Document"
+            hint="PDF, DOCX, MD"
+            onClick={() => {
+              setOpenMenu(null);
+              docInputRef.current?.click();
+            }}
+          />
+            </PopoverMenu>
+          )}
+        </DropdownMenu>
 
-        {/* Spacer */}
+        {/* Right cluster: model, mode, send */}
         <div className="flex-1" />
 
         {/* Right cluster: model, mode, send */}
         {models.length > 0 && (
-          <IconButton
-            ariaLabel="Select model and intelligence"
-            title={selectedModel ? `Model: ${selectedModel.label}${intelligence ? ` · ${intelligence}` : ""}` : "Model"}
-            active={openMenu === "model"}
-            onClick={() => setOpenMenu(openMenu === "model" ? null : "model")}
+          <DropdownMenu
+            open={openMenu === "model"}
+            onOpenChange={(open) => setOpenMenu(open ? "model" : null)}
           >
-            <Sparkles size={12} className="text-primary" />
-            <span className="text-[10px] font-medium">
-              {selectedModel ? selectedModel.label : "Default"}
-              {intelligence && <span className="ml-1 text-muted-foreground">{intelligenceLabel(intelligence)}</span>}
-            </span>
-          </IconButton>
+            <DropdownMenuTrigger asChild>
+              <IconButton
+                ariaLabel="Select model and intelligence"
+                title={selectedModel ? `Model: ${selectedModel.label}${intelligence ? ` · ${intelligence}` : ""}` : "Model"}
+                active={openMenu === "model"}
+              >
+                <Sparkles size={12} className="text-primary" />
+                <span className="text-[10px] font-medium">
+                  {selectedModel ? selectedModel.label : "Default"}
+                  {intelligence && (
+                    <span className="ml-1 text-muted-foreground">
+                      {intelligenceLabel(intelligence)}
+                    </span>
+                  )}
+                </span>
+              </IconButton>
+            </DropdownMenuTrigger>
+            {openMenu === "model" && models.length > 0 && (
+        <ModelIntelligencePopover
+          models={models}
+          selectedModel={model}
+          onModelChange={(v) => { onModelChange?.(v); setOpenMenu(null); }}
+          intelligenceLevels={intelligenceLevels}
+          intelligence={intelligence}
+          onIntelligenceChange={onIntelligenceChange}
+          onClose={() => setOpenMenu(null)}
+        />
+      )}
+          </DropdownMenu>
         )}
 
-        <button
+        <Toggle
+          size="sm"
           type="button"
           onClick={() => onModeChange(mode === "plan" ? "instant" : "plan")}
-          aria-pressed={mode === "plan"}
+          pressed={mode === "plan"}
           title={
             mode === "plan"
               ? "Plan mode — agent proposes a plan before making changes"
@@ -756,19 +920,23 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
         >
           {mode === "plan" ? <ClipboardList size={11} /> : <Zap size={11} />}
           {mode === "plan" ? "Plan" : "Instant"}
-        </button>
+        </Toggle>
 
         {isStreaming ? (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={onStop}
             className="ml-1 flex h-7 w-7 items-center justify-center rounded-md bg-destructive/20 text-destructive hover:bg-destructive/30 transition"
             aria-label="Stop agent"
           >
             <Square size={13} />
-          </button>
+          </Button>
         ) : (
-          <button
+          <Button
+            variant="default"
+            size="compact"
             type="button"
             onClick={handleSubmit}
             disabled={!canSubmit}
@@ -781,144 +949,21 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
             aria-label="Send message"
           >
             <Send size={13} />
-          </button>
+          </Button>
         )}
       </div>
 
       {/* Popovers ───────────────────────────────────────────────── */}
-      {openMenu === "agent" && (
-        <PopoverMenu anchor="left" onClose={() => setOpenMenu(null)}>
-          <MenuHeader label="Agent" />
-          {agents.filter((a) => a.available).map((a) => (
-            <MenuItem
-              key={a.type}
-              active={a.type === agentType}
-              onClick={() => {
-                onAgentChange(a.type);
-                setOpenMenu(null);
-              }}
-              icon={<AgentIcon agentName={a.type} size={12} className={agentAccentColor(a.type)} />}
-              label={a.name}
-            />
-          ))}
-          {agents.filter((a) => a.available).length === 0 && (
-            <div className="px-3 py-2 text-[10px] text-muted-foreground">No agents installed.</div>
-          )}
-          {/* Divider + Add Agent shortcut */}
-          <div className="my-1 border-t border-border/50" />
-          <MenuItem
-            icon={<Plus size={12} className="text-muted-foreground" />}
-            label="Add Agent…"
-            onClick={() => {
-              setOpenMenu(null);
-              onOpenAgentManager?.();
-            }}
-          />
-        </PopoverMenu>
-      )}
-
-      {openMenu === "context" && (
-        <PopoverMenu anchor="left" onClose={() => setOpenMenu(null)}>
-          <MenuHeader label="Add context" />
-          <MenuItem
-            icon={<Bookmark size={12} />}
-            label="Instructions"
-            hint="Saved prompts"
-            onClick={() => { setOpenMenu(null); setPickerKind("instruction"); }}
-          />
-          <MenuItem
-            icon={<FileText size={12} />}
-            label="Files"
-            hint="Search & select"
-            onClick={() => { setOpenMenu(null); setPickerKind("file"); }}
-          />
-          <MenuItem
-            icon={<FolderOpen size={12} />}
-            label="Folders"
-            hint="Search & select"
-            onClick={() => { setOpenMenu(null); setPickerKind("folder"); }}
-          />
-          <MenuItem
-            icon={<Link2 size={12} />}
-            label="URL"
-            hint="Paste link"
-            onClick={() => { setOpenMenu(null); setPickerKind("url"); }}
-          />
-          <MenuItem
-            icon={<GitCommit size={12} />}
-            label="Commit"
-            hint="Search history"
-            onClick={() => { setOpenMenu(null); setPickerKind("commit"); }}
-          />
-          <MenuItem
-            icon={<Terminal size={12} />}
-            label="Terminal output"
-            hint="From sessions"
-            onClick={() => { setOpenMenu(null); setPickerKind("terminal"); }}
-          />
-          <MenuItem
-            icon={<Brain size={12} />}
-            label="Skills"
-            hint="Install & manage"
-            onClick={() => { setOpenMenu(null); setPickerKind("skill"); }}
-          />
-        </PopoverMenu>
-      )}
-
-      {openMenu === "attach" && (
-        <PopoverMenu anchor="left" onClose={() => setOpenMenu(null)}>
-          <MenuHeader label="Attach" />
-          <MenuItem
-            icon={<FolderOpen size={12} />}
-            label="File"
-            hint="From workspace"
-            onClick={() => {
-              setOpenMenu(null);
-              addFilesFromPicker("file");
-            }}
-          />
-          <MenuItem
-            icon={<ImageIcon size={12} />}
-            label="Image"
-            hint="PNG, JPG, SVG"
-            onClick={() => {
-              setOpenMenu(null);
-              imageInputRef.current?.click();
-            }}
-          />
-          <MenuItem
-            icon={<FileText size={12} />}
-            label="Document"
-            hint="PDF, DOCX, MD"
-            onClick={() => {
-              setOpenMenu(null);
-              docInputRef.current?.click();
-            }}
-          />
-        </PopoverMenu>
-      )}
-
-      {openMenu === "model" && models.length > 0 && (
-        <ModelIntelligencePopover
-          models={models}
-          selectedModel={model}
-          onModelChange={(v) => { onModelChange?.(v); setOpenMenu(null); }}
-          intelligenceLevels={intelligenceLevels}
-          intelligence={intelligence}
-          onIntelligenceChange={onIntelligenceChange}
-          onClose={() => setOpenMenu(null)}
-        />
-      )}
 
       {/* Hidden native file inputs for image / document attachments */}
-      <input
+      <Input
         ref={attachInputRef}
         type="file"
         multiple
         hidden
         onChange={(e) => handleNativeFiles(e.target.files, addAttachment, "file")}
       />
-      <input
+      <Input
         ref={imageInputRef}
         type="file"
         multiple
@@ -926,7 +971,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
         hidden
         onChange={(e) => handleNativeFiles(e.target.files, addAttachment, "image")}
       />
-      <input
+      <Input
         ref={docInputRef}
         type="file"
         multiple
@@ -1027,43 +1072,29 @@ function shortAgentLabel(name: string): string {
 
 // ── Sub-components ──────────────────────────────────────────────────
 
-function IconButton({
-  children,
-  onClick,
-  ariaLabel,
-  title,
-  active,
-  disabled,
-}: {
-  children: React.ReactNode;
-  onClick: () => void;
-  ariaLabel: string;
-  title?: string;
-  active?: boolean;
-  disabled?: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-label={ariaLabel}
-      title={title}
-      disabled={disabled}
-      className={clsx(
-        "flex h-7 items-center gap-1 rounded-md border px-2 text-muted-foreground transition",
-        active
-          ? "border-primary/60 bg-primary/10 text-foreground"
-          : "border-transparent hover:border-border hover:bg-card hover:text-foreground",
-        disabled && "opacity-40 cursor-not-allowed hover:border-transparent hover:bg-transparent",
-      )}
-    >
-      {children}
-    </button>
-  );
-}
+const IconButton = forwardRef<
+  HTMLButtonElement,
+  ButtonProps & { ariaLabel: string; active?: boolean; }
+>(({ ariaLabel, active, className, ...props }, ref) => (
+  <Button
+    ref={ref}
+    variant="ghost"
+    size="compact"
+    aria-label={ariaLabel}
+    {...props}
+    className={clsx(
+      "h-7 gap-1 rounded-md border px-2 text-muted-foreground",
+      active
+        ? "border-primary/60 bg-primary/10 text-foreground"
+        : "border-transparent hover:border-border hover:bg-card",
+      className,
+    )}
+  />
+));
+IconButton.displayName = "IconButton";
 
 function PopoverMenu({
-  anchor,
+  anchor: _anchor,
   onClose: _onClose,
   children,
 }: {
@@ -1072,15 +1103,9 @@ function PopoverMenu({
   children: React.ReactNode;
 }) {
   return (
-    <div
-      role="menu"
-      className={clsx(
-        "absolute bottom-full z-40 mb-2 max-h-[var(--composer-popup-height)] min-w-[200px] overflow-auto rounded-lg border border-border bg-background shadow-xl",
-        anchor === "left" ? "left-2" : "right-2",
-      )}
-    >
-      {children}
-    </div>
+    <DropdownMenuContent side="top" align="start" className="min-w-[200px]">
+      <DropdownMenuGroup>{children}</DropdownMenuGroup>
+    </DropdownMenuContent>
   );
 }
 
@@ -1108,11 +1133,9 @@ function MenuItem({
   onClick: () => void;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
+    <DropdownMenuItem
+      onSelect={onClick}
       disabled={disabled}
-      role="menuitem"
       className={clsx(
         "flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition",
         disabled
@@ -1124,9 +1147,13 @@ function MenuItem({
     >
       <span className="shrink-0 text-primary">{icon}</span>
       <span className="flex-1 truncate">{label}</span>
-      {hint && <span className="shrink-0 text-[10px] text-muted-foreground">{hint}</span>}
+      {hint && (
+        <span className="shrink-0 text-[10px] text-muted-foreground">
+          {hint}
+        </span>
+      )}
       {active && <Check size={11} className="shrink-0 text-primary" />}
-    </button>
+    </DropdownMenuItem>
   );
 }
 
@@ -1142,14 +1169,16 @@ function AttachmentChip({
     <span className="inline-flex items-center gap-1 rounded border border-border bg-card px-1.5 py-0.5 text-[10px] text-foreground">
       <Icon size={10} className="text-primary" />
       <span className="max-w-[160px] truncate">{attachment.label}</span>
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={onRemove}
         className="ml-0.5 text-muted-foreground hover:text-foreground"
         aria-label={`Remove ${attachment.label}`}
       >
         <X size={10} />
-      </button>
+      </Button>
     </span>
   );
 }
@@ -1192,113 +1221,97 @@ function ModelIntelligencePopover({
   onIntelligenceChange?: (level: string | null) => void;
   onClose: () => void;
 }) {
-  const [showMore, setShowMore] = useState(false);
-
   const primaryModels = models.slice(0, MAX_PRIMARY_MODELS);
   const otherModels = models.slice(MAX_PRIMARY_MODELS);
 
   return (
-    <div
-      role="menu"
-      className="absolute bottom-full right-2 z-40 mb-2 min-w-[180px] rounded-lg border border-border bg-background shadow-xl"
-    >
-      {/* Intelligence section */}
-      {intelligenceLevels.length > 0 && (
-        <>
-          <div className="px-3 py-1 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground">
-            Intelligence
-          </div>
-          <button type="button" onClick={() => onIntelligenceChange?.(null)} className="flex w-full items-center gap-2 px-3 py-1 text-left text-[11px] text-foreground hover:bg-accent">
-            <span className="flex-1">Default effort</span>{!intelligence && <Check size={11} className="shrink-0" />}
-          </button>
-          {intelligenceLevels.map((level) => (
-            <button
-              key={level}
-              type="button"
-              onClick={() => onIntelligenceChange?.(level)}
-              className={clsx(
+    <DropdownMenuContent side="top" align="start" className="min-w-[180px]">
+      <DropdownMenuGroup>
+        {/* Intelligence section */}
+        {intelligenceLevels.length > 0 && (
+          <>
+            <div className="px-3 py-1 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground">
+              Intelligence
+            </div>
+            <DropdownMenuItem
+              onSelect={() => onIntelligenceChange?.(null)}
+              className="justify-start flex w-full items-center gap-2 px-3 py-1 text-left text-[11px] text-foreground hover:bg-accent"
+            >
+              <span className="flex-1">Default effort</span>
+              {!intelligence && <Check size={11} className="shrink-0" />}
+            </DropdownMenuItem>
+            {intelligenceLevels.map((level) => (
+              <DropdownMenuItem
+                key={level}
+                onSelect={() => onIntelligenceChange?.(level)}
+                className={clsx(
                 "flex w-full items-center gap-2 px-3 py-1 text-left text-[11px] transition",
                 intelligence === level
                   ? "text-primary"
                   : "text-foreground hover:bg-accent",
               )}
-            >
-              <span className="flex-1">{intelligenceLabel(level)}</span>
-              {intelligence === level && <Check size={11} className="shrink-0" />}
-            </button>
-          ))}
-          <div className="my-1 border-t border-border/50" />
-        </>
-      )}
+              >
+                <span className="flex-1">{intelligenceLabel(level)}</span>
+                {intelligence === level && (
+                  <Check size={11} className="shrink-0" />
+                )}
+              </DropdownMenuItem>
+            ))}
+            <div className="my-1 border-t border-border/50" />
+          </>
+        )}
 
-      {/* Model section */}
-      <div className="px-3 py-1 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground">
-        Model
-      </div>
-      <button
-        type="button"
-        onClick={() => onModelChange("")}
-        className={clsx(
+        {/* More models submenu */}
+        <div className="px-3 py-1 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground">
+          Model
+        </div>
+        <DropdownMenuItem
+          onSelect={() => onModelChange("")}
+          className={clsx(
           "flex w-full items-center gap-2 px-3 py-1 text-left text-[11px] transition",
           !selectedModel ? "text-primary" : "text-foreground hover:bg-accent",
         )}
-      >
-        <span className="flex-1">Agent default</span>
-        {!selectedModel && <Check size={11} className="shrink-0" />}
-      </button>
-      {primaryModels.map((m) => (
-        <button
-          key={m.value}
-          type="button"
-          onClick={() => onModelChange(m.value)}
-          className={clsx(
+        >
+          <span className="flex-1">Agent default</span>
+          {!selectedModel && <Check size={11} className="shrink-0" />}
+        </DropdownMenuItem>
+        {primaryModels.map((m) => (
+          <DropdownMenuItem
+            key={m.value}
+            onSelect={() => onModelChange(m.value)}
+            className={clsx(
             "flex w-full items-center gap-2 px-3 py-1 text-left text-[11px] transition",
             selectedModel === m.value ? "text-primary" : "text-foreground hover:bg-accent",
           )}
-        >
-          <span className="flex-1">{m.label}</span>
-          {selectedModel === m.value && <Check size={11} className="shrink-0" />}
-        </button>
-      ))}
-
-      {/* More models submenu */}
-      {otherModels.length > 0 && (
-        <div
-          className="relative"
-          onMouseEnter={() => setShowMore(true)}
-          onMouseLeave={() => setShowMore(false)}
-        >
-          <button
-            type="button"
-            onClick={() => setShowMore(!showMore)}
-            className="flex w-full items-center gap-2 px-3 py-1 text-left text-[11px] text-foreground hover:bg-accent transition"
           >
-            <span className="flex-1">More models</span>
-            <ChevronRight size={11} className="shrink-0 text-muted-foreground" />
-          </button>
+            <span className="flex-1">{m.label}</span>
+            {selectedModel === m.value && (
+              <Check size={11} className="shrink-0" />
+            )}
+          </DropdownMenuItem>
+        ))}
 
-          {showMore && (
-            <div className="absolute right-full top-0 z-50 mr-1 min-w-[150px] rounded-lg border border-border bg-background shadow-lg">
-              <div className="py-1">
-                {otherModels.map((m) => (
-                  <button
-                    key={m.value}
-                    type="button"
-                    onClick={() => onModelChange(m.value)}
-                    className={clsx(
-                      "flex w-full items-center gap-2 px-3 py-1 text-left text-[11px] transition",
-                      selectedModel === m.value ? "text-primary" : "text-foreground hover:bg-accent",
-                    )}
-                  >
-                    <span className="flex-1">{m.label}</span>
-                    {selectedModel === m.value && <Check size={11} className="shrink-0" />}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
+        {otherModels.length > 0 && (
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger>More models</DropdownMenuSubTrigger>
+            <DropdownMenuPortal>
+              <DropdownMenuSubContent>
+                <DropdownMenuGroup>
+                  {otherModels.map((model) => (
+                    <DropdownMenuItem
+                      key={model.value}
+                      onSelect={() => onModelChange(model.value)}
+                    >
+                      {model.label}
+                      {model.value === selectedModel && <Check size={11} />}
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuGroup>
+              </DropdownMenuSubContent>
+            </DropdownMenuPortal>
+          </DropdownMenuSub>
+        )}
+      </DropdownMenuGroup>
+    </DropdownMenuContent>
   );
 }

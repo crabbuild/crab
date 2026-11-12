@@ -1,20 +1,21 @@
+import { Button } from "@/components/ui/button";
 /**
  * SyncManagementPanel — full sync pair management view.
  * Shows all configured sync pairs for a profile with status, controls
  * (start/pause/remove), transfer progress, and conflict resolution.
  */
 
-import { useState, useEffect, useCallback } from "react";
-import {
-  FolderSync,
-  Play,
-  Pause,
-  Trash2,
-  AlertTriangle,
-  RefreshCw,
-  ArrowUpDown,
-} from "lucide-react";
 import clsx from "clsx";
+import {
+  AlertTriangle,
+  ArrowUpDown,
+  FolderSync,
+  Pause,
+  Play,
+  RefreshCw,
+  Trash2,
+} from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
 import { SyncConflictList } from "./SyncConflictList";
 
 // ── Types ────────────────────────────────────────────────────────
@@ -69,7 +70,11 @@ export function SyncManagementPanel({ profileId }: SyncManagementPanelProps) {
       const result = await ssh.syncListPairs(profileId);
       setPairs(Array.isArray(result) ? result : []);
     } catch (err) {
-      setError(err instanceof Error ? err.message : (err as any)?.message ?? "Failed to load sync pairs");
+      setError(
+        err instanceof Error
+          ? err.message
+          : ((err as any)?.message ?? "Failed to load sync pairs"),
+      );
     } finally {
       setLoading(false);
     }
@@ -129,9 +134,14 @@ export function SyncManagementPanel({ profileId }: SyncManagementPanelProps) {
       <div className="flex flex-col items-center justify-center py-12 gap-2">
         <AlertTriangle className="w-5 h-5 text-destructive" />
         <p className="text-xs text-destructive">{error}</p>
-        <button onClick={fetchPairs} className="text-xs text-primary hover:underline">
+        <Button
+          variant="ghost"
+          size="compact"
+          onClick={fetchPairs}
+          className="text-xs text-primary hover:underline"
+        >
           Retry
-        </button>
+        </Button>
       </div>
     );
   }
@@ -142,9 +152,12 @@ export function SyncManagementPanel({ profileId }: SyncManagementPanelProps) {
         <div className="flex h-12 w-12 items-center justify-center rounded-full bg-primary/10">
           <FolderSync size={24} className="text-primary" />
         </div>
-        <h3 className="text-sm font-medium text-foreground">No sync pairs configured</h3>
+        <h3 className="text-sm font-medium text-foreground">
+          No sync pairs configured
+        </h3>
         <p className="text-xs text-muted-foreground max-w-xs">
-          Right-click a folder in the File Browser and select "Sync this folder locally" to set up bidirectional sync.
+          Right-click a folder in the File Browser and select "Sync this folder
+          locally" to set up bidirectional sync.
         </p>
       </div>
     );
@@ -158,23 +171,25 @@ export function SyncManagementPanel({ profileId }: SyncManagementPanelProps) {
           <ArrowUpDown className="w-4 h-4 text-primary" />
           Sync Pairs ({pairs.length})
         </h2>
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           onClick={fetchPairs}
           className="p-1 text-muted-foreground hover:text-foreground hover:bg-accent rounded transition"
           aria-label="Refresh"
           title="Refresh"
         >
           <RefreshCw className="w-3.5 h-3.5" />
-        </button>
+        </Button>
       </div>
 
       {/* Pair list */}
       <div className="flex-1 overflow-y-auto">
         {pairs.map((pair) => (
           <div key={pair.id} className="border-b border-border last:border-b-0">
-            {/* Pair row */}
+            {/* Pair list */}
             <div className="flex items-center gap-3 px-4 py-3 hover:bg-accent transition">
-              {/* Status indicator */}
+              {/* Pair row */}
               <div
                 className={clsx(
                   "w-2 h-2 rounded-full shrink-0",
@@ -185,9 +200,11 @@ export function SyncManagementPanel({ profileId }: SyncManagementPanelProps) {
                 title={pair.status}
               />
 
-              {/* Pair info */}
-              <button
-                className="flex-1 min-w-0 text-left"
+              {/* Status indicator */}
+              <Button
+                variant="ghost"
+                size="compact"
+                className="justify-start flex-1 min-w-0 text-left"
                 onClick={() => setExpandedPairId(expandedPairId === pair.id ? null : pair.id)}
               >
                 <div className="flex items-center gap-1.5">
@@ -200,7 +217,9 @@ export function SyncManagementPanel({ profileId }: SyncManagementPanelProps) {
                   </span>
                 </div>
                 <div className="flex items-center gap-2 mt-0.5">
-                  <span className="text-[10px] text-muted-foreground capitalize">{pair.status}</span>
+                  <span className="text-[10px] text-muted-foreground capitalize">
+                    {pair.status}
+                  </span>
                   {pair.lastSyncAt && (
                     <span className="text-[10px] text-muted-foreground">
                       · Last sync: {formatTimestamp(pair.lastSyncAt)}
@@ -212,37 +231,43 @@ export function SyncManagementPanel({ profileId }: SyncManagementPanelProps) {
                     </span>
                   )}
                 </div>
-              </button>
+              </Button>
 
               {/* Actions */}
               <div className="flex items-center gap-1 shrink-0">
                 {pair.status === "active" ? (
-                  <button
+                  <Button
+                    variant="ghost"
+                    size="compact"
                     onClick={() => handlePause(pair.id)}
                     className="p-1 text-muted-foreground hover:text-warning hover:bg-accent rounded transition"
                     title="Pause sync"
                     aria-label="Pause sync"
                   >
                     <Pause className="w-3.5 h-3.5" />
-                  </button>
+                  </Button>
                 ) : (
-                  <button
+                  <Button
+                    variant="ghost"
+                    size="compact"
                     onClick={() => handleStart(pair.id)}
                     className="p-1 text-muted-foreground hover:text-success hover:bg-accent rounded transition"
                     title="Start sync"
                     aria-label="Start sync"
                   >
                     <Play className="w-3.5 h-3.5" />
-                  </button>
+                  </Button>
                 )}
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   onClick={() => handleRemove(pair.id)}
                   className="p-1 text-muted-foreground hover:text-destructive hover:bg-accent rounded transition"
                   title="Remove sync pair"
                   aria-label="Remove sync pair"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
-                </button>
+                </Button>
               </div>
             </div>
 
@@ -251,17 +276,29 @@ export function SyncManagementPanel({ profileId }: SyncManagementPanelProps) {
               <div className="px-4 pb-3 space-y-2">
                 <div className="rounded border border-border bg-background p-2 space-y-1">
                   <div className="flex items-center gap-2 text-[11px]">
-                    <span className="text-muted-foreground w-14 shrink-0">Remote:</span>
-                    <span className="text-foreground font-mono truncate">{pair.remoteDir}</span>
+                    <span className="text-muted-foreground w-14 shrink-0">
+                      Remote:
+                    </span>
+                    <span className="text-foreground font-mono truncate">
+                      {pair.remoteDir}
+                    </span>
                   </div>
                   <div className="flex items-center gap-2 text-[11px]">
-                    <span className="text-muted-foreground w-14 shrink-0">Local:</span>
-                    <span className="text-foreground font-mono truncate">{pair.localDir}</span>
+                    <span className="text-muted-foreground w-14 shrink-0">
+                      Local:
+                    </span>
+                    <span className="text-foreground font-mono truncate">
+                      {pair.localDir}
+                    </span>
                   </div>
                   {pair.ignorePatterns.length > 0 && (
                     <div className="flex items-start gap-2 text-[11px]">
-                      <span className="text-muted-foreground w-14 shrink-0">Ignore:</span>
-                      <span className="text-muted-foreground font-mono">{pair.ignorePatterns.join(", ")}</span>
+                      <span className="text-muted-foreground w-14 shrink-0">
+                        Ignore:
+                      </span>
+                      <span className="text-muted-foreground font-mono">
+                        {pair.ignorePatterns.join(", ")}
+                      </span>
                     </div>
                   )}
                 </div>

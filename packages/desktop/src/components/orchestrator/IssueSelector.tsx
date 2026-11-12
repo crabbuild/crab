@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 /**
  * IssueSelector — browse and select GitHub/Linear issues for task creation.
@@ -7,8 +8,8 @@ import { Input } from "@/components/ui/input";
  * searchable, filterable list.
  */
 
+import { ExternalLink, Loader2, Search, Tag, User } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Loader2, Search, Tag, User, ExternalLink } from "lucide-react";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -121,7 +122,9 @@ export function IssueSelector({ provider, onSelect, selectedIssueNumber }: Props
     return (
       <div className="flex items-center gap-2 rounded-md border border-border bg-background px-3 py-4 text-xs text-muted-foreground">
         <Loader2 size={14} className="animate-spin" />
-        <span>Fetching {provider === "linear" ? "Linear" : "GitHub"} issues…</span>
+        <span>
+          Fetching {provider === "linear" ? "Linear" : "GitHub"} issues…
+        </span>
       </div>
     );
   }
@@ -134,13 +137,15 @@ export function IssueSelector({ provider, onSelect, selectedIssueNumber }: Props
             ? "Linear API token required. Add it in Settings → Integrations."
             : "GitHub authentication required. Connect via Settings → Forge."}
         </p>
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={fetchIssues}
           className="mt-2 text-[11px] text-primary hover:underline"
         >
           Retry
-        </button>
+        </Button>
       </div>
     );
   }
@@ -148,14 +153,18 @@ export function IssueSelector({ provider, onSelect, selectedIssueNumber }: Props
   if (fetchState === "error") {
     return (
       <div className="rounded-md border border-border bg-background px-3 py-4 text-xs">
-        <p className="text-destructive">{errorMessage || "Failed to fetch issues"}</p>
-        <button
+        <p className="text-destructive">
+          {errorMessage || "Failed to fetch issues"}
+        </p>
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={fetchIssues}
           className="mt-2 text-[11px] text-primary hover:underline"
         >
           Retry
-        </button>
+        </Button>
       </div>
     );
   }
@@ -176,14 +185,16 @@ export function IssueSelector({ provider, onSelect, selectedIssueNumber }: Props
 
       {/* Filter toggles */}
       <div className="flex items-center gap-2">
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={() => setShowFilters(!showFilters)}
           className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground"
         >
           <Tag size={10} />
           Filters {showFilters ? "▾" : "▸"}
-        </button>
+        </Button>
         {issues.length > 0 && (
           <span className="text-[10px] text-muted-foreground">
             {filteredIssues.length} of {issues.length} issues
@@ -210,7 +221,9 @@ export function IssueSelector({ provider, onSelect, selectedIssueNumber }: Props
           <div className="flex-1">
             <div className="flex items-center gap-1 mb-0.5">
               <User size={9} className="text-muted-foreground" />
-              <span className="text-[10px] text-muted-foreground">Assignee</span>
+              <span className="text-[10px] text-muted-foreground">
+                Assignee
+              </span>
             </div>
             <Input
               type="text"
@@ -233,7 +246,9 @@ export function IssueSelector({ provider, onSelect, selectedIssueNumber }: Props
           <ul className="divide-y divide-border">
             {filteredIssues.map((issue) => (
               <li key={issue.number}>
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
                   onClick={() => onSelect(issue)}
                   className={`w-full px-3 py-2 text-left transition hover:bg-primary/10 ${
@@ -245,10 +260,14 @@ export function IssueSelector({ provider, onSelect, selectedIssueNumber }: Props
                       #{issue.number}
                     </span>
                     <div className="min-w-0 flex-1">
-                      <p className="truncate text-xs text-foreground">{issue.title}</p>
+                      <p className="truncate text-xs text-foreground">
+                        {issue.title}
+                      </p>
                       <div className="mt-0.5 flex items-center gap-2">
                         {issue.author && (
-                          <span className="text-[10px] text-muted-foreground">{issue.author}</span>
+                          <span className="text-[10px] text-muted-foreground">
+                            {issue.author}
+                          </span>
                         )}
                         {issue.labels.length > 0 && (
                           <div className="flex gap-1">
@@ -280,7 +299,7 @@ export function IssueSelector({ provider, onSelect, selectedIssueNumber }: Props
                       <ExternalLink size={10} />
                     </a>
                   </div>
-                </button>
+                </Button>
               </li>
             ))}
           </ul>

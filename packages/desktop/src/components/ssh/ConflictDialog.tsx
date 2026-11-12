@@ -1,12 +1,15 @@
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 /**
  * ConflictDialog — modal dialog for handling duplicate file conflicts during
  * drag-and-drop uploads. Prompts the user to overwrite, skip, or rename
  * with an "apply to all" option for batch resolution.
  */
 
-import { useState, useCallback } from "react";
-import { AlertTriangle, FileWarning, X } from "lucide-react";
 import clsx from "clsx";
+import { AlertTriangle, FileWarning, X } from "lucide-react";
+import { useCallback, useState } from "react";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -63,46 +66,44 @@ export function ConflictDialog({
   if (!open || !conflict) return null;
 
   return (
-    <div
-      className="fixed inset-0 z-[100] flex items-center justify-center"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="conflict-dialog-title"
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) handleCancel();
+      }}
     >
       {/* Backdrop */}
-      <div
-        className="absolute inset-0 bg-black/40 dark:bg-black/60"
-        onClick={handleCancel}
-        aria-hidden="true"
-      />
 
       {/* Dialog panel */}
-      <div
-        className={clsx(
-          "relative z-10 w-full max-w-md mx-4",
+      <DialogContent
+        aria-describedby={undefined}
+        showCloseButton={false}
+        className={
+          clsx(
+          "w-full max-w-md mx-4",
           "bg-background bg-card rounded-xl shadow-xl",
           "border border-border border-border",
-        )}
+        ) + " p-0 gap-0"
+        }
       >
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-border border-border">
           <div className="flex items-center gap-2">
             <FileWarning className="w-5 h-5 text-warning" />
-            <h2
-              id="conflict-dialog-title"
-              className="text-base font-semibold text-foreground text-foreground"
-            >
+            <DialogTitle className="text-base font-semibold text-foreground text-foreground">
               File Already Exists
-            </h2>
+            </DialogTitle>
           </div>
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={handleCancel}
             className="p-1 rounded hover:bg-card hover:bg-card text-muted-foreground hover:text-muted-foreground hover:text-muted-foreground"
             aria-label="Close dialog"
           >
             <X size={16} />
-          </button>
+          </Button>
         </div>
 
         {/* Body */}
@@ -123,7 +124,9 @@ export function ConflictDialog({
               {(conflict.existingSize !== undefined || conflict.newSize !== undefined) && (
                 <div className="flex gap-4 mt-2 text-xs text-muted-foreground text-muted-foreground">
                   {conflict.existingSize !== undefined && (
-                    <span>Existing: {formatFileSize(conflict.existingSize)}</span>
+                    <span>
+                      Existing: {formatFileSize(conflict.existingSize)}
+                    </span>
                   )}
                   {conflict.newSize !== undefined && (
                     <span>New: {formatFileSize(conflict.newSize)}</span>
@@ -136,10 +139,9 @@ export function ConflictDialog({
           {/* Apply to all checkbox */}
           {remainingCount > 1 && (
             <label className="flex items-center gap-2 mb-4 cursor-pointer">
-              <input
-                type="checkbox"
+              <Checkbox
                 checked={applyToAll}
-                onChange={(e) => setApplyToAll(e.target.checked)}
+                onCheckedChange={(checked) => setApplyToAll(checked === true)}
                 className="w-4 h-4 rounded border-border border-border text-info focus:ring-info"
               />
               <span className="text-sm text-muted-foreground text-muted-foreground">
@@ -151,7 +153,9 @@ export function ConflictDialog({
 
         {/* Actions */}
         <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-border border-border bg-background bg-card/50 rounded-b-xl">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={() => handleResolve("skip")}
             className={clsx(
@@ -162,8 +166,10 @@ export function ConflictDialog({
             )}
           >
             Skip
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={() => handleResolve("rename")}
             className={clsx(
@@ -174,8 +180,10 @@ export function ConflictDialog({
             )}
           >
             Rename
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="destructive"
+            size="compact"
             type="button"
             onClick={() => handleResolve("overwrite")}
             className={clsx(
@@ -185,10 +193,10 @@ export function ConflictDialog({
             )}
           >
             Overwrite
-          </button>
+          </Button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 

@@ -1,6 +1,13 @@
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
-import { useState, useEffect, useRef, useMemo } from "react";
-import { Puzzle, X, ChevronDown } from "lucide-react";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import { ChevronDown, Puzzle, X } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 import type { SkillListItem } from "../../ipc";
 
 interface Props {
@@ -14,8 +21,6 @@ export function SkillPicker({ selected, onChange, repoPath }: Props) {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [open, setOpen] = useState(false);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -36,18 +41,6 @@ export function SkillPicker({ selected, onChange, repoPath }: Props) {
     load();
     return () => { cancelled = true; };
   }, [repoPath]);
-
-  // Close on outside click
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e: MouseEvent) => {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [open]);
 
   const filtered = useMemo(() => {
     if (!search.trim()) return skills;
@@ -74,86 +67,75 @@ export function SkillPicker({ selected, onChange, repoPath }: Props) {
   const selectedSkills = skills.filter((s) => selected.includes(s.record.id));
 
   return (
-    <div ref={containerRef} className="relative">
-      {/* Selected chips + open button */}
-      <div
-        className="flex flex-wrap items-center gap-1 min-h-[32px] rounded border border-border bg-accent px-2 py-1 cursor-pointer"
-        onClick={() => { setOpen(!open); setTimeout(() => inputRef.current?.focus(), 50); }}
-      >
-        {selectedSkills.length === 0 && (
-          <span className="text-xs text-muted-foreground">Select skills...</span>
-        )}
-        {selectedSkills.map((s) => (
+    <Popover open={open} onOpenChange={setOpen}>
+      <div className="flex flex-wrap items-center gap-1 rounded border border-border px-2 py-1">
+        {selectedSkills.map((skill) => (
           <span
-            key={s.record.id}
-            className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] text-primary"
+            key={skill.record.id}
+            className="inline-flex items-center gap-1 rounded bg-accent px-2 py-0.5 text-xs"
           >
             <Puzzle size={10} />
-            {s.frontmatter.name || s.record.name}
-            <button
-              type="button"
-              onClick={(e) => { e.stopPropagation(); remove(s.record.id); }}
-              className="hover:text-destructive"
+            {skill.frontmatter.name || skill.record.name}
+            <Button
+              variant="ghost"
+              size="compact"
+              className="p-0.5"
+              aria-label={`Remove ${skill.record.name}`}
+              onClick={() => remove(skill.record.id)}
             >
               <X size={10} />
-            </button>
+            </Button>
           </span>
         ))}
-        <ChevronDown size={14} className="ml-auto text-muted-foreground shrink-0" />
+        <PopoverTrigger asChild>
+          <Button
+            variant="ghost"
+            size="compact"
+            className="ml-auto"
+            aria-label="Select skills"
+          >
+            {selectedSkills.length ? "Add skills" : "Select skills…"}
+        <ChevronDown size={12} />
+          </Button>
+        </PopoverTrigger>
       </div>
-
-      {/* Dropdown */}
-      {open && (
-        <div className="absolute top-full left-0 right-0 mt-1 z-50 rounded-lg border border-border bg-background shadow-xl max-h-48 overflow-hidden flex flex-col">
-          <div className="p-1.5 border-b border-border">
-            <Input
-              ref={inputRef}
-              type="text"
-              placeholder="Search skills..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              onClick={(e) => e.stopPropagation()}
-              className="w-full rounded border border-border bg-accent px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary"
-            />
-          </div>
-          <div className="overflow-y-auto flex-1">
+      <PopoverContent align="start" className="w-80 p-0">
+        <div className="border-b p-2">
+          <Input
+            aria-label="Search skills"
+            placeholder="Search skills…"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+          />
+        </div>
+        <div className="max-h-48 overflow-auto p-1">
             {loading ? (
-              <div className="p-3 text-xs text-muted-foreground text-center">Loading...</div>
+              <p className="p-3 text-xs text-muted-foreground">Loading…</p>
             ) : filtered.length === 0 ? (
-              <div className="p-3 text-xs text-muted-foreground text-center">
-                {skills.length === 0 ? "No skills available" : "No matches"}
-              </div>
+              <p className="p-3 text-xs text-muted-foreground">
+                {skills.length ? "No matches" : "No skills available"}
+            </p>
             ) : (
-              filtered.map((s) => {
-                const isSelected = selected.includes(s.record.id);
-                return (
-                  <button
-                    key={s.record.id}
-                    type="button"
-                    className={`w-full text-left px-3 py-1.5 flex items-center gap-2 text-xs hover:bg-accent transition-colors ${
-                      isSelected ? "bg-primary/5" : ""
-                    }`}
-                    onClick={(e) => { e.stopPropagation(); toggle(s.record.id); }}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={isSelected}
-                      onChange={() => {}}
-                      className="rounded"
-                    />
-                    <span className="text-foreground truncate">
-                      {s.frontmatter.name || s.record.name}
+              filtered.map((skill) => (
+              <label
+                key={skill.record.id}
+                className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-accent focus-within:bg-accent"
+              >
+                <Checkbox
+                  checked={selected.includes(skill.record.id)}
+                  onCheckedChange={() => toggle(skill.record.id)}
+                />
+                    <span className="min-w-0 flex-1 truncate">
+                  {skill.frontmatter.name || skill.record.name}
                     </span>
-                    <span className="text-muted-foreground truncate ml-auto text-[10px]">
-                      {s.record.description.slice(0, 40)}
+                    <span className="max-w-32 truncate text-[10px] text-muted-foreground">
+                  {skill.record.description}
                     </span>
-                  </button>
-                );
-              })
+                  </label>
+            ))
             )}
           </div>
-        </div>
-      )}
-    </div>
+        </PopoverContent>
+    </Popover>
   );
 }

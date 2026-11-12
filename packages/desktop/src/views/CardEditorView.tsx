@@ -1,19 +1,27 @@
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { NativeSelect } from "@/components/ui/native-select";
-import { useCallback, useEffect, useMemo, useState } from "react";
 import clsx from "clsx";
-import { marked } from "marked";
 import {
   AlertTriangle,
   FileText,
   Loader2,
   Save,
 } from "lucide-react";
+import { marked } from "marked";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
-import { OpenRepo } from "../state";
 import { rpc } from "../ipc";
 import { inferCardType, lintCard, LintWarning } from "../lib/card-lint";
+import { OpenRepo } from "../state";
 
 interface Props {
   repo: OpenRepo;
@@ -276,7 +284,9 @@ export function CardEditorView({ repo, path }: Props) {
             </span>
           )}
         </div>
-        <button
+        <Button
+          variant="default"
+          size="compact"
           type="button"
           disabled={!dirty || saving}
           onClick={handleSave}
@@ -288,9 +298,13 @@ export function CardEditorView({ repo, path }: Props) {
           )}
           aria-label="Save card"
         >
-          {saving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
+          {saving ? (
+            <Loader2 size={12} className="animate-spin" />
+          ) : (
+            <Save size={12} />
+          )}
           Save
-        </button>
+        </Button>
       </div>
 
       {/* Error banner */}
@@ -301,7 +315,7 @@ export function CardEditorView({ repo, path }: Props) {
         </div>
       )}
 
-      {/* Lint warnings panel */}
+      {/* Error banner */}
       {lintWarnings.length > 0 && (
         <div className="shrink-0 border-b border-warning/30 bg-warning/5 px-3 py-1.5">
           <div className="flex flex-wrap gap-x-4 gap-y-1">
@@ -312,9 +326,9 @@ export function CardEditorView({ repo, path }: Props) {
         </div>
       )}
 
-      {/* Split pane */}
+      {/* Lint warnings panel */}
       <PanelGroup direction="horizontal" className="min-h-0 flex-1">
-        {/* Left: YAML form */}
+        {/* Split pane */}
         <Panel defaultSize={45} minSize={25}>
           <div className="h-full overflow-auto p-4">
             <div className="mb-3 text-[10px] uppercase tracking-wider text-muted-foreground">
@@ -336,7 +350,9 @@ export function CardEditorView({ repo, path }: Props) {
                   </div>
                   {extraKeys.map((key) => (
                     <div key={key}>
-                      <label className="mb-0.5 block text-[11px] text-muted-foreground">{key}</label>
+                      <label className="mb-0.5 block text-[11px] text-muted-foreground">
+                        {key}
+                      </label>
                       <Input
                         type="text"
                         className="w-full rounded border border-border bg-background px-2 py-1 text-xs text-foreground focus-visible:outline-none focus:border-primary"
@@ -396,23 +412,34 @@ function FormField({
 }) {
   return (
     <div>
-      <label className="mb-0.5 block text-[11px] text-muted-foreground">{field.label}</label>
+      <label className="mb-0.5 block text-[11px] text-muted-foreground">
+        {field.label}
+      </label>
       {field.type === "dropdown" && field.options ? (
-        <NativeSelect
-          className="w-full rounded border border-border bg-background px-2 py-1 text-xs text-foreground focus-visible:outline-none focus:border-primary"
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
+        <Select
+          value={":" + String(value)}
+          onValueChange={(selectedValue) => {
+            const value = selectedValue.slice(1);
+            return onChange(value);
+          }}
         >
-          {field.options.map((opt) => (
-            <option key={opt} value={opt}>
-              {opt || "(none)"}
-            </option>
-          ))}
-          {/* If the current value isn't in the options list, show it */}
-          {value && !field.options.includes(value) && (
-            <option value={value}>{value}</option>
-          )}
-        </NativeSelect>
+          <SelectTrigger className="w-full rounded border border-border bg-background px-2 py-1 text-xs text-foreground focus-visible:outline-none focus:border-primary">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              {field.options.map((opt) => (
+                <SelectItem key={opt} value={":" + String(opt)}>
+                  {opt || "(none)"}
+                </SelectItem>
+              ))}
+              {/* If the current value isn't in the options list, show it */}
+              {value && !field.options.includes(value) && (
+                <SelectItem value={":" + String(value)}>{value}</SelectItem>
+              )}
+            </SelectGroup>
+          </SelectContent>
+        </Select>
       ) : (
         <Input
           type="text"

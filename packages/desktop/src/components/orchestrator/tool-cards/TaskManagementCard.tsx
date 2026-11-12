@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { useCardExpanded } from "./useCardExpanded";
 /**
  * Specialized renderer for task management tool calls (Claude Code protocol).
@@ -16,22 +17,21 @@ import { useCardExpanded } from "./useCardExpanded";
  *   - TaskGet/TaskList → collapsible detail view
  */
 
-
 import clsx from "clsx";
 import {
+  CheckCircle2,
   ChevronDown,
   ChevronRight,
+  Circle,
   CirclePlus,
   ClipboardCheck,
   List,
-  RefreshCw,
-  Circle,
-  CheckCircle2,
   Loader2,
+  RefreshCw,
   XCircle,
 } from "lucide-react";
-import type { ToolCardRendererProps } from "./types";
 import { CollapsedCardLine } from "./CollapsedCardLine";
+import type { ToolCardRendererProps } from "./types";
 
 // ── Status styling ──────────────────────────────────────────────────
 
@@ -132,7 +132,9 @@ export function TaskManagementCard({ event, defaultExpanded = false, collapsed: 
       <>
         <RefreshCw size={11} className="shrink-0 text-muted-foreground" />
         <span className="font-medium text-foreground/80">{collapsedLabel}</span>
-        {collapsedDetail && <span className="truncate text-foreground/70">{collapsedDetail}</span>}
+        {collapsedDetail && (
+          <span className="truncate text-foreground/70">{collapsedDetail}</span>
+        )}
       </>
     );
     return (
@@ -155,7 +157,9 @@ export function TaskManagementCard({ event, defaultExpanded = false, collapsed: 
         <RefreshCw size={11} className="text-muted-foreground shrink-0" />
         <span className="text-muted-foreground">Update Task</span>
         {taskId && (
-          <span className="font-mono text-foreground/70">#{taskId.slice(0, 8)}</span>
+          <span className="font-mono text-foreground/70">
+            #{taskId.slice(0, 8)}
+          </span>
         )}
         {statusConfig && (
           <>
@@ -171,7 +175,9 @@ export function TaskManagementCard({ event, defaultExpanded = false, collapsed: 
           </>
         )}
         {hasOutput && (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={() => setExpanded(!expanded)}
             className="ml-auto text-muted-foreground/60 hover:text-foreground transition cursor-pointer"
@@ -180,7 +186,7 @@ export function TaskManagementCard({ event, defaultExpanded = false, collapsed: 
               ? <ChevronDown size={10} />
               : <ChevronRight size={10} />
             }
-          </button>
+          </Button>
         )}
       </div>
     );
@@ -192,7 +198,9 @@ export function TaskManagementCard({ event, defaultExpanded = false, collapsed: 
 
     return (
       <div className="rounded-md border border-border/40 overflow-hidden">
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={() => hasOutput && setExpanded(!expanded)}
           className={clsx(
@@ -202,16 +210,20 @@ export function TaskManagementCard({ event, defaultExpanded = false, collapsed: 
           )}
         >
           <CirclePlus size={12} className="text-success/70 shrink-0" />
-          <span className="font-medium text-muted-foreground shrink-0">New Task</span>
-          <span className="min-w-0 flex-1 truncate text-foreground/80">
-            {title.slice(0, 80)}{title.length > 80 ? "…" : ""}
+          <span className="font-medium text-muted-foreground shrink-0">
+            New Task
           </span>
-          {hasOutput && (
-            expanded
-              ? <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
-              : <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
-          )}
-        </button>
+          <span className="min-w-0 flex-1 truncate text-foreground/80">
+            {title.slice(0, 80)}
+            {title.length > 80 ? "…" : ""}
+          </span>
+          {hasOutput &&
+            (expanded ? (
+              <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
+            ) : (
+              <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
+            ))}
+        </Button>
 
         {expanded && hasOutput && (
           <div className="border-t border-border/30 px-2.5 py-1.5 text-[10px] text-foreground/60">
@@ -246,7 +258,9 @@ export function TaskManagementCard({ event, defaultExpanded = false, collapsed: 
 
   return (
     <div className="rounded-md border border-border/40 overflow-hidden">
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={() => hasOutput && setExpanded(!expanded)}
         className={clsx(
@@ -256,14 +270,19 @@ export function TaskManagementCard({ event, defaultExpanded = false, collapsed: 
         )}
       >
         <Icon size={11} className="text-muted-foreground shrink-0" />
-        <span className="shrink-0 font-medium text-muted-foreground">{label}</span>
-        <span className="min-w-0 flex-1 truncate text-foreground/80">{summary}</span>
-        {hasOutput && (
-          expanded
-            ? <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
-            : <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
-        )}
-      </button>
+        <span className="shrink-0 font-medium text-muted-foreground">
+          {label}
+        </span>
+        <span className="min-w-0 flex-1 truncate text-foreground/80">
+          {summary}
+        </span>
+        {hasOutput &&
+          (expanded ? (
+            <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
+          ) : (
+            <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
+          ))}
+      </Button>
 
       {expanded && hasOutput && (
         <div className="border-t border-border/30 max-h-[200px] overflow-auto px-2.5 py-2">

@@ -1,6 +1,7 @@
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { useCallback, useEffect, useState } from "react";
 import { Loader2, Pencil, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
 import type { WorkspaceTemplate } from "./TemplatePicker";
 
 // ── Component ───────────────────────────────────────────────────────
@@ -61,7 +62,9 @@ export function TemplatesSection() {
       const updated = { ...template, description: editDesc.trim() };
       await (window as any).crab?.orchestrator?.saveTemplate?.(updated);
       setTemplates((prev) =>
-        prev.map((t) => (t.name === editingName ? { ...t, description: editDesc.trim() } : t)),
+        prev.map((t) =>
+          t.name === editingName ? { ...t, description: editDesc.trim() } : t,
+        ),
       );
     } catch {
       // Best-effort save.
@@ -80,8 +83,12 @@ export function TemplatesSection() {
   if (templates.length === 0) {
     return (
       <div className="text-xs text-muted-foreground">
-        No templates configured. Use "Save as template" from a workspace to create one, or add
-        templates to <code className="font-mono text-foreground/80">crab-orchestrator.json</code>.
+        No templates configured. Use "Save as template" from a workspace to
+        create one, or add templates to{" "}
+        <code className="font-mono text-foreground/80">
+          crab-orchestrator.json
+        </code>
+        .
       </div>
     );
   }
@@ -107,7 +114,9 @@ export function TemplatesSection() {
             {/* Name + description */}
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-1.5">
-                <span className="text-xs font-medium text-foreground">{template.name}</span>
+                <span className="text-xs font-medium text-foreground">
+                  {template.name}
+                </span>
                 <span className="shrink-0 rounded-full bg-background px-1.5 py-0.5 text-[9px] text-muted-foreground">
                   {template.source}
                 </span>
@@ -134,28 +143,34 @@ export function TemplatesSection() {
             {/* Actions (user-level only) */}
             {isUserLevel && !isEditing && (
               <div className="flex shrink-0 items-center gap-1">
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
                   onClick={() => handleEditStart(template)}
                   className="rounded p-1 text-muted-foreground transition hover:bg-accent hover:text-foreground"
                   aria-label={`Edit ${template.name}`}
                 >
                   <Pencil size={12} />
-                </button>
-                <button
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
                   onClick={() => handleDelete(template.name)}
                   className="rounded p-1 text-muted-foreground transition hover:bg-destructive/10 hover:text-destructive"
                   aria-label={`Delete ${template.name}`}
                 >
                   <Trash2 size={12} />
-                </button>
+                </Button>
               </div>
             )}
 
             {/* Read-only badge for non-user templates */}
             {!isUserLevel && (
-              <span className="shrink-0 text-[9px] text-muted-foreground">read-only</span>
+              <span className="shrink-0 text-[9px] text-muted-foreground">
+                read-only
+              </span>
             )}
           </div>
         );

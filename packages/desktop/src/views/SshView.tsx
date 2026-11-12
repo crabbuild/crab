@@ -1,34 +1,41 @@
 import { Button } from "@/components/ui/button";
-import { NativeSelect } from "@/components/ui/native-select";
 import { Input } from "@/components/ui/input";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import clsx from "clsx";
 import {
-  Monitor,
-  Plus,
-  FileDown,
-  Search,
-  Filter,
-} from "lucide-react";
-import { useStore, SshConnectionState } from "../state";
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import clsx from "clsx";
+import { FileDown, Filter, Monitor, Plus, Search } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ConflictResolutionDialog } from "../components/ssh/ConflictResolutionDialog";
 import { ConnectionCard } from "../components/ssh/ConnectionCard";
 import { ConnectionForm, SshProfileFormData } from "../components/ssh/ConnectionForm";
-import { SshConfigBanner } from "../components/ssh/SshConfigBanner";
-import { SshConfigImport, ParsedSshHost } from "../components/ssh/SshConfigImport";
-import { RemoteFileBrowser } from "../components/ssh/RemoteFileBrowser";
-import { PortForwardPanel } from "../components/ssh/PortForwardPanel";
-import { SyncPairDialog, SyncPairConfig } from "../components/ssh/SyncPairDialog";
-import { ConflictResolutionDialog } from "../components/ssh/ConflictResolutionDialog";
-import { SyncTransferProgress } from "../components/ssh/SyncTransferProgress";
 import { DeployProgressIndicator } from "../components/ssh/DeployProgressIndicator";
+import { PortForwardPanel } from "../components/ssh/PortForwardPanel";
+import { RemoteFileBrowser } from "../components/ssh/RemoteFileBrowser";
+import type { SshProfile } from "../components/ssh/ssh-profile-types";
+import { SshConfigBanner } from "../components/ssh/SshConfigBanner";
+import {
+  ParsedSshHost,
+  SshConfigImport,
+} from "../components/ssh/SshConfigImport";
 import { SyncManagementPanel } from "../components/ssh/SyncManagementPanel";
-import { publishToast } from "../lib/toasts";
+import {
+  SyncPairConfig,
+  SyncPairDialog,
+} from "../components/ssh/SyncPairDialog";
+import { SyncTransferProgress } from "../components/ssh/SyncTransferProgress";
 import { useSyncConflictNotifications } from "../hooks/useSyncConflictNotifications";
+import { publishToast } from "../lib/toasts";
+import { SshConnectionState, useStore } from "../state";
 
 // Minimal SshProfile type for the renderer (mirrors electron/ssh-manager.ts)
 // Extracted to components/ssh/ssh-profile-types.ts to break circular deps.
 export type { SshProfile } from "../components/ssh/ssh-profile-types";
-import type { SshProfile } from "../components/ssh/ssh-profile-types";
 
 /**
  * SSH Connections manager view. Lists all saved profiles with live
@@ -276,9 +283,10 @@ export function SshView() {
       publishToast({
         kind: "error",
         title: "Failed to create sync pair",
-        body: err instanceof Error
-          ? err.message
-          : (err as any)?.message ?? String(err),
+        body:
+          err instanceof Error
+            ? err.message
+            : ((err as any)?.message ?? String(err)),
       });
     }
   }
@@ -344,10 +352,12 @@ export function SshView() {
           <div className="flex h-16 w-16 items-center justify-center rounded-full bg-primary/10">
             <Monitor size={32} className="text-primary" aria-hidden="true" />
           </div>
-          <h2 className="text-lg font-semibold text-foreground">SSH Remote Connections</h2>
+          <h2 className="text-lg font-semibold text-foreground">
+            SSH Remote Connections
+          </h2>
           <p className="max-w-sm text-sm text-muted-foreground">
-            Connect to remote servers over SSH to manage repositories, run terminals, and deploy
-            agents — all from within Crab Desktop.
+            Connect to remote servers over SSH to manage repositories, run
+            terminals, and deploy agents — all from within Crab Desktop.
           </p>
         </div>
         <div className="flex flex-col items-center gap-2">
@@ -387,7 +397,7 @@ export function SshView() {
           existingProfiles={profiles.map((p) => ({ host: p.host, port: p.port, username: p.username }))}
         />
 
-        {/* Connection form dialog */}
+        {/* Import dialog */}
         {formOpen && (
           <ConnectionForm
             profile={editingProfile}
@@ -401,73 +411,86 @@ export function SshView() {
 
   return (
     <div className="flex h-full flex-col overflow-hidden">
-      {/* Sub-view: File Browser or Port Forwards */}
-      {subView && (() => {
-        const profile = profiles.find((p) => p.id === subView.profileId);
-        if (!profile) { setSubView(null); return null; }
+      {/* Import dialog */}
+      {subView &&
+        (() => {
+          const profile = profiles.find((p) => p.id === subView.profileId);
+          if (!profile) { setSubView(null); return null; }
 
-        return (
-          <div className="flex h-full flex-col overflow-hidden">
-            <header className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-2">
-              <button
-                type="button"
-                className="text-xs text-primary hover:underline"
-                onClick={() => setSubView(null)}
-              >
-                ← Back to connections
-              </button>
-              <span className="text-xs text-muted-foreground">
-                {profile.label}
-              </span>
-              <div className="flex-1" />
-              {/* Sub-view tabs */}
-              <div className="flex items-center gap-1">
-                <button
+          return (
+            <div className="flex h-full flex-col overflow-hidden">
+              <header className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-2">
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
-                  className={clsx(
+                  className="text-xs text-primary hover:underline"
+                  onClick={() => setSubView(null)}
+                >
+                  ← Back to connections
+                </Button>
+                <span className="text-xs text-muted-foreground">
+                  {profile.label}
+                </span>
+                <div className="flex-1" />
+                {/* Connection form dialog */}
+                <div className="flex items-center gap-1">
+                  <Button
+                    variant="ghost"
+                    size="compact"
+                    type="button"
+                    className={clsx(
                     "px-2 py-1 text-[11px] rounded transition",
                     subView.type === "files"
                       ? "bg-primary/15 text-primary font-medium"
                       : "text-muted-foreground hover:text-foreground hover:bg-accent",
                   )}
-                  onClick={() => setSubView({ ...subView, type: "files" })}
-                >
-                  Files
-                </button>
-                <button
-                  type="button"
-                  className={clsx(
+                    onClick={() => setSubView({ ...subView, type: "files" })}
+                  >
+                    Files
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="compact"
+                    type="button"
+                    className={clsx(
                     "px-2 py-1 text-[11px] rounded transition",
                     subView.type === "sync"
                       ? "bg-primary/15 text-primary font-medium"
                       : "text-muted-foreground hover:text-foreground hover:bg-accent",
                   )}
-                  onClick={() => setSubView({ ...subView, type: "sync" })}
-                >
-                  Sync
-                </button>
-                <button
-                  type="button"
-                  className={clsx(
+                    onClick={() => setSubView({ ...subView, type: "sync" })}
+                  >
+                    Sync
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="compact"
+                    type="button"
+                    className={clsx(
                     "px-2 py-1 text-[11px] rounded transition",
                     subView.type === "ports"
                       ? "bg-primary/15 text-primary font-medium"
                       : "text-muted-foreground hover:text-foreground hover:bg-accent",
                   )}
-                  onClick={() => setSubView({ ...subView, type: "ports" })}
-                >
-                  Ports
-                </button>
+                    onClick={() => setSubView({ ...subView, type: "ports" })}
+                  >
+                    Ports
+                  </Button>
+                </div>
+              </header>
+              {openError && (
+                <p role="alert" className="px-3 py-2 text-sm text-destructive">
+                  {openError}
+                </p>
+              )}
+              {/* Sub-view tabs */}
+              <div className="shrink-0 px-3">
+                <DeployProgressIndicator profileId={profile.id} />
+                <SyncTransferProgress />
               </div>
-            </header>
-            {openError && <p role="alert" className="px-3 py-2 text-sm text-destructive">{openError}</p>}
-            {/* Deploy progress + sync transfer progress */}
-            <div className="shrink-0 px-3">
-              <DeployProgressIndicator profileId={profile.id} />
-              <SyncTransferProgress />
-            </div>
-            <div className="flex-1 overflow-auto">
-              {subView.type === "files" ? (
+              <div className="flex-1 overflow-auto">
+                {subView.type === "files" ? (
                 <RemoteFileBrowser
                   key={fileBrowserKey}
                   profileId={profile.id}
@@ -510,44 +533,60 @@ export function SshView() {
                   }}
                 />
               )}
+              </div>
             </div>
-          </div>
-        );
-      })()}
+          );
+        })()}
 
       {/* Main connection list (hidden when sub-view is active) */}
-      {!subView && <>
-      {/* Header */}
-      <header className="flex shrink-0 items-center gap-2 border-b border-border px-4 py-3">
-        <Monitor size={16} className="text-muted-foreground" aria-hidden="true" />
-        <h1 className="text-sm font-semibold text-foreground">SSH Connections</h1>
-        <span className="ml-1 rounded-full bg-accent px-2 py-0.5 text-[10px] text-muted-foreground" aria-label={`${displayProfiles.length} connections`}>
-          {displayProfiles.length}
-        </span>
-        <div className="flex-1" />
+      {!subView && (
+        <>
+          {/* Main connection list (hidden when sub-view is active) */}
+          <header className="flex shrink-0 items-center gap-2 border-b border-border px-4 py-3">
+            <Monitor size={16} className="text-muted-foreground" aria-hidden="true" />
+            <h1 className="text-sm font-semibold text-foreground">
+              SSH Connections
+            </h1>
+            <span className="ml-1 rounded-full bg-accent px-2 py-0.5 text-[10px] text-muted-foreground" aria-label={`${displayProfiles.length} connections`}>
+              {displayProfiles.length}
+            </span>
+            <div className="flex-1" />
 
-        {/* Tag filter */}
-        {allTags.length > 0 && (
-          <div className="relative">
-            <NativeSelect
-              className="appearance-none rounded border border-border bg-card px-2 py-1 pr-6 text-xs text-foreground"
-              value={filterTag ?? ""}
-              onChange={(e) => setFilterTag(e.target.value || null)}
-              aria-label="Filter by tag"
-            >
-              <option value="">All tags</option>
-              {allTags.map((tag) => (
-                <option key={tag} value={tag}>{tag}</option>
-              ))}
-            </NativeSelect>
-            <Filter size={10} className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground" />
-          </div>
-        )}
+            {/* Main connection list (hidden when sub-view is active) */}
+            {allTags.length > 0 && (
+              <div className="relative">
+                <Select
+                  value={":" + String(filterTag ?? "")}
+                  onValueChange={(selectedValue) => {
+                    const value = selectedValue.slice(1);
+                    return setFilterTag(value || null);
+                  }}
+                >
+                  <SelectTrigger
+                    className="appearance-none rounded border border-border bg-card px-2 py-1 pr-6 text-xs text-foreground"
+                    aria-label="Filter by tag"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      <SelectItem value={":" + String("")}>All tags</SelectItem>
+                      {allTags.map((tag) => (
+                        <SelectItem key={tag} value={":" + String(tag)}>
+                          {tag}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+                <Filter size={10} className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground" />
+              </div>
+            )}
 
-        {/* Search */}
-        <div className="relative">
-          <Search size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
-          <Input
+            {/* Search */}
+            <div className="relative">
+              <Search size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
+              <Input
             type="search"
             placeholder="Search..."
             className="w-36 rounded border border-border bg-card py-1 pl-7 pr-2 text-xs text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
@@ -555,11 +594,11 @@ export function SshView() {
             onChange={(e) => setSearchQuery(e.target.value)}
             aria-label="Search connections"
           />
-        </div>
-      </header>
+            </div>
+          </header>
 
-      {/* Connection list */}
-      <div
+          {/* Connection list */}
+          <div
         ref={listRef}
         className="flex-1 overflow-auto p-4"
         role="list"
@@ -567,12 +606,12 @@ export function SshView() {
         onKeyDown={handleKeyDown}
         tabIndex={0}
       >
-        <SshConfigBanner onImport={handleImportConfig} />
-        <div className="mx-auto flex max-w-3xl flex-col gap-3">
-          {displayProfiles.map((profile, index) => {
-            const connState = getConnectionState(profile.id);
-            return (
-              <div
+            <SshConfigBanner onImport={handleImportConfig} />
+            <div className="mx-auto flex max-w-3xl flex-col gap-3">
+              {displayProfiles.map((profile, index) => {
+                const connState = getConnectionState(profile.id);
+                return (
+                  <div
                 key={profile.id}
                 role="listitem"
                 draggable
@@ -587,7 +626,7 @@ export function SshView() {
                 )}
                 aria-label={`${profile.label} - ${connState?.status ?? "disconnected"}`}
               >
-                <ConnectionCard
+                    <ConnectionCard
                   profile={profile}
                   connectionState={connState}
                   focused={focusedIndex === index}
@@ -598,36 +637,36 @@ export function SshView() {
                   onTogglePin={() => handleTogglePin(profile.id)}
                   onOpenTerminal={() => handleOpenTerminal(profile.id)}
                 />
-              </div>
-            );
-          })}
-        </div>
-      </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
 
-      {/* Footer actions */}
-      <footer className="flex shrink-0 items-center gap-3 border-t border-border px-4 py-3">
-        <Button variant="default"
+          {/* Footer actions */}
+          <footer className="flex shrink-0 items-center gap-3 border-t border-border px-4 py-3">
+            <Button variant="default"
           type="button"
           className="flex items-center gap-1.5 px-3 py-1.5 text-xs"
           onClick={() => { setEditingProfile(null); setFormOpen(true); }}
           aria-label="Add new SSH connection"
         >
-          <Plus size={12} />
-          Add Connection
-        </Button>
-        <Button variant="outline"
+              <Plus size={12} />
+              Add Connection
+            </Button>
+            <Button variant="outline"
           type="button"
           className="flex items-center gap-1.5 px-3 py-1.5 text-xs"
           onClick={handleImportConfig}
           aria-label="Import from SSH config file"
         >
-          <FileDown size={12} />
-          Import from SSH Config
-        </Button>
-      </footer>
+              <FileDown size={12} />
+              Import from SSH Config
+            </Button>
+          </footer>
 
-      {/* Connection form dialog */}
-      {formOpen && (
+          {/* Connection form dialog */}
+          {formOpen && (
         <ConnectionForm
           profile={editingProfile}
           onSave={handleSave}
@@ -635,14 +674,15 @@ export function SshView() {
         />
       )}
 
-      {/* SSH Config Import dialog */}
-      <SshConfigImport
+          {/* SSH Config Import dialog */}
+          <SshConfigImport
         isOpen={importDialogOpen}
         onClose={() => setImportDialogOpen(false)}
         onImport={handleImportHosts}
         existingProfiles={profiles.map((p) => ({ host: p.host, port: p.port, username: p.username }))}
       />
-      </>}
+        </>
+      )}
 
       {/* Sync Pair Dialog — rendered outside sub-view guard so it overlays everything */}
       {syncDialogState && (

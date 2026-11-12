@@ -1,3 +1,4 @@
+import { chooseSelect } from "../helpers/select";
 import { test, expect, _electron as electron } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -59,7 +60,8 @@ test("SQL uses selected SQLite, WAL, LFS and Crab sources and joins cancellation
       const object = path.join(gitDir, "lfs", "objects", oid.slice(0, 2), oid.slice(2, 4), oid);
       mkdirSync(path.dirname(object), { recursive: true });
       writeFileSync(object, payload);
-      writeFileSync(file, `version https://git-lfs.github.com/spec/v1\noid sha256:${oid}\nsize ${payload.length}\n`);
+      writeFileSync(file, `version https://git-lfs.github.com/spec/v1\noid sha256:${oid}\nsize ${payload.length}\n`,
+      );
     };
     const writeRevision = async (phase: "before" | "after") => {
       const payload = readFileSync(path.join(__dirname, `../fixtures/metadata-${phase}.parquet`));
@@ -107,7 +109,7 @@ test("SQL uses selected SQLite, WAL, LFS and Crab sources and joins cancellation
     await page.evaluate(({ handle, source }) => window.dispatchEvent(new CustomEvent("crab:repo-opened", { detail: { handle, path: source } })), { handle, source });
     await page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Files", exact: true }).click();
     const revision = page.getByRole("combobox").filter({ has: page.getByRole("option", { name: "HEAD (default)", exact: true }) });
-    await revision.selectOption({ label: "query-before" });
+    await chooseSelect(revision, { label: "query-before" });
     const open = (file: string) => page.locator(`[role="treeitem"][data-item-path="${file}"]`).click();
     const editor = page.getByRole("textbox", { name: "SQL query", exact: true });
     const run = page.getByRole("button", { name: "Run", exact: true });
@@ -170,7 +172,10 @@ test("SQL uses selected SQLite, WAL, LFS and Crab sources and joins cancellation
       const retry = page.getByRole("button", { name: "Retry reopening repository", exact: true });
       await expect.poll(async () => {
         const current = nativePid();
-        return (current !== undefined && current !== native) || await retry.isVisible();
+        return (
+            (current !== undefined && current !== native) ||
+            (await retry.isVisible())
+          );
       }).toBe(true);
       if (await retry.isVisible()) await retry.click();
       await expect.poll(() => existsSync(snapshot)).toBe(false);
@@ -198,7 +203,7 @@ test("SQL uses selected SQLite, WAL, LFS and Crab sources and joins cancellation
     expect(staged.rows).toEqual([{ value: 113 }]);
     await open("corrupt.sqlite");
     await expect(page.getByRole("alert").filter({ hasText: "Invalid captured SQLite WAL" })).toBeVisible();
-    await revision.selectOption({ label: "HEAD (default)" });
+    await chooseSelect(revision, { label: "HEAD (default)" });
     await open("mixed.sqlite");
     await expect(cell("113")).toBeVisible();
     await sql.click();

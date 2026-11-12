@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Keybinding editor UI component.
  *
@@ -6,16 +7,17 @@
  * open sessions, and provides a "Reset to Defaults" action.
  */
 
-import { useCallback,useEffect,useRef,useState } from "react";
-import { RotateCcw,AlertTriangle,Keyboard } from "lucide-react";
 import clsx from "clsx";
+import { AlertTriangle, Keyboard, RotateCcw } from "lucide-react";
+import { useCallback,useEffect,useRef,useState } from "react";
 import {
-createKeybindingRegistry,
-detectConflicts,ACTION_LABELS,
-DEFAULT_BINDINGS,
+  ACTION_LABELS,
+  createKeybindingRegistry,
+  DEFAULT_BINDINGS,
+  detectConflicts,
+  type KeybindingConflict,
 type TerminalAction,
 type TerminalKeybinding,
-type KeybindingConflict
 } from "../lib/terminal-keybindings";
 
 // --- Types ---
@@ -151,14 +153,16 @@ export function KeybindingEditor({
             Terminal Keybindings
           </h3>
         </div>
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           onClick={resetAll}
           className="flex items-center gap-1 px-2 py-1 text-xs rounded hover:bg-accent text-muted-foreground"
           title="Reset all keybindings to defaults"
         >
           <RotateCcw className="w-3 h-3" />
           Reset to Defaults
-        </button>
+        </Button>
       </div>
 
       {/* Binding list */}
@@ -187,37 +191,45 @@ export function KeybindingEditor({
                   </kbd>
                   {pendingKeys && (
                     <>
-                      <button
+                      <Button
+                        variant="ghost"
+                        size="compact"
                         onClick={confirmBinding}
                         className="px-2 py-1 text-xs bg-accent text-foreground rounded hover:opacity-80"
                       >
                         Save
-                      </button>
-                      <button
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="compact"
                         onClick={cancelEditing}
                         className="px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
                       >
                         Cancel
-                      </button>
+                      </Button>
                     </>
                   )}
                 </div>
               ) : (
                 <>
-                  <button
+                  <Button
+                    variant="ghost"
+                    size="compact"
                     onClick={() => startEditing(binding.action)}
                     className="px-2 py-1 text-xs font-mono bg-accent border border-border rounded hover:border-ring min-w-[120px] text-center"
                   >
                     {binding.keys}
-                  </button>
+                  </Button>
                   {!binding.isDefault && (
-                    <button
+                    <Button
+                      variant="ghost"
+                      size="compact"
                       onClick={() => resetAction(binding.action)}
                       className="p-1 text-muted-foreground hover:text-muted-foreground"
                       title={`Reset to default (${DEFAULT_BINDINGS[binding.action]})`}
                     >
                       <RotateCcw className="w-3 h-3" />
-                    </button>
+                    </Button>
                   )}
                 </>
               )}

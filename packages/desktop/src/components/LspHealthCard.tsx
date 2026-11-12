@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * LspHealthCard — "Language Servers" card for the Health view.
  *
@@ -7,8 +8,8 @@
  * "Copy diagnostics" bundle.
  */
 
-import { useCallback, useEffect, useState } from "react";
 import { Check, Loader2, Minus, RotateCcw, Square, X } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
 import type { LspServerStatusInfo } from "../ipc";
 
 // ── Types ───────────────────────────────────────────────────────────
@@ -87,15 +88,21 @@ export function LspHealthCard({ className }: Props) {
   if (servers.length === 0) {
     return (
       <div className={`rounded border border-border bg-card p-4 ${className ?? ""}`}>
-        <h3 className="text-sm font-medium text-foreground mb-2">Language Servers</h3>
-        <p className="text-xs text-muted-foreground">No language servers discovered.</p>
+        <h3 className="text-sm font-medium text-foreground mb-2">
+          Language Servers
+        </h3>
+        <p className="text-xs text-muted-foreground">
+          No language servers discovered.
+        </p>
       </div>
     );
   }
 
   return (
     <div className={`rounded border border-border bg-card p-4 ${className ?? ""}`}>
-      <h3 className="text-sm font-medium text-foreground mb-3">Language Servers</h3>
+      <h3 className="text-sm font-medium text-foreground mb-3">
+        Language Servers
+      </h3>
 
       <div className="space-y-2">
         {servers.map((server) => (
@@ -136,7 +143,9 @@ export function LspHealthCard({ className }: Props) {
             {/* Action buttons */}
             <div className="flex items-center gap-1 shrink-0">
               {(server.state === "running" || server.state === "error") && (
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
                   onClick={() => handleRestart(server.language)}
                   className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground transition"
@@ -144,10 +153,12 @@ export function LspHealthCard({ className }: Props) {
                   aria-label={`Restart ${server.language} server`}
                 >
                   <RotateCcw size={11} />
-                </button>
+                </Button>
               )}
               {server.state === "running" && (
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
                   onClick={() => handleStop(server.language)}
                   className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-destructive transition"
@@ -155,7 +166,7 @@ export function LspHealthCard({ className }: Props) {
                   aria-label={`Stop ${server.language} server`}
                 >
                   <Square size={11} />
-                </button>
+                </Button>
               )}
             </div>
           </div>
@@ -194,7 +205,9 @@ function StatusIcon({ state }: { state: LspServerStatusInfo["state"] }) {
     case "running":
       return <Check size={12} className="text-success shrink-0" />;
     case "restarting":
-      return <Loader2 size={12} className="animate-spin text-warning shrink-0" />;
+      return (
+        <Loader2 size={12} className="animate-spin text-warning shrink-0" />
+      );
     case "error":
       return <X size={12} className="text-destructive shrink-0" />;
     default:

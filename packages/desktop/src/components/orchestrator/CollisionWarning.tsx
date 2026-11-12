@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { AlertTriangle, CheckCircle2, Lightbulb, X } from "lucide-react";
 
 // ── Types ───────────────────────────────────────────────────────────
@@ -52,17 +53,20 @@ export function CollisionWarning({ predictions, onApplySuggestions, onDismiss }:
         <div className="flex items-center gap-2">
           <AlertTriangle size={16} className="text-warning" />
           <span className="text-sm font-medium text-foreground">
-            {predictions.length} potential conflict{predictions.length !== 1 ? "s" : ""} detected
+            {predictions.length} potential conflict
+            {predictions.length !== 1 ? "s" : ""} detected
           </span>
         </div>
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={onDismiss}
           className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
           aria-label="Dismiss collision warnings"
         >
           <X size={14} />
-        </button>
+        </Button>
       </div>
 
       {/* Summary badges */}
@@ -125,7 +129,9 @@ export function CollisionWarning({ predictions, onApplySuggestions, onDismiss }:
 
       {/* Actions */}
       <div className="mt-3 flex items-center gap-2">
-        <button
+        <Button
+          variant="default"
+          size="compact"
           type="button"
           onClick={() => onApplySuggestions(predictions)}
           className="flex items-center gap-1.5 rounded bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition hover:bg-primary-hover"
@@ -133,14 +139,16 @@ export function CollisionWarning({ predictions, onApplySuggestions, onDismiss }:
         >
           <CheckCircle2 size={12} />
           Apply suggestions
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={onDismiss}
           className="rounded border border-border px-3 py-1.5 text-xs text-foreground transition hover:bg-accent"
         >
           Proceed anyway
-        </button>
+        </Button>
       </div>
     </div>
   );

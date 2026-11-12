@@ -1,5 +1,6 @@
-import { useCallback, useState } from "react";
+import { Button } from "@/components/ui/button";
 import { Check, Clipboard, FileCode2 } from "lucide-react";
+import { useCallback, useState } from "react";
 import { PointerPatchKind, pointerKindLabel } from "../lib/pointer-detection";
 
 /**
@@ -49,10 +50,11 @@ export function PointerConflictCard({ path, kind }: PointerConflictCardProps) {
             {label} — cannot merge inline
           </h3>
           <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
-            This file is tracked as a {kind === "crab" ? "Crab" : kind === "lfs" ? "Git LFS" : "pointer"}{" "}
-            pointer. The merge editor cannot compare binary content.
-            Run the hydrate command below to materialise the file, then
-            resolve the conflict manually.
+            This file is tracked as a{" "}
+            {kind === "crab" ? "Crab" : kind === "lfs" ? "Git LFS" : "pointer"}{" "}
+            pointer. The merge editor cannot compare binary content. Run the
+            hydrate command below to materialise the file, then resolve the
+            conflict manually.
           </p>
         </div>
       </div>
@@ -62,7 +64,9 @@ export function PointerConflictCard({ path, kind }: PointerConflictCardProps) {
         <code className="flex-1 select-all font-mono text-xs text-foreground">
           {hydrateCommand}
         </code>
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={handleCopy}
           className="flex shrink-0 items-center gap-1.5 rounded border border-border px-2 py-1 text-[11px] text-muted-foreground transition hover:bg-accent hover:text-foreground"
@@ -80,12 +84,12 @@ export function PointerConflictCard({ path, kind }: PointerConflictCardProps) {
               <span>Copy</span>
             </>
           )}
-        </button>
+        </Button>
       </div>
 
       <p className="text-[11px] leading-relaxed text-muted-foreground">
-        After resolving, paste the final content into the result pane below
-        and click <strong className="text-foreground">Save Resolution</strong>.
+        After resolving, paste the final content into the result pane below and
+        click <strong className="text-foreground">Save Resolution</strong>.
       </p>
     </div>
   );

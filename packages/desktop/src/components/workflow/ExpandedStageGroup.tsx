@@ -1,7 +1,8 @@
-import { memo, useCallback, useState } from "react";
-import { Handle, Position, NodeProps } from "@xyflow/react";
+import { Button } from "@/components/ui/button";
+import { Handle, NodeProps, Position } from "@xyflow/react";
 import clsx from "clsx";
 import { ChevronDown, ChevronRight, Layers } from "lucide-react";
+import { memo, useCallback, useState } from "react";
 
 interface ExpandedStageGroupData {
   templateName: string;
@@ -35,9 +36,11 @@ export const ExpandedStageGroup = memo(function ExpandedStageGroup({ data }: Nod
       />
 
       {/* Header */}
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
-        className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-accent"
+        className="justify-start flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-accent"
         onClick={toggleCollapse}
       >
         {collapsed ? (
@@ -52,7 +55,7 @@ export const ExpandedStageGroup = memo(function ExpandedStageGroup({ data }: Nod
         <span className="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-primary/20 px-1.5 text-[10px] font-bold text-primary">
           {expandedCount}
         </span>
-      </button>
+      </Button>
 
       {/* Expanded child stages */}
       {!collapsed && (

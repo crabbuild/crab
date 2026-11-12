@@ -1,5 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { SIDECAR_DEFS, SidecarDef } from "@/lib/sidecar-defs";
+import { sidecar, SidecarId, SidecarState } from "@/lib/sidecar-ipc";
 import {
+  AlertCircle,
   Circle,
   Database,
   ExternalLink,
@@ -9,10 +12,8 @@ import {
   NotebookPen,
   Play,
   Square,
-  AlertCircle,
 } from "lucide-react";
-import { sidecar, SidecarState, SidecarId } from "@/lib/sidecar-ipc";
-import { SIDECAR_DEFS, SidecarDef } from "@/lib/sidecar-defs";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 // ── Icon lookup ──────────────────────────────────────────────────────
 
@@ -96,7 +97,9 @@ function SidecarChip({ state, onRefresh }: { state: SidecarState; onRefresh: () 
       <span className="text-foreground">{label}</span>
       {state.status === "running" && (
         <>
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={handleOpen}
             className="ml-0.5 text-primary hover:text-foreground"
@@ -104,8 +107,10 @@ function SidecarChip({ state, onRefresh }: { state: SidecarState; onRefresh: () 
             aria-label={`Open ${label} in browser`}
           >
             <ExternalLink size={10} />
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={handleStop}
             className="text-muted-foreground hover:text-destructive"
@@ -113,7 +118,7 @@ function SidecarChip({ state, onRefresh }: { state: SidecarState; onRefresh: () 
             aria-label={`Stop ${label}`}
           >
             <Square size={9} />
-          </button>
+          </Button>
         </>
       )}
       {state.status === "error" && state.error && (
@@ -134,7 +139,9 @@ function StatusDot({ status }: { status: SidecarState["status"] }) {
     case "error":
       return <Circle size={6} className="fill-destructive text-destructive" />;
     default:
-      return <Circle size={6} className="fill-muted-foreground/60 text-muted-foreground/60" />;
+      return (
+        <Circle size={6} className="fill-muted-foreground/60 text-muted-foreground/60" />
+      );
   }
 }
 
@@ -237,7 +244,9 @@ function SidecarCard({
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <span className="text-sm font-medium text-foreground">{def.label}</span>
+            <span className="text-sm font-medium text-foreground">
+              {def.label}
+            </span>
             <StatusBadge status={status} />
           </div>
           <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
@@ -266,7 +275,9 @@ function SidecarCard({
       {/* Actions */}
       <div className="mt-3 flex items-center gap-2">
         {status === "stopped" || status === "error" ? (
-          <button
+          <Button
+            variant="default"
+            size="compact"
             type="button"
             onClick={handleStart}
             disabled={starting}
@@ -279,7 +290,7 @@ function SidecarCard({
               <Play size={11} />
             )}
             Start
-          </button>
+          </Button>
         ) : status === "starting" ? (
           <span className="inline-flex items-center gap-1.5 text-[11px] text-info">
             <Loader2 size={11} className="animate-spin" /> Starting…
@@ -288,22 +299,26 @@ function SidecarCard({
 
         {status === "running" && (
           <>
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={handleOpen}
               className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1 text-[11px] text-foreground transition hover:bg-accent"
               aria-label={`Open ${def.label} in browser`}
             >
               <ExternalLink size={11} /> Open
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={handleStop}
               className="inline-flex items-center gap-1.5 rounded-md border border-destructive/40 px-3 py-1 text-[11px] text-destructive transition hover:bg-destructive/10"
               aria-label={`Stop ${def.label}`}
             >
               <Square size={11} /> Stop
-            </button>
+            </Button>
           </>
         )}
       </div>

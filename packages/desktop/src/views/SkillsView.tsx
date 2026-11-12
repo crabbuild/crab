@@ -1,10 +1,11 @@
-import { useState, useEffect, useCallback } from "react";
-import { Puzzle, Plus, Download, RefreshCw } from "lucide-react";
-import { SkillsProvider, useSkills } from "../state/skills-store";
-import { SkillList } from "../components/skills/SkillList";
-import { SkillDetail } from "../components/skills/SkillDetail";
+import { Button } from "@/components/ui/button";
+import { Download, Plus, Puzzle, RefreshCw } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
 import { SkillCreateModal } from "../components/skills/SkillCreateModal";
+import { SkillDetail } from "../components/skills/SkillDetail";
 import { SkillInstallModal } from "../components/skills/SkillInstallModal";
+import { SkillList } from "../components/skills/SkillList";
+import { SkillsProvider, useSkills } from "../state/skills-store";
 
 interface SkillsViewProps {
   repoPath?: string;
@@ -70,28 +71,34 @@ function SkillsViewInner() {
         <h2 className="text-sm font-semibold text-foreground">Skills</h2>
         <div className="flex-1" />
         <AgentStatusDots />
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
           onClick={handleResync}
           disabled={syncing}
           title="Resync skills to all agents"
         >
           <RefreshCw size={14} className={syncing ? "animate-spin" : ""} />
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="default"
+          size="compact"
           className="flex items-center gap-1 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 transition-opacity"
           onClick={() => setShowCreate(true)}
         >
           <Plus size={14} />
           New Skill
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           className="flex items-center gap-1 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent transition-colors"
           onClick={() => setShowInstall(true)}
         >
           <Download size={14} />
           Install from URL
-        </button>
+        </Button>
       </div>
 
       {/* Content */}
@@ -102,12 +109,14 @@ function SkillsViewInner() {
       ) : state.error ? (
         <div className="flex-1 flex flex-col items-center justify-center gap-3">
           <p className="text-destructive text-sm">{state.error}</p>
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             className="rounded-md border border-border px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent transition-colors"
             onClick={handleRetry}
           >
             Retry
-          </button>
+          </Button>
         </div>
       ) : (
         <div className="flex flex-1 min-h-0">

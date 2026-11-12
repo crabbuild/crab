@@ -1,6 +1,5 @@
-import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { useState } from "react";
+import { Input } from "@/components/ui/input";
 import {
   CheckCircle2,
   ChevronDown,
@@ -12,6 +11,7 @@ import {
   Upload,
   XCircle,
 } from "lucide-react";
+import { useState } from "react";
 import { StagedFileEntry, StagingStats } from "../../ipc";
 import { formatBytes } from "../../lib/format";
 
@@ -102,10 +102,12 @@ export function StagedSection({
 
   return (
     <div className="border-b border-border">
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={() => setExpanded(!expanded)}
-        className="flex w-full items-center gap-2 px-4 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-muted-foreground hover:bg-accent"
+        className="justify-start flex w-full items-center gap-2 px-4 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-muted-foreground hover:bg-accent"
       >
         {expanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
         <HardDrive size={11} className="text-primary" />
@@ -116,7 +118,7 @@ export function StagedSection({
             {totalChunks > 0 && ` · ${totalChunks.toLocaleString()} chunks`}
           </span>
         )}
-      </button>
+      </Button>
 
       {expanded && (
         <>
@@ -152,8 +154,9 @@ export function StagedSection({
               />
             )}
             <p className="text-[10px] text-muted-foreground">
-              Staged chunks live in <code className="font-mono">.crab/staging/</code>{" "}
-              until pushed. Already-pushed files appear in Storage Map.
+              Staged chunks live in{" "}
+              <code className="font-mono">.crab/staging/</code> until pushed.
+              Already-pushed files appear in Storage Map.
             </p>
           </div>
         </>
@@ -274,7 +277,9 @@ function StagedFileRow({
         {label}
       </span>
       <StatusBadge status={status} />
-      <span className="shrink-0 tabular-nums text-muted-foreground">{formatBytes(file.total_bytes)}</span>
+      <span className="shrink-0 tabular-nums text-muted-foreground">
+        {formatBytes(file.total_bytes)}
+      </span>
       <span className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary">
         {file.total_chunks} chunks
       </span>
@@ -283,15 +288,21 @@ function StagedFileRow({
           {file.pending_chunks} pending
         </span>
       )}
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         className="shrink-0 rounded p-0.5 text-muted-foreground transition hover:bg-destructive/10 hover:text-destructive"
         onClick={onRemove}
         disabled={removing}
         title="Remove from staging area"
       >
-        {removing ? <Loader2 size={11} className="animate-spin" /> : <XCircle size={11} />}
-      </button>
+        {removing ? (
+          <Loader2 size={11} className="animate-spin" />
+        ) : (
+          <XCircle size={11} />
+        )}
+      </Button>
     </div>
   );
 }

@@ -1,16 +1,12 @@
+import { Button } from "@/components/ui/button";
 /**
  * Agent Upgrade Notification — non-blocking notification for outdated agent
  * with upgrade offer, and disabled UI controls with tooltip showing minimum
  * version required.
  */
 
-import { useState, useCallback } from "react";
-import {
-  ArrowUpCircle,
-  X,
-  Info,
-  AlertCircle,
-} from "lucide-react";
+import { AlertCircle, ArrowUpCircle, Info, X } from "lucide-react";
+import { useCallback, useState } from "react";
 import type { AgentCapabilities } from "../../../electron/ssh-types";
 
 // ── Types ────────────────────────────────────────────────────────
@@ -79,19 +75,23 @@ export function AgentUpgradeNotification({
         </p>
       </div>
       <div className="flex items-center gap-1 shrink-0">
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           onClick={onUpgrade}
           className="px-2 py-0.5 text-xs font-medium text-info text-info bg-info/10 bg-info/50 hover:bg-info/10 hover:bg-info rounded"
         >
           Upgrade
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           onClick={handleDismiss}
           className="p-0.5 text-info hover:text-info hover:text-info rounded"
           aria-label="Dismiss upgrade notification"
         >
           <X className="w-3.5 h-3.5" />
-        </button>
+        </Button>
       </div>
     </div>
   );
@@ -114,7 +114,7 @@ export function DisabledFeatureControl({
       aria-disabled="true"
       aria-label={`${featureName} — disabled, requires agent version ${minVersion}`}
     >
-      {/* Disabled overlay */}
+      {/* Tooltip on hover */}
       <div className="opacity-50 pointer-events-none select-none">
         {children}
       </div>
@@ -123,9 +123,7 @@ export function DisabledFeatureControl({
       <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 hidden group-hover:block z-50 pointer-events-none">
         <div className="bg-background bg-card text-foreground rounded px-2 py-1 shadow-lg whitespace-nowrap text-[10px] flex items-center gap-1">
           <Info className="w-3 h-3 text-muted-foreground" />
-          <span>
-            Requires agent v{minVersion}
-          </span>
+          <span>Requires agent v{minVersion}</span>
           {/* Arrow */}
           <div className="absolute top-full left-1/2 -translate-x-1/2 w-0 h-0 border-l-[4px] border-r-[4px] border-t-[4px] border-transparent border-t-gray-900 dark:border-t-gray-700" />
         </div>

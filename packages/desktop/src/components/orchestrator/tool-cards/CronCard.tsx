@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { useCardExpanded } from "./useCardExpanded";
 /**
  * Specialized renderer for Cron (scheduled task) tool calls.
@@ -7,11 +8,10 @@ import { useCardExpanded } from "./useCardExpanded";
  * Shows scheduled task management with timing info.
  */
 
-
 import clsx from "clsx";
-import { ChevronDown, ChevronRight, Clock, Trash2, List } from "lucide-react";
-import type { ToolCardRendererProps } from "./types";
+import { ChevronDown, ChevronRight, Clock, List, Trash2 } from "lucide-react";
 import { CollapsedCardLine } from "./CollapsedCardLine";
+import type { ToolCardRendererProps } from "./types";
 
 // ── Component ───────────────────────────────────────────────────────
 
@@ -75,7 +75,9 @@ export function CronCard({ event, defaultExpanded = false, collapsed: collapsedP
 
   return (
     <div className="rounded-md border border-border/40 overflow-hidden">
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={() => hasOutput && setExpanded(!expanded)}
         className={clsx(
@@ -85,15 +87,20 @@ export function CronCard({ event, defaultExpanded = false, collapsed: collapsedP
         )}
       >
         <Icon size={11} className="text-muted-foreground shrink-0" />
-        <span className="shrink-0 font-medium text-muted-foreground">{label}</span>
-        <span className="min-w-0 flex-1 truncate text-foreground/80">{summary}</span>
+        <span className="shrink-0 font-medium text-muted-foreground">
+          {label}
+        </span>
+        <span className="min-w-0 flex-1 truncate text-foreground/80">
+          {summary}
+        </span>
 
-        {hasOutput && (
-          expanded
-            ? <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
-            : <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
-        )}
-      </button>
+        {hasOutput &&
+          (expanded ? (
+            <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
+          ) : (
+            <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
+          ))}
+      </Button>
 
       {expanded && hasOutput && (
         <div className="border-t border-border/30 max-h-[200px] overflow-auto px-2.5 py-2">

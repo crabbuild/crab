@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { Button } from "@/components/ui/button";
 import { ShieldCheck } from "lucide-react";
+import { useState } from "react";
 import type { AgentEvent } from "../../../../electron/orchestrator-adapters";
-import { useHunkActions } from "./HunkActionsContext";
 import { CollapsedCardLine } from "./CollapsedCardLine";
+import { useHunkActions } from "./HunkActionsContext";
 import type { ToolCardRendererProps } from "./types";
 
 export function ApprovalCard({ event, collapsed, onToggleCollapse }: ToolCardRendererProps) {
@@ -28,18 +29,40 @@ export function ApprovalCard({ event, collapsed, onToggleCollapse }: ToolCardRen
     }
   };
   if (resolved && collapsed) {
-    return <CollapsedCardLine summary={resolvedLabel} onExpand={() => onToggleCollapse?.(false)} ariaLabel={resolvedLabel} />;
+    return (
+      <CollapsedCardLine summary={resolvedLabel} onExpand={() => onToggleCollapse?.(false)} ariaLabel={resolvedLabel} />
+    );
   }
   return (
     <div className="rounded-md border border-border bg-card px-3 py-2 text-xs space-y-2">
-      <div className="flex items-center gap-2 font-medium text-foreground"><ShieldCheck size={14} />{resolved ? resolvedLabel : payload.summary}</div>
-      {payload.detail && <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all text-muted-foreground">{payload.detail}</pre>}
-      {error && <p role="alert" className="text-destructive">{error}</p>}
+      <div className="flex items-center gap-2 font-medium text-foreground">
+        <ShieldCheck size={14} />
+        {resolved ? resolvedLabel : payload.summary}
+      </div>
+      {payload.detail && (
+        <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all text-muted-foreground">
+          {payload.detail}
+        </pre>
+      )}
+      {error && (
+        <p role="alert" className="text-destructive">
+          {error}
+        </p>
+      )}
       {!resolved && (
         <div className="flex flex-wrap gap-2">
-          {payload.options?.map(option => (
-            <button key={option.id} type="button" disabled={submitting || !taskId} onClick={() => void choose(option.id, option.label)}
-              className="rounded border border-border px-2 py-1 text-foreground hover:bg-accent disabled:opacity-50">{option.label}</button>
+          {payload.options?.map((option) => (
+            <Button
+              variant="ghost"
+              size="compact"
+              key={option.id}
+              type="button"
+              disabled={submitting || !taskId}
+              onClick={() => void choose(option.id, option.label)}
+              className="rounded border border-border px-2 py-1 text-foreground hover:bg-accent disabled:opacity-50"
+            >
+              {option.label}
+            </Button>
           ))}
         </div>
       )}

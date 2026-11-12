@@ -1,6 +1,7 @@
+import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Code, Send, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -122,9 +123,11 @@ export function InlineCommentComposer({
 
       {/* Composer body */}
       <div className="px-3 py-2">
-        {/* Toolbar */}
+        {/* Composer body */}
         <div className="mb-1.5 flex items-center gap-1">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-primary/10 hover:text-primary"
             onClick={insertSuggestion}
@@ -133,7 +136,7 @@ export function InlineCommentComposer({
           >
             <Code size={10} />
             Suggest change
-          </button>
+          </Button>
         </div>
 
         {/* Textarea */}
@@ -164,10 +167,13 @@ export function InlineCommentComposer({
         {/* Actions */}
         <div className="mt-2 flex items-center justify-between">
           <span className="text-[9px] text-muted-foreground">
-            {navigator.platform?.includes("Mac") ? "⌘" : "Ctrl"}+Enter to submit · Esc to cancel
+            {navigator.platform?.includes("Mac") ? "⌘" : "Ctrl"}+Enter to submit
+            · Esc to cancel
           </span>
           <div className="flex items-center gap-2">
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className="inline-flex items-center gap-1 rounded px-2 py-1 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
               onClick={onCancel}
@@ -175,8 +181,10 @@ export function InlineCommentComposer({
             >
               <X size={10} />
               Cancel
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className="inline-flex items-center gap-1 rounded bg-primary/10 px-2 py-1 text-[10px] text-primary hover:bg-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
               disabled={!body.trim()}
@@ -185,7 +193,7 @@ export function InlineCommentComposer({
             >
               <Send size={10} />
               Submit
-            </button>
+            </Button>
           </div>
         </div>
       </div>

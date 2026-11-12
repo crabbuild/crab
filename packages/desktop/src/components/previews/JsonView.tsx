@@ -1,10 +1,10 @@
 import { Button } from "@/components/ui/button";
-import { useEffect, useMemo, useState } from "react";
 import clsx from "clsx";
 import { ChevronDown, ChevronRight, Code2 } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 import { rpc } from "../../ipc";
-import { CodeEditor } from "../CodeEditor";
 import { useSetting } from "../../settings";
+import { CodeEditor } from "../CodeEditor";
 
 interface Props {
   repoId: string;
@@ -77,7 +77,9 @@ export function JsonView({ repoId, path, rev, jsonl }: Props) {
             {err}
           </div>
         )}
-        {text != null && mode === "source" && <CodeEditor path={path} value={text} />}
+        {text != null && mode === "source" && (
+          <CodeEditor path={path} value={text} />
+        )}
         {text != null && mode === "tree" && parsed.err && (
           <div className="m-4 rounded border border-warning/40 bg-warning/10 p-3 text-xs text-warning">
             Could not parse JSON: {parsed.err}
@@ -109,7 +111,9 @@ function JsonNode({ value, label, depth }: { value: unknown; label: string | nul
   if (Array.isArray(value)) {
     return (
       <div>
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={() => setOpen((o) => !o)}
           className="flex items-center gap-1 text-foreground hover:text-primary"
@@ -118,7 +122,7 @@ function JsonNode({ value, label, depth }: { value: unknown; label: string | nul
           {label != null && <span className="text-info">"{label}"</span>}
           {label != null && <span className="text-muted-foreground">:</span>}
           <span className="text-muted-foreground">[{value.length}]</span>
-        </button>
+        </Button>
         {open && (
           <div className="ml-4 border-l border-border/60 pl-2">
             {value.map((v, i) => (
@@ -133,7 +137,9 @@ function JsonNode({ value, label, depth }: { value: unknown; label: string | nul
     const entries = Object.entries(value as Record<string, unknown>);
     return (
       <div>
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={() => setOpen((o) => !o)}
           className="flex items-center gap-1 text-foreground hover:text-primary"
@@ -142,7 +148,7 @@ function JsonNode({ value, label, depth }: { value: unknown; label: string | nul
           {label != null && <span className="text-info">"{label}"</span>}
           {label != null && <span className="text-muted-foreground">:</span>}
           <span className="text-muted-foreground">{`{${entries.length}}`}</span>
-        </button>
+        </Button>
         {open && (
           <div className="ml-4 border-l border-border/60 pl-2">
             {entries.map(([k, v]) => (

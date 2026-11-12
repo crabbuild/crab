@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * SSH Status Bar Integration — shows connection status in the
  * application status bar (bottom). Displays "SSH: N connected"
@@ -46,13 +47,17 @@ export function SshStatusBar({ connections, onClick }: SshStatusBarProps) {
   const hasIssues = connections.some((c) => c.status === "error" || c.status === "reconnecting");
 
   return (
-    <button
+    <Button
+      variant="ghost"
+      size="compact"
       className="ssh-status-bar"
       onClick={onClick}
       aria-label={`SSH: ${connectedCount} connected${hasIssues ? " (issues detected)" : ""}`}
       title={connections.map((c) => `${c.label}: ${c.status}`).join("\n")}
     >
-      <span className="ssh-status-bar__icon" aria-hidden="true">⬡</span>
+      <span className="ssh-status-bar__icon" aria-hidden="true">
+        ⬡
+      </span>
       {connections.length <= 2 ? (
         // Show individual names for 1-2 connections
         <span className="ssh-status-bar__names">
@@ -71,10 +76,14 @@ export function SshStatusBar({ connections, onClick }: SshStatusBarProps) {
         // Show count for 3+ connections
         <span className="ssh-status-bar__count">
           SSH: {connectedCount}/{connections.length}
-          {hasIssues && <span className="ssh-status-bar__warning" aria-hidden="true">⚠</span>}
+          {hasIssues && (
+            <span className="ssh-status-bar__warning" aria-hidden="true">
+              ⚠
+            </span>
+          )}
         </span>
       )}
-    </button>
+    </Button>
   );
 }
 

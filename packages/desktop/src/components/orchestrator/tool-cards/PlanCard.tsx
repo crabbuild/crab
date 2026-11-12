@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Specialized renderer for plan mode tool calls.
  *
@@ -14,12 +15,18 @@
  * of the chat surface.
  */
 
-import { useState } from "react";
 import clsx from "clsx";
-import { ChevronDown, ChevronRight, ClipboardList, CheckCircle2, Loader2 } from "lucide-react";
+import {
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  ClipboardList,
+  Loader2,
+} from "lucide-react";
+import { useState } from "react";
 import { Streamdown } from "streamdown";
-import type { ToolCardRendererProps } from "./types";
 import { CollapsedCardLine } from "./CollapsedCardLine";
+import type { ToolCardRendererProps } from "./types";
 
 // ── Component ───────────────────────────────────────────────────────
 
@@ -37,7 +44,7 @@ export function PlanModeCard({ event, defaultExpanded, collapsed: collapsedProp,
   const isLive = status === "streaming" || status === "in_progress" || status === "updated";
   const [expanded, setExpanded] = useState(defaultExpanded ?? isLive);
 
-  const Icon = isLive ? Loader2 : (isEnter ? ClipboardList : CheckCircle2);
+  const Icon = isLive ? Loader2 : isEnter ? ClipboardList : CheckCircle2;
   const label = isLive ? "Planning…" : isEnter ? "Plan" : "Plan Ready";
   const description = isLive
     ? "Drafting plan"
@@ -71,7 +78,9 @@ export function PlanModeCard({ event, defaultExpanded, collapsed: collapsedProp,
         isLive ? "border-info/30 bg-info/5" : "border-border/40",
       )}
     >
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={() => hasContent && setExpanded(!expanded)}
         className={clsx(
@@ -90,14 +99,17 @@ export function PlanModeCard({ event, defaultExpanded, collapsed: collapsedProp,
         <span className={clsx("shrink-0 font-medium", isLive ? "text-info" : "text-muted-foreground")}>
           {label}
         </span>
-        <span className="flex-1 text-muted-foreground/80 truncate">{description}</span>
+        <span className="flex-1 text-muted-foreground/80 truncate">
+          {description}
+        </span>
 
-        {hasContent && (
-          expanded
-            ? <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
-            : <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
-        )}
-      </button>
+        {hasContent &&
+          (expanded ? (
+            <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
+          ) : (
+            <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
+          ))}
+      </Button>
 
       {expanded && hasContent && (
         <div className="border-t border-border/30 max-h-[360px] overflow-auto px-3 py-2">

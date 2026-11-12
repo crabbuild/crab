@@ -1,4 +1,12 @@
-import { NativeSelect } from "@/components/ui/native-select";
+import { Button } from "@/components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import clsx from "clsx";
 import { GripVertical, Loader2 } from "lucide-react";
 import { useCallback, useRef, useState } from "react";
@@ -143,11 +151,12 @@ export function RebaseTodo({
           Interactive Rebase
         </h3>
         <p className="mt-0.5 text-[11px] text-muted-foreground">
-          Reorder commits by dragging. Change the action per commit using the dropdown.
+          Reorder commits by dragging. Change the action per commit using the
+          dropdown.
         </p>
       </div>
 
-      {/* Todo list */}
+      {/* Header */}
       <div className="max-h-[400px] min-h-[120px] overflow-auto px-2 py-2">
         {items.length === 0 && (
           <div className="px-2 py-4 text-center text-[12px] text-muted-foreground">
@@ -178,20 +187,38 @@ export function RebaseTodo({
               <GripVertical size={14} />
             </span>
 
-            {/* Action selector */}
-            <NativeSelect
-              value={typeof item.action === "string" ? item.action : "Pick"}
-              onChange={(e) => handleActionChange(index, parseAction(e.target.value))}
-              className="shrink-0 rounded border border-border bg-background px-1.5 py-0.5 text-[11px] text-foreground focus-visible:outline-none focus:ring-1 focus:ring-primary"
-              aria-label={`Action for commit ${item.sha.slice(0, 7)}`}
+            {/* Drag handle */}
+            <Select
+              value={
+                ":" +
+                String(typeof item.action === "string" ? item.action : "Pick")
+              }
+              onValueChange={(selectedValue) => {
+                const value = selectedValue.slice(1);
+                return handleActionChange(index, parseAction(value));
+              }}
               disabled={applying}
             >
+              <SelectTrigger
+                className="shrink-0 rounded border border-border bg-background px-1.5 py-0.5 text-[11px] text-foreground focus-visible:outline-none focus:ring-1 focus:ring-primary"
+              aria-label={`Action for commit ${item.sha.slice(0, 7)}`}
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
               {TODO_ACTIONS.map((action) => (
-                <option key={typeof action === "string" ? action : action.Exec} value={typeof action === "string" ? action : "Pick"}>
+                <SelectItem
+                      key={typeof action === "string" ? action : action.Exec} value={
+                        ":" +
+                        String(typeof action === "string" ? action : "Pick")
+                      }>
                   {actionLabel(action)}
-                </option>
-              ))}
-            </NativeSelect>
+                </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
 
             {/* SHA */}
             <span className="shrink-0 font-mono text-[11px] text-primary">
@@ -215,7 +242,9 @@ export function RebaseTodo({
 
       {/* Footer */}
       <div className="flex items-center justify-end gap-2 border-t border-border p-3">
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={onCancel}
           disabled={applying}
@@ -226,8 +255,10 @@ export function RebaseTodo({
           )}
         >
           Cancel
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={handleApply}
           disabled={applying || items.length === 0}
@@ -239,7 +270,7 @@ export function RebaseTodo({
         >
           {applying && <Loader2 size={12} className="animate-spin" />}
           Apply
-        </button>
+        </Button>
       </div>
     </div>
   );

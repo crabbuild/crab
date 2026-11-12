@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { useCardExpanded } from "./useCardExpanded";
 /**
  * Specialized renderer for sub-agent/task tool calls (Claude Code protocol).
@@ -16,20 +17,19 @@ import { useCardExpanded } from "./useCardExpanded";
  *   - TaskStop → "stopped"
  */
 
-
 import clsx from "clsx";
 import {
+  ArrowRight,
+  Bot,
+  CheckCircle2,
   ChevronDown,
   ChevronRight,
   MessageSquare,
-  Bot,
-  CheckCircle2,
-  ArrowRight,
   StopCircle,
 } from "lucide-react";
 import { Streamdown } from "streamdown";
-import type { ToolCardRendererProps } from "./types";
 import { CollapsedCardLine } from "./CollapsedCardLine";
+import type { ToolCardRendererProps } from "./types";
 
 // ── Component ───────────────────────────────────────────────────────
 
@@ -86,8 +86,13 @@ export function SubAgentCard({ event, defaultExpanded = false, collapsed: collap
       <>
         <Bot size={11} className="shrink-0 text-info" />
         <span className="font-medium text-foreground/80">Agent</span>
-        <span className="truncate text-foreground/70">{description.slice(0, 60)}{description.length > 60 ? "…" : ""}</span>
-        <span className={clsx("shrink-0 text-[9px] font-medium", statusColor)}>{statusLabel}</span>
+        <span className="truncate text-foreground/70">
+          {description.slice(0, 60)}
+          {description.length > 60 ? "…" : ""}
+        </span>
+        <span className={clsx("shrink-0 text-[9px] font-medium", statusColor)}>
+          {statusLabel}
+        </span>
       </>
     );
     return (
@@ -102,7 +107,9 @@ export function SubAgentCard({ event, defaultExpanded = false, collapsed: collap
   return (
     <div className="rounded-md border border-border/40 overflow-hidden">
       {/* Header */}
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={() => canExpand && setExpanded(!expanded)}
         className={clsx(
@@ -112,11 +119,14 @@ export function SubAgentCard({ event, defaultExpanded = false, collapsed: collap
         )}
       >
         <Bot size={12} className="text-info shrink-0" />
-        <span className="shrink-0 font-medium text-muted-foreground">Agent</span>
+        <span className="shrink-0 font-medium text-muted-foreground">
+          Agent
+        </span>
 
         {/* Description / prompt (truncated) */}
         <span className="min-w-0 flex-1 truncate text-foreground/80">
-          {description.slice(0, 80)}{description.length > 80 ? "…" : ""}
+          {description.slice(0, 80)}
+          {description.length > 80 ? "…" : ""}
         </span>
 
         {/* Status badge */}
@@ -129,12 +139,13 @@ export function SubAgentCard({ event, defaultExpanded = false, collapsed: collap
           {statusLabel}
         </span>
 
-        {canExpand && (
-          expanded
-            ? <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
-            : <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
-        )}
-      </button>
+        {canExpand &&
+          (expanded ? (
+            <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
+          ) : (
+            <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
+          ))}
+      </Button>
 
       {/* Expanded: full prompt and/or result */}
       {expanded && canExpand && (
@@ -142,7 +153,9 @@ export function SubAgentCard({ event, defaultExpanded = false, collapsed: collap
           {/* Show full prompt when truncated */}
           {description.length > 80 && (
             <div className="px-2.5 py-1.5 border-b border-border/20">
-              <span className="text-[9px] font-medium text-muted-foreground uppercase tracking-wider">Prompt</span>
+              <span className="text-[9px] font-medium text-muted-foreground uppercase tracking-wider">
+                Prompt
+              </span>
               <p className="mt-0.5 text-[10px] leading-relaxed text-foreground/70 whitespace-pre-wrap">
                 {description}
               </p>
@@ -152,7 +165,9 @@ export function SubAgentCard({ event, defaultExpanded = false, collapsed: collap
           {/* Sub-agent result output */}
           {hasOutput && (
             <div className="max-h-[300px] overflow-auto px-2.5 py-2">
-              <span className="text-[9px] font-medium text-muted-foreground uppercase tracking-wider">Result</span>
+              <span className="text-[9px] font-medium text-muted-foreground uppercase tracking-wider">
+                Result
+              </span>
               <div className="mt-1">
                 <SubAgentOutput output={output} />
               </div>

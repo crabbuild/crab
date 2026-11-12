@@ -1,6 +1,13 @@
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { NativeSelect } from "@/components/ui/native-select";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import clsx from "clsx";
 import {
   ChevronDown,
@@ -14,16 +21,12 @@ import {
   Search,
   X,
 } from "lucide-react";
-import { OpenRepo } from "../state";
-import {
-  DirEntry,
-  ParquetPreview,
-  SafetensorsPreview,
-  rpc,
-} from "../ipc";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { DirEntry, ParquetPreview, rpc, SafetensorsPreview } from "../ipc";
 import { classifyFile, DatasetKind } from "../lib/dataset-kind";
-import { useDatasetRules } from "../lib/useDatasetRules";
 import { formatBytes } from "../lib/format";
+import { useDatasetRules } from "../lib/useDatasetRules";
+import { OpenRepo } from "../state";
 
 interface Props {
   repo: OpenRepo;
@@ -234,7 +237,9 @@ export function DatasetsView({ repo, onOpenFile }: Props) {
             <Database size={11} /> Datasets
           </span>
           <div className="flex items-center gap-1.5">
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className={clsx(
                 "relative text-muted-foreground hover:text-foreground",
@@ -248,8 +253,10 @@ export function DatasetsView({ repo, onOpenFile }: Props) {
               {hasActiveFilters && (
                 <span className="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-primary" />
               )}
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className="text-muted-foreground hover:text-foreground"
               onClick={fetchEntries}
@@ -257,7 +264,7 @@ export function DatasetsView({ repo, onOpenFile }: Props) {
               aria-label="Refresh datasets"
             >
               <RefreshCw size={11} />
-            </button>
+            </Button>
           </div>
         </div>
         <div className="relative">
@@ -294,7 +301,9 @@ export function DatasetsView({ repo, onOpenFile }: Props) {
           </div>
         )}
         {!loading && !error && grouped.length === 0 && entries && (
-          <div className="p-3 text-xs text-muted-foreground">No dataset files found.</div>
+          <div className="p-3 text-xs text-muted-foreground">
+            No dataset files found.
+          </div>
         )}
         {!loading &&
           !error &&
@@ -340,22 +349,26 @@ function KindGroup({
 }) {
   return (
     <div>
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={onToggle}
-        className="flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-[11px] font-medium text-foreground hover:bg-accent"
+        className="justify-start flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-[11px] font-medium text-foreground hover:bg-accent"
       >
         {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
         <span>{KIND_LABELS[kind]}</span>
         <span className="ml-auto rounded-full bg-primary/20 px-1.5 py-[1px] text-[10px] text-primary">
           {entries.length}
         </span>
-      </button>
+      </Button>
       {!collapsed && (
         <ul className="pb-1">
           {entries.map((entry) => (
             <li key={entry.path}>
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 onClick={() => onSelect(entry)}
                 className={clsx(
@@ -366,13 +379,15 @@ function KindGroup({
                 )}
               >
                 <FileIcon kind={kind} />
-                <span className="min-w-0 flex-1 truncate">{fileName(entry.path)}</span>
+                <span className="min-w-0 flex-1 truncate">
+                  {fileName(entry.path)}
+                </span>
                 {entry.size != null && (
                   <span className="shrink-0 text-[10px] text-muted-foreground">
                     {formatBytes(entry.size)}
                   </span>
                 )}
-              </button>
+              </Button>
             </li>
           ))}
         </ul>
@@ -424,32 +439,45 @@ function FilterBar({
     <div className="mt-2 space-y-2 rounded border border-border bg-background p-2">
       {/* Size filter */}
       <div>
-        <label className="mb-0.5 block text-[10px] text-muted-foreground">Min size</label>
-        <NativeSelect
-          className="w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs text-foreground focus-visible:outline-none focus:border-primary"
-          value={filters.minSize ?? ""}
-          onChange={(e) =>
-            onChange({
+        <label className="mb-0.5 block text-[10px] text-muted-foreground">
+          Min size
+        </label>
+        <Select
+          value={":" + String(filters.minSize ?? "")}
+          onValueChange={(selectedValue) => {
+            const value = selectedValue.slice(1);
+            return onChange({
               ...filters,
-              minSize: e.target.value ? Number(e.target.value) : null,
-            })
-          }
+              minSize: value ? Number(value) : null,
+            });
+          }}
         >
-          <option value="">Any size</option>
-          {SIZE_THRESHOLDS.map((t) => (
-            <option key={t.bytes} value={t.bytes}>
-              {t.label}
-            </option>
-          ))}
-        </NativeSelect>
+          <SelectTrigger className="w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs text-foreground focus-visible:outline-none focus:border-primary">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              <SelectItem value={":" + String("")}>Any size</SelectItem>
+              {SIZE_THRESHOLDS.map((t) => (
+                <SelectItem key={t.bytes} value={":" + String(t.bytes)}>
+                  {t.label}
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          </SelectContent>
+        </Select>
       </div>
 
       {/* Kind filter */}
       <div>
-        <label className="mb-0.5 block text-[10px] text-muted-foreground">Kind</label>
+        <label className="mb-0.5 block text-[10px] text-muted-foreground">
+          Kind
+        </label>
         <div className="flex flex-wrap gap-1">
           {KIND_ORDER.map((kind) => (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               key={kind}
               type="button"
               onClick={() => toggleKind(kind)}
@@ -463,7 +491,7 @@ function FilterBar({
               )}
             >
               {KIND_LABELS[kind]}
-            </button>
+            </Button>
           ))}
         </div>
       </div>
@@ -472,32 +500,46 @@ function FilterBar({
       <div>
         <label className="mb-0.5 block text-[10px] text-muted-foreground">
           Modified
-          <span className="ml-1 italic text-muted-foreground/60">(when available)</span>
+          <span className="ml-1 italic text-muted-foreground/60">
+            (when available)
+          </span>
         </label>
-        <NativeSelect
-          className="w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs text-foreground focus-visible:outline-none focus:border-primary"
-          value={filters.mtimeMaxAgeMs}
-          onChange={(e) =>
-            onChange({ ...filters, mtimeMaxAgeMs: Number(e.target.value) })
-          }
+        <Select
+          value={":" + String(filters.mtimeMaxAgeMs)}
+          onValueChange={(selectedValue) => {
+            const value = selectedValue.slice(1);
+            return onChange({ ...filters, mtimeMaxAgeMs: Number(value) });
+          }}
         >
-          {MTIME_OPTIONS.map((opt) => (
-            <option key={opt.maxAgeMs} value={opt.maxAgeMs}>
-              {opt.label}
-            </option>
-          ))}
-        </NativeSelect>
+          <SelectTrigger className="w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs text-foreground focus-visible:outline-none focus:border-primary">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              {MTIME_OPTIONS.map((opt) => (
+                <SelectItem
+                  key={opt.maxAgeMs}
+                  value={":" + String(opt.maxAgeMs)}
+                >
+                  {opt.label}
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          </SelectContent>
+        </Select>
       </div>
 
       {/* Clear button */}
       {hasActive && (
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={onClear}
           className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground"
         >
           <X size={10} /> Clear all filters
-        </button>
+        </Button>
       )}
     </div>
   );
@@ -555,7 +597,9 @@ function ParquetMetadata({ repo, path }: { repo: OpenRepo; path: string }) {
 
   return (
     <div className="max-h-40 overflow-auto p-3 text-xs">
-      <div className="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground">Parquet</div>
+      <div className="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground">
+        Parquet
+      </div>
       <div className="space-y-1">
         <MetaRow label="Rows" value={preview.num_rows.toLocaleString()} />
         <MetaRow label="Columns" value={String(preview.num_columns)} />
@@ -613,7 +657,9 @@ function SafetensorsMetadata({ repo, path }: { repo: OpenRepo; path: string }) {
 
   return (
     <div className="max-h-40 overflow-auto p-3 text-xs">
-      <div className="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground">Safetensors</div>
+      <div className="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground">
+        Safetensors
+      </div>
       <div className="space-y-1">
         <MetaRow label="Tensors" value={String(preview.tensor_count)} />
         <MetaRow label="Total params" value={formatParamCount(preview.total_params)} />
@@ -639,7 +685,9 @@ function CheckpointMetadata({ entry }: { entry: ClassifiedEntry }) {
   const isPointer = entry.kind === "pointer" || entry.kind === "lfs";
   return (
     <div className="max-h-40 overflow-auto p-3 text-xs">
-      <div className="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground">Checkpoint</div>
+      <div className="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground">
+        Checkpoint
+      </div>
       <div className="space-y-1">
         <MetaRow label="File" value={fileName(entry.path)} />
         <MetaRow label="Size" value={formatBytes(entry.size)} />
@@ -652,7 +700,9 @@ function CheckpointMetadata({ entry }: { entry: ClassifiedEntry }) {
 function NotebookMetadata({ entry }: { entry: ClassifiedEntry }) {
   return (
     <div className="max-h-40 overflow-auto p-3 text-xs">
-      <div className="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground">Notebook</div>
+      <div className="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground">
+        Notebook
+      </div>
       <div className="space-y-1">
         <MetaRow label="File" value={fileName(entry.path)} />
         <MetaRow label="Size" value={formatBytes(entry.size)} />
@@ -668,7 +718,9 @@ function NotebookMetadata({ entry }: { entry: ClassifiedEntry }) {
 function BasicMetadata({ entry }: { entry: ClassifiedEntry }) {
   return (
     <div className="max-h-40 overflow-auto p-3 text-xs">
-      <div className="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground">File Info</div>
+      <div className="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground">
+        File Info
+      </div>
       <div className="space-y-1">
         <MetaRow label="Path" value={entry.path} />
         <MetaRow label="Size" value={formatBytes(entry.size)} />
@@ -684,7 +736,9 @@ function MetaRow({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-baseline justify-between gap-2">
       <span className="shrink-0 text-muted-foreground">{label}</span>
-      <span className="min-w-0 truncate text-right font-mono text-foreground">{value}</span>
+      <span className="min-w-0 truncate text-right font-mono text-foreground">
+        {value}
+      </span>
     </div>
   );
 }
@@ -698,9 +752,7 @@ function MetadataLoading() {
 }
 
 function MetadataError({ message }: { message: string }) {
-  return (
-    <div className="p-3 text-xs text-destructive">{message}</div>
-  );
+  return <div className="p-3 text-xs text-destructive">{message}</div>;
 }
 
 function formatParamCount(totalParams: string): string {

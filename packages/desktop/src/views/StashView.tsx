@@ -1,16 +1,18 @@
-import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import clsx from "clsx";
 import {
   Archive,
   ArrowUpFromLine,
   ChevronDown,
   ChevronRight,
   Copy,
-  FileText,
-  FilePlus2,
-  FileX2,
   FilePen,
+  FilePlus2,
+  FileText,
+  FileX2,
   Layers,
   Loader2,
   Plus,
@@ -18,14 +20,14 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import clsx from "clsx";
-import { OpenRepo } from "../state";
-import { rpc } from "../ipc";
-import { ViewToolbar, ToolbarAction } from "../components/ViewToolbar";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ContextMenu, MenuItemDef } from "../components/ContextMenu";
-import { executeCommand, CommandContext } from "../lib/command-registry";
+import { ToolbarAction, ViewToolbar } from "../components/ViewToolbar";
+import { getWatchPath, useFileWatcher } from "../hooks/useFileWatcher";
+import { rpc } from "../ipc";
+import { CommandContext, executeCommand } from "../lib/command-registry";
 import { publishToast } from "../lib/toasts";
-import { useFileWatcher, getWatchPath } from "../hooks/useFileWatcher";
+import { OpenRepo } from "../state";
 
 interface Props {
   repo: OpenRepo;
@@ -348,7 +350,9 @@ export function StashView({ repo }: Props) {
         actions={toolbarActions}
         onAction={handleToolbarAction}
         trailing={
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-primary/20 hover:text-foreground"
             onClick={refresh}
@@ -356,7 +360,7 @@ export function StashView({ repo }: Props) {
             aria-label="Refresh stashes"
           >
             <RefreshCw size={14} />
-          </button>
+          </Button>
         }
       />
 
@@ -383,7 +387,9 @@ export function StashView({ repo }: Props) {
             >
               {busy ? <Loader2 size={12} className="animate-spin" /> : "Stash"}
             </Button>
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-primary/20 hover:text-foreground"
               onClick={() => {
@@ -393,13 +399,14 @@ export function StashView({ repo }: Props) {
               aria-label="Cancel"
             >
               <X size={14} />
-            </button>
+            </Button>
           </div>
           <label className="mt-2 flex cursor-pointer items-center gap-2 text-[11px] text-muted-foreground">
-            <input
-              type="checkbox"
+            <Checkbox
               checked={includeUntracked}
-              onChange={(e) => setIncludeUntracked(e.target.checked)}
+              onCheckedChange={(checked) =>
+                setIncludeUntracked(checked === true)
+              }
               className="h-3.5 w-3.5 rounded border-border accent-primary"
             />
             Include untracked files
@@ -433,9 +440,12 @@ export function StashView({ repo }: Props) {
             <div className="flex h-12 w-12 items-center justify-center rounded-full bg-card">
               <Layers size={22} className="text-muted-foreground" />
             </div>
-            <p className="mt-3 text-sm font-medium text-foreground">No stashes</p>
+            <p className="mt-3 text-sm font-medium text-foreground">
+              No stashes
+            </p>
             <p className="mt-1 max-w-[220px] text-xs leading-relaxed text-muted-foreground">
-              Stash your uncommitted changes to save them for later without committing.
+              Stash your uncommitted changes to save them for later without
+              committing.
             </p>
             <Button variant="default"
               type="button"
@@ -479,8 +489,10 @@ export function StashView({ repo }: Props) {
                 >
                   {/* Main row */}
                   <div className="flex items-center gap-2 px-3 py-2">
-                    {/* Expand chevron */}
-                    <button
+                    {/* Main row */}
+                    <Button
+                      variant="ghost"
+                      size="compact"
                       type="button"
                       className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground"
                       onClick={(e) => {
@@ -489,29 +501,39 @@ export function StashView({ repo }: Props) {
                       }}
                       aria-label={isExpanded ? "Collapse" : "Expand"}
                     >
-                      {isExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-                    </button>
+                      {isExpanded ? (
+                        <ChevronDown size={13} />
+                      ) : (
+                        <ChevronRight size={13} />
+                      )}
+                    </Button>
 
                     {/* Index badge */}
                     <span className="flex h-5 min-w-[20px] shrink-0 items-center justify-center rounded bg-card px-1 font-mono text-[10px] text-muted-foreground">
                       {idx}
                     </span>
 
-                    {/* Message */}
+                    {/* Index badge */}
                     <div className="min-w-0 flex-1">
                       <div className="truncate text-[12.5px] text-foreground">
-                        {s.message || <span className="italic text-muted-foreground">No message</span>}
+                        {s.message || (
+                          <span className="italic text-muted-foreground">
+                            No message
+                          </span>
+                        )}
                       </div>
                     </div>
 
-                    {/* Inline action buttons (visible on hover or selection) */}
+                    {/* Message */}
                     <div
                       className={clsx(
                         "ml-1 flex shrink-0 gap-0.5 transition-opacity",
                         isSelected ? "opacity-100" : "opacity-0 group-hover:opacity-100",
                       )}
                     >
-                      <button
+                      <Button
+                        variant="ghost"
+                        size="compact"
                         type="button"
                         className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-success/20 hover:text-success"
                         onClick={(e) => {
@@ -523,8 +545,10 @@ export function StashView({ repo }: Props) {
                         aria-label={`Pop ${s.ref}`}
                       >
                         <ArrowUpFromLine size={13} />
-                      </button>
-                      <button
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="compact"
                         type="button"
                         className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-primary/20 hover:text-primary"
                         onClick={(e) => {
@@ -536,8 +560,10 @@ export function StashView({ repo }: Props) {
                         aria-label={`Apply ${s.ref}`}
                       >
                         <Copy size={13} />
-                      </button>
-                      <button
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="compact"
                         type="button"
                         className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-destructive/20 hover:text-destructive"
                         onClick={(e) => {
@@ -549,7 +575,7 @@ export function StashView({ repo }: Props) {
                         aria-label={`Drop ${s.ref}`}
                       >
                         <Trash2 size={13} />
-                      </button>
+                      </Button>
                     </div>
                   </div>
 
@@ -558,33 +584,36 @@ export function StashView({ repo }: Props) {
                     <div className="border-t border-border/30 bg-background px-3 py-1.5">
                       {loadingFiles && (
                         <div className="flex items-center gap-2 py-1 text-[11px] text-muted-foreground">
-                          <Loader2 size={10} className="animate-spin" /> Loading files…
+                          <Loader2 size={10} className="animate-spin" /> Loading
+                          files…
                         </div>
                       )}
                       {!loadingFiles && expandedFiles && expandedFiles.length === 0 && (
-                        <div className="py-1 text-[11px] text-muted-foreground">No file changes</div>
-                      )}
+                          <div className="py-1 text-[11px] text-muted-foreground">
+                            No file changes
+                          </div>
+                        )}
                       {!loadingFiles && expandedFiles && expandedFiles.length > 0 && (
-                        <ul className="space-y-0.5">
-                          {expandedFiles.map((f) => {
-                            const { Icon, color } = fileStatusIcon(f.status);
-                            return (
-                              <li
+                          <ul className="space-y-0.5">
+                            {expandedFiles.map((f) => {
+                              const { Icon, color } = fileStatusIcon(f.status);
+                              return (
+                                <li
                                 key={f.path}
                                 className="flex items-center gap-2 rounded px-1.5 py-0.5 text-[11px] hover:bg-accent"
                               >
-                                <Icon size={12} className={color} />
-                                <span className="min-w-0 flex-1 truncate font-mono text-foreground">
-                                  {f.path}
-                                </span>
-                                <span className="shrink-0 text-[10px] uppercase text-muted-foreground">
-                                  {f.status}
-                                </span>
-                              </li>
-                            );
-                          })}
-                        </ul>
-                      )}
+                                  <Icon size={12} className={color} />
+                                  <span className="min-w-0 flex-1 truncate font-mono text-foreground">
+                                    {f.path}
+                                  </span>
+                                  <span className="shrink-0 text-[10px] uppercase text-muted-foreground">
+                                    {f.status}
+                                  </span>
+                                </li>
+                              );
+                            })}
+                          </ul>
+                        )}
                     </div>
                   )}
                 </li>
@@ -613,30 +642,38 @@ export function StashView({ repo }: Props) {
 
       {/* ── Drop confirmation dialog ──────────────────────────────── */}
       {confirmDrop && (
-        <div
-          className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50"
-          onClick={() => setConfirmDrop(null)}
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="drop-dialog-title"
+        <Dialog
+          open
+          onOpenChange={(open) => {
+            if (!open) {
+              setConfirmDrop(null);
+            }
+          }}
         >
-          <div
-            className="w-80 rounded-lg border border-border bg-card p-5 shadow-2xl"
+          <DialogContent
+            showCloseButton={false}
+            aria-describedby={undefined}
+            className="block gap-0 p-0 w-80 rounded-lg border border-border bg-card p-5 shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
-            <h3 id="drop-dialog-title" className="text-sm font-medium text-foreground">
+            <DialogTitle className="text-sm font-medium text-foreground">
               Drop stash?
-            </h3>
+            </DialogTitle>
             <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
               This will permanently delete{" "}
-              <span className="font-mono font-medium text-foreground">{confirmDrop.ref}</span>.
+              <span className="font-mono font-medium text-foreground">
+                {confirmDrop.ref}
+              </span>
+              .
             </p>
             {confirmDrop.message && (
               <p className="mt-1 truncate text-xs italic text-muted-foreground">
                 "{confirmDrop.message}"
               </p>
             )}
-            <p className="mt-2 text-[11px] text-destructive/80">This action cannot be undone.</p>
+            <p className="mt-2 text-[11px] text-destructive/80">
+              This action cannot be undone.
+            </p>
             <div className="mt-4 flex justify-end gap-2">
               <Button variant="outline"
                 type="button"
@@ -654,8 +691,8 @@ export function StashView({ repo }: Props) {
                 Drop Stash
               </Button>
             </div>
-          </div>
-        </div>
+          </DialogContent>
+        </Dialog>
       )}
     </>
   );

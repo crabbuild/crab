@@ -1,6 +1,9 @@
-import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { cloneElement, isValidElement, useEffect, useId, useRef, useState } from "react";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { Toggle } from "@/components/ui/toggle";
 import clsx from "clsx";
 import {
   Check,
@@ -12,6 +15,7 @@ import {
   X,
   Zap,
 } from "lucide-react";
+import { cloneElement, isValidElement, useEffect, useId, useRef, useState } from "react";
 import type { SshProfile } from "./ssh-profile-types";
 
 export interface SshProfileFormData {
@@ -67,7 +71,6 @@ const COLOURS = ["gray", "blue", "green", "purple", "orange", "red", "pink", "cy
  * - Accessible: focus trap, escape to close, aria-labelledby
  */
 export function ConnectionForm({ profile, onSave, onCancel }: ConnectionFormProps) {
-  const titleId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -111,13 +114,6 @@ export function ConnectionForm({ profile, onSave, onCancel }: ConnectionFormProp
   }, []);
 
   // Escape to close
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onCancel();
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [onCancel]);
 
   function buildFormData(): SshProfileFormData {
     let authMethod: SshProfile["authMethod"];
@@ -219,31 +215,32 @@ export function ConnectionForm({ profile, onSave, onCancel }: ConnectionFormProp
   const isValid = label.trim() && host.trim() && username.trim() && port > 0 && port <= 65535;
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
-      onClick={(e) => { if (e.target === e.currentTarget) onCancel(); }}
-      role="presentation"
+    <Dialog
+      open
+      onOpenChange={(open) => { if (!open) {
+          onCancel(); }}}
     >
-      <div
+      <DialogContent
+        showCloseButton={false}
+        aria-describedby={undefined}
         ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        className="relative max-h-[90vh] w-full max-w-lg overflow-auto rounded-xl border border-border bg-background p-6 shadow-2xl"
+        className="block gap-0 p-0 max-h-[90vh] w-full max-w-lg overflow-auto rounded-xl border border-border bg-background p-6 shadow-2xl"
       >
         {/* Close button */}
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           className="absolute right-4 top-4 text-muted-foreground hover:text-foreground"
           onClick={onCancel}
           aria-label="Close dialog"
         >
           <X size={16} />
-        </button>
+        </Button>
 
-        <h2 id={titleId} className="mb-4 text-base font-semibold text-foreground">
+        <DialogTitle className="mb-4 text-base font-semibold text-foreground">
           {profile ? "Edit SSH Connection" : "Add SSH Connection"}
-        </h2>
+        </DialogTitle>
 
         <form onSubmit={handleSubmit} className="space-y-4">
           {/* Basic fields */}
@@ -295,52 +292,33 @@ export function ConnectionForm({ profile, onSave, onCancel }: ConnectionFormProp
 
           {/* Auth method */}
           <FormField label="Authentication">
-            <div className="space-y-2">
+            <RadioGroup
+              value={authType}
+              onValueChange={(next) => setAuthType(next as typeof authType)}
+              className="space-y-2">
               <label className="flex items-center gap-2 text-xs text-foreground cursor-pointer">
-                <input
-                  type="radio"
-                  name="auth"
-                  value="agent"
-                  checked={authType === "agent"}
-                  onChange={() => setAuthType("agent")}
-                  className="accent-primary"
+                <RadioGroupItem value="agent" className="accent-primary"
                 />
                 SSH Agent (recommended)
               </label>
               <label className="flex items-center gap-2 text-xs text-foreground cursor-pointer">
-                <input
-                  type="radio"
-                  name="auth"
-                  value="key"
-                  checked={authType === "key"}
-                  onChange={() => setAuthType("key")}
-                  className="accent-primary"
+                <RadioGroupItem value="key" className="accent-primary"
                 />
                 Key File
               </label>
               <label className="flex items-center gap-2 text-xs text-foreground cursor-pointer">
-                <input
-                  type="radio"
-                  name="auth"
+                <RadioGroupItem
                   value="key_passphrase"
-                  checked={authType === "key_passphrase"}
-                  onChange={() => setAuthType("key_passphrase")}
                   className="accent-primary"
                 />
                 Key File (with passphrase)
               </label>
               <label className="flex items-center gap-2 text-xs text-foreground cursor-pointer">
-                <input
-                  type="radio"
-                  name="auth"
-                  value="password"
-                  checked={authType === "password"}
-                  onChange={() => setAuthType("password")}
-                  className="accent-primary"
+                <RadioGroupItem value="password" className="accent-primary"
                 />
                 Password
               </label>
-            </div>
+            </RadioGroup>
             {(authType === "key" || authType === "key_passphrase") && (
               <Input
                 type="text"
@@ -364,7 +342,9 @@ export function ConnectionForm({ profile, onSave, onCancel }: ConnectionFormProp
           </FormField>
 
           {/* Advanced section */}
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="flex w-full items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground"
             onClick={() => setShowAdvanced(!showAdvanced)}
@@ -372,7 +352,7 @@ export function ConnectionForm({ profile, onSave, onCancel }: ConnectionFormProp
           >
             {showAdvanced ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
             Advanced
-          </button>
+          </Button>
 
           {showAdvanced && (
             <div className="space-y-3 rounded border border-border bg-card p-3">
@@ -401,7 +381,8 @@ export function ConnectionForm({ profile, onSave, onCancel }: ConnectionFormProp
               <FormField label="Colour">
                 <div className="flex items-center gap-1.5">
                   {COLOURS.map((c) => (
-                    <button
+                    <Toggle
+                      size="sm"
                       key={c}
                       type="button"
                       className={clsx(
@@ -411,7 +392,7 @@ export function ConnectionForm({ profile, onSave, onCancel }: ConnectionFormProp
                       style={{ backgroundColor: c }}
                       onClick={() => setColour(c)}
                       aria-label={`Select ${c} colour`}
-                      aria-pressed={colour === c}
+                      pressed={colour === c}
                     />
                   ))}
                 </div>
@@ -428,7 +409,7 @@ export function ConnectionForm({ profile, onSave, onCancel }: ConnectionFormProp
                 />
               </FormField>
 
-              {/* Toggles */}
+              {/* Tags */}
               <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                 <ToggleField label="Forward SSH agent" checked={forwardAgent} onChange={setForwardAgent} />
                 <ToggleField label="Enable compression" checked={compression} onChange={setCompression} />
@@ -436,7 +417,7 @@ export function ConnectionForm({ profile, onSave, onCancel }: ConnectionFormProp
                 <ToggleField label="Auto-deploy agent" checked={autoDeployAgent} onChange={setAutoDeployAgent} />
               </div>
 
-              {/* Keep alive */}
+              {/* Toggles */}
               <FormField label="Keep-alive interval (seconds)">
                 <Input
                   type="number"
@@ -448,7 +429,7 @@ export function ConnectionForm({ profile, onSave, onCancel }: ConnectionFormProp
                 />
               </FormField>
 
-              {/* Timeouts */}
+              {/* Keep alive */}
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <FormField label="Connection timeout (ms)" hint="Initial handshake timeout">
                   <Input
@@ -481,7 +462,9 @@ export function ConnectionForm({ profile, onSave, onCancel }: ConnectionFormProp
               {/* Port forwards */}
               <div>
                 <div className="mb-2 flex items-center justify-between">
-                  <span className="text-xs font-medium text-foreground">Port Forwards</span>
+                  <span className="text-xs font-medium text-foreground">
+                    Port Forwards
+                  </span>
                   <Button variant="outline"
                     type="button"
                     className="flex items-center gap-1 text-[10px]"
@@ -502,7 +485,9 @@ export function ConnectionForm({ profile, onSave, onCancel }: ConnectionFormProp
                           onChange={(e) => updatePortForward(fwd.id, "localPort", Number(e.target.value))}
                           aria-label="Local port"
                         />
-                        <span className="text-[10px] text-muted-foreground">→</span>
+                        <span className="text-[10px] text-muted-foreground">
+                          →
+                        </span>
                         <Input
                           type="number"
                           className="w-16 text-xs"
@@ -520,22 +505,25 @@ export function ConnectionForm({ profile, onSave, onCancel }: ConnectionFormProp
                           aria-label="Forward label"
                         />
                         <label className="flex items-center gap-1 text-[10px] text-muted-foreground whitespace-nowrap cursor-pointer">
-                          <input
-                            type="checkbox"
+                          <Checkbox
                             checked={fwd.autoStart}
-                            onChange={(e) => updatePortForward(fwd.id, "autoStart", e.target.checked)}
+                            onCheckedChange={(checked) => updatePortForward(fwd.id, "autoStart",
+                                checked === true,
+                              )}
                             className="accent-primary"
                           />
                           Auto
                         </label>
-                        <button
+                        <Button
+                          variant="ghost"
+                          size="compact"
                           type="button"
                           className="text-destructive hover:text-destructive"
                           onClick={() => removePortForward(fwd.id)}
                           aria-label="Remove forward"
                         >
                           <Trash2 size={12} />
-                        </button>
+                        </Button>
                       </div>
                     ))}
                   </div>
@@ -600,8 +588,8 @@ export function ConnectionForm({ profile, onSave, onCancel }: ConnectionFormProp
             </Button>
           </div>
         </form>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -628,7 +616,9 @@ function FormField({
         {required && <span className="ml-0.5 text-destructive">*</span>}
       </label>
       {control ? cloneElement(control, { id: controlId }) : children}
-      {hint && <p className="mt-0.5 text-[10px] text-muted-foreground">{hint}</p>}
+      {hint && (
+        <p className="mt-0.5 text-[10px] text-muted-foreground">{hint}</p>
+      )}
     </div>
   );
 }
@@ -644,10 +634,9 @@ function ToggleField({
 }) {
   return (
     <label className="flex items-center gap-2 text-xs text-foreground cursor-pointer">
-      <input
-        type="checkbox"
+      <Checkbox
         checked={checked}
-        onChange={(e) => onChange(e.target.checked)}
+        onCheckedChange={(checked) => onChange(checked === true)}
         className="accent-primary"
       />
       {label}

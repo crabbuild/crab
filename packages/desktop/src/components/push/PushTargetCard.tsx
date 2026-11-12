@@ -1,15 +1,17 @@
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { useState } from "react";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import {
   AlertTriangle,
+  Check,
   ChevronDown,
   ChevronRight,
   Copy,
-  Check,
   GitBranch,
   GitCommit,
   GitPullRequest,
 } from "lucide-react";
+import { useState } from "react";
 import { PushRemote, PushTargetInfo } from "../../hooks/usePushTarget";
 
 interface Props {
@@ -78,7 +80,9 @@ export function PushTargetCard({
               {destinationBranch || target.branch || "?"}
             </span>
           ) : target.upstream.full ? (
-            <span className="font-mono text-muted-foreground">{target.upstream.full}</span>
+            <span className="font-mono text-muted-foreground">
+              {target.upstream.full}
+            </span>
           ) : (
             <span className="text-muted-foreground">no destination</span>
           )}
@@ -109,7 +113,9 @@ export function PushTargetCard({
           <code className="flex-1 truncate font-mono text-muted-foreground" title={selected.url}>
             {selected.url}
           </code>
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="text-muted-foreground transition hover:text-foreground"
             title="Copy URL"
@@ -120,8 +126,12 @@ export function PushTargetCard({
               });
             }}
           >
-            {copied ? <Check size={12} className="text-success" /> : <Copy size={12} />}
-          </button>
+            {copied ? (
+              <Check size={12} className="text-success" />
+            ) : (
+              <Copy size={12} />
+            )}
+          </Button>
         </div>
       )}
 
@@ -131,38 +141,46 @@ export function PushTargetCard({
           <AlertTriangle size={12} className="shrink-0" />
           <span className="flex-1">
             Remote has {target.upstream.behind} new commit
-            {target.upstream.behind === 1 ? "" : "s"}. Pulling first avoids a force-push.
+            {target.upstream.behind === 1 ? "" : "s"}. Pulling first avoids a
+            force-push.
           </span>
           {onPullFirst && (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className="text-warning underline-offset-2 hover:underline"
               onClick={onPullFirst}
             >
               Pull
-            </button>
+            </Button>
           )}
         </Banner>
       )}
       {!target.upstream.full && !target.detached && target.branch && selected && (
-        <Banner tone="info">
-          <AlertTriangle size={12} className="shrink-0" />
-          <span className="flex-1">
-            <span className="font-mono">{target.branch}</span> has no upstream. The push will
-            set <span className="font-mono">{selected.name}/{destinationBranch}</span> as
-            the tracking branch.
-          </span>
-          {onSetUpstream && (
-            <button
-              type="button"
-              className="text-primary underline-offset-2 hover:underline"
-              onClick={onSetUpstream}
-            >
-              Configure
-            </button>
-          )}
-        </Banner>
-      )}
+          <Banner tone="info">
+            <AlertTriangle size={12} className="shrink-0" />
+            <span className="flex-1">
+              <span className="font-mono">{target.branch}</span> has no
+              upstream. The push will set{" "}
+              <span className="font-mono">
+                {selected.name}/{destinationBranch}
+              </span>{" "}
+              as the tracking branch.
+            </span>
+            {onSetUpstream && (
+              <Button
+                variant="ghost"
+                size="compact"
+                type="button"
+                className="text-primary underline-offset-2 hover:underline"
+                onClick={onSetUpstream}
+              >
+                Configure
+              </Button>
+            )}
+          </Banner>
+        )}
       {target.upstream.full &&
         selected &&
         target.upstream.remote !== null &&
@@ -175,14 +193,16 @@ export function PushTargetCard({
                 {target.upstream.remote}/{target.upstream.branch}
               </span>{" "}
               but you're pushing to{" "}
-              <span className="font-mono">{selected.name}</span>. Double-check this is
-              intentional.
+              <span className="font-mono">{selected.name}</span>. Double-check
+              this is intentional.
             </span>
           </Banner>
         )}
 
       {/* ── Change destination disclosure ────────────────────────── */}
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         className="flex w-full items-center gap-1 border-t border-border/60 px-3 py-1.5 text-[11px] text-muted-foreground transition hover:text-foreground"
         onClick={() => setExpanded(!expanded)}
@@ -190,7 +210,7 @@ export function PushTargetCard({
       >
         {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
         Change destination
-      </button>
+      </Button>
 
       {expanded && (
         <div className="space-y-2 border-t border-border/60 px-3 py-2 text-xs">
@@ -203,7 +223,9 @@ export function PushTargetCard({
             <label htmlFor="push-dest-branch" className="text-muted-foreground">
               Push as:
             </label>
-            <span className="font-mono text-muted-foreground">{selectedRemote ?? "?"}/</span>
+            <span className="font-mono text-muted-foreground">
+              {selectedRemote ?? "?"}/
+            </span>
             <Input
               id="push-dest-branch"
               type="text"
@@ -216,9 +238,10 @@ export function PushTargetCard({
           </div>
           {target.remotes.length > target.crabRemotes.length && (
             <div className="text-[11px] text-muted-foreground">
-              {target.remotes.length - target.crabRemotes.length} non-crab remote
-              {target.remotes.length - target.crabRemotes.length === 1 ? "" : "s"} hidden
-              (only crab:// URLs can stream pointer files).
+              {target.remotes.length - target.crabRemotes.length} non-crab
+              remote
+              {target.remotes.length - target.crabRemotes.length === 1 ? "" : "s"}{" "}
+              hidden (only crab:// URLs can stream pointer files).
             </div>
           )}
         </div>
@@ -241,20 +264,27 @@ function RemotePicker({
   if (remotes.length === 0) {
     return (
       <div className="rounded border border-warning/40 bg-warning/10 p-2 text-[11px] text-warning">
-        No <code className="font-mono">crab://</code> remotes configured. Add one with{" "}
-        <code className="font-mono">git remote add crab crab://&lt;bucket&gt;/&lt;repo&gt;</code>.
+        No <code className="font-mono">crab://</code> remotes configured. Add
+        one with{" "}
+        <code className="font-mono">
+          git remote add crab crab://&lt;bucket&gt;/&lt;repo&gt;
+        </code>
+        .
       </div>
     );
   }
   return (
-    <div className="space-y-1">
+    <RadioGroup
+      aria-label="Push remote"
+      value={selected ?? ""}
+      onValueChange={onSelect}
+      className="space-y-1"
+    >
       {remotes.map((r) => {
         const active = r.name === selected;
         return (
-          <button
+          <label
             key={r.name}
-            type="button"
-            onClick={() => onSelect(r.name)}
             className={
               "flex w-full items-center gap-2 rounded border px-2 py-1.5 text-left transition " +
               (active
@@ -262,20 +292,15 @@ function RemotePicker({
                 : "border-border hover:border-border/80 hover:bg-background")
             }
           >
-            <input
-              type="radio"
-              className="accent-primary"
-              checked={active}
-              readOnly
-            />
+            <RadioGroupItem value={r.name} />
             <span className="font-mono text-xs">{r.name}</span>
             <span className="flex-1 truncate font-mono text-[11px] text-muted-foreground">
               {r.url}
             </span>
-          </button>
+          </label>
         );
       })}
-    </div>
+    </RadioGroup>
   );
 }
 

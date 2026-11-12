@@ -1,22 +1,23 @@
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 /**
  * Environment Panel — manages remote environment variables and PATH entries
  * with add/modify/delete, persist toggle, and inline validation.
  */
 
-import { useState, useCallback, useMemo } from "react";
+import clsx from "clsx";
 import {
-  Variable,
-  Plus,
-  Trash2,
-  Save,
-  ChevronUp,
-  ChevronDown,
   AlertCircle,
+  ChevronDown,
+  ChevronUp,
+  Plus,
+  Save,
   ToggleLeft,
   ToggleRight,
+  Trash2,
+  Variable,
 } from "lucide-react";
-import clsx from "clsx";
+import { useCallback, useMemo, useState } from "react";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -122,7 +123,9 @@ function VariableForm({
         />
       </div>
       <div className="flex items-center gap-2">
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={() => setPersist(!persist)}
           className="flex items-center gap-1 text-xs text-muted-foreground text-muted-foreground"
@@ -134,17 +137,21 @@ function VariableForm({
             <ToggleLeft className="w-4 h-4 text-muted-foreground" />
           )}
           Persist to shell config
-        </button>
+        </Button>
       </div>
       <div className="flex justify-end gap-2 pt-1">
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={onCancel}
           className="px-3 py-1 text-xs text-muted-foreground text-muted-foreground hover:bg-card hover:bg-card rounded"
         >
           Cancel
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           type="submit"
           className="px-3 py-1 text-xs bg-info text-info-foreground rounded hover:bg-info"
         >
@@ -152,7 +159,7 @@ function VariableForm({
             <Save className="w-3 h-3" />
             {initial ? "Update" : "Add"}
           </span>
-        </button>
+        </Button>
       </div>
     </form>
   );
@@ -181,7 +188,9 @@ function PathEntry({
         {entry}
       </span>
       <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           onClick={onMoveUp}
           disabled={index === 0}
           className="p-0.5 text-muted-foreground hover:text-info hover:text-info rounded disabled:opacity-30 disabled:cursor-not-allowed"
@@ -189,8 +198,10 @@ function PathEntry({
           title="Move up"
         >
           <ChevronUp className="w-3 h-3" />
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           onClick={onMoveDown}
           disabled={index === total - 1}
           className="p-0.5 text-muted-foreground hover:text-info hover:text-info rounded disabled:opacity-30 disabled:cursor-not-allowed"
@@ -198,15 +209,17 @@ function PathEntry({
           title="Move down"
         >
           <ChevronDown className="w-3 h-3" />
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           onClick={onRemove}
           className="p-0.5 text-muted-foreground hover:text-destructive hover:text-destructive rounded"
           aria-label="Remove path entry"
           title="Remove"
         >
           <Trash2 className="w-3 h-3" />
-        </button>
+        </Button>
       </div>
     </li>
   );
@@ -292,14 +305,16 @@ export function EnvironmentPanel({
               Variables ({variables.length})
             </h4>
             {!showAddForm && !editingVar && (
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 onClick={() => setShowAddForm(true)}
                 className="flex items-center gap-1 px-2 py-0.5 text-[10px] text-info text-info hover:bg-info/10 hover:bg-info/20 rounded"
                 aria-label="Add variable"
               >
                 <Plus className="w-3 h-3" />
                 Add
-              </button>
+              </Button>
             )}
           </div>
 
@@ -333,26 +348,32 @@ export function EnvironmentPanel({
                     <span className="text-xs font-mono font-medium text-foreground text-muted-foreground">
                       {v.name}
                     </span>
-                    <span className="text-xs text-muted-foreground text-muted-foreground mx-1">=</span>
+                    <span className="text-xs text-muted-foreground text-muted-foreground mx-1">
+                      =
+                    </span>
                     <span className="text-xs text-muted-foreground text-muted-foreground truncate">
                       {v.value}
                     </span>
                   </div>
                   <div className="flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <button
+                    <Button
+                      variant="ghost"
+                      size="compact"
                       onClick={() => setEditingVar(v)}
                       className="px-1.5 py-0.5 text-[10px] text-info text-info hover:bg-info/10 hover:bg-info/20 rounded"
                       aria-label={`Edit ${v.name}`}
                     >
                       Edit
-                    </button>
-                    <button
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="compact"
                       onClick={() => onDeleteVariable(v.name)}
                       className="p-0.5 text-destructive hover:bg-destructive/10 hover:bg-destructive/20 rounded"
                       aria-label={`Delete ${v.name}`}
                     >
                       <Trash2 className="w-3 h-3" />
-                    </button>
+                    </Button>
                   </div>
                 </li>
               ))}
@@ -367,14 +388,16 @@ export function EnvironmentPanel({
               PATH ({pathEntries.length})
             </h4>
             {!showAddPath && (
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 onClick={() => setShowAddPath(true)}
                 className="flex items-center gap-1 px-2 py-0.5 text-[10px] text-info text-info hover:bg-info/10 hover:bg-info/20 rounded"
                 aria-label="Add PATH entry"
               >
                 <Plus className="w-3 h-3" />
                 Add
-              </button>
+              </Button>
             )}
           </div>
 
@@ -388,19 +411,23 @@ export function EnvironmentPanel({
                 className="flex-1 px-2 py-1 text-xs border border-border border-border rounded bg-background bg-card"
                 autoFocus
               />
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="submit"
                 className="px-2 py-1 text-xs bg-info text-info-foreground rounded hover:bg-info"
               >
                 Add
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 onClick={() => { setShowAddPath(false); setNewPathEntry(""); }}
                 className="px-2 py-1 text-xs text-muted-foreground text-muted-foreground hover:bg-card hover:bg-card rounded"
               >
                 Cancel
-              </button>
+              </Button>
             </form>
           )}
 
@@ -431,4 +458,4 @@ export function EnvironmentPanel({
 
 // ── Exports for testing ──────────────────────────────────────────
 
-export { validateEnvName, ENV_NAME_REGEX };
+export { ENV_NAME_REGEX, validateEnvName };

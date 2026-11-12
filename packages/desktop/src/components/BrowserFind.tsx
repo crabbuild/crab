@@ -1,6 +1,7 @@
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { ChevronDown, ChevronUp, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ChevronUp, ChevronDown, X } from "lucide-react";
 
 interface BrowserFindProps {
   isOpen: boolean;
@@ -141,34 +142,40 @@ export function BrowserFind({ isOpen, onClose, webviewRef }: BrowserFindProps) {
 
       <div className="mx-0.5 h-4 w-px bg-border" />
 
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         className="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground transition"
         onClick={findPrevious}
         title="Previous match"
       >
         <ChevronUp size={14} />
-      </button>
+      </Button>
 
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         className="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground transition"
         onClick={findNext}
         title="Next match"
       >
         <ChevronDown size={14} />
-      </button>
+      </Button>
 
       <div className="mx-0.5 h-4 w-px bg-border" />
 
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         className="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground transition"
         onClick={onClose}
         title="Close"
       >
         <X size={14} />
-      </button>
+      </Button>
     </div>
   );
 }

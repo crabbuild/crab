@@ -1,7 +1,13 @@
-import { NativeSelect } from "@/components/ui/native-select";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import clsx from "clsx";
 import {
   AlertCircle,
@@ -13,6 +19,7 @@ import {
   RefreshCw,
   Server,
 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   nextJobId,
   rpc,
@@ -79,27 +86,24 @@ export function ManagedRepositoryPicker({ selectedUrl, onSelectRepository }: Pro
     }
   }, [applyProfiles]);
 
-  const loadOrganizations = useCallback(async (
-    service: string,
-    cursor?: string,
-    append = false,
-  ) => {
-    const request = ++organizationRequest.current;
-    setLoadingOrganizations(true);
-    setError(null);
-    try {
-      const page = await rpc.managedOrganizations(service, cursor);
-      if (request !== organizationRequest.current) return;
-      setOrganizations((current) => append ? [...current, ...page.organizations] : page.organizations);
-      setOrganizationCursor(page.next_cursor);
-      if (!append) {
-        setOrganization((current) =>
-          page.organizations.some((item) => item.slug === current)
-            ? current
-            : page.organizations[0]?.slug ?? "",
-        );
-      }
-    } catch (cause) {
+  const loadOrganizations = useCallback(
+    async (service: string, cursor?: string, append = false) => {
+      const request = ++organizationRequest.current;
+      setLoadingOrganizations(true);
+      setError(null);
+      try {
+        const page = await rpc.managedOrganizations(service, cursor);
+        if (request !== organizationRequest.current) return;
+        setOrganizations((current) => append ? [...current, ...page.organizations] : page.organizations);
+        setOrganizationCursor(page.next_cursor);
+        if (!append) {
+          setOrganization((current) =>
+            page.organizations.some((item) => item.slug === current)
+              ? current
+              : (page.organizations[0]?.slug ?? ""),
+          );
+        }
+      } catch (cause) {
       if (request === organizationRequest.current) {
         setError(managedErrorDetails(cause));
       }
@@ -108,7 +112,9 @@ export function ManagedRepositoryPicker({ selectedUrl, onSelectRepository }: Pro
         setLoadingOrganizations(false);
       }
     }
-  }, []);
+    },
+    [],
+  );
 
   const loadRepositories = useCallback(async (
     service: string,
@@ -242,7 +248,8 @@ export function ManagedRepositoryPicker({ selectedUrl, onSelectRepository }: Pro
               {profiles?.profiles.length ? "Managed service" : "Connect a managed service"}
             </h3>
             <p className="mt-0.5 text-[11px] text-muted-foreground">
-              Sign in to Crab Cloud or an enterprise deployment. Credentials stay in the shared Crab token store.
+              Sign in to Crab Cloud or an enterprise deployment. Credentials
+              stay in the shared Crab token store.
             </p>
           </div>
         </div>
@@ -250,18 +257,33 @@ export function ManagedRepositoryPicker({ selectedUrl, onSelectRepository }: Pro
         {profiles?.profiles.length ? (
           <div className="mt-3 grid gap-2 sm:grid-cols-[1fr_auto]">
             <label className="min-w-0">
-              <span className="mb-1 block text-[11px] text-muted-foreground">Service profile</span>
-              <NativeSelect
-                className="w-full text-sm"
-                value={authority}
-                onChange={(event) => void selectProfile(event.target.value)}
+              <span className="mb-1 block text-[11px] text-muted-foreground">
+                Service profile
+              </span>
+              <Select
+                value={":" + String(authority)}
+                onValueChange={(selectedValue) => {
+                  const value = selectedValue.slice(1);
+                  return void selectProfile(value);
+                }}
               >
-                {profiles.profiles.map((profile) => (
-                  <option key={profile.authority} value={profile.authority}>
-                    {profile.authority}{profile.discovered ? "" : " (not discovered)"}
-                  </option>
-                ))}
-              </NativeSelect>
+                <SelectTrigger className="w-full text-sm">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    {profiles.profiles.map((profile) => (
+                      <SelectItem
+                        key={profile.authority}
+                        value={":" + String(profile.authority)}
+                      >
+                        {profile.authority}
+                        {profile.discovered ? "" : " (not discovered)"}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
             </label>
             <Button variant="outline"
               type="button"
@@ -289,7 +311,11 @@ export function ManagedRepositoryPicker({ selectedUrl, onSelectRepository }: Pro
             onClick={() => void signIn()}
             disabled={signingIn || !serviceOrigin.trim()}
           >
-            {signingIn ? <Loader2 size={13} className="animate-spin" /> : <Server size={13} />}
+            {signingIn ? (
+              <Loader2 size={13} className="animate-spin" />
+            ) : (
+              <Server size={13} />
+            )}
             {profiles?.profiles.length ? "Add service" : "Sign in"}
           </Button>
         </div>
@@ -308,19 +334,36 @@ export function ManagedRepositoryPicker({ selectedUrl, onSelectRepository }: Pro
                 <span className="mb-1 flex items-center gap-1 text-[11px] text-muted-foreground">
                   <Building2 size={12} /> Organization
                 </span>
-                <NativeSelect
-                  className="w-full text-sm"
-                  value={organization}
-                  onChange={(event) => setOrganization(event.target.value)}
+                <Select
+                  value={":" + String(organization)}
+                  onValueChange={(selectedValue) => {
+                    const value = selectedValue.slice(1);
+                    return setOrganization(value);
+                  }}
                   disabled={organizations.length === 0}
                 >
-                  {organizations.length === 0 && <option value="">No organizations</option>}
-                  {organizations.map((item) => (
-                    <option key={item.id} value={item.slug}>
-                      {item.slug}{item.state === "active" ? "" : ` (${item.state})`}
-                    </option>
-                  ))}
-                </NativeSelect>
+                  <SelectTrigger className="w-full text-sm">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      {organizations.length === 0 && (
+                        <SelectItem value={":" + String("")}>
+                          No organizations
+                        </SelectItem>
+                      )}
+                      {organizations.map((item) => (
+                        <SelectItem
+                          key={item.id}
+                          value={":" + String(item.slug)}
+                        >
+                          {item.slug}
+                          {item.state === "active" ? "" : ` (${item.state})`}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
               </label>
               {organizationCursor && (
                 <Button variant="outline"
@@ -353,7 +396,11 @@ export function ManagedRepositoryPicker({ selectedUrl, onSelectRepository }: Pro
                   !repositorySlug.trim()
                 }
               >
-                {creating ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}
+                {creating ? (
+                  <Loader2 size={13} className="animate-spin" />
+                ) : (
+                  <Plus size={13} />
+                )}
                 Create
               </Button>
             </div>
@@ -365,7 +412,9 @@ export function ManagedRepositoryPicker({ selectedUrl, onSelectRepository }: Pro
                 Repositories
               </h3>
               {repositoryCursor && (
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
                   className="text-[11px] text-primary hover:text-primary-hover"
                   onClick={() => void loadRepositories(
@@ -377,7 +426,7 @@ export function ManagedRepositoryPicker({ selectedUrl, onSelectRepository }: Pro
                   disabled={loadingCatalog}
                 >
                   Load more
-                </button>
+                </Button>
               )}
             </div>
             <div className="space-y-2">
@@ -390,7 +439,9 @@ export function ManagedRepositoryPicker({ selectedUrl, onSelectRepository }: Pro
                 const access = managedRepositoryAccess(repository);
                 const selected = selectedUrl === repository.canonical_url;
                 return (
-                  <button
+                  <Button
+                    variant="ghost"
+                    size="compact"
                     key={repository.repository_id}
                     type="button"
                     className={clsx(
@@ -409,9 +460,13 @@ export function ManagedRepositoryPicker({ selectedUrl, onSelectRepository }: Pro
                           <span className="truncate font-mono text-xs text-foreground">
                             {repository.canonical_url}
                           </span>
-                          {selected && <Check size={13} className="shrink-0 text-primary" />}
+                          {selected && (
+                            <Check size={13} className="shrink-0 text-primary" />
+                          )}
                         </div>
-                        <p className="mt-1 text-[10px] text-muted-foreground">{access.detail}</p>
+                        <p className="mt-1 text-[10px] text-muted-foreground">
+                          {access.detail}
+                        </p>
                       </div>
                       <span className={clsx(
                         "shrink-0 rounded border px-1.5 py-0.5 text-[10px]",
@@ -420,7 +475,7 @@ export function ManagedRepositoryPicker({ selectedUrl, onSelectRepository }: Pro
                         {access.label}
                       </span>
                     </div>
-                  </button>
+                  </Button>
                 );
               })}
             </div>
@@ -439,8 +494,12 @@ export function ManagedRepositoryPicker({ selectedUrl, onSelectRepository }: Pro
           <AlertCircle size={14} className="mt-0.5 shrink-0" />
           <div>
             <p>{error.message}</p>
-            {error.remediation && <p className="mt-1 opacity-80">{error.remediation}</p>}
-            <button
+            {error.remediation && (
+              <p className="mt-1 opacity-80">{error.remediation}</p>
+            )}
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className="mt-2 font-medium underline underline-offset-2"
               onClick={() => authority
@@ -448,7 +507,7 @@ export function ManagedRepositoryPicker({ selectedUrl, onSelectRepository }: Pro
                 : void loadProfiles()}
             >
               Retry
-            </button>
+            </Button>
           </div>
         </div>
       )}

@@ -1,4 +1,14 @@
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { DropdownMenuItem, PointMenu } from "@/components/ui/dropdown-menu";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  Copy,
+  ExternalLink,
+  Globe,
+  RefreshCw,
+  TriangleAlert,
+} from "lucide-react";
 import {
 useCallback,
 useEffect,
@@ -7,41 +17,29 @@ useRef,
 useState,
 } from "react";
 import {
-Globe,
-RefreshCw,ExternalLink,
-Copy,TriangleAlert
-} from "lucide-react";
+BrowserContextMenu,
+BrowserContextMenuState,
+} from "../components/BrowserContextMenu";
+import { BrowserFind } from "../components/BrowserFind";
 import {
-loadBookmarks,
-toggleBookmark,
-isBookmarked,
-type BookmarkEntry,
+BrowserMobileDriverOverlay
+} from "../components/BrowserMobileDriverOverlay";
+import { BrowserToolbar } from "../components/BrowserToolbar";
+import {
+  isBookmarked,
+  loadBookmarks,
+  toggleBookmark,
+  type BookmarkEntry,
 } from "../lib/browser-bookmarks";
 import {
 loadHistory,removeHistoryEntry,
 type HistoryEntry
 } from "../lib/browser-history";
-import { BrowserToolbar } from "../components/BrowserToolbar";
-import { BrowserFind } from "../components/BrowserFind";
 import {
-BrowserContextMenu,
-BrowserContextMenuState,
-} from "../components/BrowserContextMenu";
-import {
-BrowserMobileDriverOverlay
-} from "../components/BrowserMobileDriverOverlay";
-import {
-
-normalizeBrowserNavigationUrl,
-CRAB_BROWSER_BLANK_URL,
-DEFAULT_SEARCH_ENGINE,
+  CRAB_BROWSER_BLANK_URL,
+  DEFAULT_SEARCH_ENGINE,
+  normalizeBrowserNavigationUrl,
 } from "../lib/browser-url";
-import {
-
-registerWebview,
-destroyWebview,
-destroyAllWebviews,
-} from "../lib/browser-webview-registry";
 import {
 
 BROWSER_VIEWPORT_PRESETS,
@@ -49,7 +47,11 @@ getBrowserViewportPreset,
 presetToOverride,
 type BrowserViewportPresetId,
 } from "../lib/browser-viewport-presets";
-
+import {
+  destroyAllWebviews,
+  destroyWebview,
+  registerWebview,
+} from "../lib/browser-webview-registry";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -879,7 +881,12 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
           const d = prev.get(payload.downloadId);
           if (!d) return prev;
           const next = new Map(prev);
-          next.set(payload.downloadId, { ...d, status: (payload.status as "completed" | "canceled" | "interrupted"), savePath: payload.savePath, error: payload.error });
+          next.set(payload.downloadId, {
+            ...d,
+            status: payload.status as "completed" | "canceled" | "interrupted",
+            savePath: payload.savePath,
+            error: payload.error,
+          });
           return next;
         });
         setTimeout(() => {
@@ -889,7 +896,7 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
             return next;
           });
         }, 6000);
-      }
+      },
     );
 
     // Context menu
@@ -1063,7 +1070,6 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
 
   // ── Download Notice Auto-Dismiss ──────────────────────────────────────
 
-
   // ── Derived State ─────────────────────────────────────────────────────
 
   const isBlankTab =
@@ -1164,14 +1170,14 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
 
       {/* WebView area */}
       <div className="relative flex min-h-0 flex-1 overflow-hidden">
-        {/* Loading progress bar — Chrome-style thin line */}
+        {/* WebView area */}
         {activeTab?.loading && !showFailureOverlay ? (
           <div className="pointer-events-none absolute top-0 left-0 right-0 z-30 h-0.5">
             <div className="h-full w-full animate-browser-loading bg-primary opacity-80" />
           </div>
         ) : null}
 
-        {/* WebView containers — only active tab is visible */}
+        {/* WebView area */}
         {tabs.map((tab) => (
           <div
             key={tab.id}
@@ -1182,28 +1188,33 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
           />
         ))}
 
-
-        {/* History panel */}
+        {/* WebView area */}
         {showHistoryPanel ? (
           <div className="absolute inset-0 z-30 flex bg-background">
             <div className="flex h-full w-full flex-col">
               <div className="flex items-center justify-between border-b border-border px-4 py-2">
-                <h3 className="text-sm font-semibold text-foreground">History</h3>
+                <h3 className="text-sm font-semibold text-foreground">
+                  History
+                </h3>
                 <div className="flex items-center gap-2">
-                  <button
+                  <Button
+                    variant="ghost"
+                    size="compact"
                     type="button"
                     className="rounded px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-accent transition"
                     onClick={() => { setHistoryEntries([]); setShowHistoryPanel(false); }}
                   >
                     Clear
-                  </button>
-                  <button
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="compact"
                     type="button"
                     className="rounded px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-accent transition"
                     onClick={() => setShowHistoryPanel(false)}
                   >
                     Close
-                  </button>
+                  </Button>
                 </div>
               </div>
               <div className="flex-1 overflow-y-auto">
@@ -1213,28 +1224,36 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
                   </div>
                 ) : (
                   historyEntries.map((entry) => (
-                    <button
+                    <Button
+                      variant="ghost"
+                      size="compact"
                       key={entry.url}
                       type="button"
-                      className="flex w-full items-center gap-3 px-4 py-2 text-left text-xs hover:bg-accent transition border-b border-border/30"
+                      className="justify-start flex w-full items-center gap-3 px-4 py-2 text-left text-xs hover:bg-accent transition border-b border-border/30"
                       onClick={() => {
                         if (activeTabId) navigateTab(activeTabId, entry.url);
                         setShowHistoryPanel(false);
                       }}
                     >
                       <div className="flex min-w-0 flex-1 flex-col">
-                        <span className="truncate font-medium text-foreground">{entry.title || entry.url}</span>
-                        <span className="truncate text-[10px] text-muted-foreground">{entry.url} · {entry.visitCount} visits</span>
+                        <span className="truncate font-medium text-foreground">
+                          {entry.title || entry.url}
+                        </span>
+                        <span className="truncate text-[10px] text-muted-foreground">
+                          {entry.url} · {entry.visitCount} visits
+                        </span>
                       </div>
-                      <button
+                      <Button
+                        variant="ghost"
+                        size="compact"
                         type="button"
                         className="shrink-0 rounded p-0.5 text-muted-foreground/40 hover:text-destructive transition"
                         onClick={(e) => { e.stopPropagation(); setHistoryEntries(removeHistoryEntry(entry.url)); }}
                         title="Remove from history"
                       >
                         ×
-                      </button>
-                    </button>
+                      </Button>
+                    </Button>
                   ))
                 )}
               </div>
@@ -1247,26 +1266,33 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
           <div className="absolute inset-0 z-30 flex bg-background">
             <div className="flex h-full w-full flex-col">
               <div className="flex items-center justify-between border-b border-border px-4 py-2">
-                <h3 className="text-sm font-semibold text-foreground">Session Profiles</h3>
-                <button
+                <h3 className="text-sm font-semibold text-foreground">
+                  Session Profiles
+                </h3>
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
                   className="rounded px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-accent transition"
                   onClick={() => setShowProfileManager(false)}
                 >
                   Close
-                </button>
+                </Button>
               </div>
               <div className="flex-1 overflow-y-auto p-3">
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
-                  className="mb-3 w-full rounded-md border border-border bg-card px-3 py-1.5 text-left text-xs text-foreground hover:bg-accent transition"
+                  className="justify-start mb-3 w-full rounded-md border border-border bg-card px-3 py-1.5 text-left text-xs text-foreground hover:bg-accent transition"
                   onClick={handleCreateProfile}
                 >
                   + Create New Profile
-                </button>
+                </Button>
                 {sessionProfiles.length === 0 ? (
                   <div className="text-center text-xs text-muted-foreground mt-4">
-                    No profiles yet. Create one to start managing separate browsing sessions.
+                    No profiles yet. Create one to start managing separate
+                    browsing sessions.
                   </div>
                 ) : (
                   <div className="flex flex-col gap-2">
@@ -1277,11 +1303,17 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
                       >
                         <div className="flex items-center justify-between">
                           <div>
-                            <div className="text-xs font-medium text-foreground">{profile.label}</div>
-                            <div className="text-[10px] text-muted-foreground">{profile.scope}</div>
+                            <div className="text-xs font-medium text-foreground">
+                              {profile.label}
+                            </div>
+                            <div className="text-[10px] text-muted-foreground">
+                              {profile.scope}
+                            </div>
                           </div>
                           <div className="flex items-center gap-1">
-                            <button
+                            <Button
+                              variant="ghost"
+                              size="compact"
                               type="button"
                               className="rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent transition"
                               onClick={() => {
@@ -1290,21 +1322,25 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
                               }}
                             >
                               Use
-                            </button>
-                            <button
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="compact"
                               type="button"
                               className="rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent transition"
                               onClick={() => handleImportCookies(profile.id)}
                             >
                               Import Cookies
-                            </button>
-                            <button
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="compact"
                               type="button"
                               className="rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-destructive transition"
                               onClick={() => handleDeleteProfile(profile.id)}
                             >
                               Delete
-                            </button>
+                            </Button>
                           </div>
                         </div>
                       </div>
@@ -1318,7 +1354,7 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
 
         {/* Viewport preset overlay */}
         <BrowserMobileDriverOverlay presetId={viewportPresetId} />
-        {/* Error overlay */}
+        {/* Viewport preset overlay */}
         {showFailureOverlay ? (
           <div className="absolute inset-0 z-10 flex items-center justify-center bg-background px-6">
             <div className="flex max-w-sm flex-col items-center px-8 py-8 text-center opacity-80">
@@ -1334,10 +1370,14 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
                 {formatLoadFailureDescription()}
               </p>
               {loadErrorHint ? (
-                <p className="mt-2 text-xs text-muted-foreground/80">{loadErrorHint}</p>
+                <p className="mt-2 text-xs text-muted-foreground/80">
+                  {loadErrorHint}
+                </p>
               ) : null}
               <div className="mt-5 flex items-center gap-2">
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
                   className="inline-flex items-center gap-2 rounded-md border border-border bg-card px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent transition"
                   onClick={() => {
@@ -1349,8 +1389,10 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
                 >
                   <RefreshCw size={14} />
                   Refresh
-                </button>
-                <button
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
                   className="inline-flex items-center gap-2 rounded-md border border-transparent px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent transition"
                   onClick={() => {
@@ -1361,8 +1403,10 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
                 >
                   <Copy size={14} />
                   Copy Address
-                </button>
-                <button
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
                   className="inline-flex items-center gap-2 rounded-md border border-transparent px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent transition"
                   onClick={() => {
@@ -1371,7 +1415,7 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
                 >
                   <ExternalLink size={14} />
                   Open Externally
-                </button>
+                </Button>
               </div>
             </div>
           </div>
@@ -1385,7 +1429,9 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
                 <Globe size={20} className="text-muted-foreground" />
               </div>
               <div className="text-center">
-                <p className="text-base font-semibold text-foreground/85">New Tab</p>
+                <p className="text-base font-semibold text-foreground/85">
+                  New Tab
+                </p>
                 <p className="mt-2 text-sm text-muted-foreground">
                   Enter a URL or search term above.
                 </p>
@@ -1407,9 +1453,9 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
 
         {/* Grab Action Popover — shown after element selection */}
         {grabResult && grabActionPosition && !showAnnotationDialog ? (
-          <div
-            className="fixed z-50 min-w-[16rem] overflow-hidden rounded-lg border border-border bg-card shadow-xl"
-            style={{ left: Math.min(grabActionPosition.x, window.innerWidth - 280), top: Math.min(grabActionPosition.y, window.innerHeight - 220) }}
+          <PointMenu
+            position={grabActionPosition}
+            onClose={() => handleDismissGrab()}
           >
             {/* Element info header */}
             <div className="border-b border-border px-3 py-2">
@@ -1421,84 +1467,109 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
               </div>
             </div>
             {/* Actions */}
-            <button
+            <DropdownMenuItem
               className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground hover:bg-accent transition"
-              onClick={handleGrabCopyText}
+              onSelect={handleGrabCopyText}
             >
               Copy Text
-            </button>
-            <button
+            </DropdownMenuItem>
+            <DropdownMenuItem
               className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground hover:bg-accent transition"
-              onClick={handleGrabCopyHTML}
+              onSelect={handleGrabCopyHTML}
             >
               Copy HTML
-            </button>
-            <button
+            </DropdownMenuItem>
+            <DropdownMenuItem
               className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground hover:bg-accent transition"
-              onClick={handleGrabScreenshot}
+              onSelect={handleGrabScreenshot}
             >
               Crop Screenshot
-            </button>
+            </DropdownMenuItem>
             <div className="my-1 border-t border-border" />
-            <button
+            <DropdownMenuItem
               className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-primary hover:bg-primary/10 transition"
-              onClick={() => { setGrabActionPosition(null); setShowAnnotationDialog(true); }}
+              onSelect={() => { setGrabActionPosition(null); setShowAnnotationDialog(true); }}
             >
               Annotate...
-            </button>
+            </DropdownMenuItem>
             <div className="my-1 border-t border-border" />
-            <button
+            <DropdownMenuItem
               className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-muted-foreground hover:bg-accent transition"
-              onClick={handleDismissGrab}
+              onSelect={handleDismissGrab}
             >
               Dismiss
-            </button>
-          </div>
+            </DropdownMenuItem>
+          </PointMenu>
         ) : null}
 
         {/* Annotation Dialog */}
         {showAnnotationDialog && grabResult ? (
           <>
             <div className="fixed inset-0 z-40" onClick={handleDismissGrab} />
-            <div className="fixed inset-0 z-50 flex items-center justify-center">
-              <div className="w-[22rem] rounded-lg border border-border bg-card shadow-xl">
+            <Dialog
+              open
+              onOpenChange={(open) => {
+                if (!open) handleDismissGrab();
+              }}
+            >
+              <DialogContent
+                showCloseButton={false}
+                aria-describedby={undefined}
+                className="block gap-0 p-0 w-[22rem] rounded-lg border border-border bg-card shadow-xl"
+              >
+                <DialogTitle className="sr-only">New annotation</DialogTitle>
                 <div className="border-b border-border px-4 py-3">
-                  <div className="text-sm font-medium text-foreground">New Annotation</div>
+                  <div className="text-sm font-medium text-foreground">
+                    New Annotation
+                  </div>
                   <div className="mt-1 text-[11px] text-muted-foreground">
-                    &lt;{grabResult.target?.tagName || 'element'}&gt; — {grabResult.target?.textSnippet?.slice(0, 60) || ''}
+                    &lt;{grabResult.target?.tagName || 'element'}&gt; —{" "}
+                    {grabResult.target?.textSnippet?.slice(0, 60) || ''}
                   </div>
                 </div>
                 <div className="px-4 py-3 space-y-3">
                   <div>
-                    <label className="block text-[11px] font-medium text-muted-foreground mb-1">Intent</label>
+                    <label className="block text-[11px] font-medium text-muted-foreground mb-1">
+                      Intent
+                    </label>
                     <div className="flex gap-1">
-                      {['fix','change','question','approve'].map((intent) => (
-                        <button
-                          key={intent}
-                          className={`rounded px-2.5 py-1 text-[11px] transition ${annotationIntent === intent ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent'}`}
-                          onClick={() => setAnnotationIntent(intent)}
-                        >
-                          {intent}
-                        </button>
-                      ))}
+                      {['fix','change','question','approve'].map(
+                        (intent) => (
+                          <Button
+                            variant="default"
+                            size="compact"
+                            key={intent}
+                            className={`rounded px-2.5 py-1 text-[11px] transition ${annotationIntent === intent ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent'}`}
+                            onClick={() => setAnnotationIntent(intent)}
+                          >
+                            {intent}
+                          </Button>
+                        ),
+                      )}
                     </div>
                   </div>
                   <div>
-                    <label className="block text-[11px] font-medium text-muted-foreground mb-1">Priority</label>
+                    <label className="block text-[11px] font-medium text-muted-foreground mb-1">
+                      Priority
+                    </label>
                     <div className="flex gap-1">
                       {['blocking','important','suggestion'].map((p) => (
-                        <button
+                        <Button
+                          variant="default"
+                          size="compact"
                           key={p}
                           className={`rounded px-2.5 py-1 text-[11px] transition ${annotationPriority === p ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent'}`}
                           onClick={() => setAnnotationPriority(p)}
                         >
                           {p}
-                        </button>
+                        </Button>
                       ))}
                     </div>
                   </div>
                   <div>
-                    <label className="block text-[11px] font-medium text-muted-foreground mb-1">Comment</label>
+                    <label className="block text-[11px] font-medium text-muted-foreground mb-1">
+                      Comment
+                    </label>
                     <Textarea
                       className="w-full rounded border border-border bg-accent px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground/50 resize-none"
                       rows={3}
@@ -1510,22 +1581,26 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
                   </div>
                 </div>
                 <div className="border-t border-border px-4 py-2 flex justify-end gap-2">
-                  <button
+                  <Button
+                    variant="ghost"
+                    size="compact"
                     className="rounded px-3 py-1 text-[11px] text-muted-foreground hover:bg-accent transition"
                     onClick={handleDismissGrab}
                   >
                     Cancel
-                  </button>
-                  <button
+                  </Button>
+                  <Button
+                    variant="default"
+                    size="compact"
                     className="rounded px-3 py-1 text-[11px] bg-primary text-primary-foreground hover:bg-primary/90 transition disabled:opacity-40"
                     onClick={handleCreateAnnotation}
                     disabled={!annotationComment.trim()}
                   >
                     Annotate
-                  </button>
+                  </Button>
                 </div>
-              </div>
-            </div>
+              </DialogContent>
+            </Dialog>
           </>
         ) : null}
 
@@ -1536,7 +1611,9 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
               <div className="text-xs font-medium text-foreground">
                 Annotations ({pageAnnotations.length})
               </div>
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 className="text-[11px] text-muted-foreground hover:text-foreground transition"
                 onClick={() => {
                   void window.crab.browser.setAnnotationViewportBridge({
@@ -1550,7 +1627,7 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
                 }}
               >
                 Clear all
-              </button>
+              </Button>
             </div>
             {pageAnnotations.map((a: any) => (
               <div key={a.id} className="border-b border-border/50 px-3 py-2 last:border-b-0">
@@ -1564,22 +1641,29 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
                   </span>
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-1">
-                      <span className="text-[10px] font-medium text-muted-foreground">{a.intent}</span>
-                      <span className="text-[10px] text-muted-foreground/60">{a.priority}</span>
+                      <span className="text-[10px] font-medium text-muted-foreground">
+                        {a.intent}
+                      </span>
+                      <span className="text-[10px] text-muted-foreground/60">
+                        {a.priority}
+                      </span>
                     </div>
                     <div className="mt-0.5 text-[11px] text-foreground leading-tight">
                       {a.comment}
                     </div>
                     <div className="mt-0.5 text-[10px] text-muted-foreground/60 truncate">
-                      &lt;{a.payload.target?.tagName || 'element'}&gt; {a.payload.target?.textSnippet?.slice(0, 50) || ''}
+                      &lt;{a.payload.target?.tagName || 'element'}&gt;{" "}
+                      {a.payload.target?.textSnippet?.slice(0, 50) || ''}
                     </div>
                   </div>
-                  <button
+                  <Button
+                    variant="ghost"
+                    size="compact"
                     className="shrink-0 text-[10px] text-muted-foreground/50 hover:text-destructive transition"
                     onClick={() => handleDeleteAnnotation(a.id)}
                   >
                     ×
-                  </button>
+                  </Button>
                 </div>
               </div>
             ))}
@@ -1620,11 +1704,15 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
                   <div className="flex items-center justify-between gap-2">
                     <span className="truncate">{d.filename}</span>
                     {d.status === "downloading" ? (
-                      <span className="shrink-0 text-muted-foreground">{progress}%</span>
+                      <span className="shrink-0 text-muted-foreground">
+                        {progress}%
+                      </span>
                     ) : d.status === "completed" ? (
                       <span className="shrink-0 text-success">Done</span>
                     ) : d.status === "canceled" ? (
-                      <span className="shrink-0 text-muted-foreground">Canceled</span>
+                      <span className="shrink-0 text-muted-foreground">
+                        Canceled
+                      </span>
                     ) : (
                       <span className="shrink-0 text-destructive">Failed</span>
                     )}
@@ -1639,13 +1727,16 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
                       {formatBytes(d.speed)}/s
                       {d.totalBytes > d.receivedBytes ? (
                         <span className="ml-1">
-                          ETA {formatDuration((d.totalBytes - d.receivedBytes) / d.speed)}
+                          ETA{" "}
+                          {formatDuration((d.totalBytes - d.receivedBytes) / d.speed)}
                         </span>
                       ) : null}
                     </div>
                   ) : null}
                   {d.status === "completed" && d.savePath ? (
-                    <div className="mt-1 truncate text-[10px] text-muted-foreground">{d.savePath}</div>
+                    <div className="mt-1 truncate text-[10px] text-muted-foreground">
+                      {d.savePath}
+                    </div>
                   ) : null}
                 </div>
               );

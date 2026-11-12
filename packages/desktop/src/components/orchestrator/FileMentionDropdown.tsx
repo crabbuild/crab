@@ -1,3 +1,9 @@
+import {
+  CommandGroup,
+  CommandItem,
+  CommandList,
+  CommandPopover,
+} from "@/components/ui/command";
 /**
  * File mention dropdown — the `#file.ts` equivalent of the existing `/`
  * slash command typeahead. Triggers when the user types `#` at a word
@@ -12,8 +18,8 @@
  * stays dumb and easy to unit-test.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
 import { FileText } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -26,6 +32,7 @@ export interface FileMatch {
 
 interface Props {
   /** Matches to render (already filtered/sorted by the parent). */
+  anchorRef: React.RefObject<HTMLElement | null>;
   matches: FileMatch[];
   /** `true` while the parent is fetching a fresh list. */
   loading?: boolean;
@@ -39,7 +46,13 @@ interface Props {
 
 // ── Component ───────────────────────────────────────────────────────
 
-export function FileMentionDropdown({ matches, loading, onSelect, visible }: Props) {
+export function FileMentionDropdown({
+  anchorRef,
+  matches,
+  loading,
+  onSelect,
+  visible,
+}: Props) {
   const [activeIndex, setActiveIndex] = useState(0);
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -86,52 +99,64 @@ export function FileMentionDropdown({ matches, loading, onSelect, visible }: Pro
 
   useEffect(() => {
     if (!visible) return;
-    document.addEventListener("keydown", handleKeyDown, true);
-    return () => document.removeEventListener("keydown", handleKeyDown, true);
-  }, [visible, handleKeyDown]);
+    const anchor = anchorRef.current;
+    anchor?.addEventListener("keydown", handleKeyDown);
+    return () => anchor?.removeEventListener("keydown", handleKeyDown);
+  }, [visible, handleKeyDown, anchorRef]);
 
   if (!visible) return null;
 
   return (
-    <div
-      ref={listRef}
-      role="listbox"
-      aria-label="File mentions"
-      className="absolute bottom-full left-0 right-0 mb-1 max-h-[min(240px,var(--composer-popup-height))] overflow-auto rounded-lg border border-border bg-background shadow-lg z-50"
+    <CommandPopover
+      anchorRef={anchorRef}
+      onClose={() => onSelect("")}
+      value={String(activeIndex)}
+      onValueChange={(value) => setActiveIndex(Number(value))}
     >
-      {loading && matches.length === 0 && (
-        <div className="px-3 py-2 text-[11px] text-muted-foreground">Searching files…</div>
-      )}
-      {!loading && matches.length === 0 && (
-        <div className="px-3 py-2 text-[11px] text-muted-foreground">No matching files</div>
-      )}
-      {matches.map((m, i) => {
-        const dir = m.path.includes("/")
+      <CommandList
+        ref={listRef}
+        className="max-h-[min(280px,var(--composer-popup-height))]"
+        label="File mentions"
+      >
+        <CommandGroup>
+          {loading && matches.length === 0 && (
+            <div className="px-3 py-2 text-[11px] text-muted-foreground">
+              Searching files…
+            </div>
+          )}
+          {!loading && matches.length === 0 && (
+            <div className="px-3 py-2 text-[11px] text-muted-foreground">
+              No matching files
+            </div>
+          )}
+          {matches.map((m, i) => {
+            const dir = m.path.includes("/")
           ? m.path.slice(0, m.path.lastIndexOf("/"))
           : "";
-        return (
-          <button
-            key={m.path}
-            type="button"
-            role="option"
-            aria-selected={i === activeIndex}
-            data-active={i === activeIndex}
-            onClick={() => onSelect(m.path)}
-            onMouseEnter={() => setActiveIndex(i)}
-            className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition ${
+            return (
+              <CommandItem
+                value={String(i)}
+                key={m.path}
+                data-active={i === activeIndex}
+                onSelect={() => onSelect(m.path)}
+                className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition ${
               i === activeIndex
                 ? "bg-primary/10 text-foreground"
                 : "text-foreground hover:bg-accent"
             }`}
-          >
-            <FileText size={11} className="shrink-0 text-primary" />
-            <span className="truncate font-medium">{m.label}</span>
-            {dir && (
-              <span className="truncate text-[10px] text-muted-foreground">{dir}</span>
-            )}
-          </button>
-        );
-      })}
-    </div>
+              >
+                <FileText size={11} className="shrink-0 text-primary" />
+                <span className="truncate font-medium">{m.label}</span>
+                {dir && (
+                  <span className="truncate text-[10px] text-muted-foreground">
+                    {dir}
+                  </span>
+                )}
+              </CommandItem>
+            );
+          })}
+        </CommandGroup>
+      </CommandList>
+    </CommandPopover>
   );
 }

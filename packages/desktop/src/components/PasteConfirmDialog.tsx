@@ -1,6 +1,9 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import clsx from "clsx";
-import { AlertTriangle, ShieldAlert, Clipboard } from "lucide-react";
+import { AlertTriangle, Clipboard, ShieldAlert } from "lucide-react";
+import { useId, useRef, useState } from "react";
 import type { PasteAnalysis } from "../lib/terminal-paste-guard";
 
 /**
@@ -33,10 +36,8 @@ export function PasteConfirmDialog({
   onConfirm,
   onCancel,
 }: PasteConfirmDialogProps) {
-  const headingId = useId();
   const bodyId = useId();
   const cancelRef = useRef<HTMLButtonElement | null>(null);
-  const previousActive = useRef<HTMLElement | null>(null);
   const [riskAcknowledged, setRiskAcknowledged] = useState(false);
 
   const hasDangerousPatterns = analysis.reasons.includes("dangerous-pattern");
@@ -47,46 +48,29 @@ export function PasteConfirmDialog({
   // and the user hasn't acknowledged the risk.
   const pasteDisabled = hasDangerousPatterns && !riskAcknowledged;
 
-  // Focus management: grab focus on mount, restore on unmount.
-  useEffect(() => {
-    previousActive.current =
-      (document.activeElement as HTMLElement | null) ?? null;
-    cancelRef.current?.focus();
-    return () => {
-      previousActive.current?.focus?.();
-    };
-  }, []);
-
-  // Esc cancels.
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        onCancel();
-      }
-    };
-    window.addEventListener("keydown", handler, true);
-    return () => window.removeEventListener("keydown", handler, true);
-  }, [onCancel]);
-
   // Determine the severity icon and color.
   const isDangerous = hasDangerousPatterns;
   const iconColor = isDangerous ? "text-destructive" : "text-warning";
   const iconBg = isDangerous ? "bg-destructive/15" : "bg-warning/15";
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onCancel();
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) {
+          onCancel();
+        }
       }}
     >
-      <div
+      <DialogContent
         role="alertdialog"
-        aria-modal="true"
-        aria-labelledby={headingId}
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+    cancelRef.current?.focus();
+        }}
+        showCloseButton={false}
         aria-describedby={bodyId}
-        className="w-[32rem] max-w-[calc(100vw-2rem)] rounded-lg border border-border bg-card shadow-2xl"
+        className="block gap-0 p-0 w-[32rem] max-w-[calc(100vw-2rem)] rounded-lg border border-border bg-card shadow-2xl"
       >
         {/* Header */}
         <div className="flex items-start gap-3 border-b border-border p-4">
@@ -104,14 +88,12 @@ export function PasteConfirmDialog({
             )}
           </div>
           <div className="min-w-0 flex-1">
-            <h2
-              id={headingId}
-              className="text-[14px] font-semibold text-foreground"
+            <DialogTitle className="text-[14px] font-semibold text-foreground"
             >
               {isDangerous
                 ? "Dangerous paste detected"
                 : "Review paste content"}
-            </h2>
+            </DialogTitle>
             <p
               id={bodyId}
               className="mt-1 text-[12px] leading-relaxed text-muted-foreground"
@@ -162,10 +144,9 @@ export function PasteConfirmDialog({
         {hasDangerousPatterns && (
           <div className="border-b border-border px-4 py-3">
             <label className="flex cursor-pointer items-center gap-2.5">
-              <input
-                type="checkbox"
+              <Checkbox
                 checked={riskAcknowledged}
-                onChange={(e) => setRiskAcknowledged(e.target.checked)}
+                onCheckedChange={(checked) => setRiskAcknowledged(checked === true)}
                 className="h-4 w-4 rounded border-border text-destructive accent-destructive focus:ring-destructive"
               />
               <span className="text-[12px] font-medium text-foreground">
@@ -177,7 +158,9 @@ export function PasteConfirmDialog({
 
         {/* Footer buttons */}
         <div className="flex items-center justify-end gap-2 p-3">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             ref={cancelRef}
             type="button"
             onClick={onCancel}
@@ -187,8 +170,10 @@ export function PasteConfirmDialog({
             )}
           >
             Cancel
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={onConfirm}
             disabled={pasteDisabled}
@@ -203,10 +188,10 @@ export function PasteConfirmDialog({
             )}
           >
             Paste
-          </button>
+          </Button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 

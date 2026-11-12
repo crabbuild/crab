@@ -1,6 +1,18 @@
+import {
+  CommandGroup,
+  CommandItem,
+  CommandList,
+  CommandPopover,
+} from "@/components/ui/command";
 import { Input } from "@/components/ui/input";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import clsx from "clsx";
+import { useCallback, useRef, useState } from "react";
 import { rpc } from "../../ipc";
 import type { TemplateCompletion } from "../../lib/workflow-types";
 
@@ -162,23 +174,18 @@ export function TemplateAutocomplete({
   }, []);
 
   // Close dropdown on outside click.
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (
-        dropdownRef.current &&
-        !dropdownRef.current.contains(e.target as HTMLElement) &&
-        !inputRef.current?.contains(e.target as HTMLElement)
-      ) {
-        setShowDropdown(false);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, []);
 
   return (
     <div className="relative">
-      <Input
+      <TooltipProvider>
+        <Tooltip
+          open={tooltip !== null}
+          onOpenChange={(open) => {
+            if (!open) setTooltip(null);
+          }}
+        >
+          <TooltipTrigger asChild>
+            <Input
         ref={inputRef}
         type="text"
         className={clsx(" w-full font-mono text-xs", className)}
@@ -189,47 +196,54 @@ export function TemplateAutocomplete({
         onMouseLeave={handleMouseLeave}
         placeholder={placeholder}
       />
+          </TooltipTrigger>
+          <TooltipContent
+            side="top"
+            align="start"
+            alignOffset={tooltip?.x ?? 0}
+          >
+            {tooltip?.text}
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
 
       {/* Tooltip for resolved values */}
-      {tooltip && (
-        <div
-          className="absolute -top-7 z-50 rounded border border-border bg-card px-2 py-0.5 text-[10px] text-muted-foreground shadow"
-          style={{ left: tooltip.x }}
-        >
-          {tooltip.text}
-        </div>
-      )}
-
-      {/* Completions dropdown */}
       {showDropdown && (
-        <div
-          ref={dropdownRef}
-          className="absolute left-0 top-full z-50 mt-1 max-h-48 w-full overflow-y-auto rounded border border-border bg-card shadow-lg"
+        <CommandPopover
+          anchorRef={inputRef}
+          onClose={() => setShowDropdown(false)}
+          side="bottom"
+          value={String(selectedIndex)}
+          onValueChange={(value) => setSelectedIndex(Number(value))}
         >
-          {completions.map((c, i) => (
-            <button
-              key={c.key}
-              type="button"
-              className={clsx(
+          <CommandList ref={dropdownRef} className="max-h-48">
+            <CommandGroup>
+              {completions.map((c, i) => (
+                <CommandItem
+                  value={String(i)}
+                  key={c.key}
+                  className={clsx(
                 "flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs",
                 i === selectedIndex
                   ? "bg-primary/10 text-foreground"
                   : "text-foreground hover:bg-accent",
               )}
-              onMouseDown={(e) => {
-                e.preventDefault();
-                insertCompletion(c);
-              }}
-              onMouseEnter={() => setSelectedIndex(i)}
-            >
-              <span className="rounded bg-background px-1 py-0.5 text-[10px] text-muted-foreground">
-                {c.source}
-              </span>
-              <span className="flex-1 font-mono">{c.key}</span>
-              <span className="truncate text-muted-foreground">{c.value}</span>
-            </button>
-          ))}
-        </div>
+                  onSelect={() => {
+                    insertCompletion(c);
+                  }}
+                >
+                  <span className="rounded bg-background px-1 py-0.5 text-[10px] text-muted-foreground">
+                    {c.source}
+                  </span>
+                  <span className="flex-1 font-mono">{c.key}</span>
+                  <span className="truncate text-muted-foreground">
+                    {c.value}
+                  </span>
+                </CommandItem>
+              ))}
+            </CommandGroup>
+          </CommandList>
+        </CommandPopover>
       )}
     </div>
   );

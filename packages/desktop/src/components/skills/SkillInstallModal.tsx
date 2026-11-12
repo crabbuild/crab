@@ -1,8 +1,10 @@
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { useState, useRef, useEffect } from "react";
 import { X } from "lucide-react";
-import { useSkills } from "../../state/skills-store";
+import { useEffect, useRef, useState } from "react";
 import { publishToast } from "../../lib/toasts";
+import { useSkills } from "../../state/skills-store";
 
 interface Props {
   open: boolean;
@@ -62,34 +64,43 @@ export function SkillInstallModal({ open, onClose }: Props) {
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Escape") onClose();
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") handleInstall();
   };
 
   if (!open) return null;
 
   return (
-    <div
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm"
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
-      onKeyDown={handleKeyDown}
+    <Dialog
+      open
+      onOpenChange={(open) => { if (!open) onClose(); }}
     >
-      <div className="w-full max-w-lg rounded-xl border border-border bg-background shadow-2xl">
+      <DialogContent
+        onKeyDown={handleKeyDown}
+        showCloseButton={false}
+        aria-describedby={undefined}
+        className="block gap-0 p-0 w-full max-w-lg rounded-xl border border-border bg-background shadow-2xl"
+      >
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-border">
-          <h3 className="text-sm font-semibold text-foreground">Install Skill from URL</h3>
-          <button
+          <DialogTitle className="text-sm font-semibold text-foreground">
+            Install Skill from URL
+          </DialogTitle>
+          <Button
+            variant="ghost"
+            size="compact"
             className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
             onClick={onClose}
           >
             <X size={16} />
-          </button>
+          </Button>
         </div>
 
         {/* Body */}
         <div className="px-4 py-3 space-y-3">
           <div>
-            <label className="block text-xs font-medium text-muted-foreground mb-1">GitHub URL</label>
+            <label className="block text-xs font-medium text-muted-foreground mb-1">
+              GitHub URL
+            </label>
             <Input
               ref={urlRef}
               type="text"
@@ -99,28 +110,33 @@ export function SkillInstallModal({ open, onClose }: Props) {
               className="w-full rounded border border-border bg-accent px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary"
             />
             <p className="text-[10px] text-muted-foreground mt-0.5">
-              Supports GitHub blob/tree URLs, raw URLs, or <code>owner/repo/path</code> shorthand.
+              Supports GitHub blob/tree URLs, raw URLs, or{" "}
+              <code>owner/repo/path</code> shorthand.
             </p>
           </div>
         </div>
 
         {/* Footer */}
         <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-border">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             className="rounded-md px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
             onClick={onClose}
           >
             Cancel
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="default"
+            size="compact"
             className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 transition-opacity disabled:opacity-50"
             onClick={handleInstall}
             disabled={installing}
           >
             {installing ? "Installing..." : "Install"}
-          </button>
+          </Button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

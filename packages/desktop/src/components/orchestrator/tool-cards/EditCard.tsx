@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Specialized renderer for Edit / Write / FileDelete tool calls.
  *
@@ -24,32 +25,32 @@
  *   - input.content / input.diff (Write or partial diff body)
  */
 
-import { useState, useMemo } from "react";
 import clsx from "clsx";
 import {
   Check,
   ChevronDown,
   ChevronRight,
+  FileMinus2,
   FilePen,
   FilePlus2,
-  FileMinus2,
   Loader2,
   ShieldOff,
   Undo2,
   XCircle,
 } from "lucide-react";
-import type { ToolCardRendererProps } from "./types";
-import { useHunkActions } from "./HunkActionsContext";
-import { publishToast } from "../../../lib/toasts";
+import { useMemo, useState } from "react";
 import {
-  isUnifiedDiff,
-  isPartialDiff,
-  synthesizeUnifiedDiff,
   extractAddedFileContent,
+  isPartialDiff,
+  isUnifiedDiff,
+  synthesizeUnifiedDiff,
 } from "../../../lib/codex-diff";
-import { ShikiPreview } from "./ShikiPreview";
-import { UnifiedDiff } from "../UnifiedDiff";
+import { publishToast } from "../../../lib/toasts";
 import { parseDiffStats } from "../../../lib/unified-diff-stats";
+import { UnifiedDiff } from "../UnifiedDiff";
+import { useHunkActions } from "./HunkActionsContext";
+import { ShikiPreview } from "./ShikiPreview";
+import type { ToolCardRendererProps } from "./types";
 
 // ── Component ───────────────────────────────────────────────────────
 
@@ -184,10 +185,12 @@ export function EditCard({
   if (collapsed) {
     return (
       <div className={clsx("rounded-md border overflow-hidden transition-colors", tone.border, tone.bg)}>
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={toggleCollapse}
-          className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-accent transition cursor-pointer"
+          className="justify-start flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-accent transition cursor-pointer"
           aria-expanded="false"
         >
           <Icon size={11} className={clsx("shrink-0", accent)} />
@@ -199,8 +202,12 @@ export function EditCard({
               </span>
               {stats.show && (
                 <span className="flex items-center gap-1 shrink-0">
-                  <span className="text-[9px] font-mono text-success">+{stats.added}</span>
-                  <span className="text-[9px] font-mono text-destructive">−{stats.removed}</span>
+                  <span className="text-[9px] font-mono text-success">
+                    +{stats.added}
+                  </span>
+                  <span className="text-[9px] font-mono text-destructive">
+                    −{stats.removed}
+                  </span>
                 </span>
               )}
               {/* Empty diff, no badge — quietly styled one-liner */}
@@ -217,7 +224,9 @@ export function EditCard({
               </span>
               {stats.show && (
                 <span className="flex items-center gap-1 shrink-0">
-                  <span className="text-[9px] font-mono text-success">+ {stats.added} lines</span>
+                  <span className="text-[9px] font-mono text-success">
+                    + {stats.added} lines
+                  </span>
                 </span>
               )}
             </>
@@ -230,7 +239,9 @@ export function EditCard({
               </span>
               {stats.show && (
                 <span className="flex items-center gap-1 shrink-0">
-                  <span className="text-[9px] font-mono text-destructive">− {stats.removed} lines</span>
+                  <span className="text-[9px] font-mono text-destructive">
+                    − {stats.removed} lines
+                  </span>
                 </span>
               )}
             </>
@@ -239,7 +250,7 @@ export function EditCard({
           <span className="flex-1" />
           <StatusBadge status={status} />
           <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
-        </button>
+        </Button>
       </div>
     );
   }
@@ -249,14 +260,18 @@ export function EditCard({
   return (
     <div className={clsx("rounded-md border overflow-hidden transition-colors", tone.border, tone.bg)}>
       {/* Header */}
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={toggleCollapse}
-        className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-accent transition cursor-pointer"
+        className="justify-start flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-accent transition cursor-pointer"
         aria-expanded="true"
       >
         <Icon size={11} className={clsx("shrink-0", accent)} />
-        <span className={clsx("shrink-0 text-[10px] font-medium", accent)}>{label}</span>
+        <span className={clsx("shrink-0 text-[10px] font-medium", accent)}>
+          {label}
+        </span>
 
         {/* File path */}
         <span className="min-w-0 flex-1 flex items-baseline gap-1 truncate">
@@ -272,10 +287,14 @@ export function EditCard({
         {stats.show && (
           <span className="flex items-center gap-1.5 shrink-0">
             {stats.added > 0 && (
-              <span className="text-[9px] font-mono text-success">+{stats.added}</span>
+              <span className="text-[9px] font-mono text-success">
+                +{stats.added}
+              </span>
             )}
             {stats.removed > 0 && (
-              <span className="text-[9px] font-mono text-destructive">-{stats.removed}</span>
+              <span className="text-[9px] font-mono text-destructive">
+                -{stats.removed}
+              </span>
             )}
           </span>
         )}
@@ -296,33 +315,45 @@ export function EditCard({
               </span>
             ) : (
               <>
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
                   disabled={hunkState === "applying" || hunkState === "reverting"}
                   onClick={() => void applyHunk()}
                   className="inline-flex items-center gap-0.5 rounded border border-success/40 bg-success/10 px-1 py-0.5 text-[9px] text-success hover:bg-success/20 transition disabled:opacity-50"
                   title="Apply this edit to disk"
                 >
-                  {hunkState === "applying" ? <Loader2 size={9} className="animate-spin" /> : <Check size={9} />}
+                  {hunkState === "applying" ? (
+                    <Loader2 size={9} className="animate-spin" />
+                  ) : (
+                    <Check size={9} />
+                  )}
                   Apply
-                </button>
-                <button
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
                   disabled={hunkState === "applying" || hunkState === "reverting"}
                   onClick={() => void revertHunkAction()}
                   className="inline-flex items-center gap-0.5 rounded border border-destructive/40 bg-destructive/10 px-1 py-0.5 text-[9px] text-destructive hover:bg-destructive/20 transition disabled:opacity-50"
                   title="Revert this edit"
                 >
-                  {hunkState === "reverting" ? <Loader2 size={9} className="animate-spin" /> : <Undo2 size={9} />}
+                  {hunkState === "reverting" ? (
+                    <Loader2 size={9} className="animate-spin" />
+                  ) : (
+                    <Undo2 size={9} />
+                  )}
                   Revert
-                </button>
+                </Button>
               </>
             )}
           </span>
         )}
 
         <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
-      </button>
+      </Button>
 
       {/* Hunk error, if any */}
       {hunkError && (

@@ -1,6 +1,8 @@
-import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { DropdownMenuItem, PointMenu } from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
+import { requestPrompt } from "@/lib/application-dialogs";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import clsx from "clsx";
 import {
   Copy,
@@ -16,22 +18,31 @@ import {
   Undo2,
   X,
 } from "lucide-react";
-import { useVirtualizer } from "@tanstack/react-virtual";
-import { OpenRepo } from "../state";
-import { CiCheck, CommitRef, CommitRow, ExperimentRun, ExperimentRunStatus, rpc, gitLogCancellable, isCancelledError } from "../ipc";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CiStatusChip } from "../components/CiStatusChip";
 import {
   CommitGraphSvg,
   graphWidth,
   ROW_HEIGHT,
 } from "../components/CommitGraph";
-import { computeTrunk } from "../lib/commit-graph";
-import { useCommitGraphAsync } from "../hooks/useCommitGraphAsync";
 import { CommitPopover } from "../components/CommitPopover";
-import { CiStatusChip } from "../components/CiStatusChip";
-import { executeCommand } from "../lib/command-registry";
-import type { CommandContext } from "../lib/command-registry";
-import { useFileWatcher, getWatchPath } from "../hooks/useFileWatcher";
+import { useCommitGraphAsync } from "../hooks/useCommitGraphAsync";
+import { getWatchPath, useFileWatcher } from "../hooks/useFileWatcher";
 import { useSessionScroll } from "../hooks/useSessionScroll";
+import {
+  CiCheck,
+  CommitRef,
+  CommitRow,
+  ExperimentRun,
+  ExperimentRunStatus,
+  gitLogCancellable,
+  isCancelledError,
+  rpc,
+} from "../ipc";
+import type { CommandContext } from "../lib/command-registry";
+import { executeCommand } from "../lib/command-registry";
+import { computeTrunk } from "../lib/commit-graph";
+import { OpenRepo } from "../state";
 
 // ── Experiment run chips in Timeline ────────────────────────────────
 
@@ -627,14 +638,6 @@ export function TimelineView({
     return () => el.removeEventListener("scroll", onScroll);
   }, []);
 
-  // Click anywhere else → close context menu.
-  useEffect(() => {
-    if (!menu) return;
-    const onClick = () => setMenu(null);
-    window.addEventListener("click", onClick);
-    return () => window.removeEventListener("click", onClick);
-  }, [menu]);
-
   // Toast auto-dismiss (4 s).
   useEffect(() => {
     if (!toast) return;
@@ -654,7 +657,9 @@ export function TimelineView({
           )}
         </span>
         <div className="flex items-center gap-2">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="text-muted-foreground hover:text-foreground"
             onClick={() => {
@@ -665,8 +670,10 @@ export function TimelineView({
             aria-label="Find commits"
           >
             <Search size={11} />
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="text-muted-foreground hover:text-foreground"
             onClick={refresh}
@@ -674,7 +681,7 @@ export function TimelineView({
             aria-label="Refresh timeline"
           >
             <RefreshCw size={11} />
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -752,28 +759,30 @@ export function TimelineView({
         )}
         {/* Load more button when there are more commits available. */}
         {commits && total != null && commits.length < total && commits.length < MAX_LOADED_COMMITS && (
-          <div className="flex items-center justify-center border-t border-border/40 py-3">
-            <Button variant="outline"
+            <div className="flex items-center justify-center border-t border-border/40 py-3">
+              <Button variant="outline"
               type="button"
               className="text-xs"
               onClick={loadMore}
               disabled={loadingMore}
             >
-              {loadingMore ? (
-                <>
-                  <Loader2 size={11} className="animate-spin" /> Loading…
-                </>
-              ) : (
+                {loadingMore ? (
+                  <>
+                    <Loader2 size={11} className="animate-spin" /> Loading…
+                  </>
+                ) : (
                 `Load more (${commits.length} / ${total})`
               )}
-            </Button>
-          </div>
-        )}
+              </Button>
+            </div>
+          )}
         {commits && total != null && commits.length >= MAX_LOADED_COMMITS && commits.length < total && (
-          <div className="flex items-center justify-center border-t border-border/40 py-3 text-[10px] text-muted-foreground">
-            Showing {commits.length.toLocaleString()} of {total.toLocaleString()} commits. Use Find (⌘F) to search the full history.
-          </div>
-        )}
+            <div className="flex items-center justify-center border-t border-border/40 py-3 text-[10px] text-muted-foreground">
+              Showing {commits.length.toLocaleString()} of{" "}
+              {total.toLocaleString()} commits. Use Find (⌘F) to search the full
+              history.
+            </div>
+          )}
       </div>
 
       {hover && (
@@ -799,7 +808,9 @@ export function TimelineView({
       {/* Inline toast */}
       {toast && (
         <div className="pointer-events-none fixed inset-x-0 bottom-4 z-50 flex justify-center">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={() => setToast(null)}
             className={`pointer-events-auto rounded border px-3 py-1.5 text-xs shadow-lg transition ${
@@ -810,7 +821,7 @@ export function TimelineView({
           >
             {toast.text}
             <span className="ml-2 text-muted-foreground">dismiss</span>
-          </button>
+          </Button>
         </div>
       )}
     </>
@@ -1084,7 +1095,9 @@ function FindBar({
       <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
         {matches === 0 ? "no matches" : `${cursor + 1}/${matches}`}
       </span>
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={onPrev}
         className="rounded px-1 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
@@ -1092,8 +1105,10 @@ function FindBar({
         aria-label="Previous match"
       >
         ▲
-      </button>
-      <button
+      </Button>
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={onNext}
         className="rounded px-1 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
@@ -1101,8 +1116,10 @@ function FindBar({
         aria-label="Next match"
       >
         ▼
-      </button>
-      <button
+      </Button>
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={onClose}
         className="rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
@@ -1110,7 +1127,7 @@ function FindBar({
         aria-label="Close search"
       >
         <X size={11} />
-      </button>
+      </Button>
     </div>
   );
 }
@@ -1137,10 +1154,6 @@ function CommitContextMenu({
     (r) => r.kind === "branch" || r.kind === "head_target",
   );
   const tags = refs.filter((r) => r.kind === "tag");
-
-  const MAX_WIDTH = 240;
-  const left = Math.min(x, window.innerWidth - MAX_WIDTH - 8);
-  const top = Math.min(y, window.innerHeight - 260);
 
   // Build a minimal CommandContext for executeCommand routing.
   const buildContext = (): CommandContext => ({
@@ -1176,7 +1189,7 @@ function CommitContextMenu({
 
   const handleCreateBranch = async () => {
     onClose();
-    const name = window.prompt("New branch name:");
+    const name = await requestPrompt("New branch name:");
     if (!name?.trim()) return;
     // git.branch.create-at expects "branchName:commitSha" format.
     void executeCommand("git.branch.create-at", buildContext(), `${name.trim()}:${commit.sha}`).then(() => onRefresh());
@@ -1189,12 +1202,7 @@ function CommitContextMenu({
   };
 
   return (
-    <div
-      role="menu"
-      style={{ position: "fixed", top, left, width: MAX_WIDTH, zIndex: 60 }}
-      onClick={(e) => e.stopPropagation()}
-      className="overflow-hidden rounded-md border border-border bg-card p-1 text-[12px] shadow-2xl"
-    >
+    <PointMenu position={{ x, y }} onClose={onClose}>
       <MenuItem
         icon={<GitCommitHorizontal size={11} />}
         label="Cherry-Pick"
@@ -1284,14 +1292,17 @@ function CommitContextMenu({
           ))}
         </>
       )}
-    </div>
+    </PointMenu>
   );
 }
 
 /** Simple prompt for reset mode selection. Returns null if cancelled. */
 function promptResetMode(): Promise<"soft" | "mixed" | "hard" | null> {
-  return new Promise((resolve) => {
-    const choice = window.prompt("Reset mode (soft / mixed / hard):", "mixed");
+  return new Promise(async (resolve) => {
+    const choice = await requestPrompt(
+      "Reset mode (soft / mixed / hard):",
+      "mixed",
+    );
     if (!choice) {
       resolve(null);
       return;
@@ -1317,15 +1328,18 @@ function MenuItem({
   onClick: () => void;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="flex w-full items-center gap-2 rounded px-2 py-1 text-left text-[12px] text-foreground transition hover:bg-accent"
+    <DropdownMenuItem
+      onSelect={onClick}
+      className="justify-start flex w-full items-center gap-2 rounded px-2 py-1 text-left text-[12px] text-foreground transition hover:bg-accent"
     >
       <span className="shrink-0 text-muted-foreground">{icon}</span>
       <span className="min-w-0 flex-1 truncate">{label}</span>
-      {hint && <span className="shrink-0 text-[9.5px] text-muted-foreground">{hint}</span>}
-    </button>
+      {hint && (
+        <span className="shrink-0 text-[9.5px] text-muted-foreground">
+          {hint}
+        </span>
+      )}
+    </DropdownMenuItem>
   );
 }
 

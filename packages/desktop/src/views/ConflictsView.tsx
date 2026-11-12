@@ -1,5 +1,6 @@
 import { Button } from "@/components/ui/button";
-import { forwardRef, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import clsx from "clsx";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -9,24 +10,24 @@ import {
   ChevronDown,
   ChevronRight,
   Columns,
-  GitMerge,
   GitBranch,
+  GitMerge,
   Loader2,
   Play,
   Square,
   XCircle,
 } from "lucide-react";
-import clsx from "clsx";
-import { OpenRepo } from "../state";
-import { OpStatusResult, rpc } from "../ipc";
-import { useFileWatcher, getWatchPath } from "../hooks/useFileWatcher";
-import { ViewToolbar } from "../components/ViewToolbar";
-import type { ToolbarAction } from "../components/ViewToolbar";
-import { ContextMenu } from "../components/ContextMenu";
+import { forwardRef, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MenuItemDef } from "../components/ContextMenu";
-import { executeCommand } from "../lib/command-registry";
+import { ContextMenu } from "../components/ContextMenu";
+import type { ToolbarAction } from "../components/ViewToolbar";
+import { ViewToolbar } from "../components/ViewToolbar";
+import { getWatchPath, useFileWatcher } from "../hooks/useFileWatcher";
+import { OpStatusResult, rpc } from "../ipc";
 import type { CommandContext } from "../lib/command-registry";
+import { executeCommand } from "../lib/command-registry";
 import { publishToast } from "../lib/toasts";
+import { OpenRepo } from "../state";
 
 interface ConflictFile {
   path: string;
@@ -575,25 +576,34 @@ export function ConflictsView({ repo, selectedPath, onSelectFile, onConflictCoun
           />
         )}
 
-        {/* ── All-resolved banner (only when op exists + 0 conflicts) */}
+        {/* ── Operation context banner ─────────────────────────────── */}
         {!loading && pausedOp && files && files.length === 0 && (
           <div className="m-2 rounded-md border border-success/40 bg-success/10 p-3">
             <div className="mb-2 flex items-center gap-1.5 text-xs font-medium text-foreground">
               <CheckCircle2 size={13} className="text-success" />
-              All conflicts resolved. Ready to continue the {opLabel(pausedOp.op)}.
+              All conflicts resolved. Ready to continue the{" "}
+              {opLabel(pausedOp.op)}.
             </div>
             <div className="flex items-center gap-2">
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 disabled={bannerBusy}
                 onClick={handleContinue}
                 className="rounded bg-success px-3 py-1.5 text-[11px] font-medium text-success-foreground transition hover:bg-success/80 disabled:opacity-50"
                 aria-label={`Continue ${opLabel(pausedOp.op)}`}
               >
-                {bannerBusy ? <Loader2 size={11} className="inline animate-spin" /> : <Play size={11} className="inline" />}
-                {" "}Continue
-              </button>
-              <button
+                {bannerBusy ? (
+                  <Loader2 size={11} className="inline animate-spin" />
+                ) : (
+                  <Play size={11} className="inline" />
+                )}{" "}
+                Continue
+              </Button>
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 disabled={bannerBusy}
                 onClick={handleAbort}
@@ -601,7 +611,7 @@ export function ConflictsView({ repo, selectedPath, onSelectFile, onConflictCoun
                 aria-label={`Abort ${opLabel(pausedOp.op)}`}
               >
                 Abort
-              </button>
+              </Button>
             </div>
             {bannerError && (
               <div className="mt-2 flex items-center gap-1 text-[11px] text-destructive">
@@ -613,7 +623,8 @@ export function ConflictsView({ repo, selectedPath, onSelectFile, onConflictCoun
 
         {loading && (
           <div className="flex items-center gap-2 p-4 text-xs text-muted-foreground">
-            <Loader2 size={12} className="animate-spin" /> Checking for conflicts…
+            <Loader2 size={12} className="animate-spin" /> Checking for
+            conflicts…
           </div>
         )}
 
@@ -629,10 +640,12 @@ export function ConflictsView({ repo, selectedPath, onSelectFile, onConflictCoun
             <div className="flex h-12 w-12 items-center justify-center rounded-full bg-success/10">
               <CheckCircle2 size={22} className="text-success" />
             </div>
-            <p className="mt-3 text-sm font-medium text-foreground">No conflicts</p>
+            <p className="mt-3 text-sm font-medium text-foreground">
+              No conflicts
+            </p>
             <p className="mt-1 max-w-[240px] text-xs leading-relaxed text-muted-foreground">
-              This view activates automatically when a merge, rebase, or cherry-pick encounters
-              conflicting changes.
+              This view activates automatically when a merge, rebase, or
+              cherry-pick encounters conflicting changes.
             </p>
             <div className="mt-4 rounded border border-border bg-card px-3 py-2 text-[11px] text-muted-foreground">
               <div className="flex items-center gap-2">
@@ -671,15 +684,21 @@ export function ConflictsView({ repo, selectedPath, onSelectFile, onConflictCoun
         {/* ── Resolved files section ───────────────────────────────── */}
         {resolvedFiles.length > 0 && (
           <div className="border-t border-border/60">
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className="flex w-full items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium text-muted-foreground hover:text-foreground"
               onClick={() => setShowResolved(!showResolved)}
               aria-expanded={showResolved}
             >
-              {showResolved ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+              {showResolved ? (
+                <ChevronDown size={12} />
+              ) : (
+                <ChevronRight size={12} />
+              )}
               Resolved ({resolvedFiles.length})
-            </button>
+            </Button>
             {showResolved && (
               <ul role="group" aria-label="Resolved files">
                 {resolvedFiles.map((f) => (
@@ -726,26 +745,31 @@ export function ConflictsView({ repo, selectedPath, onSelectFile, onConflictCoun
 
       {/* ── Bulk resolve confirmation dialog ───────────────────────── */}
       {confirmBulk && (
-        <div
-          className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50"
-          onClick={() => setConfirmBulk(null)}
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="bulk-resolve-title"
+        <Dialog
+          open
+          onOpenChange={(open) => {
+            if (!open) {
+              setConfirmBulk(null);
+            }
+          }}
         >
-          <div
-            className="w-80 rounded-lg border border-border bg-card p-5 shadow-2xl"
+          <DialogContent
+            showCloseButton={false}
+            aria-describedby={undefined}
+            className="block gap-0 p-0 w-80 rounded-lg border border-border bg-card p-5 shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
-            <h3 id="bulk-resolve-title" className="text-sm font-medium text-foreground">
+            <DialogTitle className="text-sm font-medium text-foreground">
               Accept all {confirmBulk === "ours" ? labels.ours : labels.theirs}?
-            </h3>
+            </DialogTitle>
             <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-              This will resolve {count} conflicted file{count !== 1 ? "s" : ""} by accepting the{" "}
+              This will resolve {count} conflicted file{count !== 1 ? "s" : ""}{" "}
+              by accepting the{" "}
               <span className="font-medium text-foreground">
                 {confirmBulk === "ours" ? "current" : "incoming"}
               </span>{" "}
-              version for each file. Individual conflict regions within files will not be merged.
+              version for each file. Individual conflict regions within files
+              will not be merged.
             </p>
             <div className="mt-4 flex justify-end gap-2">
               <Button variant="outline"
@@ -767,13 +791,12 @@ export function ConflictsView({ repo, selectedPath, onSelectFile, onConflictCoun
                 Accept All
               </Button>
             </div>
-          </div>
-        </div>
+          </DialogContent>
+        </Dialog>
       )}
     </>
   );
 }
-
 
 // ── Operation Context Banner ─────────────────────────────────────────
 
@@ -802,7 +825,9 @@ function OperationBanner({ op, conflictCount, resolvedCount, labels }: Operation
       {/* Operation type + branch info */}
       <div className="flex items-center gap-2 text-xs">
         <GitMerge size={13} className="shrink-0 text-warning" />
-        <span className="font-medium capitalize text-foreground">{opType} in progress</span>
+        <span className="font-medium capitalize text-foreground">
+          {opType} in progress
+        </span>
         {source && target && (
           <span className="truncate text-muted-foreground">
             <span className="font-mono text-primary">{source}</span>
@@ -911,7 +936,9 @@ const ConflictFileRow = forwardRef<HTMLLIElement, ConflictFileRowProps>(
               {fileName}
             </span>
             {dirPath && (
-              <span className="truncate text-[10px] text-muted-foreground">{dirPath}/</span>
+              <span className="truncate text-[10px] text-muted-foreground">
+                {dirPath}/
+              </span>
             )}
           </div>
         </div>
@@ -938,7 +965,9 @@ const ConflictFileRow = forwardRef<HTMLLIElement, ConflictFileRowProps>(
             )}
           >
             {strategies.map((s) => (
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 key={s.id}
                 type="button"
                 className="rounded px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground hover:bg-primary/15 hover:text-primary"
@@ -950,7 +979,7 @@ const ConflictFileRow = forwardRef<HTMLLIElement, ConflictFileRowProps>(
                 aria-label={s.tooltip}
               >
                 {s.label}
-              </button>
+              </Button>
             ))}
           </div>
         )}

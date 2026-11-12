@@ -1,5 +1,13 @@
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 import {
   ArrowDown,
@@ -17,19 +25,20 @@ import {
   RefreshCw,
   Trash2,
 } from "lucide-react";
-import { OpenRepo } from "../state";
-import { RefEntry, RefKind, rpc } from "../ipc";
-import { useFileWatcher, getWatchPath } from "../hooks/useFileWatcher";
-import { useSessionScroll } from "../hooks/useSessionScroll";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ConfirmForceDeleteDialog } from "../components/ConfirmForceDeleteDialog";
 import { ConfirmForcePushDialog } from "../components/ConfirmForcePushDialog";
+import { ContextMenu, MenuItemDef } from "../components/ContextMenu";
+import { CreatePrDialog } from "../components/CreatePrDialog";
 import { MergeDialog } from "../components/MergeDialog";
 import { RebaseDialog } from "../components/RebaseDialog";
-import { CreatePrDialog } from "../components/CreatePrDialog";
-import { ViewToolbar, ToolbarAction } from "../components/ViewToolbar";
-import { ContextMenu, MenuItemDef } from "../components/ContextMenu";
-import { executeCommand, CommandContext } from "../lib/command-registry";
+import { ToolbarAction, ViewToolbar } from "../components/ViewToolbar";
+import { getWatchPath, useFileWatcher } from "../hooks/useFileWatcher";
+import { useSessionScroll } from "../hooks/useSessionScroll";
+import { RefEntry, RefKind, rpc } from "../ipc";
+import { CommandContext, executeCommand } from "../lib/command-registry";
 import { publishToast } from "../lib/toasts";
+import { OpenRepo } from "../state";
 
 // ── Pull mode types ────────────────────────────────────────────────
 
@@ -456,7 +465,9 @@ export function BranchesView({ repo, selectedBranch, onSelectBranch }: Props) {
         onAction={handleToolbarAction}
         trailing={
           <span className="flex items-center gap-[4px]">
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-primary/20 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
               onClick={handleFetchAll}
@@ -464,17 +475,27 @@ export function BranchesView({ repo, selectedBranch, onSelectBranch }: Props) {
               title="Fetch all remotes"
               aria-label="Fetch all remotes"
             >
-              {fetchingAll ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
-            </button>
-            <button
+              {fetchingAll ? (
+                <Loader2 size={14} className="animate-spin" />
+              ) : (
+                <Download size={14} />
+              )}
+            </Button>
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-primary/20 hover:text-foreground"
               onClick={refresh}
               title="Refresh"
               aria-label="Refresh branches"
             >
-              {loading ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-            </button>
+              {loading ? (
+                <Loader2 size={14} className="animate-spin" />
+              ) : (
+                <RefreshCw size={14} />
+              )}
+            </Button>
           </span>
         }
       />
@@ -524,7 +545,7 @@ export function BranchesView({ repo, selectedBranch, onSelectBranch }: Props) {
         </div>
       )}
 
-      {/* Body */}
+      {/* Preserve mounted actions and their geometry while background reads run. */}
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto">
         {loading && !refs && (
           <div className="flex items-center gap-2 p-3 text-xs text-muted-foreground">
@@ -576,14 +597,12 @@ export function BranchesView({ repo, selectedBranch, onSelectBranch }: Props) {
                 onCreatePr={(name) => setCreatePrBranch(name)}
               />
             )}
-            {tags.length > 0 && (
-              <TagSection tags={tags} />
-            )}
+            {tags.length > 0 && <TagSection tags={tags} />}
           </div>
         )}
       </div>
 
-      {/* Context menu (reusable ContextMenu component routed through executeCommand) */}
+      {/* Force delete confirmation dialog */}
       {contextMenu && (
         <ContextMenu
           items={branchContextMenuItems}
@@ -593,7 +612,7 @@ export function BranchesView({ repo, selectedBranch, onSelectBranch }: Props) {
         />
       )}
 
-      {/* Force delete confirmation dialog */}
+      {/* Force push confirmation dialog */}
       {forceDeleteBranch && (
         <ConfirmForceDeleteDialog
           branchName={forceDeleteBranch}
@@ -602,7 +621,7 @@ export function BranchesView({ repo, selectedBranch, onSelectBranch }: Props) {
         />
       )}
 
-      {/* Force push confirmation dialog */}
+      {/* Merge dialog */}
       {forcePushBranch && (
         <ConfirmForcePushDialog
           branchName={forcePushBranch}
@@ -611,7 +630,7 @@ export function BranchesView({ repo, selectedBranch, onSelectBranch }: Props) {
         />
       )}
 
-      {/* Merge dialog */}
+      {/* Rebase dialog */}
       {mergeBranch && headBranch && (
         <MergeDialog
           sourceBranch={mergeBranch}
@@ -633,7 +652,7 @@ export function BranchesView({ repo, selectedBranch, onSelectBranch }: Props) {
         />
       )}
 
-      {/* Rebase dialog */}
+      {/* Toast */}
       {rebaseBranch && headBranch && (
         <RebaseDialog
           branch={rebaseBranch}
@@ -655,10 +674,12 @@ export function BranchesView({ repo, selectedBranch, onSelectBranch }: Props) {
         />
       )}
 
-      {/* Toast */}
+      {/* Post-push "Create PR?" prompt */}
       {toast && (
         <div className="pointer-events-none fixed inset-x-0 bottom-4 z-50 flex justify-center">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={() => setToast(null)}
             className={`pointer-events-auto rounded border px-3 py-1.5 text-xs shadow-lg transition ${
@@ -669,7 +690,7 @@ export function BranchesView({ repo, selectedBranch, onSelectBranch }: Props) {
           >
             {toast.text}
             <span className="ml-2 text-muted-foreground">dismiss</span>
-          </button>
+          </Button>
         </div>
       )}
 
@@ -678,8 +699,12 @@ export function BranchesView({ repo, selectedBranch, onSelectBranch }: Props) {
         <div className="pointer-events-none fixed inset-x-0 bottom-4 z-50 flex justify-center">
           <div className="pointer-events-auto flex items-center gap-2 rounded border border-primary/40 bg-card px-3 py-1.5 text-xs shadow-lg">
             <GitPullRequest size={12} className="text-primary" />
-            <span className="text-foreground">Branch pushed. Create a pull request?</span>
-            <button
+            <span className="text-foreground">
+              Branch pushed. Create a pull request?
+            </span>
+            <Button
+              variant="default"
+              size="compact"
               type="button"
               className="rounded bg-primary px-2 py-0.5 text-[11px] font-medium text-primary-foreground hover:bg-primary/90"
               onClick={() => {
@@ -688,14 +713,16 @@ export function BranchesView({ repo, selectedBranch, onSelectBranch }: Props) {
               }}
             >
               Create PR
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className="text-muted-foreground hover:text-foreground"
               onClick={() => setPostPushBranch(null)}
             >
               dismiss
-            </button>
+            </Button>
           </div>
         </div>
       )}
@@ -716,7 +743,6 @@ export function BranchesView({ repo, selectedBranch, onSelectBranch }: Props) {
     </>
   );
 }
-
 
 // ── Tree section (collapsible group) ───────────────────────────────
 
@@ -762,7 +788,9 @@ function TreeSection({
 
   return (
     <div className="mb-1">
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         className="flex w-full items-center gap-1 px-3 py-1 text-[11px] uppercase tracking-wider text-muted-foreground hover:text-foreground"
         onClick={() => setOpen((o) => !o)}
@@ -771,7 +799,7 @@ function TreeSection({
         {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
         {title}
         <span className="ml-auto text-[10px]">({count})</span>
-      </button>
+      </Button>
       {open && (
         <div role="listbox" aria-label={`${title} branches`}>
           <TreeNodeList
@@ -935,7 +963,9 @@ function FolderNode({
 
   return (
     <div>
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         className="flex w-full items-center gap-1 py-0.5 text-[12px] text-muted-foreground hover:bg-background hover:text-foreground"
         style={{ paddingLeft }}
@@ -944,7 +974,7 @@ function FolderNode({
       >
         {open ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
         <span className="font-mono text-[11px]">{node.segment}/</span>
-      </button>
+      </Button>
       {open && (
         <TreeNodeList
           node={node}
@@ -1034,11 +1064,6 @@ function BranchRow({
     }
   }
 
-  async function handlePull(e: React.MouseEvent) {
-    e.stopPropagation();
-    setPullModeOpen(true);
-  }
-
   async function handlePullWithMode(mode: PullMode) {
     setPullModeOpen(false);
     setStoredPullMode(repoId, branch.name, mode);
@@ -1106,7 +1131,9 @@ function BranchRow({
       aria-selected={isSelected}
     >
       {branch.is_head && (
-        <span className="shrink-0 text-primary" title="HEAD">*</span>
+        <span className="shrink-0 text-primary" title="HEAD">
+          *
+        </span>
       )}
       <span
         className={`min-w-0 flex-1 truncate font-mono text-[11px] ${
@@ -1121,7 +1148,9 @@ function BranchRow({
       {hasUpstream && (
         <span className={clsx("relative flex shrink-0 items-center gap-0.5 transition-opacity", pullModeOpen ? "opacity-100" : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100")}>
           {ahead > 0 && (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className="rounded p-0.5 text-primary hover:bg-primary/20 disabled:opacity-50"
               onClick={handlePush}
@@ -1129,30 +1158,44 @@ function BranchRow({
               title={`Push ${branch.name}`}
               aria-label={`Push ${branch.name}`}
             >
-              {actionBusy === "push" ? <Loader2 size={11} className="animate-spin" /> : <ArrowUp size={11} />}
-            </button>
+              {actionBusy === "push" ? (
+                <Loader2 size={11} className="animate-spin" />
+              ) : (
+                <ArrowUp size={11} />
+              )}
+            </Button>
           )}
           {behind > 0 && (
-            <button
-              type="button"
+            <DropdownMenu open={pullModeOpen} onOpenChange={setPullModeOpen}>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="compact"
+                  type="button"
               className="rounded p-0.5 text-warning hover:bg-warning/20 disabled:opacity-50"
-              onClick={handlePull}
+              onClick={(event) => event.stopPropagation()}
               disabled={actionBusy !== null}
               title={`Pull ${branch.name}`}
               aria-label={`Pull ${branch.name}`}
             >
-              {actionBusy === "pull" ? <Loader2 size={11} className="animate-spin" /> : <ArrowDown size={11} />}
-            </button>
-          )}
-          {pullModeOpen && (
-            <PullModeDropdown
+              {actionBusy === "pull" ? (
+                    <Loader2 size={11} className="animate-spin" />
+                  ) : (
+                    <ArrowDown size={11} />
+                  )}
+                </Button>
+              </DropdownMenuTrigger>
+              <PullModeDropdown
               repoId={repoId}
               branchName={branch.name}
               onSelect={handlePullWithMode}
-              onClose={() => setPullModeOpen(false)}
-            />
+              />
+            </DropdownMenu>
           )}
-          <button
+
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="rounded p-0.5 text-muted-foreground hover:bg-card hover:text-foreground disabled:opacity-50"
             onClick={handleFetch}
@@ -1160,9 +1203,15 @@ function BranchRow({
             title={`Fetch ${branch.name}`}
             aria-label={`Fetch ${branch.name}`}
           >
-            {actionBusy === "fetch" ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
-          </button>
-          <button
+            {actionBusy === "fetch" ? (
+              <Loader2 size={11} className="animate-spin" />
+            ) : (
+              <RefreshCw size={11} />
+            )}
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="rounded p-0.5 text-muted-foreground hover:bg-primary/80 hover:text-primary disabled:opacity-50"
             onClick={(e) => { e.stopPropagation(); onCreatePr(branch.name); }}
@@ -1171,7 +1220,7 @@ function BranchRow({
             aria-label={`Create pull request for ${branch.name}`}
           >
             <GitPullRequest size={11} />
-          </button>
+          </Button>
         </span>
       )}
 
@@ -1183,64 +1232,32 @@ function BranchRow({
 
 // ── Pull mode dropdown ──────────────────────────────────────────────
 
-interface PullModeDropdownProps {
+function PullModeDropdown({ repoId, branchName, onSelect,
+}: {
   repoId: string;
   branchName: string;
   onSelect: (mode: PullMode) => void;
-  onClose: () => void;
-}
-
-function PullModeDropdown({ repoId, branchName, onSelect, onClose }: PullModeDropdownProps) {
-  const ref = useRef<HTMLDivElement>(null);
-  const currentMode = getStoredPullMode(repoId, branchName);
-
-  useEffect(() => {
-    const dismiss = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("mousedown", dismiss);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("mousedown", dismiss);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [onClose]);
-
-  const modes: { value: PullMode; label: string }[] = [
+}) {
+  return (
+    <DropdownMenuContent align="end">
+      <DropdownMenuLabel>Pull mode</DropdownMenuLabel>
+      <DropdownMenuRadioGroup
+        value={getStoredPullMode(repoId, branchName)}
+        onValueChange={(mode) => onSelect(mode as PullMode)}
+      >
+        {(
+          [
     { value: "merge", label: "Merge" },
     { value: "rebase", label: "Rebase" },
     { value: "ff-only", label: "Fast-forward only" },
-  ];
-
-  return (
-    <div
-      ref={ref}
-      className="absolute right-0 top-full z-50 mt-1 min-w-[140px] rounded border border-border bg-card py-1 shadow-lg"
-      role="menu"
-      onClick={(e) => e.stopPropagation()}
-    >
-      <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-muted-foreground">
-        Pull mode
-      </div>
-      {modes.map((m) => (
-        <button
-          key={m.value}
-          type="button"
-          className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] hover:bg-primary/10 ${
-            currentMode === m.value ? "text-primary font-medium" : "text-foreground"
-          }`}
-          onClick={() => onSelect(m.value)}
-          role="menuitem"
-        >
-          {currentMode === m.value && <span className="text-primary">•</span>}
-          {currentMode !== m.value && <span className="invisible">•</span>}
-          {m.label}
-        </button>
-      ))}
-    </div>
+  ] as const
+        ).map((mode) => (
+          <DropdownMenuRadioItem key={mode.value} value={mode.value}>
+            {mode.label}
+          </DropdownMenuRadioItem>
+        ))}
+      </DropdownMenuRadioGroup>
+    </DropdownMenuContent>
   );
 }
 
@@ -1286,7 +1303,9 @@ function TagSection({ tags }: { tags: RefEntry[] }) {
   const [open, setOpen] = useState(false);
   return (
     <div className="mb-1">
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         className="flex w-full items-center gap-1 px-3 py-1 text-[11px] uppercase tracking-wider text-muted-foreground hover:text-foreground"
         onClick={() => setOpen((o) => !o)}
@@ -1295,7 +1314,7 @@ function TagSection({ tags }: { tags: RefEntry[] }) {
         {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
         Tags
         <span className="ml-auto text-[10px]">({tags.length})</span>
-      </button>
+      </Button>
       {open && (
         <div>
           {tags.map((t) => (

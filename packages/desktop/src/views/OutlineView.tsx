@@ -1,9 +1,10 @@
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { Button } from "@/components/ui/button";
 import clsx from "clsx";
 import { ChevronDown, ChevronRight, List, Loader2 } from "lucide-react";
-import { OpenRepo } from "../state";
-import { getAncestorChain, getSymbolTree, SymbolNode } from "../lib/symbol-tree";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { SymbolKindIcon } from "../components/SymbolKindIcon";
+import { getAncestorChain, getSymbolTree, SymbolNode } from "../lib/symbol-tree";
+import { OpenRepo } from "../state";
 
 export interface OutlineViewProps {
   repo: OpenRepo;
@@ -185,18 +186,16 @@ function SymbolTreeItem({
       >
         {/* Expand/collapse toggle */}
         {hasChildren ? (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="shrink-0 p-0.5 rounded hover:bg-accent"
             onClick={handleToggle}
             aria-label={expanded ? "Collapse" : "Expand"}
           >
-            {expanded ? (
-              <ChevronDown size={12} />
-            ) : (
-              <ChevronRight size={12} />
-            )}
-          </button>
+            {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+          </Button>
         ) : (
           <span className="w-[16px] shrink-0" />
         )}

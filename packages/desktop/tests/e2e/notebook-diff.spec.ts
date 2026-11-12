@@ -1,3 +1,4 @@
+import { chooseSelect } from "../helpers/select";
 import { test, expect, _electron as electron } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -46,7 +47,8 @@ test("packaged notebooks compare captured versions, page content and expose fail
     rmSync(path.join(source, "removed.ipynb"));
     writeFileSync(path.join(source, "added.ipynb"), notebook(1, "new"));
     writeFileSync(path.join(source, "added-empty.ipynb"), notebook(0, "new"));
-    writeFileSync(path.join(source, "missing.ipynb"), `version https://git-lfs.github.com/spec/v1\noid sha256:${createHash("sha256").update("missing").digest("hex")}\nsize 7\n`);
+    writeFileSync(path.join(source, "missing.ipynb"), `version https://git-lfs.github.com/spec/v1\noid sha256:${createHash("sha256").update("missing").digest("hex")}\nsize 7\n`,
+    );
     const large = openSync(path.join(source, "oversize.ipynb"), "w");
     try { ftruncateSync(large, 17 * 1024 ** 2); } finally { closeSync(large); }
 
@@ -72,9 +74,9 @@ test("packaged notebooks compare captured versions, page content and expose fail
     const comparison = page.getByRole("region", { name: "Notebook comparison", exact: true });
     await expect(comparison.getByText("1 changed cell", { exact: true })).toBeVisible();
     await expect(comparison.getByRole("region", { name: "After Source", exact: true })).toContainText("working");
-    await selector.selectOption("staged");
+    await chooseSelect(selector, "staged");
     await expect(comparison.getByRole("region", { name: "After Source", exact: true })).toContainText("staged");
-    await selector.selectOption("unstaged");
+    await chooseSelect(selector, "unstaged");
     await expect(comparison.getByRole("region", { name: "Before Source", exact: true })).toContainText("staged");
     await expect(comparison.getByRole("region", { name: "After Source", exact: true })).toContainText("working");
     await comparison.getByRole("button", { name: "Show all outputs", exact: true }).click();
@@ -131,7 +133,7 @@ test("packaged notebooks compare captured versions, page content and expose fail
       // Pause the real worker at startup so cancellation is deterministic even
       // on fast CI hosts. The UI must terminate it, not just hide its result.
       await debuggerSession.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true, filter: [{ type: "worker", exclude: false }] });
-      await selector.selectOption("staged");
+      await chooseSelect(selector, "staged");
       await expect(page.getByRole("button", { name: "Cancel notebook comparison", exact: true })).toBeVisible();
       await expect.poll(() => notebookWorker).toBeTruthy();
       await page.getByRole("button", { name: "Cancel notebook comparison", exact: true }).click();

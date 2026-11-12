@@ -1,7 +1,6 @@
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 /** Guided tracking, selected-file commit and push through the existing owners. */
-import { useCallback, useEffect, useMemo, useState } from "react";
 import clsx from "clsx";
 import {
   AlertTriangle,
@@ -14,9 +13,10 @@ import {
   Package,
   XCircle,
 } from "lucide-react";
-import { OpenRepo } from "../state";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { rpc, TrackAndAddResult } from "../ipc";
 import { formatBytes } from "../lib/format";
+import { OpenRepo } from "../state";
 import { PushFlowPanel } from "../views/PushFlowPanel";
 
 interface Props {
@@ -145,10 +145,10 @@ export function LargeFileWizard({ repo, files, onComplete, onBack }: Props) {
 
       {/* Content area */}
       <div className="min-h-0 flex-1 overflow-auto">
-        {/* Step 1: Review */}
+        {/* Content area */}
         {step === "review" && (
           <div className="space-y-4 p-4">
-            {/* Summary card */}
+            {/* Step 1: Review */}
             <div className="rounded-lg border border-border bg-background p-4">
               <div className="flex items-center justify-between">
                 <div>
@@ -159,13 +159,15 @@ export function LargeFileWizard({ repo, files, onComplete, onBack }: Props) {
                     Total size: {formatBytes(totalSize)}
                   </div>
                 </div>
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
                   className="text-xs text-primary hover:underline"
                   onClick={onBack}
                 >
                   Change selection
-                </button>
+                </Button>
               </div>
             </div>
 
@@ -186,13 +188,17 @@ export function LargeFileWizard({ repo, files, onComplete, onBack }: Props) {
                 ))}
               </div>
               <p className="mt-2 text-[10px] text-muted-foreground">
-                Tracking configures repository-local Crab and Git LFS drivers with Crab. New paths use Crab chunking. Existing file routing is retained.
+                Tracking configures repository-local Crab and Git LFS drivers
+                with Crab. New paths use Crab chunking. Existing file routing is
+                retained.
               </p>
             </div>
 
             {/* File list */}
             <div>
-              <div className="mb-2 text-xs font-medium text-muted-foreground">Files to track</div>
+              <div className="mb-2 text-xs font-medium text-muted-foreground">
+                Files to track
+              </div>
               <div className="space-y-1">
                 {fileStatuses.map((f) => (
                   <FileRow key={f.path} file={f} />
@@ -202,7 +208,9 @@ export function LargeFileWizard({ repo, files, onComplete, onBack }: Props) {
 
             {/* What will happen */}
             <div className="rounded-lg border border-border p-4">
-              <div className="text-xs font-medium text-foreground">What will happen</div>
+              <div className="text-xs font-medium text-foreground">
+                What will happen
+              </div>
               <ol className="mt-2 space-y-1.5 text-[11px] text-muted-foreground">
                 <li className="flex items-start gap-2">
                   <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-primary/10 text-[9px] font-bold text-primary">
@@ -210,28 +218,33 @@ export function LargeFileWizard({ repo, files, onComplete, onBack }: Props) {
                   </span>
                   <span>
                     Register selected paths in{" "}
-                    <code className="font-mono text-foreground">.gitattributes</code>
+                    <code className="font-mono text-foreground">
+                      .gitattributes
+                    </code>
                   </span>
                 </li>
                 <li className="flex items-start gap-2">
                   <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-primary/10 text-[9px] font-bold text-primary">
                     2
                   </span>
-                  <span>
-                    Store each file through its configured filter
-                  </span>
+                  <span>Store each file through its configured filter</span>
                 </li>
                 <li className="flex items-start gap-2">
                   <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-primary/10 text-[9px] font-bold text-primary">
                     3
                   </span>
-                  <span>Stage lightweight pointers while keeping the working files</span>
+                  <span>
+                    Stage lightweight pointers while keeping the working files
+                  </span>
                 </li>
                 <li className="flex items-start gap-2">
                   <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-primary/10 text-[9px] font-bold text-primary">
                     4
                   </span>
-                  <span>Commit the selected files and tracking rules, then push to the remote</span>
+                  <span>
+                    Commit the selected files and tracking rules, then push to
+                    the remote
+                  </span>
                 </li>
               </ol>
             </div>
@@ -314,14 +327,20 @@ export function LargeFileWizard({ repo, files, onComplete, onBack }: Props) {
                         {f.path.split("/").pop()}
                       </div>
                       {f.error && (
-                        <div className="mt-1 text-destructive/70">{f.error}</div>
+                        <div className="mt-1 text-destructive/70">
+                          {f.error}
+                        </div>
                       )}
                     </div>
                   ))}
               </div>
             )}
 
-            {errorCount > 0 && <Button variant="outline" type="button" className="w-full justify-center" onClick={handleTrack}>Retry tracking</Button>}
+            {errorCount > 0 && (
+              <Button variant="outline" type="button" className="w-full justify-center" onClick={handleTrack}>
+                Retry tracking
+              </Button>
+            )}
 
             {/* Continue to commit (if any files succeeded) */}
             {trackedCount > 0 && (
@@ -350,7 +369,8 @@ export function LargeFileWizard({ repo, files, onComplete, onBack }: Props) {
               <div className="mt-2 space-y-1 text-[11px] text-muted-foreground">
                 <div className="flex items-center gap-1.5">
                   <Check size={10} className="text-success" />
-                  {trackedCount} pointer file{trackedCount > 1 ? "s" : ""} staged
+                  {trackedCount} pointer file{trackedCount > 1 ? "s" : ""}{" "}
+                  staged
                 </div>
                 {trackResult?.commit_paths.includes(".gitattributes") && (
                   <div className="flex items-center gap-1.5">
@@ -360,7 +380,8 @@ export function LargeFileWizard({ repo, files, onComplete, onBack }: Props) {
                 )}
                 <div className="flex items-center gap-1.5">
                   <HardDrive size={10} className="text-primary" />
-                  {formatBytes(fileStatuses.filter(file => file.status === "tracked").reduce((sum, file) => sum + file.size, 0))} tracked
+                  {formatBytes(fileStatuses.filter(file => file.status === "tracked").reduce((sum, file) => sum + file.size, 0))}{" "}
+                  tracked
                 </div>
               </div>
             </div>
@@ -389,7 +410,8 @@ export function LargeFileWizard({ repo, files, onComplete, onBack }: Props) {
                 aria-label="Commit message for tracked files"
               />
               <p className="mt-1 text-[10px] text-muted-foreground">
-                Ctrl+Enter commits the current contents of these selected files and their tracking rules.
+                Ctrl+Enter commits the current contents of these selected files
+                and their tracking rules.
               </p>
             </div>
 
@@ -452,13 +474,15 @@ export function LargeFileWizard({ repo, files, onComplete, onBack }: Props) {
             </div>
 
             {/* Skip push option */}
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className="w-full text-center text-xs text-muted-foreground hover:text-foreground"
               onClick={onComplete}
             >
               Skip push — I'll push later
-            </button>
+            </Button>
           </div>
         )}
 
@@ -468,10 +492,12 @@ export function LargeFileWizard({ repo, files, onComplete, onBack }: Props) {
             <div className="flex h-12 w-12 items-center justify-center rounded-full bg-success/10">
               <CheckCircle2 size={24} className="text-success" />
             </div>
-            <div className="mt-4 text-sm font-medium text-foreground">All done</div>
+            <div className="mt-4 text-sm font-medium text-foreground">
+              All done
+            </div>
             <div className="mt-1 text-xs text-muted-foreground">
-              {trackedCount} file{trackedCount > 1 ? "s" : ""} tracked, committed, and pushed
-              to remote.
+              {trackedCount} file{trackedCount > 1 ? "s" : ""} tracked,
+              committed, and pushed to remote.
             </div>
             <Button variant="default"
               type="button"
@@ -562,7 +588,9 @@ function FileRow({ file }: { file: FileStatus }) {
       <div className="flex min-w-0 flex-1 items-baseline gap-1">
         <span className="truncate font-mono text-foreground">{fileName}</span>
         {dirPath && (
-          <span className="truncate text-[10px] text-muted-foreground">{dirPath}</span>
+          <span className="truncate text-[10px] text-muted-foreground">
+            {dirPath}
+          </span>
         )}
       </div>
 

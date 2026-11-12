@@ -1,4 +1,11 @@
-import { Input } from "@/components/ui/input";
+import {
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+  Command as CommandRoot,
+} from "@/components/ui/command";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 /**
  * WorkspaceSymbolPalette — Cmd/Ctrl+T style fuzzy finder for symbols
  * across the whole workspace.
@@ -13,15 +20,15 @@ import { Input } from "@/components/ui/input";
  *   Escape        — close palette
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
-import { Loader2, Search } from "lucide-react";
-import { SymbolKindIcon } from "./SymbolKindIcon";
+import { Loader2 } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { lspSymbolKindToSymbolKind } from "../lib/lsp-symbol-kind";
 import {
   searchWorkspaceSymbols,
   type WorkspaceSymbolResult,
 } from "../lib/lsp-workspace-symbols";
-import { lspSymbolKindToSymbolKind } from "../lib/lsp-symbol-kind";
+import { SymbolKindIcon } from "./SymbolKindIcon";
 
 interface Props {
   open: boolean;
@@ -100,38 +107,6 @@ export function WorkspaceSymbolPalette({ open, onClose, onNavigate }: Props) {
     };
   }, [query, open]);
 
-  const commit = useCallback(() => {
-    const match = results[selectedIndex];
-    if (!match) return;
-    onNavigate(match.uri, match.range.startLineNumber, match.range.startColumn);
-    onClose();
-  }, [results, selectedIndex, onNavigate, onClose]);
-
-  const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent<HTMLInputElement>) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onClose();
-      } else if (e.key === "Enter") {
-        e.preventDefault();
-        commit();
-      } else if (e.key === "ArrowDown") {
-        e.preventDefault();
-        setSelectedIndex((i) => Math.min(i + 1, Math.max(0, results.length - 1)));
-      } else if (e.key === "ArrowUp") {
-        e.preventDefault();
-        setSelectedIndex((i) => Math.max(0, i - 1));
-      } else if (e.key === "Home") {
-        e.preventDefault();
-        setSelectedIndex(0);
-      } else if (e.key === "End") {
-        e.preventDefault();
-        setSelectedIndex(Math.max(0, results.length - 1));
-      }
-    },
-    [results.length, commit, onClose],
-  );
-
   // Keep selected item in view as the user navigates.
   useEffect(() => {
     const list = listRef.current;
@@ -143,99 +118,117 @@ export function WorkspaceSymbolPalette({ open, onClose, onNavigate }: Props) {
   if (!open) return null;
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 pt-[12vh]"
-      onClick={onClose}
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) {
+          onClose();
+        }
+      }}
     >
-      <div
-        className="flex w-[min(720px,92vw)] max-h-[70vh] flex-col overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
+      <DialogContent
+        showCloseButton={false}
+        aria-describedby={undefined}
+        className="block gap-0 p-0 flex w-[min(720px,92vw)] max-h-[70vh] flex-col overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Search input */}
-        <div className="flex items-center gap-2 border-b border-border px-3 py-2">
-          <Search size={14} className="shrink-0 text-muted-foreground" />
-          <Input
-            ref={inputRef}
-            type="text"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Search workspace symbols..."
-            className="flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground/50 outline-none"
-            aria-label="Search workspace symbols"
-            autoComplete="off"
-            spellCheck={false}
-          />
-          {loading && <Loader2 size={12} className="animate-spin text-muted-foreground" />}
-        </div>
+        <CommandRoot
+          shouldFilter={false}
+          value={String(selectedIndex)}
+          onValueChange={(value) => setSelectedIndex(Number(value))}
+        >
+          <DialogTitle className="sr-only">
+            {"Workspace Symbol Palette"}
+          </DialogTitle>
+          {/* Search input */}
+          <div className="flex items-center gap-2 border-b border-border px-3 py-2">
+            <CommandInput
+              ref={inputRef}
+              value={query}
+              onValueChange={(value) => setQuery(value)}
+              placeholder="Search workspace symbols..."
+              className="flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground/50 outline-none"
+              aria-label="Search workspace symbols"
+              autoComplete="off"
+              spellCheck={false}
+            />
+            {loading && (
+              <Loader2 size={12} className="animate-spin text-muted-foreground" />
+            )}
+          </div>
 
-        {/* Results */}
-        <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
-          {lastError && (
-            <div className="px-3 py-4 text-xs text-destructive">
-              Search failed: {lastError}
-            </div>
-          )}
-          {!lastError && !loading && query.trim() && results.length === 0 && (
-            <div className="px-3 py-4 text-xs text-muted-foreground">
-              No symbols found for "{query.trim()}"
-            </div>
-          )}
-          {!query.trim() && (
-            <div className="px-3 py-4 text-xs text-muted-foreground">
-              Start typing to search across functions, classes, and methods in your workspace.
-            </div>
-          )}
-          {results.map((symbol, idx) => (
-            <button
-              key={`${symbol.language}-${symbol.uri}-${symbol.range.startLineNumber}-${symbol.name}-${idx}`}
-              data-index={idx}
-              type="button"
-              onClick={() => {
+          {/* Results */}
+          <CommandList
+            ref={listRef} className="min-h-0 flex-1 overflow-y-auto scrollbar-thin"
+          >
+            <CommandGroup>
+              {lastError && (
+                <div className="px-3 py-4 text-xs text-destructive">
+                  Search failed: {lastError}
+                </div>
+              )}
+              {!lastError && !loading && query.trim() && results.length === 0 && (
+                  <div className="px-3 py-4 text-xs text-muted-foreground">
+                    No symbols found for "{query.trim()}"
+                  </div>
+                )}
+              {!query.trim() && (
+                <div className="px-3 py-4 text-xs text-muted-foreground">
+                  Start typing to search across functions, classes, and methods
+                  in your workspace.
+                </div>
+              )}
+              {results.map((symbol, idx) => (
+                <CommandItem
+                  value={String(idx)}
+                  key={`${symbol.language}-${symbol.uri}-${symbol.range.startLineNumber}-${symbol.name}-${idx}`}
+                  data-index={idx}
+                  onSelect={() => {
                 setSelectedIndex(idx);
                 onNavigate(symbol.uri, symbol.range.startLineNumber, symbol.range.startColumn);
                 onClose();
               }}
-              onMouseEnter={() => setSelectedIndex(idx)}
-              className={clsx(
+                  className={clsx(
                 "flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition",
                 idx === selectedIndex
                   ? "bg-primary/10 text-foreground"
                   : "text-foreground/90 hover:bg-accent",
               )}
-            >
-              <SymbolKindIcon
+                >
+                  <SymbolKindIcon
                 kind={lspSymbolKindToSymbolKind(symbol.kind)}
                 size={12}
               />
-              <span className="truncate font-medium">
-                {symbol.name}
-              </span>
-              {symbol.containerName && (
-                <span className="shrink-0 truncate text-[10px] text-muted-foreground">
-                  in {symbol.containerName}
-                </span>
-              )}
-              <span className="ml-auto shrink-0 truncate text-[10px] text-muted-foreground/70">
-                {displayPath(symbol.uri)}:{symbol.range.startLineNumber}
-              </span>
-            </button>
-          ))}
-        </div>
+                  <span className="truncate font-medium">{symbol.name}</span>
+                  {symbol.containerName && (
+                    <span className="shrink-0 truncate text-[10px] text-muted-foreground">
+                      in {symbol.containerName}
+                    </span>
+                  )}
+                  <span className="ml-auto shrink-0 truncate text-[10px] text-muted-foreground/70">
+                    {displayPath(symbol.uri)}:{symbol.range.startLineNumber}
+                  </span>
+                </CommandItem>
+              ))}
+            </CommandGroup>
+          </CommandList>
 
-        {/* Footer */}
-        <div className="flex items-center justify-between border-t border-border bg-background px-3 py-1 text-[10px] text-muted-foreground">
-          <span>
-            {results.length > 0
+          {/* Footer */}
+          <div className="flex items-center justify-between border-t border-border bg-background px-3 py-1 text-[10px] text-muted-foreground">
+            <span>
+              {results.length > 0
               ? `${results.length} result${results.length === 1 ? "" : "s"}`
               : ""}
-          </span>
-          <span>
-            <kbd className="font-sans">↑↓</kbd> navigate <kbd className="font-sans ml-2">↵</kbd> open <kbd className="font-sans ml-2">esc</kbd> close
-          </span>
-        </div>
-      </div>
-    </div>
+            </span>
+            <span>
+              <kbd className="font-sans">↑↓</kbd> navigate{" "}
+              <kbd className="font-sans ml-2">↵</kbd> open{" "}
+              <kbd className="font-sans ml-2">esc</kbd> close
+            </span>
+          </div>
+        </CommandRoot>
+      </DialogContent>
+    </Dialog>
   );
 }
 

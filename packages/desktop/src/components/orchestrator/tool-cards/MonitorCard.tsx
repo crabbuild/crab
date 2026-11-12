@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { useCardExpanded } from "./useCardExpanded";
 /**
  * Specialized renderer for Monitor tool calls.
@@ -7,12 +8,11 @@ import { useCardExpanded } from "./useCardExpanded";
  * syntax highlighting when it looks like structured content.
  */
 
-
 import clsx from "clsx";
-import { ChevronDown, ChevronRight, Radio, Eye } from "lucide-react";
-import type { ToolCardRendererProps } from "./types";
+import { ChevronDown, ChevronRight, Eye, Radio } from "lucide-react";
 import { CollapsedCardLine } from "./CollapsedCardLine";
 import { ShikiPreview } from "./ShikiPreview";
+import type { ToolCardRendererProps } from "./types";
 
 // ── Component ───────────────────────────────────────────────────────
 
@@ -34,7 +34,9 @@ export function MonitorCard({ event, defaultExpanded = false, collapsed: collaps
       <>
         <Eye size={11} className="shrink-0 text-muted-foreground" />
         <span className="font-medium text-foreground/80">Monitor</span>
-        <span className="truncate text-foreground/70 font-mono">{displayText}</span>
+        <span className="truncate text-foreground/70 font-mono">
+          {displayText}
+        </span>
         <span className="shrink-0 flex items-center gap-0.5 text-[9px] text-success">
           <Radio size={8} /> live
         </span>
@@ -51,7 +53,9 @@ export function MonitorCard({ event, defaultExpanded = false, collapsed: collaps
 
   return (
     <div className="rounded-md border border-border/40 overflow-hidden">
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={() => hasOutput && setExpanded(!expanded)}
         className={clsx(
@@ -61,7 +65,9 @@ export function MonitorCard({ event, defaultExpanded = false, collapsed: collaps
         )}
       >
         <Eye size={11} className="text-muted-foreground shrink-0" />
-        <span className="shrink-0 font-medium text-muted-foreground">Monitor</span>
+        <span className="shrink-0 font-medium text-muted-foreground">
+          Monitor
+        </span>
 
         <span className="min-w-0 flex-1 truncate font-mono text-foreground/80">
           {displayText}
@@ -73,12 +79,13 @@ export function MonitorCard({ event, defaultExpanded = false, collapsed: collaps
           live
         </span>
 
-        {hasOutput && (
-          expanded
-            ? <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
-            : <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
-        )}
-      </button>
+        {hasOutput &&
+          (expanded ? (
+            <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
+          ) : (
+            <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
+          ))}
+      </Button>
 
       {expanded && hasOutput && (
         <div className="border-t border-border/30 max-h-[200px] overflow-auto">
@@ -103,7 +110,9 @@ function MonitorOutput({ output }: { output: string }) {
   if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
     try {
       JSON.parse(output.length > OUTPUT_TRUNCATION_LIMIT ? output : trimmed);
-      return <ShikiPreview code={text} lang="json" className="[&_pre]:!py-2 [&_pre]:!px-2.5" />;
+      return (
+        <ShikiPreview code={text} lang="json" className="[&_pre]:!py-2 [&_pre]:!px-2.5" />
+      );
     } catch {
       // Not valid JSON, fall through.
     }

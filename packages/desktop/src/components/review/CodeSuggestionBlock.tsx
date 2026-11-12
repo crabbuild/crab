@@ -1,5 +1,6 @@
-import { useCallback, useState } from "react";
+import { Button } from "@/components/ui/button";
 import { AlertCircle, Check, Clock, GitCommitHorizontal, Loader2 } from "lucide-react";
+import { useCallback, useState } from "react";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -151,7 +152,9 @@ export function CodeSuggestionBlock({
         )}
 
         {canApply && (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="inline-flex items-center gap-1 rounded bg-primary/10 px-2 py-1 text-[10px] text-primary hover:bg-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
             onClick={handleApply}
@@ -169,7 +172,7 @@ export function CodeSuggestionBlock({
                 Apply suggestion
               </>
             )}
-          </button>
+          </Button>
         )}
 
         {!canApply && !applied && !outdated && !hasWriteAccess && (

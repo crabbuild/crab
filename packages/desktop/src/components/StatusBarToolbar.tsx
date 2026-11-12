@@ -1,5 +1,6 @@
-import { useState, useCallback } from "react";
+import { Button } from "@/components/ui/button";
 import { ArrowDown, ArrowUp, GitBranch, Loader2, RefreshCw } from "lucide-react";
+import { useCallback, useState } from "react";
 import { executeCommand, type CommandContext } from "../lib/command-registry";
 
 export interface StatusBarToolbarProps {
@@ -73,7 +74,9 @@ export function StatusBarToolbar({
       </span>
 
       {/* Fetch button */}
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={() => handleClick("fetch")}
         disabled={inflight !== null}
@@ -85,10 +88,12 @@ export function StatusBarToolbar({
         ) : (
           <RefreshCw size={12} />
         )}
-      </button>
+      </Button>
 
       {/* Pull button */}
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={() => handleClick("pull")}
         disabled={inflight !== null}
@@ -100,10 +105,12 @@ export function StatusBarToolbar({
         ) : (
           <ArrowDown size={12} />
         )}
-      </button>
+      </Button>
 
       {/* Push button */}
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={() => handleClick("push")}
         disabled={inflight !== null}
@@ -115,7 +122,7 @@ export function StatusBarToolbar({
         ) : (
           <ArrowUp size={12} />
         )}
-      </button>
+      </Button>
     </div>
   );
 }

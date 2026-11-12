@@ -1,5 +1,7 @@
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Slider } from "@/components/ui/slider";
 /**
  * RemoteWorkspaceDialog — multi-step wizard for adding a remote
  * workspace source to the current workspace.
@@ -15,7 +17,6 @@ import { Input } from "@/components/ui/input";
  * discovery scan.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
 import clsx from "clsx";
 import {
   AlertCircle,
@@ -30,8 +31,9 @@ import {
   Server,
   X,
 } from "lucide-react";
-import type { SshProfile } from "../ssh/ssh-profile-types";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { SshConnectionState } from "../../state";
+import type { SshProfile } from "../ssh/ssh-profile-types";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -245,33 +247,38 @@ export function RemoteWorkspaceDialog({
   const stepIndex = ["select-profile", "browse-directory", "configure", "confirm"].indexOf(step);
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
-      onClick={onClose}
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="remote-workspace-dialog-title"
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) {
+          onClose();
+        }
+      }}
     >
-      <div
-        className="flex max-h-[85vh] w-[min(560px,92vw)] flex-col rounded-xl border border-border bg-card shadow-2xl"
+      <DialogContent
+        showCloseButton={false}
+        aria-describedby={undefined}
+        className="block gap-0 p-0 flex max-h-[85vh] w-[min(560px,92vw)] flex-col rounded-xl border border-border bg-card shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
         <div className="flex items-center justify-between border-b border-border px-5 py-4">
           <div className="flex items-center gap-2">
             <Cloud size={18} className="text-primary" />
-            <h2 id="remote-workspace-dialog-title" className="text-base font-semibold">
+            <DialogTitle className="text-base font-semibold">
               Connect to Remote Workspace
-            </h2>
+            </DialogTitle>
           </div>
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
             onClick={onClose}
             aria-label="Close"
           >
             <X size={18} />
-          </button>
+          </Button>
         </div>
 
         {/* Step indicator */}
@@ -364,11 +371,10 @@ export function RemoteWorkspaceDialog({
             )}
           </div>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
-
 
 // ── Step Indicator ───────────────────────────────────────────────────
 
@@ -434,7 +440,8 @@ function SelectProfileStep({
           No SSH connections configured.
         </p>
         <p className="text-xs text-muted-foreground/70 text-center max-w-xs">
-          Add an SSH connection in the SSH view first, then come back here to add a remote workspace.
+          Add an SSH connection in the SSH view first, then come back here to
+          add a remote workspace.
         </p>
       </div>
     );
@@ -451,7 +458,9 @@ function SelectProfileStep({
           const isSelected = selectedProfile?.id === profile.id;
 
           return (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               key={profile.id}
               type="button"
               className={clsx(
@@ -483,7 +492,7 @@ function SelectProfileStep({
               {isSelected && (
                 <Check size={16} className="shrink-0 text-primary" />
               )}
-            </button>
+            </Button>
           );
         })}
       </div>
@@ -522,7 +531,6 @@ function ConnectionStatusBadge({ status }: { status: SshConnectionState["status"
   }
   return null;
 }
-
 
 // ── Step 2: Browse Remote Directory ──────────────────────────────────
 
@@ -615,7 +623,9 @@ function BrowseDirectoryStep({
 
       {/* Manual path input */}
       <div>
-        <label className="text-[11px] text-muted-foreground block mb-1">Remote path</label>
+        <label className="text-[11px] text-muted-foreground block mb-1">
+          Remote path
+        </label>
         <div className="flex gap-2">
           <Input
             className="flex-1 font-mono text-sm"
@@ -639,7 +649,9 @@ function BrowseDirectoryStep({
         {segments.map((seg, i) => (
           <span key={seg.path} className="flex items-center gap-0.5 shrink-0">
             {i > 0 && <span className="text-muted-foreground/50">/</span>}
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={() => handleNavigate(seg.path)}
               className={clsx(
@@ -648,7 +660,7 @@ function BrowseDirectoryStep({
               )}
             >
               {seg.label}
-            </button>
+            </Button>
           </span>
         ))}
       </div>
@@ -657,7 +669,9 @@ function BrowseDirectoryStep({
       {displayError && !loading && (
         <div className="flex flex-col items-center justify-center py-6 gap-3 rounded-lg border border-destructive/30 bg-destructive/5">
           <AlertCircle size={24} className="text-destructive" />
-          <p className="text-xs text-destructive text-center max-w-xs">{displayError}</p>
+          <p className="text-xs text-destructive text-center max-w-xs">
+            {displayError}
+          </p>
           <Button variant="outline"
             type="button"
             className="text-xs flex items-center gap-1"
@@ -677,7 +691,9 @@ function BrowseDirectoryStep({
       {loading && (
         <div className="flex items-center justify-center py-8 gap-2">
           <Loader2 size={16} className="animate-spin text-primary" />
-          <span className="text-xs text-muted-foreground">Loading directory...</span>
+          <span className="text-xs text-muted-foreground">
+            Loading directory...
+          </span>
         </div>
       )}
 
@@ -691,7 +707,9 @@ function BrowseDirectoryStep({
           ) : (
             <div className="divide-y divide-border/30">
               {entries.map((entry) => (
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   key={entry.path}
                   type="button"
                   className={clsx(
@@ -702,7 +720,7 @@ function BrowseDirectoryStep({
                 >
                   <Folder size={14} className="shrink-0 text-primary" />
                   <span className="truncate text-foreground">{entry.name}</span>
-                </button>
+                </Button>
               ))}
             </div>
           )}
@@ -721,7 +739,6 @@ function BrowseDirectoryStep({
     </div>
   );
 }
-
 
 // ── Step 3: Configure Discovery ──────────────────────────────────────
 
@@ -745,7 +762,8 @@ function ConfigureStep({
   return (
     <div className="flex flex-col gap-4">
       <p className="text-xs text-muted-foreground">
-        Configure how deep to scan for git repositories and which directories to skip.
+        Configure how deep to scan for git repositories and which directories to
+        skip.
       </p>
 
       {/* Max depth */}
@@ -754,13 +772,15 @@ function ConfigureStep({
           Maximum scan depth
         </label>
         <div className="flex items-center gap-3">
-          <input
-            type="range"
+          <Slider
             min={1}
             max={10}
-            value={config.maxDepth}
-            onChange={(e) =>
-              onConfigChange({ ...config, maxDepth: parseInt(e.target.value, 10) })
+            value={[Number(config.maxDepth)]}
+            onValueChange={([value]) =>
+              onConfigChange({
+                ...config,
+                maxDepth: parseInt(String(value), 10),
+              })
             }
             className="flex-1 accent-primary"
           />
@@ -807,14 +827,16 @@ function ConfigureStep({
               className="inline-flex items-center gap-1 rounded bg-background border border-border px-2 py-0.5 text-[11px] text-muted-foreground font-mono"
             >
               {pattern}
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 className="text-muted-foreground hover:text-destructive transition-colors"
                 onClick={() => onRemovePattern(pattern)}
                 aria-label={`Remove ${pattern}`}
               >
                 <X size={10} />
-              </button>
+              </Button>
             </span>
           ))}
         </div>
@@ -859,10 +881,14 @@ function ConfirmStep({
         <div className="flex items-center gap-2 text-xs">
           <Folder size={12} className="text-muted-foreground shrink-0" />
           <span className="text-muted-foreground">Path:</span>
-          <span className="font-medium text-foreground font-mono truncate">{remotePath}</span>
+          <span className="font-medium text-foreground font-mono truncate">
+            {remotePath}
+          </span>
         </div>
         <div className="flex items-center gap-2 text-xs">
-          <span className="text-muted-foreground ml-5">Depth: {config.maxDepth} | Excludes: {config.excludePatterns.length}</span>
+          <span className="text-muted-foreground ml-5">
+            Depth: {config.maxDepth} | Excludes: {config.excludePatterns.length}
+          </span>
         </div>
       </div>
 
@@ -870,7 +896,9 @@ function ConfirmStep({
       {discovering && (
         <div className="flex flex-col items-center justify-center py-8 gap-3">
           <Loader2 size={24} className="animate-spin text-primary" />
-          <p className="text-sm text-muted-foreground">Scanning for repositories...</p>
+          <p className="text-sm text-muted-foreground">
+            Scanning for repositories...
+          </p>
           <p className="text-[10px] text-muted-foreground/70">
             Searching up to {config.maxDepth} levels deep in {remotePath}
           </p>
@@ -881,7 +909,9 @@ function ConfirmStep({
       {error && !discovering && (
         <div className="flex flex-col items-center justify-center py-6 gap-3 rounded-lg border border-destructive/30 bg-destructive/5">
           <AlertCircle size={24} className="text-destructive" />
-          <p className="text-xs text-destructive text-center max-w-xs">{error}</p>
+          <p className="text-xs text-destructive text-center max-w-xs">
+            {error}
+          </p>
           <Button variant="outline"
             type="button"
             className="text-xs flex items-center gap-1"
@@ -899,7 +929,8 @@ function ConfirmStep({
           <div className="flex items-center gap-2 mb-2">
             <FolderGit2 size={14} className="text-primary" />
             <span className="text-xs font-medium text-foreground">
-              Found {discoveredRepos.length} repositor{discoveredRepos.length === 1 ? "y" : "ies"}
+              Found {discoveredRepos.length} repositor
+              {discoveredRepos.length === 1 ? "y" : "ies"}
             </span>
           </div>
           <div className="border border-border rounded-lg max-h-[200px] overflow-y-auto divide-y divide-border/30">

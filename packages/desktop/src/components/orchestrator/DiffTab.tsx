@@ -1,5 +1,22 @@
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { repositoryTreeTheme } from "@/lib/repository-tree-theme";
-import { NativeSelect } from "@/components/ui/native-select";
+import type { GitStatus, GitStatusEntry } from "@pierre/trees";
+import {
+  FileTree as PierreFileTree,
+  useFileTree,
+  useFileTreeSelection,
+} from "@pierre/trees/react";
+import clsx from "clsx";
 import {
   forwardRef,
   useCallback,
@@ -9,14 +26,7 @@ import {
   useRef,
   useState,
 } from "react";
-import clsx from "clsx";
 import { call } from "../../ipc";
-import {
-  FileTree as PierreFileTree,
-  useFileTree,
-  useFileTreeSelection,
-} from "@pierre/trees/react";
-import type { GitStatus, GitStatusEntry } from "@pierre/trees";
 
 import {
   Check,
@@ -39,11 +49,11 @@ import {
   X,
 } from "lucide-react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
-import { SafePatchDiff } from "../SafePatchDiff";
-import { CommentGutter } from "../CommentGutter";
-import type { CommentsByLine, DiffComment } from "../CommentGutter";
 import { useEffectiveTheme } from "../../hooks/useEffectiveTheme";
 import { diffOptions } from "../../lib/diffTheme";
+import type { CommentsByLine, DiffComment } from "../CommentGutter";
+import { CommentGutter } from "../CommentGutter";
+import { SafePatchDiff } from "../SafePatchDiff";
 import { OrchestratorTask } from "./TaskCard";
 
 // ── Types ───────────────────────────────────────────────────────────
@@ -160,7 +170,9 @@ export function DiffTab({ task, workspaceRevision, repo: _repo, active, initialA
       if (onAppliedFilesChange) {
         onAppliedFilesChange(updater);
       } else {
-        setLocalAppliedFiles((prev) => (typeof updater === "function" ? updater(prev) : updater));
+        setLocalAppliedFiles((prev) =>
+          typeof updater === "function" ? updater(prev) : updater,
+        );
       }
     },
     [onAppliedFilesChange],
@@ -422,9 +434,21 @@ export function DiffTab({ task, workspaceRevision, repo: _repo, active, initialA
   if (diffError) {
     return (
       <div role="alert" className="flex h-full flex-col items-center justify-center gap-2 p-4 text-xs">
-        <span className="font-medium text-destructive">Could not load changes</span>
-        <span className="max-w-lg break-words text-muted-foreground">{diffError}</span>
-        <button type="button" onClick={() => setDiffRequest(request => request + 1)} className="rounded border border-border px-3 py-1.5 hover:bg-accent">Reload changes</button>
+        <span className="font-medium text-destructive">
+          Could not load changes
+        </span>
+        <span className="max-w-lg break-words text-muted-foreground">
+          {diffError}
+        </span>
+        <Button
+          variant="ghost"
+          size="compact"
+          type="button"
+          onClick={() => setDiffRequest(request => request + 1)}
+          className="rounded border border-border px-3 py-1.5 hover:bg-accent"
+        >
+          Reload changes
+        </Button>
       </div>
     );
   }
@@ -440,11 +464,16 @@ export function DiffTab({ task, workspaceRevision, repo: _repo, active, initialA
   }
 
   // Count unresolved comments
-  const unresolvedCount = Object.values(fileComments).reduce((total, fileMap) => {
-    return total + Object.values(fileMap).reduce((sum, comments) => {
+  const unresolvedCount = Object.values(fileComments).reduce(
+    (total, fileMap) => {
+      return (
+        total + Object.values(fileMap).reduce((sum, comments) => {
       return sum + comments.filter((c) => !c.resolved).length;
-    }, 0);
-  }, 0);
+    }, 0)
+      );
+    },
+    0,
+  );
 
   return (
     <div className="flex h-full flex-col">
@@ -474,7 +503,11 @@ export function DiffTab({ task, workspaceRevision, repo: _repo, active, initialA
         }}
       />
 
-      {revertError && <div role="alert" className="break-words border-b border-border px-3 py-2 text-xs text-destructive">{revertError}</div>}
+      {revertError && (
+        <div role="alert" className="break-words border-b border-border px-3 py-2 text-xs text-destructive">
+          {revertError}
+        </div>
+      )}
 
       {/* Conflict banner */}
       {conflicts && (
@@ -580,55 +613,64 @@ export function DiffTab({ task, workspaceRevision, repo: _repo, active, initialA
 
       {/* Action buttons (bottom bar) */}
       <div className="flex shrink-0 items-center gap-2 border-t border-border px-4 py-2">
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={handleApplyAll}
           disabled={inPrimaryWorkspace}
           className="flex items-center gap-1.5 rounded-md bg-success px-3 py-1.5 text-xs font-medium text-success-foreground hover:bg-success/85 transition disabled:opacity-50 disabled:cursor-not-allowed"
         >
           <Check size={12} /> Apply all
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={handleCherryPick}
           disabled={inPrimaryWorkspace || selectedFiles.size === 0}
           className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs text-foreground hover:bg-accent transition disabled:opacity-50 disabled:cursor-not-allowed"
         >
           <Cherry size={12} /> Apply selected ({selectedFiles.size})
-        </button>
+        </Button>
 
         <div className="flex-1" />
 
         {onReviewWithAi && (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={onReviewWithAi}
             className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs text-foreground hover:bg-accent transition"
           >
             <Sparkles size={12} /> Review with AI
-          </button>
+          </Button>
         )}
         {onCreatePr && (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={onCreatePr}
             className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs text-foreground hover:bg-accent transition"
           >
             <GitPullRequest size={12} /> Create PR
-          </button>
+          </Button>
         )}
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={onDiscard}
           className="flex items-center gap-1.5 rounded-md border border-destructive/40 px-3 py-1.5 text-xs text-destructive hover:bg-destructive/10 transition"
         >
           <Trash2 size={12} /> Discard
-        </button>
+        </Button>
       </div>
     </div>
   );
 }
-
 
 // ── Toolbar ─────────────────────────────────────────────────────────
 
@@ -671,13 +713,13 @@ function DiffToolbar({
     <div className="flex shrink-0 items-center gap-3 border-b border-border px-4 py-2 text-[11px] text-muted-foreground">
       {/* Select all checkbox */}
       {selectableCount > 0 && (
-        <input
-          type="checkbox"
-          checked={selectedCount > 0 && selectedCount >= selectableCount}
-          ref={(el) => {
-            if (el) el.indeterminate = selectedCount > 0 && selectedCount < selectableCount;
-          }}
-          onChange={onToggleSelectAll}
+        <Checkbox
+          checked={
+            selectedCount > 0 && selectedCount < selectableCount
+              ? "indeterminate"
+              : selectedCount > 0
+          }
+          onCheckedChange={onToggleSelectAll}
           className="h-3 w-3 rounded border-border accent-primary"
           aria-label={selectedCount >= selectableCount ? "Deselect all files" : "Select all files"}
           title={selectedCount >= selectableCount ? "Deselect all" : "Select all"}
@@ -685,13 +727,13 @@ function DiffToolbar({
       )}
       {/* File count + stats */}
       <span className="flex items-center gap-1.5">
-        <span className="font-medium text-foreground">{files.length}</span> file{files.length !== 1 ? "s" : ""} changed
+        <span className="font-medium text-foreground">{files.length}</span> file
+        {files.length !== 1 ? "s" : ""} changed
       </span>
       <span>
         <span className="font-semibold text-success">
           +{files.reduce((s, f) => s + f.additions, 0)}
-        </span>
-        {" "}
+        </span>{" "}
         <span className="font-semibold text-destructive">
           −{files.reduce((s, f) => s + f.deletions, 0)}
         </span>
@@ -701,13 +743,17 @@ function DiffToolbar({
       {appliedCount > 0 && (
         <span className="flex items-center gap-1 text-success">
           <GitMerge size={10} />
-          <span>{appliedCount}/{totalCount} applied</span>
+          <span>
+            {appliedCount}/{totalCount} applied
+          </span>
         </span>
       )}
 
       {/* Unresolved comment count */}
       {unresolvedCount > 0 && (
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={onToggleResolved}
           className="flex items-center gap-1 rounded px-1.5 py-0.5 text-primary hover:bg-primary/10"
@@ -715,105 +761,98 @@ function DiffToolbar({
         >
           <MessageSquare size={10} />
           <span>{unresolvedCount} unresolved</span>
-        </button>
+        </Button>
       )}
 
       <div className="flex-1" />
 
       {/* Commit filter dropdown */}
       {commits.length > 1 && (
-        <NativeSelect
-          value={selectedCommit}
-          onChange={(e) => onSelectCommit(e.target.value)}
-          className="rounded border border-border bg-card px-2 py-0.5 text-[11px] text-foreground focus:border-primary focus-visible:outline-none"
-          aria-label="Filter by commit"
+        <Select
+          value={":" + String(selectedCommit)}
+          onValueChange={(selectedValue) => {
+            const value = selectedValue.slice(1);
+            return onSelectCommit(value);
+          }}
         >
-          <option value="all">All commits</option>
-          {commits.map((c) => (
-            <option key={c.sha} value={c.sha}>
-              {c.sha.slice(0, 7)} {c.message.slice(0, 40)}
-            </option>
-          ))}
-        </NativeSelect>
+          <SelectTrigger
+            className="rounded border border-border bg-card px-2 py-0.5 text-[11px] text-foreground focus:border-primary focus-visible:outline-none"
+            aria-label="Filter by commit"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              <SelectItem value={":" + String("all")}>All commits</SelectItem>
+              {commits.map((c) => (
+                <SelectItem key={c.sha} value={":" + String(c.sha)}>
+                  {c.sha.slice(0, 7)} {c.message.slice(0, 40)}
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          </SelectContent>
+        </Select>
       )}
-
-      {/* File view mode toggle (list / tree / unified) — matches commit page */}
-      <div
-        role="radiogroup"
-        aria-label="Files view"
-        className="flex overflow-hidden rounded border border-border"
-      >
-        <ModeButton
-          active={fileViewMode === "list"}
-          icon={<List size={11} />}
-          label="List"
-          onClick={() => onSetFileViewMode("list")}
-        />
-        <ModeButton
-          active={fileViewMode === "tree"}
-          icon={<FolderTree size={11} />}
-          label="Tree"
-          onClick={() => onSetFileViewMode("tree")}
-        />
-        <ModeButton
-          active={fileViewMode === "unified"}
-          icon={<ScrollText size={11} />}
-          label="Unified"
-          onClick={() => onSetFileViewMode("unified")}
-        />
-      </div>
 
       {/* Diff render mode toggle (inline / side-by-side) */}
-      <div
-        role="radiogroup"
-        aria-label="Diff render mode"
-        className="flex overflow-hidden rounded border border-border"
+      <ToggleGroup
+        type="single"
+        value={fileViewMode}
+        onValueChange={(value) => {
+          if (value) onSetFileViewMode(value as typeof fileViewMode);
+        }}
+        aria-label="Files view"
+        className="gap-0 overflow-hidden rounded border border-border"
       >
-        <ModeButton
-          active={diffRenderMode === "inline"}
-          icon={<SplitSquareHorizontal size={11} />}
-          label="Inline"
-          onClick={() => onSetDiffRenderMode("inline")}
-        />
-        <ModeButton
-          active={diffRenderMode === "side-by-side"}
-          icon={<Columns2 size={11} />}
-          label="Side-by-side"
-          onClick={() => onSetDiffRenderMode("side-by-side")}
-        />
-      </div>
-    </div>
-  );
-}
+        <ToggleGroupItem
+          value={"list"}
+          className="h-6 min-w-0 gap-1 rounded-none px-2 text-[11px]"
+          aria-label={"List" + " view"}
+        >
+          {<List size={11} />}List
+        </ToggleGroupItem>
+        <ToggleGroupItem
+          value={"tree"}
+          className="h-6 min-w-0 gap-1 rounded-none px-2 text-[11px]"
+          aria-label={"Tree" + " view"}
+        >
+          {<FolderTree size={11} />}Tree
+        </ToggleGroupItem>
+        <ToggleGroupItem
+          value={"unified"}
+          className="h-6 min-w-0 gap-1 rounded-none px-2 text-[11px]"
+          aria-label={"Unified" + " view"}
+        >
+          {<ScrollText size={11} />}Unified
+        </ToggleGroupItem>
+      </ToggleGroup>
 
-function ModeButton({
-  active,
-  icon,
-  label,
-  onClick,
-}: {
-  active: boolean;
-  icon: React.ReactNode;
-  label: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      role="radio"
-      aria-checked={active}
-      onClick={onClick}
-      className={clsx(
-        "flex items-center gap-1 px-2 py-0.5 text-[11px] transition",
-        active
-          ? "bg-primary/20 text-foreground"
-          : "text-muted-foreground hover:bg-accent hover:text-foreground",
-      )}
-      title={`${label} view`}
-    >
-      {icon}
-      {label}
-    </button>
+      {/* Diff render mode toggle (inline / side-by-side) */}
+      <ToggleGroup
+        type="single"
+        value={diffRenderMode}
+        onValueChange={(value) => {
+          if (value) onSetDiffRenderMode(value as typeof diffRenderMode);
+        }}
+        aria-label="Diff render mode"
+        className="gap-0 overflow-hidden rounded border border-border"
+      >
+        <ToggleGroupItem
+          value={"inline"}
+          className="h-6 min-w-0 gap-1 rounded-none px-2 text-[11px]"
+          aria-label={"Inline" + " view"}
+        >
+          {<SplitSquareHorizontal size={11} />}Inline
+        </ToggleGroupItem>
+        <ToggleGroupItem
+          value={"side-by-side"}
+          className="h-6 min-w-0 gap-1 rounded-none px-2 text-[11px]"
+          aria-label={"Side-by-side" + " view"}
+        >
+          {<Columns2 size={11} />}Side-by-side
+        </ToggleGroupItem>
+      </ToggleGroup>
+    </div>
   );
 }
 
@@ -864,18 +903,17 @@ function DiffFileList({
                 )}
                 onClick={() => onSelectFile(f.path)}
               >
-                {/* Checkbox for cherry-pick selection */}
-                <input
-                  type="checkbox"
+                {/* Status indicator */}
+                <Checkbox
                   checked={selectedFiles.has(f.path)}
-                  onChange={() => onToggleFile(f.path)}
+                  onCheckedChange={() => onToggleFile(f.path)}
                   onClick={(e) => e.stopPropagation()}
                   disabled={isApplied}
                   className="h-3 w-3 shrink-0 rounded border-border accent-primary"
                   aria-label={`Select ${f.path}`}
                 />
 
-                {/* Status indicator */}
+                {/* File info */}
                 <FileStatusIcon status={f.status} isApplied={isApplied} />
 
                 {/* File info */}
@@ -898,16 +936,16 @@ function DiffFileList({
                   )}
                 </div>
 
-                {/* Right side: stats + indicators */}
+                {/* Applied badge */}
                 <div className="flex shrink-0 items-center gap-1.5">
-                  {/* Applied badge */}
+                  {/* Comment indicator */}
                   {isApplied && (
                     <span className="flex items-center gap-0.5 rounded bg-success/10 px-1 py-0.5 text-[9px] font-medium text-success">
                       <Check size={8} /> Applied
                     </span>
                   )}
 
-                  {/* Comment indicator */}
+                  {/* +/- stats */}
                   {commentCount > 0 && (
                     <span className="flex items-center gap-0.5 text-[9px] text-primary">
                       <MessageSquare size={9} />
@@ -928,7 +966,9 @@ function DiffFileList({
 
                   {/* Revert button (visible on hover) */}
                   {!isApplied && onRevertFile && (
-                    <button
+                    <Button
+                      variant="ghost"
+                      size="compact"
                       type="button"
                       disabled={revertingFile !== undefined}
                       aria-busy={revertingFile === f.path}
@@ -941,7 +981,7 @@ function DiffFileList({
                       title="Revert file"
                     >
                       <RotateCcw size={10} />
-                    </button>
+                    </Button>
                   )}
                 </div>
               </div>
@@ -1101,7 +1141,9 @@ function UnifiedFileNav({
 
           return (
             <li key={f.path}>
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 onClick={() => onSelectFile(f.path)}
                 className={clsx(
@@ -1115,10 +1157,9 @@ function UnifiedFileNav({
                 title={f.path}
               >
                 {/* Checkbox */}
-                <input
-                  type="checkbox"
+                <Checkbox
                   checked={selectedFiles.has(f.path)}
-                  onChange={() => onToggleFile(f.path)}
+                  onCheckedChange={() => onToggleFile(f.path)}
                   onClick={(e) => e.stopPropagation()}
                   disabled={isApplied}
                   className="h-3 w-3 shrink-0 rounded border-border accent-primary"
@@ -1136,7 +1177,9 @@ function UnifiedFileNav({
 
                 <span className="shrink-0 flex items-center gap-1 text-[10px]">
                   {isApplied && (
-                    <span className="text-success"><Check size={9} /></span>
+                    <span className="text-success">
+                      <Check size={9} />
+                    </span>
                   )}
                   {commentCount > 0 && (
                     <span className="text-primary">{commentCount}</span>
@@ -1148,7 +1191,7 @@ function UnifiedFileNav({
                     <span className="text-destructive">−{f.deletions}</span>
                   )}
                 </span>
-              </button>
+              </Button>
             </li>
           );
         })}
@@ -1224,7 +1267,6 @@ function FileStatusBadge({ status }: { status?: string }) {
   );
 }
 
-
 // ── All Diffs Pane (unified mode — all files rendered sequentially) ──
 
 interface AllDiffsPaneHandle {
@@ -1281,7 +1323,9 @@ const AllDiffsPane = forwardRef<
             className="border-b border-border"
           >
             {/* Sticky file header */}
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={() => onSelectFile(file.path)}
               className={clsx(
@@ -1306,16 +1350,22 @@ const AllDiffsPane = forwardRef<
                   </span>
                 )}
                 {file.additions > 0 && (
-                  <span className="font-semibold text-success">+{file.additions}</span>
+                  <span className="font-semibold text-success">
+                    +{file.additions}
+                  </span>
                 )}
                 {file.deletions > 0 && (
-                  <span className="font-semibold text-destructive">−{file.deletions}</span>
+                  <span className="font-semibold text-destructive">
+                    −{file.deletions}
+                  </span>
                 )}
                 {file.status === "renamed" && file.oldPath && (
-                  <span className="rounded border border-border px-1 py-0.5 text-[9px]">← {file.oldPath}</span>
+                  <span className="rounded border border-border px-1 py-0.5 text-[9px]">
+                    ← {file.oldPath}
+                  </span>
                 )}
               </span>
-            </button>
+            </Button>
 
             {/* Diff content */}
             {isApplied ? (
@@ -1385,7 +1435,9 @@ function SingleFileDiffContent({
         {/* File header */}
         <div className="flex shrink-0 items-center gap-2 border-b border-border bg-card px-4 py-2">
           <FileStatusIcon status={file.status} isApplied={true} />
-          <span className="font-mono text-[12px] text-foreground line-through opacity-60">{file.path}</span>
+          <span className="font-mono text-[12px] text-foreground line-through opacity-60">
+            {file.path}
+          </span>
           <FileStatusBadge status={file.status} />
           <span className="rounded bg-success/10 px-1.5 py-0.5 text-[9px] font-medium text-success">
             Applied
@@ -1412,7 +1464,9 @@ function SingleFileDiffContent({
       <div className="flex h-full flex-col">
         <div className="flex shrink-0 items-center gap-2 border-b border-border bg-card px-4 py-2">
           <FileStatusIcon status={file.status} isApplied={false} />
-          <span className="font-mono text-[12px] text-foreground">{file.path}</span>
+          <span className="font-mono text-[12px] text-foreground">
+            {file.path}
+          </span>
           <FileStatusBadge status={file.status} />
         </div>
         <div className="flex flex-1 items-center justify-center gap-2 text-xs text-muted-foreground">
@@ -1427,14 +1481,20 @@ function SingleFileDiffContent({
       {/* File header */}
       <div className="flex shrink-0 items-center gap-2 border-b border-border bg-card px-4 py-2">
         <FileStatusIcon status={file.status} isApplied={false} />
-        <span className="font-mono text-[12px] text-foreground">{file.path}</span>
+        <span className="font-mono text-[12px] text-foreground">
+          {file.path}
+        </span>
         <FileStatusBadge status={file.status} />
         <span className="ml-auto flex items-center gap-2 text-[10px] text-muted-foreground">
           {file.additions > 0 && (
-            <span className="font-semibold text-success">+{file.additions}</span>
+            <span className="font-semibold text-success">
+              +{file.additions}
+            </span>
           )}
           {file.deletions > 0 && (
-            <span className="font-semibold text-destructive">−{file.deletions}</span>
+            <span className="font-semibold text-destructive">
+              −{file.deletions}
+            </span>
           )}
         </span>
       </div>
@@ -1662,7 +1722,6 @@ function parseSideBySide(patch: string): { leftLines: SideBySideLine[]; rightLin
   return { leftLines, rightLines };
 }
 
-
 // ── Conflict Banner ─────────────────────────────────────────────────
 
 function ConflictBanner({
@@ -1675,7 +1734,8 @@ function ConflictBanner({
   return (
     <div className="flex items-center gap-2 border-b border-destructive/30 bg-destructive/5 px-4 py-2 text-[11px]">
       <span className="font-medium text-destructive">
-        Conflicts in {conflicts.files.length} file{conflicts.files.length !== 1 ? "s" : ""}:
+        Conflicts in {conflicts.files.length} file
+        {conflicts.files.length !== 1 ? "s" : ""}:
       </span>
       <span className="min-w-0 flex-1 truncate font-mono text-destructive">
         {conflicts.files.join(", ")}
@@ -1690,14 +1750,16 @@ function ConflictBanner({
       >
         Resolve in Conflicts View
       </a>
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={onDismiss}
         className="shrink-0 rounded p-0.5 text-muted-foreground hover:text-foreground"
         aria-label="Dismiss conflict banner"
       >
         <X size={12} />
-      </button>
+      </Button>
     </div>
   );
 }
@@ -1724,13 +1786,15 @@ function PartialApplyBanner({
         {remainingCount} file{remainingCount !== 1 ? "s" : ""} remaining
       </span>
       <div className="flex-1" />
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={onApplyRemaining}
         className="flex items-center gap-1 rounded-md bg-primary/10 px-2 py-1 text-[11px] text-primary hover:bg-primary/20 transition"
       >
         <Check size={10} /> Apply remaining
-      </button>
+      </Button>
     </div>
   );
 }
@@ -1818,28 +1882,34 @@ function CommentEntry({
     <div className="mb-1.5 rounded border border-border bg-card p-2">
       <div className="flex items-center gap-2 text-[10px]">
         <span className="font-medium text-foreground">{comment.author}</span>
-        <span className="text-muted-foreground">{formatTimestamp(comment.created_at)}</span>
+        <span className="text-muted-foreground">
+          {formatTimestamp(comment.created_at)}
+        </span>
       </div>
       <div className="mt-1 whitespace-pre-wrap text-[11px] text-foreground/80">
         {comment.body}
       </div>
       <div className="mt-1.5 flex items-center gap-2">
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={() => onSendToAgent(comment)}
           className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-primary hover:bg-primary/10"
           aria-label="Send comment to agent as feedback"
         >
           <Send size={9} /> Send to agent
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={() => onResolve(comment.id, line)}
           className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-success"
           aria-label="Resolve comment"
         >
           <Check size={9} /> Resolve
-        </button>
+        </Button>
       </div>
     </div>
   );

@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 /**
  * Mount status panel showing detailed information about a specific mount.
@@ -10,7 +11,6 @@ import { Input } from "@/components/ui/input";
  * - "Switch Branch" dropdown
  */
 
-import { useCallback, useEffect, useState } from "react";
 import {
   GitBranch,
   HardDrive,
@@ -18,6 +18,7 @@ import {
   RefreshCw,
   X,
 } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
 
 /** Detailed mount status from the coordinator. */
 interface MountStatusData {
@@ -139,15 +140,19 @@ export function MountStatusPanel({ mountpoint, onClose, onUnmounted }: MountStat
       {/* Header */}
       <div className="flex items-center gap-2 border-b border-border px-4 py-3">
         <HardDrive size={14} className="text-primary shrink-0" />
-        <h3 className="flex-1 truncate text-sm font-semibold text-foreground">{displayName}</h3>
-        <button
+        <h3 className="flex-1 truncate text-sm font-semibold text-foreground">
+          {displayName}
+        </h3>
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground transition"
           onClick={onClose}
           aria-label="Close panel"
         >
           <X size={14} />
-        </button>
+        </Button>
       </div>
 
       {/* Content */}
@@ -180,7 +185,9 @@ export function MountStatusPanel({ mountpoint, onClose, onUnmounted }: MountStat
             {/* Actions */}
             <div className="space-y-2 pt-2 border-t border-border">
               {/* Refresh */}
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 className="flex w-full items-center gap-2 rounded border border-border px-3 py-2 text-xs text-foreground hover:bg-accent transition disabled:opacity-50"
                 onClick={handleRefresh}
@@ -188,18 +195,20 @@ export function MountStatusPanel({ mountpoint, onClose, onUnmounted }: MountStat
               >
                 <RefreshCw size={12} className={refreshing ? "animate-spin" : ""} />
                 <span>{refreshing ? "Refreshing…" : "Refresh"}</span>
-              </button>
+              </Button>
 
               {/* Switch branch */}
               {!showSwitchInput ? (
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
                   className="flex w-full items-center gap-2 rounded border border-border px-3 py-2 text-xs text-foreground hover:bg-accent transition"
                   onClick={() => setShowSwitchInput(true)}
                 >
                   <GitBranch size={12} />
                   <span>Switch Branch</span>
-                </button>
+                </Button>
               ) : (
                 <div className="flex items-center gap-1">
                   <Input
@@ -212,27 +221,37 @@ export function MountStatusPanel({ mountpoint, onClose, onUnmounted }: MountStat
                     disabled={switching}
                     autoFocus
                   />
-                  <button
+                  <Button
+                    variant="default"
+                    size="compact"
                     type="button"
                     className="rounded bg-primary px-2 py-1.5 text-xs text-primary-foreground hover:bg-primary/90 transition disabled:opacity-50"
                     onClick={handleSwitchRef}
                     disabled={switching || !switchRef.trim()}
                   >
-                    {switching ? <Loader2 size={10} className="animate-spin" /> : "Go"}
-                  </button>
-                  <button
+                    {switching ? (
+                      <Loader2 size={10} className="animate-spin" />
+                    ) : (
+                      "Go"
+                    )}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="compact"
                     type="button"
                     className="rounded p-1.5 text-muted-foreground hover:text-foreground hover:bg-accent transition"
                     onClick={() => { setShowSwitchInput(false); setSwitchRef(""); }}
                     aria-label="Cancel"
                   >
                     <X size={10} />
-                  </button>
+                  </Button>
                 </div>
               )}
 
               {/* Unmount */}
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 className="flex w-full items-center gap-2 rounded border border-destructive/40 px-3 py-2 text-xs text-destructive hover:bg-destructive/10 transition disabled:opacity-50"
                 onClick={handleUnmount}
@@ -240,7 +259,7 @@ export function MountStatusPanel({ mountpoint, onClose, onUnmounted }: MountStat
               >
                 <X size={12} />
                 <span>{unmounting ? "Unmounting…" : "Unmount"}</span>
-              </button>
+              </Button>
             </div>
           </>
         )}
@@ -256,8 +275,12 @@ export function MountStatusPanel({ mountpoint, onClose, onUnmounted }: MountStat
 function StatusField({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
   return (
     <div>
-      <dt className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">{label}</dt>
-      <dd className={`mt-0.5 text-xs text-foreground truncate ${mono ? "font-mono" : ""}`}>{value}</dd>
+      <dt className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
+        {label}
+      </dt>
+      <dd className={`mt-0.5 text-xs text-foreground truncate ${mono ? "font-mono" : ""}`}>
+        {value}
+      </dd>
     </div>
   );
 }

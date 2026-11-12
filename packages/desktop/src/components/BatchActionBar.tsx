@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Floating batch action bar — appears when 2+ files are multi-selected
  * (Cmd/Ctrl+click or Shift+click) in the Changes view. Provides
@@ -36,7 +37,9 @@ export function BatchActionBar({
       </span>
 
       <div className="ml-auto flex items-center gap-1">
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={onStage}
           disabled={busy}
@@ -45,8 +48,10 @@ export function BatchActionBar({
         >
           <Plus size={12} />
           Stage
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={onUnstage}
           disabled={busy}
@@ -55,18 +60,23 @@ export function BatchActionBar({
         >
           <Minus size={12} />
           Unstage
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={onDiscard}
           disabled={busy || !onDiscard}
           className="flex items-center gap-1 rounded px-2 py-0.5 text-[11px] text-destructive hover:bg-destructive/10 disabled:opacity-50 transition"
           title="Discard selected files (Delete)"
+          aria-label="Discard selected files"
         >
           <Trash2 size={12} />
           Discard
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={onClear}
           className="ml-1 flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground transition"
@@ -74,7 +84,7 @@ export function BatchActionBar({
           aria-label="Clear selection"
         >
           <X size={12} />
-        </button>
+        </Button>
       </div>
     </div>
   );

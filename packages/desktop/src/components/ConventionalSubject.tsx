@@ -1,5 +1,13 @@
-import { NativeSelect } from "@/components/ui/native-select";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Toggle } from "@/components/ui/toggle";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 // Standard conventional-commit types.
@@ -121,8 +129,8 @@ export function ConventionalSubject({ value, onChange, onKeyDown }: Props) {
   );
 
   const handleTypeChange = useCallback(
-    (e: React.ChangeEvent<HTMLSelectElement>) => {
-      const next = e.target.value as CommitType;
+    (selectedValue: string) => {
+      const next = selectedValue.slice(1) as CommitType;
       setType(next);
       emit(next, scope, breaking, description);
     },
@@ -156,18 +164,23 @@ export function ConventionalSubject({ value, onChange, onKeyDown }: Props) {
   return (
     <div className="flex w-full items-center gap-1" onKeyDown={onKeyDown}>
       {/* Type dropdown */}
-      <NativeSelect
-        value={type}
-        onChange={handleTypeChange}
-        className="shrink-0 rounded border border-border bg-background px-1.5 py-1 text-xs text-foreground focus:border-primary focus-visible:outline-none"
+      <Select value={":" + String(type)} onValueChange={handleTypeChange}>
+        <SelectTrigger
+          className="shrink-0 rounded border border-border bg-background px-1.5 py-1 text-xs text-foreground focus:border-primary focus-visible:outline-none"
         aria-label="Commit type"
       >
-        {COMMIT_TYPES.map((t) => (
-          <option key={t} value={t}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectGroup>
+            {COMMIT_TYPES.map((t) => (
+          <SelectItem key={t} value={":" + String(t)}>
             {t}
-          </option>
+          </SelectItem>
         ))}
-      </NativeSelect>
+      </SelectGroup>
+        </SelectContent>
+      </Select>
 
       {/* Scope input */}
       <Input
@@ -181,7 +194,8 @@ export function ConventionalSubject({ value, onChange, onKeyDown }: Props) {
       />
 
       {/* Breaking change toggle */}
-      <button
+      <Toggle
+        size="sm"
         type="button"
         onClick={handleBreakingToggle}
         title={breaking ? "Breaking change (click to unset)" : "Mark as breaking change"}
@@ -191,10 +205,10 @@ export function ConventionalSubject({ value, onChange, onKeyDown }: Props) {
             : "border-border bg-background text-muted-foreground hover:text-foreground"
         }`}
         aria-label="Breaking change"
-        aria-pressed={breaking}
+        pressed={breaking}
       >
         !
-      </button>
+      </Toggle>
 
       {/* Description input */}
       <Input

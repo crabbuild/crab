@@ -1,43 +1,56 @@
-import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { NativeSelect } from "@/components/ui/native-select";
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
+import { Toggle } from "@/components/ui/toggle";
 import clsx from "clsx";
 import {
+  AlertCircle,
   ChevronLeft,
   ChevronRight,
+  Columns3,
   Copy,
   Database,
   Download,
   Hash,
+  History,
   Key,
   Loader2,
   Play,
-  AlertCircle,
   Search,
   SortAsc,
   SortDesc,
   Table2,
   Terminal,
-  History,
-  Columns3,
 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { FileQueryResult } from "../../ipc";
 import type { FileQuery } from "../../lib/file-query";
 
 export function FileQueryMode({ query, mode }: { query: FileQuery; mode: "browse" | "sql" }) {
   return (
     <div className="flex items-center rounded border border-border bg-background" role="group" aria-label="File view">
-      {(["browse", "sql"] as const).map(value => {
+      {(["browse", "sql"] as const).map((value) => {
         const Icon = value === "browse" ? Table2 : Terminal;
         return (
-          <button key={value} type="button" aria-pressed={mode === value}
+          <Toggle
+            size="sm"
+            key={value}
+            type="button"
+            pressed={mode === value}
             onClick={() => query.setMode(value)}
             className={clsx("flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium transition",
-              mode === value ? "bg-primary/15 text-primary" : "text-muted-foreground hover:text-foreground")}>
+              mode === value ? "bg-primary/15 text-primary" : "text-muted-foreground hover:text-foreground")}
+          >
             <Icon size={10} /> {value === "browse" ? "Browse" : "SQL"}
-          </button>
+          </Toggle>
         );
       })}
     </div>
@@ -46,7 +59,11 @@ export function FileQueryMode({ query, mode }: { query: FileQuery; mode: "browse
 
 export function FileBrowseState({ error, loading }: { error: string | null; loading: string }) {
   if (error) {
-    return <div role="alert" className="m-4 rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">{error}</div>;
+    return (
+      <div role="alert" className="m-4 rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
+        {error}
+      </div>
+    );
   }
   return (
     <div role="status" className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground">
@@ -284,7 +301,9 @@ export function FileQueryPanel({ query, nativeSessionId, tables }: Props) {
             {tables.map((t) => (
               <div key={t.name} className="mb-0.5">
                 <div className="group flex items-center gap-0.5">
-                  <button
+                  <Button
+                    variant="ghost"
+                    size="compact"
                     type="button"
                     onClick={() =>
                       setExpandedTable(expandedTable === t.name ? null : t.name)
@@ -298,8 +317,10 @@ export function FileQueryPanel({ query, nativeSessionId, tables }: Props) {
                         expandedTable === t.name && "rotate-90",
                       )}
                     />
-                  </button>
-                  <button
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="compact"
                     type="button"
                     onClick={() => handleTableSelect(t.name)}
                     className={clsx(
@@ -316,25 +337,29 @@ export function FileQueryPanel({ query, nativeSessionId, tables }: Props) {
                     <span className="shrink-0 text-[9px] text-muted-foreground">
                       {t.row_count.toLocaleString()}
                     </span>
-                  </button>
+                  </Button>
                   {/* Quick action buttons (visible on hover) */}
                   <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition group-hover:opacity-100">
-                    <button
+                    <Button
+                      variant="ghost"
+                      size="compact"
                       type="button"
                       onClick={() => handleCountTable(t.name)}
                       title="COUNT(*)"
                       className="rounded p-0.5 text-muted-foreground hover:bg-background hover:text-foreground"
                     >
                       <Hash size={9} />
-                    </button>
-                    <button
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="compact"
                       type="button"
                       onClick={() => handleSchemaTable(t.name)}
                       title="Table schema"
                       className="rounded p-0.5 text-muted-foreground hover:bg-background hover:text-foreground"
                     >
                       <Columns3 size={9} />
-                    </button>
+                    </Button>
                   </div>
                 </div>
 
@@ -342,7 +367,9 @@ export function FileQueryPanel({ query, nativeSessionId, tables }: Props) {
                 {expandedTable === t.name && (
                   <div className="ml-5 mt-0.5 mb-1 space-y-px border-l border-border/60 pl-2">
                     {t.columns.map((col) => (
-                      <button
+                      <Button
+                        variant="ghost"
+                        size="compact"
                         key={col.name}
                         type="button"
                         onClick={() => insertColumnRef(col.name)}
@@ -352,7 +379,9 @@ export function FileQueryPanel({ query, nativeSessionId, tables }: Props) {
                         {col.pk ? (
                           <Key size={8} className="shrink-0 text-warning" />
                         ) : (
-                          <span className="w-2 shrink-0 text-center text-muted-foreground">·</span>
+                          <span className="w-2 shrink-0 text-center text-muted-foreground">
+                            ·
+                          </span>
                         )}
                         <span className="min-w-0 flex-1 truncate text-left font-mono text-foreground">
                           {col.name}
@@ -365,18 +394,22 @@ export function FileQueryPanel({ query, nativeSessionId, tables }: Props) {
                             NN
                           </span>
                         )}
-                      </button>
+                      </Button>
                     ))}
                     {/* Quick schema actions */}
                     <div className="mt-1 flex gap-1 pt-1 border-t border-border/40">
-                      <button
+                      <Button
+                        variant="ghost"
+                        size="compact"
                         type="button"
                         onClick={() => handleIndexesTable(t.name)}
                         className="rounded bg-background px-1.5 py-0.5 text-[9px] text-muted-foreground hover:text-foreground"
                       >
                         Indexes
-                      </button>
-                      <button
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="compact"
                         type="button"
                         onClick={() => {
                           setIsBrowsingTable(false);
@@ -387,7 +420,7 @@ export function FileQueryPanel({ query, nativeSessionId, tables }: Props) {
                         className="rounded bg-background px-1.5 py-0.5 text-[9px] text-muted-foreground hover:text-foreground"
                       >
                         DDL
-                      </button>
+                      </Button>
                     </div>
                   </div>
                 )}
@@ -404,18 +437,20 @@ export function FileQueryPanel({ query, nativeSessionId, tables }: Props) {
               </div>
               <div className="max-h-[100px] overflow-auto px-1 pb-1">
                 {history.slice(0, 10).map((q, i) => (
-                  <button
+                  <Button
+                    variant="ghost"
+                    size="compact"
                     key={i}
                     type="button"
                     onClick={() => {
                       setSql(q);
                       execute(q);
                     }}
-                    className="mb-0.5 w-full truncate rounded px-2 py-0.5 text-left font-mono text-[9px] text-muted-foreground transition hover:bg-accent hover:text-foreground"
+                    className="justify-start mb-0.5 w-full truncate rounded px-2 py-0.5 text-left font-mono text-[9px] text-muted-foreground transition hover:bg-accent hover:text-foreground"
                     title={q}
                   >
                     {q}
-                  </button>
+                  </Button>
                 ))}
               </div>
             </div>
@@ -442,7 +477,9 @@ export function FileQueryPanel({ query, nativeSessionId, tables }: Props) {
             )}
             <div className="ml-auto flex items-center gap-2 text-[10px]">
               {result && (
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
                   onClick={handleExportCsv}
                   className="flex items-center gap-1 rounded px-1.5 py-0.5 text-muted-foreground hover:bg-background hover:text-foreground"
@@ -450,7 +487,7 @@ export function FileQueryPanel({ query, nativeSessionId, tables }: Props) {
                 >
                   <Download size={10} />
                   CSV
-                </button>
+                </Button>
               )}
               <span className="text-muted-foreground">⌘+Enter</span>
             </div>
@@ -481,18 +518,20 @@ export function FileQueryPanel({ query, nativeSessionId, tables }: Props) {
                 {status === "cancelling" ? "Cancelling…" : "Cancel query"}
               </Button>
             ) : (
-            <button
-              type="button"
-              onClick={() => { setIsBrowsingTable(false); execute(); }}
-              disabled={!sql.trim()}
-              className={clsx(
+              <Button
+                variant="default"
+                size="compact"
+                type="button"
+                onClick={() => { setIsBrowsingTable(false); execute(); }}
+                disabled={!sql.trim()}
+                className={clsx(
                 "absolute bottom-4 right-5 flex items-center gap-1.5 rounded px-2.5 py-1",
                 "text-[11px] font-medium transition",
                 "bg-primary text-primary-foreground hover:bg-primary/90",
               )}
-            >
-              <Play size={10} /> Run
-            </button>
+              >
+                <Play size={10} /> Run
+              </Button>
             )}
           </div>
         </div>
@@ -515,7 +554,9 @@ export function FileQueryPanel({ query, nativeSessionId, tables }: Props) {
               className="min-w-0 flex-1 bg-transparent font-mono text-[11px] text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
             />
             {filterText && (
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 onClick={() => {
                   setFilterText("");
@@ -527,7 +568,7 @@ export function FileQueryPanel({ query, nativeSessionId, tables }: Props) {
                 className="text-muted-foreground hover:text-foreground"
               >
                 <span className="text-[10px]">Clear</span>
-              </button>
+              </Button>
             )}
           </div>
         )}
@@ -558,7 +599,11 @@ export function FileQueryPanel({ query, nativeSessionId, tables }: Props) {
                 : "Write a SQL query and press ⌘+Enter"}
             </div>
           )}
-          {status === "cancelled" && <p role="status" className="p-3 text-xs text-muted-foreground">Query cancelled</p>}
+          {status === "cancelled" && (
+            <p role="status" className="p-3 text-xs text-muted-foreground">
+              Query cancelled
+            </p>
+          )}
           {loading && (
             <div role="status" className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
               <Loader2 size={14} className="animate-spin" />
@@ -571,7 +616,8 @@ export function FileQueryPanel({ query, nativeSessionId, tables }: Props) {
         {result && activeTable && hasSidebar && (
           <div className="flex shrink-0 items-center gap-3 border-t border-border bg-card px-3 py-1 text-[11px] text-muted-foreground">
             <span>
-              Showing <strong className="text-foreground">{page.offset + 1}</strong>–
+              Showing{" "}
+              <strong className="text-foreground">{page.offset + 1}</strong>–
               <strong className="text-foreground">
                 {Math.min(page.offset + result.row_count, page.offset + page.limit)}
               </strong>
@@ -580,25 +626,29 @@ export function FileQueryPanel({ query, nativeSessionId, tables }: Props) {
               )}
             </span>
             <div className="ml-auto flex items-center gap-1">
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 onClick={handlePrevPage}
                 disabled={page.offset === 0}
                 className="rounded p-1 hover:bg-background disabled:opacity-30"
               >
                 <ChevronLeft size={12} />
-              </button>
+              </Button>
               <span className="px-1 text-[10px]">
                 Page {Math.floor(page.offset / page.limit) + 1}
               </span>
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 onClick={handleNextPage}
                 disabled={result.row_count < page.limit}
                 className="rounded p-1 hover:bg-background disabled:opacity-30"
               >
                 <ChevronRight size={12} />
-              </button>
+              </Button>
             </div>
           </div>
         )}
@@ -784,7 +834,9 @@ function ResultGrid({ result, elapsed, sort, onSort, onCellCopy, copiedCell, sor
             </span>
           )}
           {/* Filter toggle */}
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={() => setShowFilters(!showFilters)}
             className={clsx(
@@ -797,10 +849,12 @@ function ResultGrid({ result, elapsed, sort, onSort, onCellCopy, copiedCell, sor
           >
             <Search size={10} />
             Filter
-          </button>
-          {/* Mode toggle */}
+          </Button>
+          {/* Filter toggle */}
           <div className="flex items-center rounded border border-border bg-background">
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={() => setMode("table")}
               className={clsx(
@@ -811,8 +865,10 @@ function ResultGrid({ result, elapsed, sort, onSort, onCellCopy, copiedCell, sor
               )}
             >
               Table
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={() => setMode("pivot")}
               className={clsx(
@@ -823,7 +879,7 @@ function ResultGrid({ result, elapsed, sort, onSort, onCellCopy, copiedCell, sor
               )}
             >
               Pivot
-            </button>
+            </Button>
           </div>
         </div>
       </div>
@@ -833,53 +889,83 @@ function ResultGrid({ result, elapsed, sort, onSort, onCellCopy, copiedCell, sor
         <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border bg-card px-3 py-1.5 text-[10px]">
           <label className="flex items-center gap-1 text-muted-foreground">
             Group by:
-            <NativeSelect
-              value={pivotCfg.groupBy[0] || ""}
-              onChange={(e) =>
-                setPivotCfg((p) => ({ ...p, groupBy: e.target.value ? [e.target.value] : [] }))
-              }
-              className="rounded border border-border bg-background px-1 py-0.5 font-mono text-foreground"
+            <Select
+              value={":" + String(pivotCfg.groupBy[0] || "")}
+              onValueChange={(selectedValue) => {
+                const value = selectedValue.slice(1);
+                return setPivotCfg((p) => ({
+                  ...p,
+                  groupBy: value ? [value] : [],
+                }));
+              }}
             >
-              <option value="">—</option>
-              {cols.map((c) => (
-                <option key={c} value={c}>
-                  {c}
-                </option>
-              ))}
-            </NativeSelect>
+              <SelectTrigger className="rounded border border-border bg-background px-1 py-0.5 font-mono text-foreground">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  <SelectItem value={":" + String("")}>—</SelectItem>
+                  {cols.map((c) => (
+                    <SelectItem key={c} value={":" + String(c)}>
+                      {c}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
           </label>
           <label className="flex items-center gap-1 text-muted-foreground">
             Value:
-            <NativeSelect
-              value={pivotCfg.values[0] || ""}
-              onChange={(e) =>
-                setPivotCfg((p) => ({ ...p, values: e.target.value ? [e.target.value] : [] }))
-              }
-              className="rounded border border-border bg-background px-1 py-0.5 font-mono text-foreground"
+            <Select
+              value={":" + String(pivotCfg.values[0] || "")}
+              onValueChange={(selectedValue) => {
+                const value = selectedValue.slice(1);
+                return setPivotCfg((p) => ({
+                  ...p,
+                  values: value ? [value] : [],
+                }));
+              }}
             >
-              <option value="">—</option>
-              {cols.map((c) => (
-                <option key={c} value={c}>
-                  {c}
-                </option>
-              ))}
-            </NativeSelect>
+              <SelectTrigger className="rounded border border-border bg-background px-1 py-0.5 font-mono text-foreground">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  <SelectItem value={":" + String("")}>—</SelectItem>
+                  {cols.map((c) => (
+                    <SelectItem key={c} value={":" + String(c)}>
+                      {c}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
           </label>
           <label className="flex items-center gap-1 text-muted-foreground">
             Agg:
-            <NativeSelect
-              value={pivotCfg.agg}
-              onChange={(e) =>
-                setPivotCfg((p) => ({ ...p, agg: e.target.value as PivotConfig["agg"] }))
-              }
-              className="rounded border border-border bg-background px-1 py-0.5 font-mono text-foreground"
+            <Select
+              value={":" + String(pivotCfg.agg)}
+              onValueChange={(selectedValue) => {
+                const value = selectedValue.slice(1);
+                return setPivotCfg((p) => ({
+                  ...p,
+                  agg: value as PivotConfig["agg"],
+                }));
+              }}
             >
-              {(["COUNT", "SUM", "AVG", "MIN", "MAX"] as const).map((a) => (
-                <option key={a} value={a}>
-                  {a}
-                </option>
-              ))}
-            </NativeSelect>
+              <SelectTrigger className="rounded border border-border bg-background px-1 py-0.5 font-mono text-foreground">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  {(["COUNT", "SUM", "AVG", "MIN", "MAX"] as const).map((a) => (
+                    <SelectItem key={a} value={":" + String(a)}>
+                      {a}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
           </label>
           <span className="text-muted-foreground">
             {pivotData ? `${pivotData.length} groups` : ""}
@@ -891,7 +977,9 @@ function ResultGrid({ result, elapsed, sort, onSort, onCellCopy, copiedCell, sor
       <div className="min-h-0 flex-1 overflow-auto">
         {mode === "table" ? (
           result.row_count === 0 ? (
-            <div className="p-4 text-center text-xs text-muted-foreground">No rows returned.</div>
+            <div className="p-4 text-center text-xs text-muted-foreground">
+              No rows returned.
+            </div>
           ) : (
             <table className="border-collapse font-mono text-[11px]" style={{ minWidth: "100%" }}>
               <thead className="sticky top-0 z-10 bg-card">

@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { Button } from "@/components/ui/button";
 import { ChevronDown, ChevronRight, Download, Upload } from "lucide-react";
-import { formatBytes } from "../../lib/format";
+import { useState } from "react";
 import { HydrationEntry } from "../../ipc";
+import { formatBytes } from "../../lib/format";
 import { ResolvedScope } from "../../lib/hydrateScope";
 
 interface Props {
@@ -39,7 +40,9 @@ export function HydrateScopePreview({ hydrate, dehydrate }: Props) {
         />
       </div>
 
-      {expanded === "hydrate" && <FileList entries={hydrate.matched} skipped={hydrate.skipped} />}
+      {expanded === "hydrate" && (
+        <FileList entries={hydrate.matched} skipped={hydrate.skipped} />
+      )}
       {expanded === "dehydrate" && (
         <FileList entries={dehydrate.matched} skipped={dehydrate.skipped} />
       )}
@@ -68,7 +71,9 @@ function PreviewCell({
 }) {
   const isEmpty = resolved.matched.length === 0;
   return (
-    <button
+    <Button
+      variant="ghost"
+      size="compact"
       type="button"
       onClick={onToggle}
       disabled={isEmpty && resolved.skipped.length === 0}
@@ -83,17 +88,23 @@ function PreviewCell({
           {resolved.matched.length.toLocaleString()}{" "}
           {resolved.matched.length === 1 ? "file" : "files"}
         </span>
-        <span className="font-mono text-muted-foreground">{formatBytes(resolved.bytes)}</span>
+        <span className="font-mono text-muted-foreground">
+          {formatBytes(resolved.bytes)}
+        </span>
         {resolved.skipped.length > 0 && (
           <span className="text-[10px] text-muted-foreground">
             ({resolved.skipped.length} skipped)
           </span>
         )}
         {!isEmpty || resolved.skipped.length > 0 ? (
-          expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />
+          expanded ? (
+            <ChevronDown size={12} />
+          ) : (
+            <ChevronRight size={12} />
+          )
         ) : null}
       </span>
-    </button>
+    </Button>
   );
 }
 
@@ -117,7 +128,9 @@ function FileList({
           {shown.map((e) => (
             <div key={e.path} className="flex items-center justify-between gap-3 py-px">
               <span className="truncate text-foreground">{e.path}</span>
-              <span className="shrink-0 text-muted-foreground">{formatBytes(e.logical)}</span>
+              <span className="shrink-0 text-muted-foreground">
+                {formatBytes(e.logical)}
+              </span>
             </div>
           ))}
           {truncated && (
@@ -127,7 +140,8 @@ function FileList({
           )}
           {skipped.length > 0 && (
             <div className="mt-2 border-t border-border pt-1.5 text-[10px] text-muted-foreground">
-              {skipped.length.toLocaleString()} outside the eligible file states.
+              {skipped.length.toLocaleString()} outside the eligible file
+              states.
             </div>
           )}
         </>

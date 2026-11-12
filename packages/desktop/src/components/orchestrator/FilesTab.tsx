@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 /**
  * Files Tab — Full file explorer for the agent's isolated worktree.
@@ -9,14 +10,14 @@ import { Input } from "@/components/ui/input";
  *   3. Monaco editor below — shows the active tab's file content
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { ChevronsDownUp, Loader2, Search, X } from "lucide-react";
 import clsx from "clsx";
+import { ChevronsDownUp, Loader2, Search, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
-import { FileTree } from "../FileTree";
-import { FileIcon } from "../FileIcon";
-import { CodeEditor } from "../CodeEditor";
 import { DirEntry, mainProcess } from "../../ipc";
+import { CodeEditor } from "../CodeEditor";
+import { FileIcon } from "../FileIcon";
+import { FileTree } from "../FileTree";
 import { OrchestratorTask } from "./TaskCard";
 
 // ── Types ───────────────────────────────────────────────────────────
@@ -175,7 +176,7 @@ export function FilesTab({ task, selectedFile, onSelectFile }: Props) {
         <div className="flex h-full flex-col overflow-hidden border-r border-border">
           {/* Toolbar: filter + collapse */}
           <div className="shrink-0 border-b border-border px-2 py-2">
-            {/* Filter input */}
+            {/* Toolbar: filter + collapse */}
             <div className="relative">
               <Search size={11} className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground" />
               <Input
@@ -185,22 +186,27 @@ export function FilesTab({ task, selectedFile, onSelectFile }: Props) {
                 onChange={(e) => setFilter(e.target.value)}
               />
               {filter && (
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
                   onClick={() => setFilter("")}
                   className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground hover:text-foreground"
                   aria-label="Clear filter"
                 >
                   <X size={10} />
-                </button>
+                </Button>
               )}
             </div>
             {/* Action bar */}
             <div className="mt-1.5 flex items-center justify-between">
               <span className="text-[10px] text-muted-foreground">
-                {filteredEntries.length} file{filteredEntries.length !== 1 ? "s" : ""}
+                {filteredEntries.length} file
+                {filteredEntries.length !== 1 ? "s" : ""}
               </span>
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground transition"
                 title="Collapse All"
@@ -208,7 +214,7 @@ export function FilesTab({ task, selectedFile, onSelectFile }: Props) {
                 onClick={() => setCollapseKey((k) => k + 1)}
               >
                 <ChevronsDownUp size={12} />
-              </button>
+              </Button>
             </div>
           </div>
 
@@ -315,7 +321,9 @@ function EditorTabPill({
     >
       <FileIcon path={tab.path} kind="file" />
       <span className="max-w-[120px] truncate">{tab.label}</span>
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={(e) => {
           e.stopPropagation();
@@ -330,7 +338,7 @@ function EditorTabPill({
         aria-label={`Close ${tab.label}`}
       >
         <X size={10} />
-      </button>
+      </Button>
     </div>
   );
 }

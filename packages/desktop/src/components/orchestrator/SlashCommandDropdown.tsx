@@ -1,5 +1,20 @@
+import { Button } from "@/components/ui/button";
+import {
+  CommandGroup,
+  CommandItem,
+  CommandList,
+  CommandPopover,
+} from "@/components/ui/command";
+import {
+  Bug,
+  Code,
+  GitBranch,
+  Plus,
+  Search,
+  Shield,
+  Terminal,
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Plus, Terminal, GitBranch, Shield, Bug, Search, Code } from "lucide-react";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -17,6 +32,7 @@ export interface SlashCommand {
 }
 
 interface Props {
+  anchorRef: React.RefObject<HTMLElement | null>;
   commands: SlashCommand[];
   filter: string;
   onSelect: (name: string) => void;
@@ -93,7 +109,10 @@ function fuzzyMatch(text: string, query: string): boolean {
  *
  * Supports keyboard navigation (arrow keys, Enter, Escape, Tab to accept).
  */
-export function SlashCommandDropdown({ commands, filter, onSelect, visible, onCreateCommand }: Props) {
+export function SlashCommandDropdown({
+  anchorRef,
+  commands, filter, onSelect, visible, onCreateCommand,
+}: Props) {
   const [activeIndex, setActiveIndex] = useState(0);
   const listRef = useRef<HTMLDivElement>(null);
   // Track whether the last activeIndex change came from keyboard navigation.
@@ -177,9 +196,10 @@ export function SlashCommandDropdown({ commands, filter, onSelect, visible, onCr
   // from the textarea.
   useEffect(() => {
     if (!visible) return;
-    document.addEventListener("keydown", handleKeyDown, true);
-    return () => document.removeEventListener("keydown", handleKeyDown, true);
-  }, [visible, handleKeyDown]);
+    const anchor = anchorRef.current;
+    anchor?.addEventListener("keydown", handleKeyDown);
+    return () => anchor?.removeEventListener("keydown", handleKeyDown);
+  }, [visible, handleKeyDown, anchorRef]);
 
   if (!visible) return null;
 
@@ -187,17 +207,23 @@ export function SlashCommandDropdown({ commands, filter, onSelect, visible, onCr
   let flatIdx = 0;
 
   return (
-    <div
-      ref={listRef}
-      role="listbox"
-      aria-label="Slash commands"
-      className="absolute bottom-full left-0 right-0 mb-1 max-h-[min(240px,40vh,var(--composer-popup-height))] overflow-auto rounded-lg border border-border bg-background shadow-lg z-50"
+    <CommandPopover
+      anchorRef={anchorRef}
+      onClose={() => onSelect("")}
+      value={String(activeIndex)}
+      onValueChange={(value) => setActiveIndex(Number(value))}
     >
+      <CommandList
+        ref={listRef}
+        className="max-h-[min(280px,var(--composer-popup-height))]"
+        label="Slash commands"
+      >
+        <CommandGroup>
       {/* Header */}
       <div className="sticky top-0 z-10 flex items-center justify-between border-b border-border/50 bg-background/95 backdrop-blur-sm px-3 py-1.5">
         <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-          Commands
-        </span>
+              Commands
+            </span>
         {filter && (
           <span className="text-[10px] text-muted-foreground">
             {flatList.length} match{flatList.length !== 1 ? "es" : ""}
@@ -208,17 +234,19 @@ export function SlashCommandDropdown({ commands, filter, onSelect, visible, onCr
       {flatList.length === 0 ? (
         <div className="px-3 py-3 text-center">
           <div className="text-[11px] text-muted-foreground mb-2">
-            No commands match "/{filter}"
-          </div>
+                No commands match "/{filter}"
+              </div>
           {onCreateCommand && (
-            <button
-              type="button"
+            <Button
+                  variant="ghost"
+                  size="compact"
+                  type="button"
               onClick={() => onCreateCommand(filter)}
               className="inline-flex items-center gap-1.5 rounded-md bg-primary/10 px-2.5 py-1 text-[11px] font-medium text-primary hover:bg-primary/20 transition"
             >
               <Plus size={11} />
-              Create "/{filter}"
-            </button>
+                  Create "/{filter}"
+                </Button>
           )}
         </div>
       ) : (
@@ -234,14 +262,11 @@ export function SlashCommandDropdown({ commands, filter, onSelect, visible, onCr
               {cmds.map((cmd) => {
                 const idx = flatIdx++;
                 return (
-                  <button
-                    key={cmd.name}
-                    type="button"
-                    role="option"
-                    aria-selected={idx === activeIndex}
-                    data-active={idx === activeIndex}
-                    onClick={() => onSelect(cmd.name)}
-                    onMouseEnter={() => setActiveIndex(idx)}
+                  <CommandItem
+                        value={String(idx)}
+                        key={cmd.name}
+                        data-active={idx === activeIndex}
+                        onSelect={() => onSelect(cmd.name)}
                     className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition ${
                       idx === activeIndex
                         ? "bg-primary/10 text-foreground"
@@ -267,7 +292,7 @@ export function SlashCommandDropdown({ commands, filter, onSelect, visible, onCr
                     >
                       {cmd.source}
                     </span>
-                  </button>
+                  </CommandItem>
                 );
               })}
             </div>
@@ -276,18 +301,22 @@ export function SlashCommandDropdown({ commands, filter, onSelect, visible, onCr
           {/* Create command footer */}
           {onCreateCommand && (
             <div className="border-t border-border/50 px-3 py-1.5">
-              <button
-                type="button"
+              <Button
+                    variant="ghost"
+                    size="compact"
+                    type="button"
                 onClick={() => onCreateCommand()}
                 className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground transition"
               >
                 <Plus size={11} />
                 <span>Create custom command…</span>
-              </button>
-            </div>
+              </Button>
+                </div>
+              )}
+            </>
           )}
-        </>
-      )}
-    </div>
+        </CommandGroup>
+      </CommandList>
+    </CommandPopover>
   );
 }

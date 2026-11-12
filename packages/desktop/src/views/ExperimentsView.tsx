@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { Button } from "@/components/ui/button";
 import clsx from "clsx";
 import {
   ChevronDown,
@@ -9,13 +9,14 @@ import {
   RefreshCw,
   Settings,
 } from "lucide-react";
-import { OpenRepo } from "../state";
+import { useCallback, useEffect, useState } from "react";
 import {
   ExperimentRun,
   ExperimentRunDetail,
   ExperimentRunStatus,
   rpc,
 } from "../ipc";
+import { OpenRepo } from "../state";
 
 interface Props {
   repo: OpenRepo;
@@ -136,18 +137,23 @@ export function ExperimentsView({ repo, onNavigateToCommit, onNavigateToSettings
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
         <FlaskConical size={32} className="text-muted-foreground" />
-        <div className="text-sm text-foreground">No experiment provider configured</div>
+        <div className="text-sm text-foreground">
+          No experiment provider configured
+        </div>
         <p className="text-xs text-muted-foreground">
-          Connect MLflow or Weights &amp; Biases to see experiment runs linked to your commits.
+          Connect MLflow or Weights &amp; Biases to see experiment runs linked
+          to your commits.
         </p>
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={onNavigateToSettings}
           className="mt-2 flex items-center gap-1.5 rounded border border-border px-3 py-1.5 text-xs text-foreground hover:bg-accent"
         >
           <Settings size={12} />
           Open Settings
-        </button>
+        </Button>
       </div>
     );
   }
@@ -160,7 +166,9 @@ export function ExperimentsView({ repo, onNavigateToCommit, onNavigateToSettings
           <span className="flex items-center gap-1">
             <FlaskConical size={11} /> Experiments
           </span>
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="text-muted-foreground hover:text-foreground"
             onClick={fetchRuns}
@@ -168,7 +176,7 @@ export function ExperimentsView({ repo, onNavigateToCommit, onNavigateToSettings
             aria-label="Refresh experiment runs"
           >
             <RefreshCw size={11} className={loading ? "animate-spin" : ""} />
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -185,7 +193,9 @@ export function ExperimentsView({ repo, onNavigateToCommit, onNavigateToSettings
           </div>
         )}
         {!loading && !error && runs && runs.length === 0 && (
-          <div className="p-3 text-xs text-muted-foreground">No experiment runs found.</div>
+          <div className="p-3 text-xs text-muted-foreground">
+            No experiment runs found.
+          </div>
         )}
         {runs && runs.length > 0 && (
           <ul className="py-1">
@@ -226,7 +236,9 @@ function RunRow({
 
   return (
     <li className="border-b border-border/50 last:border-b-0">
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={onToggle}
         className={clsx(
@@ -241,7 +253,9 @@ function RunRow({
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <span className="truncate font-medium text-foreground">{run.name}</span>
+            <span className="truncate font-medium text-foreground">
+              {run.name}
+            </span>
             <StatusChip status={run.status} />
           </div>
           {metricEntries.length > 0 && (
@@ -256,7 +270,9 @@ function RunRow({
           <div className="mt-0.5 flex items-center gap-2 text-[10px] text-muted-foreground">
             <span>{formatTime(run.start_time)}</span>
             {run.commit_sha && (
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 onClick={(e) => {
                   e.stopPropagation();
@@ -266,11 +282,11 @@ function RunRow({
                 title={`Go to commit ${run.commit_sha}`}
               >
                 {shortSha(run.commit_sha)}
-              </button>
+              </Button>
             )}
           </div>
         </div>
-      </button>
+      </Button>
 
       {expanded && (
         <RunDetailPanel repoId={repoId} runId={run.id} url={run.url} />
@@ -353,7 +369,9 @@ function RunDetailPanel({
             {paramEntries.map(([key, val]) => (
               <div key={key} className="flex items-baseline justify-between gap-1">
                 <span className="truncate text-muted-foreground">{key}</span>
-                <span className="shrink-0 font-mono text-foreground">{val}</span>
+                <span className="shrink-0 font-mono text-foreground">
+                  {val}
+                </span>
               </div>
             ))}
           </div>
@@ -378,7 +396,9 @@ function RunDetailPanel({
 function DetailSection({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div>
-      <div className="mb-0.5 text-[10px] uppercase tracking-wider text-muted-foreground">{title}</div>
+      <div className="mb-0.5 text-[10px] uppercase tracking-wider text-muted-foreground">
+        {title}
+      </div>
       {children}
     </div>
   );

@@ -1,6 +1,11 @@
+import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { useCallback, useRef, useState, useEffect, type KeyboardEvent } from "react";
-import { Pencil, Trash2, Save, X } from "lucide-react";
+import { Pencil, Save, Trash2, X } from "lucide-react";
+import {
+  useCallback,
+  useEffect,
+  useRef, useState, type KeyboardEvent,
+} from "react";
 import type { PendingComment } from "../../review/types";
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -91,7 +96,9 @@ export function PendingCommentCard({ comment, onUpdate, onRemove }: PendingComme
 
         {!editing && (
           <div className="flex items-center gap-1">
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-primary/10 hover:text-primary"
               onClick={handleEdit}
@@ -99,8 +106,10 @@ export function PendingCommentCard({ comment, onUpdate, onRemove }: PendingComme
             >
               <Pencil size={10} />
               Edit
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
               onClick={handleDelete}
@@ -108,7 +117,7 @@ export function PendingCommentCard({ comment, onUpdate, onRemove }: PendingComme
             >
               <Trash2 size={10} />
               Delete
-            </button>
+            </Button>
           </div>
         )}
       </div>
@@ -127,7 +136,9 @@ export function PendingCommentCard({ comment, onUpdate, onRemove }: PendingComme
               aria-label="Edit comment body"
             />
             <div className="mt-1.5 flex items-center justify-end gap-2">
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 className="inline-flex items-center gap-1 rounded px-2 py-1 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
                 onClick={handleCancel}
@@ -135,8 +146,10 @@ export function PendingCommentCard({ comment, onUpdate, onRemove }: PendingComme
               >
                 <X size={10} />
                 Cancel
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 className="inline-flex items-center gap-1 rounded bg-primary/10 px-2 py-1 text-[10px] text-primary hover:bg-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
                 disabled={!editBody.trim()}
@@ -145,7 +158,7 @@ export function PendingCommentCard({ comment, onUpdate, onRemove }: PendingComme
               >
                 <Save size={10} />
                 Save
-              </button>
+              </Button>
             </div>
           </>
         ) : (

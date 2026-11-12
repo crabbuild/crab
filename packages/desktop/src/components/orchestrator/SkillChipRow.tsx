@@ -1,5 +1,6 @@
-import { useState, useEffect } from "react";
+import { Button } from "@/components/ui/button";
 import { Puzzle, X } from "lucide-react";
+import { useEffect, useState } from "react";
 
 interface Props {
   skills: string[];
@@ -45,14 +46,16 @@ export function SkillChipRow({ skills, onRemove }: Props) {
         >
           <Puzzle size={10} />
           {skillNames.get(id) ?? id}
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={() => onRemove(id)}
             className="hover:text-destructive transition-colors"
             title="Remove skill"
           >
             <X size={10} />
-          </button>
+          </Button>
         </span>
       ))}
     </div>

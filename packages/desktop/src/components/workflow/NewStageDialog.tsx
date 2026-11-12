@@ -1,8 +1,9 @@
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { Button } from "@/components/ui/button";
-import { useState } from "react";
 import { X } from "lucide-react";
+import { useState } from "react";
 import { WorkflowStage } from "../../lib/workflow-types";
 
 interface Props {
@@ -58,23 +59,40 @@ export function NewStageDialog({ existingNames, onAdd, onClose }: Props) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="w-[400px] rounded-lg border border-border bg-card shadow-xl">
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) {
+          onClose();
+        }
+      }}
+    >
+      <DialogContent
+        showCloseButton={false}
+        aria-describedby={undefined}
+        className="block gap-0 p-0 w-[400px] rounded-lg border border-border bg-card shadow-xl"
+      >
         <div className="flex items-center justify-between border-b border-border px-4 py-3">
-          <h2 className="text-sm font-medium text-foreground">New Stage</h2>
-          <button
+          <DialogTitle className="text-sm font-medium text-foreground">
+            New Stage
+          </DialogTitle>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
             onClick={onClose}
           >
             <X size={16} />
-          </button>
+          </Button>
         </div>
 
         <form onSubmit={handleSubmit} className="p-4">
           <div className="space-y-3">
             <div>
-              <label className="mb-1 block text-xs text-muted-foreground">Stage Name</label>
+              <label className="mb-1 block text-xs text-muted-foreground">
+                Stage Name
+              </label>
               <Input
                 type="text"
                 className="w-full text-sm"
@@ -86,7 +104,9 @@ export function NewStageDialog({ existingNames, onAdd, onClose }: Props) {
             </div>
 
             <div>
-              <label className="mb-1 block text-xs text-muted-foreground">Command</label>
+              <label className="mb-1 block text-xs text-muted-foreground">
+                Command
+              </label>
               <Textarea
                 className="w-full resize-y font-mono text-xs"
                 rows={3}
@@ -112,7 +132,7 @@ export function NewStageDialog({ existingNames, onAdd, onClose }: Props) {
             </Button>
           </div>
         </form>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

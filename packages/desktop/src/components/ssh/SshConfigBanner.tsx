@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Non-blocking banner shown on first launch when SSH hosts are detected
  * in `~/.ssh/config` but no profiles exist yet.
@@ -9,8 +10,8 @@
  *   in localStorage so it won't appear again.
  */
 
-import { useCallback, useEffect, useState } from "react";
 import { FileDown, X } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
 
 const DISMISSED_KEY = "crab.ssh.configBannerDismissed";
 
@@ -72,22 +73,26 @@ export function SshConfigBanner({ onImport }: SshConfigBannerProps) {
         We found <strong>{hostCount}</strong> SSH{" "}
         {hostCount === 1 ? "host" : "hosts"} in your config
       </p>
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         className="rounded border border-primary/50 bg-primary/10 px-2.5 py-1 text-[11px] font-medium text-primary transition hover:bg-primary/20"
         onClick={handleImport}
         aria-label={`Import ${hostCount} SSH hosts from config`}
       >
         Import
-      </button>
-      <button
+      </Button>
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         className="rounded p-1 text-muted-foreground transition hover:bg-accent hover:text-foreground"
         onClick={handleDismiss}
         aria-label="Dismiss SSH config import banner"
       >
         <X size={14} />
-      </button>
+      </Button>
     </div>
   );
 }

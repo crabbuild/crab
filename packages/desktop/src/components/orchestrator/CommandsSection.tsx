@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { Button } from "@/components/ui/button";
 import { ExternalLink, Loader2, Plus, Terminal, Trash2 } from "lucide-react";
-import type { SlashCommand } from "./SlashCommandDropdown";
-import { CreateCommandDialog } from "./CreateCommandDialog";
+import { useCallback, useEffect, useState } from "react";
 import { publishToast } from "../../lib/toasts";
+import { CreateCommandDialog } from "./CreateCommandDialog";
+import type { SlashCommand } from "./SlashCommandDropdown";
 
 // ── Component ───────────────────────────────────────────────────────
 
@@ -74,36 +75,42 @@ export function CommandsSection() {
         <div className="text-[11px] text-muted-foreground">
           {commands.length} command{commands.length !== 1 ? "s" : ""} available
         </div>
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={() => setCreateOpen(true)}
           className="flex items-center gap-1 rounded-md bg-primary/10 px-2 py-1 text-[10px] font-medium text-primary hover:bg-primary/20 transition"
         >
           <Plus size={10} />
           New command
-        </button>
+        </Button>
       </div>
 
       {/* Help text */}
       <div className="rounded-md border border-border/50 bg-card/50 px-3 py-2 text-[10px] text-muted-foreground leading-relaxed">
-        <p className="mb-1">
-          Commands are markdown files loaded from:
-        </p>
+        <p className="mb-1">Commands are markdown files loaded from:</p>
         <ul className="list-disc list-inside space-y-0.5">
           <li>
-            <code className="font-mono text-foreground/70">.crab/orchestrator/commands/</code>{" "}
+            <code className="font-mono text-foreground/70">
+              .crab/orchestrator/commands/
+            </code>{" "}
             <span className="text-success">(project)</span>
           </li>
           <li>
-            <code className="font-mono text-foreground/70">~/.crab/commands/</code>{" "}
+            <code className="font-mono text-foreground/70">
+              ~/.crab/commands/
+            </code>{" "}
             <span className="text-thinking">(user)</span>
           </li>
         </ul>
         <p className="mt-1.5">
           Use YAML frontmatter for metadata. Supports{" "}
           <code className="font-mono text-foreground/70">$ARGUMENTS</code>,{" "}
-          <code className="font-mono text-foreground/70">$0/$1</code> positional args, and{" "}
-          <code className="font-mono text-foreground/70">!`shell`</code> dynamic context.
+          <code className="font-mono text-foreground/70">$0/$1</code> positional
+          args, and{" "}
+          <code className="font-mono text-foreground/70">!`shell`</code> dynamic
+          context.
         </p>
       </div>
 
@@ -122,14 +129,18 @@ export function CommandsSection() {
               <Terminal size={12} className="shrink-0 text-primary" />
               <div className="min-w-0 flex-1">
                 <div className="flex items-baseline gap-1.5">
-                  <span className="text-xs font-medium text-foreground">/{cmd.name}</span>
+                  <span className="text-xs font-medium text-foreground">
+                    /{cmd.name}
+                  </span>
                   {cmd.argumentHint && (
                     <span className="text-[10px] font-mono text-muted-foreground/70">
                       {cmd.argumentHint}
                     </span>
                   )}
                 </div>
-                <div className="text-[10px] text-muted-foreground truncate">{cmd.description}</div>
+                <div className="text-[10px] text-muted-foreground truncate">
+                  {cmd.description}
+                </div>
               </div>
 
               {/* Category badge */}
@@ -155,24 +166,28 @@ export function CommandsSection() {
               {/* Actions (visible on hover) */}
               <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                 {cmd.path && (
-                  <button
+                  <Button
+                    variant="ghost"
+                    size="compact"
                     type="button"
                     onClick={() => handleOpenFile(cmd)}
                     title="Open file"
                     className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground transition"
                   >
                     <ExternalLink size={11} />
-                  </button>
+                  </Button>
                 )}
                 {cmd.source !== "builtin" && (
-                  <button
+                  <Button
+                    variant="ghost"
+                    size="compact"
                     type="button"
                     onClick={() => handleDelete(cmd.name)}
                     title="Delete command"
                     className="rounded p-1 text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition"
                   >
                     <Trash2 size={11} />
-                  </button>
+                  </Button>
                 )}
               </div>
             </div>

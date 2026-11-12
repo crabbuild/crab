@@ -1,8 +1,17 @@
-import { NativeSelect } from "@/components/ui/native-select";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
-import { useCallback, useEffect, useState } from "react";
 import clsx from "clsx";
+import type { LucideIcon } from "lucide-react";
 import {
   ChevronDown,
   Coins,
@@ -13,10 +22,10 @@ import {
   Server,
   Settings,
 } from "lucide-react";
-import type { LucideIcon } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
 import { useSettings } from "../../settings";
-import { TemplatesSection } from "./TemplatesSection";
 import { CommandsSection } from "./CommandsSection";
+import { TemplatesSection } from "./TemplatesSection";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -73,22 +82,38 @@ export function OrchestratorSettings() {
           label="Default agent"
           hint="Which agent CLI to use for new tasks."
         >
-          <NativeSelect
-            className="rounded border border-border bg-background px-2 py-1 text-sm focus-visible:outline-none focus:border-primary"
-            value={settings.orchestratorDefaultAgent}
-            onChange={(e) => update("orchestratorDefaultAgent", e.target.value)}
+          <Select
+            value={":" + String(settings.orchestratorDefaultAgent)}
+            onValueChange={(selectedValue) => {
+              const value = selectedValue.slice(1);
+              return update("orchestratorDefaultAgent", value);
+            }}
           >
-            {registeredAgents.length > 0 ? (
-              registeredAgents.map(agent => (
-                <option key={agent.type} value={agent.type}>{agent.name}</option>
-              ))
-            ) : (
-              <>
-                <option value="claude-code">Claude Code</option>
-                <option value="codex">Codex</option>
-              </>
-            )}
-          </NativeSelect>
+            <SelectTrigger className="rounded border border-border bg-background px-2 py-1 text-sm focus-visible:outline-none focus:border-primary">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                {registeredAgents.length > 0 ? (
+                  registeredAgents.map((agent) => (
+                    <SelectItem
+                      key={agent.type}
+                      value={":" + String(agent.type)}
+                    >
+                      {agent.name}
+                    </SelectItem>
+                  ))
+                ) : (
+                  <>
+                    <SelectItem value={":" + String("claude-code")}>
+                      Claude Code
+                    </SelectItem>
+                    <SelectItem value={":" + String("codex")}>Codex</SelectItem>
+                  </>
+                )}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
         </SettingsRow>
 
         <SettingsRow
@@ -146,8 +171,12 @@ export function OrchestratorSettings() {
       {/* ── Scripts ──────────────────────────────────────────────── */}
       <CollapsibleGroup title="Scripts" icon={Play}>
         <div className="mb-2 text-[10px] text-muted-foreground">
-          Lifecycle scripts run in the workspace directory. Override per-repo via{" "}
-          <code className="font-mono text-foreground/80">crab-orchestrator.json</code>.
+          Lifecycle scripts run in the workspace directory. Override per-repo
+          via{" "}
+          <code className="font-mono text-foreground/80">
+            crab-orchestrator.json
+          </code>
+          .
         </div>
 
         <SettingsRow label="Setup script" hint="Runs before the first agent turn in a new or restored worktree (e.g. npm install).">
@@ -227,7 +256,10 @@ export function OrchestratorSettings() {
       <CollapsibleGroup title="Preferences" icon={FileText}>
         <div className="mb-2 text-[10px] text-muted-foreground">
           Injected into agent prompts. Override per-repo via{" "}
-          <code className="font-mono text-foreground/80">.crab/orchestrator/preferences.md</code>.
+          <code className="font-mono text-foreground/80">
+            .crab/orchestrator/preferences.md
+          </code>
+          .
         </div>
         <PreferencesSection />
       </CollapsibleGroup>
@@ -283,13 +315,17 @@ function CollapsibleGroup({
 
   return (
     <div className="rounded-lg border border-border/60 bg-card/50">
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={() => setOpen(!open)}
-        className="flex w-full items-center gap-2 px-4 py-3 text-left"
+        className="justify-start flex w-full items-center gap-2 px-4 py-3 text-left"
       >
         <Icon size={13} className="text-muted-foreground" />
-        <span className="flex-1 text-xs font-medium text-foreground">{title}</span>
+        <span className="flex-1 text-xs font-medium text-foreground">
+          {title}
+        </span>
         <ChevronDown
           size={13}
           className={clsx(
@@ -297,7 +333,7 @@ function CollapsibleGroup({
             !open && "-rotate-90",
           )}
         />
-      </button>
+      </Button>
       {open && (
         <div className="space-y-4 border-t border-border/40 px-4 pb-4 pt-3">
           {children}
@@ -322,7 +358,11 @@ function SettingsRow({
     <div className="grid grid-cols-[1fr_auto] items-start gap-4 pb-3 last:pb-0">
       <div>
         <div className="text-xs text-foreground">{label}</div>
-        {hint && <div className="mt-0.5 max-w-sm text-[10px] text-muted-foreground">{hint}</div>}
+        {hint && (
+          <div className="mt-0.5 max-w-sm text-[10px] text-muted-foreground">
+            {hint}
+          </div>
+        )}
       </div>
       <div className="min-w-[180px]">{children}</div>
     </div>
@@ -331,25 +371,7 @@ function SettingsRow({
 
 function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
   return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      onClick={() => onChange(!checked)}
-      className={clsx(
-        "relative inline-flex h-5 w-9 items-center rounded-full border transition",
-        checked
-          ? "border-primary bg-primary/70"
-          : "border-border bg-background",
-      )}
-    >
-      <span
-        className={clsx(
-          "inline-block h-3.5 w-3.5 transform rounded-full bg-background shadow transition",
-          checked ? "translate-x-[18px]" : "translate-x-[2px]",
-        )}
-      />
-    </button>
+    <Switch checked={checked} onCheckedChange={() => onChange(!checked)} />
   );
 }
 
@@ -379,7 +401,9 @@ function NumberInput({
         }}
         className="w-20 rounded border border-border bg-background px-2 py-1 text-sm font-mono focus-visible:outline-none focus:border-primary"
       />
-      {suffix && <span className="text-[10px] text-muted-foreground">{suffix}</span>}
+      {suffix && (
+        <span className="text-[10px] text-muted-foreground">{suffix}</span>
+      )}
     </div>
   );
 }
@@ -466,7 +490,9 @@ function PrefField({
 }) {
   return (
     <div>
-      <label className="mb-1 block text-[10px] font-medium text-muted-foreground">{label}</label>
+      <label className="mb-1 block text-[10px] font-medium text-muted-foreground">
+        {label}
+      </label>
       <Textarea
         className="w-full rounded border border-border bg-background px-2 py-1 font-mono text-xs focus-visible:outline-none focus:border-primary resize-y min-h-[40px]"
         placeholder={placeholder}
@@ -506,7 +532,9 @@ function MCPServersSection() {
   if (servers.length === 0) {
     return (
       <p className="text-[10px] text-muted-foreground">
-        No MCP servers configured. Add a <code className="font-mono text-foreground/80">.mcp.json</code> to your repo root.
+        No MCP servers configured. Add a{" "}
+        <code className="font-mono text-foreground/80">.mcp.json</code> to your
+        repo root.
       </p>
     );
   }
@@ -516,8 +544,12 @@ function MCPServersSection() {
       {servers.map((s) => (
         <div key={s.name} className="flex items-center gap-2 rounded border border-border/60 bg-background px-3 py-1.5">
           <Server size={10} className="text-primary shrink-0" />
-          <span className="text-[10px] font-medium text-foreground">{s.name}</span>
-          <span className="flex-1 truncate text-[9px] font-mono text-muted-foreground">{s.command}</span>
+          <span className="text-[10px] font-medium text-foreground">
+            {s.name}
+          </span>
+          <span className="flex-1 truncate text-[9px] font-mono text-muted-foreground">
+            {s.command}
+          </span>
         </div>
       ))}
     </div>
@@ -563,7 +595,9 @@ function UsageSection() {
 
   if (costs.length === 0) {
     return (
-      <p className="text-[10px] text-muted-foreground">No usage data yet. Costs are tracked per task.</p>
+      <p className="text-[10px] text-muted-foreground">
+        No usage data yet. Costs are tracked per task.
+      </p>
     );
   }
 
@@ -578,15 +612,24 @@ function UsageSection() {
             Total across {costs.length} workspace{costs.length !== 1 ? "s" : ""}
           </div>
         </div>
-        <NativeSelect
-          className="rounded border border-border bg-background px-2 py-0.5 text-[10px] focus-visible:outline-none"
-          value={range}
-          onChange={(e) => setRange(e.target.value as DateRange)}
+        <Select
+          value={":" + String(range)}
+          onValueChange={(selectedValue) => {
+            const value = selectedValue.slice(1);
+            return setRange(value as DateRange);
+          }}
         >
-          <option value="7d">Last 7 days</option>
-          <option value="30d">Last 30 days</option>
-          <option value="all">All time</option>
-        </NativeSelect>
+          <SelectTrigger className="rounded border border-border bg-background px-2 py-0.5 text-[10px] focus-visible:outline-none">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              <SelectItem value={":" + String("7d")}>Last 7 days</SelectItem>
+              <SelectItem value={":" + String("30d")}>Last 30 days</SelectItem>
+              <SelectItem value={":" + String("all")}>All time</SelectItem>
+            </SelectGroup>
+          </SelectContent>
+        </Select>
       </div>
     </div>
   );

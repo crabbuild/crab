@@ -1,7 +1,9 @@
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import clsx from "clsx";
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -23,33 +25,9 @@ export interface SaveTemplateDialogProps {
  *   - Proper ARIA labelling.
  */
 export function SaveTemplateDialog({ onSave, onCancel }: SaveTemplateDialogProps) {
-  const headingId = useId();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const nameRef = useRef<HTMLInputElement | null>(null);
-  const previousActive = useRef<HTMLElement | null>(null);
-
-  // Focus management: grab focus on mount, restore on unmount.
-  useEffect(() => {
-    previousActive.current = (document.activeElement as HTMLElement | null) ?? null;
-    nameRef.current?.focus();
-    return () => {
-      previousActive.current?.focus?.();
-    };
-  }, []);
-
-  // Esc cancels.
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        onCancel();
-      }
-    };
-    window.addEventListener("keydown", handler, true);
-    return () => window.removeEventListener("keydown", handler, true);
-  }, [onCancel]);
-
   const handleSubmit = useCallback(
     (e: React.FormEvent) => {
       e.preventDefault();
@@ -61,23 +39,28 @@ export function SaveTemplateDialog({ onSave, onCancel }: SaveTemplateDialogProps
   );
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onCancel();
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) {
+          onCancel();
+        }
       }}
     >
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={headingId}
-        className="w-[26rem] max-w-[calc(100vw-2rem)] rounded-lg border border-border bg-card shadow-2xl"
+      <DialogContent
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+    nameRef.current?.focus();
+        }}
+        showCloseButton={false}
+        aria-describedby={undefined}
+        className="block gap-0 p-0 w-[26rem] max-w-[calc(100vw-2rem)] rounded-lg border border-border bg-card shadow-2xl"
       >
         {/* Header */}
         <div className="border-b border-border p-4">
-          <h2 id={headingId} className="text-[14px] font-semibold text-foreground">
+          <DialogTitle className="text-[14px] font-semibold text-foreground">
             Save as Template
-          </h2>
+          </DialogTitle>
           <p className="mt-1 text-[12px] text-muted-foreground">
             Save the current workspace configuration for reuse.
           </p>
@@ -122,7 +105,9 @@ export function SaveTemplateDialog({ onSave, onCancel }: SaveTemplateDialogProps
 
           {/* Actions */}
           <div className="flex items-center justify-end gap-2 pt-1">
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={onCancel}
               className={clsx(
@@ -131,8 +116,10 @@ export function SaveTemplateDialog({ onSave, onCancel }: SaveTemplateDialogProps
               )}
             >
               Cancel
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="default"
+              size="compact"
               type="submit"
               disabled={!name.trim()}
               className={clsx(
@@ -142,10 +129,10 @@ export function SaveTemplateDialog({ onSave, onCancel }: SaveTemplateDialogProps
               )}
             >
               Save Template
-            </button>
+            </Button>
           </div>
         </form>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

@@ -1,6 +1,5 @@
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { useState } from "react";
 import clsx from "clsx";
 import {
   CheckCircle2,
@@ -11,9 +10,10 @@ import {
   XCircle,
   Zap,
 } from "lucide-react";
-import { OpenRepo } from "../state";
+import { useState } from "react";
 import { useCrabAddFlow } from "../hooks/useAddFlow";
 import { formatBytes, formatDuration } from "../lib/format";
+import { OpenRepo } from "../state";
 
 interface Props {
   repo: OpenRepo;
@@ -48,7 +48,9 @@ export function AddFlowPanel({ repo, onComplete }: Props) {
     <div className="flex flex-col gap-3 p-4">
       {/* Header */}
       <div className="flex items-center justify-between">
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           className="flex items-center gap-1 text-sm font-semibold text-foreground"
           onClick={() => setExpanded(!expanded)}
@@ -56,7 +58,7 @@ export function AddFlowPanel({ repo, onComplete }: Props) {
           {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
           <Package size={14} />
           Track with Crab
-        </button>
+        </Button>
         {isDone && (
           <Button variant="outline" type="button" className="text-xs" onClick={() => { reset(); onComplete?.(); }}>
             Done
@@ -70,7 +72,8 @@ export function AddFlowPanel({ repo, onComplete }: Props) {
           {state.phase === "idle" && (
             <div className="space-y-2">
               <label className="block text-xs text-muted-foreground">
-                File patterns (one per line, e.g. <code className="kbd">*.safetensors</code>)
+                File patterns (one per line, e.g.{" "}
+                <code className="kbd">*.safetensors</code>)
               </label>
               <Textarea
                 className="h-20 w-full rounded border border-border bg-background p-2 font-mono text-sm focus-visible:outline-none focus:border-primary"
@@ -131,7 +134,7 @@ export function AddFlowPanel({ repo, onComplete }: Props) {
             </div>
           )}
 
-          {/* Done state */}
+          {/* Cancel button */}
           {isDone && (
             <div className="space-y-3">
               <div className="rounded border border-success/30 bg-success/5 p-3">
@@ -141,16 +144,27 @@ export function AddFlowPanel({ repo, onComplete }: Props) {
                 </div>
                 <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-muted-foreground">
                   <div>
-                    <span className="text-foreground">{state.summary.files_staged}</span> files
+                    <span className="text-foreground">
+                      {state.summary.files_staged}
+                    </span>{" "}
+                    files
                   </div>
                   <div>
-                    <span className="text-foreground">{state.summary.chunks_staged.toLocaleString()}</span> chunks
+                    <span className="text-foreground">
+                      {state.summary.chunks_staged.toLocaleString()}
+                    </span>{" "}
+                    chunks
                   </div>
                   <div>
-                    <span className="text-foreground">{formatBytes(state.summary.bytes_processed)}</span> processed
+                    <span className="text-foreground">
+                      {formatBytes(state.summary.bytes_processed)}
+                    </span>{" "}
+                    processed
                   </div>
                   <div>
-                    <span className="text-foreground">{formatDuration(state.summary.duration_ms)}</span>
+                    <span className="text-foreground">
+                      {formatDuration(state.summary.duration_ms)}
+                    </span>
                   </div>
                 </div>
               </div>
@@ -212,7 +226,9 @@ function FileRow({ file }: { file: import("../ipc").AddFlowFileProgress }) {
       </span>
 
       {/* Size */}
-      <span className="shrink-0 text-muted-foreground">{formatBytes(file.size)}</span>
+      <span className="shrink-0 text-muted-foreground">
+        {formatBytes(file.size)}
+      </span>
 
       {/* Chunks badge */}
       {file.chunks !== null && (

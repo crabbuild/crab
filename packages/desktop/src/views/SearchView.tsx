@@ -1,8 +1,8 @@
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { useCallback,useEffect,useMemo,useRef,useState } from "react";
-import { useSessionScroll } from "../hooks/useSessionScroll";
-import clsx from "clsx";
+import { Toggle } from "@/components/ui/toggle";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import clsx from "clsx";
 import {
 CaseSensitive,
 ChevronDown,
@@ -19,13 +19,15 @@ ReplaceAll,
 Search,
 WholeWord
 } from "lucide-react";
-import { DirEntry } from "../ipc";
-import { OpenRepo,useStore,getActiveWorkspace } from "../state";
+import { useCallback,useEffect,useMemo,useRef,useState } from "react";
+import { useSessionScroll } from "../hooks/useSessionScroll";
 import {
-gitGrepCancellable,
-isCancelledError,
-searchReplaceCancellable,
+  DirEntry,
+  gitGrepCancellable,
+  isCancelledError,
+  searchReplaceCancellable,
 } from "../ipc";
+import { getActiveWorkspace, OpenRepo, useStore } from "../state";
 
 interface Props {
   repo: OpenRepo;
@@ -401,14 +403,20 @@ export function SearchView({ repo, onOpenFile, entryByPath }: Props) {
         {/* Search input row */}
         <div className="flex items-center gap-1">
           {/* Toggle replace chevron */}
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={() => setShowReplace(!showReplace)}
             className="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
             title={showReplace ? "Hide Replace" : "Show Replace"}
           >
-            {showReplace ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-          </button>
+            {showReplace ? (
+              <ChevronDown size={12} />
+            ) : (
+              <ChevronRight size={12} />
+            )}
+          </Button>
 
           <div className="flex flex-1 flex-col gap-1.5">
             {/* Search field + toggles */}
@@ -458,7 +466,9 @@ export function SearchView({ repo, onOpenFile, entryByPath }: Props) {
                     onClick={() => setPreserveCase(!preserveCase)}
                   />
                 </div>
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
                   onClick={handleReplaceAll}
                   disabled={replacing || !query.trim() || !matches || matches.length === 0}
@@ -466,7 +476,7 @@ export function SearchView({ repo, onOpenFile, entryByPath }: Props) {
                   title="Replace All"
                 >
                   <ReplaceAll size={14} />
-                </button>
+                </Button>
               </div>
             )}
           </div>
@@ -476,7 +486,9 @@ export function SearchView({ repo, onOpenFile, entryByPath }: Props) {
         {showFilters && (
           <div className="mt-2 space-y-1.5 pl-[22px]">
             <div>
-              <label className="text-[10px] text-muted-foreground">files to include</label>
+              <label className="text-[10px] text-muted-foreground">
+                files to include
+              </label>
               <Input
                 className="mt-0.5 w-full rounded border border-border bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus:border-primary"
                 placeholder="e.g. *.ts, src/**"
@@ -485,7 +497,9 @@ export function SearchView({ repo, onOpenFile, entryByPath }: Props) {
               />
             </div>
             <div>
-              <label className="text-[10px] text-muted-foreground">files to exclude</label>
+              <label className="text-[10px] text-muted-foreground">
+                files to exclude
+              </label>
               <Input
                 className="mt-0.5 w-full rounded border border-border bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus:border-primary"
                 placeholder="e.g. *.lock, node_modules/**"
@@ -499,7 +513,8 @@ export function SearchView({ repo, onOpenFile, entryByPath }: Props) {
         {/* Result summary */}
         {matches && !loading && !searchAllRepos && (
           <div className="mt-2 text-[11px] text-muted-foreground">
-            {totalMatches} result{totalMatches !== 1 ? "s" : ""} in {totalFiles} file
+            {totalMatches} result{totalMatches !== 1 ? "s" : ""} in {totalFiles}{" "}
+            file
             {totalFiles !== 1 ? "s" : ""}
             {truncated && " (truncated)"}
           </div>
@@ -508,8 +523,10 @@ export function SearchView({ repo, onOpenFile, entryByPath }: Props) {
         {/* Workspace search summary */}
         {workspaceResults && !workspaceLoading && searchAllRepos && (
           <div className="mt-2 text-[11px] text-muted-foreground">
-            {workspaceResults.totalMatches} result{workspaceResults.totalMatches !== 1 ? "s" : ""} across{" "}
-            {workspaceResults.groups.filter((g) => g.matches.length > 0).length} repo
+            {workspaceResults.totalMatches} result
+            {workspaceResults.totalMatches !== 1 ? "s" : ""} across{" "}
+            {workspaceResults.groups.filter((g) => g.matches.length > 0).length}{" "}
+            repo
             {workspaceResults.groups.filter((g) => g.matches.length > 0).length !== 1 ? "s" : ""}
           </div>
         )}
@@ -519,7 +536,8 @@ export function SearchView({ repo, onOpenFile, entryByPath }: Props) {
           <div className="mt-1 rounded border border-success/40 bg-success/10 px-2 py-1 text-[11px] text-success">
             Replaced {replaceResult.replacements} occurrence
             {replaceResult.replacements !== 1 ? "s" : ""} in{" "}
-            {replaceResult.files.length} file{replaceResult.files.length !== 1 ? "s" : ""}
+            {replaceResult.files.length} file
+            {replaceResult.files.length !== 1 ? "s" : ""}
           </div>
         )}
       </div>
@@ -546,7 +564,9 @@ export function SearchView({ repo, onOpenFile, entryByPath }: Props) {
         {searchAllRepos && workspaceResults && !workspaceLoading && (
           <>
             {workspaceResults.totalMatches === 0 && (
-              <div className="p-3 text-xs text-muted-foreground">No results found across workspace repos.</div>
+              <div className="p-3 text-xs text-muted-foreground">
+                No results found across workspace repos.
+              </div>
             )}
             <WorkspaceSearchResultsView
               results={workspaceResults}
@@ -563,7 +583,9 @@ export function SearchView({ repo, onOpenFile, entryByPath }: Props) {
         {!searchAllRepos && (
           <>
             {matches && matches.length === 0 && !loading && (
-              <div className="p-3 text-xs text-muted-foreground">No results found.</div>
+              <div className="p-3 text-xs text-muted-foreground">
+                No results found.
+              </div>
             )}
 
             {viewMode === "tree" && grouped.length > 0 && (
@@ -640,10 +662,12 @@ function WorkspaceSearchResultsView({
           return (
             <div key={group.relativePath} className="mb-1">
               {/* Repo section header */}
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 onClick={() => toggleRepo(group.relativePath)}
-                className="flex w-full items-center gap-1.5 px-2 py-1 text-left hover:bg-accent"
+                className="justify-start flex w-full items-center gap-1.5 px-2 py-1 text-left hover:bg-accent"
               >
                 {isCollapsed ? (
                   <ChevronRight size={12} className="shrink-0 text-muted-foreground" />
@@ -657,7 +681,7 @@ function WorkspaceSearchResultsView({
                 <span className="ml-auto shrink-0 rounded-full bg-card px-1.5 py-0.5 text-[10px] text-muted-foreground">
                   {group.matches.length}
                 </span>
-              </button>
+              </Button>
 
               {/* Error indicator */}
               {group.error && (
@@ -725,7 +749,9 @@ function WorkspaceRepoMatchList({
           <div className="flex items-center gap-1 px-2 py-0.5 text-muted-foreground">
             <FileText size={10} className="shrink-0" />
             <span className="truncate font-mono text-[10.5px]">{g.path}</span>
-            <span className="ml-auto shrink-0 text-[9px]">{g.items.length}</span>
+            <span className="ml-auto shrink-0 text-[9px]">
+              {g.items.length}
+            </span>
           </div>
           <ul>
             {g.items.map((m, i) => (
@@ -778,38 +804,48 @@ function TreeResults({
           <div
             className="group flex items-center gap-1 px-2 py-0.5 hover:bg-accent"
           >
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={() => onToggleCollapse(g.path)}
               className="shrink-0 rounded p-0.5 text-muted-foreground"
               aria-label={g.collapsed ? "Expand" : "Collapse"}
             >
-              {g.collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
-            </button>
+              {g.collapsed ? (
+                <ChevronRight size={12} />
+              ) : (
+                <ChevronDown size={12} />
+              )}
+            </Button>
             <FileText size={12} className="shrink-0 text-muted-foreground" />
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={() => {
                 const entry = entryByPath.get(g.path);
                 if (entry) onOpenFile(g.path, entry);
               }}
-              className="min-w-0 flex-1 truncate text-left font-mono text-[11.5px] text-foreground hover:underline"
+              className="justify-start min-w-0 flex-1 truncate text-left font-mono text-[11.5px] text-foreground hover:underline"
               title={g.path}
             >
               {g.path}
-            </button>
+            </Button>
             <span className="shrink-0 rounded-full bg-card px-1.5 py-0.5 text-[10px] text-muted-foreground">
               {g.items.length}
             </span>
             {showReplace && (
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 onClick={() => onReplaceInFile(g.path)}
                 className="shrink-0 rounded p-0.5 text-muted-foreground opacity-0 hover:bg-accent hover:text-foreground group-hover:opacity-100"
                 title={`Replace all in ${g.path}`}
               >
                 <Replace size={12} />
-              </button>
+              </Button>
             )}
           </div>
 
@@ -1044,7 +1080,9 @@ function MatchRow({
   );
 
   return (
-    <button
+    <Button
+      variant="ghost"
+      size="compact"
       type="button"
       onClick={() => {
         const entry = entryByPath.get(m.path);
@@ -1063,7 +1101,7 @@ function MatchRow({
       )}
       <span className="shrink-0 text-[10px] opacity-60">{m.line}</span>
       <span className="truncate text-foreground">{highlighted}</span>
-    </button>
+    </Button>
   );
 }
 
@@ -1122,7 +1160,8 @@ function ToggleButton({
   onClick: () => void;
 }) {
   return (
-    <button
+    <Toggle
+      size="sm"
       type="button"
       onClick={onClick}
       className={clsx(
@@ -1132,10 +1171,10 @@ function ToggleButton({
           : "text-muted-foreground hover:bg-accent hover:text-foreground",
       )}
       title={title}
-      aria-pressed={active}
+      pressed={active}
     >
       {icon}
-    </button>
+    </Toggle>
   );
 }
 
@@ -1152,7 +1191,8 @@ function ToolbarButton({
   onClick: () => void;
 }) {
   return (
-    <button
+    <Toggle
+      size="sm"
       type="button"
       onClick={onClick}
       className={clsx(
@@ -1162,9 +1202,9 @@ function ToolbarButton({
           : "text-muted-foreground hover:bg-accent hover:text-foreground",
       )}
       title={title}
-      aria-pressed={active}
+      pressed={active}
     >
       {icon}
-    </button>
+    </Toggle>
   );
 }

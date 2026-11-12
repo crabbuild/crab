@@ -1,6 +1,12 @@
+import { Button } from "@/components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
-import { useEffect, useMemo, useState } from "react";
 import { Brain, Copy, Loader2, Search } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 import { rpc, SafetensorsPreview, SafetensorsTensor } from "../../ipc";
 import { formatBytes } from "../../lib/format";
 
@@ -56,7 +62,8 @@ export function SafetensorsView({ repoId, path, rev }: Props) {
   if (!data) {
     return (
       <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
-        <Loader2 size={14} className="animate-spin" /> Reading safetensors header…
+        <Loader2 size={14} className="animate-spin" /> Reading safetensors
+        header…
       </div>
     );
   }
@@ -88,10 +95,16 @@ export function SafetensorsView({ repoId, path, rev }: Props) {
           </div>
         )}
         {data.metadata && Object.keys(data.metadata).length > 0 && (
-          <details className="mt-3 rounded border border-border bg-background p-2 text-[11px]">
-            <summary className="cursor-pointer text-muted-foreground">Embedded metadata</summary>
-            <pre className="mt-2 overflow-auto">{JSON.stringify(data.metadata, null, 2)}</pre>
-          </details>
+          <Collapsible className="mt-3 rounded border border-border bg-background p-2 text-[11px]">
+            <CollapsibleTrigger className="cursor-pointer text-muted-foreground">
+              Embedded metadata
+            </CollapsibleTrigger>
+            <CollapsibleContent>
+              <pre className="mt-2 overflow-auto">
+                {JSON.stringify(data.metadata, null, 2)}
+              </pre>
+            </CollapsibleContent>
+          </Collapsible>
         )}
       </div>
 
@@ -113,11 +126,21 @@ export function SafetensorsView({ repoId, path, rev }: Props) {
         <table className="w-full border-collapse">
           <thead className="sticky top-0 bg-card">
             <tr>
-              <th className="border-b border-border px-2 py-1 text-left text-muted-foreground">Name</th>
-              <th className="border-b border-border px-2 py-1 text-left text-muted-foreground">Dtype</th>
-              <th className="border-b border-border px-2 py-1 text-left text-muted-foreground">Shape</th>
-              <th className="border-b border-border px-2 py-1 text-right text-muted-foreground">Params</th>
-              <th className="border-b border-border px-2 py-1 text-right text-muted-foreground">Size</th>
+              <th className="border-b border-border px-2 py-1 text-left text-muted-foreground">
+                Name
+              </th>
+              <th className="border-b border-border px-2 py-1 text-left text-muted-foreground">
+                Dtype
+              </th>
+              <th className="border-b border-border px-2 py-1 text-left text-muted-foreground">
+                Shape
+              </th>
+              <th className="border-b border-border px-2 py-1 text-right text-muted-foreground">
+                Params
+              </th>
+              <th className="border-b border-border px-2 py-1 text-right text-muted-foreground">
+                Size
+              </th>
               <th className="border-b border-border px-2 py-1"></th>
             </tr>
           </thead>
@@ -128,8 +151,12 @@ export function SafetensorsView({ repoId, path, rev }: Props) {
                 : 1;
               return (
                 <tr key={t.name} className="odd:bg-card">
-                  <td className="border-b border-border/40 px-2 py-1 align-top text-foreground">{t.name}</td>
-                  <td className="border-b border-border/40 px-2 py-1 align-top text-primary">{t.dtype}</td>
+                  <td className="border-b border-border/40 px-2 py-1 align-top text-foreground">
+                    {t.name}
+                  </td>
+                  <td className="border-b border-border/40 px-2 py-1 align-top text-primary">
+                    {t.dtype}
+                  </td>
                   <td className="border-b border-border/40 px-2 py-1 align-top text-foreground">
                     [{t.shape.join(" × ")}]
                   </td>
@@ -140,14 +167,16 @@ export function SafetensorsView({ repoId, path, rev }: Props) {
                     {formatBytes(t.nbytes)}
                   </td>
                   <td className="border-b border-border/40 px-2 py-1 align-top">
-                    <button
+                    <Button
+                      variant="ghost"
+                      size="compact"
                       type="button"
                       className="text-muted-foreground hover:text-primary"
                       onClick={() => void navigator.clipboard.writeText(t.name)}
                       title="Copy tensor name"
                     >
                       <Copy size={11} />
-                    </button>
+                    </Button>
                   </td>
                 </tr>
               );
@@ -162,7 +191,9 @@ export function SafetensorsView({ repoId, path, rev }: Props) {
 function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded border border-border bg-background p-3">
-      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</div>
+      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+        {label}
+      </div>
       <div className="mt-1 font-mono text-lg text-foreground">{value}</div>
     </div>
   );

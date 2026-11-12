@@ -1,3 +1,5 @@
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 /**
  * TransferHistory — paginated list of past transfers with search, sort,
@@ -7,22 +9,22 @@ import { Input } from "@/components/ui/input";
  * date, size, duration, speed. Includes aggregate stats by day/week/month.
  */
 
-import { useState, useCallback, useEffect } from "react";
+import clsx from "clsx";
 import {
-  Search,
+  ArrowDownCircle,
+  ArrowUpCircle,
+  ArrowUpDown,
+  CheckCircle2,
   ChevronLeft,
   ChevronRight,
-  ArrowUpDown,
   HardDrive,
-  Zap,
-  CheckCircle2,
-  XCircle,
   Inbox,
-  ArrowUpCircle,
-  ArrowDownCircle,
+  Search,
   X,
+  XCircle,
+  Zap,
 } from "lucide-react";
-import clsx from "clsx";
+import { useCallback, useEffect, useState } from "react";
 import type { TransferRecord, TransferStats } from "../../../electron/ssh-types";
 import { formatBytes, formatSpeed } from "./TransferProgressBar";
 
@@ -143,7 +145,9 @@ export function TransferHistory({ profileId }: TransferHistoryProps) {
   return (
     <div className="flex flex-col h-full overflow-hidden" role="region" aria-label="Transfer history">
       {/* Stats summary */}
-      {stats && <StatsBar stats={stats} period={statsPeriod} onPeriodChange={setStatsPeriod} />}
+      {stats && (
+        <StatsBar stats={stats} period={statsPeriod} onPeriodChange={setStatsPeriod} />
+      )}
 
       {/* Search and sort controls */}
       <div className="flex items-center gap-2 px-3 py-2 border-b border-border border-border">
@@ -160,7 +164,9 @@ export function TransferHistory({ profileId }: TransferHistoryProps) {
         </div>
         <div className="flex items-center gap-1">
           {(Object.keys(SORT_LABELS) as SortField[]).map((field) => (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               key={field}
               type="button"
               onClick={() => handleSort(field)}
@@ -177,7 +183,7 @@ export function TransferHistory({ profileId }: TransferHistoryProps) {
               {sortBy === field && (
                 <ArrowUpDown size={10} className="inline ml-0.5" />
               )}
-            </button>
+            </Button>
           ))}
         </div>
       </div>
@@ -186,7 +192,9 @@ export function TransferHistory({ profileId }: TransferHistoryProps) {
       <div className="flex-1 overflow-y-auto">
         {isLoading ? (
           <div className="flex items-center justify-center py-8">
-            <span className="text-xs text-muted-foreground text-muted-foreground">Loading…</span>
+            <span className="text-xs text-muted-foreground text-muted-foreground">
+              Loading…
+            </span>
           </div>
         ) : entries.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-8">
@@ -213,7 +221,9 @@ export function TransferHistory({ profileId }: TransferHistoryProps) {
           {total} total · Page {page} of {totalPages}
         </span>
         <div className="flex items-center gap-1">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             disabled={page <= 1}
             onClick={() => setPage((p) => Math.max(1, p - 1))}
@@ -221,8 +231,10 @@ export function TransferHistory({ profileId }: TransferHistoryProps) {
             aria-label="Previous page"
           >
             <ChevronLeft size={14} />
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             disabled={page >= totalPages}
             onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
@@ -230,7 +242,7 @@ export function TransferHistory({ profileId }: TransferHistoryProps) {
             aria-label="Next page"
           >
             <ChevronRight size={14} />
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -258,10 +270,14 @@ function StatsBar({ stats, period, onPeriodChange }: StatsBarProps) {
   return (
     <div className="px-3 py-2 border-b border-border border-border bg-background bg-card/50">
       <div className="flex items-center justify-between mb-1.5">
-        <span className="text-xs font-semibold text-muted-foreground text-muted-foreground">Statistics</span>
+        <span className="text-xs font-semibold text-muted-foreground text-muted-foreground">
+          Statistics
+        </span>
         <div className="flex items-center gap-1">
           {(["day", "week", "month"] as StatsPeriod[]).map((p) => (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               key={p}
               type="button"
               onClick={() => onPeriodChange(p)}
@@ -273,7 +289,7 @@ function StatsBar({ stats, period, onPeriodChange }: StatsBarProps) {
               )}
             >
               {p}
-            </button>
+            </Button>
           ))}
         </div>
       </div>
@@ -282,7 +298,13 @@ function StatsBar({ stats, period, onPeriodChange }: StatsBarProps) {
         <StatItem icon={<HardDrive size={12} />} label="Downloaded" value={formatBytes(stats.totalDownloaded)} />
         <StatItem icon={<Zap size={12} />} label="Avg Speed" value={formatSpeed(stats.averageSpeed)} />
         <StatItem
-          icon={stats.failureCount > 0 ? <XCircle size={12} /> : <CheckCircle2 size={12} />}
+          icon={
+            stats.failureCount > 0 ? (
+              <XCircle size={12} />
+            ) : (
+              <CheckCircle2 size={12} />
+            )
+          }
           label="Success/Fail"
           value={`${stats.successCount}/${stats.failureCount} (${failureRate}%)`}
         />
@@ -298,7 +320,9 @@ function StatItem({ icon, label, value }: { icon: React.ReactNode; label: string
         {icon}
         <span className="text-[10px]">{label}</span>
       </div>
-      <span className="text-xs font-medium text-foreground text-foreground truncate">{value}</span>
+      <span className="text-xs font-medium text-foreground text-foreground truncate">
+        {value}
+      </span>
     </div>
   );
 }
@@ -332,9 +356,12 @@ function HistoryRow({ entry, onClick }: HistoryRowProps) {
         )}
       />
       <div className="flex-1 min-w-0">
-        <p className="text-sm text-foreground text-foreground truncate">{fileName}</p>
+        <p className="text-sm text-foreground text-foreground truncate">
+          {fileName}
+        </p>
         <p className="text-xs text-muted-foreground text-muted-foreground">
-          {date.toLocaleDateString()} {date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+          {date.toLocaleDateString()}{" "}
+          {date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
         </p>
       </div>
       <div className="flex items-center gap-3 text-xs text-muted-foreground text-muted-foreground shrink-0">
@@ -367,20 +394,35 @@ function HistoryDetail({ entry, onClose }: HistoryDetailProps) {
   const endTime = new Date(entry.timestamp + entry.duration);
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center" role="dialog" aria-modal="true">
-      <div className="absolute inset-0 bg-black/40 dark:bg-black/60" onClick={onClose} aria-hidden="true" />
-      <div className="relative z-10 w-full max-w-md mx-4 bg-background bg-card rounded-xl shadow-xl border border-border border-border">
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) onClose();
+      }}
+    >
+      <DialogContent
+        aria-describedby={undefined}
+        showCloseButton={false}
+        className={
+          "w-full max-w-md mx-4 bg-background bg-card rounded-xl shadow-xl border border-border border-border" +
+          " p-0 gap-0"
+        }
+      >
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-3 border-b border-border border-border">
-          <h3 className="text-sm font-semibold text-foreground text-foreground">Transfer Details</h3>
-          <button
+          <DialogTitle className="text-sm font-semibold text-foreground text-foreground">
+            Transfer Details
+          </DialogTitle>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={onClose}
             className="p-1 rounded hover:bg-card hover:bg-card text-muted-foreground"
             aria-label="Close"
           >
             <X size={16} />
-          </button>
+          </Button>
         </div>
 
         {/* Body */}
@@ -403,19 +445,19 @@ function HistoryDetail({ entry, onClose }: HistoryDetailProps) {
           {entry.deltaSavingsPercent !== undefined && (
             <DetailRow label="Delta Savings" value={`${entry.deltaSavingsPercent.toFixed(1)}%`} />
           )}
-          {entry.error && (
-            <DetailRow label="Error" value={entry.error} error />
-          )}
+          {entry.error && <DetailRow label="Error" value={entry.error} error />}
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
 function DetailRow({ label, value, mono, error }: { label: string; value: string; mono?: boolean; error?: boolean }) {
   return (
     <div className="flex items-start justify-between gap-4">
-      <span className="text-xs text-muted-foreground text-muted-foreground shrink-0">{label}</span>
+      <span className="text-xs text-muted-foreground text-muted-foreground shrink-0">
+        {label}
+      </span>
       <span
         className={clsx(
           "text-xs text-right truncate max-w-[60%]",

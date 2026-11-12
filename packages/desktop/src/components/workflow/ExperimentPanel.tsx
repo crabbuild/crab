@@ -1,17 +1,25 @@
 import { Button } from "@/components/ui/button";
-import { NativeSelect } from "@/components/ui/native-select";
 import { Input } from "@/components/ui/input";
-import { useCallback,useEffect,useState } from "react";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import clsx from "clsx";
 import {
-Play,
-Square,
-Plus,RefreshCw,
-Clock,
-CheckCircle2,
-XCircle,
-Loader2
+  CheckCircle2,
+  Clock,
+  Loader2,
+  Play,
+  Plus,
+  RefreshCw,
+  Square,
+  XCircle,
 } from "lucide-react";
+import { useCallback,useEffect,useState } from "react";
 import { rpc } from "../../ipc";
 import type { ExperimentEntry,ExpStatusKind } from "../../lib/workflow-types";
 
@@ -125,16 +133,26 @@ export function ExperimentPanel({ repoId }: Props) {
 
         <div className="flex-1" />
 
-        <NativeSelect
-          className="w-16 text-xs"
-          value={jobs}
-          onChange={(e) => setJobs(Number(e.target.value))}
-          title="Parallel jobs"
+        <Select
+          value={":" + String(jobs)}
+          onValueChange={(selectedValue) => {
+            const value = selectedValue.slice(1);
+            return setJobs(Number(value));
+          }}
         >
-          {[1, 2, 3, 4, 6, 8].map((n) => (
-            <option key={n} value={n}>{n}</option>
-          ))}
-        </NativeSelect>
+          <SelectTrigger className="w-16 text-xs" title="Parallel jobs">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              {[1, 2, 3, 4, 6, 8].map((n) => (
+                <SelectItem key={n} value={":" + String(n)}>
+                  {n}
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          </SelectContent>
+        </Select>
 
         <Button variant="outline"
           type="button"
@@ -149,10 +167,14 @@ export function ExperimentPanel({ repoId }: Props) {
       {/* Queue form */}
       {showQueue && (
         <div className="border-b border-border bg-background/50 px-4 py-3">
-          <div className="mb-2 text-xs font-medium text-foreground">Queue Experiments</div>
+          <div className="mb-2 text-xs font-medium text-foreground">
+            Queue Experiments
+          </div>
           <div className="flex items-end gap-2">
             <div className="flex-1">
-              <label className="mb-1 block text-[10px] text-muted-foreground">Parameter</label>
+              <label className="mb-1 block text-[10px] text-muted-foreground">
+                Parameter
+              </label>
               <Input
                 className="w-full text-xs"
                 placeholder="train.lr"
@@ -193,13 +215,15 @@ export function ExperimentPanel({ repoId }: Props) {
         {experiments.length === 0 && !loading && (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-muted-foreground">
             <div>No experiments queued.</div>
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className="text-xs text-primary hover:underline"
               onClick={() => setShowQueue(true)}
             >
               Queue your first experiment
-            </button>
+            </Button>
           </div>
         )}
 
@@ -236,7 +260,9 @@ export function ExperimentPanel({ repoId }: Props) {
                         {config.label}
                       </span>
                     </td>
-                    <td className="px-4 py-2 text-muted-foreground">{exp.queued_at}</td>
+                    <td className="px-4 py-2 text-muted-foreground">
+                      {exp.queued_at}
+                    </td>
                   </tr>
                 );
               })}

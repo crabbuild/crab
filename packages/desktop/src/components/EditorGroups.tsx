@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { DropdownMenuItem, PointMenu } from "@/components/ui/dropdown-menu";
 import clsx from "clsx";
 import { GitCompareArrows, Pin, X } from "lucide-react";
-import { PanelGroup, Panel, PanelResizeHandle } from "react-resizable-panels";
-import { FileIcon } from "./FileIcon";
+import { useCallback, useMemo, useRef, useState } from "react";
+import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { publishToast } from "../lib/toasts";
+import { FileIcon } from "./FileIcon";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -295,9 +297,7 @@ function EditorGroup({
         onSplitTab={onSplitTab}
       />
       {/* Content area */}
-      <div className="min-h-0 flex-1 overflow-hidden">
-        {children}
-      </div>
+      <div className="min-h-0 flex-1 overflow-hidden">{children}</div>
       {/* Split drop zone on the right edge */}
       {showSplitZone && onSplitDrop && (
         <SplitDropZone onSplitDrop={onSplitDrop} />
@@ -382,9 +382,7 @@ function SplitDropZone({
       onDrop={handleDrop}
       aria-label="Drop here to split editor"
     >
-      {isDragOver && (
-        <div className="h-8 w-[2px] rounded bg-primary" />
-      )}
+      {isDragOver && <div className="h-8 w-[2px] rounded bg-primary" />}
     </div>
   );
 }
@@ -629,7 +627,9 @@ function Tab({
           <Pin size={10} className="shrink-0 text-primary rotate-45" />
         )}
 
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={onActivate}
           className="flex items-center gap-2 truncate"
@@ -637,10 +637,12 @@ function Tab({
         >
           {icon}
           <span className="truncate max-w-[140px]">{tab.title}</span>
-        </button>
+        </Button>
 
         {closable && !tab.pinned && (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={(e) => {
               e.stopPropagation();
@@ -651,7 +653,7 @@ function Tab({
             title="Close"
           >
             <X size={12} />
-          </button>
+          </Button>
         )}
       </div>
 
@@ -713,41 +715,9 @@ function TabContextMenu({
   onSplitTab?: () => void;
   onDismiss: () => void;
 }) {
-  const menuRef = useRef<HTMLDivElement>(null);
-
   // Close on click outside or Escape.
-  useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        onDismiss();
-      }
-    };
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onDismiss();
-    };
-    document.addEventListener("mousedown", handleClickOutside);
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      document.removeEventListener("mousedown", handleClickOutside);
-      document.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [onDismiss]);
 
   // Adjust position so the menu doesn't overflow the viewport.
-  const [pos, setPos] = useState({ x, y });
-  useEffect(() => {
-    if (!menuRef.current) return;
-    const rect = menuRef.current.getBoundingClientRect();
-    let adjustedX = x;
-    let adjustedY = y;
-    if (x + rect.width > window.innerWidth) {
-      adjustedX = window.innerWidth - rect.width - 4;
-    }
-    if (y + rect.height > window.innerHeight) {
-      adjustedY = window.innerHeight - rect.height - 4;
-    }
-    setPos({ x: adjustedX, y: adjustedY });
-  }, [x, y]);
 
   const handleCopyPath = useCallback(() => {
     if (tab.path) {
@@ -764,12 +734,7 @@ function TabContextMenu({
   }, [tab.path, onDismiss]);
 
   return (
-    <div
-      ref={menuRef}
-      className="fixed z-50 min-w-[220px] rounded-md border border-border bg-card py-1 shadow-lg text-[12px]"
-      style={{ left: pos.x, top: pos.y }}
-      role="menu"
-    >
+    <PointMenu position={{ x, y }} onClose={onDismiss}>
       {/* --- Close group --- */}
       {closable && (
         <ContextMenuItem label="Close" shortcut="⌘W" onClick={onClose} />
@@ -784,12 +749,12 @@ function TabContextMenu({
         <ContextMenuItem label="Close All" shortcut="⌘K W" onClick={onCloseAll} />
       )}
 
-      {/* --- Separator --- */}
+      {/* --- Close group --- */}
       {tab.path && (
         <div className="my-1 border-t border-border" role="separator" />
       )}
 
-      {/* --- Copy path group --- */}
+      {/* --- Separator --- */}
       {tab.path && (
         <ContextMenuItem label="Copy Path" shortcut="⇧⌘C" onClick={handleCopyPath} />
       )}
@@ -797,12 +762,12 @@ function TabContextMenu({
         <ContextMenuItem label="Copy Relative Path" shortcut="⌥⇧⌘C" onClick={handleCopyRelativePath} />
       )}
 
-      {/* --- Separator --- */}
+      {/* --- Copy path group --- */}
       {(onPin || onSplitTab) && (
         <div className="my-1 border-t border-border" role="separator" />
       )}
 
-      {/* Pin / Unpin */}
+      {/* --- Copy path group --- */}
       {onPin && (
         <ContextMenuItem
           label={tab.pinned ? "Unpin" : "Pin"}
@@ -811,16 +776,16 @@ function TabContextMenu({
         />
       )}
 
-      {/* --- Separator --- */}
+      {/* Pin / Unpin */}
       {onSplitTab && (
         <div className="my-1 border-t border-border" role="separator" />
       )}
 
-      {/* Split Right */}
+      {/* Pin / Unpin */}
       {onSplitTab && (
         <ContextMenuItem label="Split Right" shortcut="⌘\\" onClick={onSplitTab} />
       )}
-    </div>
+    </PointMenu>
   );
 }
 
@@ -836,11 +801,9 @@ function ContextMenuItem({
   disabled?: boolean;
 }) {
   return (
-    <button
-      type="button"
-      role="menuitem"
+    <DropdownMenuItem
       disabled={disabled}
-      onClick={onClick}
+      onSelect={onClick}
       className={clsx(
         "flex w-full items-center justify-between px-3 py-1.5 text-left transition",
         disabled
@@ -849,8 +812,12 @@ function ContextMenuItem({
       )}
     >
       <span>{label}</span>
-      {shortcut && <span className="ml-4 text-[10px] text-muted-foreground">{shortcut}</span>}
-    </button>
+      {shortcut && (
+        <span className="ml-4 text-[10px] text-muted-foreground">
+          {shortcut}
+        </span>
+      )}
+    </DropdownMenuItem>
   );
 }
 

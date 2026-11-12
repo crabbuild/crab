@@ -1,3 +1,9 @@
+import { Button } from "@/components/ui/button";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 /**
  * LSP status indicator widget for the editor footer.
  *
@@ -12,9 +18,9 @@
  * - Install button (not-found state, when auto-install is supported)
  */
 
+import { Check, Download, Loader2, Minus, RotateCcw, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Check, Download, Loader2, X, Minus, RotateCcw } from "lucide-react";
-import type { LspServerStatusInfo, LspInstallProgress } from "../ipc";
+import type { LspInstallProgress, LspServerStatusInfo } from "../ipc";
 
 type ServerState = LspServerStatusInfo["state"];
 
@@ -75,16 +81,6 @@ export function LspStatus({ language }: LspStatusProps) {
   }, [language]);
 
   // Close popover on outside click
-  useEffect(() => {
-    if (!popoverOpen) return;
-    const handleClick = (e: MouseEvent) => {
-      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
-        setPopoverOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", handleClick);
-    return () => document.removeEventListener("mousedown", handleClick);
-  }, [popoverOpen]);
 
   const activeServer = language
     ? servers.find((s) => s.language === language)
@@ -121,8 +117,12 @@ export function LspStatus({ language }: LspStatusProps) {
 
   return (
     <div className="relative" ref={popoverRef}>
-      <button
-        type="button"
+      <Popover open={popoverOpen} onOpenChange={setPopoverOpen}>
+        <PopoverTrigger asChild>
+          <Button
+            variant="ghost"
+            size="compact"
+            type="button"
         className="flex items-center gap-1 text-[11px] hover:text-foreground"
         onClick={() => setPopoverOpen((o) => !o)}
         title={`LSP: ${serverName} (${state})`}
@@ -131,11 +131,18 @@ export function LspStatus({ language }: LspStatusProps) {
         <span className="max-w-[120px] truncate">
           {isInstalling ? installLabel(installProgress) : serverName}
         </span>
-      </button>
+      </Button>
+        </PopoverTrigger>
 
       {popoverOpen && (
-        <div className="absolute bottom-full right-0 mb-1 w-64 rounded border border-border bg-card p-3 shadow-lg text-xs z-50">
-          <div className="mb-2 font-medium text-foreground">Language Server</div>
+        <PopoverContent
+            side="top"
+            align="end"
+            className=" w-64 rounded border border-border bg-card p-3 text-xs "
+          >
+          <div className="mb-2 font-medium text-foreground">
+              Language Server
+            </div>
 
           <div className="space-y-1 text-muted-foreground">
             <Row label="Language" value={language} />
@@ -165,28 +172,27 @@ export function LspStatus({ language }: LspStatusProps) {
           )}
 
           {state === "error" && !isInstalling && (
-            <button
-              type="button"
-              onClick={handleRestart}
+            <Button
+                onSelect={handleRestart}
               className="mt-2 flex items-center gap-1 rounded bg-primary/10 px-2 py-1 text-[11px] text-primary hover:bg-primary/20"
             >
               <RotateCcw size={10} />
-              Restart
-            </button>
+                Restart
+              </Button>
           )}
 
           {notFound && canInstall && !isInstalling && (
-            <button
-              type="button"
-              onClick={handleInstall}
+            <Button
+                onSelect={handleInstall}
               className="mt-2 flex items-center gap-1 rounded bg-primary/10 px-2 py-1 text-[11px] text-primary hover:bg-primary/20"
             >
               <Download size={10} />
-              Install {language} language server
-            </button>
-          )}
-        </div>
-      )}
+                Install {language} language server
+              </Button>
+            )}
+          </PopoverContent>
+        )}
+      </Popover>
     </div>
   );
 }

@@ -1,9 +1,19 @@
-import { NativeSelect } from "@/components/ui/native-select";
-import { useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { ExternalLink, HelpCircle } from "lucide-react";
+import { useState } from "react";
 import type { AgentElicitationInput, ElicitationResponse, ElicitationValue } from "../../../../electron/agent-elicitation";
-import { useHunkActions } from "./HunkActionsContext";
 import { CollapsedCardLine } from "./CollapsedCardLine";
+import { useHunkActions } from "./HunkActionsContext";
 import type { ToolCardRendererProps } from "./types";
 
 export function ElicitationCard({ request, event, collapsed, onToggleCollapse }: ToolCardRendererProps & { request: AgentElicitationInput }) {
@@ -43,45 +53,195 @@ export function ElicitationCard({ request, event, collapsed, onToggleCollapse }:
     }
   };
 
-  if (resolved && collapsed) return <CollapsedCardLine summary={`${request.serverName}: ${resolvedLabel}`} onExpand={() => onToggleCollapse?.(false)} ariaLabel={request.resolutionReason ?? "Request resolved"} />;
-  return <form noValidate onSubmit={event => { event.preventDefault(); void submit("accept"); }} className="space-y-3 rounded-md border border-border bg-card px-3 py-2 text-xs">
-    <div className="flex items-center gap-2 font-medium text-foreground"><HelpCircle size={14} />{request.serverName}: {resolved ? resolvedLabel : "input requested"}</div>
-    <p className="whitespace-pre-wrap text-foreground">{request.message}</p>
-    {request.mode === "url" && <div className="space-y-1 text-foreground">
-      <strong>{new URL(request.url).host}</strong>
-      <p className="break-all font-mono text-muted-foreground">{request.url}</p>
-    </div>}
-    <fieldset disabled={Boolean(resolved || submitting)} className="space-y-3">
-      {request.mode === "form" && request.fields.map(field => {
-        const value = Object.hasOwn(content, field.name) ? content[field.name] : undefined;
-        const selected = Array.isArray(value) ? value : [];
-        return <div key={field.name} className="space-y-1.5">
-          <label htmlFor={`${request.requestId}-${field.name}`} className="block text-foreground">{field.title}{field.required ? " *" : " (optional)"}</label>
-          {field.description && <p className="text-muted-foreground">{field.description}</p>}
-          {field.type === "array" ? <div role="group" aria-label={field.title} className="space-y-1">
-            {field.options?.map(option => <label key={option.value} className="flex items-center gap-2 text-foreground">
-              <input type="checkbox" checked={selected.includes(option.value)} onChange={event => setValue(field.name, event.target.checked ? [...selected, option.value] : selected.filter(value => value !== option.value))} />{option.label}
-            </label>)}
-          </div> : field.type === "boolean" ? <NativeSelect id={`${request.requestId}-${field.name}`} value={typeof value === "boolean" ? String(value) : ""} onChange={event => setValue(field.name, event.target.value === "" ? undefined : event.target.value === "true")} className="w-full">
-            <option value="">Choose…</option><option value="true">Yes</option><option value="false">No</option>
-          </NativeSelect> : field.options ? <NativeSelect id={`${request.requestId}-${field.name}`} value={value === undefined ? "" : String(field.options.findIndex(option => option.value === value))} onChange={event => setValue(field.name, event.target.value === "" ? undefined : field.options?.[Number(event.target.value)].value)} className="w-full">
-            <option value="">Choose…</option>{field.options.map((option, index) => <option key={option.value} value={index}>{option.label}</option>)}
-          </NativeSelect> : <input id={`${request.requestId}-${field.name}`} type={field.type === "number" || field.type === "integer" ? "number" : "text"}
+  if (resolved && collapsed)
+    return (
+      <CollapsedCardLine summary={`${request.serverName}: ${resolvedLabel}`} onExpand={() => onToggleCollapse?.(false)} ariaLabel={request.resolutionReason ?? "Request resolved"} />
+    );
+  return (
+    <form noValidate onSubmit={event => { event.preventDefault(); void submit("accept"); }} className="space-y-3 rounded-md border border-border bg-card px-3 py-2 text-xs">
+      <div className="flex items-center gap-2 font-medium text-foreground">
+        <HelpCircle size={14} />
+        {request.serverName}: {resolved ? resolvedLabel : "input requested"}
+      </div>
+      <p className="whitespace-pre-wrap text-foreground">{request.message}</p>
+      {request.mode === "url" && (
+        <div className="space-y-1 text-foreground">
+          <strong>{new URL(request.url).host}</strong>
+          <p className="break-all font-mono text-muted-foreground">
+            {request.url}
+          </p>
+        </div>
+      )}
+      <fieldset disabled={Boolean(resolved || submitting)} className="space-y-3">
+        {request.mode === "form" &&
+          request.fields.map((field) => {
+            const value = Object.hasOwn(content, field.name) ? content[field.name] : undefined;
+            const selected = Array.isArray(value) ? value : [];
+            return (
+              <div key={field.name} className="space-y-1.5">
+                <label htmlFor={`${request.requestId}-${field.name}`} className="block text-foreground">
+                  {field.title}
+                  {field.required ? " *" : " (optional)"}
+                </label>
+                {field.description && (
+                  <p className="text-muted-foreground">{field.description}</p>
+                )}
+                {field.type === "array" ? (
+                  <div role="group" aria-label={field.title} className="space-y-1">
+                    {field.options?.map((option) => (
+                      <label key={option.value} className="flex items-center gap-2 text-foreground">
+                        <Checkbox
+                          checked={selected.includes(option.value)}
+                          onCheckedChange={(checked) =>
+                            setValue(
+                              field.name,
+                              checked === true
+                                ? [...selected, option.value]
+                                : selected.filter(value => value !== option.value),
+                            )
+                          }
+                        />
+                        {option.label}
+                      </label>
+                    ))}
+                  </div>
+                ) : field.type === "boolean" ? (
+                  <Select
+                    value={
+                      ":" +
+                      String(typeof value === "boolean" ? String(value) : "")
+                    }
+                    onValueChange={(selectedValue) => {
+                      const value = selectedValue.slice(1);
+                      return setValue(
+                        field.name,
+                        value === "" ? undefined : value === "true",
+                      );
+                    }}
+                  >
+                    <SelectTrigger
+                      id={`${request.requestId}-${field.name}`}
+                      className="w-full"
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        <SelectItem value={":" + String("")}>
+                          Choose…
+                        </SelectItem>
+                        <SelectItem value={":" + String("true")}>
+                          Yes
+                        </SelectItem>
+                        <SelectItem value={":" + String("false")}>
+                          No
+                        </SelectItem>
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                ) : field.options ? (
+                  <Select
+                    value={
+                      ":" +
+                      String(
+                        value === undefined ? "" : String(field.options.findIndex(option => option.value === value)),
+                      )
+                    }
+                    onValueChange={(selectedValue) => {
+                      const value = selectedValue.slice(1);
+                      return setValue(
+                        field.name,
+                        value === ""
+                          ? undefined
+                          : field.options?.[Number(value)].value,
+                      );
+                    }}
+                  >
+                    <SelectTrigger
+                      id={`${request.requestId}-${field.name}`}
+                      className="w-full"
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        <SelectItem value={":" + String("")}>
+                          Choose…
+                        </SelectItem>
+                        {field.options.map((option, index) => (
+                          <SelectItem
+                            key={option.value}
+                            value={":" + String(index)}
+                          >
+                            {option.label}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <Input
+                    id={`${request.requestId}-${field.name}`} type={field.type === "number" || field.type === "integer" ? "number" : "text"}
             step={field.type === "number" ? "any" : undefined} inputMode={field.format === "email" ? "email" : field.format === "uri" ? "url" : undefined}
             value={typeof value === "number" || typeof value === "string" ? value : ""} onChange={event => setValue(field.name,
               field.type === "number" || field.type === "integer" ? event.target.value === "" ? undefined : event.target.valueAsNumber : event.target.value)}
-            className="w-full" />}
-          {!field.required && Object.hasOwn(content, field.name) && <button type="button" onClick={() => setValue(field.name, undefined)} className="text-muted-foreground underline">Omit {field.title}</button>}
-        </div>;
-      })}
-    </fieldset>
-    {error && <p role="alert" className="text-destructive">{error}</p>}
-    {!resolved && <div className="flex flex-wrap gap-2">
-      <button type="submit" disabled={!taskId || submitting} className="inline-flex items-center gap-1 rounded border border-primary/30 px-2 py-1 text-primary disabled:opacity-50">
-        {request.mode === "url" && <ExternalLink size={12} />}{request.mode === "form" ? "Send form" : opened ? "Confirm opened link" : `Open ${new URL(request.url).host}`}
-      </button>
-      <button type="button" disabled={submitting} onClick={() => void submit("decline")} className="rounded border border-border px-2 py-1 text-muted-foreground">Decline</button>
-      <button type="button" disabled={submitting} onClick={() => void submit("cancel")} className="rounded border border-border px-2 py-1 text-muted-foreground">Cancel</button>
-    </div>}
-  </form>;
+            className="w-full"
+                  />
+                )}
+                {!field.required && Object.hasOwn(content, field.name) && (
+                  <Button
+                    variant="ghost"
+                    size="compact"
+                    type="button"
+                    onClick={() => setValue(field.name, undefined)}
+                    className="text-muted-foreground underline"
+                  >
+                    Omit {field.title}
+                  </Button>
+                )}
+              </div>
+            );
+          })}
+      </fieldset>
+      {error && (
+        <p role="alert" className="text-destructive">
+          {error}
+        </p>
+      )}
+      {!resolved && (
+        <div className="flex flex-wrap gap-2">
+          <Button
+            variant="ghost"
+            size="compact"
+            type="submit"
+            disabled={!taskId || submitting}
+            className="inline-flex items-center gap-1 rounded border border-primary/30 px-2 py-1 text-primary disabled:opacity-50"
+          >
+            {request.mode === "url" && <ExternalLink size={12} />}
+            {request.mode === "form" ? "Send form" : opened ? "Confirm opened link" : `Open ${new URL(request.url).host}`}
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
+            type="button"
+            disabled={submitting}
+            onClick={() => void submit("decline")}
+            className="rounded border border-border px-2 py-1 text-muted-foreground"
+          >
+            Decline
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
+            type="button"
+            disabled={submitting}
+            onClick={() => void submit("cancel")}
+            className="rounded border border-border px-2 py-1 text-muted-foreground"
+          >
+            Cancel
+          </Button>
+        </div>
+      )}
+    </form>
+  );
 }

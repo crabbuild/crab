@@ -1,13 +1,21 @@
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { NativeSelect } from "@/components/ui/native-select";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 /**
  * Task Search — Filter/search across all tasks by title, status, or agent type.
  */
 
-import { type RefObject, useCallback, useState } from "react";
 import { Search, X } from "lucide-react";
-import type { TaskStatus } from "./TaskCard";
+import { type RefObject, useCallback, useState } from "react";
 import { applyTaskFilter, type TaskFilter } from "../../lib/orchestrator-sidebar";
+import type { TaskStatus } from "./TaskCard";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -47,7 +55,9 @@ export function TaskSearch({ onFilterChange, compact, inputRef }: Props) {
 
   if (compact) {
     return (
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={() => {
           // In compact mode, just show a search icon that could expand
@@ -56,7 +66,7 @@ export function TaskSearch({ onFilterChange, compact, inputRef }: Props) {
         aria-label="Search tasks"
       >
         <Search size={12} />
-      </button>
+      </Button>
     );
   }
 
@@ -75,34 +85,47 @@ export function TaskSearch({ onFilterChange, compact, inputRef }: Props) {
           aria-label="Search tasks by title"
         />
         {(query || status !== "all") && (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={handleClear}
             className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
             aria-label="Clear search"
           >
             <X size={11} />
-          </button>
+          </Button>
         )}
       </div>
 
       {/* Status filter */}
-      <NativeSelect
-        value={status}
-        onChange={(e) => handleStatusChange(e.target.value as TaskStatus | "all")}
-        className="w-full rounded border border-border bg-background px-2 py-1 text-[10px] text-foreground focus:border-primary focus:outline-none"
+      <Select
+        value={":" + String(status)}
+        onValueChange={(selectedValue) => {
+          const value = selectedValue.slice(1);
+          return handleStatusChange(value as TaskStatus | "all");
+        }}
+      >
+        <SelectTrigger
+          className="w-full rounded border border-border bg-background px-2 py-1 text-[10px] text-foreground focus:border-primary focus:outline-none"
         aria-label="Filter by status"
       >
-        <option value="all">All statuses</option>
-        <option value="running">Running</option>
-        <option value="planning">Planning</option>
-        <option value="reviewing">Reviewing</option>
-        <option value="iterating">Iterating</option>
-        <option value="queued">Queued</option>
-        <option value="applied">Applied</option>
-        <option value="archived">Archived</option>
-        <option value="failed">Failed</option>
-      </NativeSelect>
+        <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectGroup>
+            <SelectItem value={":" + String("all")}>All statuses</SelectItem>
+            <SelectItem value={":" + String("running")}>Running</SelectItem>
+            <SelectItem value={":" + String("planning")}>Planning</SelectItem>
+            <SelectItem value={":" + String("reviewing")}>Reviewing</SelectItem>
+            <SelectItem value={":" + String("iterating")}>Iterating</SelectItem>
+            <SelectItem value={":" + String("queued")}>Queued</SelectItem>
+            <SelectItem value={":" + String("applied")}>Applied</SelectItem>
+            <SelectItem value={":" + String("archived")}>Archived</SelectItem>
+            <SelectItem value={":" + String("failed")}>Failed</SelectItem>
+          </SelectGroup>
+        </SelectContent>
+      </Select>
     </div>
   );
 }

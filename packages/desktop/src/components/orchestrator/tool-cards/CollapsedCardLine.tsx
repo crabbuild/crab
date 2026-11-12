@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Shared collapsed one-liner for all tool cards.
  *
@@ -9,8 +10,8 @@
  * `prefers-reduced-motion`. Hover state uses a subtle background tint.
  */
 
-import type { ReactNode } from "react";
 import { ChevronRight } from "lucide-react";
+import type { ReactNode } from "react";
 
 export interface CollapsedCardLineProps {
   /** The summary content to display (icon + text + optional badge). */
@@ -23,7 +24,9 @@ export interface CollapsedCardLineProps {
 
 export function CollapsedCardLine({ summary, onExpand, ariaLabel }: CollapsedCardLineProps) {
   return (
-    <button
+    <Button
+      variant="ghost"
+      size="compact"
       type="button"
       onClick={onExpand}
       aria-expanded={false}
@@ -41,6 +44,6 @@ export function CollapsedCardLine({ summary, onExpand, ariaLabel }: CollapsedCar
         {summary}
       </span>
       <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
-    </button>
+    </Button>
   );
 }

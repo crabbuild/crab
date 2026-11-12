@@ -1,10 +1,9 @@
 "use client";
 
-import * as React from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
-
-import { cn } from "@/lib/utils";
+import * as React from "react";
+import { cn, controlFocusOwner, scopeControlKeys } from "@/lib/utils";
 
 const Dialog = DialogPrimitive.Root;
 
@@ -31,7 +30,15 @@ const DialogContent = React.forwardRef<
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content> & {
     showCloseButton?: boolean;
   }
->(({ className, children, showCloseButton = true, ...props }, ref) => (
+>(({ className, children, showCloseButton = true,
+      onOpenAutoFocus,
+      onCloseAutoFocus,
+      ...props
+    },
+    ref,
+  ) => {
+    const owner = React.useRef<HTMLElement | null>(null);
+    return (
   <DialogPortal>
     <DialogOverlay />
     <DialogPrimitive.Content
@@ -41,6 +48,18 @@ const DialogContent = React.forwardRef<
         className,
       )}
       {...props}
+          onKeyDown={scopeControlKeys(props.onKeyDown)}
+          onOpenAutoFocus={(event) => {
+            owner.current = controlFocusOwner();
+            onOpenAutoFocus?.(event);
+          }}
+          onCloseAutoFocus={(event) => {
+            onCloseAutoFocus?.(event);
+            if (!event.defaultPrevented && owner.current) {
+              event.preventDefault();
+              owner.current.focus();
+            }
+          }}
     >
       {children}
       {showCloseButton && (
@@ -51,7 +70,9 @@ const DialogContent = React.forwardRef<
       )}
     </DialogPrimitive.Content>
   </DialogPortal>
-));
+);
+  },
+);
 DialogContent.displayName = DialogPrimitive.Content.displayName;
 
 const DialogHeader = ({
@@ -111,13 +132,13 @@ DialogDescription.displayName = DialogPrimitive.Description.displayName;
 
 export {
   Dialog,
-  DialogPortal,
-  DialogOverlay,
-  DialogTrigger,
   DialogClose,
   DialogContent,
-  DialogHeader,
-  DialogFooter,
-  DialogTitle,
   DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogOverlay,
+  DialogPortal,
+  DialogTitle,
+  DialogTrigger,
 };

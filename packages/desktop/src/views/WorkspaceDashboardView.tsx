@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Button } from "@/components/ui/button";
 import clsx from "clsx";
 import {
+  AlertCircle,
   ArrowDown,
   ArrowUp,
   ArrowUpDown,
-  AlertCircle,
   CheckCircle2,
   Cloud,
   Download,
@@ -13,10 +13,11 @@ import {
   RefreshCw,
   WifiOff,
 } from "lucide-react";
-import type { Workspace } from "../state";
-import { useWorkspaceRepoSelect } from "../hooks/useWorkspaceRepoSelect";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ConnectionQuality } from "../../electron/ssh-types";
 import { ConnectionQualityBar } from "../components/ssh/ConnectionQualityBar";
+import { useWorkspaceRepoSelect } from "../hooks/useWorkspaceRepoSelect";
+import type { Workspace } from "../state";
 
 interface DashboardRow {
   name: string;
@@ -292,7 +293,9 @@ export function WorkspaceDashboardView({ workspace }: Props) {
 
         {/* Actions */}
         <div className="flex items-center gap-3">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="flex items-center gap-1.5 rounded-md border border-border bg-card px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent transition disabled:opacity-50 disabled:pointer-events-none"
             onClick={handleFetchAll}
@@ -304,8 +307,10 @@ export function WorkspaceDashboardView({ workspace }: Props) {
               <RefreshCw size={13} />
             )}
             Fetch All
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="flex items-center gap-1.5 rounded-md border border-border bg-card px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent transition disabled:opacity-50 disabled:pointer-events-none"
             onClick={handlePullAll}
@@ -327,14 +332,16 @@ export function WorkspaceDashboardView({ workspace }: Props) {
                 {pullableCount}
               </span>
             )}
-          </button>
+          </Button>
         </div>
 
         {/* Global error */}
         {bulkErrors.has("__global__") && (
           <div className="flex items-center gap-2 rounded border border-destructive/30 bg-destructive/5 px-3 py-2 text-[11px] text-destructive">
             <AlertCircle size={13} />
-            <span className="min-w-0 flex-1">{bulkErrors.get("__global__")}</span>
+            <span className="min-w-0 flex-1">
+              {bulkErrors.get("__global__")}
+            </span>
           </div>
         )}
 
@@ -587,7 +594,9 @@ function DashboardTableRow({
         {/* Status icon */}
         <td className="px-2 py-2.5 text-center">
           {row.error ? (
-            <span title={row.error}><AlertCircle size={13} className="text-destructive" /></span>
+            <span title={row.error}>
+              <AlertCircle size={13} className="text-destructive" />
+            </span>
           ) : status === "clean" ? (
             <CheckCircle2 size={13} className="text-success/60" />
           ) : null}

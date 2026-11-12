@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { useCardExpanded } from "./useCardExpanded";
 /**
  * Specialized renderer for Grep/Glob/search tool calls.
@@ -11,12 +12,18 @@ import { useCardExpanded } from "./useCardExpanded";
  *   - detail (search results from tool_result)
  */
 
-import { useMemo } from "react";
 import clsx from "clsx";
-import { ChevronDown, ChevronRight, Search, FileSearch, FolderSearch } from "lucide-react";
-import type { ToolCardRendererProps } from "./types";
+import {
+  ChevronDown,
+  ChevronRight,
+  FileSearch,
+  FolderSearch,
+  Search,
+} from "lucide-react";
+import { useMemo } from "react";
 import { CollapsedCardLine } from "./CollapsedCardLine";
 import { ShikiPreview } from "./ShikiPreview";
+import type { ToolCardRendererProps } from "./types";
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -81,7 +88,7 @@ export function SearchCard({ event, defaultExpanded = false, collapsed: collapse
   const hasOutput = output.length > 0;
 
   const isGlob = event.tool === "Glob";
-  const Icon = isGlob ? FolderSearch : (searchPath ? FileSearch : Search);
+  const Icon = isGlob ? FolderSearch : searchPath ? FileSearch : Search;
   const label = event.tool ?? "Search";
 
   const matches = useMemo(() => parseSearchResults(output), [output]);
@@ -110,7 +117,9 @@ export function SearchCard({ event, defaultExpanded = false, collapsed: collapse
           {pattern || searchPath}
         </code>
         {matchCount > 0 && (
-          <span className="shrink-0 text-[9px] text-primary">{matchCount} {matchCount === 1 ? "match" : "matches"}</span>
+          <span className="shrink-0 text-[9px] text-primary">
+            {matchCount} {matchCount === 1 ? "match" : "matches"}
+          </span>
         )}
       </>
     );
@@ -126,7 +135,9 @@ export function SearchCard({ event, defaultExpanded = false, collapsed: collapse
   return (
     <div className="rounded-md border border-border/40 overflow-hidden">
       {/* Header */}
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={() => hasOutput && setExpanded(!expanded)}
         className={clsx(
@@ -136,7 +147,9 @@ export function SearchCard({ event, defaultExpanded = false, collapsed: collapse
         )}
       >
         <Icon size={11} className="text-muted-foreground shrink-0" />
-        <span className="shrink-0 font-medium text-muted-foreground">{label}</span>
+        <span className="shrink-0 font-medium text-muted-foreground">
+          {label}
+        </span>
 
         {/* Pattern */}
         <span className="min-w-0 flex-1 flex items-center gap-1.5 truncate">
@@ -144,7 +157,9 @@ export function SearchCard({ event, defaultExpanded = false, collapsed: collapse
             {pattern || searchPath}
           </code>
           {searchPath && pattern && (
-            <span className="text-[9px] text-muted-foreground/60 truncate">in {searchPath}</span>
+            <span className="text-[9px] text-muted-foreground/60 truncate">
+              in {searchPath}
+            </span>
           )}
         </span>
 
@@ -155,12 +170,13 @@ export function SearchCard({ event, defaultExpanded = false, collapsed: collapse
           </span>
         )}
 
-        {hasOutput && (
-          expanded
-            ? <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
-            : <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
-        )}
-      </button>
+        {hasOutput &&
+          (expanded ? (
+            <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
+          ) : (
+            <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
+          ))}
+      </Button>
 
       {/* Expanded: search results */}
       {expanded && hasOutput && (
@@ -200,9 +216,13 @@ function SearchResults({ fileGroups }: { fileGroups: Map<string, SearchMatch[]> 
           <div key={file} className="px-2.5 py-0.5">
             {/* File header */}
             <div className="flex items-center gap-1.5 text-[9px]">
-              <span className="text-foreground/80 font-medium truncate">{file}</span>
+              <span className="text-foreground/80 font-medium truncate">
+                {file}
+              </span>
               {matches.length > 1 && (
-                <span className="text-muted-foreground/60">({matches.length})</span>
+                <span className="text-muted-foreground/60">
+                  ({matches.length})
+                </span>
               )}
             </div>
             {/* Match lines — syntax highlighted when possible */}
@@ -211,7 +231,7 @@ function SearchResults({ fileGroups }: { fileGroups: Map<string, SearchMatch[]> 
                 <ShikiPreview code={snippet} path={file} maxLines={5} className="[&_pre]:!py-1 [&_pre]:!px-1.5" />
               </div>
             ) : (
-              matches.slice(0, 3).map((m, idx) => (
+              matches.slice(0, 3).map((m, idx) =>
                 m.content ? (
                   <div key={idx} className="flex items-baseline gap-1.5 pl-2 text-[9px]">
                     {m.line && (
@@ -219,10 +239,12 @@ function SearchResults({ fileGroups }: { fileGroups: Map<string, SearchMatch[]> 
                         {m.line}
                       </span>
                     )}
-                    <span className="font-mono text-foreground/60 truncate">{m.content.trim()}</span>
+                    <span className="font-mono text-foreground/60 truncate">
+                      {m.content.trim()}
+                    </span>
                   </div>
-                ) : null
-              ))
+                ) : null,
+              )
             )}
             {matches.length > 5 && (
               <div className="pl-2 text-[8px] text-muted-foreground/50 italic">

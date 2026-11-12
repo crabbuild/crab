@@ -204,9 +204,9 @@ export function ProgressDrawer({ open, onClose }: Props) {
               autoFocus
             />
             {searchQuery && (
-              <button type="button" onClick={() => setSearchQuery("")} className="text-muted-foreground hover:text-foreground">
+              <Button variant="ghost" size="compact" type="button" onClick={() => setSearchQuery("")} className="text-muted-foreground hover:text-foreground">
                 <X size={11} />
-              </button>
+              </Button>
             )}
           </div>
         )}
@@ -215,7 +215,7 @@ export function ProgressDrawer({ open, onClose }: Props) {
         {opTypes.length > 1 && (
           <div className="flex items-center gap-1.5 border-b border-border bg-background px-3 py-1">
             <Filter size={10} className="text-muted-foreground" />
-            <button
+            <Button variant="ghost" size="compact"
               type="button"
               onClick={() => setFilterOp("all")}
               className={clsx(
@@ -226,9 +226,9 @@ export function ProgressDrawer({ open, onClose }: Props) {
               )}
             >
               All
-            </button>
+            </Button>
             {opTypes.map((op) => (
-              <button
+              <Button variant="ghost" size="compact"
                 key={op}
                 type="button"
                 onClick={() => setFilterOp(op === filterOp ? "all" : op)}
@@ -240,7 +240,7 @@ export function ProgressDrawer({ open, onClose }: Props) {
                 )}
               >
                 {op}
-              </button>
+              </Button>
             ))}
           </div>
         )}
@@ -304,7 +304,7 @@ export function ProgressDrawer({ open, onClose }: Props) {
             ))}
             {/* Auto-scroll indicator */}
             {!autoScroll && filteredLogs.length > 0 && (
-              <button
+              <Button variant="ghost" size="compact"
                 type="button"
                 className="sticky bottom-2 left-1/2 -translate-x-1/2 rounded-full bg-primary/90 px-3 py-1 text-[10px] text-foreground shadow-lg hover:bg-primary"
                 onClick={() => {
@@ -313,7 +313,7 @@ export function ProgressDrawer({ open, onClose }: Props) {
                 }}
               >
                 ↓ New output
-              </button>
+              </Button>
             )}
           </div>
         </div>
@@ -415,7 +415,7 @@ function JobCard({ jobId, job, expanded, onToggle, onFilter }: JobCardProps) {
             : "border-border/50 bg-card/50",
       )}
     >
-      <button
+      <Button variant="ghost" size="compact"
         type="button"
         className="flex w-full items-center gap-1.5 px-2 py-1.5 text-left"
         onClick={onToggle}
@@ -433,7 +433,7 @@ function JobCard({ jobId, job, expanded, onToggle, onFilter }: JobCardProps) {
           {job.op}{job.intent ? ` · ${localPathName(job.intent.repository)}` : ""}
         </span>
         {expanded ? <ChevronDown size={9} className="text-muted-foreground" /> : <ChevronRight size={9} className="text-muted-foreground" />}
-      </button>
+      </Button>
       {transfer && <div className="space-y-1 px-2 pb-2 text-[10px] text-muted-foreground">
         {job.status === "interrupted" && <p>Last recorded progress</p>}
         <p className="tabular-nums">{job.status === "running" && transfer.total_bytes === 0 && transfer.files_total ? "Checking selection…" : <>{formatBytes(transferBytes)}{transfer.total_bytes === null ? "" : ` / ${formatBytes(transfer.total_bytes)}`} {dehydrating ? "checked" : "written"}</>}</p>
@@ -471,12 +471,12 @@ function JobCard({ jobId, job, expanded, onToggle, onFilter }: JobCardProps) {
             <p className="break-all">{job.intent.repository}</p>
             <p>{job.intent.paths.length} selected paths · {new Date(job.startedAt).toLocaleString()}</p>
             <p>Captured source versions</p>
-            {sourceError ? <p role="alert" className="break-words text-gx-error">{sourceError} <button type="button" className="btn" onClick={() => setSourceRefresh(value => value + 1)}>Reload sources</button></p> : !sourcePage && <p role="status">Loading captured sources…</p>}
+            {sourceError ? <p role="alert" className="break-words text-destructive">{sourceError} <Button variant="ghost" size="compact" type="button" className="btn" onClick={() => setSourceRefresh(value => value + 1)}>Reload sources</Button></p> : !sourcePage && <p role="status">Loading captured sources…</p>}
             <ul className="max-h-48 space-y-2 overflow-auto">{job.intent.paths.slice(pathPage * 50, (pathPage + 1) * 50).map((path, index) => {
               const source = byPosition.get(pathPage * 50 + index);
               const algorithm = source?.kind === "git" ? "Git blob" : source?.kind === "crab" ? "BLAKE3" : "SHA-256";
               return <li className="break-all" key={path}>
-                <p className="font-mono text-gx-text">{path}</p>
+                <p className="font-mono text-foreground">{path}</p>
                 {source ? <>
                   <p>{algorithm} · {formatBytes(source.size)}{source.mode ? ` · ${source.mode}` : ""}</p>
                   <code>{source.hash}</code>
@@ -491,13 +491,13 @@ function JobCard({ jobId, job, expanded, onToggle, onFilter }: JobCardProps) {
           {job.status === "failed" && job.exitCode !== undefined && (
             <div className="mt-0.5 text-destructive">Exit code: {job.exitCode}</div>
           )}
-          <button
+          <Button variant="ghost" size="compact"
             type="button"
             className="mt-1 text-[9px] text-primary hover:underline"
             onClick={(e) => { e.stopPropagation(); onFilter(); }}
           >
             Filter to this op →
-          </button>
+          </Button>
         </div>
       )}
     </div>

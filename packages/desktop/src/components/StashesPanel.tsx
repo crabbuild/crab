@@ -1,6 +1,8 @@
-import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import clsx from "clsx";
 import {
   ArrowUpFromLine,
   ChevronDown,
@@ -8,8 +10,8 @@ import {
   Copy,
   FilePen,
   FilePlus2,
-  FileX2,
   FileText,
+  FileX2,
   Layers,
   Loader2,
   Plus,
@@ -17,10 +19,10 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import clsx from "clsx";
-import { rpc } from "../ipc";
-import { executeCommand, CommandContext } from "../lib/command-registry";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useFileWatcher } from "../hooks/useFileWatcher";
+import { rpc } from "../ipc";
+import { CommandContext, executeCommand } from "../lib/command-registry";
 
 interface StashEntry {
   ref: string;
@@ -211,11 +213,14 @@ export function StashesPanel({
         <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
           <Layers size={12} />
           <span>
-            <strong className="text-foreground">{stashCount}</strong> stash{stashCount !== 1 ? "es" : ""}
+            <strong className="text-foreground">{stashCount}</strong> stash
+            {stashCount !== 1 ? "es" : ""}
           </span>
         </div>
         <div className="flex items-center gap-1">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-primary/20 hover:text-foreground"
             onClick={() => {
@@ -226,8 +231,10 @@ export function StashesPanel({
             aria-label="New stash"
           >
             <Plus size={13} />
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-primary/20 hover:text-foreground"
             onClick={refresh}
@@ -235,7 +242,7 @@ export function StashesPanel({
             aria-label="Refresh stashes"
           >
             <RefreshCw size={12} />
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -264,19 +271,22 @@ export function StashesPanel({
             >
               Stash
             </Button>
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:text-foreground"
               onClick={() => { setShowCreate(false); setCreateMsg(""); }}
             >
               <X size={12} />
-            </button>
+            </Button>
           </div>
           <label className="mt-1.5 flex cursor-pointer items-center gap-2 text-[10px] text-muted-foreground">
-            <input
-              type="checkbox"
+            <Checkbox
               checked={includeUntracked}
-              onChange={(e) => setIncludeUntracked(e.target.checked)}
+              onCheckedChange={(checked) =>
+                setIncludeUntracked(checked === true)
+              }
               className="h-3 w-3 rounded border-border accent-primary"
             />
             Include untracked files
@@ -297,7 +307,7 @@ export function StashesPanel({
           </div>
         )}
 
-        {/* Empty state */}
+        {/* Stash list */}
         {!loading && stashes && stashes.length === 0 && (
           <div className="flex flex-col items-center px-4 py-8 text-center">
             <Layers size={20} className="text-muted-foreground" />
@@ -315,7 +325,7 @@ export function StashesPanel({
           </div>
         )}
 
-        {/* Stash entries */}
+        {/* Empty state */}
         {stashes && stashes.length > 0 && (
           <ul>
             {stashes.map((s) => {
@@ -327,7 +337,7 @@ export function StashesPanel({
 
               return (
                 <li key={s.ref} className="border-b border-border/40">
-                  {/* Stash row */}
+                  {/* Stash entries */}
                   <div
                     className={clsx(
                       "group flex cursor-pointer items-center gap-1.5 px-2 py-1.5 text-[12px] transition",
@@ -335,28 +345,40 @@ export function StashesPanel({
                     )}
                     onClick={() => onSelectStash(s.ref)}
                   >
-                    {/* Expand chevron */}
-                    <button
+                    {/* Stash row */}
+                    <Button
+                      variant="ghost"
+                      size="compact"
                       type="button"
                       className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground"
                       onClick={(e) => { e.stopPropagation(); toggleExpand(s.ref); }}
                     >
-                      {isExpanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
-                    </button>
+                      {isExpanded ? (
+                        <ChevronDown size={11} />
+                      ) : (
+                        <ChevronRight size={11} />
+                      )}
+                    </Button>
 
-                    {/* Index badge */}
+                    {/* Expand chevron */}
                     <span className="flex h-4 min-w-[16px] shrink-0 items-center justify-center rounded bg-card px-0.5 font-mono text-[9px] text-muted-foreground">
                       {idx}
                     </span>
 
-                    {/* Message */}
+                    {/* Index badge */}
                     <span className="min-w-0 flex-1 truncate text-foreground">
-                      {s.message || <span className="italic text-muted-foreground">No message</span>}
+                      {s.message || (
+                        <span className="italic text-muted-foreground">
+                          No message
+                        </span>
+                      )}
                     </span>
 
-                    {/* Inline actions */}
+                    {/* Message */}
                     <div className="ml-1 flex shrink-0 gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
-                      <button
+                      <Button
+                        variant="ghost"
+                        size="compact"
                         type="button"
                         className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-success/20 hover:text-success"
                         onClick={(e) => { e.stopPropagation(); handleAction("pop", s.ref); }}
@@ -364,8 +386,10 @@ export function StashesPanel({
                         title="Pop"
                       >
                         <ArrowUpFromLine size={11} />
-                      </button>
-                      <button
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="compact"
                         type="button"
                         className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-primary/20 hover:text-primary"
                         onClick={(e) => { e.stopPropagation(); handleAction("apply", s.ref); }}
@@ -373,8 +397,10 @@ export function StashesPanel({
                         title="Apply"
                       >
                         <Copy size={11} />
-                      </button>
-                      <button
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="compact"
                         type="button"
                         className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-destructive/20 hover:text-destructive"
                         onClick={(e) => { e.stopPropagation(); handleAction("drop", s.ref); }}
@@ -382,7 +408,7 @@ export function StashesPanel({
                         title="Drop"
                       >
                         <Trash2 size={11} />
-                      </button>
+                      </Button>
                     </div>
                   </div>
 
@@ -391,17 +417,21 @@ export function StashesPanel({
                     <div className="bg-background pl-7 pr-2 py-0.5">
                       {isLoadingFiles && (
                         <div className="flex items-center gap-1.5 py-1 text-[10px] text-muted-foreground">
-                          <Loader2 size={9} className="animate-spin" /> Loading files…
+                          <Loader2 size={9} className="animate-spin" /> Loading
+                          files…
                         </div>
                       )}
                       {!isLoadingFiles && files && files.length === 0 && (
-                        <div className="py-1 text-[10px] text-muted-foreground">No changes</div>
+                        <div className="py-1 text-[10px] text-muted-foreground">
+                          No changes
+                        </div>
                       )}
-                      {!isLoadingFiles && files && files.map((f) => {
-                        const { Icon, color } = fileStatusIcon(f.status);
-                        const isFileSelected = selectedStashRef === s.ref && selectedFilePath === f.path;
-                        return (
-                          <div
+                      {!isLoadingFiles && files &&
+                        files.map((f) => {
+                          const { Icon, color } = fileStatusIcon(f.status);
+                          const isFileSelected = selectedStashRef === s.ref && selectedFilePath === f.path;
+                          return (
+                            <div
                             key={f.path}
                             className={clsx(
                               "flex cursor-pointer items-center gap-1.5 rounded px-1.5 py-0.5 text-[11px] transition",
@@ -409,14 +439,16 @@ export function StashesPanel({
                             )}
                             onClick={(e) => { e.stopPropagation(); onSelectStashFile(s.ref, f.path); }}
                           >
-                            <Icon size={11} className={color} />
-                            <span className="min-w-0 flex-1 truncate font-mono text-foreground">
-                              {f.path.split("/").pop()}
-                            </span>
-                            <span className="text-[9px] uppercase text-muted-foreground">{f.status}</span>
-                          </div>
-                        );
-                      })}
+                              <Icon size={11} className={color} />
+                              <span className="min-w-0 flex-1 truncate font-mono text-foreground">
+                                {f.path.split("/").pop()}
+                              </span>
+                              <span className="text-[9px] uppercase text-muted-foreground">
+                                {f.status}
+                              </span>
+                            </div>
+                          );
+                        })}
                     </div>
                   )}
                 </li>
@@ -428,18 +460,40 @@ export function StashesPanel({
 
       {/* Drop confirmation */}
       {confirmDrop && (
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50" onClick={() => setConfirmDrop(null)}>
-          <div className="w-72 rounded-lg border border-border bg-card p-4 shadow-2xl" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-sm font-medium text-foreground">Drop stash?</h3>
+        <Dialog
+          open
+          onOpenChange={(open) => {
+            if (!open) {
+              setConfirmDrop(null);
+            }
+          }}
+        >
+          <DialogContent
+            showCloseButton={false}
+            aria-describedby={undefined}
+            className="block gap-0 p-0 w-72 rounded-lg border border-border bg-card p-4 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <DialogTitle className="text-sm font-medium text-foreground">
+              Drop stash?
+            </DialogTitle>
             <p className="mt-1.5 text-xs text-muted-foreground">
-              Permanently delete <span className="font-mono text-foreground">{confirmDrop.ref}</span>. Cannot be undone.
+              Permanently delete{" "}
+              <span className="font-mono text-foreground">
+                {confirmDrop.ref}
+              </span>
+              . Cannot be undone.
             </p>
             <div className="mt-3 flex justify-end gap-2">
-              <Button variant="outline" type="button" className="text-xs" onClick={() => setConfirmDrop(null)}>Cancel</Button>
-              <Button variant="destructive" type="button" className="text-xs" onClick={handleConfirmDrop}>Drop</Button>
+              <Button variant="outline" type="button" className="text-xs" onClick={() => setConfirmDrop(null)}>
+                Cancel
+              </Button>
+              <Button variant="destructive" type="button" className="text-xs" onClick={handleConfirmDrop}>
+                Drop
+              </Button>
             </div>
-          </div>
-        </div>
+          </DialogContent>
+        </Dialog>
       )}
     </div>
   );

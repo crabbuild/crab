@@ -1,7 +1,9 @@
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { useCallback, useEffect, useRef, useState } from "react";
 import { FileText, FolderOpen, Terminal, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { publishToast } from "../../lib/toasts";
 
 // ── Types ───────────────────────────────────────────────────────────
@@ -120,25 +122,35 @@ export function CreateCommandDialog({ open, onClose, onCreated, initialName = ""
   if (!open) return null;
 
   return (
-    <div
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm"
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
-      onKeyDown={handleKeyDown}
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) onClose();
+      }}
     >
-      <div className="w-full max-w-lg rounded-xl border border-border bg-background shadow-2xl">
+      <DialogContent
+        onKeyDown={handleKeyDown}
+        showCloseButton={false}
+        aria-describedby={undefined}
+        className="block gap-0 p-0 w-full max-w-lg rounded-xl border border-border bg-background shadow-2xl"
+      >
         {/* Header */}
         <div className="flex items-center justify-between border-b border-border px-5 py-3">
           <div className="flex items-center gap-2">
             <Terminal size={14} className="text-primary" />
-            <h2 className="text-sm font-semibold text-foreground">Create Slash Command</h2>
+            <DialogTitle className="text-sm font-semibold text-foreground">
+              Create Slash Command
+            </DialogTitle>
           </div>
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={onClose}
             className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground transition"
           >
             <X size={14} />
-          </button>
+          </Button>
         </div>
 
         {/* Body */}
@@ -182,7 +194,8 @@ export function CreateCommandDialog({ open, onClose, onCreated, initialName = ""
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="block text-[11px] font-medium text-muted-foreground mb-1">
-                Argument hint <span className="text-muted-foreground/50">(optional)</span>
+                Argument hint{" "}
+                <span className="text-muted-foreground/50">(optional)</span>
               </label>
               <Input
                 type="text"
@@ -194,7 +207,8 @@ export function CreateCommandDialog({ open, onClose, onCreated, initialName = ""
             </div>
             <div>
               <label className="block text-[11px] font-medium text-muted-foreground mb-1">
-                Category <span className="text-muted-foreground/50">(optional)</span>
+                Category{" "}
+                <span className="text-muted-foreground/50">(optional)</span>
               </label>
               <Input
                 type="text"
@@ -242,33 +256,43 @@ export function CreateCommandDialog({ open, onClose, onCreated, initialName = ""
               className="w-full rounded-md border border-border bg-card px-3 py-2 text-xs text-foreground font-mono outline-none placeholder:text-muted-foreground/50 focus:border-primary/50 resize-none"
             />
             <p className="mt-1 text-[10px] text-muted-foreground">
-              Supports <code className="font-mono text-foreground/70">$ARGUMENTS</code>,{" "}
-              <code className="font-mono text-foreground/70">$0</code>/<code className="font-mono text-foreground/70">$1</code> positional args, and{" "}
-              <code className="font-mono text-foreground/70">!`shell command`</code> for dynamic context.
+              Supports{" "}
+              <code className="font-mono text-foreground/70">$ARGUMENTS</code>,{" "}
+              <code className="font-mono text-foreground/70">$0</code>/
+              <code className="font-mono text-foreground/70">$1</code>{" "}
+              positional args, and{" "}
+              <code className="font-mono text-foreground/70">
+                !`shell command`
+              </code>{" "}
+              for dynamic context.
             </p>
           </div>
         </div>
 
         {/* Footer */}
         <div className="flex items-center justify-end gap-2 border-t border-border px-5 py-3">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={onClose}
             className="rounded-md px-3 py-1.5 text-xs text-muted-foreground hover:bg-accent transition"
           >
             Cancel
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="default"
+            size="compact"
             type="button"
             onClick={handleCreate}
             disabled={creating || !name.trim() || !description.trim()}
             className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition"
           >
             {creating ? "Creating…" : "Create command"}
-          </button>
+          </Button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -288,7 +312,9 @@ function ScopeButton({
   hint: string;
 }) {
   return (
-    <button
+    <Button
+      variant="ghost"
+      size="compact"
       type="button"
       onClick={onClick}
       className={`flex-1 rounded-md border px-3 py-2 text-left transition ${
@@ -298,12 +324,16 @@ function ScopeButton({
       }`}
     >
       <div className="flex items-center gap-1.5">
-        <span className={active ? "text-primary" : "text-muted-foreground"}>{icon}</span>
+        <span className={active ? "text-primary" : "text-muted-foreground"}>
+          {icon}
+        </span>
         <span className={`text-xs font-medium ${active ? "text-foreground" : "text-muted-foreground"}`}>
           {label}
         </span>
       </div>
-      <div className="mt-0.5 text-[9px] font-mono text-muted-foreground/70 truncate">{hint}</div>
-    </button>
+      <div className="mt-0.5 text-[9px] font-mono text-muted-foreground/70 truncate">
+        {hint}
+      </div>
+    </Button>
   );
 }

@@ -1,3 +1,11 @@
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 /**
  * Top-level chat transcript component.
  *
@@ -19,16 +27,16 @@
  *   - onReview: callback to open the Diff tab
  */
 
-import { useMemo, useRef, useCallback, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { LayoutList } from "lucide-react";
-import type { AgentEvent } from "../../../electron/orchestrator-adapters";
+import { useCallback, useMemo, useRef, useState } from "react";
 import type { ChatMessage, ToolEvent } from "../../../electron/agent-chat-messages";
+import type { AgentEvent } from "../../../electron/orchestrator-adapters";
+import { useChatUIState } from "../../lib/chat-ui-state";
 import { deriveTurns } from "../../lib/turn-derivation";
-import { Turn } from "./Turn";
 import { TimelineRail } from "./TimelineRail";
 import { HunkActionsProvider } from "./tool-cards/HunkActionsContext";
-import { useChatUIState } from "../../lib/chat-ui-state";
+import { Turn } from "./Turn";
 
 // ─── Props ───────────────────────────────────────────────────────────────────
 
@@ -358,9 +366,7 @@ export function ChatTranscript({
             {turns.map((turn, i) => (
               <div key={`turn-${turn.turnIndex}`}>
                 {/* Light divider between turns (not before the first) */}
-                {i > 0 && (
-                  <div className="my-3 border-t border-border/30" />
-                )}
+                {i > 0 && <div className="my-3 border-t border-border/30" />}
                 <Turn
                   turn={turn}
                   taskId={taskId}
@@ -501,33 +507,40 @@ function TimelineRailDensityToggle({
   onToggle,
   onSelect,
 }: TimelineRailDensityToggleProps) {
-  const menuRef = useRef<HTMLDivElement>(null);
-
   return (
-    <div className="absolute right-0 top-0 z-10" ref={menuRef}>
-      <button
-        type="button"
-        onClick={onToggle}
-        className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent transition"
+    <div className="absolute right-0 top-0 z-10">
+      <DropdownMenu
+        open={open}
+        onOpenChange={(next) => {
+          if (next !== open) onToggle();
+        }}
+      >
+        <DropdownMenuTrigger asChild>
+          <Button
+            variant="ghost"
+            size="compact"
+            type="button"
+            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent transition"
         aria-label="Timeline rail settings"
         aria-expanded={open}
         aria-haspopup="menu"
         title="Timeline rail"
       >
         <LayoutList size={11} />
-      </button>
+      </Button>
+        </DropdownMenuTrigger>
       {open && (
-        <div
-          role="menu"
-          className="absolute right-0 top-full mt-1 min-w-[140px] rounded-lg border border-border bg-background shadow-xl overflow-hidden z-50"
-        >
+        <DropdownMenuContent
+            side="bottom"
+            align="end"
+            className="p-0 min-w-[140px] rounded-lg border border-border bg-background overflow-hidden"
+          >
+            <DropdownMenuGroup>
           <div className="px-3 py-1.5 border-b border-border text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-            Timeline rail
-          </div>
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => onSelect("compact")}
+                Timeline rail
+              </div>
+          <DropdownMenuItem
+                onSelect={() => onSelect("compact")}
             className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition ${
               timelineRail === "compact"
                 ? "bg-primary/10 text-foreground"
@@ -538,11 +551,9 @@ function TimelineRailDensityToggle({
             {timelineRail === "compact" && (
               <span className="text-primary text-[10px]">✓</span>
             )}
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => onSelect("off")}
+          </DropdownMenuItem>
+              <DropdownMenuItem
+                onSelect={() => onSelect("off")}
             className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition ${
               timelineRail === "off"
                 ? "bg-primary/10 text-foreground"
@@ -553,9 +564,11 @@ function TimelineRailDensityToggle({
             {timelineRail === "off" && (
               <span className="text-primary text-[10px]">✓</span>
             )}
-          </button>
-        </div>
-      )}
+          </DropdownMenuItem>
+            </DropdownMenuGroup>
+          </DropdownMenuContent>
+        )}
+      </DropdownMenu>
     </div>
   );
 }

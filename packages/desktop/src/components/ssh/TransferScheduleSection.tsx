@@ -1,5 +1,20 @@
-import { NativeSelect } from "@/components/ui/native-select";
+import { Button } from "@/components/ui/button";
+import { Calendar } from "@/components/ui/calendar";
 import { Input } from "@/components/ui/input";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { format, startOfDay } from "date-fns";
 /**
  * TransferScheduleSection — displays scheduled transfers and allows
  * creating/cancelling scheduled transfers.
@@ -8,17 +23,17 @@ import { Input } from "@/components/ui/input";
  * and compressed sizes. Validates that scheduled times are in the future.
  */
 
-import { useState, useCallback, useEffect } from "react";
-import {
-  Clock,
-  Calendar,
-  X,
-  Plus,
-  AlertCircle,
-  TrendingDown,
-  Archive,
-} from "lucide-react";
 import clsx from "clsx";
+import {
+  AlertCircle,
+  Archive,
+  Calendar as CalendarIcon,
+  Clock,
+  Plus,
+  TrendingDown,
+  X,
+} from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
 import type { ScheduledTransfer, TransferDirection } from "../../../electron/ssh-types";
 import { formatBytes } from "./TransferProgressBar";
 
@@ -35,7 +50,7 @@ interface ScheduleFormData {
   localPath: string;
   remotePath: string;
   direction: TransferDirection;
-  scheduledAt: string; // datetime-local input value
+  scheduledAt: string; // Local date and time, without a timezone suffix.
 }
 
 // ── Component ────────────────────────────────────────────────────
@@ -118,7 +133,10 @@ export function TransferScheduleSection({ profileId, transfers }: TransferSchedu
   }, [formData, profileId, fetchScheduled]);
 
   // Get minimum datetime for the input (now + 1 minute)
-  const minDateTime = new Date(Date.now() + 60_000).toISOString().slice(0, 16);
+  const selectedDate = formData.scheduledAt
+    ? new Date(formData.scheduledAt)
+    : undefined;
+  const selectedTime = formData.scheduledAt.slice(11) || "00:00";
 
   return (
     <div className="flex flex-col gap-3" role="region" aria-label="Scheduled transfers">
@@ -135,7 +153,9 @@ export function TransferScheduleSection({ profileId, transfers }: TransferSchedu
             </span>
           )}
         </div>
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={() => setShowForm(!showForm)}
           className="flex items-center gap-1 px-2 py-1 text-xs font-medium text-thinking text-thinking hover:bg-thinking/10 hover:bg-thinking/20 rounded transition-colors"
@@ -143,7 +163,7 @@ export function TransferScheduleSection({ profileId, transfers }: TransferSchedu
         >
           {showForm ? <X size={12} /> : <Plus size={12} />}
           <span>{showForm ? "Cancel" : "Schedule"}</span>
-        </button>
+        </Button>
       </div>
 
       {/* Schedule creation form */}
@@ -152,20 +172,40 @@ export function TransferScheduleSection({ profileId, transfers }: TransferSchedu
           <div className="space-y-2.5">
             {/* Direction */}
             <div className="flex items-center gap-2">
-              <label className="text-xs text-muted-foreground text-muted-foreground w-20">Direction</label>
-              <NativeSelect
-                value={formData.direction}
-                onChange={(e) => setFormData((d) => ({ ...d, direction: e.target.value as TransferDirection }))}
-                className="flex-1 px-2 py-1 text-xs rounded border border-border border-border bg-background bg-background"
+              <label className="text-xs text-muted-foreground text-muted-foreground w-20">
+                Direction
+              </label>
+              <Select
+                value={":" + String(formData.direction)}
+                onValueChange={(selectedValue) => {
+                  const value = selectedValue.slice(1);
+                  return setFormData((d) => ({
+                    ...d,
+                    direction: value as TransferDirection,
+                  }));
+                }}
               >
-                <option value="upload">Upload</option>
-                <option value="download">Download</option>
-              </NativeSelect>
+                <SelectTrigger className="flex-1 px-2 py-1 text-xs rounded border border-border border-border bg-background bg-background">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    <SelectItem value={":" + String("upload")}>
+                      Upload
+                    </SelectItem>
+                    <SelectItem value={":" + String("download")}>
+                      Download
+                    </SelectItem>
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
             </div>
 
             {/* Local path */}
             <div className="flex items-center gap-2">
-              <label className="text-xs text-muted-foreground text-muted-foreground w-20">Local Path</label>
+              <label className="text-xs text-muted-foreground text-muted-foreground w-20">
+                Local Path
+              </label>
               <Input
                 type="text"
                 value={formData.localPath}
@@ -177,7 +217,9 @@ export function TransferScheduleSection({ profileId, transfers }: TransferSchedu
 
             {/* Remote path */}
             <div className="flex items-center gap-2">
-              <label className="text-xs text-muted-foreground text-muted-foreground w-20">Remote Path</label>
+              <label className="text-xs text-muted-foreground text-muted-foreground w-20">
+                Remote Path
+              </label>
               <Input
                 type="text"
                 value={formData.remotePath}
@@ -189,14 +231,90 @@ export function TransferScheduleSection({ profileId, transfers }: TransferSchedu
 
             {/* Scheduled time */}
             <div className="flex items-center gap-2">
-              <label className="text-xs text-muted-foreground text-muted-foreground w-20">Start Time</label>
-              <Input
-                type="datetime-local"
-                value={formData.scheduledAt}
-                min={minDateTime}
-                onChange={(e) => setFormData((d) => ({ ...d, scheduledAt: e.target.value }))}
-                className="flex-1 px-2 py-1 text-xs rounded border border-border border-border bg-background bg-background"
-              />
+              <label className="text-xs text-muted-foreground text-muted-foreground w-20">
+                Start Time
+              </label>
+              <div className="flex min-w-0 flex-1 items-center gap-1">
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button
+                      className="min-w-0 flex-1 justify-start text-xs"
+                      aria-label="Scheduled date"
+                    >
+                      <CalendarIcon size={12} />
+                      {selectedDate
+                        ? format(selectedDate, "PP")
+                        : "Pick a date"}
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-auto p-0">
+                    <Calendar
+                      mode="single"
+                      selected={selectedDate}
+                      disabled={{ before: startOfDay(new Date()) }}
+                      initialFocus
+                      onSelect={(date) => {
+                        if (date)
+                          setFormData((data) => ({
+                            ...data,
+                            scheduledAt: `${format(date, "yyyy-MM-dd")}T${selectedTime}`,
+                          }));
+                      }}
+                    />
+                  </PopoverContent>
+                </Popover>
+                <Select
+                  disabled={!selectedDate}
+                  value={selectedTime.slice(0, 2)}
+                  onValueChange={(hour) =>
+                    setFormData((data) => ({
+                      ...data,
+                      scheduledAt: `${data.scheduledAt.slice(0, 11)}${hour}:${selectedTime.slice(3)}`,
+                    }))
+                  }
+                >
+                  <SelectTrigger aria-label="Scheduled hour" className="w-16">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      {Array.from({ length: 24 }, (_, hour) =>
+                        String(hour).padStart(2, "0"),
+                      ).map((hour) => (
+                        <SelectItem key={hour} value={hour}>
+                          {hour}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+                <span>:</span>
+                <Select
+                  disabled={!selectedDate}
+                  value={selectedTime.slice(3)}
+                  onValueChange={(minute) =>
+                    setFormData((data) => ({
+                      ...data,
+                      scheduledAt: `${data.scheduledAt.slice(0, 11)}${selectedTime.slice(0, 2)}:${minute}`,
+                    }))
+                  }
+                >
+                  <SelectTrigger aria-label="Scheduled minute" className="w-16">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      {Array.from({ length: 60 }, (_, minute) =>
+                        String(minute).padStart(2, "0"),
+                      ).map((minute) => (
+                        <SelectItem key={minute} value={minute}>
+                          {minute}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
 
             {/* Error */}
@@ -209,7 +327,9 @@ export function TransferScheduleSection({ profileId, transfers }: TransferSchedu
 
             {/* Submit */}
             <div className="flex justify-end pt-1">
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 onClick={handleSubmit}
                 disabled={isSubmitting}
@@ -221,7 +341,7 @@ export function TransferScheduleSection({ profileId, transfers }: TransferSchedu
                 )}
               >
                 {isSubmitting ? "Scheduling…" : "Schedule Transfer"}
-              </button>
+              </Button>
             </div>
           </div>
         </div>
@@ -268,7 +388,9 @@ function ScheduledRow({ item, transferInfo, onCancel }: ScheduledRowProps) {
     <li className="flex items-center gap-2 px-3 py-2 hover:bg-background hover:bg-card/50">
       <Clock className="w-4 h-4 text-thinking text-thinking shrink-0" />
       <div className="flex-1 min-w-0">
-        <p className="text-sm text-foreground text-foreground truncate">{fileName}</p>
+        <p className="text-sm text-foreground text-foreground truncate">
+          {fileName}
+        </p>
         <p className="text-xs text-muted-foreground text-muted-foreground truncate">
           → {item.remotePath}
         </p>
@@ -281,21 +403,24 @@ function ScheduledRow({ item, transferInfo, onCancel }: ScheduledRowProps) {
           </span>
           {/* Delta savings indicator */}
           {transferInfo?.deltaSavingsPercent !== undefined && transferInfo.deltaSavingsPercent > 0 && (
-            <span className="flex items-center gap-0.5 text-[10px] text-success text-success">
-              <TrendingDown size={10} />
-              {transferInfo.deltaSavingsPercent.toFixed(1)}% saved
-            </span>
-          )}
+              <span className="flex items-center gap-0.5 text-[10px] text-success text-success">
+                <TrendingDown size={10} />
+                {transferInfo.deltaSavingsPercent.toFixed(1)}% saved
+              </span>
+            )}
           {/* Compressed size indicator */}
           {transferInfo?.compressedBytes !== undefined && transferInfo.compressedBytes > 0 && (
-            <span className="flex items-center gap-0.5 text-[10px] text-info text-info">
-              <Archive size={10} />
-              {formatBytes(transferInfo.totalBytes)} → {formatBytes(transferInfo.compressedBytes)}
-            </span>
-          )}
+              <span className="flex items-center gap-0.5 text-[10px] text-info text-info">
+                <Archive size={10} />
+                {formatBytes(transferInfo.totalBytes)} →{" "}
+                {formatBytes(transferInfo.compressedBytes)}
+              </span>
+            )}
         </div>
       </div>
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={onCancel}
         className="shrink-0 p-1 rounded hover:bg-destructive/10 hover:bg-destructive/20 text-muted-foreground hover:text-destructive hover:text-destructive transition-colors"
@@ -303,7 +428,7 @@ function ScheduledRow({ item, transferInfo, onCancel }: ScheduledRowProps) {
         title="Cancel scheduled transfer"
       >
         <X size={14} />
-      </button>
+      </Button>
     </li>
   );
 }

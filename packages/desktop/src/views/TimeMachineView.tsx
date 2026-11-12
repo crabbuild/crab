@@ -1,7 +1,8 @@
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { Slider } from "@/components/ui/slider";
 import { Clock, Loader2, User } from "lucide-react";
-import { OpenRepo } from "../state";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { CommitRow, rpc } from "../ipc";
+import { OpenRepo } from "../state";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -147,12 +148,9 @@ export const TimeMachineView = memo(function TimeMachineView({
     }, []);
   }, [blameLines]);
 
-  const handleSliderChange = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      setSliderIndex(Number(e.target.value));
-    },
-    [],
-  );
+  const handleSliderChange = useCallback(([value]: number[]) => {
+    setSliderIndex(value);
+  }, []);
 
   // ── Render ───────────────────────────────────────────────────────
 
@@ -199,7 +197,9 @@ export const TimeMachineView = memo(function TimeMachineView({
               <User size={11} />
               {currentCommit.author}
             </span>
-            <span className="text-muted-foreground">{formatDate(currentCommit.date)}</span>
+            <span className="text-muted-foreground">
+              {formatDate(currentCommit.date)}
+            </span>
             <span className="truncate text-foreground font-medium">
               {currentCommit.subject}
             </span>
@@ -211,12 +211,11 @@ export const TimeMachineView = memo(function TimeMachineView({
 
         {/* Slider */}
         <div className="mt-3">
-          <input
-            type="range"
+          <Slider
             min={0}
             max={commits.length - 1}
-            value={sliderIndex}
-            onChange={handleSliderChange}
+            value={[Number(sliderIndex)]}
+            onValueChange={handleSliderChange}
             className="w-full accent-primary"
             aria-label="Navigate file history"
           />

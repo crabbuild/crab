@@ -1,3 +1,4 @@
+import { Toggle } from "@/components/ui/toggle";
 /**
  * Compact View Toggle — a small icon button in the chat header that
  * toggles between compact (auto-collapsed) and expanded view modes.
@@ -6,7 +7,7 @@
  * the given task and writes via setCompactView on toggle.
  */
 
-import { Minimize2, Maximize2 } from "lucide-react";
+import { Maximize2, Minimize2 } from "lucide-react";
 import { useChatUIState } from "../../lib/chat-ui-state";
 
 const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.userAgent);
@@ -29,15 +30,16 @@ export function CompactViewToggle({ taskId }: CompactViewToggleProps) {
     : `Compact view (${mod}+E)`;
 
   return (
-    <button
+    <Toggle
+      size="sm"
       type="button"
       onClick={handleToggle}
       className="flex items-center gap-1 px-2 py-2 text-xs text-muted-foreground hover:text-foreground transition"
       title={tooltip}
       aria-label={tooltip}
-      aria-pressed={compactView}
+      pressed={compactView}
     >
       {compactView ? <Minimize2 size={12} /> : <Maximize2 size={12} />}
-    </button>
+    </Toggle>
   );
 }

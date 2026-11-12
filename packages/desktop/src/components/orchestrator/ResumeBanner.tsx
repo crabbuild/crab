@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Resume banner — surfaces "pick up where you left off" when the app
  * opens and the selected task's most-recent checkpoint is older than
@@ -8,8 +9,8 @@
  * tasks or restarts don't hammer the user with repeat prompts.
  */
 
+import { Clock, RotateCcw, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { Clock, X, RotateCcw } from "lucide-react";
 
 interface Props {
   taskId: string;
@@ -90,23 +91,28 @@ export function ResumeBanner({ taskId, lastMessageTs, onResume }: Props) {
       <Clock size={12} className="shrink-0 text-info" />
       <span className="flex-1">
         Previous session reached <strong>turn {latest.turnNumber}</strong>
-        {checkpointTs ? ` (${formatAgo(checkpointTs)})` : ""}. Resume where you left off?
+        {checkpointTs ? ` (${formatAgo(checkpointTs)})` : ""}. Resume where you
+        left off?
       </span>
-      <button
+      <Button
+        variant="default"
+        size="compact"
         type="button"
         onClick={onResume}
         className="inline-flex items-center gap-1 rounded-md bg-primary px-2 py-0.5 text-primary-foreground hover:bg-primary-hover transition"
       >
         <RotateCcw size={10} /> Resume
-      </button>
-      <button
+      </Button>
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={dismiss}
         aria-label="Dismiss resume prompt"
         className="rounded p-0.5 text-muted-foreground hover:text-foreground"
       >
         <X size={12} />
-      </button>
+      </Button>
     </div>
   );
 }

@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 /**
  * Bookmarks Panel — bookmark list above directory tree, add/remove with
@@ -5,19 +6,19 @@ import { Input } from "@/components/ui/input";
  * and path-not-found handling.
  */
 
-import { useState, useCallback, useMemo } from "react";
 import {
+  AlertCircle,
   Bookmark,
+  Clock,
+  FileText,
+  FolderOpen,
+  Loader2,
   Plus,
   Trash2,
-  Clock,
-  FolderOpen,
-  FileText,
-  AlertCircle,
-  Loader2,
   X,
 } from "lucide-react";
-import type { RemoteBookmark, RecentFile } from "../../../electron/ssh-types";
+import { useCallback, useMemo, useState } from "react";
+import type { RecentFile, RemoteBookmark } from "../../../electron/ssh-types";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -125,19 +126,23 @@ function AddBookmarkForm({
         </p>
       )}
       <div className="flex justify-end gap-2 pt-1">
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={onCancel}
           className="px-3 py-1 text-xs text-muted-foreground text-muted-foreground hover:bg-card hover:bg-card rounded"
         >
           Cancel
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           type="submit"
           className="px-3 py-1 text-xs bg-info text-info-foreground rounded hover:bg-info"
         >
           Add Bookmark
-        </button>
+        </Button>
       </div>
     </form>
   );
@@ -169,27 +174,33 @@ function PathNotFoundBanner({
             </p>
           </div>
         </div>
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           onClick={onDismiss}
           className="p-0.5 text-muted-foreground hover:text-muted-foreground hover:text-muted-foreground rounded"
           aria-label="Dismiss"
         >
           <X className="w-3 h-3" />
-        </button>
+        </Button>
       </div>
       <div className="flex justify-end gap-2">
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           onClick={onDismiss}
           className="px-2 py-0.5 text-[10px] text-muted-foreground text-muted-foreground hover:bg-card hover:bg-card rounded"
         >
           Keep
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           onClick={onRemove}
           className="px-2 py-0.5 text-[10px] text-destructive text-destructive hover:bg-destructive/10 hover:bg-destructive/20 rounded"
         >
           Remove entry
-        </button>
+        </Button>
       </div>
     </div>
   );
@@ -237,14 +248,16 @@ export function BookmarksPanel({
             <Loader2 className="w-3.5 h-3.5 text-info animate-spin" aria-label="Connecting" />
           )}
           {!showAddForm && (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               onClick={() => setShowAddForm(true)}
               className="flex items-center gap-1 px-2 py-1 text-xs text-info text-info hover:bg-info/10 hover:bg-info/20 rounded"
               aria-label="Add bookmark"
             >
               <Plus className="w-3 h-3" />
               Add
-            </button>
+            </Button>
           )}
         </div>
       </div>
@@ -293,14 +306,16 @@ export function BookmarksPanel({
                       </p>
                     </div>
                   </div>
-                  <button
+                  <Button
+                    variant="ghost"
+                    size="compact"
                     onClick={(e) => { e.stopPropagation(); onRemoveBookmark(bk.id); }}
                     className="p-0.5 text-muted-foreground hover:text-destructive hover:text-destructive rounded opacity-0 group-hover:opacity-100 transition-opacity"
                     aria-label={`Remove bookmark ${bk.label}`}
                     title="Remove bookmark"
                   >
                     <Trash2 className="w-3 h-3" />
-                  </button>
+                  </Button>
                 </li>
               ))}
             </ul>

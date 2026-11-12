@@ -1,11 +1,17 @@
+import { Button } from "@/components/ui/button";
 /**
  * Compact status bar displayed below the terminal viewport.
  * Shows shell name, cwd, running command duration, scrollback usage,
  * and connection status.
  */
 
+import {
+  Clock,
+  Database,
+  Folder, Terminal as TerminalIcon,
+  Wifi,
+} from "lucide-react";
 import { useEffect, useState } from "react";
-import { Folder, Terminal as TerminalIcon, Clock, Database, Wifi } from "lucide-react";
 import type { ShellIntegrationState } from "../lib/terminal-shell-integration";
 import { formatDuration } from "../lib/terminal-shell-integration";
 import type { AgentType } from "../lib/terminal-ux-enhancements";
@@ -65,7 +71,9 @@ export function TerminalStatusBar({
   return (
     <div className="flex shrink-0 items-center gap-3 border-t border-border bg-card px-2 py-0.5 text-[10px] text-muted-foreground">
       {/* Shell name */}
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={onShellClick}
         className="flex items-center gap-1 hover:text-foreground transition-colors"
@@ -73,7 +81,7 @@ export function TerminalStatusBar({
       >
         <TerminalIcon size={9} />
         <span>{shellName}</span>
-      </button>
+      </Button>
 
       {/* Agent indicator */}
       {agentType && (
@@ -86,7 +94,9 @@ export function TerminalStatusBar({
       )}
 
       {/* CWD */}
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={() => cwd && onCwdClick?.(cwd)}
         className="flex items-center gap-1 hover:text-foreground transition-colors truncate max-w-[200px]"
@@ -94,7 +104,7 @@ export function TerminalStatusBar({
       >
         <Folder size={9} />
         <span className="truncate">{cwdDisplay}</span>
-      </button>
+      </Button>
 
       {/* Running command duration */}
       {runningDuration !== null && (

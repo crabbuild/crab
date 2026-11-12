@@ -1,5 +1,12 @@
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Textarea } from "@/components/ui/textarea";
-import { useCallback, useRef, useState, useEffect, type KeyboardEvent } from "react";
 import clsx from "clsx";
 import {
   AlertCircle,
@@ -16,8 +23,18 @@ import {
   Undo2,
   X,
 } from "lucide-react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from "react";
 import type { ReviewThread as ReviewThreadType, ThreadComment } from "../../review/types";
-import type { OptimisticThreadComment, OptimisticReviewThread } from "../../review/useOptimisticThreads";
+import type {
+  OptimisticReviewThread,
+  OptimisticThreadComment,
+} from "../../review/useOptimisticThreads";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -137,20 +154,24 @@ export function ReviewThreadComponent({
           thread.outdated && "opacity-60",
         )}
       >
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
-          className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] text-muted-foreground hover:bg-accent"
+          className="justify-start flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] text-muted-foreground hover:bg-accent"
           onClick={() => setExpanded(true)}
           aria-label="Expand resolved thread"
         >
           <ChevronRight size={12} className="shrink-0" />
           <Check size={12} className="shrink-0 text-success" />
           <span className="truncate">
-            <span className="font-medium text-foreground">{firstComment?.author ?? "Unknown"}</span>
+            <span className="font-medium text-foreground">
+              {firstComment?.author ?? "Unknown"}
+            </span>
             {" · "}
             {summaryText}
           </span>
-        </button>
+        </Button>
         {resolveError && (
           <div className="flex items-center justify-between border-t border-destructive/30 bg-destructive/5 px-3 py-1.5">
             <span className="flex items-center gap-1.5 text-[10px] text-destructive">
@@ -158,14 +179,16 @@ export function ReviewThreadComponent({
               {resolveError}
             </span>
             {onDismissResolveError && (
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 className="inline-flex items-center rounded p-0.5 text-destructive hover:bg-destructive/10"
                 onClick={() => onDismissResolveError(thread.threadId)}
                 aria-label="Dismiss resolve error"
               >
                 <X size={10} />
-              </button>
+              </Button>
             )}
           </div>
         )}
@@ -199,7 +222,9 @@ export function ReviewThreadComponent({
             </span>
           )}
         </div>
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           className={clsx(
             "inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px]",
@@ -221,7 +246,7 @@ export function ReviewThreadComponent({
               Resolve
             </>
           )}
-        </button>
+        </Button>
       </div>
 
       {/* Inline error from failed resolve/unresolve */}
@@ -232,14 +257,16 @@ export function ReviewThreadComponent({
             {resolveError}
           </span>
           {onDismissResolveError && (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className="inline-flex items-center rounded p-0.5 text-destructive hover:bg-destructive/10"
               onClick={() => onDismissResolveError(thread.threadId)}
               aria-label="Dismiss resolve error"
             >
               <X size={10} />
-            </button>
+            </Button>
           )}
         </div>
       )}
@@ -260,9 +287,7 @@ export function ReviewThreadComponent({
             );
           }
           if (optimistic.pending) {
-            return (
-              <PendingCommentItem key={comment.id} comment={optimistic} />
-            );
+            return <PendingCommentItem key={comment.id} comment={optimistic} />;
           }
           return (
             <CommentItem
@@ -289,7 +314,9 @@ export function ReviewThreadComponent({
           aria-label={`Reply to thread on ${thread.path}:${thread.line}`}
         />
         <div className="mt-1.5 flex items-center justify-end">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="inline-flex items-center gap-1 rounded bg-primary/10 px-2 py-1 text-[10px] text-primary hover:bg-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
             disabled={!replyBody.trim() || replyLoading}
@@ -298,7 +325,7 @@ export function ReviewThreadComponent({
           >
             <Send size={10} />
             {replyLoading ? "Sending…" : "Reply"}
-          </button>
+          </Button>
         </div>
       </div>
     </div>
@@ -335,16 +362,6 @@ function CommentItem({ comment, currentUser, onEdit, onDelete }: CommentItemProp
   }, [editing]);
 
   // Close menu on outside click.
-  useEffect(() => {
-    if (!menuOpen) return;
-    const handler = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setMenuOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [menuOpen]);
 
   const handleStartEdit = useCallback(() => {
     setEditBody(comment.body);
@@ -413,7 +430,9 @@ function CommentItem({ comment, currentUser, onEdit, onDelete }: CommentItemProp
         <div className="flex items-center gap-1.5 text-[10px]">
           <span className="font-medium text-foreground">@{comment.author}</span>
           <span className="text-muted-foreground">·</span>
-          <span className="text-muted-foreground">{formatRelativeDate(comment.createdAt)}</span>
+          <span className="text-muted-foreground">
+            {formatRelativeDate(comment.createdAt)}
+          </span>
           {comment.edited && (
             <span className="text-muted-foreground italic">(edited)</span>
           )}
@@ -421,36 +440,46 @@ function CommentItem({ comment, currentUser, onEdit, onDelete }: CommentItemProp
 
         {isMine && !editing && (
           <div className="relative" ref={menuRef}>
-            <button
-              type="button"
-              className="inline-flex items-center rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
-              onClick={() => setMenuOpen((v) => !v)}
-              aria-label="Comment actions"
-              aria-expanded={menuOpen}
-            >
-              <MoreHorizontal size={12} />
-            </button>
+            <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="compact"
+                  type="button"
+                  className="inline-flex items-center rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+                  onClick={() => setMenuOpen((v) => !v)}
+                  aria-label="Comment actions"
+                  aria-expanded={menuOpen}
+                >
+                  <MoreHorizontal size={12} />
+                </Button>
+              </DropdownMenuTrigger>
 
-            {menuOpen && (
-              <div className="absolute right-0 top-full z-10 mt-1 min-w-[100px] rounded border border-border bg-card py-1 shadow-lg">
-                <button
-                  type="button"
-                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[10px] text-foreground hover:bg-accent"
-                  onClick={handleStartEdit}
+              {menuOpen && (
+                <DropdownMenuContent
+                  side="bottom"
+                  align="end"
+                  className=" min-w-[100px] rounded border border-border bg-card py-1 "
                 >
-                  <Pencil size={10} />
-                  Edit
-                </button>
-                <button
-                  type="button"
-                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[10px] text-destructive hover:bg-destructive/10"
-                  onClick={handleDelete}
-                >
-                  <Trash2 size={10} />
-                  Delete
-                </button>
-              </div>
-            )}
+                  <DropdownMenuGroup>
+                    <DropdownMenuItem
+                      className="justify-start flex w-full items-center gap-2 px-3 py-1.5 text-left text-[10px] text-foreground hover:bg-accent"
+                      onSelect={handleStartEdit}
+                    >
+                      <Pencil size={10} />
+                      Edit
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      className="justify-start flex w-full items-center gap-2 px-3 py-1.5 text-left text-[10px] text-destructive hover:bg-destructive/10"
+                      onSelect={handleDelete}
+                    >
+                      <Trash2 size={10} />
+                      Delete
+                    </DropdownMenuItem>
+                  </DropdownMenuGroup>
+                </DropdownMenuContent>
+              )}
+            </DropdownMenu>
           </div>
         )}
       </div>
@@ -475,7 +504,9 @@ function CommentItem({ comment, currentUser, onEdit, onDelete }: CommentItemProp
               </div>
             )}
             <div className="mt-1.5 flex items-center justify-end gap-2">
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 className="inline-flex items-center gap-1 rounded px-2 py-1 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
                 onClick={handleCancelEdit}
@@ -483,8 +514,10 @@ function CommentItem({ comment, currentUser, onEdit, onDelete }: CommentItemProp
               >
                 <X size={10} />
                 Cancel
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 className="inline-flex items-center gap-1 rounded bg-primary/10 px-2 py-1 text-[10px] text-primary hover:bg-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
                 disabled={!editBody.trim() || editLoading}
@@ -493,7 +526,7 @@ function CommentItem({ comment, currentUser, onEdit, onDelete }: CommentItemProp
               >
                 <Save size={10} />
                 {editLoading ? "Saving…" : "Save"}
-              </button>
+              </Button>
             </div>
           </>
         ) : (
@@ -506,8 +539,12 @@ function CommentItem({ comment, currentUser, onEdit, onDelete }: CommentItemProp
       {/* Delete confirmation */}
       {deleteConfirm && (
         <div className="mt-2 flex items-center gap-2 rounded border border-destructive/30 bg-destructive/5 px-2 py-1.5">
-          <span className="text-[10px] text-destructive">Delete this comment?</span>
-          <button
+          <span className="text-[10px] text-destructive">
+            Delete this comment?
+          </span>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="inline-flex items-center gap-1 rounded bg-destructive/15 px-2 py-0.5 text-[10px] text-destructive hover:bg-destructive/25 disabled:cursor-not-allowed disabled:opacity-50"
             onClick={handleConfirmDelete}
@@ -515,8 +552,10 @@ function CommentItem({ comment, currentUser, onEdit, onDelete }: CommentItemProp
             aria-label="Confirm delete"
           >
             {deleteLoading ? "Deleting…" : "Delete"}
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
             onClick={() => { setDeleteConfirm(false); setDeleteError(null); }}
@@ -524,7 +563,7 @@ function CommentItem({ comment, currentUser, onEdit, onDelete }: CommentItemProp
             aria-label="Cancel delete"
           >
             Cancel
-          </button>
+          </Button>
           {deleteError && (
             <span className="flex items-center gap-1 text-[10px] text-destructive">
               <AlertCircle size={10} />
@@ -593,11 +632,15 @@ function FailedCommentItem({ comment, threadId, onRetry, onDismiss }: FailedComm
         </p>
       </div>
       {comment.failureMessage && (
-        <p className="mt-1 text-[10px] text-destructive">{comment.failureMessage}</p>
+        <p className="mt-1 text-[10px] text-destructive">
+          {comment.failureMessage}
+        </p>
       )}
       <div className="mt-1.5 flex items-center gap-2">
         {onRetry && (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="inline-flex items-center gap-1 rounded bg-primary/10 px-2 py-0.5 text-[10px] text-primary hover:bg-primary/20"
             onClick={() => onRetry(threadId, comment.id)}
@@ -605,10 +648,12 @@ function FailedCommentItem({ comment, threadId, onRetry, onDismiss }: FailedComm
           >
             <RefreshCw size={10} />
             Retry
-          </button>
+          </Button>
         )}
         {onDismiss && (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
             onClick={() => onDismiss(threadId, comment.id)}
@@ -616,7 +661,7 @@ function FailedCommentItem({ comment, threadId, onRetry, onDismiss }: FailedComm
           >
             <X size={10} />
             Dismiss
-          </button>
+          </Button>
         )}
       </div>
     </div>

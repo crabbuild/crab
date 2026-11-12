@@ -1,49 +1,73 @@
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Toggle } from "@/components/ui/toggle";
+import { requestPrompt } from "@/lib/application-dialogs";
 /**
  * Agent Tasks View (Orchestrator Mode).
  *
  * Chat workspace and skill management, accessed through the Chat activity entry.
  */
 
-import { useAgentChat } from "../lib/use-agent-chat";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
-import { MessageSquare, GitCompare, Terminal, MoreHorizontal, Pin, Puzzle, Users, FolderTree } from "lucide-react";
-import { OpenRepo } from "../state";
-import { TaskList } from "../components/orchestrator/TaskList";
-import { OrchestratorTask } from "../components/orchestrator/TaskCard";
-import { NewTaskDialog, NewTaskData } from "../components/orchestrator/NewTaskDialog";
-import { ChatTab } from "../components/orchestrator/ChatTab";
+import {
+  FolderTree,
+  GitCompare,
+  MessageSquare,
+  MoreHorizontal,
+  Pin,
+  Puzzle,
+  Terminal,
+  Users,
+} from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChatMessage } from "../../electron/agent-chat-messages";
-import { DiffTab } from "../components/orchestrator/DiffTab";
-import { TerminalView } from "./TerminalView";
-import { SkillsView } from "./SkillsView";
 import { ActionBar } from "../components/orchestrator/ActionBar";
-import { NewChatLanding } from "../components/orchestrator/NewChatLanding";
 import { AgentSetupWizard } from "../components/orchestrator/AgentSetupWizard";
-import { IssueItem } from "../components/orchestrator/IssueSelector";
-import { installIssueDeepLinkListener } from "../components/orchestrator/issueDeepLink";
-import { getSuggestedActions } from "../components/orchestrator/SuggestedActions";
-import { publishToast } from "../lib/toasts";
 import { BudgetWarningDialog } from "../components/orchestrator/BudgetWarningDialog";
-import { LiveFileTree, LiveFile } from "../components/orchestrator/LiveFileTree";
+import { ChatTab } from "../components/orchestrator/ChatTab";
 import { CheckpointDropdown } from "../components/orchestrator/CheckpointDropdown";
-import { KeyboardShortcutsButton } from "../components/orchestrator/KeyboardShortcutsDialog";
 import { CompactViewToggle } from "../components/orchestrator/CompactViewToggle";
+import { DiffTab } from "../components/orchestrator/DiffTab";
 import { FilesTab } from "../components/orchestrator/FilesTab";
+import { installIssueDeepLinkListener } from "../components/orchestrator/issueDeepLink";
+import { IssueItem } from "../components/orchestrator/IssueSelector";
+import { KeyboardShortcutsButton } from "../components/orchestrator/KeyboardShortcutsDialog";
+import {
+  LiveFile,
+  LiveFileTree,
+} from "../components/orchestrator/LiveFileTree";
+import { NewChatLanding } from "../components/orchestrator/NewChatLanding";
+import {
+  NewTaskData,
+  NewTaskDialog,
+} from "../components/orchestrator/NewTaskDialog";
+import { getSuggestedActions } from "../components/orchestrator/SuggestedActions";
+import { OrchestratorTask } from "../components/orchestrator/TaskCard";
+import { TaskList } from "../components/orchestrator/TaskList";
+import { publishToast } from "../lib/toasts";
+import { useAgentChat } from "../lib/use-agent-chat";
+import { OpenRepo } from "../state";
+import { SkillsView } from "./SkillsView";
+import { TerminalView } from "./TerminalView";
 
-import { ResizeHandle } from "../components/orchestrator/ResizeHandle";
+import type { ChatAttachment } from "../components/orchestrator/ChatInput";
+import { ChatTranscript } from "../components/orchestrator/ChatTranscript";
 import { ContextPinPanel } from "../components/orchestrator/ContextPinPanel";
 import { MultiAgentView } from "../components/orchestrator/MultiAgentView";
-import { useAgentSessions } from "../lib/use-agent-sessions";
-import { useSession, useActiveRepoKey } from "../lib/session-context";
-import { ChatTranscript } from "../components/orchestrator/ChatTranscript";
-import type { ChatAttachment } from "../components/orchestrator/ChatInput";
+import { ResizeHandle } from "../components/orchestrator/ResizeHandle";
 import { rpc, type AgentWorkflowDefinition, type AgentWorkflowRun, type RefEntry } from "../ipc";
+import { useActiveRepoKey, useSession } from "../lib/session-context";
+import { useAgentSessions } from "../lib/use-agent-sessions";
 
 // ── Types ───────────────────────────────────────────────────────────
 
 type WorkspaceTab = "chat" | "diff" | "files" | "terminal" | "agents";
-
 
 interface Props {
   repo: OpenRepo;
@@ -97,17 +121,6 @@ function branchNamesFromRefs(refs: RefEntry[]): string[] {
   return Array.from(new Set(names));
 }
 
-async function promptForSidebarValue(message: string, defaultValue?: string): Promise<string | null> {
-  const dialogPrompt = (window as any).crab?.dialogPrompt;
-  if (typeof dialogPrompt === "function") {
-    return dialogPrompt(message, defaultValue);
-  }
-  if (typeof window.prompt === "function") {
-    return window.prompt(message, defaultValue);
-  }
-  return null;
-}
-
 function shouldDeferDiffFetch(status?: string): boolean {
   return status === "running" || status === "iterating" || status === "queued";
 }
@@ -123,8 +136,8 @@ function appendChatNote(taskId: string, content: string, kind: "text" | "error" 
 // Imported from the shared model-catalog module. Keep that file updated
 // when new models are released.
 
-import { modelOptions, useAgentModels } from "../components/orchestrator/model-catalog";
 import { useAgentAvailability } from "../components/orchestrator/agent-availability";
+import { modelOptions, useAgentModels } from "../components/orchestrator/model-catalog";
 
 // ── Component ───────────────────────────────────────────────────────
 
@@ -139,10 +152,11 @@ export function AgentTasksView({ repo, onOpenAgentManager }: Props) {
           { id: "chats", label: "Chats", icon: MessageSquare },
           { id: "skills", label: "Skills", icon: Puzzle },
         ] as const).map(({ id, label, icon: Icon }) => (
-          <button
+          <Toggle
+            size="sm"
             key={id}
             type="button"
-            aria-pressed={section === id}
+            pressed={section === id}
             onClick={() => setSection(id)}
             className={clsx(
               "flex items-center gap-1.5 border-b-2 px-4 py-2 text-xs transition focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-primary",
@@ -153,7 +167,7 @@ export function AgentTasksView({ repo, onOpenAgentManager }: Props) {
           >
             <Icon size={13} />
             {label}
-          </button>
+          </Toggle>
         ))}
       </nav>
       {/* Keep the chat mounted so Skills navigation preserves drafts and live sessions. */}
@@ -179,14 +193,16 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
   const savedOrchestrator = useMemo(() => {
     if (!repoPath) return null;
     const session = sessionManager.activate(repoPath);
-    return session?.viewState?.orchestrator as {
+    return (
+      (session?.viewState?.orchestrator as {
       selectedTaskId?: string | null;
       activeTab?: WorkspaceTab;
       composerAgent?: Record<string, string>;
       composerModel?: Record<string, string>;
       composerMode?: Record<string, "plan" | "instant">;
       activatedTerminalTasks?: string[];
-    } | undefined ?? null;
+    } | undefined) ?? null
+    );
   }, [repoPath, sessionManager]);
 
   const [tasks, setTasks] = useState<OrchestratorTask[]>([]);
@@ -288,9 +304,10 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
   const [messages, setMessages] = useAgentChat(transcriptTask);
   const closedConversation = selectedTask ? ["archived", "applied", "discarded"].includes(selectedTask.status) : false;
   const modelCatalog = useAgentModels(closedConversation || !transcriptTask ? undefined : selectedTask?.agentName, selectedTask?.worktreePath, transcriptTask);
-  const selectedModel = selectedTask ? composerModel[selectedTask.id] ?? selectedTask.model : undefined;
+  const selectedModel = selectedTask
+    ? (composerModel[selectedTask.id] ?? selectedTask.model)
+    : undefined;
   const availableModels = modelOptions(modelCatalog.models, selectedModel);
-
 
   const refreshTasksFromBackend = useCallback(
     async (preferredTaskId?: string | null): Promise<OrchestratorTask[]> => {
@@ -826,10 +843,12 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
     let cancelled = false;
     (window as any).crab?.agentWorkflows
       ?.listDefinitions?.(workflowRepoPath)
-      .then((result: { success?: boolean; definitions?: AgentWorkflowDefinition[] }) => {
-        if (cancelled) return;
-        setAgentWorkflows(result?.success ? result.definitions ?? [] : []);
-      })
+      .then(
+        (result: { success?: boolean; definitions?: AgentWorkflowDefinition[] }) => {
+          if (cancelled) return;
+          setAgentWorkflows(result?.success ? (result.definitions ?? []) : []);
+        },
+      )
       .catch(() => {
         if (!cancelled) setAgentWorkflows([]);
       });
@@ -1019,10 +1038,8 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
         const workflow = agentWorkflows.find((candidate) => candidate.id === workflowDefinitionId);
         const workflowName = workflow?.name ?? "Workflow";
 
-
-
         try {
-          const result = await (window as any).crab?.agentWorkflows?.startRun?.(
+          const result = (await (window as any).crab?.agentWorkflows?.startRun?.(
             repoPathForWorkflow,
             workflowDefinitionId,
             {
@@ -1036,7 +1053,8 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
               createSourceTask: !sourceTaskId,
               sourceTaskTitle: `Workflow: ${workflowName}`,
             },
-          ) as { success?: boolean; run?: { id: string }; sourceTask?: any; error?: string } | undefined;
+          )) as
+            { success?: boolean; run?: { id: string }; sourceTask?: any; error?: string } | undefined;
 
           if (!result?.success) {
             throw new Error(result?.error ?? `Failed to start workflow ${workflowName}`);
@@ -1112,7 +1130,7 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
       const taskCwd =
         selectedWorktreeMode === "primary"
           ? primaryRepoPath
-          : selectedWorktreePath ?? primaryRepoPath;
+          : (selectedWorktreePath ?? primaryRepoPath);
 
       // ── Terminal-only agents ──────────────────────────────────────────
       // Agents that don't support the structured NDJSON protocol (e.g. pi,
@@ -1225,7 +1243,9 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
           }
           // Replace the optimistic task with the real one
           const realTask = mapBackendTask(result.task);
-          setTasks((prev) => prev.map((t) => t.id === optimisticId ? realTask : t));
+          setTasks((prev) =>
+            prev.map((t) => (t.id === optimisticId ? realTask : t)),
+          );
           setSelectedTaskId(realTask.id);
           // Transfer streaming state from optimistic ID to real ID.
           setStreamingTasks((prev) => {
@@ -1462,22 +1482,23 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
       });
   }, []);
 
-  const handleSetTaskGroup = useCallback(async (taskId: string, currentGroup?: string) => {
-    const nextValue = await promptForSidebarValue(
-      "Collection name. Leave blank to remove this chat from its collection.",
-      currentGroup ?? "",
-    );
-    if (nextValue === null) return;
+  const handleSetTaskGroup = useCallback(
+    async (taskId: string, currentGroup?: string) => {
+      const nextValue = await requestPrompt(
+        "Collection name. Leave blank to remove this chat from its collection.",
+        currentGroup ?? "",
+      );
+      if (nextValue === null) return;
 
-    const nextGroup = nextValue.trim() || undefined;
-    const previousGroup = currentGroup?.trim() || undefined;
+      const nextGroup = nextValue.trim() || undefined;
+      const previousGroup = currentGroup?.trim() || undefined;
 
-    setTasks((prev) =>
+      setTasks((prev) =>
       prev.map((task) => task.id === taskId ? { ...task, sidebarGroup: nextGroup } : task),
     );
 
-    const setTaskSidebarGroup = (window as any).crab?.orchestrator?.setTaskSidebarGroup;
-    if (typeof setTaskSidebarGroup !== "function") {
+      const setTaskSidebarGroup = (window as any).crab?.orchestrator?.setTaskSidebarGroup;
+      if (typeof setTaskSidebarGroup !== "function") {
       setTasks((prev) =>
         prev.map((task) => task.id === taskId ? { ...task, sidebarGroup: previousGroup } : task),
       );
@@ -1485,7 +1506,7 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
       return;
     }
 
-    setTaskSidebarGroup(taskId, nextGroup ?? null)
+      setTaskSidebarGroup(taskId, nextGroup ?? null)
       .then((result: { success?: boolean; task?: any; error?: string }) => {
         if (!result?.success) {
           setTasks((prev) =>
@@ -1505,20 +1526,23 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
         );
         publishToast({ kind: "error", title: "Failed to update collection" });
       });
-  }, []);
+    },
+    [],
+  );
 
-  const handleRenameTask = useCallback(async (taskId: string, currentTitle: string) => {
-    const nextValue = await promptForSidebarValue("Chat name", currentTitle);
-    if (nextValue === null) return;
-    const nextTitle = nextValue.trim();
-    if (!nextTitle || nextTitle === currentTitle) return;
+  const handleRenameTask = useCallback(
+    async (taskId: string, currentTitle: string) => {
+      const nextValue = await requestPrompt("Chat name", currentTitle);
+      if (nextValue === null) return;
+      const nextTitle = nextValue.trim();
+      if (!nextTitle || nextTitle === currentTitle) return;
 
-    setTasks((prev) =>
+      setTasks((prev) =>
       prev.map((task) => task.id === taskId ? { ...task, title: nextTitle, sidebarLabel: undefined, lastActivityAt: Date.now() } : task),
     );
 
-    const renameTask = (window as any).crab?.orchestrator?.renameTask;
-    if (typeof renameTask !== "function") {
+      const renameTask = (window as any).crab?.orchestrator?.renameTask;
+      if (typeof renameTask !== "function") {
       setTasks((prev) =>
         prev.map((task) => task.id === taskId ? { ...task, title: currentTitle } : task),
       );
@@ -1526,7 +1550,7 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
       return;
     }
 
-    renameTask(taskId, nextTitle)
+      renameTask(taskId, nextTitle)
       .then((result: { success?: boolean; task?: any; error?: string }) => {
         if (!result?.success) {
           setTasks((prev) =>
@@ -1546,7 +1570,9 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
         );
         publishToast({ kind: "error", title: "Failed to rename chat" });
       });
-  }, []);
+    },
+    [],
+  );
 
   // Dispatch an action triggered from a toast notification button.
   const dispatchToastAction = useCallback(
@@ -1581,16 +1607,34 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
 
   // ── Render ──────────────────────────────────────────────────────────
 
-  if (repo.repo_id.startsWith("ssh://") && tasks.length === 0 && setupComplete !== true) {
-    return <div className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
-      <p role={availability.error ? "alert" : "status"} className="text-sm text-foreground">
-        {setupComplete === null ? "Checking agents on this server…" : availability.error ?? "No Codex or Claude Code found on this server’s PATH."}
-      </p>
-      {setupComplete === false && <>
-        <p className="max-w-md text-xs text-muted-foreground">{availability.error ? "Check this SSH account’s connection and agent installation, then retry." : "Install an agent for this SSH account and make it available on the server’s PATH."}</p>
-        <button type="button" onClick={availability.retry} className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary">Retry server detection</button>
-      </>}
-    </div>;
+  if (
+    repo.repo_id.startsWith("ssh://") && tasks.length === 0 && setupComplete !== true
+  ) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
+        <p role={availability.error ? "alert" : "status"} className="text-sm text-foreground">
+          {setupComplete === null
+            ? "Checking agents on this server…"
+            : (availability.error ?? "No Codex or Claude Code found on this server’s PATH.")}
+        </p>
+        {setupComplete === false && (
+          <>
+            <p className="max-w-md text-xs text-muted-foreground">
+              {availability.error ? "Check this SSH account’s connection and agent installation, then retry." : "Install an agent for this SSH account and make it available on the server’s PATH."}
+            </p>
+            <Button
+              variant="ghost"
+              size="compact"
+              type="button"
+              onClick={availability.retry}
+              className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+            >
+              Retry server detection
+            </Button>
+          </>
+        )}
+      </div>
+    );
   }
 
   // Show setup wizard when no agents are available.
@@ -1652,7 +1696,7 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
 
   return (
     <div className="flex h-full w-full">
-      {/* Left: Task List */}
+      {/* Issue-based task creation dialog (deep-link fallback) */}
       <div
         className="shrink-0 border-r border-border bg-card"
         style={{ width: effectiveTaskListWidth }}
@@ -1672,7 +1716,7 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
         />
       </div>
 
-      {/* Resize handle for task list */}
+      {/* Left: Task List */}
       {!effectiveTaskListCompact && (
         <ResizeHandle
           direction="horizontal"
@@ -1682,11 +1726,11 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
         />
       )}
 
-      {/* Right: Workspace Detail */}
+      {/* Left: Task List */}
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         {selectedTask ? (
           <>
-            {/* Tabs */}
+            {/* Resize handle for task list */}
             <div className="flex shrink-0 items-center border-b border-border bg-card">
               {(!tabsOverflow || activeTab === "chat") && (
                 <TabButton
@@ -1702,11 +1746,13 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
                   onClick={() => setActiveTab("diff")}
                   icon={<GitCompare size={13} />}
                   label="Diff"
-                  badge={diffStats && diffStats.filesChanged > 0 ? (
-                    <span className="ml-1.5 inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-primary/15 px-1 text-[10px] font-medium tabular-nums text-primary">
-                      {diffStats.filesChanged}
-                    </span>
-                  ) : undefined}
+                  badge={
+                    diffStats && diffStats.filesChanged > 0 ? (
+                      <span className="ml-1.5 inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-primary/15 px-1 text-[10px] font-medium tabular-nums text-primary">
+                        {diffStats.filesChanged}
+                      </span>
+                    ) : undefined
+                  }
                 />
               )}
               {(!tabsOverflow || activeTab === "terminal") && (
@@ -1759,7 +1805,9 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
               />
               <KeyboardShortcutsButton />
               <CompactViewToggle taskId={selectedTask.id} />
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 onClick={() => setContextPanelOpen(!contextPanelOpen)}
                 className={clsx(
@@ -1769,7 +1817,7 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
                 title="Toggle pinned context"
               >
                 <Pin size={12} />
-              </button>
+              </Button>
 
               {tabsOverflow && (
                 <TabOverflowMenu
@@ -1781,55 +1829,57 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
 
             {/* Main area: tab content sits left, pin sidebar slides in on the right. */}
             <div className="flex min-h-0 flex-1 overflow-hidden">
-            {/* Tab content */}
-            <div className="min-h-0 min-w-0 flex-1 relative overflow-hidden">
-              {activeTab === "chat" && (
-                <div className="flex h-full">
-                  {/* Chat content */}
-                  <div className="min-w-0 flex-1">
-                    <ChatTab
-                      task={selectedTask}
-                      messages={messages[selectedTask.id] ?? []}
-                      isStreaming={streamingTasks.has(selectedTask.id)}
-                      onSendMessage={handleSendMessage}
-                      onStop={handleStop}
-                      iterationCount={
+              {/* Main area: tab content sits left, pin sidebar slides in on the right. */}
+              <div className="min-h-0 min-w-0 flex-1 relative overflow-hidden">
+                {activeTab === "chat" && (
+                  <div className="flex h-full">
+                    {/* Main area: tab content sits left, pin sidebar slides in on the right. */}
+                    <div className="min-w-0 flex-1">
+                      <ChatTab
+                        task={selectedTask}
+                        messages={messages[selectedTask.id] ?? []}
+                        isStreaming={streamingTasks.has(selectedTask.id)}
+                        onSendMessage={handleSendMessage}
+                        onStop={handleStop}
+                        iterationCount={
                         (messages[selectedTask.id] ?? []).filter((m) => m.role === "user").length - 1
                       }
-                      agents={agents
+                        agents={agents
                         .filter((a) => a.type === selectedTask.agentName)
                         .map((a) => ({ type: a.type, name: a.name, available: a.available }))}
-                      selectedAgentType={selectedTask.agentName}
-                      onAgentChange={(t) =>
+                        selectedAgentType={selectedTask.agentName}
+                        onAgentChange={(t) =>
                         setComposerAgent((prev) => ({ ...prev, [selectedTask.id]: t }))
                       }
-                      models={availableModels}
-                      intelligenceLevels={availableModels.find(model => model.value === selectedModel)?.intelligenceLevels ?? []}
-                      modelDiscovery={modelCatalog}
-                      selectedModel={composerModel[selectedTask.id] ?? selectedTask.model ?? ""}
-                      onModelChange={(m) =>
+                        models={availableModels}
+                        intelligenceLevels={availableModels.find(model => model.value === selectedModel)?.intelligenceLevels ?? []}
+                        modelDiscovery={modelCatalog}
+                        selectedModel={composerModel[selectedTask.id] ?? selectedTask.model ?? ""}
+                        onModelChange={(m) =>
                         setComposerModel((prev) => ({ ...prev, [selectedTask.id]: m }))
                       }
-                      mode={composerMode[selectedTask.id] ?? (selectedTask.planFirst ? "plan" : "instant")}
-                      onModeChange={(m) =>
+                        mode={composerMode[selectedTask.id] ?? (selectedTask.planFirst ? "plan" : "instant")}
+                        onModeChange={(m) =>
                         setComposerMode((prev) => ({ ...prev, [selectedTask.id]: m }))
                       }
-                      repoId={repo.repo_id}
-                      workflows={agentWorkflows}
-                      activeEditorFile={
-                        selectedLiveFile
-                          ? (selectedTask.worktreePath
+                        repoId={repo.repo_id}
+                        workflows={agentWorkflows}
+                        activeEditorFile={
+                          selectedLiveFile
+                            ? selectedTask.worktreePath
                               ? `${selectedTask.worktreePath}/${selectedLiveFile}`
-                              : selectedLiveFile)
-                          : null
-                      }
-                      activeEditorLabel={selectedLiveFile?.split("/").pop() ?? null}
-                      onOpenAgentManager={onOpenAgentManager}
-                      workflowRuns={workflowRuns.filter((run) => {
-                        const taskRunIds = workflowRunIdsByTask[selectedTask.id];
-                        return run.sourceTaskId === selectedTask.id || taskRunIds?.has(run.id);
-                      })}
-                      transcript={
+                              : selectedLiveFile
+                            : null
+                        }
+                        activeEditorLabel={selectedLiveFile?.split("/").pop() ?? null}
+                        onOpenAgentManager={onOpenAgentManager}
+                        workflowRuns={workflowRuns.filter((run) => {
+                          const taskRunIds = workflowRunIdsByTask[selectedTask.id];
+                          return (
+                            run.sourceTaskId === selectedTask.id || taskRunIds?.has(run.id)
+                          );
+                        })}
+                        transcript={
                         <ChatTranscript
                           taskId={selectedTask.id}
                           messages={messages[selectedTask.id] ?? []}
@@ -1837,20 +1887,20 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
                           agentName={selectedTask.agentName}
                         />
                       }
-                    />
-                  </div>
-                  {/* Live File Tree sidebar (visible only when files have been edited) */}
-                  {(liveFilesRef.current[selectedTask.id]?.size ?? 0) > 0 && (
-                    <>
-                      <ResizeHandle
+                      />
+                    </div>
+                    {/* Live File Tree sidebar (visible only when files have been edited) */}
+                    {(liveFilesRef.current[selectedTask.id]?.size ?? 0) > 0 && (
+                      <>
+                        <ResizeHandle
                         direction="horizontal"
                         onResize={(delta) => {
                           // Negative delta = dragging left = making tree wider
                           setLiveTreeWidth((w) => Math.max(120, Math.min(320, w - delta)));
                         }}
                       />
-                      <div className="shrink-0 border-l border-border" style={{ width: liveTreeWidth }}>
-                        <LiveFileTree
+                        <div className="shrink-0 border-l border-border" style={{ width: liveTreeWidth }}>
+                          <LiveFileTree
                           files={liveFilesRef.current[selectedTask.id] ?? new Map()}
                           isStreaming={streamingTasks.has(selectedTask.id)}
                           selectedFile={selectedLiveFile}
@@ -1859,12 +1909,12 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
                             setActiveTab("diff");
                           }}
                         />
-                      </div>
-                    </>
-                  )}
-                </div>
-              )}
-              {activeTab === "diff" && (
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
+                {activeTab === "diff" && (
                 <DiffTab
                   task={selectedTask}
                   workspaceRevision={workspaceRevision}
@@ -1904,24 +1954,25 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
                   }}
                 />
               )}
-              {/* Terminal stays mounted (hidden via CSS) to preserve sessions across tab AND task switches.
+                {/* Terminal stays mounted (hidden via CSS) to preserve sessions across tab AND task switches.
                   Each activated task gets its own TerminalView that persists until evicted from the keep-alive cap. */}
-              <div
+                <div
                 className="absolute inset-0"
                 style={{ display: activeTab === "terminal" ? "block" : "none" }}
               >
-                {/* Render a TerminalView for each activated task — only the selected one is visible */}
-                {Array.from(activatedTerminalTasks).map((taskId) => {
-                  const task = tasks.find((t) => t.id === taskId);
-                  if (!task?.worktreePath) return null;
-                  const isVisible = active && activeTab === "terminal" && selectedTaskId === taskId;
-                  return (
-                    <div
+                  {/* Terminal stays mounted (hidden via CSS) to preserve sessions across tab AND task switches.
+                  Each activated task gets its own TerminalView that persists until evicted from the keep-alive cap. */}
+                  {Array.from(activatedTerminalTasks).map((taskId) => {
+                    const task = tasks.find((t) => t.id === taskId);
+                    if (!task?.worktreePath) return null;
+                    const isVisible = active && activeTab === "terminal" && selectedTaskId === taskId;
+                    return (
+                      <div
                       key={taskId}
                       className="absolute inset-0"
                       style={{ display: isVisible ? "block" : "none" }}
                     >
-                      <TerminalView
+                        <TerminalView
                         persistenceKey={`task:${task.id}`}
                         repo={{
                           ...repo,
@@ -1938,19 +1989,19 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
                           setActiveTab("chat");
                         }}
                       />
+                      </div>
+                    );
+                  })}
+                  {/* Show placeholder when selected task has no worktreePath yet */}
+                  {selectedTask && !selectedTask.worktreePath && (
+                    <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
+                      Preparing workspace…
                     </div>
-                  );
-                })}
-                {/* Show placeholder when selected task has no worktreePath yet */}
-                {selectedTask && !selectedTask.worktreePath && (
-                  <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
-                    Preparing workspace…
-                  </div>
-                )}
-              </div>
+                  )}
+                </div>
 
-              {/* Files tab: file tree + editor */}
-              {activeTab === "files" && (
+                {/* Show placeholder when selected task has no worktreePath yet */}
+                {activeTab === "files" && (
                 <FilesTab
                   task={selectedTask}
                   selectedFile={selectedLiveFile}
@@ -1958,8 +2009,8 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
                 />
               )}
 
-              {/* Multi-Agent view */}
-              {activeTab === "agents" && (
+                {/* Files tab: file tree + editor */}
+                {activeTab === "agents" && (
                 <MultiAgentView
                   task={selectedTask}
                   childTasks={tasks.filter(task => task.parentTaskId === selectedTask.id)}
@@ -1989,10 +2040,10 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
                   }}
                 />
               )}
-            </div>
+              </div>
 
-            {/* Context Pin Panel (slides in from the right, inside the horizontal flex) */}
-            {contextPanelOpen && selectedTask && (
+              {/* Context Pin Panel (slides in from the right, inside the horizontal flex) */}
+              {contextPanelOpen && selectedTask && (
               <ContextPinPanel
                 task={selectedTask}
                 repoId={repo.repo_id}
@@ -2001,7 +2052,7 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
             )}
             </div>
 
-            {/* Action bar */}
+            {/* Context Pin Panel (slides in from the right, inside the horizontal flex) */}
             <ActionBar
               task={selectedTask}
               isStreaming={streamingTasks.has(selectedTask.id)}
@@ -2071,7 +2122,7 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
         initialSource={initialSource}
       />
 
-      {/* Budget Warning Dialog */}
+      {/* New Task Dialog */}
       {budgetWarning && (
         <BudgetWarningDialog
           cost={budgetWarning.cost}
@@ -2107,7 +2158,9 @@ function TabButton({
   badge?: React.ReactNode;
 }) {
   return (
-    <button
+    <Button
+      variant="ghost"
+      size="compact"
       type="button"
       onClick={onClick}
       className={clsx(
@@ -2122,7 +2175,7 @@ function TabButton({
       {icon}
       {label}
       {badge}
-    </button>
+    </Button>
   );
 }
 
@@ -2147,28 +2200,39 @@ function TabOverflowMenu({
 
   return (
     <div className="relative">
-      <button
-        type="button"
-        onClick={() => setOpen(!open)}
-        className="flex items-center gap-1 px-3 py-2 text-xs text-muted-foreground hover:text-foreground transition"
-        aria-label="More tabs"
-      >
-        <MoreHorizontal size={13} />
-      </button>
-      {open && (
-        <div className="absolute right-0 top-full z-50 mt-1 rounded-md border border-border bg-card shadow-lg">
-          {hiddenTabs.map((tab) => (
-            <button
-              key={tab.id}
-              type="button"
-              onClick={() => { onSelectTab(tab.id); setOpen(false); }}
-              className="block w-full px-4 py-2 text-left text-xs text-foreground hover:bg-accent transition"
-            >
-              {tab.label}
-            </button>
-          ))}
-        </div>
-      )}
+      <DropdownMenu open={open} onOpenChange={setOpen}>
+        <DropdownMenuTrigger asChild>
+          <Button
+            variant="ghost"
+            size="compact"
+            type="button"
+            onClick={() => setOpen(!open)}
+            className="flex items-center gap-1 px-3 py-2 text-xs text-muted-foreground hover:text-foreground transition"
+            aria-label="More tabs"
+          >
+            <MoreHorizontal size={13} />
+          </Button>
+        </DropdownMenuTrigger>
+        {open && (
+          <DropdownMenuContent
+            side="bottom"
+            align="end"
+            className=" rounded-md border border-border bg-card "
+          >
+            <DropdownMenuGroup>
+              {hiddenTabs.map((tab) => (
+                <DropdownMenuItem
+                  key={tab.id}
+                  onSelect={() => { onSelectTab(tab.id); setOpen(false); }}
+                  className="justify-start block w-full px-4 py-2 text-left text-xs text-foreground hover:bg-accent transition"
+                >
+                  {tab.label}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuGroup>
+          </DropdownMenuContent>
+        )}
+      </DropdownMenu>
     </div>
   );
 }

@@ -1,6 +1,14 @@
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { NativeSelect } from "@/components/ui/native-select";
-import { useCallback, useState } from "react";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   ArrowRight,
   Check,
@@ -10,6 +18,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
+import { useCallback, useState } from "react";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -119,34 +128,40 @@ export function DecomposeDialog({ graph, onApprove, onEdit, onCancel }: Props) {
   }, [graph, nodes, onEdit]);
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="decompose-dialog-title"
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) {
+          onCancel();
+        }
+      }}
     >
-      <div className="mx-4 flex max-h-[80vh] w-full max-w-2xl flex-col rounded-lg border border-border bg-background shadow-xl">
+      <DialogContent
+        showCloseButton={false}
+        aria-describedby={undefined}
+        className="block gap-0 p-0 mx-4 flex max-h-[80vh] w-full max-w-2xl flex-col rounded-lg border border-border bg-background shadow-xl"
+      >
         {/* Header */}
         <div className="flex items-center justify-between border-b border-border px-5 py-4">
           <div>
-            <h2
-              id="decompose-dialog-title"
-              className="text-sm font-semibold text-foreground"
+            <DialogTitle className="text-sm font-semibold text-foreground"
             >
               Task Decomposition
-            </h2>
+            </DialogTitle>
             <p className="mt-0.5 text-xs text-muted-foreground line-clamp-1">
               {graph.rootPrompt}
             </p>
           </div>
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={onCancel}
             className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
             aria-label="Close dialog"
           >
             <X size={16} />
-          </button>
+          </Button>
         </div>
 
         {/* Node list */}
@@ -158,7 +173,9 @@ export function DecomposeDialog({ graph, onApprove, onEdit, onCancel }: Props) {
                 className="group flex items-start gap-2 rounded border border-border/60 bg-background px-3 py-2"
               >
                 {/* Drag handle / reorder */}
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
                   onClick={() => handleMoveUp(idx)}
                   className="mt-0.5 shrink-0 text-muted-foreground/50 hover:text-foreground"
@@ -166,7 +183,7 @@ export function DecomposeDialog({ graph, onApprove, onEdit, onCancel }: Props) {
                   disabled={idx === 0}
                 >
                   <GripVertical size={14} />
-                </button>
+                </Button>
 
                 {/* Content */}
                 <div className="min-w-0 flex-1">
@@ -183,28 +200,32 @@ export function DecomposeDialog({ graph, onApprove, onEdit, onCancel }: Props) {
                         autoFocus
                         aria-label="Task title"
                       />
-                      <button
+                      <Button
+                        variant="ghost"
+                        size="compact"
                         type="button"
                         onClick={commitRename}
                         className="rounded p-0.5 text-success hover:bg-accent"
                         aria-label="Confirm rename"
                       >
                         <Check size={12} />
-                      </button>
+                      </Button>
                     </div>
                   ) : (
                     <div className="flex items-center gap-1.5">
                       <span className="text-xs font-medium text-foreground">
                         {idx + 1}. {node.title}
                       </span>
-                      <button
+                      <Button
+                        variant="ghost"
+                        size="compact"
                         type="button"
                         onClick={() => handleRename(node)}
                         className="rounded p-0.5 text-muted-foreground/50 opacity-0 transition hover:text-foreground group-hover:opacity-100"
                         aria-label={`Rename "${node.title}"`}
                       >
                         <Pencil size={10} />
-                      </button>
+                      </Button>
                     </div>
                   )}
 
@@ -222,7 +243,7 @@ export function DecomposeDialog({ graph, onApprove, onEdit, onCancel }: Props) {
                     </div>
                   )}
 
-                  {/* Estimated files */}
+                  {/* Dependencies */}
                   {node.estimatedFiles.length > 0 && (
                     <div className="mt-0.5 text-[10px] text-muted-foreground/70 truncate">
                       Files: {node.estimatedFiles.slice(0, 3).join(", ")}
@@ -231,35 +252,50 @@ export function DecomposeDialog({ graph, onApprove, onEdit, onCancel }: Props) {
                   )}
                 </div>
 
-                {/* Agent selector */}
-                <NativeSelect
-                  className="shrink-0 rounded border border-border bg-background px-1.5 py-0.5 text-[10px] text-foreground focus-visible:outline-none focus:border-primary"
-                  value={node.suggestedAgent}
-                  onChange={(e) => handleAgentChange(node.id, e.target.value as AgentType)}
-                  aria-label={`Agent for "${node.title}"`}
+                {/* Estimated files */}
+                <Select
+                  value={":" + String(node.suggestedAgent)}
+                  onValueChange={(selectedValue) => {
+                    const value = selectedValue.slice(1);
+                    return handleAgentChange(node.id, value as AgentType);
+                  }}
                 >
-                  {Object.entries(AGENT_LABELS).map(([value, label]) => (
-                    <option key={value} value={value}>
+                  <SelectTrigger
+                    className="shrink-0 rounded border border-border bg-background px-1.5 py-0.5 text-[10px] text-foreground focus-visible:outline-none focus:border-primary"
+                    aria-label={`Agent for "${node.title}"`}
+                >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      {Object.entries(AGENT_LABELS).map(([value, label]) => (
+                    <SelectItem key={value} value={":" + String(value)}>
                       {label}
-                    </option>
-                  ))}
-                </NativeSelect>
+                    </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
 
                 {/* Remove */}
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
                   onClick={() => handleRemove(node.id)}
                   className="shrink-0 rounded p-0.5 text-muted-foreground/50 opacity-0 transition hover:text-destructive group-hover:opacity-100"
                   aria-label={`Remove "${node.title}"`}
                 >
                   <Trash2 size={12} />
-                </button>
+                </Button>
               </li>
             ))}
           </ul>
 
           {/* Add node */}
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={handleAddNode}
             className="mt-2 flex items-center gap-1.5 rounded border border-dashed border-border/60 px-3 py-1.5 text-xs text-muted-foreground transition hover:border-primary hover:text-foreground"
@@ -267,7 +303,7 @@ export function DecomposeDialog({ graph, onApprove, onEdit, onCancel }: Props) {
           >
             <Plus size={12} />
             Add task
-          </button>
+          </Button>
         </div>
 
         {/* Footer */}
@@ -276,31 +312,37 @@ export function DecomposeDialog({ graph, onApprove, onEdit, onCancel }: Props) {
             {nodes.length} task{nodes.length !== 1 ? "s" : ""}
           </span>
           <div className="flex items-center gap-2">
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={onCancel}
               className="rounded border border-border px-3 py-1.5 text-xs text-foreground transition hover:bg-accent"
             >
               Cancel
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={handleEdit}
               className="rounded border border-border px-3 py-1.5 text-xs text-foreground transition hover:bg-accent"
             >
               Re-decompose
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="default"
+              size="compact"
               type="button"
               onClick={handleApprove}
               className="rounded bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition hover:bg-primary-hover"
               disabled={nodes.length === 0}
             >
               Approve & Start
-            </button>
+            </Button>
           </div>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

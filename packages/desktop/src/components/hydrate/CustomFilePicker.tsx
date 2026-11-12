@@ -1,6 +1,9 @@
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
-import { useMemo, useState } from "react";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Search } from "lucide-react";
+import { useMemo, useState } from "react";
 import { HydrationEntry } from "../../ipc";
 import { formatBytes } from "../../lib/format";
 
@@ -87,10 +90,14 @@ export function CustomFilePicker({ entries, selected, onChange }: Props) {
             className="w-full rounded border border-border bg-background py-1 pl-7 pr-2 text-xs focus-visible:outline-none focus:border-primary"
           />
         </div>
-        <div
-          className="inline-flex items-center gap-px rounded border border-border bg-card p-0.5 text-[11px]"
-          role="tablist"
+        <ToggleGroup
+          type="single"
+          value={stateFilter}
+          onValueChange={(value) => {
+            if (value) setStateFilter(value as typeof stateFilter);
+          }}
           aria-label="State filter"
+          className="inline-flex items-center gap-px rounded border border-border bg-card p-0.5 text-[11px]"
         >
           {(
             [
@@ -99,12 +106,9 @@ export function CustomFilePicker({ entries, selected, onChange }: Props) {
               ["hydrated", "Hydrated"],
             ] as const
           ).map(([id, label]) => (
-            <button
+            <ToggleGroupItem
+              value={id}
               key={id}
-              type="button"
-              role="tab"
-              aria-selected={stateFilter === id}
-              onClick={() => setStateFilter(id)}
               className={
                 "rounded px-1.5 py-0.5 transition " +
                 (stateFilter === id
@@ -113,33 +117,38 @@ export function CustomFilePicker({ entries, selected, onChange }: Props) {
               }
             >
               {label}
-            </button>
+            </ToggleGroupItem>
           ))}
-        </div>
+        </ToggleGroup>
       </div>
 
       <div className="flex items-center justify-between text-[11px] text-muted-foreground">
         <span>
-          {selection.count.toLocaleString()} selected · {formatBytes(selection.bytes)} ·{" "}
-          {filtered.length.toLocaleString()} match{filtered.length === 1 ? "" : "es"}
+          {selection.count.toLocaleString()} selected ·{" "}
+          {formatBytes(selection.bytes)} · {filtered.length.toLocaleString()}{" "}
+          match{filtered.length === 1 ? "" : "es"}
         </span>
         <div className="flex items-center gap-2">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="text-primary hover:underline"
             onClick={toggleAllVisible}
             disabled={visiblePaths.length === 0}
           >
             {allVisibleSelected ? "Clear visible" : "Select visible"}
-          </button>
+          </Button>
           {selSet.size > 0 && (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className="text-muted-foreground hover:text-foreground hover:underline"
               onClick={() => onChange([])}
             >
               Clear all
-            </button>
+            </Button>
           )}
         </div>
       </div>
@@ -161,15 +170,20 @@ export function CustomFilePicker({ entries, selected, onChange }: Props) {
                       (checked ? "bg-primary/10" : "hover:bg-background")
                     }
                   >
-                    <input
-                      type="checkbox"
+                    <Checkbox
                       className="accent-primary"
                       checked={checked}
-                      onChange={(ev) => togglePath(e.path, ev.target.checked)}
+                      onCheckedChange={(checked) =>
+                        togglePath(e.path, checked === true)
+                      }
                     />
-                    <span className="flex-1 truncate font-mono text-foreground">{e.path}</span>
+                    <span className="flex-1 truncate font-mono text-foreground">
+                      {e.path}
+                    </span>
                     <StateBadge state={e.state} />
-                    <span className="shrink-0 text-muted-foreground">{formatBytes(e.logical)}</span>
+                    <span className="shrink-0 text-muted-foreground">
+                      {formatBytes(e.logical)}
+                    </span>
                   </label>
                 </li>
               );
@@ -179,7 +193,8 @@ export function CustomFilePicker({ entries, selected, onChange }: Props) {
         {truncated && (
           <div className="border-t border-border px-3 py-1.5 text-[11px] text-muted-foreground">
             Showing first {MAX_ROWS.toLocaleString()} of{" "}
-            {filtered.length.toLocaleString()} matches. Refine the filter to narrow down.
+            {filtered.length.toLocaleString()} matches. Refine the filter to
+            narrow down.
           </div>
         )}
       </div>

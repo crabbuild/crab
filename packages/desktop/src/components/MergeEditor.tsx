@@ -1,19 +1,19 @@
 import { Button } from "@/components/ui/button";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Editor, Monaco, OnMount } from "@monaco-editor/react";
+import { ChevronLeft, ChevronRight, Loader2, Save, X } from "lucide-react";
 import type { editor } from "monaco-editor";
-import { Loader2, Save, X, ChevronLeft, ChevronRight } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffectiveTheme } from "../hooks/useEffectiveTheme";
 import { rpc } from "../ipc";
 import { languageForPath } from "../lib/language";
-import { useSettings } from "../settings";
-import { useEffectiveTheme } from "../hooks/useEffectiveTheme";
 import {
   ConflictRegion,
   parseConflictMarkers,
   resolveConflict,
 } from "../lib/parseConflictMarkers";
-import { PointerConflictCard } from "./PointerConflictCard";
 import type { PointerPatchKind } from "../lib/pointer-detection";
+import { useSettings } from "../settings";
+import { PointerConflictCard } from "./PointerConflictCard";
 
 // Signatures for detecting pointer content in raw file bodies.
 // These match the same patterns as `isPointerPatch` in
@@ -116,7 +116,7 @@ export function MergeEditor({ repoId, path, onResolved, onCancel, onNextFile, on
       if (conflicts.length === 0) return;
 
       const ed = resultEditorRef.current;
-      const cursorLine = ed ? ed.getPosition()?.lineNumber ?? 1 : 1;
+      const cursorLine = ed ? (ed.getPosition()?.lineNumber ?? 1) : 1;
       // Monaco lines are 1-based, our regions are 0-based
       const cursorIdx = cursorLine - 1;
 
@@ -142,7 +142,7 @@ export function MergeEditor({ repoId, path, onResolved, onCancel, onNextFile, on
 
       handleResolve(nearest, resolution);
     },
-    [conflicts, handleResolve]
+    [conflicts, handleResolve],
   );
 
   // Keyboard shortcuts: Ctrl+Shift+1/2/3 for resolve, Alt+↓/↑ for next/prev conflict
@@ -315,7 +315,8 @@ export function MergeEditor({ repoId, path, onResolved, onCancel, onNextFile, on
   if (error && !sides) {
     return (
       <div className="m-4 rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
-        Failed to load conflict data for <code className="font-mono">{path}</code>: {error}
+        Failed to load conflict data for{" "}
+        <code className="font-mono">{path}</code>: {error}
       </div>
     );
   }
@@ -340,7 +341,9 @@ export function MergeEditor({ repoId, path, onResolved, onCancel, onNextFile, on
           {/* File navigation */}
           {(onPrevFile || onNextFile) && (
             <div className="flex items-center gap-0.5">
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
                 onClick={onPrevFile}
@@ -349,8 +352,10 @@ export function MergeEditor({ repoId, path, onResolved, onCancel, onNextFile, on
                 title="Previous file"
               >
                 <ChevronLeft size={14} />
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
                 onClick={onNextFile}
@@ -359,7 +364,7 @@ export function MergeEditor({ repoId, path, onResolved, onCancel, onNextFile, on
                 title="Next file"
               >
                 <ChevronRight size={14} />
-              </button>
+              </Button>
             </div>
           )}
           <Button variant="default"
@@ -369,10 +374,16 @@ export function MergeEditor({ repoId, path, onResolved, onCancel, onNextFile, on
             disabled={saving}
             aria-label="Save resolution"
           >
-            {saving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
+            {saving ? (
+              <Loader2 size={12} className="animate-spin" />
+            ) : (
+              <Save size={12} />
+            )}
             Save Resolution
           </Button>
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
             onClick={onCancel}
@@ -380,7 +391,7 @@ export function MergeEditor({ repoId, path, onResolved, onCancel, onNextFile, on
             title="Close"
           >
             <X size={14} />
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -564,7 +575,9 @@ function ConflictToolbar({
       <div className="flex items-center gap-3 text-xs">
         {/* Navigation buttons */}
         <div className="flex items-center gap-0.5">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
             onClick={() => onNavigate("prev")}
@@ -572,8 +585,10 @@ function ConflictToolbar({
             aria-label="Previous conflict"
           >
             <ChevronLeft size={12} />
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
             onClick={() => onNavigate("next")}
@@ -581,7 +596,7 @@ function ConflictToolbar({
             aria-label="Next conflict"
           >
             <ChevronRight size={12} />
-          </button>
+          </Button>
         </div>
 
         <span className="font-medium text-foreground">
@@ -595,7 +610,9 @@ function ConflictToolbar({
             <span className="text-muted-foreground">
               L{region.startLine + 1}–{region.endLine + 1}
             </span>
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className="rounded px-1.5 py-0.5 text-[10px] font-medium text-info hover:bg-info/10"
               onClick={() => onResolve(i, "current")}
@@ -603,8 +620,10 @@ function ConflictToolbar({
               aria-label={`Accept current for conflict at line ${region.startLine + 1}`}
             >
               Current
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className="rounded px-1.5 py-0.5 text-[10px] font-medium text-success hover:bg-success/10"
               onClick={() => onResolve(i, "incoming")}
@@ -612,8 +631,10 @@ function ConflictToolbar({
               aria-label={`Accept incoming for conflict at line ${region.startLine + 1}`}
             >
               Incoming
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className="rounded px-1.5 py-0.5 text-[10px] font-medium text-warning hover:bg-warning/10"
               onClick={() => onResolve(i, "both")}
@@ -621,7 +642,7 @@ function ConflictToolbar({
               aria-label={`Accept both for conflict at line ${region.startLine + 1}`}
             >
               Both
-            </button>
+            </Button>
           </div>
         ))}
       </div>

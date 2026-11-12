@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { useCardExpanded } from "./useCardExpanded";
 /**
  * Specialized renderer for PushNotification and RemoteTrigger tool calls.
@@ -9,11 +10,10 @@ import { useCardExpanded } from "./useCardExpanded";
  * on claude.ai (schedule-based automation).
  */
 
-
 import clsx from "clsx";
-import { ChevronDown, ChevronRight, Bell, CalendarClock } from "lucide-react";
-import type { ToolCardRendererProps } from "./types";
+import { Bell, CalendarClock, ChevronDown, ChevronRight } from "lucide-react";
 import { CollapsedCardLine } from "./CollapsedCardLine";
+import type { ToolCardRendererProps } from "./types";
 
 // ── Component ───────────────────────────────────────────────────────
 
@@ -63,7 +63,9 @@ export function NotificationCard({ event, defaultExpanded = false, collapsed: co
 
   return (
     <div className="rounded-md border border-border/40 overflow-hidden">
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={() => hasDetail && setExpanded(!expanded)}
         className={clsx(
@@ -73,7 +75,9 @@ export function NotificationCard({ event, defaultExpanded = false, collapsed: co
         )}
       >
         <Icon size={11} className="text-muted-foreground shrink-0" />
-        <span className="shrink-0 font-medium text-muted-foreground">{label}</span>
+        <span className="shrink-0 font-medium text-muted-foreground">
+          {label}
+        </span>
         <span className="min-w-0 flex-1 truncate text-foreground/80">
           {summary}
         </span>
@@ -91,12 +95,13 @@ export function NotificationCard({ event, defaultExpanded = false, collapsed: co
           </span>
         )}
 
-        {hasDetail && (
-          expanded
-            ? <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
-            : <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
-        )}
-      </button>
+        {hasDetail &&
+          (expanded ? (
+            <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
+          ) : (
+            <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
+          ))}
+      </Button>
 
       {expanded && hasDetail && (
         <div className="border-t border-border/30 px-2.5 py-2 space-y-1.5">

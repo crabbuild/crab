@@ -1,8 +1,18 @@
-import { NativeSelect } from "@/components/ui/native-select";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { useCallback, useEffect, useRef, useState } from "react";
 import { GitPullRequest, Loader2, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { rpc } from "../ipc";
 import { IssueSuggestions } from "./IssueSuggestions";
 
@@ -119,38 +129,38 @@ export function CreatePrDialog({
   }, [repoId, title, body, branchName, base, draft, onSuccess]);
 
   // Close on Escape
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onCancel();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onCancel]);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div
-        className="mx-4 w-full max-w-lg rounded-lg border border-border bg-card shadow-xl"
-        role="dialog"
-        aria-labelledby="create-pr-title"
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) {
+          onCancel();
+    }
+      }}
+    >
+      <DialogContent
+        showCloseButton={false}
+        aria-describedby={undefined}
+        className="block gap-0 p-0 mx-4 w-full max-w-lg rounded-lg border border-border bg-card shadow-xl"
       >
         {/* Header */}
         <div className="flex items-center justify-between border-b border-border px-4 py-3">
-          <h2
-            id="create-pr-title"
-            className="flex items-center gap-2 text-sm font-semibold text-foreground"
+          <DialogTitle className="flex items-center gap-2 text-sm font-semibold text-foreground"
           >
             <GitPullRequest size={16} className="text-primary" />
             Create Pull Request
-          </h2>
-          <button
+          </DialogTitle>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="rounded p-1 text-muted-foreground hover:bg-background hover:text-foreground"
             onClick={onCancel}
             aria-label="Close"
           >
             <X size={14} />
-          </button>
+          </Button>
         </div>
 
         {/* Body */}
@@ -179,20 +189,31 @@ export function CreatePrDialog({
                 >
                   Base branch
                 </label>
-                <NativeSelect
-                  id="pr-base-branch"
-                  className="w-full rounded border border-border bg-background px-2 py-1.5 font-mono text-[11px] text-foreground focus-visible:outline-none focus:border-primary"
-                  value={base}
-                  onChange={(e) => setBase(e.target.value)}
+                <Select
+                  value={":" + String(base)}
+                  onValueChange={(selectedValue) => {
+                    const value = selectedValue.slice(1);
+                    return setBase(value);
+                  }}
                 >
+                  <SelectTrigger
+                    id="pr-base-branch"
+                  className="w-full rounded border border-border bg-background px-2 py-1.5 font-mono text-[11px] text-foreground focus-visible:outline-none focus:border-primary"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
                   {localBranches
                     .filter((b) => b !== branchName)
                     .map((b) => (
-                      <option key={b} value={b}>
+                      <SelectItem key={b} value={":" + String(b)}>
                         {b}
-                      </option>
-                    ))}
-                </NativeSelect>
+                      </SelectItem>
+                        ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
               </div>
 
               {/* Title */}
@@ -247,10 +268,9 @@ export function CreatePrDialog({
 
               {/* Draft toggle */}
               <label className="flex items-center gap-2 text-xs text-foreground">
-                <input
-                  type="checkbox"
+                <Checkbox
                   checked={draft}
-                  onChange={(e) => setDraft(e.target.checked)}
+                  onCheckedChange={(checked) => setDraft(checked === true)}
                   className="rounded border-border"
                 />
                 Create as draft
@@ -268,15 +288,19 @@ export function CreatePrDialog({
 
         {/* Footer */}
         <div className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="rounded border border-border px-3 py-1.5 text-xs text-foreground hover:bg-background"
             onClick={onCancel}
             disabled={submitting}
           >
             Cancel
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="default"
+            size="compact"
             type="button"
             className="rounded bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
             onClick={handleSubmit}
@@ -289,9 +313,9 @@ export function CreatePrDialog({
             ) : (
               "Create"
             )}
-          </button>
+          </Button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

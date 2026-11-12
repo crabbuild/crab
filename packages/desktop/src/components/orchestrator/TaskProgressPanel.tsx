@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Task Progress Panel — fixed bottom panel for Claude Code's
  * TaskCreate/TaskUpdate protocol.
@@ -12,7 +13,6 @@
  * bar and individual task items with status icons.
  */
 
-import { useState } from "react";
 import clsx from "clsx";
 import {
   Check,
@@ -22,6 +22,7 @@ import {
   ClipboardList,
   Loader2,
 } from "lucide-react";
+import { useState } from "react";
 import type { ToolEvent } from "../../../electron/agent-chat-messages";
 
 // ── Types ───────────────────────────────────────────────────────────
@@ -222,62 +223,65 @@ export function TaskProgressPanel({ taskEvents }: TaskProgressPanelProps) {
   return (
     <div className="shrink-0 border-t border-border bg-background">
       <div className="mx-auto max-w-4xl">
-      {/* Header — always visible */}
-      <button
-        type="button"
-        onClick={() => setExpanded(!expanded)}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-accent transition cursor-pointer"
-      >
-        <ClipboardList size={12} className="text-info shrink-0" />
-        <span className="text-[11px] font-medium text-foreground">Tasks</span>
+        {/* Header — always visible */}
+        <Button
+          variant="ghost"
+          size="compact"
+          type="button"
+          onClick={() => setExpanded(!expanded)}
+          className="justify-start flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-accent transition cursor-pointer"
+        >
+          <ClipboardList size={12} className="text-info shrink-0" />
+          <span className="text-[11px] font-medium text-foreground">Tasks</span>
 
-        {/* Compact progress summary */}
-        <span className="flex items-center gap-1.5 text-[10px] text-foreground/80">
-          {completed > 0 && (
-            <span className="flex items-center gap-0.5 text-success">
-              <Check size={9} strokeWidth={3} />
-              {completed}
-            </span>
-          )}
-          {inProgress > 0 && (
-            <span className="flex items-center gap-0.5 text-primary">
-              <Loader2 size={9} />
-              {inProgress}
-            </span>
-          )}
-        </span>
+          {/* Compact progress summary */}
+          <span className="flex items-center gap-1.5 text-[10px] text-foreground/80">
+            {completed > 0 && (
+              <span className="flex items-center gap-0.5 text-success">
+                <Check size={9} strokeWidth={3} />
+                {completed}
+              </span>
+            )}
+            {inProgress > 0 && (
+              <span className="flex items-center gap-0.5 text-primary">
+                <Loader2 size={9} />
+                {inProgress}
+              </span>
+            )}
+          </span>
 
-        {/* Status label */}
-        <span className={clsx(
+          {/* Status label */}
+          <span className={clsx(
           "rounded px-1.5 py-0.5 text-[9px] font-medium border",
           completed === total
             ? "bg-success/15 text-success border-success/30"
             : "bg-primary/15 text-primary border-primary/30",
         )}>
-          {statusLabel}
-        </span>
+            {statusLabel}
+          </span>
 
-        {/* Progress fraction */}
-        <span className="text-[10px] text-muted-foreground font-mono tabular-nums ml-auto mr-1">
-          {completed}/{total}
-        </span>
+          {/* Progress fraction */}
+          <span className="text-[10px] text-muted-foreground font-mono tabular-nums ml-auto mr-1">
+            {completed}/{total}
+          </span>
 
-        {expanded
-          ? <ChevronDown size={11} className="shrink-0 text-muted-foreground/60" />
-          : <ChevronUp size={11} className="shrink-0 text-muted-foreground/60" />
-        }
-      </button>
+          {expanded ? (
+            <ChevronDown size={11} className="shrink-0 text-muted-foreground/60" />
+          ) : (
+            <ChevronUp size={11} className="shrink-0 text-muted-foreground/60" />
+          )}
+        </Button>
 
-      {/* Expanded content */}
-      {expanded && (
-        <div className="border-t border-border/30 px-3 py-2 space-y-2 max-h-[240px] overflow-auto">
-          {/* Progress bar */}
-          <ProgressBar completed={completed} total={total} />
+        {/* Expanded content */}
+        {expanded && (
+          <div className="border-t border-border/30 px-3 py-2 space-y-2 max-h-[240px] overflow-auto">
+            {/* Progress bar */}
+            <ProgressBar completed={completed} total={total} />
 
-          {/* Task checklist */}
-          <div className="space-y-0.5">
-            {tasks.map((task) => (
-              <div
+            {/* Task checklist */}
+            <div className="space-y-0.5">
+              {tasks.map((task) => (
+                <div
                 key={task.id}
                 className={clsx(
                   "flex items-center gap-2 rounded px-1.5 py-1 transition",
@@ -286,8 +290,8 @@ export function TaskProgressPanel({ taskEvents }: TaskProgressPanelProps) {
                   task.status === "pending" && "border-l-2 border-transparent",
                 )}
               >
-                <StatusIcon status={task.status} />
-                <span
+                  <StatusIcon status={task.status} />
+                  <span
                   className={clsx(
                     "flex-1 text-[10px] leading-tight",
                     task.status === "completed" && "text-muted-foreground line-through",
@@ -295,15 +299,16 @@ export function TaskProgressPanel({ taskEvents }: TaskProgressPanelProps) {
                     task.status === "pending" && "text-foreground/80",
                   )}
                 >
-                  {task.title}
-                </span>
-                <StatusBadge status={task.status} />
-              </div>
-            ))}
+                    {task.title}
+                  </span>
+                  <StatusBadge status={task.status} />
+                </div>
+              ))}
+            </div>
           </div>
-        </div>
-      )}
-      </div>{/* close max-w-4xl */}
+        )}
+      </div>
+      {/* close max-w-4xl */}
     </div>
   );
 }

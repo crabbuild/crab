@@ -1,7 +1,6 @@
-import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { StorageConfigSection } from "../views/StorageConfigSection";
-import { useCallback,useEffect,useState } from "react";
+import { Input } from "@/components/ui/input";
+import { PopoverContent } from "@/components/ui/popover";
 import {
 Cloud,
 GitBranch,
@@ -13,9 +12,11 @@ Wifi,
 WifiOff,
 X
 } from "lucide-react";
+import { useCallback,useEffect,useState } from "react";
 import { rpc } from "../ipc";
-import { useActiveRepo } from "../state";
 import { sanitizeRemoteUrl } from "../lib/format";
+import { useActiveRepo } from "../state";
+import { StorageConfigSection } from "../views/StorageConfigSection";
 
 type RemoteStatus = "unchecked" | "verifying" | "connected" | "failed";
 
@@ -131,27 +132,31 @@ export function RemoteManagerPopover({ open, onClose, onPushTo }: Props) {
   if (!open) return null;
 
   return (
-    <div className="absolute bottom-8 right-2 z-50 w-80 rounded-lg border border-border bg-card shadow-xl">
+    <PopoverContent side="top" align="end" className="w-80 p-0">
       {/* Header */}
       <div className="flex items-center justify-between border-b border-border px-3 py-2">
         <span className="text-xs font-semibold text-foreground">Remotes</span>
         <div className="flex items-center gap-1">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="rounded p-1 text-muted-foreground hover:bg-background hover:text-foreground"
             onClick={() => setShowAddForm(true)}
             title="Add remote"
           >
             <Plus size={12} />
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="rounded p-1 text-muted-foreground hover:bg-background hover:text-foreground"
             onClick={onClose}
             title="Close"
           >
             <X size={12} />
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -195,7 +200,7 @@ export function RemoteManagerPopover({ open, onClose, onPushTo }: Props) {
           onCancel={() => setShowAddForm(false)}
         />
       )}
-    </div>
+    </PopoverContent>
   );
 }
 
@@ -247,43 +252,53 @@ function RemoteRow({
           </div>
         </div>
         <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="rounded p-1 text-muted-foreground hover:bg-primary/10 hover:text-primary"
             onClick={onPush}
             title={`Push to ${remote.name}`}
           >
             <Upload size={11} />
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="rounded p-1 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
             onClick={() => setConfirmDelete(true)}
             title={`Remove ${remote.name}`}
           >
             <Trash2 size={11} />
-          </button>
+          </Button>
         </div>
       </div>
 
       {/* Delete confirmation */}
       {confirmDelete && (
         <div className="mt-1.5 flex items-center gap-2 rounded border border-destructive/30 bg-destructive/5 p-1.5 text-[10px]">
-          <span className="text-destructive">Remove remote "{remote.name}"?</span>
-          <button
+          <span className="text-destructive">
+            Remove remote "{remote.name}"?
+          </span>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="rounded bg-destructive/20 px-2 py-0.5 text-destructive hover:bg-destructive/30"
             onClick={() => { onRemove(); setConfirmDelete(false); }}
           >
             Remove
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="rounded px-2 py-0.5 text-muted-foreground hover:text-foreground"
             onClick={() => setConfirmDelete(false)}
           >
             Cancel
-          </button>
+          </Button>
         </div>
       )}
     </div>
@@ -312,11 +327,32 @@ function AddRemoteForm({ onAdded, onCancel }: { onAdded: () => void; onCancel: (
     finally { setSaving(false); }
   }
 
-  return <div className="space-y-3 border-t border-border p-3">
-    <label className="block text-xs text-muted-foreground">Remote name<Input className="input mt-1 w-full" value={name} onChange={event => setName(event.target.value)} disabled={saving} /></label>
-    <label className="block text-xs text-muted-foreground">Remote URL<Input className="input mt-1 w-full" value={url} onChange={event => setUrl(event.target.value)} disabled={saving} placeholder="crab://bucket/repository or a Git URL" /></label>
-    {objectStore && <StorageConfigSection onSelect={setConnection} selectedId={connection} />}
-    {error && <p role="alert" className="break-words text-xs text-destructive">{error}</p>}
-    <div className="flex gap-2"><Button variant="default" type="button" className="text-xs" disabled={saving || !name.trim() || !url.trim()} onClick={() => void add()}>{saving && <Loader2 size={13} className="animate-spin" />}Add remote</Button><Button variant="outline" type="button" className="text-xs" onClick={onCancel} disabled={saving}>Cancel</Button></div>
-  </div>;
+  return (
+    <div className="space-y-3 border-t border-border p-3">
+      <label className="block text-xs text-muted-foreground">
+        Remote name
+        <Input className="input mt-1 w-full" value={name} onChange={event => setName(event.target.value)} disabled={saving} />
+      </label>
+      <label className="block text-xs text-muted-foreground">
+        Remote URL
+        <Input className="input mt-1 w-full" value={url} onChange={event => setUrl(event.target.value)} disabled={saving} placeholder="crab://bucket/repository or a Git URL" />
+      </label>
+      {objectStore && (
+        <StorageConfigSection onSelect={setConnection} selectedId={connection} />
+      )}
+      {error && (
+        <p role="alert" className="break-words text-xs text-destructive">
+          {error}
+        </p>
+      )}
+      <div className="flex gap-2">
+        <Button variant="default" type="button" className="text-xs" disabled={saving || !name.trim() || !url.trim()} onClick={() => void add()}>
+          {saving && <Loader2 size={13} className="animate-spin" />}Add remote
+        </Button>
+        <Button variant="outline" type="button" className="text-xs" onClick={onCancel} disabled={saving}>
+          Cancel
+        </Button>
+      </div>
+    </div>
+  );
 }

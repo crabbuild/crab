@@ -1,10 +1,16 @@
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import clsx from "clsx";
 import { CheckSquare, Link2, Plus, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import clsx from "clsx";
 import { useTaskList } from "../hooks/useTaskList";
-import type { TaskItem } from "../lib/workspace-settings-store";
 import { formatAnchor, parseAnchor } from "../lib/task-anchor";
+import type { TaskItem } from "../lib/workspace-settings-store";
 
 interface TaskListPopoverProps {
   /** Callback when the user clicks a file anchor (navigate to file:line). */
@@ -27,35 +33,13 @@ export function TaskListPopover({ onNavigateFile, onNavigateCommit }: TaskListPo
   const popoverRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const keyRef = useRef(workspaceKey); keyRef.current = workspaceKey;
+  const keyRef = useRef(workspaceKey);
+  keyRef.current = workspaceKey;
   useEffect(() => { setNewTitle(""); setOpen(false); }, [workspaceKey]);
 
   // Close on outside click.
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e: MouseEvent) => {
-      if (
-        popoverRef.current &&
-        !popoverRef.current.contains(e.target as Node) &&
-        buttonRef.current &&
-        !buttonRef.current.contains(e.target as Node)
-      ) {
-        setOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [open]);
 
   // Close on Escape.
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("keydown", handler);
-    return () => document.removeEventListener("keydown", handler);
-  }, [open]);
 
   // Focus input when popover opens.
   useEffect(() => {
@@ -67,7 +51,8 @@ export function TaskListPopover({ onNavigateFile, onNavigateCommit }: TaskListPo
   const handleAdd = useCallback(async () => {
     const title = newTitle.trim();
     if (!title) return;
-    if (await addTask(title) && keyRef.current === workspaceKey) setNewTitle(current => current === title ? "" : current);
+    if ((await addTask(title)) && keyRef.current === workspaceKey)
+      setNewTitle((current) => (current === title ? "" : current));
   }, [newTitle, addTask, workspaceKey]);
 
   const handleKeyDown = useCallback(
@@ -98,54 +83,76 @@ export function TaskListPopover({ onNavigateFile, onNavigateCommit }: TaskListPo
   return (
     <div className="relative">
       {/* Status bar button */}
-      <button
-        ref={buttonRef}
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className={clsx(
+      <Popover open={open} onOpenChange={setOpen}>
+        <PopoverTrigger asChild>
+          <Button
+            variant="ghost"
+            size="compact"
+            ref={buttonRef}
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            className={clsx(
           "flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] hover:bg-background hover:text-foreground",
           open ? "bg-background text-foreground" : "text-muted-foreground",
         )}
-        title="Task list"
-        aria-label={error ? "Task list: unavailable" : `Task list: ${done} of ${total} done`}
-      >
-        <CheckSquare size={11} />
-        <span className="tabular-nums">
-          {loading ? "…" : error ? "!" : `${done}/${total}`}
-        </span>
-      </button>
+            title="Task list"
+            aria-label={error ? "Task list: unavailable" : `Task list: ${done} of ${total} done`}
+          >
+            <CheckSquare size={11} />
+            <span className="tabular-nums">
+              {loading ? "…" : error ? "!" : `${done}/${total}`}
+            </span>
+          </Button>
+        </PopoverTrigger>
 
-      {/* Popover */}
-      {open && (
-        <div
-          ref={popoverRef}
-          className="absolute bottom-full right-0 z-50 mb-2 w-80 rounded-lg border border-border bg-card shadow-xl"
-          role="dialog"
-          aria-label="Task list"
-        >
-          {/* Header */}
-          <div className="flex items-center justify-between border-b border-border px-3 py-2">
-            <span className="text-xs font-medium text-foreground">Tasks</span>
-            <button
-              type="button"
-              onClick={() => setOpen(false)}
-              className="text-muted-foreground hover:text-foreground"
-              aria-label="Close task list"
-            >
-              <X size={14} />
-            </button>
-          </div>
+        {/* Popover */}
+        {open && (
+          <PopoverContent
+            ref={popoverRef}
+            side="top"
+            align="end"
+            className=" w-80 rounded-lg border border-border bg-card "
+            role="dialog"
+            aria-label="Task list"
+          >
+            {/* Popover */}
+            <div className="flex items-center justify-between border-b border-border px-3 py-2">
+              <span className="text-xs font-medium text-foreground">Tasks</span>
+              <Button
+                variant="ghost"
+                size="compact"
+                type="button"
+                onClick={() => setOpen(false)}
+                className="text-muted-foreground hover:text-foreground"
+                aria-label="Close task list"
+              >
+                <X size={14} />
+              </Button>
+            </div>
 
-          {error && <div role="alert" className="px-3 py-2 text-xs text-destructive">{error} <button type="button" className="underline" onClick={reload}>Retry loading tasks</button></div>}
-          {/* Task list */}
-          <fieldset disabled={!canEdit || loading}>
-          <div className="max-h-64 overflow-y-auto">
-            {tasks.length === 0 && !loading && !error && canEdit && (
-              <div className="px-3 py-4 text-center text-xs text-muted-foreground">
-                No tasks yet. Add one below.
+            {error && (
+              <div role="alert" className="px-3 py-2 text-xs text-destructive">
+                {error}{" "}
+                <Button
+                  variant="ghost"
+                  size="compact"
+                  type="button"
+                  className="underline"
+                  onClick={reload}
+                >
+                  Retry loading tasks
+                </Button>
               </div>
             )}
-            {tasks.map((task) => (
+            {/* Task list */}
+            <fieldset disabled={!canEdit || loading}>
+              <div className="max-h-64 overflow-y-auto">
+                {tasks.length === 0 && !loading && !error && canEdit && (
+                  <div className="px-3 py-4 text-center text-xs text-muted-foreground">
+                    No tasks yet. Add one below.
+                  </div>
+                )}
+                {tasks.map((task) => (
               <TaskRow
                 key={task.id}
                 task={task}
@@ -154,13 +161,13 @@ export function TaskListPopover({ onNavigateFile, onNavigateCommit }: TaskListPo
                 onAnchorClick={handleAnchorClick}
               />
             ))}
-          </div>
+              </div>
 
-          {/* Add task input */}
-          <div className="border-t border-border px-3 py-2">
-            <div className="flex items-center gap-2">
-              <Plus size={12} className="shrink-0 text-muted-foreground" />
-              <Input
+              {/* Add task input */}
+              <div className="border-t border-border px-3 py-2">
+                <div className="flex items-center gap-2">
+                  <Plus size={12} className="shrink-0 text-muted-foreground" />
+                  <Input
                 ref={inputRef}
                 type="text"
                 value={newTitle}
@@ -170,20 +177,23 @@ export function TaskListPopover({ onNavigateFile, onNavigateCommit }: TaskListPo
                 className="flex-1 bg-transparent text-xs text-foreground placeholder:text-muted-foreground outline-none"
                 aria-label="New task title"
               />
-              <button
-                type="button"
-                onClick={handleAdd}
-                disabled={!canEdit || loading || !newTitle.trim()}
-                className="text-xs text-primary hover:text-primary/80 disabled:opacity-40"
-                aria-label="Add task"
-              >
-                Add
-              </button>
-            </div>
-          </div>
-          </fieldset>
-        </div>
-      )}
+                  <Button
+                    variant="ghost"
+                    size="compact"
+                    type="button"
+                    onClick={handleAdd}
+                    disabled={!canEdit || loading || !newTitle.trim()}
+                    className="text-xs text-primary hover:text-primary/80 disabled:opacity-40"
+                    aria-label="Add task"
+                  >
+                    Add
+                  </Button>
+                </div>
+              </div>
+            </fieldset>
+          </PopoverContent>
+        )}
+      </Popover>
     </div>
   );
 }
@@ -207,7 +217,9 @@ function TaskRow({ task, onToggle, onRemove, onAnchorClick }: TaskRowProps) {
       onMouseLeave={() => setHovered(false)}
     >
       {/* Checkbox */}
-      <button
+      <Button
+        variant="default"
+        size="compact"
         type="button"
         onClick={onToggle}
         className={clsx(
@@ -223,7 +235,7 @@ function TaskRow({ task, onToggle, onRemove, onAnchorClick }: TaskRowProps) {
             <path d="M2 5L4 7L8 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         )}
-      </button>
+      </Button>
 
       {/* Title */}
       <span
@@ -238,7 +250,9 @@ function TaskRow({ task, onToggle, onRemove, onAnchorClick }: TaskRowProps) {
 
       {/* Anchor link */}
       {task.anchor && (
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={() => onAnchorClick(task.anchor!)}
           className="flex items-center gap-0.5 text-[10px] text-primary hover:underline"
@@ -247,11 +261,13 @@ function TaskRow({ task, onToggle, onRemove, onAnchorClick }: TaskRowProps) {
         >
           <Link2 size={10} />
           <span>{formatAnchor(task.anchor)}</span>
-        </button>
+        </Button>
       )}
 
       {/* Delete button (visible on hover) */}
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={onRemove}
         className={clsx(
@@ -261,7 +277,7 @@ function TaskRow({ task, onToggle, onRemove, onAnchorClick }: TaskRowProps) {
         aria-label={`Delete task "${task.title}"`}
       >
         <Trash2 size={12} />
-      </button>
+      </Button>
     </div>
   );
 }

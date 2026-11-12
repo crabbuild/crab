@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 /**
  * Remote file editor component.
@@ -7,7 +8,7 @@ import { Textarea } from "@/components/ui/textarea";
  * detection.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import clsx from "clsx";
 import {
   AlertTriangle,
   Check,
@@ -15,7 +16,7 @@ import {
   Save,
   X,
 } from "lucide-react";
-import clsx from "clsx";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { call } from "../../ipc";
 
 // ── Types ────────────────────────────────────────────────────────
@@ -200,7 +201,9 @@ export function RemoteFileEditor({
     return (
       <div className="flex items-center justify-center h-full">
         <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
-        <span className="ml-2 text-sm text-muted-foreground">Loading file...</span>
+        <span className="ml-2 text-sm text-muted-foreground">
+          Loading file...
+        </span>
       </div>
     );
   }
@@ -210,12 +213,14 @@ export function RemoteFileEditor({
       <div className="flex flex-col items-center justify-center h-full gap-2">
         <AlertTriangle className="w-6 h-6 text-destructive" />
         <p className="text-sm text-destructive text-destructive">{error}</p>
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           onClick={handleReload}
           className="text-xs text-info hover:underline"
         >
           Retry
-        </button>
+        </Button>
       </div>
     );
   }
@@ -253,7 +258,9 @@ export function RemoteFileEditor({
         )}
 
         {/* Save button */}
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           onClick={handleSave}
           disabled={!isDirty || saveState === "saving"}
           className={clsx(
@@ -266,17 +273,19 @@ export function RemoteFileEditor({
           aria-label="Save file"
         >
           <Save className="w-3.5 h-3.5" />
-        </button>
+        </Button>
 
         {onClose && (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             onClick={onClose}
             className="p-1 rounded hover:bg-card hover:bg-card"
             title="Close"
             aria-label="Close editor"
           >
             <X className="w-3.5 h-3.5" />
-          </button>
+          </Button>
         )}
       </div>
 
@@ -288,24 +297,30 @@ export function RemoteFileEditor({
             File was modified on the remote since you opened it.
           </span>
           <div className="flex-1" />
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             onClick={handleOverwrite}
             className="text-xs px-2 py-0.5 rounded bg-warning text-warning-foreground hover:bg-warning"
           >
             Overwrite
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             onClick={handleReload}
             className="text-xs px-2 py-0.5 rounded border border-warning text-warning hover:bg-warning/10 hover:bg-warning/40"
           >
             Reload
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             onClick={() => setSaveState("idle")}
             className="text-xs text-muted-foreground hover:text-foreground"
           >
             Cancel
-          </button>
+          </Button>
         </div>
       )}
 

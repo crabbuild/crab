@@ -1,16 +1,18 @@
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 /**
  * Transfer Panel — displays all file transfers grouped by status
  * with sorting, direction indicators, empty state, clear button,
  * and batch selection support.
  */
 
-import { useMemo, useCallback } from "react";
-import { ArrowUpCircle, ArrowDownCircle, Inbox, Trash2 } from "lucide-react";
 import clsx from "clsx";
+import { ArrowDownCircle, ArrowUpCircle, Inbox, Trash2 } from "lucide-react";
+import { useCallback, useMemo } from "react";
 import type { TransferEntry, TransferStatus } from "../../../electron/ssh-types";
+import { useTransferSelection } from "../../hooks/useTransferSelection";
 import type { SshEnhancedAction } from "../../state/ssh-enhanced-state";
 import { TransferBatchBar } from "./TransferBatchBar";
-import { useTransferSelection } from "../../hooks/useTransferSelection";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -163,7 +165,9 @@ export function TransferPanel({
         <span className="text-xs font-semibold text-muted-foreground text-muted-foreground">
           Transfers
         </span>
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={handleClearCompleted}
           disabled={!hasClearable}
@@ -178,7 +182,7 @@ export function TransferPanel({
         >
           <Trash2 size={12} />
           <span>Clear</span>
-        </button>
+        </Button>
       </div>
 
       {/* Batch selection bar */}
@@ -281,10 +285,9 @@ function TransferRow({ entry, isSelected, onToggleSelect, onShiftSelect }: Trans
     >
       {/* Checkbox for selection */}
       {onToggleSelect && (
-        <input
-          type="checkbox"
+        <Checkbox
           checked={isSelected}
-          onChange={() => onToggleSelect(entry.id)}
+          onCheckedChange={() => onToggleSelect(entry.id)}
           onClick={(e) => {
             if (e.shiftKey && onShiftSelect) {
               e.preventDefault();

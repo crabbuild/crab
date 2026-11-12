@@ -1,21 +1,22 @@
-import { useEffectiveTheme } from "../../hooks/useEffectiveTheme";
-import { resolveTheme, getStoredSchemeId } from "../../lib/terminal-themes";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Terminal } from "@xterm/xterm";
+import { Button } from "@/components/ui/button";
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
+import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { Plus, Send, X, Terminal as TerminalIcon } from "lucide-react";
-import { OrchestratorTask } from "./TaskCard";
+import { Plus, Send, Terminal as TerminalIcon, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffectiveTheme } from "../../hooks/useEffectiveTheme";
 import { attachWebgl } from "../../lib/terminal-font";
 import {
-  registerTerminal,
   appendOutput,
   markTerminalClosed,
+  registerTerminal,
   removeTerminal,
   terminalTail,
 } from "../../lib/terminal-registry";
+import { getStoredSchemeId, resolveTheme } from "../../lib/terminal-themes";
+import { OrchestratorTask } from "./TaskCard";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -409,25 +410,31 @@ export function TerminalTab({ task: _task, workspacePath, onSendErrorToAgent }: 
                 : "text-muted-foreground hover:bg-accent"
             }`}
           >
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={() => setActiveTabId(tab.id)}
               className="flex items-center gap-1 truncate"
             >
               <TerminalIcon size={10} />
               {tab.title}
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={() => closeTab(tab.id)}
               className="opacity-0 transition group-hover:opacity-100 hover:text-destructive"
               aria-label="Close terminal tab"
             >
               <X size={10} />
-            </button>
+            </Button>
           </div>
         ))}
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={() => void spawnTab()}
           className="flex h-full items-center px-2 text-muted-foreground hover:text-foreground"
@@ -435,7 +442,7 @@ export function TerminalTab({ task: _task, workspacePath, onSendErrorToAgent }: 
           aria-label="New terminal tab"
         >
           <Plus size={12} />
-        </button>
+        </Button>
 
         {/* Per-tab failure banner */}
         {activeTabId && failedExits.has(activeTabId) && onSendErrorToAgent && (
@@ -443,22 +450,26 @@ export function TerminalTab({ task: _task, workspacePath, onSendErrorToAgent }: 
             <span className="text-destructive">
               Exit {failedExits.get(activeTabId)!.exitCode}
             </span>
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={() => sendErrorToAgent(activeTabId)}
               className="inline-flex items-center gap-1 rounded-md border border-primary/40 bg-primary/10 px-2 py-0.5 text-primary hover:bg-primary/20 transition"
               title="Send the last 200 lines to the agent and ask it to fix this"
             >
               <Send size={9} /> Send error to agent
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               onClick={() => dismissError(activeTabId)}
               className="rounded p-0.5 text-muted-foreground hover:text-foreground"
               aria-label="Dismiss exit notice"
             >
               <X size={10} />
-            </button>
+            </Button>
           </div>
         )}
       </div>

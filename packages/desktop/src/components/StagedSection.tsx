@@ -1,6 +1,12 @@
-import { NativeSelect } from "@/components/ui/native-select";
 import { Button } from "@/components/ui/button";
-import { useCallback, useEffect, useState } from "react";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import clsx from "clsx";
 import {
   ChevronDown,
@@ -8,15 +14,16 @@ import {
   Cloud,
   Database,
   HardDrive,
+  Layers,
   Loader2,
   Trash2,
   Upload,
-  Layers,
   XCircle,
 } from "lucide-react";
-import { OpenRepo } from "../state";
-import { rpc, StagingStats, StagedFileEntry } from "../ipc";
+import { useCallback, useEffect, useState } from "react";
+import { rpc, StagedFileEntry, StagingStats } from "../ipc";
 import { formatBytes } from "../lib/format";
+import { OpenRepo } from "../state";
 
 interface Props {
   repo: OpenRepo;
@@ -146,9 +153,11 @@ export function CrabStagedSection({ repo, refreshKey, onPush, onAdd }: Props) {
   return (
     <div className="border-b border-border">
       {/* Header */}
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
-        className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] hover:bg-accent"
+        className="justify-start flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] hover:bg-accent"
         onClick={() => setExpanded(!expanded)}
       >
         {expanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
@@ -159,8 +168,10 @@ export function CrabStagedSection({ repo, refreshKey, onPush, onAdd }: Props) {
           {chunkCount > 0 && ` · ${chunkCount.toLocaleString()} chunks`}
           {totalBytes > 0 && ` · ${formatBytes(totalBytes)}`}
         </span>
-        {loading && <Loader2 size={10} className="animate-spin text-muted-foreground" />}
-      </button>
+        {loading && (
+          <Loader2 size={10} className="animate-spin text-muted-foreground" />
+        )}
+      </Button>
 
       {expanded && (
         <div className="px-3 pb-2">
@@ -174,8 +185,8 @@ export function CrabStagedSection({ repo, refreshKey, onPush, onAdd }: Props) {
               {(stats.dead_bytes ?? 0) > 0 && (
                 <span className="flex items-center gap-1 text-warning">
                   <Trash2 size={9} />
-                  {formatBytes(stats.dead_bytes ?? 0)} dead
-                  ({((stats.dead_ratio ?? 0) * 100).toFixed(0)}%)
+                  {formatBytes(stats.dead_bytes ?? 0)} dead (
+                  {((stats.dead_ratio ?? 0) * 100).toFixed(0)}%)
                 </span>
               )}
               <span className="flex items-center gap-1">
@@ -197,7 +208,7 @@ export function CrabStagedSection({ repo, refreshKey, onPush, onAdd }: Props) {
                     key={f.file_hash}
                     className="group flex items-center gap-2 rounded px-2 py-1 text-xs hover:bg-accent"
                   >
-                    {/* File type badge */}
+                    {/* Per-file list */}
                     <span
                       className={clsx(
                         "shrink-0 w-5 text-center text-[9px] font-bold",
@@ -207,7 +218,7 @@ export function CrabStagedSection({ repo, refreshKey, onPush, onAdd }: Props) {
                       {fileType.label}
                     </span>
 
-                    {/* File name or hash (truncated) */}
+                    {/* File type badge */}
                     <span
                       className="min-w-0 flex-1 truncate font-mono text-foreground"
                       title={f.file_path ?? f.file_hash}
@@ -215,34 +226,36 @@ export function CrabStagedSection({ repo, refreshKey, onPush, onAdd }: Props) {
                       {f.file_path ?? `${f.file_hash.slice(0, 16)}…`}
                     </span>
 
-                    {/* Size */}
+                    {/* File name or hash (truncated) */}
                     <span className="shrink-0 text-muted-foreground">
                       {formatBytes(f.total_bytes)}
                     </span>
 
-                    {/* Chunk info */}
+                    {/* Size */}
                     {hasChunks && (
                       <span className="shrink-0 rounded bg-card px-1 text-[10px] text-muted-foreground">
                         {f.total_chunks} chunks
                       </span>
                     )}
 
-                    {/* Pending indicator */}
+                    {/* Chunk info */}
                     {f.pending_chunks > 0 && (
                       <span className="shrink-0 rounded bg-warning/10 px-1 text-[10px] text-warning">
                         {f.pending_chunks} pending
                       </span>
                     )}
 
-                    {/* Segment count */}
+                    {/* Pending indicator */}
                     {f.segments > 0 && (
                       <span className="shrink-0 rounded bg-card px-1 text-[10px] text-muted-foreground">
                         {f.segments} seg{f.segments !== 1 ? "s" : ""}
                       </span>
                     )}
 
-                    {/* Remove from staging button */}
-                    <button
+                    {/* Segment count */}
+                    <Button
+                      variant="ghost"
+                      size="compact"
                       type="button"
                       className="shrink-0 rounded p-0.5 text-muted-foreground transition hover:bg-destructive/10 hover:text-destructive"
                       onClick={() => handleRemoveFile(f.file_hash)}
@@ -254,7 +267,7 @@ export function CrabStagedSection({ repo, refreshKey, onPush, onAdd }: Props) {
                       ) : (
                         <XCircle size={11} />
                       )}
-                    </button>
+                    </Button>
                   </li>
                 );
               })}
@@ -264,29 +277,43 @@ export function CrabStagedSection({ repo, refreshKey, onPush, onAdd }: Props) {
           {/* Empty state */}
           {files.length === 0 && fileCount === 0 && (
             <p className="mb-2 text-xs text-muted-foreground">
-              No files staged. Use <code className="text-foreground">crab add</code> to stage files.
+              No files staged. Use{" "}
+              <code className="text-foreground">crab add</code> to stage files.
             </p>
           )}
 
-          {/* Action buttons */}
+          {/* Empty state */}
           <div className="flex flex-col gap-2">
-            {/* Remote selector — shown when multiple crab remotes exist */}
+            {/* Empty state */}
             {remotes.length > 1 && filesWithChunks.length > 0 && (
               <div className="flex items-center gap-2 text-xs">
-                <label htmlFor="staging-push-remote" className="shrink-0 text-muted-foreground">Remote:</label>
-                <NativeSelect
-                  id="staging-push-remote"
-                  className="flex-1 rounded border border-border bg-card px-2 py-1 text-xs text-foreground"
-                  value={selectedRemote ?? ""}
-                  onChange={(e) => setSelectedRemote(e.target.value || undefined)}
+                <label htmlFor="staging-push-remote" className="shrink-0 text-muted-foreground">
+                  Remote:
+                </label>
+                <Select
+                  value={":" + String(selectedRemote ?? "")}
+                  onValueChange={(selectedValue) => {
+                    const value = selectedValue.slice(1);
+                    return setSelectedRemote(value || undefined);
+                  }}
                 >
-                  <option value="">default</option>
+                  <SelectTrigger
+                    id="staging-push-remote"
+                    className="flex-1 rounded border border-border bg-card px-2 py-1 text-xs text-foreground"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      <SelectItem value={":" + String("")}>default</SelectItem>
                   {remotes.map((r) => (
-                    <option key={r.name} value={r.name}>
+                    <SelectItem key={r.name} value={":" + String(r.name)}>
                       {r.name} — {r.url}
-                    </option>
-                  ))}
-                </NativeSelect>
+                    </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
               </div>
             )}
             <div className="flex items-center gap-2">
@@ -296,7 +323,8 @@ export function CrabStagedSection({ repo, refreshKey, onPush, onAdd }: Props) {
                   className="text-xs"
                   onClick={() => onPush?.(selectedRemote)}
                 >
-                  <Upload size={11} /> Push{selectedRemote ? ` to ${selectedRemote}` : " to Remote"}
+                  <Upload size={11} /> Push
+                  {selectedRemote ? ` to ${selectedRemote}` : " to Remote"}
                 </Button>
               )}
               <Button variant="outline"

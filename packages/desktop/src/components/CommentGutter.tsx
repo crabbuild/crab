@@ -1,6 +1,7 @@
+import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { useCallback, useState } from "react";
 import { MessageSquare, Plus, Send, X } from "lucide-react";
+import { useCallback, useState } from "react";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -120,7 +121,9 @@ export function GutterIcons({
   return (
     <div className="flex flex-col gap-0.5">
       {lines.map((line) => (
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           key={`comment-${line}`}
           type="button"
           className="group flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-primary hover:bg-primary/10"
@@ -129,11 +132,15 @@ export function GutterIcons({
         >
           <MessageSquare size={11} />
           <span className="font-mono">L{line}</span>
-          <span className="text-muted-foreground">({commentsByLine[line].length})</span>
-        </button>
+          <span className="text-muted-foreground">
+            ({commentsByLine[line].length})
+          </span>
+        </Button>
       ))}
       {canAdd && hoveredLine != null && !commentsByLine[hoveredLine] && (
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-primary/10 hover:text-primary"
           onClick={() => onStartCompose(hoveredLine)}
@@ -141,7 +148,7 @@ export function GutterIcons({
         >
           <Plus size={11} />
           <span className="font-mono">L{hoveredLine}</span>
-        </button>
+        </Button>
       )}
     </div>
   );
@@ -171,9 +178,11 @@ function CommentLineEntry({
   return (
     <div className="border-b border-border/50">
       {/* Collapsed header */}
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
-        className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] hover:bg-accent"
+        className="justify-start flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] hover:bg-accent"
         onClick={onToggle}
         aria-label={`${expanded ? "Collapse" : "Expand"} comment thread on line ${line}`}
       >
@@ -188,7 +197,7 @@ function CommentLineEntry({
             {comments[0].body.length > 60 ? "…" : ""}
           </span>
         )}
-      </button>
+      </Button>
 
       {/* Expanded thread */}
       {expanded && (
@@ -207,14 +216,16 @@ function CommentLineEntry({
               onCancel={onCancelCompose}
             />
           ) : onAddComment ? (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               type="button"
               className="flex items-center gap-1.5 rounded px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
               onClick={() => onStartCompose(line)}
             >
               <Plus size={10} />
               Reply
-            </button>
+            </Button>
           ) : null}
         </div>
       )}
@@ -229,7 +240,9 @@ function CommentBubble({ comment }: { comment: DiffComment }) {
     <div className="rounded border border-border bg-card p-2">
       <div className="flex items-center gap-2 text-[10px]">
         <span className="font-medium text-foreground">{comment.author}</span>
-        <span className="text-muted-foreground">{formatTimestamp(comment.created_at)}</span>
+        <span className="text-muted-foreground">
+          {formatTimestamp(comment.created_at)}
+        </span>
       </div>
       <div className="mt-1 whitespace-pre-wrap text-[11px] text-foreground/80">
         {comment.body}
@@ -260,15 +273,19 @@ function InlineComposer({
         autoFocus
       />
       <div className="mt-1.5 flex items-center justify-end gap-2">
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           className="rounded px-2 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
           onClick={onCancel}
           aria-label="Cancel comment"
         >
           <X size={10} className="inline" /> Cancel
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           className="inline-flex items-center gap-1 rounded bg-primary/10 px-2 py-0.5 text-[10px] text-primary hover:bg-primary/20 disabled:opacity-50"
           disabled={!body.trim()}
@@ -276,7 +293,7 @@ function InlineComposer({
           aria-label="Submit comment"
         >
           <Send size={10} /> Reply
-        </button>
+        </Button>
       </div>
     </div>
   );
@@ -312,15 +329,19 @@ function NewLineComposer({
           autoFocus
         />
         <div className="mt-1.5 flex items-center justify-end gap-2">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="rounded px-2 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
             onClick={onCancel}
             aria-label="Cancel comment"
           >
             <X size={10} className="inline" /> Cancel
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="inline-flex items-center gap-1 rounded bg-primary/10 px-2 py-0.5 text-[10px] text-primary hover:bg-primary/20 disabled:opacity-50"
             disabled={!body.trim()}
@@ -328,7 +349,7 @@ function NewLineComposer({
             aria-label="Submit comment"
           >
             <Send size={10} /> Comment
-          </button>
+          </Button>
         </div>
       </div>
     </div>

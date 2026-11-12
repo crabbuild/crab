@@ -1,3 +1,4 @@
+import { Toggle } from "@/components/ui/toggle";
 import clsx from "clsx";
 import {
   Bot,
@@ -6,8 +7,8 @@ import {
   Monitor,
   Package,
   Settings,
-  Workflow,
   Terminal,
+  Workflow,
 } from "lucide-react";
 import { navigationGroup, type SidebarView } from "../lib/navigation";
 
@@ -51,13 +52,14 @@ export function ActivityBar({
             ? (badges.changes ?? 0) + (badges.timeline ?? 0)
             : (badges[item.id] ?? 0);
         return (
-          <button
+          <Toggle
+            size="sm"
             key={item.id}
             type="button"
             onClick={() => onSelect(item.id)}
             className={clsx(buttonClass, selected && "text-foreground")}
             aria-label={item.label}
-            aria-pressed={selected}
+            pressed={selected}
             title={item.label}
           >
             <item.icon size={20} />
@@ -69,11 +71,12 @@ export function ActivityBar({
                 {count > 99 ? "99+" : count}
               </span>
             )}
-          </button>
+          </Toggle>
         );
       })}
       <div className="flex-1" />
-      <button
+      <Toggle
+        size="sm"
         type="button"
         className={clsx(
           buttonClass,
@@ -81,11 +84,11 @@ export function ActivityBar({
         )}
         aria-label="Settings"
         title="Settings (⌘,)"
-        aria-pressed={active === "settings"}
+        pressed={active === "settings"}
         onClick={() => onSelect("settings")}
       >
         <Settings size={20} />
-      </button>
+      </Toggle>
     </nav>
   );
 }

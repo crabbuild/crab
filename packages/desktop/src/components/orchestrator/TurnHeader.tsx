@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Turn header component.
  *
@@ -9,12 +10,13 @@
  * the user has clicked the header during the turn or prefers-reduced-motion is set.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
 import clsx from "clsx";
-import { ChevronRight, ChevronDown, Undo2, Eye, Check } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, Eye, Undo2 } from "lucide-react";
 
-import type { Turn } from "../../lib/turn-derivation";
+import { useCallback, useEffect, useRef, useState } from "react";
+
 import { useChatUIState } from "../../lib/chat-ui-state";
+import type { Turn } from "../../lib/turn-derivation";
 
 // ─── Props ───────────────────────────────────────────────────────────────────
 
@@ -158,7 +160,9 @@ export function TurnHeader({ turn, taskId, collapsed: isCollapsed, collapsible, 
         "transition-colors",
       )}
     >
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={handleToggle}
         disabled={!collapsible}
@@ -205,7 +209,9 @@ export function TurnHeader({ turn, taskId, collapsed: isCollapsed, collapsible, 
             onClick={(e) => e.stopPropagation()}
           >
             {onApply && (
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 onClick={onApply}
                 className={clsx(
@@ -217,10 +223,12 @@ export function TurnHeader({ turn, taskId, collapsed: isCollapsed, collapsible, 
               >
                 <Check size={10} />
                 Apply
-              </button>
+              </Button>
             )}
             {onReview && (
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 onClick={onReview}
                 className={clsx(
@@ -232,10 +240,12 @@ export function TurnHeader({ turn, taskId, collapsed: isCollapsed, collapsible, 
               >
                 <Eye size={10} />
                 Review
-              </button>
+              </Button>
             )}
             {onUndo && (
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 onClick={onUndo}
                 className={clsx(
@@ -247,11 +257,11 @@ export function TurnHeader({ turn, taskId, collapsed: isCollapsed, collapsible, 
               >
                 <Undo2 size={10} />
                 Undo
-              </button>
+              </Button>
             )}
           </span>
         )}
-      </button>
+      </Button>
     </div>
   );
 }

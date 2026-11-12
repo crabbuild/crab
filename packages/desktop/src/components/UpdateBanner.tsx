@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { useAutoUpdater } from "../hooks/useAutoUpdater";
 
 /**
@@ -24,7 +25,9 @@ export function UpdateBanner() {
     return (
       <div role="status" className="flex flex-wrap items-center gap-2 border-b border-border bg-card px-4 py-1.5 text-xs text-muted-foreground">
         <span>{error}</span>
-        <a className="ml-auto underline hover:text-foreground" href="https://github.com/crabbuild/crab/releases" target="_blank" rel="noreferrer">View Crab releases</a>
+        <a className="ml-auto underline hover:text-foreground" href="https://github.com/crabbuild/crab/releases" target="_blank" rel="noreferrer">
+          View Crab releases
+        </a>
       </div>
     );
   }
@@ -35,12 +38,14 @@ export function UpdateBanner() {
         <span>
           Crab <strong>v{info.version}</strong> is available.
         </span>
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           onClick={downloadUpdate}
           className="ml-auto px-2 py-0.5 rounded bg-info hover:bg-info text-info-foreground text-xs transition-colors"
         >
           Download
-        </button>
+        </Button>
       </div>
     );
   }
@@ -66,12 +71,14 @@ export function UpdateBanner() {
         <span>
           Crab <strong>v{info.version}</strong> is ready to install.
         </span>
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           onClick={quitAndInstall}
           className="ml-auto px-2 py-0.5 rounded bg-success hover:bg-success text-success-foreground text-xs transition-colors"
         >
           Restart &amp; Update
-        </button>
+        </Button>
       </div>
     );
   }

@@ -1,18 +1,20 @@
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 /**
  * Transfer Security Display — shows cipher algorithm, MAC algorithm,
  * KEX method, and warning dialog for weak/deprecated ciphers.
  */
 
-import { useState, useCallback } from "react";
+import clsx from "clsx";
 import {
+  AlertTriangle,
+  Key,
+  Lock,
   Shield,
   ShieldAlert,
   ShieldCheck,
-  Lock,
-  Key,
-  AlertTriangle,
 } from "lucide-react";
-import clsx from "clsx";
+import { useCallback, useState } from "react";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -67,16 +69,28 @@ function WeakCipherDialog({
   onCancel: () => void;
 }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" role="dialog" aria-modal="true" aria-label="Weak cipher warning">
-      <div className="bg-background bg-card rounded-lg shadow-xl max-w-md w-full mx-4 p-4 space-y-3">
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) {
+          onCancel();
+        }
+      }}
+    >
+      <DialogContent
+        showCloseButton={false}
+        aria-describedby={undefined}
+        className="block gap-0 p-0 bg-background bg-card rounded-lg shadow-xl max-w-md w-full mx-4 p-4 space-y-3"
+      >
         <div className="flex items-start gap-3">
           <ShieldAlert className="w-6 h-6 text-destructive shrink-0 mt-0.5" />
           <div>
-            <h3 className="text-sm font-semibold text-foreground text-foreground">
+            <DialogTitle className="text-sm font-semibold text-foreground text-foreground">
               Weak Cipher Detected
-            </h3>
+            </DialogTitle>
             <p className="text-xs text-muted-foreground text-muted-foreground mt-1">
-              The SSH connection is using a cipher that may not provide adequate security.
+              The SSH connection is using a cipher that may not provide adequate
+              security.
             </p>
           </div>
         </div>
@@ -85,32 +99,35 @@ function WeakCipherDialog({
           <p className="text-xs font-mono text-destructive text-destructive">
             Cipher: {cipher}
           </p>
-          <p className="text-xs text-destructive text-destructive">
-            {reason}
-          </p>
+          <p className="text-xs text-destructive text-destructive">{reason}</p>
         </div>
 
         <p className="text-xs text-muted-foreground text-muted-foreground">
-          Proceeding with this cipher may expose your data to interception. It is recommended
-          to cancel and configure a stronger cipher in your SSH settings.
+          Proceeding with this cipher may expose your data to interception. It
+          is recommended to cancel and configure a stronger cipher in your SSH
+          settings.
         </p>
 
         <div className="flex justify-end gap-2 pt-1">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             onClick={onCancel}
             className="px-4 py-1.5 text-xs bg-card bg-card text-foreground text-muted-foreground rounded hover:bg-card hover:bg-accent"
           >
             Cancel Transfer
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="destructive"
+            size="compact"
             onClick={onConfirm}
             className="px-4 py-1.5 text-xs bg-destructive text-destructive-foreground rounded hover:bg-destructive"
           >
             Proceed Anyway
-          </button>
+          </Button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -165,7 +182,9 @@ export function TransferSecurityDisplay({
         <div className="space-y-1.5 pl-6">
           <div className="flex items-center gap-2">
             <Lock className="w-3 h-3 text-muted-foreground text-muted-foreground" />
-            <span className="text-[10px] text-muted-foreground text-muted-foreground w-12">Cipher</span>
+            <span className="text-[10px] text-muted-foreground text-muted-foreground w-12">
+              Cipher
+            </span>
             <span
               className={clsx(
                 "text-xs font-mono",
@@ -176,20 +195,26 @@ export function TransferSecurityDisplay({
             >
               {security.cipher}
               {deprecated && (
-                <span className="ml-1.5 text-[10px] text-destructive font-sans">(deprecated)</span>
+                <span className="ml-1.5 text-[10px] text-destructive font-sans">
+                  (deprecated)
+                </span>
               )}
             </span>
           </div>
           <div className="flex items-center gap-2">
             <Shield className="w-3 h-3 text-muted-foreground text-muted-foreground" />
-            <span className="text-[10px] text-muted-foreground text-muted-foreground w-12">MAC</span>
+            <span className="text-[10px] text-muted-foreground text-muted-foreground w-12">
+              MAC
+            </span>
             <span className="text-xs font-mono text-foreground text-muted-foreground">
               {security.mac}
             </span>
           </div>
           <div className="flex items-center gap-2">
             <Key className="w-3 h-3 text-muted-foreground text-muted-foreground" />
-            <span className="text-[10px] text-muted-foreground text-muted-foreground w-12">KEX</span>
+            <span className="text-[10px] text-muted-foreground text-muted-foreground w-12">
+              KEX
+            </span>
             <span className="text-xs font-mono text-foreground text-muted-foreground">
               {security.kex}
             </span>
@@ -222,4 +247,4 @@ export function TransferSecurityDisplay({
 
 // ── Exports for testing ──────────────────────────────────────────
 
-export { isCipherDeprecated, DEPRECATED_CIPHERS };
+export { DEPRECATED_CIPHERS, isCipherDeprecated };

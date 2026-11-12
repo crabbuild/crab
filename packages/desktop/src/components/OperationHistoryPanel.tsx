@@ -1,8 +1,20 @@
-import { useState, useEffect } from "react";
-import { CheckCircle2, XCircle, AlertTriangle, Trash2, Undo2, Clock } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import clsx from "clsx";
-import { useOperationHistory, clearHistory, type OperationRecord } from "../lib/operation-history";
-import { useUndoStack, executeUndo, UNDO_WINDOW_MS } from "../lib/undo-stack";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Clock,
+  Trash2,
+  Undo2,
+  XCircle,
+} from "lucide-react";
+import { useEffect, useState } from "react";
+import {
+  clearHistory,
+  useOperationHistory,
+  type OperationRecord,
+} from "../lib/operation-history";
+import { executeUndo, UNDO_WINDOW_MS, useUndoStack } from "../lib/undo-stack";
 
 // --- Relative time formatter ---
 
@@ -85,7 +97,9 @@ export function OperationHistoryPanel() {
           <span>Operation History</span>
         </div>
         {history.length > 0 && (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={() => clearHistory()}
             className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-primary/20 hover:text-foreground"
@@ -94,7 +108,7 @@ export function OperationHistoryPanel() {
           >
             <Trash2 size={12} />
             Clear
-          </button>
+          </Button>
         )}
       </div>
 
@@ -154,7 +168,9 @@ function OperationRow({
 
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">
-          <span className="truncate text-xs text-foreground">{operation.label}</span>
+          <span className="truncate text-xs text-foreground">
+            {operation.label}
+          </span>
           <span
             className={clsx(
               "shrink-0 rounded px-1 py-px text-[10px] font-medium",
@@ -174,7 +190,9 @@ function OperationRow({
       </div>
 
       {canUndo && (
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={handleUndo}
           disabled={undoing}
@@ -188,7 +206,7 @@ function OperationRow({
         >
           <Undo2 size={12} />
           Undo
-        </button>
+        </Button>
       )}
     </li>
   );

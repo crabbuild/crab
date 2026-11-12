@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 /**
@@ -6,19 +7,19 @@ import { Textarea } from "@/components/ui/textarea";
  * for adding/removing/starting/pausing sync pairs.
  */
 
-import { useState, useCallback, useMemo } from "react";
 import {
-  FolderSync,
-  Play,
-  Pause,
-  Trash2,
-  Plus,
   AlertTriangle,
   CheckCircle2,
-  XCircle,
   Clock,
+  FolderSync,
+  Pause,
+  Play,
+  Plus,
+  Trash2,
+  XCircle,
 } from "lucide-react";
-import type { SyncPair, SyncConflict } from "../../../electron/ssh-types";
+import { useCallback, useMemo, useState } from "react";
+import type { SyncConflict, SyncPair } from "../../../electron/ssh-types";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -130,19 +131,23 @@ function AddPairForm({
         />
       </div>
       <div className="flex justify-end gap-2 pt-1">
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={onCancel}
           className="px-3 py-1 text-xs text-muted-foreground text-muted-foreground hover:bg-card hover:bg-card rounded"
         >
           Cancel
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           type="submit"
           className="px-3 py-1 text-xs bg-info text-info-foreground rounded hover:bg-info"
         >
           Add Sync Pair
-        </button>
+        </Button>
       </div>
     </form>
   );
@@ -168,27 +173,33 @@ function ConflictItem({
         </span>
       </div>
       <div className="flex items-center gap-1 shrink-0 ml-2">
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           onClick={() => onResolve(conflict.id, "local")}
           className="px-1.5 py-0.5 text-[10px] font-medium text-info text-info hover:bg-info/10 hover:bg-info/30 rounded"
           title="Keep local version"
         >
           Local
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           onClick={() => onResolve(conflict.id, "remote")}
           className="px-1.5 py-0.5 text-[10px] font-medium text-success text-success hover:bg-success/10 hover:bg-success/30 rounded"
           title="Keep remote version"
         >
           Remote
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="compact"
           onClick={() => onResolve(conflict.id, "both")}
           className="px-1.5 py-0.5 text-[10px] font-medium text-thinking text-thinking hover:bg-thinking/10 hover:bg-thinking/30 rounded"
           title="Keep both versions"
         >
           Both
-        </button>
+        </Button>
       </div>
     </li>
   );
@@ -235,14 +246,16 @@ export function WorkspaceSyncPanel({
           Workspace Sync
         </h3>
         {!showAddForm && (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             onClick={() => setShowAddForm(true)}
             className="flex items-center gap-1 px-2 py-1 text-xs text-info text-info hover:bg-info/10 hover:bg-info/20 rounded"
             aria-label="Add sync pair"
           >
             <Plus className="w-3 h-3" />
             Add
-          </button>
+          </Button>
         )}
       </div>
 
@@ -278,32 +291,38 @@ export function WorkspaceSyncPanel({
               </div>
               <div className="flex items-center gap-1 shrink-0">
                 {pair.status === "paused" || pair.status === "error" ? (
-                  <button
+                  <Button
+                    variant="ghost"
+                    size="compact"
                     onClick={() => onStartPair(pair.id)}
                     className="p-1 text-success text-success hover:bg-success/10 hover:bg-success/20 rounded"
                     aria-label="Start sync"
                     title="Start sync"
                   >
                     <Play className="w-3.5 h-3.5" />
-                  </button>
+                  </Button>
                 ) : (
-                  <button
+                  <Button
+                    variant="ghost"
+                    size="compact"
                     onClick={() => onPausePair(pair.id)}
                     className="p-1 text-warning text-warning hover:bg-warning/10 hover:bg-warning/20 rounded"
                     aria-label="Pause sync"
                     title="Pause sync"
                   >
                     <Pause className="w-3.5 h-3.5" />
-                  </button>
+                  </Button>
                 )}
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   onClick={() => onRemovePair(pair.id)}
                   className="p-1 text-destructive text-destructive hover:bg-destructive/10 hover:bg-destructive/20 rounded"
                   aria-label="Remove sync pair"
                   title="Remove sync pair"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
-                </button>
+                </Button>
               </div>
             </div>
 

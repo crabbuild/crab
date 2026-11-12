@@ -1,20 +1,28 @@
-import { NativeSelect } from "@/components/ui/native-select";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import clsx from "clsx";
 import {
+  AlertCircle,
+  Bot,
   Brain,
+  CheckCircle2,
   ChevronDown,
   ChevronRight,
-  CheckCircle2,
-  AlertCircle,
-  FileText,
   FilePen,
-  Terminal,
-  Search,
+  FileText,
   Filter,
   MessageSquare,
-  Bot,
+  Search,
+  Terminal,
 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -183,7 +191,7 @@ export function ActivityFeed({ events, isStreaming }: Props) {
       {/* Header: summary + filter */}
       <div className="shrink-0 border-b border-border bg-card px-4 py-2.5">
         <div className="flex items-center justify-between gap-3">
-          {/* Event count summary */}
+          {/* Header: summary + filter */}
           <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
             {summary.filesRead > 0 && (
               <span className="flex items-center gap-1">
@@ -203,24 +211,39 @@ export function ActivityFeed({ events, isStreaming }: Props) {
                 {summary.commandsRun} run
               </span>
             )}
-            {summary.filesRead === 0 && summary.filesWritten === 0 && summary.commandsRun === 0 && (
-              <span>No events yet</span>
-            )}
+            {summary.filesRead === 0 && summary.filesWritten === 0 && summary.commandsRun === 0 && <span>No events yet</span>}
           </div>
 
           {/* Filter dropdown */}
           <div className="relative">
-            <NativeSelect
-              value={filter}
-              onChange={(e) => setFilter(e.target.value as EventFilter)}
-              className="appearance-none rounded border border-border bg-background px-2 py-0.5 pr-6 text-[11px] text-foreground focus:border-primary focus:outline-none"
-              aria-label="Filter events"
+            <Select
+              value={":" + String(filter)}
+              onValueChange={(selectedValue) => {
+                const value = selectedValue.slice(1);
+                return setFilter(value as EventFilter);
+              }}
             >
-              <option value="all">All</option>
-              <option value="files">Files only</option>
-              <option value="commands">Commands only</option>
-              <option value="errors">Errors only</option>
-            </NativeSelect>
+              <SelectTrigger
+                className="appearance-none rounded border border-border bg-background px-2 py-0.5 pr-6 text-[11px] text-foreground focus:border-primary focus:outline-none"
+                aria-label="Filter events"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  <SelectItem value={":" + String("all")}>All</SelectItem>
+                  <SelectItem value={":" + String("files")}>
+                    Files only
+                  </SelectItem>
+                  <SelectItem value={":" + String("commands")}>
+                    Commands only
+                  </SelectItem>
+                  <SelectItem value={":" + String("errors")}>
+                    Errors only
+                  </SelectItem>
+                </SelectGroup>
+              </SelectContent>
+            </Select>
             <Filter size={10} className="pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
           </div>
         </div>
@@ -253,7 +276,9 @@ export function ActivityFeed({ events, isStreaming }: Props) {
       {/* Jump to bottom button */}
       {!autoScroll && (
         <div className="flex justify-center pb-1">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={() => {
               setAutoScroll(true);
@@ -262,7 +287,7 @@ export function ActivityFeed({ events, isStreaming }: Props) {
             className="flex items-center gap-1 rounded-full border border-border bg-card px-2.5 py-1 text-[10px] text-muted-foreground hover:text-foreground transition"
           >
             <ChevronDown size={10} /> Jump to bottom
-          </button>
+          </Button>
         </div>
       )}
     </div>
@@ -303,13 +328,15 @@ function EventCard({
             <p className="text-xs text-foreground whitespace-pre-wrap break-words leading-relaxed">
               {event.content?.slice(0, 300) ?? ""}
               {event.content && event.content.length > 300 && (
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
                   onClick={onToggle}
                   className="ml-1 text-primary hover:underline"
                 >
                   {expanded ? "show less" : "…more"}
-                </button>
+                </Button>
               )}
             </p>
             {expanded && event.content && event.content.length > 300 && (
@@ -324,7 +351,9 @@ function EventCard({
                 {event.agentRole ?? event.agentId.slice(0, 6)}
               </span>
             )}
-            <span className="text-[9px] text-muted-foreground">{formatRelativeTime(event.timestamp)}</span>
+            <span className="text-[9px] text-muted-foreground">
+              {formatRelativeTime(event.timestamp)}
+            </span>
           </div>
         </div>
       </div>
@@ -335,21 +364,25 @@ function EventCard({
   if (category === "thinking") {
     return (
       <div className="group">
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={onToggle}
-          className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition hover:bg-card"
+          className="justify-start flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition hover:bg-card"
           aria-expanded={expanded}
         >
           <Brain size={13} className="shrink-0 text-thinking/80" />
           <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground italic">
             {expanded ? "Thinking…" : (event.content?.slice(0, 80) ?? "Thinking…")}
           </span>
-          <span className="shrink-0 text-[9px] text-muted-foreground">{formatRelativeTime(event.timestamp)}</span>
+          <span className="shrink-0 text-[9px] text-muted-foreground">
+            {formatRelativeTime(event.timestamp)}
+          </span>
           <span className="shrink-0 text-muted-foreground">
             {expanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
           </span>
-        </button>
+        </Button>
         {expanded && event.content && (
           <div className="ml-7 mt-1 rounded-md border border-border/30 bg-background px-3 py-2">
             <p className="text-[11px] text-muted-foreground italic whitespace-pre-wrap leading-relaxed">
@@ -369,7 +402,9 @@ function EventCard({
         <span className="min-w-0 flex-1 text-xs text-success font-medium">
           {event.content ?? "Agent completed"}
         </span>
-        <span className="shrink-0 text-[9px] text-muted-foreground">{formatRelativeTime(event.timestamp)}</span>
+        <span className="shrink-0 text-[9px] text-muted-foreground">
+          {formatRelativeTime(event.timestamp)}
+        </span>
       </div>
     );
   }
@@ -383,16 +418,20 @@ function EventCard({
           <span className="min-w-0 flex-1 truncate text-xs text-destructive font-medium">
             {event.error ?? event.content ?? "Error"}
           </span>
-          <span className="shrink-0 text-[9px] text-muted-foreground">{formatRelativeTime(event.timestamp)}</span>
+          <span className="shrink-0 text-[9px] text-muted-foreground">
+            {formatRelativeTime(event.timestamp)}
+          </span>
         </div>
         {(event.error ?? event.content ?? "").length > 80 && (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={onToggle}
             className="mt-1 ml-6 text-[10px] text-destructive/80 hover:text-destructive transition"
           >
             {expanded ? "Hide details" : "Show details"}
-          </button>
+          </Button>
         )}
         {expanded && (
           <p className="mt-2 ml-6 text-[11px] text-destructive/90 whitespace-pre-wrap">
@@ -411,48 +450,46 @@ function EventCard({
         isLatest ? "border-primary/20 bg-primary/5" : "border-border/40 bg-background",
       )}
     >
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         onClick={hasExpandableContent ? onToggle : undefined}
-        className="flex w-full items-center gap-2.5 text-left"
+        className="justify-start flex w-full items-center gap-2.5 text-left"
         aria-expanded={hasExpandableContent ? expanded : undefined}
       >
-        {/* Colored icon */}
+        {/* Multi-agent label */}
         <div className={clsx("flex h-6 w-6 shrink-0 items-center justify-center rounded", bgColor)}>
           {icon}
         </div>
 
-        {/* Multi-agent label */}
+        {/* One-line summary */}
         {event.agentId && (
           <span className={clsx("shrink-0 text-[9px] font-medium rounded px-1 py-0.5 bg-card", agentColor)}>
             {event.agentRole ?? event.agentId.slice(0, 6)}
           </span>
         )}
 
-        {/* One-line summary */}
+        {/* Timestamp */}
         <span className="min-w-0 flex-1 truncate text-[11px] text-foreground">
           {label}
         </span>
 
-        {/* Timestamp */}
+        {/* Expand indicator */}
         <span className="shrink-0 text-[9px] text-muted-foreground">
           {formatRelativeTime(event.timestamp)}
         </span>
 
-        {/* Expand indicator */}
+        {/* Expandable detail */}
         {hasExpandableContent && (
           <span className="shrink-0 text-muted-foreground">
             {expanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
           </span>
         )}
-      </button>
+      </Button>
 
       {/* Expandable detail */}
-      {expanded && detail && (
-        <div className="mt-2 ml-8">
-          {detail}
-        </div>
-      )}
+      {expanded && detail && <div className="mt-2 ml-8">{detail}</div>}
     </div>
   );
 }
@@ -525,9 +562,12 @@ function getEventDisplay(
         icon: <MessageSquare size={12} className="text-muted-foreground" />,
         bgColor: "bg-card",
         label: event.content?.slice(0, 100) ?? "Event",
-        detail: event.content && event.content.length > 100 ? (
-          <p className="text-[11px] text-foreground whitespace-pre-wrap">{event.content}</p>
-        ) : null,
+        detail:
+          event.content && event.content.length > 100 ? (
+            <p className="text-[11px] text-foreground whitespace-pre-wrap">
+              {event.content}
+            </p>
+          ) : null,
       };
   }
 }
@@ -577,13 +617,15 @@ function MiniDiff({ diff }: { diff: string }) {
         ))}
       </pre>
       {truncated && !expanded && (
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={() => setExpanded(true)}
           className="w-full border-t border-border/50 px-2 py-1 text-[10px] text-muted-foreground hover:text-foreground transition text-center"
         >
           Show full diff…
-        </button>
+        </Button>
       )}
     </div>
   );
@@ -616,13 +658,15 @@ function CommandOutput({ event }: { event: AgentEvent }) {
         </div>
       )}
       {truncated && !expanded && (
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={() => setExpanded(true)}
           className="w-full border-b border-border/50 px-2 py-1 text-[10px] text-muted-foreground hover:text-foreground transition text-center"
         >
           Show full output ({output.split("\n").length} lines)…
-        </button>
+        </Button>
       )}
       <pre className="overflow-x-auto p-2 text-[10px] leading-relaxed font-mono text-muted-foreground">
         {lines.join("\n")}

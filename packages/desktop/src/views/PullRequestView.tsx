@@ -1,6 +1,15 @@
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Textarea } from "@/components/ui/textarea";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { SelectedLineRange } from "@pierre/diffs";
+import type { DiffLineAnnotation } from "@pierre/diffs/react";
 import clsx from "clsx";
 import {
   CheckCircle2,
@@ -22,9 +31,17 @@ import {
   X,
   XCircle,
 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Streamdown } from "streamdown";
 import "streamdown/styles.css";
-import { OpenRepo } from "../state";
+import { aggregateCheckStatus } from "../components/CiStatusChip";
+import { InlineCommentComposer } from "../components/review/InlineCommentComposer";
+import { PendingCommentCard } from "../components/review/PendingCommentCard";
+import { PendingReviewFab } from "../components/review/PendingReviewFab";
+import { ReviewSubmissionDialog } from "../components/review/ReviewSubmissionDialog";
+import { ReviewThreadComponent } from "../components/review/ReviewThread";
+import { SafePatchDiff } from "../components/SafePatchDiff";
+import { useEffectiveTheme } from "../hooks/useEffectiveTheme";
 import {
   PrChangedFile,
   PrInlineComment,
@@ -34,22 +51,13 @@ import {
   ReviewVerdict,
   rpc,
 } from "../ipc";
-import { DiffView, type CommentsByLine } from "./DiffView";
-import { aggregateCheckStatus } from "../components/CiStatusChip";
-import { SafePatchDiff } from "../components/SafePatchDiff";
-import { useEffectiveTheme } from "../hooks/useEffectiveTheme";
 import { diffOptions } from "../lib/diffTheme";
-import type { DiffLineAnnotation } from "@pierre/diffs/react";
-import type { SelectedLineRange } from "@pierre/diffs";
-import { PendingReviewProvider, usePendingReview } from "../review/PendingReviewContext";
 import { FileProgressProvider, useFileProgress } from "../review/FileProgressContext";
-import { PendingReviewFab } from "../components/review/PendingReviewFab";
-import { ReviewSubmissionDialog } from "../components/review/ReviewSubmissionDialog";
-import { InlineCommentComposer } from "../components/review/InlineCommentComposer";
-import { PendingCommentCard } from "../components/review/PendingCommentCard";
-import { ReviewThreadComponent } from "../components/review/ReviewThread";
+import { PendingReviewProvider, usePendingReview } from "../review/PendingReviewContext";
+import type { PendingComment, ReviewThread } from "../review/types";
 import { useOptimisticThreads, type OptimisticReviewThread } from "../review/useOptimisticThreads";
-import type { ReviewThread, PendingComment } from "../review/types";
+import { OpenRepo } from "../state";
+import { DiffView, type CommentsByLine } from "./DiffView";
 
 /** Metadata attached to each inline annotation in the diff. */
 type AnnotationMeta =
@@ -136,7 +144,6 @@ function threadsFromInlineComments(
   return threads;
 }
 
-
 // ── Main view ────────────────────────────────────────────────────────
 
 export function PullRequestView({ repo, prNumber, onClose }: Props) {
@@ -180,9 +187,15 @@ export function PullRequestView({ repo, prNumber, onClose }: Props) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 px-4 text-center">
         <GitPullRequest size={32} className="text-muted-foreground" />
-        <div className="text-sm text-foreground">Unable to load pull request</div>
-        <div className="max-w-[300px] text-[11px] text-muted-foreground">{error}</div>
-        <Button variant="outline" type="button" onClick={() => void fetchDetail()} className="mt-2 text-xs">Retry</Button>
+        <div className="text-sm text-foreground">
+          Unable to load pull request
+        </div>
+        <div className="max-w-[300px] text-[11px] text-muted-foreground">
+          {error}
+        </div>
+        <Button variant="outline" type="button" onClick={() => void fetchDetail()} className="mt-2 text-xs">
+          Retry
+        </Button>
       </div>
     );
   }
@@ -252,12 +265,16 @@ function PullRequestViewInner({ repo, prNumber, detail, onClose, onRefresh }: {
           <div className="min-w-0 flex-1">
             <h1 className="text-lg font-semibold text-foreground leading-tight">
               {detail.title}{" "}
-              <span className="font-normal text-muted-foreground">#{detail.number}</span>
+              <span className="font-normal text-muted-foreground">
+                #{detail.number}
+              </span>
             </h1>
             <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
               <PrStatusBadge status={detail.status} />
               <span>
-                <span className="font-medium text-foreground">{detail.author}</span>
+                <span className="font-medium text-foreground">
+                  {detail.author}
+                </span>
                 {" wants to merge into "}
                 <span className="rounded bg-info/10 px-1.5 py-0.5 font-mono text-[11px] text-info">
                   {detail.target_branch}
@@ -270,9 +287,16 @@ function PullRequestViewInner({ repo, prNumber, detail, onClose, onRefresh }: {
             </div>
           </div>
           {onClose && (
-            <button type="button" onClick={onClose} className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground" aria-label="Close">
+            <Button
+              variant="ghost"
+              size="compact"
+              type="button"
+              onClick={onClose}
+              className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+              aria-label="Close"
+            >
               <X size={18} />
-            </button>
+            </Button>
           )}
         </div>
 
@@ -337,7 +361,7 @@ function PullRequestViewInner({ repo, prNumber, detail, onClose, onRefresh }: {
       {/* Floating pending review badge — visible from all tabs */}
       <PendingReviewFab onClick={openSubmissionDialog} />
 
-      {/* Review submission dialog */}
+      {/* Floating pending review badge — visible from all tabs */}
       <ReviewSubmissionDialog
         open={submissionDialogOpen}
         onClose={() => setSubmissionDialogOpen(false)}
@@ -363,7 +387,9 @@ function TabButton({ id, active, onClick, icon: Icon, label, count, badge }: {
 }) {
   const isActive = active === id;
   return (
-    <button
+    <Button
+      variant="ghost"
+      size="compact"
       type="button"
       onClick={() => onClick(id)}
       className={clsx(
@@ -379,8 +405,10 @@ function TabButton({ id, active, onClick, icon: Icon, label, count, badge }: {
         </span>
       )}
       {badge}
-      {isActive && <span className="absolute bottom-0 left-0 right-0 h-[2px] rounded-t bg-primary" />}
-    </button>
+      {isActive && (
+        <span className="absolute bottom-0 left-0 right-0 h-[2px] rounded-t bg-primary" />
+      )}
+    </Button>
   );
 }
 
@@ -393,7 +421,6 @@ function DiffStatMini({ additions, deletions }: { additions: number; deletions: 
     </span>
   );
 }
-
 
 // ── Right sidebar (GitHub-style metadata) ────────────────────────────
 
@@ -437,9 +464,9 @@ function PrSidebar({ detail, repoId, prNumber, isAuthor, hasWriteAccess }: {
         <span className="text-muted-foreground">No one assigned</span>
       </SidebarSection>
 
-      {/* Labels */}
+      {/* Assignees */}
       <SidebarSection icon={Tag} title="Labels">
-        {(!detail.labels || detail.labels.length === 0) ? (
+        {!detail.labels || detail.labels.length === 0 ? (
           <span className="text-muted-foreground">None yet</span>
         ) : (
           <div className="flex flex-wrap gap-1">
@@ -510,7 +537,9 @@ function ReviewerRow({ name, verdict, repoId, prNumber, canReRequest }: {
         <span className="flex-1 truncate text-foreground">{name}</span>
         {verdictIcon()}
         {canReRequest && status !== "success" && (
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={() => void handleReRequest()}
             disabled={status === "loading"}
@@ -523,11 +552,13 @@ function ReviewerRow({ name, verdict, repoId, prNumber, canReRequest }: {
             ) : (
               <RefreshCw size={12} />
             )}
-          </button>
+          </Button>
         )}
       </div>
       {status === "error" && errorMsg && (
-        <div className="ml-7 mt-0.5 text-[10px] text-destructive">{errorMsg}</div>
+        <div className="ml-7 mt-0.5 text-[10px] text-destructive">
+          {errorMsg}
+        </div>
       )}
     </div>
   );
@@ -575,12 +606,12 @@ function ConversationTab({ detail, timeline, repo, prNumber, onRefresh, onOpenSu
         <CommentCard author={detail.author} createdAt={detail.created_at} body={detail.body} isOp />
       )}
 
-      {/* Timeline events */}
+      {/* PR body as first "comment" */}
       {timeline.map((event) => (
         <TimelineEventCard key={event.id} event={event} />
       ))}
 
-      {/* Comment input */}
+      {/* PR body as first "comment" */}
       <div className="rounded-lg border border-border bg-card">
         <div className="border-b border-border px-3 py-2 text-[11px] font-medium text-muted-foreground">
           Write
@@ -596,15 +627,21 @@ function ConversationTab({ detail, timeline, repo, prNumber, onRefresh, onOpenSu
         </div>
         <div className="flex items-center justify-end gap-2 border-t border-border px-3 py-2">
           <ReviewDropdown repo={repo} prNumber={prNumber} onRefresh={onRefresh} onOpenSubmissionDialog={onOpenSubmissionDialog} />
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="inline-flex items-center gap-1.5 rounded-md bg-success px-3 py-1.5 text-xs font-medium text-success-foreground hover:bg-success disabled:opacity-50"
             disabled={!commentBody.trim() || posting}
             onClick={() => void postComment()}
           >
-            {posting ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />}
+            {posting ? (
+              <Loader2 size={12} className="animate-spin" />
+            ) : (
+              <Send size={12} />
+            )}
             Comment
-          </button>
+          </Button>
         </div>
       </div>
     </div>
@@ -619,8 +656,14 @@ function CommentCard({ author, createdAt, body, isOp }: { author: string; create
           {author[0]?.toUpperCase()}
         </div>
         <span className="font-semibold text-foreground">{author}</span>
-        {isOp && <span className="rounded border border-border px-1 py-[1px] text-[9px] text-muted-foreground">Author</span>}
-        <span className="text-muted-foreground">commented {relativeTime(createdAt)}</span>
+        {isOp && (
+          <span className="rounded border border-border px-1 py-[1px] text-[9px] text-muted-foreground">
+            Author
+          </span>
+        )}
+        <span className="text-muted-foreground">
+          commented {relativeTime(createdAt)}
+        </span>
       </div>
       <div className="p-4 text-sm text-foreground leading-relaxed prose-agent">
         <Streamdown shikiTheme={["github-light", "github-dark"]}>
@@ -633,7 +676,9 @@ function CommentCard({ author, createdAt, body, isOp }: { author: string; create
 
 function TimelineEventCard({ event }: { event: PrTimelineEvent }) {
   if (event.kind === "comment") {
-    return <CommentCard author={event.author} createdAt={event.created_at} body={event.body ?? ""} />;
+    return (
+      <CommentCard author={event.author} createdAt={event.created_at} body={event.body ?? ""} />
+    );
   }
 
   if (event.kind === "review") {
@@ -645,7 +690,9 @@ function TimelineEventCard({ event }: { event: PrTimelineEvent }) {
         <div className="text-xs">
           <span className="font-semibold text-foreground">{event.author}</span>{" "}
           <VerdictLabel verdict={event.verdict} />{" "}
-          <span className="text-muted-foreground">{relativeTime(event.created_at)}</span>
+          <span className="text-muted-foreground">
+            {relativeTime(event.created_at)}
+          </span>
           {event.body && (
             <div className="mt-1 rounded border border-border bg-card p-3 text-sm text-foreground leading-relaxed prose-agent">
               <Streamdown shikiTheme={["github-light", "github-dark"]}>
@@ -664,8 +711,14 @@ function TimelineEventCard({ event }: { event: PrTimelineEvent }) {
         <GitCommitHorizontal size={14} className="text-muted-foreground" />
         <span className="font-semibold text-foreground">{event.author}</span>
         <span className="text-muted-foreground">pushed a commit</span>
-        {event.sha && <span className="font-mono text-[10px] text-muted-foreground">{event.sha.slice(0, 7)}</span>}
-        {event.subject && <span className="truncate text-foreground">{event.subject}</span>}
+        {event.sha && (
+          <span className="font-mono text-[10px] text-muted-foreground">
+            {event.sha.slice(0, 7)}
+          </span>
+        )}
+        {event.subject && (
+          <span className="truncate text-foreground">{event.subject}</span>
+        )}
       </div>
     );
   }
@@ -680,7 +733,10 @@ function VerdictIcon({ verdict }: { verdict?: ReviewVerdict }) {
 }
 
 function VerdictLabel({ verdict }: { verdict?: ReviewVerdict }) {
-  if (verdict === "approved") return <span className="font-medium text-success">approved these changes</span>;
+  if (verdict === "approved")
+    return (
+      <span className="font-medium text-success">approved these changes</span>
+    );
   if (verdict === "changes_requested") return <span className="font-medium text-warning">requested changes</span>;
   return <span className="text-muted-foreground">left a review</span>;
 }
@@ -690,14 +746,14 @@ function ReviewDropdown({ repo, prNumber, onRefresh, onOpenSubmissionDialog }: {
   const [submitting, setSubmitting] = useState(false);
   const { count } = usePendingReview();
 
-  const handleClick = () => {
+  const handleClick = (event: React.MouseEvent) => {
     // When there are pending comments, open the submission dialog instead
     // of the simple approve/request-changes dropdown.
     if (count > 0) {
+      event.preventDefault();
       onOpenSubmissionDialog();
       return;
     }
-    setOpen(!open);
   };
 
   const submit = async (event: "approve" | "request_changes") => {
@@ -710,23 +766,53 @@ function ReviewDropdown({ repo, prNumber, onRefresh, onOpenSubmissionDialog }: {
 
   return (
     <div className="relative">
-      <button type="button" onClick={handleClick} className="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1.5 text-xs text-foreground hover:bg-accent">
-        Review {count > 0 && <span className="rounded-full bg-warning/20 px-1.5 py-[1px] text-[10px] text-warning">{count}</span>} <ChevronDown size={10} />
-      </button>
-      {open && (
-        <div className="absolute bottom-full right-0 mb-1 w-48 rounded-lg border border-border bg-card p-1 shadow-lg">
-          <button type="button" disabled={submitting} onClick={() => void submit("approve")} className="flex w-full items-center gap-2 rounded px-3 py-2 text-xs text-foreground hover:bg-accent">
-            <CheckCircle2 size={14} className="text-success" /> Approve
-          </button>
-          <button type="button" disabled={submitting} onClick={() => void submit("request_changes")} className="flex w-full items-center gap-2 rounded px-3 py-2 text-xs text-foreground hover:bg-accent">
-            <ShieldAlert size={14} className="text-warning" /> Request changes
-          </button>
-        </div>
-      )}
+      <DropdownMenu open={open} onOpenChange={setOpen}>
+        <DropdownMenuTrigger asChild>
+          <Button
+            variant="ghost"
+            size="compact"
+            type="button"
+            onClick={handleClick}
+            className="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1.5 text-xs text-foreground hover:bg-accent"
+          >
+            Review{" "}
+            {count > 0 && (
+              <span className="rounded-full bg-warning/20 px-1.5 py-[1px] text-[10px] text-warning">
+                {count}
+              </span>
+            )}{" "}
+            <ChevronDown size={10} />
+          </Button>
+        </DropdownMenuTrigger>
+        {open && (
+          <DropdownMenuContent
+            side="top"
+            align="end"
+            className="p-0 w-48 rounded-lg border border-border bg-card p-1"
+          >
+            <DropdownMenuGroup>
+              <DropdownMenuItem
+                disabled={submitting}
+                onSelect={() => void submit("approve")}
+                className="flex w-full items-center gap-2 rounded px-3 py-2 text-xs text-foreground hover:bg-accent"
+              >
+                <CheckCircle2 size={14} className="text-success" /> Approve
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                disabled={submitting}
+                onSelect={() => void submit("request_changes")}
+                className="flex w-full items-center gap-2 rounded px-3 py-2 text-xs text-foreground hover:bg-accent"
+              >
+                <ShieldAlert size={14} className="text-warning" /> Request
+                changes
+              </DropdownMenuItem>
+            </DropdownMenuGroup>
+          </DropdownMenuContent>
+        )}
+      </DropdownMenu>
     </div>
   );
 }
-
 
 // ── Checks tab ───────────────────────────────────────────────────────
 
@@ -738,7 +824,9 @@ function ChecksTab({ checks }: { checks: import("../ipc").CiCheck[] }) {
     return (
       <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
         <CheckCircle2 size={32} className="mb-2 opacity-40" />
-        <span className="text-sm">No checks configured for this pull request</span>
+        <span className="text-sm">
+          No checks configured for this pull request
+        </span>
       </div>
     );
   }
@@ -747,16 +835,24 @@ function ChecksTab({ checks }: { checks: import("../ipc").CiCheck[] }) {
     <div className="mx-auto max-w-3xl">
       {/* Summary bar */}
       <div className={clsx("mb-4 flex items-center gap-3 rounded-lg border p-4 text-sm", status === "success" ? "border-success/30 bg-success/5" : status === "failure" ? "border-destructive/30 bg-destructive/5" : "border-warning/30 bg-warning/5")}>
-        {status === "success" && <CheckCircle2 size={20} className="text-success" />}
-        {status === "failure" && <XCircle size={20} className="text-destructive" />}
-        {(status === "running" || status === "pending") && <Clock size={20} className="text-warning" />}
+        {status === "success" && (
+          <CheckCircle2 size={20} className="text-success" />
+        )}
+        {status === "failure" && (
+          <XCircle size={20} className="text-destructive" />
+        )}
+        {(status === "running" || status === "pending") && (
+          <Clock size={20} className="text-warning" />
+        )}
         <span className="flex-1 text-foreground font-medium">
           {status === "success" && "All checks have passed"}
           {status === "failure" && "Some checks were not successful"}
           {status === "running" && "Some checks are still running"}
           {status === "pending" && "Some checks are pending"}
         </span>
-        <span className="text-xs text-muted-foreground">{passed} / {checks.length} successful</span>
+        <span className="text-xs text-muted-foreground">
+          {passed} / {checks.length} successful
+        </span>
       </div>
 
       {/* Check list */}
@@ -764,14 +860,22 @@ function ChecksTab({ checks }: { checks: import("../ipc").CiCheck[] }) {
         {checks.map((check) => (
           <div key={check.name} className="flex items-center gap-3 px-4 py-3">
             <CheckIcon check={check} />
-            <span className="min-w-0 flex-1 truncate text-sm text-foreground">{check.name}</span>
+            <span className="min-w-0 flex-1 truncate text-sm text-foreground">
+              {check.name}
+            </span>
             <span className="text-xs text-muted-foreground">
               {check.status === "completed" ? (check.conclusion ?? "done") : check.status}
             </span>
             {check.url && (
-              <button type="button" onClick={() => window.open(check.url!, "_blank", "noopener")} className="text-[10px] text-primary hover:underline">
+              <Button
+                variant="ghost"
+                size="compact"
+                type="button"
+                onClick={() => window.open(check.url!, "_blank", "noopener")}
+                className="text-[10px] text-primary hover:underline"
+              >
                 Details
-              </button>
+              </Button>
             )}
           </div>
         ))}
@@ -1017,31 +1121,36 @@ function FilesTabInner({ files, repo, inlineComments, prNumber, onRefresh, baseB
   }, [composerState, handleComposerSubmit, handleComposerCancel, updateComment, removeComment, currentUser, hasWriteAccess, replyToThread, resolveThread, editThreadComment, deleteThreadComment, retryReply, dismissFailedReply, dismissResolveError]);
 
   // Build diff options with gutter utility (GitHub-style "+" button on hover)
-  const reviewDiffOptions = useCallback((filePath: string) => {
-    const base = prDiffOptions(effective);
-    return {
-      ...base,
-      enableGutterUtility: true,
-      enableLineSelection: true,
-      onGutterUtilityClick: (range: SelectedLineRange) => {
-        const side = range.side === "deletions" ? "LEFT" as const : "RIGHT" as const;
-        if (range.start === range.end) {
+  const reviewDiffOptions = useCallback(
+    (filePath: string) => {
+      const base = prDiffOptions(effective);
+      return {
+        ...base,
+        enableGutterUtility: true,
+        enableLineSelection: true,
+        onGutterUtilityClick: (range: SelectedLineRange) => {
+          const side =
+            range.side === "deletions" ? ("LEFT" as const) : ("RIGHT" as const);
+          if (range.start === range.end) {
           handleCommentLine(filePath, range.start, side);
         } else {
           handleCommentRange(filePath, range.start, range.end, side);
         }
-      },
-      onLineSelected: (range: SelectedLineRange | null) => {
-        if (!range) return;
-        const side = range.side === "deletions" ? "LEFT" as const : "RIGHT" as const;
-        if (range.start === range.end) {
+        },
+        onLineSelected: (range: SelectedLineRange | null) => {
+          if (!range) return;
+          const side =
+            range.side === "deletions" ? ("LEFT" as const) : ("RIGHT" as const);
+          if (range.start === range.end) {
           handleCommentLine(filePath, range.start, side);
         } else {
           handleCommentRange(filePath, range.start, range.end, side);
         }
-      },
-    };
-  }, [effective, handleCommentLine, handleCommentRange]);
+        },
+      };
+    },
+    [effective, handleCommentLine, handleCommentRange],
+  );
 
   const scrollToFile = useCallback((path: string) => {
     setActiveFile(path);
@@ -1085,21 +1194,29 @@ function FilesTabInner({ files, repo, inlineComments, prNumber, onRefresh, baseB
       {/* Sticky summary header */}
       <div className="shrink-0 flex items-center justify-between border-b border-border bg-card px-4 py-2.5">
         <div className="flex items-center gap-4 text-xs">
-          <span className="font-medium text-foreground">{files.length} files changed</span>
+          <span className="font-medium text-foreground">
+            {files.length} files changed
+          </span>
           <span className="flex items-center gap-1.5">
-            <span className="font-semibold text-success">+{totalAdditions.toLocaleString()}</span>
-            <span className="font-semibold text-destructive">-{totalDeletions.toLocaleString()}</span>
+            <span className="font-semibold text-success">
+              +{totalAdditions.toLocaleString()}
+            </span>
+            <span className="font-semibold text-destructive">
+              -{totalDeletions.toLocaleString()}
+            </span>
           </span>
           <DiffBar additions={totalAdditions} deletions={totalDeletions} />
         </div>
         {/* File progress indicator */}
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <Eye size={12} />
-          <span>{viewedCount}/{totalFiles} files viewed</span>
+          <span>
+            {viewedCount}/{totalFiles} files viewed
+          </span>
         </div>
       </div>
 
-      {/* Two-pane layout: file sidebar + diffs */}
+      {/* File sidebar */}
       <div className="grid min-h-0 flex-1 grid-cols-[280px_1fr]">
         {/* File sidebar */}
         <aside className="min-h-0 overflow-auto border-r border-border bg-card">
@@ -1122,11 +1239,10 @@ function FilesTabInner({ files, repo, inlineComments, prNumber, onRefresh, baseB
                     )}
                   >
                     {/* Viewed checkbox */}
-                    <input
-                      type="checkbox"
+                    <Checkbox
+                      onClick={(event) => event.stopPropagation()}
                       checked={viewed}
-                      onChange={(e) => {
-                        e.stopPropagation();
+                      onCheckedChange={() => {
                         if (viewed) markUnviewed(file.path);
                         else markViewed(file.path);
                       }}
@@ -1134,17 +1250,19 @@ function FilesTabInner({ files, repo, inlineComments, prNumber, onRefresh, baseB
                       title={viewed ? "Mark as unviewed" : "Mark as viewed"}
                       aria-label={viewed ? `Mark ${file.path} as unviewed` : `Mark ${file.path} as viewed`}
                     />
-                    <button
+                    <Button
+                      variant="ghost"
+                      size="compact"
                       type="button"
                       onClick={() => scrollToFile(file.path)}
-                      className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                      className="justify-start flex min-w-0 flex-1 items-center gap-2 text-left"
                       title={file.path}
                     >
                       <FileCode2 size={11} className="shrink-0 text-muted-foreground" />
                       <span className="min-w-0 flex-1 truncate font-mono">
                         {file.path}
                       </span>
-                    </button>
+                    </Button>
                     <span className="shrink-0 flex items-center gap-1 text-[10px]">
                       {allResolved && (
                         <span title="All threads resolved">
@@ -1161,7 +1279,9 @@ function FilesTabInner({ files, repo, inlineComments, prNumber, onRefresh, baseB
                         <span className="text-success">+{file.additions}</span>
                       )}
                       {file.deletions > 0 && (
-                        <span className="text-destructive">-{file.deletions}</span>
+                        <span className="text-destructive">
+                          -{file.deletions}
+                        </span>
                       )}
                     </span>
                   </div>
@@ -1193,7 +1313,9 @@ function FilesTabInner({ files, repo, inlineComments, prNumber, onRefresh, baseB
                       : "bg-card/95 hover:bg-accent/95",
                   )}
                 >
-                  <button
+                  <Button
+                    variant="ghost"
+                    size="compact"
                     type="button"
                     onClick={() => setActiveFile(file.path)}
                     className="flex min-w-0 flex-1 items-center gap-2"
@@ -1202,13 +1324,17 @@ function FilesTabInner({ files, repo, inlineComments, prNumber, onRefresh, baseB
                     <span className="min-w-0 flex-1 truncate font-mono text-[12px] font-medium text-foreground">
                       {file.path}
                     </span>
-                  </button>
+                  </Button>
                   <span className="flex items-center gap-2 text-[10px] text-muted-foreground">
                     {file.additions > 0 && (
-                      <span className="font-semibold text-success">+{file.additions}</span>
+                      <span className="font-semibold text-success">
+                        +{file.additions}
+                      </span>
                     )}
                     {file.deletions > 0 && (
-                      <span className="font-semibold text-destructive">-{file.deletions}</span>
+                      <span className="font-semibold text-destructive">
+                        -{file.deletions}
+                      </span>
                     )}
                   </span>
                   <DiffBar additions={file.additions} deletions={file.deletions} />

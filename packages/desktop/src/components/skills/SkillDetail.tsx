@@ -1,10 +1,12 @@
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
-import { useState } from "react";
-import { Trash2, Edit3, Check, X, Globe, FolderGit2 } from "lucide-react";
-import { useSkills } from "../../state/skills-store";
-import { publishToast } from "../../lib/toasts";
+import { Check, Edit3, FolderGit2, Globe, Trash2, X } from "lucide-react";
 import { marked } from "marked";
+import { useState } from "react";
+import { publishToast } from "../../lib/toasts";
+import { useSkills } from "../../state/skills-store";
 
 function renderMarkdown(text: string): string {
   if (!text) return "";
@@ -125,84 +127,90 @@ export function SkillDetail() {
               onChange={(e) => setEditDesc(e.target.value)}
             />
           ) : (
-            <p className="text-xs text-muted-foreground mt-1">{skill.record.description}</p>
+            <p className="text-xs text-muted-foreground mt-1">
+              {skill.record.description}
+            </p>
           )}
         </div>
         <div className="flex items-center gap-1 ml-4 shrink-0">
           {editing ? (
             <>
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 className="p-1.5 rounded hover:bg-success/10 text-success transition-colors"
                 onClick={saveEdit}
                 disabled={saving}
                 title="Save"
               >
                 <Check size={16} />
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="ghost"
+                size="compact"
                 className="p-1.5 rounded hover:bg-destructive/10 text-destructive transition-colors"
                 onClick={cancelEdit}
                 title="Cancel"
               >
                 <X size={16} />
-              </button>
+              </Button>
             </>
           ) : confirmDelete ? (
             <>
-              <span className="text-xs text-destructive font-medium mr-1">Delete?</span>
-              <button
+              <span className="text-xs text-destructive font-medium mr-1">
+                Delete?
+              </span>
+              <Button
+                variant="destructive"
+                size="compact"
                 className="p-1.5 rounded bg-destructive text-destructive-foreground hover:opacity-90 transition-opacity"
                 onClick={handleDelete}
                 disabled={deleting}
                 title="Confirm delete"
               >
                 <Check size={16} />
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="ghost"
+                size="compact"
                 className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
                 onClick={() => setConfirmDelete(false)}
                 title="Cancel"
               >
                 <X size={16} />
-              </button>
+              </Button>
             </>
           ) : (
             <>
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
                 onClick={startEdit}
                 title="Edit skill"
               >
                 <Edit3 size={16} />
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="ghost"
+                size="compact"
                 className="p-1.5 rounded hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-colors"
                 onClick={() => setConfirmDelete(true)}
                 title="Delete skill"
               >
                 <Trash2 size={16} />
-              </button>
+              </Button>
             </>
           )}
         </div>
       </div>
 
-      {/* Enabled toggle */}
+      {/* Agent Sync Status */}
       <div className="flex items-center gap-2">
-        <button
-          className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
-            skill.record.enabled ? "bg-primary" : "bg-border"
-          }`}
-          onClick={() => toggleEnabled(skill.record.id, !skill.record.enabled)}
-          role="switch"
-          aria-checked={skill.record.enabled}
-        >
-          <span
-            className={`inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform ${
-              skill.record.enabled ? "translate-x-[18px]" : "translate-x-[2px]"
-            }`}
-          />
-        </button>
+        <Switch
+          checked={skill.record.enabled}
+          onCheckedChange={() => toggleEnabled(skill.record.id, !skill.record.enabled)}
+        />
         <span className="text-xs text-muted-foreground">
           {skill.record.enabled ? "Enabled" : "Disabled"}
         </span>
@@ -263,7 +271,11 @@ export function SkillDetail() {
         </h4>
         <div className="space-y-1 text-xs">
           <div className="flex items-center gap-2">
-            {skill.record.scope === "user" ? <Globe size={12} className="text-muted-foreground" /> : <FolderGit2 size={12} className="text-muted-foreground" />}
+            {skill.record.scope === "user" ? (
+              <Globe size={12} className="text-muted-foreground" />
+            ) : (
+              <FolderGit2 size={12} className="text-muted-foreground" />
+            )}
             <span className="text-muted-foreground">Scope:</span>
             <span className="text-foreground">{skill.record.scope}</span>
           </div>
@@ -282,7 +294,9 @@ export function SkillDetail() {
           {skill.record.sourceUrl && (
             <div className="flex items-center gap-2">
               <span className="text-muted-foreground">Source:</span>
-              <span className="text-foreground truncate">{skill.record.sourceUrl}</span>
+              <span className="text-foreground truncate">
+                {skill.record.sourceUrl}
+              </span>
             </div>
           )}
         </div>

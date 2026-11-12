@@ -1,5 +1,4 @@
 import { Button } from "@/components/ui/button";
-import { useEffect, useMemo, useState } from "react";
 import clsx from "clsx";
 import {
   CheckCircle2,
@@ -10,17 +9,18 @@ import {
   Upload,
   XCircle,
 } from "lucide-react";
-import { OpenRepo } from "../state";
+import { useEffect, useMemo, useState } from "react";
+import { ForcePushConfirmDialog } from "../components/push/ForcePushConfirmDialog";
+import { PushTargetCard } from "../components/push/PushTargetCard";
 import { PUSH_STEPS, PushPhaseGroup, useCrabPushFlow } from "../hooks/usePushFlow";
 import {
   loadPersistedRemote,
   persistRemote,
   usePushTarget,
 } from "../hooks/usePushTarget";
-import { formatBytes, formatDuration } from "../lib/format";
 import { rpc } from "../ipc";
-import { PushTargetCard } from "../components/push/PushTargetCard";
-import { ForcePushConfirmDialog } from "../components/push/ForcePushConfirmDialog";
+import { formatBytes, formatDuration } from "../lib/format";
+import { OpenRepo } from "../state";
 
 interface Props {
   repo: OpenRepo;
@@ -169,7 +169,7 @@ export function PushFlowPanel({ repo, onComplete }: Props) {
         Push to Remote
       </div>
 
-      {/* Always-visible target card */}
+      {/* Header */}
       <PushTargetCard
         target={target}
         selectedRemote={selectedRemote}
@@ -303,7 +303,10 @@ export function PushFlowPanel({ repo, onComplete }: Props) {
             </div>
             <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-muted-foreground">
               <div>
-                <span className="text-foreground">{state.summary.refs_pushed}</span> ref
+                <span className="text-foreground">
+                  {state.summary.refs_pushed}
+                </span>{" "}
+                ref
                 {state.summary.refs_pushed !== 1 ? "s" : ""} pushed
               </div>
               <div>
@@ -313,7 +316,10 @@ export function PushFlowPanel({ repo, onComplete }: Props) {
                 uploaded
               </div>
               <div>
-                <span className="text-foreground">{state.summary.xorbs_created ?? "–"}</span> xorbs
+                <span className="text-foreground">
+                  {state.summary.xorbs_created ?? "–"}
+                </span>{" "}
+                xorbs
               </div>
               <div>
                 <span className="text-foreground">
@@ -324,20 +330,28 @@ export function PushFlowPanel({ repo, onComplete }: Props) {
             {selected && (
               <div className="mt-2 border-t border-success/20 pt-2 text-xs text-muted-foreground">
                 Pushed to{" "}
-                <code className="font-mono text-foreground">{selected.name}</code>{" "}
+                <code className="font-mono text-foreground">
+                  {selected.name}
+                </code>{" "}
                 <span className="break-all font-mono">{selected.url}</span>
               </div>
             )}
           </div>
 
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
             onClick={() => setShowDetails(!showDetails)}
           >
-            {showDetails ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+            {showDetails ? (
+              <ChevronDown size={12} />
+            ) : (
+              <ChevronRight size={12} />
+            )}
             Step timings
-          </button>
+          </Button>
           {showDetails && (
             <div className="space-y-1 text-xs">
               {state.steps
@@ -345,7 +359,9 @@ export function PushFlowPanel({ repo, onComplete }: Props) {
                 .map((s) => (
                   <div key={s.index} className="flex justify-between text-muted-foreground">
                     <span>{PUSH_STEPS[s.index - 1]?.label ?? s.name}</span>
-                    <span className="font-mono">{formatDuration(s.duration_ms!)}</span>
+                    <span className="font-mono">
+                      {formatDuration(s.duration_ms!)}
+                    </span>
                   </div>
                 ))}
             </div>
@@ -464,10 +480,10 @@ function PipelineStepper({
                       {def.label}
                     </span>
                     {step?.duration_ms !== null && step?.duration_ms !== undefined && (
-                      <span className="font-mono text-muted-foreground">
-                        {formatDuration(step.duration_ms)}
-                      </span>
-                    )}
+                        <span className="font-mono text-muted-foreground">
+                          {formatDuration(step.duration_ms)}
+                        </span>
+                      )}
                   </div>
                 );
               })}
@@ -482,12 +498,16 @@ function PipelineStepper({
 function StepIcon({ status }: { status: string }) {
   switch (status) {
     case "running":
-      return <Loader2 size={10} className="shrink-0 animate-spin text-primary" />;
+      return (
+        <Loader2 size={10} className="shrink-0 animate-spin text-primary" />
+      );
     case "done":
       return <CheckCircle2 size={10} className="shrink-0 text-success" />;
     case "error":
       return <XCircle size={10} className="shrink-0 text-destructive" />;
     default:
-      return <div className="h-[10px] w-[10px] shrink-0 rounded-full border border-border" />;
+      return (
+        <div className="h-[10px] w-[10px] shrink-0 rounded-full border border-border" />
+      );
   }
 }

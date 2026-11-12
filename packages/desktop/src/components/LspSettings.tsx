@@ -1,4 +1,7 @@
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 /**
  * LspSettings — "Language Servers" section for the Settings view.
@@ -8,7 +11,6 @@ import { Textarea } from "@/components/ui/textarea";
  * display toggles.
  */
 
-import { useCallback, useEffect, useState } from "react";
 import {
   Check,
   ChevronDown,
@@ -18,6 +20,7 @@ import {
   Minus,
   X,
 } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
 import type { LspDiscoveredServer, LspServerStatusInfo } from "../ipc";
 
 // ── Install guide URLs ──────────────────────────────────────────────
@@ -182,14 +185,20 @@ export function LspSettings({ config, onConfigChange }: Props) {
             <div key={language} className="rounded border border-border bg-background">
               {/* Server row */}
               <div className="flex items-center gap-2 px-3 py-2">
-                <button
+                <Button
+                  variant="ghost"
+                  size="compact"
                   type="button"
                   className="shrink-0 text-muted-foreground hover:text-foreground"
                   onClick={() => setExpandedServer(isExpanded ? null : language)}
                   aria-label={isExpanded ? "Collapse" : "Expand"}
                 >
-                  {isExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-                </button>
+                  {isExpanded ? (
+                    <ChevronDown size={12} />
+                  ) : (
+                    <ChevronRight size={12} />
+                  )}
+                </Button>
 
                 <span className="text-xs font-medium text-foreground capitalize flex-1">
                   {language}
@@ -199,22 +208,11 @@ export function LspSettings({ config, onConfigChange }: Props) {
                 <ServerStatusChip status={status} found={!!disc} />
 
                 {/* Enable/disable toggle */}
-                <button
-                  type="button"
-                  onClick={() => toggleServer(language)}
-                  className={`relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition ${
-                    enabled ? "bg-primary" : "bg-border"
-                  }`}
-                  role="switch"
-                  aria-checked={enabled}
+                <Switch
                   aria-label={`${enabled ? "Disable" : "Enable"} ${language} language server`}
-                >
-                  <span
-                    className={`inline-block h-3 w-3 rounded-full bg-white transition-transform ${
-                      enabled ? "translate-x-3.5" : "translate-x-0.5"
-                    }`}
-                  />
-                </button>
+                  checked={enabled}
+                  onCheckedChange={() => toggleServer(language)}
+                />
               </div>
 
               {/* Expanded config editor */}
@@ -242,10 +240,9 @@ export function LspSettings({ config, onConfigChange }: Props) {
               key={language}
               className="flex items-center gap-2 px-3 py-1 text-xs text-foreground cursor-pointer hover:bg-accent rounded"
             >
-              <input
-                type="checkbox"
+              <Checkbox
                 checked={config.formatOnSave[language] ?? false}
-                onChange={() => toggleFormatOnSave(language)}
+                onCheckedChange={() => toggleFormatOnSave(language)}
                 className="rounded border-border text-primary focus:ring-primary h-3 w-3"
               />
               <span className="capitalize">{language}</span>
@@ -260,19 +257,17 @@ export function LspSettings({ config, onConfigChange }: Props) {
           Diagnostic Display
         </h4>
         <label className="flex items-center gap-2 px-3 py-1 text-xs text-foreground cursor-pointer hover:bg-accent rounded">
-          <input
-            type="checkbox"
+          <Checkbox
             checked={config.diagnostics.showInFileTree}
-            onChange={() => toggleDiagnosticDisplay("showInFileTree")}
+            onCheckedChange={() => toggleDiagnosticDisplay("showInFileTree")}
             className="rounded border-border text-primary focus:ring-primary h-3 w-3"
           />
           Show diagnostics in file tree
         </label>
         <label className="flex items-center gap-2 px-3 py-1 text-xs text-foreground cursor-pointer hover:bg-accent rounded">
-          <input
-            type="checkbox"
+          <Checkbox
             checked={config.diagnostics.showInTabs}
-            onChange={() => toggleDiagnosticDisplay("showInTabs")}
+            onCheckedChange={() => toggleDiagnosticDisplay("showInTabs")}
             className="rounded border-border text-primary focus:ring-primary h-3 w-3"
           />
           Show diagnostics in editor tabs
@@ -361,7 +356,9 @@ function ServerConfigEditor({
     <div className="border-t border-border px-3 py-2 space-y-2">
       {/* Command */}
       <div>
-        <label className="block text-[10px] text-muted-foreground mb-0.5">Command</label>
+        <label className="block text-[10px] text-muted-foreground mb-0.5">
+          Command
+        </label>
         <Input
           type="text"
           value={command}
@@ -373,7 +370,9 @@ function ServerConfigEditor({
 
       {/* Args */}
       <div>
-        <label className="block text-[10px] text-muted-foreground mb-0.5">Arguments</label>
+        <label className="block text-[10px] text-muted-foreground mb-0.5">
+          Arguments
+        </label>
         <Input
           type="text"
           value={args.join(" ")}
@@ -401,7 +400,9 @@ function ServerConfigEditor({
 
       {/* Install guide link (shown when server not found) */}
       {!discovered && guide && (
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={() => {
             if (typeof window.crab?.fsOpenExternal === "function") {
@@ -414,7 +415,7 @@ function ServerConfigEditor({
         >
           <ExternalLink size={10} />
           Install {guide.label}
-        </button>
+        </Button>
       )}
 
       {/* Version info */}

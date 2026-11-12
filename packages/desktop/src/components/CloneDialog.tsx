@@ -1,9 +1,16 @@
-import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { NativeSelect } from "@/components/ui/native-select";
-import { StorageConfigSection } from "../views/StorageConfigSection";
-import { useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 import {
   AlertCircle,
@@ -19,11 +26,13 @@ import {
   Server,
   X,
 } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { dialogs, nextJobId, rpc } from "../ipc";
-import { useStore } from "../state";
-import { useSetting } from "../settings";
-import { useJobLines } from "../lib/useJobLines";
 import { localPathName } from "../lib/local-path-name";
+import { useJobLines } from "../lib/useJobLines";
+import { useSetting } from "../settings";
+import { useStore } from "../state";
+import { StorageConfigSection } from "../views/StorageConfigSection";
 import { ManagedRepositoryPicker } from "./ManagedRepositoryPicker";
 
 // ─── Types ──────────────────────────────────────────────────────────
@@ -35,7 +44,6 @@ type RepoProvider =
   | "managed"
   | "crab"
   | "url";
-
 
 interface ProviderDef {
   id: RepoProvider;
@@ -310,7 +318,6 @@ export function CloneDialog({ open, onClose, targetWorkspaceRootPath }: Props) {
     setError(null);
   }, [provider]);
 
-
   if (!open) return null;
 
   async function pickDest() {
@@ -416,48 +423,58 @@ export function CloneDialog({ open, onClose, targetWorkspaceRootPath }: Props) {
   }
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
-      onClick={handleClose}
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="clone-dialog-title"
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) {
+          handleClose();
+        }
+      }}
     >
-      <div
-        className="flex max-h-[85vh] w-[min(720px,92vw)] flex-col rounded-xl border border-border bg-card shadow-2xl"
+      <DialogContent
+        showCloseButton={false}
+        aria-describedby={undefined}
+        className="block gap-0 p-0 flex max-h-[85vh] w-[min(720px,92vw)] flex-col rounded-xl border border-border bg-card shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
         <div className="flex items-center justify-between border-b border-border px-5 py-4">
           <div>
-            <h2 id="clone-dialog-title" className="text-base font-semibold">
+            <DialogTitle className="text-base font-semibold">
               Clone Repository
-            </h2>
+            </DialogTitle>
             {targetWorkspaceRootPath && (
               <p className="mt-0.5 text-[11px] text-muted-foreground">
-                Into workspace: <span className="font-medium text-primary">{localPathName(targetWorkspaceRootPath)}</span>
+                Into workspace:{" "}
+                <span className="font-medium text-primary">
+                  {localPathName(targetWorkspaceRootPath)}
+                </span>
               </p>
             )}
           </div>
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
             onClick={handleClose}
             aria-label="Close"
           >
             <X size={18} />
-          </button>
+          </Button>
         </div>
 
-        {/* Scrollable body */}
+        {/* Header */}
         <div className="flex-1 overflow-y-auto px-5 py-4">
-          {/* Provider selector */}
+          {/* Scrollable body */}
           <label className="mb-2 block text-xs font-medium text-muted-foreground uppercase tracking-wide">
             Provider
           </label>
           <div className="mb-4 grid grid-cols-3 gap-2 sm:grid-cols-6">
             {PROVIDERS.map((p) => (
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 key={p.id}
                 type="button"
                 className={clsx(
@@ -469,9 +486,11 @@ export function CloneDialog({ open, onClose, targetWorkspaceRootPath }: Props) {
                 onClick={() => setProvider(p.id)}
                 title={p.description}
               >
-                <span className="flex h-6 w-6 items-center justify-center">{p.icon}</span>
+                <span className="flex h-6 w-6 items-center justify-center">
+                  {p.icon}
+                </span>
                 <span className="font-medium">{p.label}</span>
-              </button>
+              </Button>
             ))}
           </div>
 
@@ -489,7 +508,9 @@ export function CloneDialog({ open, onClose, targetWorkspaceRootPath }: Props) {
             </div>
           ) : (
             <>
-              <label className="mb-1 block text-xs text-muted-foreground">Remote URL</label>
+              <label className="mb-1 block text-xs text-muted-foreground">
+                Remote URL
+              </label>
               <Input
                 className="mb-3 w-full font-mono text-sm"
                 placeholder={currentProvider.placeholder}
@@ -500,8 +521,10 @@ export function CloneDialog({ open, onClose, targetWorkspaceRootPath }: Props) {
             </>
           )}
 
-          {/* Destination folder */}
-          <label className="mb-1 block text-xs text-muted-foreground">Destination folder</label>
+          {/* Integration status banner for forge providers */}
+          <label className="mb-1 block text-xs text-muted-foreground">
+            Destination folder
+          </label>
           {isWorkspaceClone ? (
             /* Workspace clone: destination is pre-populated and immutable */
             <div className="flex gap-2">
@@ -533,13 +556,18 @@ export function CloneDialog({ open, onClose, targetWorkspaceRootPath }: Props) {
             </p>
           )}
           {!isWorkspaceClone && repoSlug && !dest.endsWith(repoSlug) && dest && (
-            <p className="mt-1 mb-3 text-[10px] text-warning">
-              Tip: The repo will be cloned into a new "{repoSlug}" subdirectory inside the selected folder.
-            </p>
-          )}
-          {(!isWorkspaceClone && (!repoSlug || dest.endsWith(repoSlug) || !dest)) && <div className="mb-4" />}
+              <p className="mt-1 mb-3 text-[10px] text-warning">
+                Tip: The repo will be cloned into a new "{repoSlug}"
+                subdirectory inside the selected folder.
+              </p>
+            )}
+          {!isWorkspaceClone && (!repoSlug || dest.endsWith(repoSlug) || !dest) && (
+              <div className="mb-4" />
+            )}
 
-          {provider === "crab" && <StorageConfigSection onSelect={setStorageConnectionId} selectedId={storageConnectionId} />}
+          {provider === "crab" && (
+            <StorageConfigSection onSelect={setStorageConnectionId} selectedId={storageConnectionId} />
+          )}
 
           {/* Advanced options */}
           <AdvancedOptionsSection
@@ -550,12 +578,12 @@ export function CloneDialog({ open, onClose, targetWorkspaceRootPath }: Props) {
             isCrab={provider === "crab" || provider === "managed"}
           />
 
-          {/* Clone progress */}
+          {/* Advanced options */}
           {busy && progressLines.length > 0 && (
             <CloneProgress lines={progressLines} />
           )}
 
-          {/* Error display */}
+          {/* Advanced options */}
           {error && (
             <div className="mt-3 flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
               <AlertCircle size={14} className="mt-0.5 shrink-0" />
@@ -564,7 +592,7 @@ export function CloneDialog({ open, onClose, targetWorkspaceRootPath }: Props) {
           )}
         </div>
 
-        {/* Footer */}
+        {/* Clone progress */}
         <div className="flex items-center justify-end gap-2 border-t border-border px-5 py-3">
           <Button variant="outline" type="button" onClick={handleClose} disabled={busy}>
             Cancel
@@ -588,8 +616,8 @@ export function CloneDialog({ open, onClose, targetWorkspaceRootPath }: Props) {
             )}
           </Button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -708,7 +736,10 @@ function IntegrationBanner({
         <p className="mt-1.5 text-xs text-muted-foreground">
           You can still clone public repositories. To access private repos,
           connect your {providerLabel} account in{" "}
-          <span className="font-medium text-foreground">Settings → Integrations</span>.
+          <span className="font-medium text-foreground">
+            Settings → Integrations
+          </span>
+          .
         </p>
         <Button variant="outline"
           type="button"
@@ -759,7 +790,9 @@ function AdvancedOptionsSection({
 
   return (
     <div>
-      <button
+      <Button
+        variant="ghost"
+        size="compact"
         type="button"
         className="flex w-full items-center gap-2 rounded-lg border border-border bg-background px-3 py-2.5 text-xs text-muted-foreground hover:border-primary/50 hover:text-foreground transition"
         onClick={() => setShowAdvanced(!showAdvanced)}
@@ -772,7 +805,7 @@ function AdvancedOptionsSection({
             {activeCount} active
           </span>
         )}
-      </button>
+      </Button>
 
       {showAdvanced && (
         <div className="mt-2 rounded-lg border border-border bg-background p-4 space-y-3">
@@ -780,7 +813,10 @@ function AdvancedOptionsSection({
           <div className="flex items-start gap-3">
             <Checkbox
               checked={advanced.shallow}
-              onChange={(v) => setAdvanced((p) => ({ ...p, shallow: v }))}
+              onCheckedChange={(checked) => {
+                const v = checked === true;
+                return setAdvanced((p) => ({ ...p, shallow: v }));
+              }}
               id="opt-shallow"
             />
             <div className="flex-1">
@@ -792,7 +828,9 @@ function AdvancedOptionsSection({
               </p>
               {advanced.shallow && (
                 <div className="mt-1.5 flex items-center gap-2">
-                  <label className="text-[10px] text-muted-foreground">Depth:</label>
+                  <label className="text-[10px] text-muted-foreground">
+                    Depth:
+                  </label>
                   <Input
                     type="number"
                     min={1}
@@ -812,7 +850,10 @@ function AdvancedOptionsSection({
           <div className="flex items-start gap-3">
             <Checkbox
               checked={advanced.singleBranch}
-              onChange={(v) => setAdvanced((p) => ({ ...p, singleBranch: v }))}
+              onCheckedChange={(checked) => {
+                const v = checked === true;
+                return setAdvanced((p) => ({ ...p, singleBranch: v }));
+              }}
               id="opt-single-branch"
             />
             <div className="flex-1">
@@ -824,7 +865,9 @@ function AdvancedOptionsSection({
               </p>
               {advanced.singleBranch && (
                 <div className="mt-1.5 flex items-center gap-2">
-                  <label className="text-[10px] text-muted-foreground">Branch:</label>
+                  <label className="text-[10px] text-muted-foreground">
+                    Branch:
+                  </label>
                   <Input
                     type="text"
                     className="flex-1 text-xs"
@@ -842,7 +885,10 @@ function AdvancedOptionsSection({
             <div className="flex items-start gap-3">
               <Checkbox
                 checked={advanced.sparseCheckout}
-                onChange={(v) => setAdvanced((p) => ({ ...p, sparseCheckout: v }))}
+                onCheckedChange={(checked) => {
+                  const v = checked === true;
+                  return setAdvanced((p) => ({ ...p, sparseCheckout: v }));
+                }}
                 id="opt-sparse"
               />
               <div className="flex-1">
@@ -874,9 +920,10 @@ function AdvancedOptionsSection({
           <div className="flex items-start gap-3">
             <Checkbox
               checked={!!advanced.filter}
-              onChange={(v) =>
-                setAdvanced((p) => ({ ...p, filter: v ? "blob:none" : "" }))
-              }
+              onCheckedChange={(checked) => {
+                const v = checked === true;
+                return setAdvanced((p) => ({ ...p, filter: v ? "blob:none" : "" }));
+              }}
               id="opt-filter"
             />
             <div className="flex-1">
@@ -884,22 +931,44 @@ function AdvancedOptionsSection({
                 Partial clone (blobless)
               </label>
               <p className="text-[10px] text-muted-foreground">
-                Defer downloading file contents until checkout (treeless or blobless)
+                Defer downloading file contents until checkout (treeless or
+                blobless)
               </p>
               {advanced.filter && (
                 <div className="mt-1.5 flex items-center gap-2">
-                  <label className="text-[10px] text-muted-foreground">Filter:</label>
-                  <NativeSelect
-                    className="text-xs"
-                    value={advanced.filter}
-                    onChange={(e) => setAdvanced((p) => ({ ...p, filter: e.target.value }))}
+                  <label className="text-[10px] text-muted-foreground">
+                    Filter:
+                  </label>
+                  <Select
+                    value={":" + String(advanced.filter)}
+                    onValueChange={(selectedValue) => {
+                      const value = selectedValue.slice(1);
+                      return setAdvanced((p) => ({ ...p, filter: value }));
+                    }}
                   >
-                    <option value="blob:none">blob:none (blobless)</option>
-                    <option value="tree:0">tree:0 (treeless)</option>
-                    <option value="blob:limit=1m">blob:limit=1m</option>
-                    <option value="blob:limit=10m">blob:limit=10m</option>
-                    <option value="blob:limit=100m">blob:limit=100m</option>
-                  </NativeSelect>
+                    <SelectTrigger className="text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        <SelectItem value={":" + String("blob:none")}>
+                          blob:none (blobless)
+                        </SelectItem>
+                        <SelectItem value={":" + String("tree:0")}>
+                          tree:0 (treeless)
+                        </SelectItem>
+                        <SelectItem value={":" + String("blob:limit=1m")}>
+                          blob:limit=1m
+                        </SelectItem>
+                        <SelectItem value={":" + String("blob:limit=10m")}>
+                          blob:limit=10m
+                        </SelectItem>
+                        <SelectItem value={":" + String("blob:limit=100m")}>
+                          blob:limit=100m
+                        </SelectItem>
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
                 </div>
               )}
             </div>
@@ -909,7 +978,10 @@ function AdvancedOptionsSection({
           <div className="flex items-start gap-3">
             <Checkbox
               checked={advanced.noCheckout}
-              onChange={(v) => setAdvanced((p) => ({ ...p, noCheckout: v }))}
+              onCheckedChange={(checked) => {
+                const v = checked === true;
+                return setAdvanced((p) => ({ ...p, noCheckout: v }));
+              }}
               id="opt-no-checkout"
             />
             <div className="flex-1">
@@ -917,7 +989,8 @@ function AdvancedOptionsSection({
                 No checkout
               </label>
               <p className="text-[10px] text-muted-foreground">
-                Skip checking out files after clone (useful for scripted workflows)
+                Skip checking out files after clone (useful for scripted
+                workflows)
               </p>
             </div>
           </div>
@@ -926,7 +999,10 @@ function AdvancedOptionsSection({
           <div className="flex items-start gap-3">
             <Checkbox
               checked={advanced.recurseSubmodules}
-              onChange={(v) => setAdvanced((p) => ({ ...p, recurseSubmodules: v }))}
+              onCheckedChange={(checked) => {
+                const v = checked === true;
+                return setAdvanced((p) => ({ ...p, recurseSubmodules: v }));
+              }}
               id="opt-submodules"
             />
             <div className="flex-1">
@@ -940,7 +1016,10 @@ function AdvancedOptionsSection({
                 <div className="mt-1.5 flex items-center gap-3">
                   <Checkbox
                     checked={advanced.shallowSubmodules}
-                    onChange={(v) => setAdvanced((p) => ({ ...p, shallowSubmodules: v }))}
+                    onCheckedChange={(checked) => {
+                      const v = checked === true;
+                      return setAdvanced((p) => ({ ...p, shallowSubmodules: v }));
+                    }}
                     id="opt-shallow-sub"
                   />
                   <label htmlFor="opt-shallow-sub" className="text-[10px] text-muted-foreground cursor-pointer">
@@ -951,10 +1030,12 @@ function AdvancedOptionsSection({
             </div>
           </div>
 
-          {/* Parallel jobs */}
+          {/* Mirror / Bare */}
           <div className="flex items-center gap-3">
-            <div className="w-4" /> {/* spacer for alignment */}
-            <label className="text-xs text-muted-foreground">Parallel fetch jobs:</label>
+            <div className="w-4" /> {/* Mirror / Bare */}
+            <label className="text-xs text-muted-foreground">
+              Parallel fetch jobs:
+            </label>
             <Input
               type="number"
               min={0}
@@ -965,15 +1046,20 @@ function AdvancedOptionsSection({
                 setAdvanced((p) => ({ ...p, jobs: Math.max(0, parseInt(e.target.value) || 0) }))
               }
             />
-            <span className="text-[10px] text-muted-foreground">(0 = auto)</span>
+            <span className="text-[10px] text-muted-foreground">
+              (0 = auto)
+            </span>
           </div>
 
-          {/* Mirror / Bare */}
+          {/* Reference repository */}
           <div className="flex gap-6">
             <div className="flex items-center gap-2">
               <Checkbox
                 checked={advanced.mirror}
-                onChange={(v) => setAdvanced((p) => ({ ...p, mirror: v, bare: v ? true : p.bare }))}
+                onCheckedChange={(checked) => {
+                  const v = checked === true;
+                  return setAdvanced((p) => ({ ...p, mirror: v, bare: v ? true : p.bare }));
+                }}
                 id="opt-mirror"
               />
               <label htmlFor="opt-mirror" className="text-xs text-foreground cursor-pointer">
@@ -983,7 +1069,10 @@ function AdvancedOptionsSection({
             <div className="flex items-center gap-2">
               <Checkbox
                 checked={advanced.bare}
-                onChange={(v) => setAdvanced((p) => ({ ...p, bare: v }))}
+                onCheckedChange={(checked) => {
+                  const v = checked === true;
+                  return setAdvanced((p) => ({ ...p, bare: v }));
+                }}
                 id="opt-bare"
               />
               <label htmlFor="opt-bare" className="text-xs text-foreground cursor-pointer">
@@ -1005,7 +1094,8 @@ function AdvancedOptionsSection({
               onChange={(e) => setAdvanced((p) => ({ ...p, reference: e.target.value }))}
             />
             <p className="mt-0.5 text-[10px] text-muted-foreground">
-              Use objects from a local reference repo to speed up clone (--reference)
+              Use objects from a local reference repo to speed up clone
+              (--reference)
             </p>
           </div>
         </div>
@@ -1015,31 +1105,3 @@ function AdvancedOptionsSection({
 }
 
 // ─── Reusable form primitives ───────────────────────────────────────
-
-function Checkbox({
-  checked,
-  onChange,
-  id,
-}: {
-  checked: boolean;
-  onChange: (v: boolean) => void;
-  id: string;
-}) {
-  return (
-    <button
-      type="button"
-      role="checkbox"
-      aria-checked={checked}
-      id={id}
-      className={clsx(
-        "mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border transition",
-        checked
-          ? "border-primary bg-primary text-primary-foreground"
-          : "border-border bg-background hover:border-primary/50",
-      )}
-      onClick={() => onChange(!checked)}
-    >
-      {checked && <Check size={10} strokeWidth={3} />}
-    </button>
-  );
-}

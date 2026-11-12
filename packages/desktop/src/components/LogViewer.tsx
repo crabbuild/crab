@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * LogViewer — read-only xterm.js replay of saved ANSI session logs.
  *
@@ -5,14 +6,14 @@
  * allowing users to browse past sessions and scroll through replayed content.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { Terminal as XTerm } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { FileText, X, RefreshCcw } from "lucide-react";
 import clsx from "clsx";
+import { FileText, RefreshCcw, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useEffectiveTheme } from "../hooks/useEffectiveTheme";
-import { resolveTheme, getStoredSchemeId } from "../lib/terminal-themes";
+import { getStoredSchemeId, resolveTheme } from "../lib/terminal-themes";
 
 interface LogEntry {
   sessionId: string;
@@ -159,20 +160,24 @@ export function LogViewer({ onClose }: Props) {
           Session Logs
         </div>
         <div className="flex items-center gap-1">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             onClick={() => void loadLogs()}
             className="p-1 rounded hover:bg-secondary text-muted-foreground hover:text-foreground"
             title="Refresh"
           >
             <RefreshCcw size={14} />
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             onClick={onClose}
             className="p-1 rounded hover:bg-secondary text-muted-foreground hover:text-foreground"
             title="Close"
           >
             <X size={14} />
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -180,10 +185,14 @@ export function LogViewer({ onClose }: Props) {
         {/* Sidebar: log list */}
         <div className="w-56 border-r border-secondary overflow-y-auto flex-shrink-0">
           {logs.length === 0 ? (
-            <div className="p-3 text-xs text-muted-foreground">No session logs found.</div>
+            <div className="p-3 text-xs text-muted-foreground">
+              No session logs found.
+            </div>
           ) : (
             logs.map((log) => (
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 key={log.sessionId}
                 onClick={() => void loadLog(log.sessionId)}
                 className={clsx(
@@ -191,12 +200,14 @@ export function LogViewer({ onClose }: Props) {
                   selectedLog === log.sessionId && "bg-card border-l-2 border-l-primary",
                 )}
               >
-                <div className="font-mono text-foreground truncate">{log.sessionId}</div>
+                <div className="font-mono text-foreground truncate">
+                  {log.sessionId}
+                </div>
                 <div className="flex justify-between mt-0.5 text-muted-foreground">
                   <span>{formatDate(log.mtimeMs)}</span>
                   <span>{formatSize(log.sizeBytes)}</span>
                 </div>
-              </button>
+              </Button>
             ))
           )}
         </div>

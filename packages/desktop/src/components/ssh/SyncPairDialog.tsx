@@ -1,3 +1,5 @@
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 /**
@@ -6,9 +8,9 @@ import { Textarea } from "@/components/ui/textarea";
  * and lets the user pick a local directory and configure ignore patterns.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import { FolderSync, FolderOpen, X, AlertCircle, Loader2 } from "lucide-react";
 import clsx from "clsx";
+import { AlertCircle, FolderOpen, FolderSync, Loader2, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -44,28 +46,6 @@ export function SyncPairDialog({
   const [isValid, setIsValid] = useState(false);
 
   const cancelRef = useRef<HTMLButtonElement | null>(null);
-  const previousActive = useRef<HTMLElement | null>(null);
-
-  // Focus management
-  useEffect(() => {
-    previousActive.current = (document.activeElement as HTMLElement | null) ?? null;
-    cancelRef.current?.focus();
-    return () => {
-      previousActive.current?.focus?.();
-    };
-  }, []);
-
-  // Escape key cancels
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        onCancel();
-      }
-    };
-    window.addEventListener("keydown", handler, true);
-    return () => window.removeEventListener("keydown", handler, true);
-  }, [onCancel]);
 
   // Validate local directory when it changes
   useEffect(() => {
@@ -131,17 +111,22 @@ export function SyncPairDialog({
   }, [localDir, remotePath, ignoreText, onConfirm]);
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onCancel();
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) {
+          onCancel();
+        }
       }}
     >
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="sync-pair-dialog-title"
-        className="w-[28rem] max-w-[calc(100vw-2rem)] rounded-lg border border-border bg-card shadow-2xl"
+      <DialogContent
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+    cancelRef.current?.focus();
+        }}
+        showCloseButton={false}
+        aria-describedby={undefined}
+        className="block gap-0 p-0 w-[28rem] max-w-[calc(100vw-2rem)] rounded-lg border border-border bg-card shadow-2xl"
       >
         {/* Header */}
         <div className="flex items-start gap-3 border-b border-border p-4">
@@ -149,24 +134,24 @@ export function SyncPairDialog({
             <FolderSync size={20} aria-hidden="true" />
           </div>
           <div className="min-w-0 flex-1">
-            <h2
-              id="sync-pair-dialog-title"
-              className="text-[14px] font-semibold text-foreground"
+            <DialogTitle className="text-[14px] font-semibold text-foreground"
             >
               Set Up Folder Sync
-            </h2>
+            </DialogTitle>
             <p className="mt-0.5 text-[12px] text-muted-foreground">
               Configure a local↔remote directory sync pair
             </p>
           </div>
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={onCancel}
             className="shrink-0 rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground transition"
             aria-label="Close"
           >
             <X size={16} />
-          </button>
+          </Button>
         </div>
 
         {/* Body */}
@@ -215,7 +200,9 @@ export function SyncPairDialog({
                   />
                 )}
               </div>
-              <button
+              <Button
+                variant="ghost"
+                size="compact"
                 type="button"
                 onClick={handleBrowse}
                 className={clsx(
@@ -226,7 +213,7 @@ export function SyncPairDialog({
                 aria-label="Browse for local directory"
               >
                 <FolderOpen size={14} />
-              </button>
+              </Button>
             </div>
             {/* Validation error */}
             {validationError && (
@@ -246,7 +233,8 @@ export function SyncPairDialog({
               Ignore Patterns
             </label>
             <p className="mt-0.5 text-[11px] text-muted-foreground/80">
-              One glob pattern per line. Matching files will be excluded from sync.
+              One glob pattern per line. Matching files will be excluded from
+              sync.
             </p>
             <Textarea
               id="sync-ignore-patterns"
@@ -265,7 +253,9 @@ export function SyncPairDialog({
 
         {/* Footer buttons */}
         <div className="flex items-center justify-end gap-2 border-t border-border p-3">
-          <button
+          <Button
+            variant="ghost"
+            size="compact"
             ref={cancelRef}
             type="button"
             onClick={onCancel}
@@ -276,8 +266,10 @@ export function SyncPairDialog({
             )}
           >
             Cancel
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="compact"
             type="button"
             onClick={handleConfirm}
             disabled={!isValid || validating}
@@ -290,9 +282,9 @@ export function SyncPairDialog({
             )}
           >
             Confirm Sync
-          </button>
+          </Button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

@@ -1,3 +1,5 @@
+import { Toggle } from "@/components/ui/toggle";
+import clsx from "clsx";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ImperativePanelHandle,
@@ -5,8 +7,6 @@ import {
   PanelGroup,
   PanelResizeHandle,
 } from "react-resizable-panels";
-import clsx from "clsx";
-import { ActivityBar } from "./ActivityBar";
 import {
   navigationGroup,
   VIEW_GROUPS,
@@ -14,6 +14,7 @@ import {
   type SidebarView,
 } from "../lib/navigation";
 import { useSetting } from "../settings";
+import { ActivityBar } from "./ActivityBar";
 
 interface Props {
   /** View content keyed by id. `undefined` means "not yet built" — the
@@ -157,10 +158,11 @@ export function WorkspaceShell({
       {VIEW_GROUPS[group]
         .filter((view) => !hiddenViews.includes(view))
         .map((view) => (
-          <button
+          <Toggle
+            size="sm"
             key={view}
             type="button"
-            aria-pressed={activeView === view}
+            pressed={activeView === view}
             onClick={() => {
               onViewChange(view);
               setOpen(true);
@@ -174,7 +176,7 @@ export function WorkspaceShell({
             )}
           >
             {VIEW_LABELS[view]}
-          </button>
+          </Toggle>
         ))}
     </nav>
   );
@@ -217,14 +219,18 @@ export function WorkspaceShell({
               !sidebarVisible && "hidden",
             )}
           >
-            {group === "files" ? groupNavigation : (
+            {group === "files" ? (
+              groupNavigation
+            ) : (
               <div className="flex shrink-0 items-center justify-between border-b border-border px-3 py-2 text-[11px] uppercase tracking-wider text-muted-foreground">
                 <span>{VIEW_LABELS[activeView]}</span>
               </div>
             )}
             <div className="flex min-h-0 flex-1 flex-col">
               {activeContent ?? (
-                <div className="p-3 text-xs text-muted-foreground">Coming soon.</div>
+                <div className="p-3 text-xs text-muted-foreground">
+                  Coming soon.
+                </div>
               )}
             </div>
           </Panel>

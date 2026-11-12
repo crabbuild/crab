@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { RotateCcw } from "lucide-react";
 
 // ── Types ───────────────────────────────────────────────────────────
@@ -37,7 +38,9 @@ export function CheckpointMarker({ turnNumber, timestamp, onRevert }: Props) {
 
       {/* Revert button — visible on hover */}
       {onRevert && (
-        <button
+        <Button
+          variant="ghost"
+          size="compact"
           type="button"
           onClick={() => onRevert(turnNumber)}
           className="shrink-0 flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground/70 opacity-0 transition hover:bg-accent hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary"
@@ -45,7 +48,7 @@ export function CheckpointMarker({ turnNumber, timestamp, onRevert }: Props) {
         >
           <RotateCcw size={10} />
           Revert
-        </button>
+        </Button>
       )}
 
       {/* Right line */}

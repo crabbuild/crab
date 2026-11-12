@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Live File Tree — Real-time view of files the agent has modified.
  *
@@ -6,9 +7,9 @@
  * its diff in the Diff tab.
  */
 
-import { useEffect, useMemo, useState } from "react";
-import { FileCode, FilePlus, FileX } from "lucide-react";
 import clsx from "clsx";
+import { FileCode, FilePlus, FileX } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -67,7 +68,10 @@ export function LiveFileTree({ files, isStreaming, onSelectFile, selectedFile }:
     <div className="flex h-full flex-col overflow-hidden">
       {/* Header */}
       <div className="sticky top-0 z-10 flex items-center gap-2 border-b border-border bg-card px-3 py-1.5 text-[10px] text-muted-foreground">
-        <span>{editedFiles.length} file{editedFiles.length !== 1 ? "s" : ""} modified</span>
+        <span>
+          {editedFiles.length} file{editedFiles.length !== 1 ? "s" : ""}{" "}
+          modified
+        </span>
         {isStreaming && (
           <span className="ml-auto flex items-center gap-1 text-success">
             <span className="h-1.5 w-1.5 rounded-full bg-success animate-pulse" />
@@ -83,7 +87,9 @@ export function LiveFileTree({ files, isStreaming, onSelectFile, selectedFile }:
           const isSelected = selectedFile === file.path;
 
           return (
-            <button
+            <Button
+              variant="ghost"
+              size="compact"
               key={file.path}
               type="button"
               onClick={() => onSelectFile?.(file.path)}
@@ -115,7 +121,7 @@ export function LiveFileTree({ files, isStreaming, onSelectFile, selectedFile }:
               {isRecent && isStreaming && (
                 <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-success animate-pulse" />
               )}
-            </button>
+            </Button>
           );
         })}
       </div>
@@ -132,9 +138,13 @@ function FileStatusIcon({ status, isRecent }: { status: LiveFile["status"]; isRe
     case "added":
       return <FilePlus size={12} className={clsx(baseClass, "text-success")} />;
     case "deleted":
-      return <FileX size={12} className={clsx(baseClass, "text-destructive")} />;
+      return (
+        <FileX size={12} className={clsx(baseClass, "text-destructive")} />
+      );
     case "modified":
     default:
-      return <FileCode size={12} className={clsx(baseClass, "text-warning", isRecent && "animate-pulse")} />;
+      return (
+        <FileCode size={12} className={clsx(baseClass, "text-warning", isRecent && "animate-pulse")} />
+      );
   }
 }

@@ -1,6 +1,7 @@
 import { Button } from "@/components/ui/button";
-import { useEffect, useMemo, useState } from "react";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Download, Loader2 } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 import { rpc } from "../../ipc";
 import { useSetting } from "../../settings";
 
@@ -132,12 +133,13 @@ export function CsvView({ repoId, path, rev, sep }: Props) {
       <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border bg-card px-3 py-1.5 text-[11px] text-muted-foreground">
         <div className="flex items-center gap-3">
           <span>{sep === "," ? "CSV" : "TSV"}</span>
-          <span>· {body.length.toLocaleString()} rows · {headers.length} cols</span>
+          <span>
+            · {body.length.toLocaleString()} rows · {headers.length} cols
+          </span>
           <label className="flex items-center gap-1">
-            <input
-              type="checkbox"
+            <Checkbox
               checked={hasHeader}
-              onChange={(e) => setHasHeader(e.target.checked)}
+              onCheckedChange={(checked) => setHasHeader(checked === true)}
             />
             Header row
           </label>
@@ -185,7 +187,9 @@ export function CsvView({ repoId, path, rev, sep }: Props) {
         <table className="w-full border-collapse font-mono text-[12px]">
           <thead className="sticky top-0 bg-card">
             <tr>
-              <th className="sticky left-0 border-b border-border bg-card px-2 py-1 text-right text-muted-foreground">#</th>
+              <th className="sticky left-0 border-b border-border bg-card px-2 py-1 text-right text-muted-foreground">
+                #
+              </th>
               {headers.map((h, i) => (
                 <th
                   key={i}
