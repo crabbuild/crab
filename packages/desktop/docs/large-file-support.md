@@ -234,6 +234,13 @@ preserving selected bytes, exact reads/diffs/previews, and interrupted preparati
 never presenting an incomplete selection as ready. This remains unimplemented
 P0 scope in the priority table, not a claim made by disposable LFS retention.
 
+A packaged macOS probe confirms the missing boundary: after an exact complete
+LFS read and application restart, the retained 4,194,413-byte body still matches
+its SHA-256, but rejecting all origin reads causes two `/v2/root` requests and
+a visible snapshot-opening failure. The probe observes the current gap; it
+does not qualify offline reopening. The canonical retention test continues to
+cover the narrower case where only the origin LFS payload is unavailable.
+
 ### Missing and corrupt SDK content
 
 The desktop RPC boundary distinguishes SDK `NotFound` and `Corruption` without
