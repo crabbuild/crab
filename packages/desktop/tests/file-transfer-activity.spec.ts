@@ -23,6 +23,14 @@ function progress(jobs: FileTransfers, published = 1) {
 afterEach(() => { for (const db of databases.splice(0)) if (db.open) db.close(); });
 
 describe("durable native file-transfer Activity", () => {
+  it.each(["file_materialize", "files_materialize", "files_dehydrate", "files_restore"])("rejects an expired session before %s capture lookup or admission", async method => {
+    const { db, jobs } = setup();
+    const work = vi.fn();
+    const failure = await jobs.run(method, { ...params, file_id: "expired" }, { ...repository, nativeSessionId: "native:replacement" }, work).then(() => null, (error: unknown) => error as { code?: string });
+    const rows = db.prepare("SELECT count(*) AS count FROM file_transfer_jobs").get() as { count: number };
+    expect({ code: failure?.code, rows: rows.count, dispatched: work.mock.calls.length }).toEqual({ code: "NATIVE_SESSION_LOST", rows: 0, dispatched: 0 });
+  });
+
   it("commits literal intent before dispatch and never persists native IDs, captures or credentials", async () => {
     const { db, jobs } = setup();
     await jobs.run("files_materialize", { ...params, paths: [...params.paths, params.paths[0]], __storage_auth: "FIXTURE_SECRET" }, repository, async () => {

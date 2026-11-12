@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 import { OP_CANCELLED_RPC_CODE } from "./rpc-transport";
 import { FileTransferOwner } from "./file-transfer-owner";
+import { nativeSessionLost } from "./repo-capabilities";
 
 type Verb = "hydrate" | "dehydrate" | "restore";
 type Params = Record<string, unknown>;
@@ -193,6 +194,9 @@ export class FileTransfers {
       const repoId = String(params.repo_id);
       const session = params.native_session_id ?? repository.nativeSessionId;
       if (!op || typeof jobId !== "string" || !jobId || typeof session !== "string" || !session || !repository.repository) throw new Error("A file transfer requires an opened repository and operation identity.");
+      // Validate ownership before capture lookup or durable intent. A replacement
+      // has already retired old captures; that must remain a session-loss error.
+      if (session !== repository.nativeSessionId) throw nativeSessionLost();
       if (this.jobs.has(jobId)) throw new Error("This transfer already has an Activity record. Start a new attempt.");
       let paths: string[];
       if (method === "file_materialize") {
