@@ -1,0 +1,93 @@
+name: Cache directory flush contract
+on:
+  push:
+    branches: [codex/cache-directory-flush-contract]
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - name: Probe owned NTFS handles
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type -TypeDefinition @'
+          using System;
+          using System.IO;
+          using System.Text;
+          using System.Runtime.InteropServices;
+          using Microsoft.Win32.SafeHandles;
+          public static class FlushContract {
+            [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+            public static extern SafeFileHandle CreateFileW(string path, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+            [DllImport("kernel32.dll", SetLastError=true)]
+            public static extern bool FlushFileBuffers(SafeFileHandle file);
+            [DllImport("kernel32.dll", SetLastError=true)]
+            public static extern bool SetFileInformationByHandle(SafeFileHandle file, int kind, IntPtr info, uint size);
+            [DllImport("kernel32.dll", SetLastError=true)]
+            public static extern bool WriteFile(SafeFileHandle file, byte[] bytes, uint length, out uint written, IntPtr overlapped);
+            [StructLayout(LayoutKind.Sequential)]
+            public struct Status { public IntPtr Result; public UIntPtr Information; }
+            [DllImport("ntdll.dll")]
+            public static extern int NtQueryInformationFile(SafeFileHandle file, out Status status, out uint mode, uint size, int kind);
+            public static object Directory(string path, bool write) {
+              using (var file=CreateFileW(path,write?0xc0000000u:0x80000000u,7,IntPtr.Zero,3,0x02200000,IntPtr.Zero)) {
+                int open=Marshal.GetLastWin32Error();
+                if(file.IsInvalid) return new {write,open,flush=false,error=open};
+                bool flush=FlushFileBuffers(file);
+                return new {write,open=0,flush,error=flush?0:Marshal.GetLastWin32Error()};
+              }
+            }
+            public static object Mutation(string directory) {
+              string source=Path.Combine(directory,"pending"), destination=Path.Combine(directory,"published");
+              object receipt;
+              using(var file=CreateFileW(source,0xc0010000u,3,IntPtr.Zero,1,0x80200000,IntPtr.Zero)) {
+                if(file.IsInvalid) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+                uint mode; Status status;
+                int query=NtQueryInformationFile(file,out status,out mode,4,16);
+                byte[] bytes=Encoding.UTF8.GetBytes("owned flush probe"); uint written;
+                if(!WriteFile(file,bytes,(uint)bytes.Length,out written,IntPtr.Zero)||written!=bytes.Length) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+                byte[] name=Encoding.Unicode.GetBytes(destination);
+                IntPtr info=Marshal.AllocHGlobal(22+name.Length);
+                bool rename;
+                try {
+                  for(int i=0;i<22+name.Length;i++) Marshal.WriteByte(info,i,0);
+                  Marshal.WriteInt32(info,0,3); Marshal.WriteIntPtr(info,8,IntPtr.Zero); Marshal.WriteInt32(info,16,name.Length);
+                  Marshal.Copy(name,0,IntPtr.Add(info,20),name.Length);
+                  rename=SetFileInformationByHandle(file,22,info,(uint)(22+name.Length));
+                  if(!rename) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+                } finally {Marshal.FreeHGlobal(info);}
+                bool renameFlush=FlushFileBuffers(file); int renameError=renameFlush?0:Marshal.GetLastWin32Error();
+                IntPtr disposition=Marshal.AllocHGlobal(4);
+                bool deleted;
+                try {Marshal.WriteInt32(disposition,3);deleted=SetFileInformationByHandle(file,21,disposition,4);}
+                finally {Marshal.FreeHGlobal(disposition);}
+                int deleteError=deleted?0:Marshal.GetLastWin32Error();
+                bool deleteFlush=FlushFileBuffers(file);int deleteFlushError=deleteFlush?0:Marshal.GetLastWin32Error();
+                receipt=new {query,mode,writeThrough=(mode&2)!=0,rename,renameFlush,renameError,deleted,deleteError,deleteFlush,deleteFlushError,visibleBeforeClose=File.Exists(destination)};
+              }
+              return new {receipt,visibleAfterClose=File.Exists(destination)};
+            }
+          }
+          '@
+          $root = Join-Path $env:RUNNER_TEMP ('cache-flush-' + [guid]::NewGuid())
+          New-Item -ItemType Directory -Path $root | Out-Null
+          try {
+            $result = [ordered]@{
+              platform = [Environment]::OSVersion.ToString()
+              filesystem = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($root)).DriveFormat
+              readDirectory = [FlushContract]::Directory($root, $false)
+              writeDirectory = [FlushContract]::Directory($root, $true)
+              mutation = [FlushContract]::Mutation($root)
+              afterDirectory = [FlushContract]::Directory($root, $true)
+            }
+            $result | ConvertTo-Json -Depth 8 | Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cache-flush-contract.json')
+          } finally { Remove-Item -Recurse -Force -LiteralPath $root }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cache-flush-contract-windows
+          path: ${{ runner.temp }}/cache-flush-contract.json
+          if-no-files-found: error
