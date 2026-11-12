@@ -287,12 +287,7 @@ mod tests {
     async fn fixture() -> Result<(tempfile::TempDir, String)> {
         let root = tempfile::tempdir()?;
         let scope = ReadScope::default();
-        command::run(
-            root.path(),
-            &["init", "--template=", "--initial-branch=main"],
-            &scope,
-        )
-        .await?;
+        command::run(root.path(), &["init", "--template="], &scope).await?;
         std::fs::write(root.path().join("body.bin"), b"12345678")?;
         let oid = command::run(
             root.path(),
@@ -374,7 +369,19 @@ mod tests {
     async fn missing_promisor_blob_is_fetched_then_captured_by_the_physical_reader() -> Result<()> {
         let (root, oid) = fixture().await?;
         let scope = ReadScope::default();
-        command::run(root.path(), &["add", "body.bin"], &scope).await?;
+        command::run(
+            root.path(),
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                "100644",
+                &oid,
+                "body.bin",
+            ],
+            &scope,
+        )
+        .await?;
         command::run(
             root.path(),
             &[
@@ -384,6 +391,8 @@ mod tests {
                 "user.email=fixture@example.invalid",
                 "-c",
                 "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=.git/hooks",
                 "commit",
                 "-m",
                 "Captured source",
@@ -416,25 +425,28 @@ mod tests {
             &scope,
         )
         .await?;
-        let missing = command::output(
-            &checkout,
-            &["--no-lazy-fetch", "cat-file", "-e", &oid],
-            &scope,
-        )
-        .await?;
+        let objects = checkout.join(".git/objects");
         assert!(
-            !missing.status.success(),
+            !crab_git::batch::copy_local_blob(
+                &objects,
+                &oid,
+                8,
+                &mut io::sink(),
+                super::scratch,
+                &|| false
+            )?,
             "fixture must exercise a genuinely absent promisor blob"
         );
         let capture = reader(&budget(8), &checkout, &oid);
         assert_eq!(capture.range(0, 8, &scope).await?.as_ref(), b"12345678");
-        let fetched = command::output(
-            &checkout,
-            &["--no-lazy-fetch", "cat-file", "-e", &oid],
-            &scope,
-        )
-        .await?;
-        assert!(fetched.status.success());
+        assert!(crab_git::batch::copy_local_blob(
+            &objects,
+            &oid,
+            8,
+            &mut io::sink(),
+            super::scratch,
+            &|| false
+        )?);
         capture.close().await;
         Ok(())
     }

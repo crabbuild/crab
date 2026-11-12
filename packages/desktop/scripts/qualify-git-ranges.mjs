@@ -187,7 +187,7 @@ try {
     return file;
   };
   captured = await capture();
-  const read = async offset => {
+  const read = async (offset, phase) => {
     const started = performance.now();
     const result = await rpc("read_range", { repo_id: repo, file_id: captured.file_id, offset, length: 4096 });
     const expected = Buffer.alloc(4096);
@@ -198,14 +198,14 @@ try {
     }
     assert.equal(result.offset, offset); assert.equal(result.length, expected.length); assert.equal(result.file_size, size);
     assert.deepEqual(Buffer.from(result.bytes_b64, "base64"), expected);
-    const phase = report.ranges.length === 0 ? "first capture read" : "subsequent capture read";
     const elapsedMs = performance.now() - started;
     report.ranges.push({ offset, length: expected.length, elapsedMs, phase });
-    if (report.ranges.length === 2 || report.ranges.length === 3) {
+    if (phase === "warm capture read") {
       assert.ok(elapsedMs < 5_000, `Warm captured range took ${elapsedMs.toFixed(1)}ms`);
     }
   };
-  for (const offset of [0, size / 2 - 17, size - 4096]) await read(offset);
+  await read(0, "cold capture read");
+  for (const offset of [size / 2 - 17, size - 4096]) await read(offset, "warm capture read");
 
   // Loose/full-pack profiles retain their unread-suffix fault and repair checks.
   // The separately prepared delta profile shares exact/cancel/close assertions
@@ -236,7 +236,7 @@ try {
       error => error.code === 1003 && /checksum differs/.test(error.message));
     report.corruptSuffixRejected = true;
     await repair();
-    await read(size - 4096);
+    await read(size - 4096, "repaired capture read");
   }
   // Warm reads can finish before cancellation arrives. Reopen an uncaptured
   // source so this check still interrupts real verification and drains its IO.
@@ -249,7 +249,7 @@ try {
   assert.equal((await rpc("rpc/cancel", { op_id: operation })).ok, true);
   await stopped;
   report.cancellationAcknowledged = true;
-  await read(0);
+  await read(0, "fresh capture read after cancellation");
   assert.deepEqual(await readFile(path.join(source, ".git/index")), index);
   assert.equal(await digest(file), fixtureDigest);
   report.verified = true;
