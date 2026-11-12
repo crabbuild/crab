@@ -11,8 +11,9 @@ import { useSettings } from "../settings";
 export function TelemetryOptInModal() {
   const { settings, update } = useSettings();
 
-  // Don't render if already seen.
-  if (settings.telemetryPromptSeen) return null;
+  // Let the welcome tour release modal focus before opening consent.
+  // Concurrent dialogs can hide the visible tour from keyboard access.
+  if (!settings.welcomeSeen || settings.telemetryPromptSeen) return null;
 
   function dismiss(optIn: boolean) {
     update("telemetryOptIn", optIn);
