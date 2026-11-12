@@ -264,9 +264,11 @@ and temporary-file callers retain cleanup ownership until the copier returns.
 The same bounded checksum loop handles copying, administrative blob verification
 and small-object visits. Working-file descriptor checks, Crab/LFS reconstruction
 and SDK remote Git decoding retain their existing owners. Partial Git ranges
-still use the selected-prefix path; their captured integrity work remains open
-and is not qualified by whole-body copy checks. Durable offline captures also
-remain unimplemented.
+now use that same whole-object verifier, retaining only selected bytes and
+requiring successful EOF and process exit. The unchecked early-success path
+is removed. Each range scans the complete compressed Git object; packaged
+range behavior and multi-GiB memory/latency need separate qualification from
+the complete-body checkpoint below. Durable offline captures remain unimplemented.
 
 The complete-read, file-copy and small-pointer regressions fail before their
 source corrections. Nine shared Git tests and 34 focused native content tests

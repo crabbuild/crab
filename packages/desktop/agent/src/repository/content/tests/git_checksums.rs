@@ -1,9 +1,11 @@
 use super::*;
 
-async fn indexed_git_source() -> Result<(tempfile::TempDir, BrowseSession, FileSource)> {
+async fn indexed_git_source(
+    bytes: &[u8],
+) -> Result<(tempfile::TempDir, BrowseSession, FileSource)> {
     let (directory, repo) = repository().await;
     let root = directory.path();
-    std::fs::write(root.join("file.bin"), vec![b'a'; 1024 * 1024])?;
+    std::fs::write(root.join("file.bin"), bytes)?;
     let oid =
         String::from_utf8(git(root, &["hash-object", "--no-filters", "-w", "file.bin"]).await?)?;
     let oid = oid.trim();
@@ -24,12 +26,15 @@ async fn indexed_git_source() -> Result<(tempfile::TempDir, BrowseSession, FileS
 }
 
 async fn corrupted_git_source() -> Result<(tempfile::TempDir, BrowseSession, FileSource)> {
-    let (directory, repo, source) = indexed_git_source().await?;
+    let original = vec![b'a'; 1024 * 1024];
+    let (directory, repo, source) = indexed_git_source(&original).await?;
     let root = directory.path();
     let Source::Git { oid, .. } = source.source.as_ref() else {
         return Err(AgentError::Other("expected a captured Git blob".into()));
     };
-    std::fs::write(root.join("replacement.bin"), vec![b'b'; 1024 * 1024])?;
+    let mut replacement = original;
+    replacement[1024 * 1024 - 1] = b'b';
+    std::fs::write(root.join("replacement.bin"), replacement)?;
     let replacement = String::from_utf8(
         git(
             root,
@@ -95,8 +100,31 @@ async fn captured_git_blob_rejects_wrong_object_bytes_in_file_copy() -> Result<(
 }
 
 #[tokio::test]
+async fn captured_git_ranges_reject_wrong_object_bytes() -> Result<()> {
+    for offset in [0, 1024 * 1024 - 32] {
+        let (_directory, repo, source) = corrupted_git_source().await?;
+        let result = source.read_range(offset, 32).await;
+        assert!(
+            result.is_err(),
+            "A selected Git range exposed another object's bytes"
+        );
+        assert!(
+            result
+                .err()
+                .ok_or_else(|| std::io::Error::other("expected corrupt Git range"))?
+                .to_string()
+                .contains("checksum differs")
+        );
+        source.close().await?;
+        repo.close().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn complete_git_file_copy_preserves_the_captured_bytes() -> Result<()> {
-    let (_directory, repo, source) = indexed_git_source().await?;
+    let original = vec![b'a'; 1024 * 1024];
+    let (_directory, repo, source) = indexed_git_source(&original).await?;
     let output = tempfile::NamedTempFile::new()?;
     source
         .copy_complete_to_file(output.as_file().try_clone()?)
@@ -145,6 +173,30 @@ async fn small_git_pointer_is_authenticated_before_classification() -> Result<()
             .to_string()
             .contains("checksum differs")
     );
+    repo.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn verified_git_ranges_preserve_unaligned_bytes_and_clamp_at_eof() -> Result<()> {
+    let body = (0..256 * 1024 + 17)
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    let (_directory, repo, source) = indexed_git_source(&body).await?;
+    for (start, length) in [
+        (0, 1),
+        (63 * 1024 + 7, 4096),
+        (128 * 1024 - 3, 10),
+        (body.len() - 7, 100),
+        (body.len(), 0),
+    ] {
+        let selected = source.read_range(start as u64, length as u32).await?;
+        assert_eq!(
+            selected.as_ref(),
+            &body[start..(start + length).min(body.len())]
+        );
+    }
+    source.close().await?;
     repo.close().await?;
     Ok(())
 }

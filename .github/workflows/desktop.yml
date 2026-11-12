@@ -76,6 +76,26 @@ jobs:
       - name: Test native desktop integration
         # Compilation, real CLI tests and Linux tests share the producer toolchain.
         run: node scripts/build-native.mjs --test
+      - name: Set up native range measurement
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Qualify bounded Git ranges and cancellation
+        run: |
+          python ../../crab/scripts/qualify_sdk.py run \
+            --backend desktop-native-git \
+            --fixture-digest 4f7eb1a4a45d43b4d7e36edd9b8bdbfa3a807d9b5578d1cc467d20cf99913596 \
+            --output "$CARGO_TARGET_DIR/git-range-proof/report.json" \
+            --require-rss-below 536870912 --timeout-seconds 600 -- \
+            node packages/desktop/scripts/qualify-git-ranges.mjs packages/desktop/resources/native/${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Crab-git-range-proof-${{ matrix.target }}
+          path: |
+            ${{ env.CARGO_TARGET_DIR }}/git-range-proof/*
+            ${{ env.CARGO_TARGET_DIR }}/git-range-qualification-*/result.json
+            ${{ env.CARGO_TARGET_DIR }}/git-range-qualification-*/agent.log
       - name: Qualify Linux runtime ABI and repository operations
         if: runner.os == 'Linux'
         run: node scripts/qualify-linux-runtime.mjs

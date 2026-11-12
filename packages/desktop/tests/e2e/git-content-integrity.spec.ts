@@ -27,6 +27,16 @@ test("captured Git text and SQLite reject wrong object bodies and recover after 
     const wrongText = "replaced incorrect row\n".repeat(512);
     expect(Buffer.byteLength(wrongText)).toBe(Buffer.byteLength(originalText));
     writeFileSync(path.join(source, "data.txt"), originalText);
+    const originalMedia = Buffer.alloc(44 + 16 * 192000);
+    originalMedia.write("RIFF"); originalMedia.writeUInt32LE(originalMedia.length - 8, 4); originalMedia.write("WAVEfmt ", 8);
+    originalMedia.writeUInt32LE(16, 16); originalMedia.writeUInt16LE(1, 20); originalMedia.writeUInt16LE(2, 22);
+    originalMedia.writeUInt32LE(48000, 24); originalMedia.writeUInt32LE(192000, 28);
+    originalMedia.writeUInt16LE(4, 32); originalMedia.writeUInt16LE(16, 34);
+    originalMedia.write("data", 36); originalMedia.writeUInt32LE(originalMedia.length - 44, 40);
+    const wrongMedia = Buffer.from(originalMedia);
+    wrongMedia[wrongMedia.length - 1] ^= 1;
+    writeFileSync(path.join(source, "data.wav"), originalMedia);
+    writeFileSync(path.join(source, "replacement.wav"), wrongMedia);
     const originalPayload = Buffer.from("original payload\n");
     for (const [file, payload] of [["pointer.txt", originalPayload], ["replacement-pointer.txt", Buffer.from("replaced payload\n")]] as const) {
       const oid = createHash("sha256").update(payload).digest("hex");
@@ -51,7 +61,7 @@ test("captured Git text and SQLite reject wrong object bodies and recover after 
         } finally { db.close(); }
       }
     }, source);
-    git(["add", "data.txt", "data.sqlite", "pointer.txt"]);
+    git(["add", "data.txt", "data.sqlite", "pointer.txt", "data.wav"]);
     git(["-c", "user.name=Desktop test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "captured"]);
     git(["tag", "captured"]);
     const index = readFileSync(path.join(source, ".git/index"));
@@ -59,7 +69,7 @@ test("captured Git text and SQLite reject wrong object bodies and recover after 
     expect(originalDatabase.length).toBeGreaterThan(262144);
     expect(readFileSync(path.join(source, "replacement.sqlite")).length).toBe(originalDatabase.length);
     writeFileSync(path.join(source, "replacement.txt"), wrongText);
-    const objects = ["data.txt", "data.sqlite", "pointer.txt"].map(file => {
+    const objects = ["data.txt", "data.sqlite", "pointer.txt", "data.wav"].map(file => {
       const oid = git(["rev-parse", `captured:${file}`]).toString().trim();
       const object = path.join(source, ".git/objects", oid.slice(0, 2), oid.slice(2));
       const original = readFileSync(object);
@@ -87,6 +97,12 @@ test("captured Git text and SQLite reject wrong object bodies and recover after 
     await expect(page.getByText(/Failed to read data.txt:.*checksum differs/)).toBeVisible();
     await expect(page.getByText("replaced incorrect row", { exact: true })).toHaveCount(0);
     await expect(call(page, "read_bytes", { repo_id: "git-integrity", path: "data.txt", rev: "captured", max_bytes: 1024 * 1024 })).rejects.toThrow(/checksum differs/);
+    const captured = await call(page, "file_open", { repo_id: "git-integrity", path: "data.txt", rev: "captured", native_session_id: handle.native_session_id });
+    try {
+      await expect(call(page, "read_range", { repo_id: "git-integrity", file_id: captured.file_id, native_session_id: handle.native_session_id, offset: 0, length: 32 })).rejects.toThrow(/checksum differs/);
+    } finally {
+      await call(page, "file_close", { repo_id: "git-integrity", file_id: captured.file_id, native_session_id: handle.native_session_id });
+    }
     await page.screenshot({ path: test.info().outputPath("git-text-checksum-error.png") });
     await open("data.sqlite");
     await expect(page.getByRole("alert").filter({ hasText: "checksum differs" })).toBeVisible();
@@ -98,8 +114,13 @@ test("captured Git text and SQLite reject wrong object bodies and recover after 
     await expect(page.getByRole("region", { name: "File details", exact: true }).getByRole("alert").filter({ hasText: "checksum differs" })).toBeVisible();
     await expect(call(page, "read_bytes", { repo_id: "git-integrity", path: "pointer.txt", rev: "captured", max_bytes: 1024 })).rejects.toThrow(/checksum differs/);
     await page.screenshot({ path: test.info().outputPath("git-pointer-checksum-error.png") });
+    await open("data.wav");
+    const mediaPreview = page.getByRole("region", { name: "Audio preview", exact: true });
+    await expect(mediaPreview.getByRole("alert").filter({ hasText: "checksum differs" })).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath("git-media-checksum-error.png") });
     for (const object of objects) writeFileSync(object.object, object.original);
     const close = (file: string) => page.getByRole("button", { name: file, exact: true }).locator("..").getByRole("button", { name: "Close tab", exact: true }).click();
+    await close("data.wav");
     await close("pointer.txt");
     await close("data.sqlite");
     await close("data.txt");
@@ -111,6 +132,15 @@ test("captured Git text and SQLite reject wrong object bodies and recover after 
     await expect(page.getByText(createHash("sha256").update(originalPayload).digest("hex"), { exact: true })).toBeVisible();
     const restoredPointer = await call(page, "read_bytes", { repo_id: "git-integrity", path: "pointer.txt", rev: "captured", max_bytes: 1024 });
     expect(Buffer.from(String(restoredPointer.bytes_b64), "base64")).toEqual(originalPayload);
+    await open("data.wav");
+    const audio = mediaPreview.locator("audio");
+    await expect.poll(() => audio.evaluate((node: HTMLMediaElement) => node.duration)).toBe(16);
+    await audio.evaluate((node: HTMLMediaElement) => { node.muted = true; node.currentTime = 3.2; });
+    await expect.poll(() => audio.evaluate((node: HTMLMediaElement) => !node.seeking && Math.abs(node.currentTime - 3.2) < 0.1)).toBe(true);
+    await audio.evaluate((node: HTMLMediaElement) => node.play());
+    await expect.poll(() => audio.evaluate((node: HTMLMediaElement) => node.currentTime > 3.3)).toBe(true);
+    await audio.evaluate((node: HTMLMediaElement) => node.pause());
+    await page.screenshot({ path: test.info().outputPath("git-media-repaired.png") });
     await open("data.sqlite");
     await page.getByRole("button", { name: /^readings/ }).click();
     await expect(page.getByRole("cell", { name: "17", exact: true })).toBeVisible();
@@ -121,9 +151,10 @@ test("captured Git text and SQLite reject wrong object bodies and recover after 
     expect(readFileSync(path.join(source, "data.txt"), "utf8")).toBe(originalText);
     expect(readFileSync(path.join(source, "data.sqlite"))).toEqual(originalDatabase);
     expect(readFileSync(path.join(source, "pointer.txt"))).toEqual(originalPointer);
+    expect(readFileSync(path.join(source, "data.wav"))).toEqual(originalMedia);
     await page.screenshot({ path: test.info().outputPath("git-content-repaired.png") });
     writeFileSync(test.info().outputPath("git-integrity-proof.json"), JSON.stringify({
-      textBytes: Buffer.byteLength(originalText), databaseBytes: originalDatabase.length,
+      textBytes: Buffer.byteLength(originalText), databaseBytes: originalDatabase.length, mediaBytes: originalMedia.length,
       rejected: objects.map(({ file, oid }) => ({ file, oid })), repairedValue: 17, snapshotRemoved: true, indexPreserved: true,
     }, null, 2));
   } catch (error) {

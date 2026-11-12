@@ -33,7 +33,7 @@ pub(crate) async fn output(
     scope: &ReadScope,
 ) -> Result<std::process::Output> {
     let command = git_command(root, args)?;
-    execute(command, scope, capture, false, None).await
+    execute(command, scope, capture, None).await
 }
 
 fn git_command(root: &Path, args: &[&str]) -> Result<std::process::Command> {
@@ -125,51 +125,62 @@ pub(super) async fn blob(
     size: u64,
     scope: &ReadScope,
 ) -> Result<Bytes> {
-    let partial = start + (length as u64) < size;
-    // Prefix readers stop their Git child once the selected bytes arrive.
-    // Whole bodies must authenticate before callers expose or publish them.
-    let complete = start == 0 && length as u64 == size;
-    let command = if complete {
-        blob_batch_command(root, oid)?
-    } else {
-        git_command(root, &["--no-replace-objects", "cat-file", "blob", oid])?
+    if start > size || length as u64 > size - start {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Git range exceeds captured size",
+        )
+        .into());
+    }
+    let mut selected = SelectedBytes {
+        skip: start,
+        remaining: length,
+        bytes: Vec::new(),
     };
+    selected
+        .bytes
+        .try_reserve_exact(length)
+        .map_err(std::io::Error::other)?;
+    let command = blob_batch_command(root, oid)?;
     let captured_oid = oid.to_owned();
     let cancellation = scope.clone();
-    let read = move |mut stdout: std::process::ChildStdout| {
-        if complete {
-            let mut bytes = Vec::new();
-            bytes
-                .try_reserve_exact(length)
-                .map_err(std::io::Error::other)?;
-            crab_git::batch::copy_blob(stdout, &captured_oid, size, &mut bytes, &|| {
-                cancellation.check().is_err()
-            })?;
-            return Ok(bytes);
-        }
-        let discarded = std::io::copy(&mut (&mut stdout).take(start), &mut std::io::sink())?;
-        if discarded != start {
-            return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
-        }
-        let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(length)
-            .map_err(std::io::Error::other)?;
-        bytes.resize(length, 0);
-        stdout.read_exact(&mut bytes)?;
-        if !partial && stdout.read(&mut [0])? != 0 {
-            return Err(std::io::Error::other("Git blob exceeds captured size"));
-        }
-        Ok(bytes)
+    let read = move |stdout: std::process::ChildStdout| {
+        // A prefix cannot authenticate a Git OID. Verify the complete stream
+        // before exposing selected bytes, retaining only the requested range.
+        crab_git::batch::copy_blob(stdout, &captured_oid, size, &mut selected, &|| {
+            cancellation.check().is_err()
+        })?;
+        Ok(selected.bytes)
     };
-    let output = execute(command, scope, read, partial, None).await?;
-    if !partial && !output.status.success() {
+    let output = execute(command, scope, read, None).await?;
+    if !output.status.success() {
         return Err(AgentError::Cli {
             status: output.status.code().unwrap_or(-1),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         });
     }
     Ok(output.stdout.into())
+}
+
+struct SelectedBytes {
+    skip: u64,
+    remaining: usize,
+    bytes: Vec<u8>,
+}
+
+impl std::io::Write for SelectedBytes {
+    fn write(&mut self, input: &[u8]) -> std::io::Result<usize> {
+        let skip = self.skip.min(input.len() as u64) as usize;
+        self.skip -= skip as u64;
+        let count = self.remaining.min(input.len() - skip);
+        self.bytes.extend_from_slice(&input[skip..skip + count]);
+        self.remaining -= count;
+        Ok(input.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 pub(super) async fn blob_size(root: &Path, oid: &str, scope: &ReadScope) -> Result<u64> {
@@ -202,7 +213,7 @@ pub(super) async fn copy_blob(
         })?;
         Ok(Vec::new())
     };
-    let output = execute(command, scope, read, false, None).await?;
+    let output = execute(command, scope, read, None).await?;
     if !output.status.success() {
         return Err(AgentError::Cli {
             status: output.status.code().unwrap_or(-1),
@@ -255,7 +266,7 @@ pub(super) async fn converted_blob_to_file(
         &["ls-files", "--stage", "-z", "--", &index.path],
     )?;
     command.env("GIT_INDEX_FILE", private_index);
-    let selected = execute(command, scope, capture, false, None).await?;
+    let selected = execute(command, scope, capture, None).await?;
     if !selected.status.success() {
         return Err(AgentError::Cli {
             status: selected.status.code().unwrap_or(-1),
@@ -280,7 +291,7 @@ pub(super) async fn converted_blob_to_file(
         std::io::copy(&mut stdout, &mut file)?;
         Ok(Vec::new())
     };
-    let output = execute(command, scope, read, false, Some(Box::new(observer))).await?;
+    let output = execute(command, scope, read, Some(Box::new(observer))).await?;
     if !output.status.success() {
         return Err(AgentError::Cli {
             status: output.status.code().unwrap_or(-1),
@@ -294,7 +305,6 @@ async fn execute(
     command: std::process::Command,
     scope: &ReadScope,
     read_stdout: impl FnOnce(std::process::ChildStdout) -> std::io::Result<Vec<u8>> + Send + 'static,
-    partial: bool,
     mut progress: Option<Box<dyn FnMut() -> Result<()> + Send>>,
 ) -> Result<std::process::Output> {
     scope.check()?;
@@ -305,16 +315,17 @@ async fn execute(
         scope.check()?;
         let mut child = OwnedChild::spawn(command)?;
         std::thread::scope(|workers| {
-            let result = communicate(
-                workers,
-                &mut child,
-                &scope,
-                read_stdout,
-                partial,
-                &mut progress,
-            );
+            let result = communicate(workers, &mut child, &scope, read_stdout, &mut progress);
             if result.is_err() {
                 child.stop()?;
+            }
+            // The verifier can observe cancellation before the pipe owner does.
+            // Preserve typed cancellation after stopping its child; actual
+            // checksum and other I/O failures must retain their own identity.
+            if matches!(&result, Err(AgentError::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted)
+                && scope.cancelled_read()
+            {
+                scope.check()?;
             }
             result
         })
@@ -328,7 +339,6 @@ fn communicate<'a>(
     child: &mut OwnedChild,
     scope: &ReadScope,
     read_stdout: impl FnOnce(std::process::ChildStdout) -> std::io::Result<Vec<u8>> + Send + 'a,
-    partial: bool,
     progress: &mut Option<Box<dyn FnMut() -> Result<()> + Send>>,
 ) -> Result<std::process::Output> {
     let stdout = child
@@ -390,11 +400,6 @@ fn communicate<'a>(
             Ok((is_stdout, result)) => {
                 if is_stdout {
                     stdout = Some(result?);
-                    // A selected prefix/range is complete before Git emits EOF.
-                    // Stop its tree now; its resulting exit signal is expected.
-                    if partial {
-                        status = Some(child.stop()?);
-                    }
                 } else {
                     stderr = Some(result?);
                 }
@@ -418,4 +423,39 @@ fn capture(mut pipe: impl Read) -> std::io::Result<Vec<u8>> {
         return Err(std::io::Error::other("Git read output exceeds 8 MiB"));
     }
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn verifier_interruption_preserves_typed_cancellation() -> Result<()> {
+        let scope = ReadScope::default();
+        let reader = scope.clone();
+        let stop = scope.clone();
+        let command = git_command(Path::new(env!("CARGO_MANIFEST_DIR")), &["--version"])?;
+        let read = move |_stdout| {
+            // The observer runs after the owner's cancellation poll. Hold the
+            // reader until that signal so interruption can arrive on its pipe
+            // channel before the owner polls again.
+            while !reader.cancellation_token().is_cancelled() {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            reader
+                .check()
+                .map_err(|_| std::io::Error::from(std::io::ErrorKind::Interrupted))?;
+            Ok(Vec::new())
+        };
+        let observer = move || {
+            stop.cancel();
+            Ok(())
+        };
+        let result = execute(command, &scope, read, Some(Box::new(observer))).await;
+        let error = result
+            .err()
+            .ok_or_else(|| std::io::Error::other("expected cancellation"))?;
+        assert!(error.is_cancelled(), "{error}");
+        Ok(())
+    }
 }
