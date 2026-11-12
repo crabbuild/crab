@@ -451,7 +451,7 @@ impl core::fmt::Debug for crab_sdk::storage::AzureOptions
 pub fn crab_sdk::storage::AzureOptions::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct crab_sdk::storage::ContentCache
 impl crab_sdk::storage::ContentCache
-pub fn crab_sdk::storage::ContentCache::new(&std::path::Path, u64) -> crab_sdk::Result<Self>
+pub fn crab_sdk::storage::ContentCache::new(&std::path::Path, impl core::convert::Into<core::option::Option<u64>>) -> crab_sdk::Result<Self>
 pub struct crab_sdk::storage::DirectStoreOptions
 impl crab_sdk::storage::DirectStoreOptions
 pub fn crab_sdk::storage::DirectStoreOptions::azure(crab_sdk::storage::AzureOptions) -> Self
