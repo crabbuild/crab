@@ -253,8 +253,8 @@ cover the narrower case where only the origin LFS payload is unavailable.
 
 ### Complete ordinary Git body verification
 
-Complete Git-backed reads, small-pointer classification and database snapshot copies authenticate the captured
-object ID, kind, size, body terminator and EOF through the shared Git batch
+Complete Git-backed reads, small-pointer classification and database snapshot
+copies authenticate the captured object ID, kind, size, body terminator and EOF through the shared Git batch
 verifier. The native copier also handles restoration's pre/post-conversion proof
 using a sink. Git may return a valid compressed body under the wrong object
 filename and exit successfully; length and process status alone cannot authorize
@@ -267,6 +267,33 @@ and SDK remote Git decoding retain their existing owners. Partial Git ranges
 still use the selected-prefix path; their captured integrity work remains open
 and is not qualified by whole-body copy checks. Durable offline captures also
 remain unimplemented.
+
+The complete-read, file-copy and small-pointer regressions fail before their
+source corrections. Nine shared Git tests and 34 focused native content tests
+pass; nine existing store/CLI cases remain ignored in that focused selection.
+Strict Git-crate lint, production-agent lint, Rust formatting, product types
+and strict touched E2E types pass. Production-agent warnings remain. All-targets
+agent lint remains red on 1,377 errors in pre-existing test code under its
+crate-level panic rule; no primary error span intersects changed lines, and
+the new regression module has no diagnostics. No lint suppression is added.
+
+The unsigned macOS ARM package passes both the new corruption/repair case and
+the canonical SQL workflow (two cases, 19.5 seconds). Files shows checksum
+errors for an 11,776-byte text body, a 274,432-byte SQLite body and a small LFS
+pointer whose replacement payload is otherwise valid. Repair restores exact
+bytes, the original LFS identity and SQLite value 17. Failed copies leave no
+query snapshots; working files and the real index remain unchanged. The SQL
+workflow also covers selected revisions, WAL, Crab/LFS sources, cancellation,
+native restart and read-only queries. Its revision selector now targets the
+current Radix trigger rather than retired descendant native options.
+
+Native producer `7b586510e05060703effb7508042f4a5cad27c82` matches all 869
+packaged assets and 1,718 frozen native inputs, including the staged local/SSH
+runtime pair. Native input digest:
+`9320b02f56fccf4eb61048debb43ffe96c4bb85152ed44ad71b2fc09dc1063ed`.
+Earlier cache/SDK/platform receipts retain their own producer attribution.
+This package qualifies the complete Git paths on macOS; partial Git ranges,
+durable offline versions and the remaining platform/provider matrix stay open.
 
 ### Missing and corrupt SDK content
 
