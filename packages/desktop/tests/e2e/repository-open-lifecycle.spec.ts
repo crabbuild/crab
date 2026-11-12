@@ -5,7 +5,7 @@ import { open, type FileHandle } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import type {} from "../../src/ipc";
-import { call, packagedExecutable } from "./packaged-app";
+import { isNativeAgentCommand, call, packagedExecutable } from "./packaged-app";
 
 for (const terminal of ["cancel", "application close"] as const) test(`pending native repository open drains its Git child on ${terminal}`, async () => {
   test.skip(process.platform === "win32", "The blocked Git fixture uses a POSIX FIFO");
@@ -48,7 +48,7 @@ for (const terminal of ["cancel", "application close"] as const) test(`pending n
     let childPid: number | undefined;
     await expect.poll(() => {
       const rows = execFileSync("ps", ["-axo", "pid=,ppid=,command="], { encoding: "utf8" }).split("\n").map(line => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line));
-      const native = rows.find(row => row && Number(row[2]) === application!.process().pid && row[3].includes("/agent/crab-desktop-agent "));
+      const native = rows.find(row => row && Number(row[2]) === application!.process().pid && isNativeAgentCommand(row[3]));
       const child = rows.find(row => row && native && row[2] === native[1] && row[3].includes("git --literal-pathspecs rev-parse"));
       childPid = child ? Number(child[1]) : undefined;
       return childPid;

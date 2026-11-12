@@ -4,7 +4,7 @@ import { execFileSync, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { call, packagedExecutable } from "./packaged-app";
+import { isNativeAgentCommand, call, packagedExecutable } from "./packaged-app";
 import type {} from "../../src/ipc";
 
 for (const end of ["disconnect", "quit"] as const) test(`local notebook executes, recovers, interrupts and restarts before busy ${end}`, async () => {
@@ -80,7 +80,7 @@ for (const end of ["disconnect", "quit"] as const) test(`local notebook executes
     };
     const repairNative = async () => {
       renameSync(path.join(source, ".git"), path.join(source, ".git-offline"));
-      const agent = execFileSync("ps", ["-axo", "pid=,ppid=,command="], { encoding: "utf8" }).split("\n").map(line => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line)).find(row => row && Number(row[2]) === application!.process().pid && row[3].includes("/agent/crab-desktop-agent "));
+      const agent = execFileSync("ps", ["-axo", "pid=,ppid=,command="], { encoding: "utf8" }).split("\n").map(line => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line)).find(row => row && Number(row[2]) === application!.process().pid && isNativeAgentCommand(row[3]));
       if (!agent) throw new Error("Owned native agent not found");
       process.kill(Number(agent[1]), "SIGKILL");
       await expect(page.getByRole("button", { name: "Retry reopening repository", exact: true })).toBeVisible();
@@ -174,7 +174,7 @@ for (const end of ["disconnect", "quit"] as const) test(`local notebook executes
     await expect(page.getByRole("button", { name: "Connect Kernel", exact: true })).toHaveCount(0);
     if (end === "disconnect") {
       await page.keyboard.press(process.platform === "darwin" ? "Meta+," : "Control+,");
-      await page.getByRole("tab", { name: "User", exact: true }).click();
+      await page.getByRole("radiogroup", { name: "Settings scope", exact: true }).getByRole("radio", { name: "User", exact: true }).click();
       await chooseSelect(
           page.getByRole("group", { name: "Theme", exact: true }).getByRole("combobox"),
           "light",

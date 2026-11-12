@@ -50,7 +50,7 @@ for (const kind of ["HTML", "SVG"] as const) test(`saved notebook ${kind} output
     const dark = await outputBody.evaluate(body => ({ text: getComputedStyle(body).color, background: getComputedStyle(body).backgroundColor }));
     await page.screenshot({ path: test.info().outputPath("isolated-notebook-output-dark.png") });
     await page.keyboard.press(process.platform === "darwin" ? "Meta+," : "Control+,");
-    await page.getByRole("tab", { name: "User", exact: true }).click();
+    await page.getByRole("radiogroup", { name: "Settings scope", exact: true }).getByRole("radio", { name: "User", exact: true }).click();
     await chooseSelect(
         page.getByRole("group", { name: "Theme", exact: true }).getByRole("combobox"),
         "light",

@@ -696,7 +696,7 @@ test("GUI snapshots at the same URL restore separate saved identities and cold c
       await expect(dialog).toHaveCount(0);
       await view(page, "weights.safetensors", fixture.payloads[index].marker);
       await page.keyboard.press(process.platform === "darwin" ? "Meta+," : "Control+,");
-      await expect(page.getByRole("tab", { name: "Workspace", exact: true })).toHaveAttribute("aria-disabled", "true");
+      await expect(page.getByRole("radiogroup", { name: "Settings scope", exact: true }).getByRole("radio", { name: "Workspace", exact: true })).toBeDisabled();
       await page.getByRole("button", { name: /^Task list:/ }).click();
       const tasks = page.getByRole("dialog", { name: "Task list", exact: true });
       await expect(tasks.getByRole("textbox", { name: "New task title", exact: true })).toBeDisabled();

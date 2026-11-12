@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { closeSync, existsSync, ftruncateSync, mkdtempSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { call, packagedExecutable } from "./packaged-app";
+import { isNativeAgentCommand, call, packagedExecutable } from "./packaged-app";
 
 for (const kind of ["audio", "video"] as const) for (const mode of ["paused", "playing", "blocked resume"] as const) test(`${kind} ${mode} media restores position and controls after native recovery`, async () => {
   const playing = mode !== "paused";
@@ -63,7 +63,7 @@ for (const kind of ["audio", "video"] as const) for (const mode of ["paused", "p
       };
     }, oldUrl);
     renameSync(metadata, offline);
-    const row = execFileSync("ps", ["-axo", "pid=,ppid=,command="], { encoding: "utf8" }).split("\n").map(line => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line)).find(row => row && Number(row[2]) === application!.process().pid && row[3].includes("/agent/crab-desktop-agent "));
+    const row = execFileSync("ps", ["-axo", "pid=,ppid=,command="], { encoding: "utf8" }).split("\n").map(line => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line)).find(row => row && Number(row[2]) === application!.process().pid && isNativeAgentCommand(row[3]));
     if (!row) throw new Error("Owned native agent not found");
     process.kill(Number(row[1]), "SIGKILL");
     await expect(page.getByRole("button", { name: "Retry reopening repository", exact: true })).toBeVisible();

@@ -1,5 +1,5 @@
 import { expect, type ElectronApplication, type Page } from "@playwright/test";
-import { createReadStream, existsSync, readFileSync, rmSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
 import { Readable } from "node:stream";
@@ -60,6 +60,15 @@ export function packagedExecutable(): string {
   const executablePath = process.env.CRAB_PACKAGED_APP ?? candidates.map(file => path.join(release, file)).find(existsSync);
   if (!executablePath) throw new Error("Build the unpacked application with npm run package:dir first");
   return executablePath;
+}
+
+export function isNativeAgentCommand(command: string): boolean {
+  const directory = path.dirname(packagedExecutable());
+  const resources = process.platform === "darwin" ? path.resolve(directory, "../Resources") : path.resolve(directory, "resources");
+  const executable = realpathSync(path.join(resources, "agent", process.platform === "win32" ? "crab-desktop-agent.exe" : "crab-desktop-agent"));
+  // Electron resolves bundle symlinks and launches this actor without arguments.
+  // Canonicalize before matching its whole executable; callers also bind its PID.
+  return command === executable || command.startsWith(`${executable} `);
 }
 
 export async function call(page: Page, method: string, params: unknown): Promise<Record<string, unknown>> {

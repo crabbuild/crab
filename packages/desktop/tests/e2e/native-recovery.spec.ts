@@ -4,12 +4,12 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "nod
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import type { AgentEvent } from "../../src/ipc";
-import { call, packagedExecutable } from "./packaged-app";
+import { isNativeAgentCommand, call, packagedExecutable } from "./packaged-app";
 
 function nativeChild(application: Awaited<ReturnType<typeof electron.launch>>): number {
   const parent = application.process().pid;
   const children = execFileSync("ps", ["-axo", "pid=,ppid=,command="], { encoding: "utf8" }).split("\n");
-  const child = children.map(line => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line)).find(row => row && Number(row[2]) === parent && row[3].includes("/agent/crab-desktop-agent "));
+  const child = children.map(line => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line)).find(row => row && Number(row[2]) === parent && isNativeAgentCommand(row[3]));
   if (!child) throw new Error("Test application's native child was not found");
   return Number(child[1]);
 }
@@ -82,7 +82,7 @@ test("packaged native recovery reopens repositories and replaces retained file a
     const staleFailure = await page.evaluate(async params => {
       try { await window.crab!.rpc("file_materialize", params); return null; }
       catch (error) { return error as { code?: string; message?: string }; }
-    }, { repo_id: "recover", file_id: stale.file_id, native_session_id: session });
+    }, { repo_id: "recover", file_id: stale.file_id, native_session_id: session, op_id: "stale-capture" });
     expect(staleFailure).toMatchObject({ code: "NATIVE_SESSION_LOST", message: "The file reader's native session ended. Reopen the file." });
     expect(await page.evaluate(async url => (await fetch(url)).status, String(media.url))).toBe(410);
     await expect(call(page, "list", { repo_id: "sibling", path: "" })).resolves.toBeDefined();

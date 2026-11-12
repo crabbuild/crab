@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { call, packagedExecutable } from "./packaged-app";
+import { isNativeAgentCommand, call, packagedExecutable } from "./packaged-app";
 
 test("local publication preserves the source on failure and retries without native services", async () => {
   test.skip(process.platform === "win32", "Requires POSIX modes and process enumeration");
@@ -42,7 +42,7 @@ test("local publication preserves the source on failure and retries without nati
     // Settings and editor saves now both use repository-scoped publication;
     // the selected scope must also reach the app's actual theme consumer.
     await page.keyboard.press(process.platform === "darwin" ? "Meta+," : "Control+,");
-    await page.getByRole("tab", { name: "Workspace", exact: true }).click();
+    await page.getByRole("radiogroup", { name: "Settings scope", exact: true }).getByRole("radio", { name: "Workspace", exact: true }).click();
     await chooseSelect(
       page.getByRole("group", { name: "Theme", exact: true }).getByRole("combobox"),
       "light",
@@ -81,14 +81,14 @@ test("local publication preserves the source on failure and retries without nati
     await application.evaluate(() => (globalThis as typeof globalThis & { heldSettings: { release: () => void } }).heldSettings.release());
     await expect.poll(() => JSON.parse(readFileSync(settingsFile, "utf8"))).toMatchObject({ marker: "PRESERVE_OTHER_SETTINGS", theme: "dark", editorFontSize: 18 });
     await expect(page.locator("html")).toHaveClass(/theme-dark/);
-    await page.getByRole("tab", { name: "User", exact: true }).click();
+    await page.getByRole("radiogroup", { name: "Settings scope", exact: true }).getByRole("radio", { name: "User", exact: true }).click();
     await chooseSelect(
       page.getByRole("group", { name: "Theme", exact: true }).getByRole("combobox"),
       "light",
     );
     await expect(page.locator("html")).toHaveClass(/theme-dark/);
     expect(JSON.parse(readFileSync(settingsFile, "utf8")).theme).toBe("dark");
-    await page.getByRole("tab", { name: "Workspace", exact: true }).click();
+    await page.getByRole("radiogroup", { name: "Settings scope", exact: true }).getByRole("radio", { name: "Workspace", exact: true }).click();
     await page.getByRole("button", { name: "Use User value for Theme", exact: true }).click();
     await expect(page.locator("html")).toHaveClass(/theme-light/);
     await expect.poll(() => JSON.parse(readFileSync(settingsFile, "utf8")).theme).toBeUndefined();
@@ -160,7 +160,7 @@ test("local publication preserves the source on failure and retries without nati
     expect(readdirSync(source).filter(name => name.startsWith(".crab-write-") && name !== userTemporaryName)).toEqual([]);
 
     renameSync(metadata, offline);
-    const row = execFileSync("ps", ["-axo", "pid=,ppid=,command="], { encoding: "utf8" }).split("\n").map(line => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line)).find(row => row && Number(row[2]) === application!.process().pid && row[3].includes("/agent/crab-desktop-agent "));
+    const row = execFileSync("ps", ["-axo", "pid=,ppid=,command="], { encoding: "utf8" }).split("\n").map(line => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line)).find(row => row && Number(row[2]) === application!.process().pid && isNativeAgentCommand(row[3]));
     if (!row) throw new Error("Owned native agent not found");
     process.kill(Number(row[1]), "SIGKILL");
     await expect(page.getByRole("button", { name: "Retry reopening repository", exact: true })).toBeVisible();
@@ -174,7 +174,7 @@ test("local publication preserves the source on failure and retries without nati
     expect(readdirSync(source).filter(name => name.startsWith(".crab-write-") && name !== userTemporaryName)).toEqual([]);
     expect(readFileSync(path.join(offline, "index")).equals(index)).toBe(true);
     await page.keyboard.press(process.platform === "darwin" ? "Meta+," : "Control+,");
-    await page.getByRole("tab", { name: "Workspace", exact: true }).click();
+    await page.getByRole("radiogroup", { name: "Settings scope", exact: true }).getByRole("radio", { name: "Workspace", exact: true }).click();
     await chooseSelect(
       page.getByRole("group", { name: "Theme", exact: true }).getByRole("combobox"),
       "dark",

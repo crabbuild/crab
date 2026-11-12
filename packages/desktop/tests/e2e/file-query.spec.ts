@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { call, packagedExecutable } from "./packaged-app";
+import { isNativeAgentCommand, call, packagedExecutable } from "./packaged-app";
 
 test("SQL uses selected SQLite, WAL, LFS and Crab sources and joins cancellation", async () => {
   test.setTimeout(90_000);
@@ -121,7 +121,7 @@ test("SQL uses selected SQLite, WAL, LFS and Crab sources and joins cancellation
         .find(row => row && Number(row[2]) === parent && matches(row[3]));
       return native ? Number(native[1]) : undefined;
     };
-    const nativePid = () => childPid(application!.process().pid!, command => /\/agent\/crab-desktop-agent(?:\s|$)/.test(command));
+    const nativePid = () => childPid(application!.process().pid!, isNativeAgentCommand);
     await open("data.sqlite");
     await expect(cell("before")).toBeVisible();
     await sql.click();

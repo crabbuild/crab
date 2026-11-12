@@ -4,7 +4,7 @@ import { cpSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writ
 import { createHash } from "node:crypto";
 import * as path from "node:path";
 import { tmpdir } from "node:os";
-import { answerConfirmation, call, packagedExecutable } from "./packaged-app";
+import { isNativeAgentCommand, answerConfirmation, call, packagedExecutable } from "./packaged-app";
 import type { FileTransferActivity, FileTransferJob, FileTransferSource } from "../../electron/file-transfers";
 import type { StorageConnectionInput } from "../../electron/storage-connection-types";
 import type { RepoHandle } from "../../src/ipc";
@@ -62,7 +62,7 @@ for (const kind of ["crab", "lfs"] as const) for (const outcome of ["cancel", "n
     const killNative = () => {
       const parent = application!.process().pid;
       const rows = execFileSync("ps", ["-axo", "pid=,ppid=,command="], { encoding: "utf8" }).split("\n");
-      const native = rows.map(row => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(row)).find(row => row && Number(row[2]) === parent && /\/agent\/crab-desktop-agent(?:\s|$)/.test(row[3]));
+      const native = rows.map(row => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(row)).find(row => row && Number(row[2]) === parent && isNativeAgentCommand(row[3]));
       if (!native) throw new Error("Owned native writer was not found");
       process.kill(Number(native[1]), "SIGKILL");
     };

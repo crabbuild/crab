@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import type { StorageConnectionInput } from "../../electron/storage-connection-types";
 import type { AgentEvent } from "../../src/ipc";
-import { call, packagedExecutable } from "./packaged-app";
+import { isNativeAgentCommand, call, packagedExecutable } from "./packaged-app";
 
 interface Fixture {
   url: string;
@@ -276,7 +276,7 @@ for (const kind of ["crab", "lfs"] as const) {
           const parent = application!.process().pid;
           const native = execFileSync("ps", ["-axo", "pid=,ppid=,command="], { encoding: "utf8" })
             .split("\n").map(line => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line))
-            .find(row => row && Number(row[2]) === parent && /\/agent\/crab-desktop-agent(?:\s|$)/.test(row[3]));
+            .find(row => row && Number(row[2]) === parent && isNativeAgentCommand(row[3]));
           if (!native) throw new Error("Owned native process was not found");
           process.kill(Number(native[1]), "SIGKILL");
         } else {
