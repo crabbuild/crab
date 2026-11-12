@@ -168,6 +168,7 @@ export function TerminalFontSettings({ onChange }: Props) {
           <span className="font-mono text-foreground">{config.fontSize}px</span>
         </label>
         <Slider
+          aria-label="Font size"
           min={8}
           max={32}
           step={1}
@@ -186,6 +187,7 @@ export function TerminalFontSettings({ onChange }: Props) {
           <span className="font-mono text-foreground">{config.fontWeight}</span>
         </label>
         <Slider
+          aria-label="Font weight"
           min={100}
           max={900}
           step={100}
@@ -209,6 +211,7 @@ export function TerminalFontSettings({ onChange }: Props) {
           </span>
         </label>
         <Slider
+          aria-label="Line height"
           min={1}
           max={2}
           step={0.05}
@@ -229,6 +232,7 @@ export function TerminalFontSettings({ onChange }: Props) {
           </span>
         </label>
         <Slider
+          aria-label="Letter spacing"
           min={-2}
           max={5}
           step={0.5}

@@ -32,7 +32,7 @@ const buttonVariants = cva(
       },
       size: {
         default: "min-h-8 px-3 py-1.5",
-        compact: "px-2 py-1 text-xs whitespace-normal",
+        compact: "px-2 py-1 text-xs whitespace-normal [&.truncate]:whitespace-nowrap",
         sm: "h-8 rounded-md px-3 text-xs",
         lg: "h-10 rounded-md px-8",
         icon: "h-6 w-6 shrink-0 p-0 text-muted-foreground",

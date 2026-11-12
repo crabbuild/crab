@@ -773,6 +773,7 @@ function ConfigureStep({
         </label>
         <div className="flex items-center gap-3">
           <Slider
+            aria-label="Maximum scan depth"
             min={1}
             max={10}
             value={[Number(config.maxDepth)]}
