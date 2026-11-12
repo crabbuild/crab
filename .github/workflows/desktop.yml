@@ -96,6 +96,16 @@ jobs:
             --output "$CARGO_TARGET_DIR/git-range-proof/packed-report.json" \
             --require-rss-below 536870912 --timeout-seconds 600 -- \
             node packages/desktop/scripts/qualify-git-ranges.mjs packages/desktop/resources/native/${{ matrix.target }} --packed
+      - name: Prepare real 512 MiB packed delta outside read measurement
+        run: node scripts/prepare-git-delta.mjs "$CARGO_TARGET_DIR/git-range-proof/delta-fixture.json"
+      - name: Qualify packed delta ranges and cancellation
+        run: |
+          python ../../crab/scripts/qualify_sdk.py run \
+            --backend desktop-native-git-delta \
+            --fixture-digest "$(node -p 'require(process.env.CARGO_TARGET_DIR + "/git-range-proof/delta-fixture.json").sha256')" \
+            --output "$CARGO_TARGET_DIR/git-range-proof/delta-report.json" \
+            --require-rss-below 536870912 --timeout-seconds 600 -- \
+            node packages/desktop/scripts/qualify-git-ranges.mjs packages/desktop/resources/native/${{ matrix.target }} --delta "$CARGO_TARGET_DIR/git-range-proof/delta-fixture.json"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
