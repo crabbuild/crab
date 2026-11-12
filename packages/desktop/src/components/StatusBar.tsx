@@ -12,6 +12,7 @@ import { StatusBarToolbar } from "./StatusBarToolbar";
 import { TaskListPopover } from "./TaskListPopover";
 
 interface Props {
+  storageSnapshot: boolean;
   summary: HydrationSummary | null;
   loading: boolean;
   error: string | null;
@@ -46,11 +47,13 @@ interface Props {
  * wants a subset hydrated — that's addressed by the per-subtree
  * Hydrate action and the dataset preset we ship in Pass B.
  */
-export function StatusBar({ summary, loading, error, onRefresh, onOpenStorageConfig, onNavigateFile, onNavigateCommit, syncToolbar, onCommandExecuted }: Props) {
+export function StatusBar({ storageSnapshot, summary, loading, error, onRefresh, onOpenStorageConfig, onNavigateFile, onNavigateCommit, syncToolbar, onCommandExecuted }: Props) {
   return (
     <div className="flex h-7 shrink-0 items-center justify-between border-t border-border bg-card px-3 text-[11px] text-muted-foreground">
       <div className="flex items-center gap-4">
-        {summary ? (
+        {storageSnapshot ? (
+          <span title="This snapshot has no working tree; previews read captured file versions.">Read-only storage snapshot</span>
+        ) : summary ? (
           <>
             <HydrationProgress summary={summary} />
             <span className="flex items-center gap-1">
@@ -89,7 +92,7 @@ export function StatusBar({ summary, loading, error, onRefresh, onOpenStorageCon
         />
         <RemoteStatusChip onClick={onOpenStorageConfig} />
         <SidecarChips />
-        <Button
+        {!storageSnapshot && <Button
           variant="ghost"
           size="compact"
           type="button"
@@ -98,7 +101,7 @@ export function StatusBar({ summary, loading, error, onRefresh, onOpenStorageCon
           title="Refresh hydration status"
         >
           <RefreshCw size={11} />
-        </Button>
+        </Button>}
       </div>
     </div>
   );

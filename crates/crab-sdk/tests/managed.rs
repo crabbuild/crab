@@ -64,7 +64,6 @@ impl LiveManaged {
     }
 
     fn client(&self, scratch: &Path) -> crab_sdk::Client {
-        std::fs::create_dir_all(scratch.join("cache")).unwrap();
         crab_sdk::Client::builder()
             .managed(
                 ManagedOptions::new(&self.token_cache)

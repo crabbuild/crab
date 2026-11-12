@@ -29,7 +29,13 @@ async fn case_distinct_keys_keep_separate_accounting_and_maintenance_owners() {
         }
         assert_ne!(cache.key_directory(&keys[0]), cache.key_directory(&keys[1]));
         assert_eq!(xet_chunk_cache_stats(&cache.root).await.unwrap().entries, 2);
-        assert_eq!(verify_xet_chunk_cache(&cache.root).await.unwrap().valid, 2);
+        assert_eq!(
+            verify_xet_chunk_cache(&cache.root, &range_catalog(&cache.root))
+                .await
+                .unwrap()
+                .valid,
+            2
+        );
         assert_eq!(
             CacheCatalog::read_only_stats(&root).unwrap().total_bytes,
             26
@@ -58,7 +64,7 @@ async fn case_distinct_keys_keep_separate_accounting_and_maintenance_owners() {
             );
         } else {
             assert_eq!(
-                prune_xet_chunk_cache(&cache.root, 0, false, false)
+                prune_xet_chunk_cache(&cache.root, &range_catalog(&cache.root), 0, false, false)
                     .await
                     .unwrap()
                     .entries_evicted,
@@ -120,9 +126,15 @@ async fn maintenance_preserves_unknown_live_and_unpublished_entries() {
     // Unknown trees are not inventory authority, even if they contain links.
     symlink(temp.path(), parent.join("live/link")).unwrap();
     assert_eq!(xet_chunk_cache_stats(&root).await.unwrap().entries, 1);
-    assert_eq!(verify_xet_chunk_cache(&root).await.unwrap().valid, 1);
     assert_eq!(
-        prune_xet_chunk_cache(&root, 0, false, false)
+        verify_xet_chunk_cache(&root, &range_catalog(&root))
+            .await
+            .unwrap()
+            .valid,
+        1
+    );
+    assert_eq!(
+        prune_xet_chunk_cache(&root, &range_catalog(&root), 0, false, false)
             .await
             .unwrap()
             .entries_evicted,
@@ -142,15 +154,23 @@ async fn maintenance_skips_active_readers_in_preview_and_apply() {
     fs::write(&payload, b"bad").unwrap();
     let reader = crate::private_fs::open_read(&root, &payload).await.unwrap();
     for dry_run in [true, false] {
-        let report = prune_xet_chunk_cache(&root, 0, dry_run, true)
+        let report = prune_xet_chunk_cache(&root, &range_catalog(&root), 0, dry_run, true)
             .await
             .unwrap();
         assert_eq!((report.entries_evicted, report.bytes_freed), (0, 0));
     }
-    assert_eq!(verify_xet_chunk_cache(&root).await.unwrap().total, 0);
+    assert_eq!(
+        verify_xet_chunk_cache(&root, &range_catalog(&root))
+            .await
+            .unwrap()
+            .total,
+        0
+    );
     assert_eq!(fs::read(&payload).unwrap(), b"bad");
     drop(reader);
-    let report = verify_xet_chunk_cache(&root).await.unwrap();
+    let report = verify_xet_chunk_cache(&root, &range_catalog(&root))
+        .await
+        .unwrap();
     assert_eq!((report.total, report.corrupt), (1, 1));
     assert!(!payload.exists());
 }
@@ -203,7 +223,7 @@ async fn maintenance_rejects_unsafe_roots_and_entries_without_touching_targets()
         );
         assert!(
             matches!(
-                verify_xet_chunk_cache(&root).await,
+                verify_xet_chunk_cache(&root, &range_catalog(&root)).await,
                 Err(CacheError::UnsafeRoot { .. })
             ),
             "{case}"
@@ -211,7 +231,7 @@ async fn maintenance_rejects_unsafe_roots_and_entries_without_touching_targets()
         for dry_run in [true, false] {
             assert!(
                 matches!(
-                    prune_xet_chunk_cache(&root, 0, dry_run, true).await,
+                    prune_xet_chunk_cache(&root, &range_catalog(&root), 0, dry_run, true).await,
                     Err(CacheError::UnsafeRoot { .. })
                 ),
                 "{case}"
@@ -228,14 +248,20 @@ async fn maintenance_missing_roots_remain_missing() {
     let root = temp.path().join("absent");
     for dry_run in [true, false] {
         assert_eq!(
-            prune_xet_chunk_cache(&root, 0, dry_run, true)
+            prune_xet_chunk_cache(&root, &range_catalog(&root), 0, dry_run, true)
                 .await
                 .unwrap()
                 .entries_evicted,
             0
         );
     }
-    assert_eq!(verify_xet_chunk_cache(&root).await.unwrap().total, 0);
+    assert_eq!(
+        verify_xet_chunk_cache(&root, &range_catalog(&root))
+            .await
+            .unwrap()
+            .total,
+        0
+    );
     assert!(!root.exists());
 }
 
@@ -274,7 +300,7 @@ async fn dropping_scan_cancels_its_worker_without_cancelling_the_parent() {
 async fn verify_checks_chunk_identity_without_treating_xorb_keys_as_chunk_hashes() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("cache/chunks");
-    let cache = XetChunkCacheHandle::open(&root, 1024 * 1024).unwrap();
+    let cache = open_cache(&root, 1024 * 1024).unwrap();
     let range = ChunkRange::new(0, 1);
     for prefix in [CHUNK_HASH_PREFIX, "xorb"] {
         let key = Key {
@@ -287,7 +313,9 @@ async fn verify_checks_chunk_identity_without_treating_xorb_keys_as_chunk_hashes
             .await
             .unwrap();
     }
-    let report = verify_xet_chunk_cache(&root).await.unwrap();
+    let report = verify_xet_chunk_cache(&root, &range_catalog(&root))
+        .await
+        .unwrap();
     assert_eq!((report.total, report.valid, report.corrupt), (2, 1, 1));
     assert_eq!(xet_chunk_cache_stats(&root).await.unwrap().entries, 1);
 }

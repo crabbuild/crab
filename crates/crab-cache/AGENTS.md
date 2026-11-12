@@ -28,20 +28,29 @@ semantics rather than treating every cache object as interchangeable.
 | Disk fill or cleanup | `crates/crab-cache/src/local_cache.rs` | `crates/crab-cache/src/lifecycle.rs` |
 | Remote client contract | `crates/crab-cache/src/cache_client.rs` | `crates/crab-cache-server/src/state.rs` |
 
-Namespace cleanup enters through `clean_cache_namespaces` in
-`crates/crab-cache/src/clean.rs`. The shared Unix/Windows implementation in
-`crates/crab-cache/src/private_fs/platform/cleanup.rs`
-keeps each child beneath the captured parent and uses that child's catalog.
-Never enumerate namespaces and reopen them by ambient pathname. Preview uses
-the private read-only catalog snapshot to preserve logical leases without writes.
-`clean::namespace_tests` covers catalog accounting, retained state and active
-leases; the pinned-directory replacement regression lives beside the traversal.
+`LocalCache::namespaced` stores identity-specific payloads beneath
+`namespaces/<64-hex>/`, sharing the supplied root catalog. Range construction,
+prune and verification require that explicit catalog owner. Never infer an
+owner from path names or reopen a namespace through an ambient pathname.
+`clean_cache` traverses the fixed namespace layout beneath the captured root;
+its read-only preview preserves root-wide logical leases without writes.
+`clean::namespace_tests`, object/range namespace tests and pinned-tree
+replacement regressions protect this boundary.
+
+Root policy is saved by `CacheCatalog::set_retention_budget`, serialized with
+maintenance before the SQLite writer. Reservations read that policy under their
+writer in addition to caller ceilings. Policy changes do not replace live range
+handles. Changing policy and applying maintenance are separate operations;
+products must refresh the saved policy even when maintenance fails.
 
 Unpublished reserved fills enter `catalog::pending` before payload writes.
 The journal's exact file ID and birth time, captured root, catalog writer and
 file lock must agree before recovery can unlink. Names and PIDs are never
-deletion authority. Keep clean previews read-only; ordinary maintenance and
-explicit cleanup share recovery. Preserve unrecorded/replaced files and the
+deletion authority. New catalog admissions recover abandoned fills under their
+writer without waiting for budget pressure, including a declined root-zero
+admission. Caller-ceiling rejection can still bypass disk initialization. Keep
+clean previews read-only; admission, ordinary maintenance and explicit cleanup
+share recovery. Preserve unrecorded/replaced files and the
 payload cleanup contract when a disposable index is unavailable.
 
 ## Invariants

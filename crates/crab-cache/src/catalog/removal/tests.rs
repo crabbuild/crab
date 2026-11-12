@@ -84,7 +84,8 @@ async fn range_deletion_surfaces_retire_only_removed_accounting() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("cache");
         let ranges = root.join("chunks");
-        let handle = XetChunkCacheHandle::open(ranges.clone(), 1024 * 1024).unwrap();
+        let range_catalog = CacheCatalog::new(root.clone(), 1024 * 1024);
+        let handle = XetChunkCacheHandle::open(ranges.clone(), range_catalog.clone()).unwrap();
         let key = Key {
             prefix: "repo".into(),
             hash: Default::default(),
@@ -109,11 +110,11 @@ async fn range_deletion_surfaces_retire_only_removed_accounting() {
         let before = CacheCatalog::read_only_stats(&root).unwrap();
         match action {
             "prune" => {
-                prune_xet_chunk_cache(&ranges, 0, true, false)
+                prune_xet_chunk_cache(&ranges, &range_catalog, 0, true, false)
                     .await
                     .unwrap();
                 assert_eq!(CacheCatalog::read_only_stats(&root).unwrap(), before);
-                prune_xet_chunk_cache(&ranges, 0, false, false)
+                prune_xet_chunk_cache(&ranges, &range_catalog, 0, false, false)
                     .await
                     .unwrap();
             }
@@ -125,7 +126,9 @@ async fn range_deletion_surfaces_retire_only_removed_accounting() {
             _ => {
                 std::fs::write(&paths[0], b"bad").unwrap();
                 if action == "verify" {
-                    verify_xet_chunk_cache(&ranges).await.unwrap();
+                    verify_xet_chunk_cache(&ranges, &range_catalog)
+                        .await
+                        .unwrap();
                 } else {
                     assert!(handle.cache.get(&key, &range).await.unwrap().is_none());
                 }
@@ -144,7 +147,7 @@ async fn declined_or_failed_removal_preserves_rows() {
         let root = temp.path().join("cache");
         let path = seeded(&root).await;
         let pinned = PinnedRoot::open(&root).unwrap();
-        let mut removal = PayloadRemoval::open(Some(&pinned), &root, false).unwrap();
+        let mut removal = PayloadRemoval::open(Some(&pinned), &root, Path::new(""), false).unwrap();
         let result = removal.remove(path.strip_prefix(&root).unwrap(), || {
             if failure {
                 Err(CacheError::Cancelled)
@@ -173,7 +176,7 @@ async fn removal_excludes_replacement_registration_until_commit() {
             std::time::Duration::ZERO,
         )
         .unwrap();
-    let mut removal = PayloadRemoval::open(Some(&pinned), &root, false).unwrap();
+    let mut removal = PayloadRemoval::open(Some(&pinned), &root, Path::new(""), false).unwrap();
     removal
         .remove(relative, || {
             let error = contender
@@ -203,7 +206,7 @@ async fn database_replacement_stops_removal_before_filesystem_action() {
     let root = temp.path().join("cache");
     let path = seeded(&root).await;
     let pinned = PinnedRoot::open(&root).unwrap();
-    let mut removal = PayloadRemoval::open(Some(&pinned), &root, false).unwrap();
+    let mut removal = PayloadRemoval::open(Some(&pinned), &root, Path::new(""), false).unwrap();
     std::fs::rename(root.join(CATALOG_FILE), root.join("saved-catalog")).unwrap();
     std::fs::write(root.join(CATALOG_FILE), b"replacement database").unwrap();
     let mut called = false;
@@ -224,7 +227,7 @@ async fn root_replacement_keeps_deletion_and_accounting_in_original_tree() {
     let path = seeded(&root).await;
     let relative = path.strip_prefix(&root).unwrap();
     let pinned = PinnedRoot::open(&root).unwrap();
-    let mut removal = PayloadRemoval::open(Some(&pinned), &root, false).unwrap();
+    let mut removal = PayloadRemoval::open(Some(&pinned), &root, Path::new(""), false).unwrap();
     let moved = temp.path().join("moved");
     std::fs::rename(&root, &moved).unwrap();
     seeded(&root).await;
@@ -286,12 +289,13 @@ async fn busy_catalog_stops_before_payload_removal() {
         .unwrap();
     writer.execute_batch("BEGIN IMMEDIATE").unwrap();
     let mut called = false;
-    let result = PayloadRemoval::open(Some(&pinned), &root, false).and_then(|mut removal| {
-        removal.remove(path.strip_prefix(&root).unwrap(), || {
-            called = true;
-            Ok(Some(4))
-        })
-    });
+    let result =
+        PayloadRemoval::open(Some(&pinned), &root, Path::new(""), false).and_then(|mut removal| {
+            removal.remove(path.strip_prefix(&root).unwrap(), || {
+                called = true;
+                Ok(Some(4))
+            })
+        });
     assert!(busy(&result.unwrap_err()));
     assert!(!called);
     drop(writer);
@@ -307,7 +311,8 @@ async fn range_parent_and_leaf_remain_paired_after_parent_replacement() {
     let root = temp.path().join("cache");
     let path = seeded(&root).await;
     let (ranges, parent) = PinnedRoot::open_with_private_parent(&root.join("chunks")).unwrap();
-    let mut removal = PayloadRemoval::open(Some(parent.as_ref().unwrap()), &root, false).unwrap();
+    let mut removal =
+        PayloadRemoval::open(Some(parent.as_ref().unwrap()), &root, Path::new(""), false).unwrap();
     let moved = temp.path().join("moved");
     std::fs::rename(&root, &moved).unwrap();
     seeded(&root).await;

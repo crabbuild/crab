@@ -670,7 +670,11 @@ async fn get_file_term_data_offsets_match_xet_core_contract() {
     }
 
     let cache_root = client.store.local_cache().root().join("chunks");
-    let cache = crab_cache::XetChunkCacheHandle::open(&cache_root, 1024 * 1024)
+    let range_catalog = crab_cache::CacheCatalog::new(
+        client.store.local_cache().catalog().root().to_owned(),
+        1024 * 1024,
+    );
+    let cache = crab_cache::XetChunkCacheHandle::open(&cache_root, range_catalog)
         .expect("decoded-range cache")
         .cache;
     let key = xet_client::cas_types::Key {

@@ -1213,6 +1213,8 @@ enum OptimizeCacheCmd {
     Verify,
     /// Remove eligible local cache payloads, preserving retained and busy state.
     Clean(CacheCleanArgs),
+    /// Save a host-wide retention limit and reclaim eligible reusable payloads.
+    Budget(CacheBudgetArgs),
     /// Evict local cache objects until configured budgets are satisfied.
     Prune {
         /// Report what would be pruned without deleting.
@@ -1443,6 +1445,7 @@ impl OptimizeCmd {
                 }
                 OptimizeCacheCmd::Stats { json } => OutputMode::from_flags(*json, false),
                 OptimizeCacheCmd::Clean(args) => OutputMode::from_flags(args.json, false),
+                OptimizeCacheCmd::Budget(args) => OutputMode::from_flags(args.json, false),
                 OptimizeCacheCmd::Verify => OutputMode::Text,
             },
             Self::Indexes(command) => match command {
@@ -1478,6 +1481,7 @@ impl OptimizeCmd {
                 OptimizeCacheCmd::Stats { .. } => "cache.stats",
                 OptimizeCacheCmd::Verify => "cache.verify",
                 OptimizeCacheCmd::Clean(_) => "cache.clean",
+                OptimizeCacheCmd::Budget(_) => "cache.budget",
                 OptimizeCacheCmd::Prune { .. } => "prune",
                 OptimizeCacheCmd::Warm { .. } => "fetch",
             },
@@ -1901,6 +1905,25 @@ enum CacheCmd {
     Verify,
     /// Remove eligible local cache payloads, preserving retained and busy state.
     Clean(CacheCleanArgs),
+    /// Save a host-wide retention limit and reclaim eligible reusable payloads.
+    Budget(CacheBudgetArgs),
+}
+
+#[derive(clap::Args)]
+struct CacheBudgetArgs {
+    /// Maximum retained bytes, including zero to stop new retention.
+    #[arg(
+        long,
+        required_unless_present = "unlimited",
+        conflicts_with = "unlimited"
+    )]
+    max_bytes: Option<u64>,
+    /// Remove the host-wide retention cap; repository ceilings still apply.
+    #[arg(long)]
+    unlimited: bool,
+    /// Structured JSON output with saved policy and actual usage.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(clap::Args)]
@@ -2128,6 +2151,7 @@ impl Cmd {
             Self::Optimize(command) => command.output_mode(),
             Self::Cache(CacheCmd::Stats { json }) => OutputMode::from_flags(*json, false),
             Self::Cache(CacheCmd::Clean(args)) => OutputMode::from_flags(args.json, false),
+            Self::Cache(CacheCmd::Budget(args)) => OutputMode::from_flags(args.json, false),
             Self::Mirror(args) => args.output_mode(),
             Self::Push(args) => OutputMode::from_flags(args.json, args.jsonl),
             Self::Ship { json, .. } => OutputMode::from_flags(*json, false),
@@ -2369,6 +2393,7 @@ impl Cmd {
             Self::Cache(CacheCmd::Stats { .. }) => "cache.stats",
             Self::Cache(CacheCmd::Verify) => "cache.verify",
             Self::Cache(CacheCmd::Clean(_)) => "cache.clean",
+            Self::Cache(CacheCmd::Budget(_)) => "cache.budget",
             Self::Config(ConfigCmd::Get { .. }) => "config.get",
             Self::Config(ConfigCmd::Set { .. }) => "config.set",
             Self::Replica(_) => "replica",
@@ -5384,6 +5409,9 @@ async fn run_optimize_command(
             }
             OptimizeCacheCmd::Verify => run_cache_command(CacheCmd::Verify, cancel).await,
             OptimizeCacheCmd::Clean(args) => run_cache_command(CacheCmd::Clean(args), cancel).await,
+            OptimizeCacheCmd::Budget(args) => {
+                run_cache_command(CacheCmd::Budget(args), cancel).await
+            }
             OptimizeCacheCmd::Prune {
                 dry_run,
                 verbose,
@@ -5799,6 +5827,15 @@ async fn run_cache_command(sub: CacheCmd, cancel: &CancellationToken) -> Result<
         CacheCmd::Clean(args) => {
             let mode = OutputMode::from_flags(args.json, false);
             crab::cmd::cache::run_cache_clean(args.dry_run, mode, cancel).await?;
+        }
+        CacheCmd::Budget(args) => {
+            let mode = OutputMode::from_flags(args.json, false);
+            let report = crab::cmd::cache::run_cache_budget(args.max_bytes, mode, cancel).await?;
+            return Ok(if report.usage.is_available() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            });
         }
     }
     Ok(ExitCode::SUCCESS)

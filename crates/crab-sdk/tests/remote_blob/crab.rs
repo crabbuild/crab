@@ -90,7 +90,6 @@ impl Fixture {
             .put_overwrite(&object, corrupt.into())
             .await
             .unwrap();
-        std::fs::create_dir(cache).unwrap();
         let client = crab_sdk::Client::builder()
             .direct_store(options)
             .content_cache(crab_sdk::storage::ContentCache::new(cache, 4 * 1024 * 1024).unwrap())
@@ -283,7 +282,6 @@ pub(super) async fn verify_limits(
         ),
     ] {
         let cache = cache.join(name);
-        std::fs::create_dir_all(&cache).unwrap();
         let client = crab_sdk::Client::builder()
             .direct_store(options.clone())
             .content_cache(crab_sdk::storage::ContentCache::new(&cache, 4 * 1024 * 1024).unwrap())

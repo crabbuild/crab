@@ -35,7 +35,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
     let cache = scratch.join("content-cache");
-    std::fs::create_dir_all(&cache)?;
     let client = Client::builder()
         .direct_store(DirectStoreOptions::s3_from_env(bucket)?)
         .content_cache(ContentCache::new(&cache, 512 * 1024 * 1024)?)

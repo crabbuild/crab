@@ -1,5 +1,5 @@
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -11,32 +11,37 @@ use tokio_util::sync::CancellationToken;
 use crate::remote_error::{consumer_error, metadata_kind, read_error};
 use crate::{Error, ErrorKind, ReadOptions, Result};
 
-/// Explicit cache directory and finite retention budget for Crab reconstruction.
+/// Explicit cache root and caller retention ceiling for Crab reconstruction.
 #[derive(Clone, Debug)]
 pub struct ContentCache {
-    root: PathBuf,
-    max_bytes: u64,
+    catalog: crab_cache::CacheCatalog,
 }
 
 impl ContentCache {
-    /// Select an existing absolute directory and a nonzero byte budget.
-    pub fn new(root: &Path, max_bytes: u64) -> Result<Self> {
-        if !root.is_absolute() || max_bytes == 0 {
+    /// Create or select a private absolute cache root with an optional caller ceiling.
+    ///
+    /// Zero disables new retention; `None` adds no caller ceiling. Every storage
+    /// namespace also observes the persisted retention policy of this root.
+    pub fn new(root: &Path, max_bytes: impl Into<Option<u64>>) -> Result<Self> {
+        if !root.is_absolute() {
             return Err(Error::new(
                 ErrorKind::InvalidInput,
-                "content cache requires an absolute directory and nonzero budget",
+                "content cache requires an absolute directory",
             ));
         }
+        crab_cache::ensure_private_cache_directory(root).map_err(|source| {
+            Error::with_source(
+                ErrorKind::Io,
+                "cannot initialize private content cache root",
+                source,
+            )
+        })?;
         let root = root.canonicalize().map_err(|source| {
             Error::with_source(ErrorKind::Io, "cannot resolve content cache", source)
         })?;
-        if !root.is_dir() {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                "content cache is not a directory",
-            ));
-        }
-        Ok(Self { root, max_bytes })
+        Ok(Self {
+            catalog: crab_cache::CacheCatalog::new(root, max_bytes),
+        })
     }
 }
 
@@ -113,24 +118,23 @@ impl ContentRuntime {
                         "Crab reconstruction requires an explicit content cache",
                     )
                 })?;
-                let root = cache.root.join(&self.namespace);
+                let namespace = self.namespace.clone();
                 let layout = self.layout.clone();
                 // Cache initialization can touch disk; the tracked caller awaits this
                 // job rather than abandoning it when a public request is dropped.
                 tokio::task::spawn_blocking(move || {
-                    let local = Arc::new(crab_cache::LocalCache::with_limits(
-                        root,
-                        cache.max_bytes,
-                        Some(cache.max_bytes),
-                    ));
-                    let config = crab_cache_store::CacheConfig {
-                        max_bytes: Some(cache.max_bytes),
-                        ..Default::default()
-                    };
+                    let local = crab_cache::LocalCache::namespaced(cache.catalog, &namespace)
+                        .map_err(|source| {
+                            Error::with_source(
+                                ErrorKind::Io,
+                                "cannot initialize content namespace",
+                                source,
+                            )
+                        })?;
                     let store = crab_cache_store::CachingStore::new_with_local_cache(
                         layout.store().clone(),
-                        config,
-                        local,
+                        crab_cache_store::CacheConfig::default(),
+                        Arc::new(local),
                     )
                     .map_err(|source| {
                         Error::with_source(ErrorKind::Io, "cannot initialize content cache", source)
@@ -286,6 +290,26 @@ fn cancelled_write() -> std::io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_cache_creates_private_roots_without_repairing_unsafe_existing_directories() {
+        use std::os::unix::fs::PermissionsExt;
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("cache");
+        ContentCache::new(&root, None).unwrap();
+        assert_eq!(
+            std::fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        ContentCache::new(&root, 0).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(ContentCache::new(&root, None).is_err());
+        assert_eq!(
+            std::fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn cancellation_releases_blocked_writer_without_dropping_receiver() {

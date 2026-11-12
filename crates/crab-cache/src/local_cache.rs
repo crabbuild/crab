@@ -190,6 +190,7 @@ pub struct CachedRemoteXorbIndex {
 /// blocking workers. Writes publish complete private files atomically.
 pub struct LocalCache {
     root: PathBuf,
+    relative_root: PathBuf,
     catalog: crate::catalog::CacheCatalog,
     /// Shared byte ceiling for large data objects: chunk fragments, xorbs, and Git packs.
     chunk_max_bytes: Option<u64>,
@@ -203,14 +204,8 @@ impl LocalCache {
     /// Create a cache rooted at `root` without a disk-retention cap.
     #[must_use]
     pub fn new(root: PathBuf) -> Self {
-        Self {
-            catalog: crate::catalog::CacheCatalog::new(root.clone(), None),
-            root,
-            chunk_max_bytes: None,
-            shard_max_bytes: None,
-            fill_locks: new_fill_locks(),
-            xorb_index_write_lock: std::sync::Mutex::new(()),
-        }
+        let catalog = crate::catalog::CacheCatalog::new(root, None);
+        Self::at(catalog, PathBuf::new(), None)
     }
 
     /// Create a cache with explicit byte budgets.
@@ -223,14 +218,49 @@ impl LocalCache {
         shard_max: Option<u64>,
     ) -> Self {
         let chunk_max = chunk_max.into();
+        let catalog = crate::catalog::CacheCatalog::new(root, chunk_max);
+        Self::at(catalog, PathBuf::new(), shard_max)
+    }
+
+    /// Bind an identity namespace to an existing catalog and retention authority.
+    ///
+    /// The namespace must be a lowercase 64-character hash. Payloads remain
+    /// separate while reservations, leases and maintenance share the catalog.
+    pub fn namespaced(catalog: crate::catalog::CacheCatalog, namespace: &str) -> Result<Self> {
+        if !crate::clean::hex(namespace, 64) {
+            return Err(CacheError::UnsafeRoot {
+                path: catalog.root().display().to_string(),
+                reason: "cache namespace must be a lowercase 64-character hash".into(),
+            });
+        }
+        let relative_root = PathBuf::from("namespaces").join(namespace);
+        Ok(Self::at(catalog, relative_root, None))
+    }
+
+    fn at(
+        catalog: crate::catalog::CacheCatalog,
+        relative_root: PathBuf,
+        shard_max_bytes: Option<u64>,
+    ) -> Self {
+        let mut root = catalog.root().to_owned();
+        if !relative_root.as_os_str().is_empty() {
+            root.push(&relative_root);
+        }
         Self {
-            catalog: crate::catalog::CacheCatalog::new(root.clone(), chunk_max),
             root,
-            chunk_max_bytes: chunk_max,
-            shard_max_bytes: shard_max,
+            relative_root,
+            chunk_max_bytes: catalog.max_bytes(),
+            shard_max_bytes,
+            catalog,
             fill_locks: new_fill_locks(),
             xorb_index_write_lock: std::sync::Mutex::new(()),
         }
+    }
+
+    /// Shared catalog governing this payload view.
+    #[must_use]
+    pub fn catalog(&self) -> &crate::catalog::CacheCatalog {
+        &self.catalog
     }
 
     /// Root directory of this cache.
@@ -239,7 +269,7 @@ impl LocalCache {
         &self.root
     }
 
-    /// Product byte budget shared by object and decoded-range caches.
+    /// Caller admission ceiling, further constrained by the catalog's root policy.
     #[must_use]
     pub fn max_bytes(&self) -> Option<u64> {
         self.catalog.max_bytes()
@@ -253,13 +283,15 @@ impl LocalCache {
     /// pinned, descriptor-relative filesystem operations as cache payloads and leaves no
     /// payload entry behind on success.
     pub fn prepare(&self) -> Result<()> {
-        crate::ensure_private_cache_directory(&self.root)?;
-        let root = crate::private_fs::PinnedRoot::create(&self.root)?;
+        crate::ensure_private_cache_directory(self.catalog.root())?;
+        let root = crate::private_fs::PinnedRoot::create(self.catalog.root())?;
         // Establish the catalog before service metrics can race the first cache fill.
         // Read-only health probes must keep treating incomplete schemas as failures.
         self.catalog.prepare_at(&root)?;
         let sequence = CACHE_PROBE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let relative = PathBuf::from(format!(".write-probe-{}-{sequence}", std::process::id()));
+        let relative = self
+            .relative_root
+            .join(format!(".write-probe-{}-{sequence}", std::process::id()));
         let pending = root.pending_file(&relative)?;
         pending.write_body_sync(&[])?;
         pending.commit_sync()?;
@@ -409,7 +441,7 @@ impl LocalCache {
         let key = CacheKey::Xorb(*hash);
         let path = self.hash_path(&key);
         let Some((data, entry)) =
-            read_file_bounded_result(&self.root, &path, MAX_XORB_SIZE as u64, |data| {
+            read_file_bounded_result(self.catalog.root(), &path, MAX_XORB_SIZE as u64, |data| {
                 verify_xorb_identity(data, hash)
             })
             .await?
@@ -447,9 +479,10 @@ impl LocalCache {
             CacheKey::Stage(_) => {
                 let path = self.hash_path(key);
                 let limit = max_bytes.unwrap_or(MAX_CACHE_STAGE_BYTES);
-                let (data, entry) = read_file_bounded_result(&self.root, &path, limit, |_| Ok(()))
-                    .await
-                    .ok()??;
+                let (data, entry) =
+                    read_file_bounded_result(self.catalog.root(), &path, limit, |_| Ok(()))
+                        .await
+                        .ok()??;
                 entry.touch().await;
                 Some(data)
             }
@@ -464,9 +497,10 @@ impl LocalCache {
                 // A body-read failure cannot authorize deleting a later ETag
                 // publication. Missing bodies are misses regardless of ETag.
                 let limit = max_bytes.unwrap_or(MAX_CACHE_MANIFEST_BYTES);
-                let (data, _entry) = read_file_bounded_result(&self.root, &path, limit, |_| Ok(()))
-                    .await
-                    .ok()??;
+                let (data, _entry) =
+                    read_file_bounded_result(self.catalog.root(), &path, limit, |_| Ok(()))
+                        .await
+                        .ok()??;
                 debug!(manifest = %name, "manifest cache hit (ETag match)");
                 Some(data)
             }
@@ -795,7 +829,7 @@ impl LocalCache {
             | CacheKey::Stage(_) => self.hash_path(key),
             CacheKey::Manifest { name, .. } => self.manifest_data_path(name),
         };
-        crate::catalog::remove_file(&self.root, &path).await?;
+        crate::catalog::remove_file(self.catalog.root(), &path).await?;
         Ok(())
     }
 
@@ -827,7 +861,7 @@ impl LocalCache {
         resolve_range: impl FnOnce(u64) -> Option<std::ops::Range<u64>> + Send,
     ) -> Option<(Bytes, u64)> {
         let path = self.hash_path(&CacheKey::Xorb(*hash));
-        let (entry, file) = PayloadRead::open(&self.root, &path).await.ok()?;
+        let (entry, file) = PayloadRead::open(self.catalog.root(), &path).await.ok()?;
         let result: Result<_> = async {
             let bytes = file.metadata().await?.len();
             if bytes > MAX_XORB_SIZE as u64 {
@@ -870,7 +904,7 @@ impl LocalCache {
         hash: &MerkleHash,
     ) -> Result<Option<(Vec<ChunkMeta>, u64)>> {
         let path = self.hash_path(&CacheKey::Xorb(*hash));
-        let (entry, file) = match PayloadRead::open(&self.root, &path).await {
+        let (entry, file) = match PayloadRead::open(self.catalog.root(), &path).await {
             Ok(opened) => opened,
             Err(CacheError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(None);
@@ -949,11 +983,12 @@ impl LocalCache {
         max_bytes: Option<u64>,
     ) -> Option<Bytes> {
         let max_bytes = max_bytes?;
-        let (data, entry) = read_file_bounded_result(&self.root, path, max_bytes, |data| {
-            verify_data_hash(data, expected)
-        })
-        .await
-        .ok()??;
+        let (data, entry) =
+            read_file_bounded_result(self.catalog.root(), path, max_bytes, |data| {
+                verify_data_hash(data, expected)
+            })
+            .await
+            .ok()??;
         entry.touch().await;
         Some(data)
     }
@@ -965,7 +1000,7 @@ impl LocalCache {
         max_bytes: Option<u64>,
     ) -> Option<Bytes> {
         let limit = max_bytes.unwrap_or(u64::MAX);
-        let (data, entry) = read_file_bounded_result(&self.root, path, limit, |data| {
+        let (data, entry) = read_file_bounded_result(self.catalog.root(), path, limit, |data| {
             verify_blake3_hash(data, expected)
         })
         .await
@@ -983,17 +1018,18 @@ impl LocalCache {
         let max_bytes = max_bytes
             .unwrap_or(MAX_XORB_SIZE as u64)
             .min(MAX_XORB_SIZE as u64);
-        let (data, entry) = read_file_bounded_result(&self.root, path, max_bytes, |data| {
-            verify_xorb_identity(data, expected)
-        })
-        .await
-        .ok()??;
+        let (data, entry) =
+            read_file_bounded_result(self.catalog.root(), path, max_bytes, |data| {
+                verify_xorb_identity(data, expected)
+            })
+            .await
+            .ok()??;
         entry.touch().await;
         Some(data)
     }
 
     async fn try_verify_xorb_payload_file(&self, path: &Path, expected: &MerkleHash) -> bool {
-        let Ok((entry, file)) = PayloadRead::open(&self.root, path).await else {
+        let Ok((entry, file)) = PayloadRead::open(self.catalog.root(), path).await else {
             return false;
         };
         let result = async {
@@ -1836,6 +1872,7 @@ mod tests {
 
     #[cfg(unix)]
     mod maintenance;
+    mod namespaces;
     #[cfg(unix)]
     mod read_repair;
     mod read_through;

@@ -52,7 +52,9 @@ async fn clean_commands_honor_tagged_range_cache_directory() {
         ),
     )
     .unwrap();
-    let cache = XetChunkCacheHandle::open(&range_root, 1024 * 1024).unwrap();
+    let range_catalog =
+        crab_cache::CacheCatalog::new(range_root.parent().unwrap().to_owned(), 1024 * 1024);
+    let cache = XetChunkCacheHandle::open(&range_root, range_catalog).unwrap();
     let key = Key {
         prefix: crab_cache::xet_chunk_cache::CHUNK_HASH_PREFIX.into(),
         hash: (*blake3::hash(b"data").as_bytes()).into(),
@@ -388,7 +390,8 @@ async fn stats_commands_report_healthy_groups_when_the_other_is_unsafe() {
             .await
             .unwrap();
         let range_root = root.join("chunks");
-        let range_cache = XetChunkCacheHandle::open(&range_root, 1024 * 1024).unwrap();
+        let range_catalog = crab_cache::CacheCatalog::new(root.clone(), 1024 * 1024);
+        let range_cache = XetChunkCacheHandle::open(&range_root, range_catalog).unwrap();
         let key = Key {
             prefix: crab_cache::xet_chunk_cache::CHUNK_HASH_PREFIX.into(),
             hash: (*blake3::hash(b"data").as_bytes()).into(),
@@ -466,7 +469,8 @@ fn stats_commands_reject_invalid_configuration_without_creating_a_cache() {
 async fn stats_commands_do_not_inspect_ranges_through_an_aliased_cache_root() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("cache");
-    let range_cache = XetChunkCacheHandle::open(root.join("chunks"), 1024 * 1024).unwrap();
+    let range_catalog = crab_cache::CacheCatalog::new(root.clone(), 1024 * 1024);
+    let range_cache = XetChunkCacheHandle::open(root.join("chunks"), range_catalog).unwrap();
     let key = Key {
         prefix: crab_cache::xet_chunk_cache::CHUNK_HASH_PREFIX.into(),
         hash: (*blake3::hash(b"data").as_bytes()).into(),
@@ -660,7 +664,9 @@ async fn verify_and_prune_commands_preserve_non_range_owners() {
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
     std::fs::write(config, "[cache]\nmax_bytes = 1\n").unwrap();
     let range_root = root.join("chunks");
-    let cache = XetChunkCacheHandle::open(&range_root, 1024 * 1024).unwrap();
+    let range_catalog =
+        crab_cache::CacheCatalog::new(range_root.parent().unwrap().to_owned(), 1024 * 1024);
+    let cache = XetChunkCacheHandle::open(&range_root, range_catalog).unwrap();
     let key = Key {
         prefix: crab_cache::xet_chunk_cache::CHUNK_HASH_PREFIX.into(),
         hash: (*blake3::hash(b"good").as_bytes()).into(),

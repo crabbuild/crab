@@ -117,12 +117,18 @@ Directory guards coordinate cooperating local owners. Callers must join their
 workers before dropping a guard. Cache contents remain disposable; cleanup
 retains unknown state and does not authorize recursive deletion.
 
-Products with separate hash-named cache namespaces use `clean_cache_namespaces`.
-It retains the parent directory handle, opens each namespace beneath that
-captured parent, and applies payload cleanup through the namespace's own catalog.
-Unknown siblings, databases and workspaces remain untouched. Preview and apply
-both honor catalog leases and in-progress reservations; preview uses the existing
-private read-only SQLite snapshot and does not create or repair catalog state.
+Products isolate storage identities with `LocalCache::namespaced(catalog, hash)`.
+Payloads live under `namespaces/<64-hex>/` and share one root catalog, budget and
+lease authority. `clean_cache` traverses those fixed layouts under the captured
+root, retaining unknown siblings, databases and workspaces. Range handles and
+maintenance receive that same explicit catalog owner.
+
+`CacheCatalog::set_retention_budget` persists the host-root limit. Each admission
+and maintenance pass combines it with its caller ceiling; zero stops new
+retention and `None` removes only the root cap. Setting policy does not reclaim
+files by itself. Run maintenance and inspect actual usage afterward; active
+readers and retained state can keep usage above the limit. Read-only inspection
+reports an unavailable policy as unknown rather than unlimited.
 
 For remote caches, enable `remote-client`, configure `CacheClient` authentication,
 and inspect health/capabilities before service-specific operations. Credential

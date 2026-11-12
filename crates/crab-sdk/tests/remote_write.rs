@@ -19,7 +19,6 @@ fn live(prefix: &str) -> (Client, RepositoryLocator, tempfile::TempDir) {
     let locator = RepositoryLocator::new(&prefix).unwrap();
     let scratch = tempfile::tempdir().unwrap();
     let cache = scratch.path().join("content-cache");
-    std::fs::create_dir(&cache).unwrap();
     let client = Client::builder()
         .direct_store(DirectStoreOptions::s3_from_env(&bucket).unwrap())
         .content_cache(ContentCache::new(&cache, 256 * 1024 * 1024).unwrap())

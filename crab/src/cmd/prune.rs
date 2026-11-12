@@ -80,6 +80,7 @@ pub async fn run_prune_with_cancel(
     check_cancelled(cancel)?;
     let xet = prune_xet_chunk_cache_with_cancel(
         &config.effective_chunk_cache_dir(),
+        &crate::cache::xet_chunk_cache::catalog_from_config(&config),
         config.effective_chunk_cache_max_bytes(),
         args.dry_run,
         args.verbose || args.mode == OutputMode::Jsonl,

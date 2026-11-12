@@ -28,25 +28,11 @@ pub async fn clean_cache(
     cancel: &CancellationToken,
 ) -> Result<CacheCleanReport> {
     run_cleanup(root, dry_run, cancel, |pinned, root, dry_run, cancel| {
-        let mut removal = crate::catalog::PayloadRemoval::open(Some(pinned), root, dry_run)?;
+        let mut removal =
+            crate::catalog::PayloadRemoval::open(Some(pinned), root, Path::new(""), dry_run)?;
         pinned.clean(dry_run, cancel, &mut |relative, operation| {
             removal.clean(relative, operation)
         })
-    })
-    .await
-}
-
-/// Clean private hash-named cache namespaces without traversing unknown siblings.
-///
-/// Each namespace retains its own catalog and payload ownership. Missing roots
-/// remain missing; dry runs create no state. Cancellation drains the worker.
-pub async fn clean_cache_namespaces(
-    root: &Path,
-    dry_run: bool,
-    cancel: &CancellationToken,
-) -> Result<CacheCleanReport> {
-    run_cleanup(root, dry_run, cancel, |pinned, _, dry_run, cancel| {
-        pinned.clean_namespaces(dry_run, cancel)
     })
     .await
 }
@@ -108,8 +94,21 @@ pub(crate) fn entry_kind(relative: &Path) -> EntryKind {
     let Some(parts) = components else {
         return EntryKind::Retain;
     };
-    let kind = match object_entry_kind(&parts) {
-        EntryKind::Retain => range_entry_kind(&parts),
+    if parts == ["namespaces"] {
+        return EntryKind::Directory;
+    }
+    let parts = match parts.as_slice() {
+        ["namespaces", namespace, payload @ ..] if hex(namespace, 64) => {
+            if payload.is_empty() {
+                return EntryKind::Directory;
+            }
+            payload
+        }
+        ["namespaces", ..] => return EntryKind::Retain,
+        parts => parts,
+    };
+    let kind = match object_entry_kind(parts) {
+        EntryKind::Retain => range_entry_kind(parts),
         kind => kind,
     };
     if matches!(kind, EntryKind::Retain)
@@ -123,6 +122,17 @@ pub(crate) fn entry_kind(relative: &Path) -> EntryKind {
         }
     }
     kind
+}
+
+pub(crate) fn payload_path(relative: &Path) -> Option<&Path> {
+    let mut components = relative.components();
+    if components.next() != Some(Component::Normal(std::ffi::OsStr::new("namespaces"))) {
+        return Some(relative);
+    }
+    let Component::Normal(namespace) = components.next()? else {
+        return None;
+    };
+    hex(namespace.to_str()?, 64).then_some(components.as_path())
 }
 
 pub(crate) fn object_entry_kind(parts: &[&str]) -> EntryKind {
@@ -345,7 +355,8 @@ mod tests {
         use xet_client::cas_types::{ChunkRange, Key};
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("cache");
-        let handle = crate::XetChunkCacheHandle::open(root.join("chunks"), 1024 * 1024).unwrap();
+        let range_catalog = crate::CacheCatalog::new(root.clone(), 1024 * 1024);
+        let handle = crate::XetChunkCacheHandle::open(root.join("chunks"), range_catalog).unwrap();
         let key = Key {
             prefix: "repo".into(),
             hash: crab_xet::hash::compute_data_hash(b"fixture"),
@@ -370,14 +381,15 @@ mod namespace_tests {
     use crate::{CacheCatalog, CacheKey, LocalCache};
 
     #[tokio::test]
-    async fn namespace_cleanup_retires_payloads_in_each_catalog_and_keeps_unknown_state() {
+    async fn namespace_cleanup_retires_shared_accounting_and_keeps_unknown_state() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("content");
         crate::ensure_private_cache_directory(&root).unwrap();
         let key = CacheKey::RefTransaction(blake3::hash(b"data"));
+        let catalog = CacheCatalog::new(root.clone(), None);
         let mut caches = Vec::new();
         for namespace in ["ab", "cd"] {
-            let cache = LocalCache::new(root.join(namespace.repeat(32)));
+            let cache = LocalCache::namespaced(catalog.clone(), &namespace.repeat(32)).unwrap();
             cache.put(&key, b"data").await.unwrap();
             caches.push(cache);
         }
@@ -386,23 +398,18 @@ mod namespace_tests {
             .await
             .unwrap();
         let cancel = CancellationToken::new();
-        let before = caches
-            .iter()
-            .map(|cache| CacheCatalog::read_only_stats(cache.root()).unwrap())
-            .collect::<Vec<_>>();
-        let preview = clean_cache_namespaces(&root, true, &cancel).await.unwrap();
+        let before = CacheCatalog::read_only_stats(&root).unwrap();
+        let preview = clean_cache(&root, true, &cancel).await.unwrap();
         assert_eq!((preview.files_removed, preview.bytes_reclaimed), (2, 8));
-        for (cache, stats) in caches.iter().zip(before) {
-            assert_eq!(CacheCatalog::read_only_stats(cache.root()).unwrap(), stats);
-            assert!(cache.contains(&key).await);
-        }
-        let report = clean_cache_namespaces(&root, false, &cancel).await.unwrap();
-        assert_eq!((report.files_removed, report.bytes_reclaimed), (2, 8));
+        assert_eq!(CacheCatalog::read_only_stats(&root).unwrap(), before);
         for cache in &caches {
-            assert_eq!(
-                CacheCatalog::read_only_stats(cache.root()).unwrap().entries,
-                0
-            );
+            assert!(cache.contains(&key).await);
+            assert!(!cache.root().join(".catalog.sqlite").exists());
+        }
+        let report = clean_cache(&root, false, &cancel).await.unwrap();
+        assert_eq!((report.files_removed, report.bytes_reclaimed), (2, 8));
+        assert_eq!(CacheCatalog::read_only_stats(&root).unwrap().entries, 0);
+        for cache in &caches {
             assert!(!cache.contains(&key).await);
         }
         assert_eq!(std::fs::read(retained).unwrap(), b"query state");
@@ -414,12 +421,13 @@ mod namespace_tests {
             let directory = tempfile::tempdir().unwrap();
             let root = directory.path().join("content");
             crate::ensure_private_cache_directory(&root).unwrap();
-            let namespace = if namespaced {
-                root.join("ab".repeat(32))
+            let catalog = CacheCatalog::new(root.clone(), None);
+            let cache = if namespaced {
+                LocalCache::namespaced(catalog.clone(), &"ab".repeat(32)).unwrap()
             } else {
-                root.clone()
+                LocalCache::new(root.clone())
             };
-            let cache = LocalCache::new(namespace.clone());
+            let namespace = cache.root().to_owned();
             let hash = blake3::hash(b"data");
             let key = CacheKey::RefTransaction(hash);
             cache.put(&key, b"data").await.unwrap();
@@ -428,28 +436,15 @@ mod namespace_tests {
                 .join("ref-transactions")
                 .join(&hex[..2])
                 .join(hex.as_str());
-            let lease = CacheCatalog::new(namespace, None)
-                .lease(&file)
-                .await
-                .unwrap();
+            let lease = catalog.lease(&file).await.unwrap();
             let cancel = CancellationToken::new();
             for dry_run in [true, false] {
-                let report = if namespaced {
-                    clean_cache_namespaces(&root, dry_run, &cancel).await
-                } else {
-                    clean_cache(&root, dry_run, &cancel).await
-                }
-                .unwrap();
+                let report = clean_cache(&root, dry_run, &cancel).await.unwrap();
                 assert_eq!((report.files_removed, report.busy_entries), (0, 1));
                 assert!(cache.contains(&key).await);
             }
             drop(lease);
-            let report = if namespaced {
-                clean_cache_namespaces(&root, false, &cancel).await
-            } else {
-                clean_cache(&root, false, &cancel).await
-            }
-            .unwrap();
+            let report = clean_cache(&root, false, &cancel).await.unwrap();
             assert_eq!(report.files_removed, 1);
         }
     }

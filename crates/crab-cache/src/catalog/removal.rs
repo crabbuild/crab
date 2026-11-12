@@ -12,7 +12,7 @@ pub(crate) async fn remove_file(root: &Path, path: &Path) -> Result<()> {
             }
             Err(error) => return Err(error),
         };
-        let mut removal = PayloadRemoval::open(Some(&root), &display_root, false)?;
+        let mut removal = PayloadRemoval::open(Some(&root), &display_root, Path::new(""), false)?;
         let result = removal.remove(&relative, || {
             crate::private_fs::check_cancelled(cancel)?;
             root.remove_file(&relative).map(Some)
@@ -137,8 +137,12 @@ impl PayloadRead {
         crate::private_fs::run_blocking(
             &tokio_util::sync::CancellationToken::new(),
             move |cancel| {
-                let mut removal =
-                    PayloadRemoval::open(Some(&self.root), &self.display_root, false)?;
+                let mut removal = PayloadRemoval::open(
+                    Some(&self.root),
+                    &self.display_root,
+                    Path::new(""),
+                    false,
+                )?;
                 removal.remove(&self.relative, || {
                     crate::private_fs::check_cancelled(cancel)?;
                     self.root.remove_read_file(&self.relative, &self.original)
@@ -153,6 +157,9 @@ impl PayloadRead {
 pub(crate) struct PayloadRemoval {
     connection: Option<Database>,
     path: PathBuf,
+    // Filesystem callbacks may use a captured namespace directory. SQL owners
+    // always use the complete catalog-relative key.
+    prefix: PathBuf,
     dry_run: bool,
 }
 
@@ -165,6 +172,8 @@ impl PayloadRemoval {
         if !matches!(entry_kind(relative), EntryKind::Temporary) {
             return self.remove(relative, || operation(None));
         }
+        let relative = self.prefix.join(relative);
+        let relative = relative.as_path();
         let Some(connection) = self.connection.as_mut() else {
             return Ok(None);
         };
@@ -212,8 +221,18 @@ impl PayloadRemoval {
     pub(crate) fn open(
         root: Option<&PinnedRoot>,
         display_root: &Path,
+        prefix: &Path,
         dry_run: bool,
     ) -> Result<Self> {
+        if prefix
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(CacheError::UnsafeRoot {
+                path: prefix.display().to_string(),
+                reason: "cache removal scope is not root-relative".into(),
+            });
+        }
         let path = display_root.join(CATALOG_FILE);
         // A standalone range directory need not have a private catalog parent.
         // Never inspect an ambient parent. Previews use the private read-only
@@ -266,6 +285,7 @@ impl PayloadRemoval {
         Ok(Self {
             connection,
             path,
+            prefix: prefix.to_owned(),
             dry_run,
         })
     }
@@ -275,6 +295,8 @@ impl PayloadRemoval {
         relative: &Path,
         operation: impl FnOnce() -> Result<Option<u64>>,
     ) -> Result<Option<u64>> {
+        let relative = self.prefix.join(relative);
+        let relative = relative.as_path();
         if self.dry_run {
             if let Some(connection) = &self.connection {
                 let key = relative_path(Path::new(""), relative)?;

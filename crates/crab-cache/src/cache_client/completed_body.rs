@@ -6,7 +6,7 @@ use bytes::Bytes;
 use futures_util::{StreamExt as _, stream::BoxStream};
 
 use super::CacheObjectStream;
-use crate::catalog::{CacheCatalog, CacheReservation};
+use crate::catalog::CacheReservation;
 use crate::{CacheError, LocalCache, Result};
 
 const READ_BYTES: usize = 64 * 1024;
@@ -27,7 +27,7 @@ pub(super) async fn complete(
         .ok_or_else(|| CacheError::Service {
             reason: "cache service omitted Content-Length for streamed object".into(),
         })?;
-    let catalog = CacheCatalog::new(cache.root().to_owned(), cache.max_bytes());
+    let catalog = cache.catalog();
     // This logical reservation name is never published. Concurrent bodies
     // have independent reservation IDs and anonymous file descriptors.
     let path = cache.root().join(".streamed-object");
@@ -85,7 +85,8 @@ fn join_error(error: tokio::task::JoinError) -> CacheError {
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
     use super::*;
-    use crate::{CacheClient, CacheServiceAuth};
+    use crate::{CacheCatalog, CacheClient, CacheServiceAuth};
+    use futures_util::TryStreamExt as _;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     async fn response(body: Bytes, advertised: usize) -> CacheObjectStream {
@@ -119,7 +120,7 @@ mod tests {
     }
 
     fn reserved(cache: &LocalCache) -> u64 {
-        CacheCatalog::read_only_stats(cache.root())
+        CacheCatalog::read_only_stats(cache.catalog().root())
             .unwrap()
             .reservations_bytes
     }
@@ -176,6 +177,48 @@ mod tests {
             .unwrap();
         drop(completed);
         assert_eq!(reserved(&cache), 0);
+    }
+
+    #[tokio::test]
+    async fn namespaces_share_anonymous_response_capacity_and_release_the_root_charge() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("cache");
+        let catalog = CacheCatalog::new(root.clone(), None);
+        let expected = Bytes::from(vec![0x3d; READ_BYTES * 3 + 1]);
+        catalog
+            .set_retention_budget(Some(expected.len() as u64 * 2 - 1))
+            .await
+            .unwrap();
+        let first = LocalCache::namespaced(catalog.clone(), &"a".repeat(64)).unwrap();
+        let second = LocalCache::namespaced(catalog, &"b".repeat(64)).unwrap();
+        let completed = response(expected.clone(), expected.len())
+            .await
+            .complete(&first)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reserved(&second), expected.len() as u64);
+        assert!(
+            response(expected.clone(), expected.len())
+                .await
+                .complete(&second)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(!first.root().join(".catalog.sqlite").exists());
+        assert!(!second.root().join(".catalog.sqlite").exists());
+        drop(completed);
+        assert_eq!(reserved(&second), 0);
+        let completed = response(expected.clone(), expected.len())
+            .await
+            .complete(&second)
+            .await
+            .unwrap()
+            .unwrap();
+        let actual = completed.try_collect::<Vec<_>>().await.unwrap().concat();
+        assert_eq!(actual, expected);
+        assert_eq!(reserved(&first), 0);
     }
 
     #[tokio::test]
@@ -248,7 +291,7 @@ mod tests {
         let worker_cache = Arc::clone(&cache);
         let completion = tokio::spawn(async move { response.complete(&worker_cache).await });
         tokio::time::timeout(Duration::from_secs(5), async {
-            while !CacheCatalog::read_only_stats(cache.root())
+            while !CacheCatalog::read_only_stats(cache.catalog().root())
                 .is_ok_and(|stats| stats.reservations_bytes == 100)
             {
                 tokio::time::sleep(Duration::from_millis(5)).await;

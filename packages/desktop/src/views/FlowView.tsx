@@ -134,7 +134,7 @@ export function CrabFlowView({ repo, onSelectCommit, onOpenFile }: Props) {
     filePath: string;
   } | null>(null);
 
-  const hydration = useHydrationStatus(repo.repo_id, !!repo.path || repo.is_remote);
+  const hydration = useHydrationStatus(repo);
 
   // Build CommandContext for executeCommand calls.
   const commandContext = useMemo<CommandContext>(() => ({
@@ -578,7 +578,7 @@ function PointerMapPanel({ repo, onSelectCommit }: { repo: OpenRepo; onSelectCom
   const [limit, setLimit] = useState<50 | 100 | 250 | 500>(50);
   const [mode, setMode] = useState<StorageViewMode>("list");
   const [historyFile, setHistoryFile] = useState<PointerEntry | null>(null);
-  const hydration = useHydrationStatus(repo.repo_id, !!repo.path || repo.is_remote);
+  const hydration = useHydrationStatus(repo);
   const [actionInProgress, setActionInProgress] = useState<string | null>(null);
 
   useEffect(() => {

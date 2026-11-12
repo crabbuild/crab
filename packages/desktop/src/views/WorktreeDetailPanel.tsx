@@ -79,7 +79,7 @@ export function WorktreeDetailPanel({ repo, worktree, status, onClose }: Props) 
   // Worktree repo handle (opened lazily for file listing/editing)
   const [wtRepo, setWtRepo] = useState<OpenRepo | null>(null);
   const transfers = useFileTransfers(wtRepo);
-  const hydration = useHydrationStatus(wtRepo?.repo_id ?? "", !!wtRepo);
+  const hydration = useHydrationStatus(wtRepo);
   const fileTransfers = useMemo(() => ({
     hydrate: transfers.hydrate ? (paths: string[]) => transfers.hydrate!({ kind: "custom", paths }) : undefined,
     dehydrate: transfers.dehydrate ? (paths: string[]) => transfers.dehydrate!({ kind: "custom", paths }) : undefined,

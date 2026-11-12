@@ -53,7 +53,6 @@ fn live_client(scratch: &Path) -> (Client, RepositoryLocator) {
         options = options.with_session_token(&token).unwrap();
     }
     let cache = scratch.join("cache");
-    std::fs::create_dir(&cache).unwrap();
     let client = Client::builder()
         .direct_store(DirectStoreOptions::s3(options))
         .content_cache(ContentCache::new(&cache, 512 * 1024 * 1024).unwrap())

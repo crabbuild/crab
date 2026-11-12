@@ -88,7 +88,12 @@ then closes that handle before checking temporary absence. Windows
 [defers deletion until all file-object handles close](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/ns-ntddk-_file_disposition_information);
 checking earlier leaves a stale journal after successful cancellation.
 
-Explicit cleanup and ordinary maintenance share that journal authority. A
+Admissions, explicit cleanup and ordinary maintenance share that journal authority.
+Before retaining another fill, admission recovers recorded dead fills and retires
+stale SQL owners under the same writer used for its capacity decision. Recovery
+commits even if root policy declines the new body; unlimited retention does not
+wait for capacity pressure. A cheap caller-ceiling rejection can still avoid
+initializing disk state. A
 temporary-looking name or dead PID alone never authorizes deletion. Recovery
 holds the captured directory, catalog writer and nonblocking file ownership
 through identity comparison and unlink. Live fills, replaced files and unknown
@@ -135,7 +140,7 @@ child token. This does not qualify catalog reservation protection, database
 ownership, complete physical accounting, or bounded-time LRU reconciliation.
 
 Decoded-range handles are canonicalized by cache directory within one process.
-Every live handle for that directory must use the same byte budget; a conflicting
+Every live handle for that directory must use the same catalog owner and caller ceiling; a conflicting
 caller receives a typed configuration error and uses its existing verified-origin
 fallback instead of silently inheriting the first caller's limit. After the last
 handle closes, the same persisted directory may reopen with a new budget.
@@ -206,6 +211,33 @@ copy. Request-bound misses, existence/size probes, and manifest/ETag reads keep
 their existing no-touch behavior. This fixes recency identity, not all-family
 LRU policy or batched catalog access accounting. Atomic manifest body/ETag
 pairing and catalog-generation changes during a read remain separate work.
+
+## Shared root retention
+
+Identity-specific object and decoded-range payloads use
+`namespaces/<64-hex>/<payload-layout>`. `LocalCache::namespaced` receives the
+physical root catalog; range construction and maintenance receive that explicit
+owner too. There is no child catalog or inferred owner. Traversal stays beneath
+captured directories. Root object inventory and verification include namespace
+payloads; decoded ranges reuse their existing streaming verifier when enabled.
+Unknown namespace names, nested layouts and retained control state remain outside
+payload deletion authority.
+
+`CacheCatalog::set_retention_budget` saves the physical-root limit separately
+from each caller ceiling. Missing policy retains the existing unlimited default;
+malformed policy fails admission and is reported unavailable. Every reservation
+reads the effective minimum under its SQLite writer, including handles opened
+before the policy changed. A nonblocking maintenance lock serializes updates
+with existing eviction passes; busy updates leave the old policy unchanged.
+A zero root cap stops new retention; unlimited removes only that cap.
+
+The setter does not run maintenance. CLI `cache budget` and Settings save policy,
+run maintenance, then report actual usage. A later maintenance/inspection failure
+does not undo the saved policy; Settings refreshes it on error. Retained state,
+metadata and active payloads can keep disk usage over the cap. This is retention
+policy, not a filesystem quota or an operation read limit. A missing catalog
+initializes the default policy; deleting cache/catalog state resets this policy.
+Offline pins and power-loss persistence remain unqualified.
 
 ## Catalog eviction
 

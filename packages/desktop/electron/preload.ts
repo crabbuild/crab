@@ -61,6 +61,7 @@ const ALLOWED_METHODS = new Set([
   "about",
   "agent_health",
   "cache_stats",
+  "cache_set_budget",
   "cache_clean",
   "clone",
   "status",

@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Output;
 
 use serde::Deserialize;
@@ -10,6 +10,7 @@ use crate::{AgentError, Result, shellout};
 #[derive(Clone, Copy)]
 pub(crate) enum Operation {
     Stats,
+    Budget { max_bytes: Option<u64> },
     Clean { dry_run: bool },
 }
 
@@ -17,6 +18,7 @@ impl Operation {
     fn schema(self) -> &'static str {
         match self {
             Self::Stats => "cache.stats",
+            Self::Budget { .. } => "cache.budget",
             Self::Clean { .. } => "cache.clean",
         }
     }
@@ -29,6 +31,7 @@ fn command(cwd: Option<&Path>, operation: Operation) -> Result<Command> {
             "cache",
             match operation {
                 Operation::Stats => "stats",
+                Operation::Budget { .. } => "budget",
                 Operation::Clean { .. } => "clean",
             },
             "--json",
@@ -38,6 +41,16 @@ fn command(cwd: Option<&Path>, operation: Operation) -> Result<Command> {
     if matches!(operation, Operation::Clean { dry_run: true }) {
         command.arg("--dry-run");
     }
+    if let Operation::Budget { max_bytes } = operation {
+        match max_bytes {
+            Some(bytes) => {
+                command.arg("--max-bytes").arg(bytes.to_string());
+            }
+            None => {
+                command.arg("--unlimited");
+            }
+        }
+    }
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
@@ -46,27 +59,7 @@ fn command(cwd: Option<&Path>, operation: Operation) -> Result<Command> {
 
 pub(crate) async fn run(cwd: Option<&Path>, operation: Operation) -> Result<Value> {
     let output = command(cwd, operation)?.output().await?;
-    let data = reply(output, operation)?;
-    let Operation::Clean { .. } = operation else {
-        return Ok(data);
-    };
-    let mut report: crab_cache::CacheCleanReport = serde_json::from_value(data)?;
-    let cancel = tokio_util::sync::CancellationToken::new();
-    let cleaned =
-        crab_cache::clean_cache_namespaces(&content_root(), report.dry_run, &cancel).await?;
-    report.files_removed = report.files_removed.saturating_add(cleaned.files_removed);
-    report.bytes_reclaimed = report
-        .bytes_reclaimed
-        .saturating_add(cleaned.bytes_reclaimed);
-    report.busy_entries = report.busy_entries.saturating_add(cleaned.busy_entries);
-    report.unsafe_entries = report.unsafe_entries.saturating_add(cleaned.unsafe_entries);
-    // CLI already counts desktop-content as one retained subtree. Its catalogs
-    // and query workspaces remain, so do not count those descendants again.
-    Ok(serde_json::to_value(report)?)
-}
-
-pub(crate) fn content_root() -> PathBuf {
-    crab_cache::default_cache_root().join("desktop-content")
+    reply(output, operation)
 }
 
 #[derive(Deserialize)]
@@ -115,12 +108,17 @@ fn reply(output: Output, operation: Operation) -> Result<Value> {
         .ok_or_else(|| AgentError::Other("Crab returned no cache report".into()))?;
     // Stats deliberately exits 1 with a valid partial report. Preserve its
     // measured lower bounds and issues; cleanup never treats a failed exit as success.
-    let partial = matches!(operation, Operation::Stats)
+    let usage = if matches!(operation, Operation::Budget { .. }) {
+        &data["usage"]
+    } else {
+        &data
+    };
+    let partial = matches!(operation, Operation::Stats | Operation::Budget { .. })
         && output.status.code() == Some(1)
-        && (data["issues"]
+        && (usage["issues"]
             .as_array()
             .is_some_and(|issues| !issues.is_empty())
-            || data["omitted_issues"]
+            || usage["omitted_issues"]
                 .as_u64()
                 .is_some_and(|count| count > 0));
     if !output.status.success() && !partial {
@@ -209,6 +207,7 @@ mod tests {
             match operation {
                 Operation::Stats => assert_eq!(result.unwrap(), data),
                 Operation::Clean { .. } => assert!(result.is_err()),
+                Operation::Budget { .. } => unreachable!(),
             }
         }
     }

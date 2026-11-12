@@ -641,7 +641,6 @@ async fn remote_commit_streams_git_and_hydrated_content_and_resumes_from_its_pac
     let locator = RepositoryLocator::new("repository").unwrap();
     let scratch = tempfile::tempdir().unwrap();
     let cache = scratch.path().join("content-cache");
-    std::fs::create_dir(&cache).unwrap();
     Arc::get_mut(&mut client.0).unwrap().cache =
         Some(crate::ContentCache::new(&cache, 4 * 1024 * 1024).unwrap());
     let (_, base) = fixture(&client, &locator, scratch.path()).await;

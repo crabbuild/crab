@@ -41,7 +41,7 @@ const SNAPSHOT_WAL: &str = "crab-query-snapshot-wal";
 const SNAPSHOT_SHM: &str = "crab-query-snapshot-shm";
 
 fn snapshot_directory() -> PathBuf {
-    crate::cache::content_root().join("database-query")
+    crab_cache::default_cache_root().join("desktop-content/database-query")
 }
 
 fn cache_busy(error: &CacheError) -> bool {

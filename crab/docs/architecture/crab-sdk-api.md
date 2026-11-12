@@ -129,6 +129,13 @@ let client = Client::builder()
     .build()?;
 ```
 
+`storage::ContentCache::new` takes an absolute root and an optional caller byte
+ceiling. It creates a missing root privately and rejects unsafe existing roots
+without changing their permissions. Zero disables new retention; `None` leaves the caller
+uncapped. Identity-specific payload directories share that root's catalog and
+persisted retention policy. Runtime read limits remain separate from disk
+retention. SDK cache initialization never reads CLI configuration implicitly.
+
 `local::Options` groups the tool paths and execution policy. It requires
 explicit tools because local workflows depend on compatible Git and Crab
 executables. A client that uses only the remote interface does not require
