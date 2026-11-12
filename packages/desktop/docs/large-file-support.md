@@ -140,6 +140,24 @@ the visible Skip control inaccessible. Tests drive the actual in-app
 confirmations and shared menu/radio/button roles without changing byte, staging,
 receipt, cancellation or timing assertions.
 
+### Missing and corrupt SDK content
+
+The desktop RPC boundary distinguishes SDK `NotFound` and `Corruption` without
+exposing private dependency diagnostics. Both retain SDK response code 1001 and
+`data.kind = "sdk"`; `data.code` identifies `not_found` or `corruption` and the
+visible message names the failure. Other SDK error categories retain their
+existing response. Shared read failures reach this same boundary after their
+native reader drains, including format preview errors.
+
+The two-store fixture can return 404s for Crab xorbs or LFS objects, or alter
+successful object responses without changing their size or validators. Four
+packaged macOS cases establish visible failure, rejected complete reads and
+byte-identical recovery after repairing the fixture, with no origin writes.
+The earlier package rejects incorrect bytes but reports the same generic SDK
+message for missing and corrupt content. Its stronger missing-content message
+assertion fails. Qualification of the new typed messages is in progress; other
+platforms, providers and publication/error profiles remain open.
+
 ### SDK on-disk fill recovery
 
 A separate packaged macOS probe pauses the actual native decoded-range fill

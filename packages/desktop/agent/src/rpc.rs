@@ -132,10 +132,30 @@ impl From<crate::AgentError> for RpcError {
         while let E::Shared(source) = detail {
             detail = source;
         }
+        let mut message = err.to_string();
         let (code, data) = match detail {
             E::UnknownMethod(_) => (-32601, None),
             E::InvalidParams { .. } => (-32602, None),
-            E::Sdk(_) => (1001, Some(serde_json::json!({ "kind": "sdk" }))),
+            E::Sdk(error) => {
+                // SDK Display keeps dependency diagnostics private. Use its
+                // typed category so missing and corrupt content remain distinct.
+                let category = match error.kind() {
+                    crab_sdk::ErrorKind::NotFound => {
+                        Some(("not_found", "Requested repository content was not found"))
+                    }
+                    crab_sdk::ErrorKind::Corruption => Some((
+                        "corruption",
+                        "Repository content failed integrity verification",
+                    )),
+                    _ => None,
+                };
+                let mut data = serde_json::json!({ "kind": "sdk" });
+                if let Some((code, description)) = category {
+                    message = format!("{description}: {error}");
+                    data["code"] = code.into();
+                }
+                (1001, Some(data))
+            }
             E::Cli { status, stderr } => (
                 1002,
                 Some(serde_json::json!({
@@ -223,7 +243,7 @@ impl From<crate::AgentError> for RpcError {
         };
         Self {
             code,
-            message: err.to_string(),
+            message,
             data,
         }
     }

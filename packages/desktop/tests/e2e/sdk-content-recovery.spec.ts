@@ -15,9 +15,10 @@ interface Fixture {
 }
 
 for (const kind of ["crab", "lfs"] as const) {
-  const outcomes = kind === "crab" ? ["cancel", "native-crash", "app-crash", "cleanup", "budget"] as const : ["cancel", "native-crash", "app-crash"] as const;
+  const outcomes = kind === "crab" ? ["cancel", "native-crash", "app-crash", "cleanup", "budget", "missing", "corrupt"] as const : ["cancel", "native-crash", "app-crash", "missing", "corrupt"] as const;
   for (const outcome of outcomes) {
-    test(outcome === "budget" ? "SDK identities and CLI share the saved desktop retention budget" : outcome === "cleanup" ? "SDK cache cleanup removes verified payloads and preserves retained state" : `SDK ${kind} partial response ${outcome} retries exact content`, async () => {
+    const contentFailure = outcome === "missing" || outcome === "corrupt";
+    test(outcome === "budget" ? "SDK identities and CLI share the saved desktop retention budget" : outcome === "cleanup" ? "SDK cache cleanup removes verified payloads and preserves retained state" : `SDK ${kind} ${contentFailure ? "content failure" : "partial response"} ${outcome} retries exact content`, async () => {
       const descriptor = process.env.CRAB_DESKTOP_STORAGE_IDENTITY_FIXTURE;
       test.skip(!descriptor || (outcome === "native-crash" && process.platform === "win32"), "Requires the owned storage fixture; native process lookup requires POSIX");
       test.setTimeout(120_000);
@@ -38,7 +39,7 @@ for (const kind of ["crab", "lfs"] as const) {
       const transport = async (action: string) => {
         const response = await fetch(`${connection.endpoint}/__fixture_${action}`);
         expect(response.ok).toBe(true);
-        return await response.json() as { get: number; writes: number; stream_blocked: number; streamed_bytes: number; paused: boolean };
+        return await response.json() as { get: number; writes: number; stream_blocked: number; streamed_bytes: number; paused: boolean; faulted: number };
       };
       const inventory = () => {
         const entries: Array<{ path: string; bytes: number }> = [];
@@ -93,6 +94,34 @@ for (const kind of ["crab", "lfs"] as const) {
         expect(repoId).toBeTruthy();
         await expect.poll(() => Boolean(epoch(repoId!))).toBe(true);
         const initialEpoch = epoch(repoId!);
+        if (contentFailure) {
+          const before = await transport(`${outcome}_${kind}`);
+          await page.locator(`[role="treeitem"][data-item-path="${filename}"]`).click();
+          const message = outcome === "missing" ? /repository content was not found/ : /content failed integrity verification/;
+          const visibleError = page.getByRole("main").getByText(message).first();
+          await expect(visibleError).toBeVisible();
+          await expect(page.getByText(payload.marker, { exact: false })).toHaveCount(0);
+          const failedRead = await page.evaluate(async params => {
+            try { await window.crab.rpc("read_bytes", params); return null; }
+            catch (error) { return error as { message?: string; code?: unknown; data?: unknown }; }
+          }, { repo_id: repoId, path: filename, max_bytes: payload.size + 1 });
+          expect(failedRead).toMatchObject({ code: 1001, data: { kind: "sdk", code: outcome === "missing" ? "not_found" : "corruption" } });
+          const failed = await transport("stats");
+          expect(failed.faulted).toBeGreaterThan(before.faulted);
+          await page.screenshot({ animations: "disabled", path: test.info().outputPath("sdk-content-error.png") });
+          await transport("clear_fault");
+          await page.getByRole("button", { name: "Close tab", exact: true }).click();
+          await page.locator(`[role="treeitem"][data-item-path="${filename}"]`).click();
+          await expect(page.getByText(payload.marker, { exact: false }).first()).toBeVisible();
+          const content = await call(page, "read_bytes", { repo_id: repoId, path: filename, max_bytes: payload.size + 1 });
+          const bytes = Buffer.from(String(content.bytes_b64), "base64");
+          expect({ size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") }).toEqual({ size: payload.size, sha256: payload.sha256 });
+          const after = await transport("stats");
+          expect(after.writes).toBe(0);
+          await page.screenshot({ animations: "disabled", path: test.info().outputPath("sdk-content-repaired.png") });
+          writeFileSync(test.info().outputPath("sdk-content-failure-proof.json"), JSON.stringify({ kind, outcome, before, failed, failedRead, after, exactBytesAfterRepair: true }, null, 2));
+          return;
+        }
         if (outcome === "budget") {
           await expect(page.getByText("Read-only storage snapshot", { exact: true })).toBeVisible();
           await expect(page.getByRole("button", { name: "Refresh hydration status", exact: true })).toHaveCount(0);
@@ -263,7 +292,7 @@ for (const kind of ["crab", "lfs"] as const) {
         if (existsSync(cache)) writeFileSync(test.info().outputPath("sdk-recovery-failure-inventory.json"), JSON.stringify(inventory(), null, 2));
         throw error;
       } finally {
-        try { await transport("release"); }
+        try { await transport("clear_fault"); await transport("release"); }
         finally { await application?.close(); }
         writeFileSync(test.info().outputPath("application-stderr.log"), stderr);
         rmSync(root, { recursive: true, force: true });
