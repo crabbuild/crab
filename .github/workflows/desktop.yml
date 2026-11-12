@@ -299,11 +299,16 @@ jobs:
             npx playwright test tests/e2e/notebook-kernel.spec.ts tests/e2e/notebook-remote-kernel.spec.ts --project=e2e-smoke --workers=1
           fi
       - name: Install isolated storage qualification tools
-        if: matrix.os == 'macos-15' || runner.os == 'Windows'
+        if: matrix.os == 'macos-15' || runner.os == 'Windows' || runner.os == 'Linux'
         run: python -m pip install awscli
       - name: Qualify native v2 storage through the packaged app
-        if: matrix.os == 'macos-15' || runner.os == 'Windows'
-        run: python scripts/qualify-v2.py
+        if: matrix.os == 'macos-15' || runner.os == 'Windows' || runner.os == 'Linux'
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a python scripts/qualify-v2.py
+          else
+            python scripts/qualify-v2.py
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: Crab-desktop-${{ runner.os }}-${{ runner.arch }}

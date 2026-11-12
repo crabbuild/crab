@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Qualify SDK transfers against an owned native RustFS on macOS or Windows."""
+"""Qualify SDK transfers against an owned native RustFS on Linux, macOS or Windows."""
 
 from __future__ import annotations
 
@@ -23,6 +23,14 @@ ROOT = Path(__file__).resolve().parents[2]
 RELEASE = "1.0.3"
 # Official release digests pin the executable used by each platform cell.
 ASSETS = {
+    ("Linux", "x86_64"): (
+        "rustfs-linux-x86_64-gnu-v1.0.3.zip",
+        "0cb0924df93734d14f708004eff4b0e48a147fbdc074756ca0d6b8ec919629b8",
+    ),
+    ("Linux", "aarch64"): (
+        "rustfs-linux-aarch64-gnu-v1.0.3.zip",
+        "1c667c8b138fae0ba41786709af49c0b99107f037428d36c8a43ba0627b2408b",
+    ),
     ("Darwin", "arm64"): (
         "rustfs-macos-aarch64-v1.0.3.zip",
         "9ec6f2ad89df88db9b8889f59e37bb27f6b67c61ee8a97968dd90aaa2ac4dd30",

@@ -173,6 +173,16 @@ leases, journal recovery and cleanup on each native filesystem. Adding the gate
 does not qualify those platforms; its new-head results are still required, as
 are packaged UI recovery and provider-specific profiles.
 
+The packaged storage runner now admits Linux to the same owned RustFS fixture
+and complete smoke selection used by macOS ARM and Windows, under Xvfb in CI.
+It selects the Linux bundle and adjacent resources instead of the macOS layout;
+the full bootstrap regression fails before that correction and passes afterward.
+Linux x86-64 and ARM64 archives retain the existing RustFS 1.0.3 release and are
+checked against its official archive digests before extraction. Both downloaded
+archives and their ELF architectures are verified; seven fixture tests and YAML
+validation pass. New-head native execution and packaged Linux recovery remain
+required. Intel macOS has no native fixture asset in this pinned release.
+
 Transfer admission also validates the current native repository epoch before
 looking up captures or saving an Activity intent. Expired single-file and batch
 hydrate/dehydrate/restore calls retain the shared `NATIVE_SESSION_LOST` error;

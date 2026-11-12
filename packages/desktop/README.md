@@ -301,9 +301,12 @@ native v2 object-store snapshot against an isolated S3-compatible fixture. Set
 packaged add/push/reconstruction/clone/hydrate test. The fixture must own its
 credentials, bucket, cache, and user-data directory.
 
-On macOS and Windows, `python3 scripts/qualify-v2.py` starts an owned native
+On Linux, macOS ARM and Windows, `python3 scripts/qualify-v2.py` starts an owned native
 RustFS fixture and runs the native tests and packaged smoke against the same
 bundled CLI. Set `CRAB_PACKAGED_APP` to qualify a package outside `release/`.
+On Linux, run the command under `xvfb-run -a` when no display is available.
+The runner uses the pinned RustFS release and verifies its archive checksum
+before extraction; Intel macOS has no native asset in that release.
 
 Windows daemon terminals use named pipes and the Windows command processor
 when no shell executable is supplied. Live descriptor handoff and POSIX file

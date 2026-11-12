@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -25,10 +26,12 @@ def main() -> None:
         raise RuntimeError("Git, AWS CLI, and Node 22 are required")
     if os.name == "nt":
         default_executable = DESKTOP / "release/win-unpacked/Crab.exe"
+    elif sys.platform == "linux":
+        default_executable = DESKTOP / "release/linux-unpacked/crab"
     else:
         default_executable = DESKTOP / "release/mac-arm64/Crab.app/Contents/MacOS/Crab"
     executable = Path(os.environ.get("CRAB_PACKAGED_APP", str(default_executable)))
-    resources = executable.parent / "resources" if os.name == "nt" else executable.parents[1] / "Resources"
+    resources = executable.parents[1] / "Resources" if sys.platform == "darwin" else executable.parent / "resources"
     crab = resources / "agent" / ("crab.exe" if os.name == "nt" else "crab")
     parent, prefix, _ = fixture.rustfs_work_location(target / "desktop-proof")
     with tempfile.TemporaryDirectory(prefix=prefix, dir=parent) as temporary:
