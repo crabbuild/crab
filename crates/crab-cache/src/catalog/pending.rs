@@ -48,15 +48,12 @@ pub(super) fn release(reservation: &CacheReservation) -> Result<()> {
     let Some(relative) = &reservation.pending_path else {
         return Ok(());
     };
-    // ReservedFile drops its temporary before this reservation. Only absence
-    // proves cancellation removed it; busy, unsafe and unknown paths stay
-    // journaled until conditional recovery can establish ownership.
-    match reservation.root.open_read(Path::new(relative)) {
-        Err(CacheError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-            retire(reservation, relative)
-        }
-        _ => Ok(()),
+    // A failed rename/unlink flush may already have removed the temporary name.
+    // Persist absence before retiring authority, including cancellation cleanup.
+    if reservation.root.confirm_absent(Path::new(relative))? {
+        retire(reservation, relative)?;
     }
+    Ok(())
 }
 
 pub(super) fn available(connection: &Connection, path: &Path) -> Result<bool> {
@@ -196,6 +193,36 @@ pub(super) fn recover(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(all(feature = "remote-client", feature = "local-cache"))]
+    #[tokio::test]
+    async fn anonymous_response_keeps_identity_until_its_final_handle_closes() {
+        use std::io::Write as _;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("cache");
+        let catalog = CacheCatalog::new(root.clone(), None);
+        let reservation = catalog
+            .reserve(&root.join("responses/.streamed-object"), 7)
+            .await
+            .unwrap()
+            .unwrap();
+        let (mut file, reservation) = reservation.anonymous_file().await.unwrap();
+        file.write_all(b"payload").unwrap();
+        let pinned = PinnedRoot::open(&root).unwrap();
+        let connection = super::super::open_catalog(&pinned, &root.join(CATALOG_FILE)).unwrap();
+        let count = || {
+            connection
+                .query_row("SELECT count(*) FROM pending_files", [], |row| {
+                    row.get::<_, u64>(0)
+                })
+                .unwrap()
+        };
+        let active = count();
+        drop(file);
+        drop(reservation);
+        assert_eq!((active, count()), (1, 0));
+    }
 
     #[tokio::test]
     async fn rejected_identity_record_never_exposes_payload_or_leaks_reservation() {

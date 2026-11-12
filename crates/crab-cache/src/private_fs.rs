@@ -267,6 +267,10 @@ impl PinnedRoot {
         self.0.open_read(relative)
     }
 
+    pub(crate) fn confirm_absent(&self, relative: &Path) -> Result<bool> {
+        self.0.confirm_absent(relative)
+    }
+
     pub(crate) fn remove_read_file(
         &self,
         relative: &Path,
@@ -438,7 +442,7 @@ impl PendingFile {
     pub(crate) async fn write(self, data: &[u8]) -> Result<()> {
         let mut writer = self.file()?;
         writer.write_all(data).await?;
-        writer.sync_all().await?;
+        writer.flush().await?;
         drop(writer);
         // The guard removes only its own descriptor-relative temporary on
         // cancellation. Rename can publish complete immutable bytes safely
@@ -451,7 +455,6 @@ impl PendingFile {
         use std::io::Write as _;
         let mut writer = self.0.file();
         writer.write_all(data)?;
-        writer.sync_all()?;
         Ok(())
     }
 
@@ -587,7 +590,9 @@ mod platform {
                 // SAFETY: the parent descriptor is live and name is a single
                 // NUL-terminated component; mkdirat never follows the leaf.
                 let result = unsafe { libc::mkdirat(self.file.as_raw_fd(), name.as_ptr(), 0o700) };
-                if result != 0 {
+                if result == 0 {
+                    self.file.sync_all()?;
+                } else {
                     let error = io::Error::last_os_error();
                     if error.kind() != io::ErrorKind::AlreadyExists {
                         return Err(error.into());
@@ -676,8 +681,48 @@ mod platform {
             dry_run: bool,
             should_remove: &mut dyn FnMut(&mut File) -> Result<bool>,
         ) -> Result<Option<u64>> {
-            let (directory, name) = self.descendant_parent(relative, false)?;
+            let (directory, name) = match self.descendant_parent(relative, false) {
+                Ok(parent) => parent,
+                Err(CacheError::Io(error))
+                    if !dry_run && error.kind() == io::ErrorKind::NotFound =>
+                {
+                    if !self.confirm_absent(relative)? {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            "cache parent changed while confirming absence",
+                        )
+                        .into());
+                    }
+                    return Err(error.into());
+                }
+                Err(error) => return Err(error),
+            };
             directory.remove_payload_if(&name, dry_run, should_remove)
+        }
+
+        pub(super) fn confirm_absent(&self, relative: &Path) -> Result<bool> {
+            let mut candidate = relative;
+            loop {
+                let (directory, name) = match self.descendant_parent(candidate, false) {
+                    Ok(parent) => parent,
+                    Err(CacheError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+                        candidate = candidate.parent().ok_or(error)?;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+                let _mutation = directory.mutation()?;
+                match directory.stat_component(&name) {
+                    Ok(_) => return Ok(false),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        // Absence only authorizes journal retirement after the
+                        // nearest existing parent has persisted that absence.
+                        directory.file.sync_all()?;
+                        return Ok(true);
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
         }
 
         pub(super) fn open_lock(&self, relative: &Path) -> Result<File> {
@@ -717,6 +762,7 @@ mod platform {
             // SAFETY: the live parent fd and one-component name identify only
             // this entry; flags=0 unlinks a leaf, never a directory or target.
             if unsafe { libc::unlinkat(self.file.as_raw_fd(), name.as_ptr(), 0) } == 0 {
+                self.file.sync_all()?;
                 Ok(())
             } else {
                 Err(io::Error::last_os_error())
@@ -749,7 +795,16 @@ mod platform {
         ) -> Result<Option<u64>> {
             let _mutation = self.mutation()?;
             let path = self.path.join(OsStr::from_bytes(name.as_bytes()));
-            let mut file = self.open_component(name, libc::O_RDONLY, &path)?;
+            let mut file = match self.open_component(name, libc::O_RDONLY, &path) {
+                Ok(file) => file,
+                Err(CacheError::Io(error))
+                    if !dry_run && error.kind() == io::ErrorKind::NotFound =>
+                {
+                    self.file.sync_all()?;
+                    return Err(error.into());
+                }
+                Err(error) => return Err(error),
+            };
             let metadata = file.metadata()?;
             validate_metadata(&metadata, &path, false)?;
             if !FileExt::try_lock_exclusive(&file)? {
@@ -1087,6 +1142,7 @@ mod platform {
         pub(super) fn commit(mut self) -> Result<()> {
             let _mutation = self.directory.mutation()?;
             self.check_name()?;
+            self.file.sync_all()?;
             // SAFETY: both single-component names are relative to the same
             // live directory descriptor. renameat replaces the leaf itself,
             // even if a competing process changed it into a symlink.
@@ -1102,6 +1158,9 @@ mod platform {
                 return Err(io::Error::last_os_error().into());
             }
             self.published = true;
+            // Keep recovery authority until rename reaches the captured parent.
+            // A failed flush must leave the journal available to the caller.
+            self.directory.file.sync_all()?;
             Ok(())
         }
     }
@@ -1127,6 +1186,23 @@ mod platform {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn confirmed_absence_stays_in_the_captured_tree_after_root_replacement() {
+            use std::io::Write as _;
+
+            let temporary = tempfile::tempdir().unwrap();
+            let root = temporary.path().join("cache");
+            let pinned = Directory::root(&root, true).unwrap();
+            std::fs::rename(&root, temporary.path().join("moved")).unwrap();
+            let relative = Path::new("chunks/aa/entry");
+            let mut replacement = TemporaryFile::new(&root, &root.join(relative)).unwrap();
+            replacement.file.write_all(b"foreign").unwrap();
+            replacement.commit().unwrap();
+
+            assert!(pinned.confirm_absent(relative).unwrap());
+            assert_eq!(std::fs::read(root.join(relative)).unwrap(), b"foreign");
+        }
 
         #[test]
         fn live_temporary_replacement_is_neither_published_nor_removed() {
@@ -1469,6 +1545,9 @@ mod platform {
             Err(unsupported(path))
         }
         pub(super) fn open_read(&self, relative: &Path) -> Result<File> {
+            Err(unsupported(relative))
+        }
+        pub(super) fn confirm_absent(&self, relative: &Path) -> Result<bool> {
             Err(unsupported(relative))
         }
         pub(super) fn remove_read_file(

@@ -139,7 +139,7 @@ pub(crate) fn object_entry_kind(parts: &[&str]) -> EntryKind {
     match parts {
         [
             "chunks" | "xorbs" | "shards" | "ref-transactions" | "git-packs" | "stages"
-            | "manifests" | "hints",
+            | "manifests" | "hints" | "responses",
         ] => EntryKind::Directory,
         ["hints", "clean-bloom.bin"] => EntryKind::Payload,
         ["manifests", name]

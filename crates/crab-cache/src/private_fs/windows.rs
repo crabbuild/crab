@@ -96,7 +96,12 @@ impl Directory {
                             if create && error.kind() == io::ErrorKind::NotFound =>
                         {
                             match create_private_directory(&current) {
-                                Ok(()) => {}
+                                Ok(()) => {
+                                    let parent = current.parent().ok_or_else(|| {
+                                        unsafe_path(&current, "cache directory has no parent")
+                                    })?;
+                                    sync_directory(parent)?;
+                                }
                                 Err(CacheError::Io(error))
                                     if error.kind() == io::ErrorKind::AlreadyExists => {}
                                 Err(error) => return Err(error),
@@ -139,7 +144,7 @@ impl Directory {
         let path = self.path.join(name);
         if create {
             match create_private_directory(&path) {
-                Ok(()) => {}
+                Ok(()) => sync_directory(&self.path)?,
                 Err(CacheError::Io(error)) if error.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(error) => return Err(error),
             }
@@ -227,9 +232,25 @@ impl Directory {
         dry_run: bool,
         should_remove: &mut dyn FnMut(&mut File) -> Result<bool>,
     ) -> Result<Option<u64>> {
-        let (directory, name) = self.descendant_parent(relative, false)?;
+        let (directory, name) = match self.descendant_parent(relative, false) {
+            Ok(parent) => parent,
+            Err(CacheError::Io(error)) if !dry_run && error.kind() == io::ErrorKind::NotFound => {
+                if !self.confirm_absent(relative)? {
+                    return Err(busy("cache parent changed while confirming absence"));
+                }
+                return Err(error.into());
+            }
+            Err(error) => return Err(error),
+        };
         let path = directory.path.join(name);
-        let mut file = open_for_delete(&path)?;
+        let mut file = match open_for_delete(&path) {
+            Ok(file) => file,
+            Err(CacheError::Io(error)) if !dry_run && error.kind() == io::ErrorKind::NotFound => {
+                sync_directory(&directory.path)?;
+                return Err(error.into());
+            }
+            Err(error) => return Err(error),
+        };
         let stat = handle_stat(&file)?;
         validate_handle(&file, &path, false)?;
         validate_private_acl(&file, &path)?;
@@ -241,8 +262,34 @@ impl Directory {
         }
         if !dry_run {
             delete_handle(&file)?;
+            // Windows completes deletion at the final file-object close.
+            // Flush the pinned parent only after that close reaches NTFS.
+            drop(file);
+            sync_directory(&directory.path)?;
         }
         Ok(Some(stat.size))
+    }
+
+    pub(super) fn confirm_absent(&self, relative: &Path) -> Result<bool> {
+        let mut candidate = relative;
+        loop {
+            let (directory, name) = match self.descendant_parent(candidate, false) {
+                Ok(parent) => parent,
+                Err(CacheError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+                    candidate = candidate.parent().ok_or(error)?;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            match std::fs::symlink_metadata(directory.path.join(name)) {
+                Ok(_) => return Ok(false),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    sync_directory(&directory.path)?;
+                    return Ok(true);
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
     }
 
     fn entry_names(&self) -> Result<Vec<OsString>> {
@@ -395,6 +442,20 @@ fn open_validated_directory(path: &Path) -> Result<File> {
     let file = open_directory(path)?;
     validate_handle(&file, path, true)?;
     Ok(file)
+}
+
+fn sync_directory(path: &Path) -> Result<()> {
+    // Directory chains deny rename/delete. Reopen that pinned path with the
+    // GENERIC_WRITE access FlushFileBuffers requires; read handles cannot flush.
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(SHARE_PINNED)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | OPEN_NO_REPARSE)
+        .open(path)?;
+    validate_handle(&file, path, true)?;
+    file.sync_all()?;
+    Ok(())
 }
 
 fn open_file(path: &Path, create: bool, exclusive: bool, share: u32) -> Result<File> {
@@ -969,6 +1030,7 @@ impl TemporaryFile {
     }
 
     pub(super) fn commit(mut self) -> Result<()> {
+        self.file.sync_all()?;
         let started = Instant::now();
         loop {
             match rename_handle(&self.file, &self.destination_path) {
@@ -982,6 +1044,7 @@ impl TemporaryFile {
             }
         }
         self.published = true;
+        sync_directory(&self._directory.path)?;
         Ok(())
     }
 }

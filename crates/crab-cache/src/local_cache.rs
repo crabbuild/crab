@@ -1310,7 +1310,7 @@ async fn copy_file_with_blake3(
         tmp_file.write_all(chunk).await?;
         hasher.update(chunk);
     }
-    tmp_file.sync_all().await?;
+    tmp_file.flush().await?;
 
     if copied == expected_len {
         return Ok(hasher.finalize());

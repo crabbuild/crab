@@ -30,7 +30,7 @@ pub(super) async fn complete(
     let catalog = cache.catalog();
     // This logical reservation name is never published. Concurrent bodies
     // have independent reservation IDs and anonymous file descriptors.
-    let path = cache.root().join(".streamed-object");
+    let path = cache.root().join("responses/.streamed-object");
     let Some(reservation) = catalog.reserve(&path, size).await? else {
         return Ok(None);
     };
@@ -151,14 +151,18 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert!(!cache.root().join(".streamed-object").exists());
-        assert!(std::fs::read_dir(cache.root()).unwrap().all(|entry| {
-            !entry
+        assert!(!cache.root().join("responses/.streamed-object").exists());
+        assert!(
+            std::fs::read_dir(cache.root().join("responses"))
                 .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".tmp-")
-        }));
+                .all(|entry| {
+                    !entry
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".tmp-")
+                })
+        );
 
         let mut actual = Vec::new();
         while let Some(chunk) = completed.next().await {
