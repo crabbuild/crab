@@ -471,7 +471,7 @@ function JobCard({ jobId, job, expanded, onToggle, onFilter }: JobCardProps) {
             <p className="break-all">{job.intent.repository}</p>
             <p>{job.intent.paths.length} selected paths · {new Date(job.startedAt).toLocaleString()}</p>
             <p>Captured source versions</p>
-            {sourceError ? <p role="alert" className="break-words text-destructive">{sourceError} <Button variant="ghost" size="compact" type="button" className="btn" onClick={() => setSourceRefresh(value => value + 1)}>Reload sources</Button></p> : !sourcePage && <p role="status">Loading captured sources…</p>}
+            {sourceError ? <p role="alert" className="break-words text-destructive">{sourceError} <Button variant="outline" size="compact" type="button" onClick={() => setSourceRefresh(value => value + 1)}>Reload sources</Button></p> : !sourcePage && <p role="status">Loading captured sources…</p>}
             <ul className="max-h-48 space-y-2 overflow-auto">{job.intent.paths.slice(pathPage * 50, (pathPage + 1) * 50).map((path, index) => {
               const source = byPosition.get(pathPage * 50 + index);
               const algorithm = source?.kind === "git" ? "Git blob" : source?.kind === "crab" ? "BLAKE3" : "SHA-256";

@@ -124,8 +124,8 @@ export function SqliteView({ repoId, path, rev, nativeSessionId }: Props) {
         )
       ) : (
         <div className="flex min-h-0 flex-1 flex-col">
-          {err && <div role="alert" className="m-4 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">{err}</div>}
-          {!data && sql === null && !err && <p role="status" className="shrink-0 px-3 py-1.5 text-xs text-gx-muted">Reading table metadata…</p>}
+          {err && <div role="alert" className="m-4 rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">{err}</div>}
+          {!data && sql === null && !err && <p role="status" className="shrink-0 px-3 py-1.5 text-xs text-muted-foreground">Reading table metadata…</p>}
           <div className="min-h-0 flex-1">
             <FileQueryPanel
               query={query}
