@@ -12,11 +12,14 @@ import { promisify } from "node:util";
 import { createDeflate } from "node:zlib";
 
 const execute = promisify(execFile);
-const packed = process.argv[3] === "--packed";
-const delta = process.argv[3] === "--delta"
-  ? JSON.parse(await readFile(process.argv[4], "utf8")) : undefined;
-if ((delta ? process.argv.length !== 5 : process.argv.length > 4) || (process.argv[3] && !packed && !delta)) {
-  throw new Error("Usage: qualify-git-ranges.mjs [native-directory] [--packed | --delta <manifest>]");
+const args = process.argv.slice(2);
+const restore = args.at(-1) === "--restore";
+if (restore) args.pop();
+const packed = args[1] === "--packed";
+const delta = args[1] === "--delta"
+  ? JSON.parse(await readFile(args[2], "utf8")) : undefined;
+if ((delta ? args.length !== 3 : args.length > 2) || (args[1] && !packed && !delta)) {
+  throw new Error("Usage: qualify-git-ranges.mjs [native-directory] [--packed | --delta <manifest>] [--restore]");
 }
 const size = delta ? delta.logicalBytes : 2 * 1024 ** 3;
 const head = delta ? Buffer.from(delta.head, "base64") : Buffer.from("verified-git-head\n");
@@ -25,7 +28,7 @@ const fixtureDigest = delta ? delta.sha256 : "515a224ca4c51ce3dbabf555d1d1da8d2f
 const pattern = delta ? Buffer.alloc(64 * 1024)
   : Buffer.concat(Array.from({ length: 2048 }, (_, i) => createHash("sha256").update(`crab-dense-git-block-${i}`).digest()));
 const platform = { darwin: "mac", linux: "linux", win32: "win" }[process.platform];
-const directory = path.resolve(process.argv[2] ?? `resources/native/${platform}-${process.arch}`);
+const directory = path.resolve(args[0] ?? `resources/native/${platform}-${process.arch}`);
 const runtime = JSON.parse(await readFile(path.join(directory, "runtime.json"), "utf8"));
 assert.equal(runtime.platform, process.platform);
 assert.equal(runtime.arch, process.arch);
@@ -250,6 +253,15 @@ try {
   await stopped;
   report.cancellationAcknowledged = true;
   await read(0, "fresh capture read after cancellation");
+  if (restore) {
+    await writeFile(file, "local working edit before confirmed restoration\n");
+    const started = performance.now();
+    const restored = await rpc("files_restore", { repo_id: repo, paths: ["large.bin"], op_id: randomUUID() });
+    assert.equal(restored.written_bytes, size);
+    report.restoredBytes = restored.written_bytes;
+    report.restoreElapsedMs = performance.now() - started;
+    report.restoreResult = restored;
+  }
   assert.deepEqual(await readFile(path.join(source, ".git/index")), index);
   assert.equal(await digest(file), fixtureDigest);
   report.verified = true;

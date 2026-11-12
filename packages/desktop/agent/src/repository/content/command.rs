@@ -10,6 +10,8 @@ use crab_git::process::OwnedChild;
 
 use super::*;
 
+pub(super) mod conversion;
+
 const MAX_PATCH_BYTES: u64 = 8 * 1024 * 1024;
 const READ_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
@@ -18,7 +20,10 @@ pub(in crate::repository) async fn run(
     args: &[&str],
     scope: &ReadScope,
 ) -> Result<Vec<u8>> {
-    let output = output(root, args, scope).await?;
+    checked_stdout(output(root, args, scope).await?)
+}
+
+fn checked_stdout(output: std::process::Output) -> Result<Vec<u8>> {
     if !output.status.success() {
         return Err(AgentError::Cli {
             status: output.status.code().unwrap_or(-1),
@@ -344,60 +349,6 @@ pub(super) async fn git_path(root: &Path, name: &str, scope: &ReadScope) -> Resu
             std::str::from_utf8(source).map_err(std::io::Error::other)?,
         ))
     }
-}
-
-pub(super) async fn converted_blob_to_file(
-    index: &super::publication::IndexFile,
-    private_index: &Path,
-    mut file: std::fs::File,
-    scope: &ReadScope,
-    mut progress: impl FnMut(u64) -> Result<()> + Send + 'static,
-) -> Result<()> {
-    // Git can read a Windows verbatim index path as an empty index. Scratch is
-    // inside this worktree; keep native ownership paths canonical and give Git
-    // the owned index relative to its working directory.
-    let root = tokio::fs::canonicalize(&index.root).await?;
-    let private_index = private_index
-        .strip_prefix(root)
-        .map_err(std::io::Error::other)?;
-    let mut command = git_command(
-        &index.root,
-        &["ls-files", "--stage", "-z", "--", &index.path],
-    )?;
-    command.env("GIT_INDEX_FILE", private_index);
-    let selected = execute(command, scope, capture, None).await?;
-    if !selected.status.success() {
-        return Err(AgentError::Cli {
-            status: selected.status.code().unwrap_or(-1),
-            stderr: String::from_utf8_lossy(&selected.stderr).into_owned(),
-        });
-    }
-    let entry = file_entry_at(&selected.stdout, &index.path, true)?;
-    if entry.0.as_deref() != Some(&index.mode) || entry.1.as_deref() != Some(&index.oid) {
-        return Err(changed());
-    }
-    let path = format!(":{}", index.path);
-    // The index expression makes Git load index-backed attributes when working
-    // attributes are absent. A raw OID with --path skips that on supported Git.
-    let mut command = git_command(
-        &index.root,
-        &["--no-replace-objects", "cat-file", "--filters", &path],
-    )?;
-    command.env("GIT_INDEX_FILE", private_index);
-    let observed = file.try_clone()?;
-    let observer = move || progress(observed.metadata()?.len());
-    let read = move |mut stdout: std::process::ChildStdout| {
-        std::io::copy(&mut stdout, &mut file)?;
-        Ok(Vec::new())
-    };
-    let output = execute(command, scope, read, Some(Box::new(observer))).await?;
-    if !output.status.success() {
-        return Err(AgentError::Cli {
-            status: output.status.code().unwrap_or(-1),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        });
-    }
-    Ok(())
 }
 
 async fn execute(

@@ -5,7 +5,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { chooseSelect } from "../helpers/select";
-import { call, packagedExecutable } from "./packaged-app";
+import { answerConfirmation, call, packagedExecutable } from "./packaged-app";
 
 test("captured Git text and SQLite reject wrong object bodies and recover after repair", async () => {
   test.setTimeout(60_000);
@@ -153,9 +153,25 @@ test("captured Git text and SQLite reject wrong object bodies and recover after 
     expect(readFileSync(path.join(source, "pointer.txt"))).toEqual(originalPointer);
     expect(readFileSync(path.join(source, "data.wav"))).toEqual(originalMedia);
     await page.screenshot({ path: test.info().outputPath("git-content-repaired.png") });
+
+    await chooseSelect(page.getByRole("combobox").filter({ hasText: "captured" }), { label: "HEAD (default)" });
+    writeFileSync(path.join(source, "data.txt"), "unstaged edit before confirmed restoration\n");
+    await page.keyboard.press(process.platform === "darwin" ? "Meta+Shift+P" : "Control+Shift+P");
+    const palette = page.getByRole("dialog", { name: "Command palette", exact: true });
+    await palette.getByRole("combobox").fill("Git: Discard File Changes");
+    await palette.getByRole("option").filter({ hasText: "Git: Discard File Changes" }).click();
+    await palette.getByRole("combobox").fill("data.txt");
+    await palette.getByRole("combobox").press("Enter");
+    await answerConfirmation(page, /^Restore /);
+    await expect(page.getByText("Restored data.txt from the index", { exact: true })).toBeVisible();
+    expect(readFileSync(path.join(source, "data.txt"), "utf8")).toBe(originalText);
+    expect(readFileSync(path.join(source, ".git/index"))).toEqual(index);
+    await open("data.txt");
+    await expect(page.getByText("captured original body", { exact: true }).first()).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath("git-index-restored.png") });
     writeFileSync(test.info().outputPath("git-integrity-proof.json"), JSON.stringify({
       textBytes: Buffer.byteLength(originalText), databaseBytes: originalDatabase.length, mediaBytes: originalMedia.length,
-      rejected: objects.map(({ file, oid }) => ({ file, oid })), repairedValue: 17, snapshotRemoved: true, indexPreserved: true,
+      rejected: objects.map(({ file, oid }) => ({ file, oid })), repairedValue: 17, snapshotRemoved: true, indexPreserved: true, restoredThroughUi: true,
     }, null, 2));
   } catch (error) {
     const page = await application?.firstWindow();

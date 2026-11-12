@@ -494,6 +494,39 @@ remains a measured P0 owner, including EOL, ident, encoding and custom-filter
 semantics. The raw-read memory result must not be relabeled as restoration
 support.
 
+### Git restoration conversion ownership
+
+Restoration now selects conversion under its private index through the
+[conversion owner](../agent/src/repository/content/command/conversion.rs).
+When checkout bytes are unchanged, one bounded physical copy authenticates its
+own output; it avoids Git's whole-object allocation and the two surrounding
+verification passes. The identity cases include absent conversion attributes
+with autocrlf disabled/input, explicit `eol=lf`, and typed `-text`. Git resolves
+working/index attributes and boolean configuration. `--all` plus an exact
+literal attribute pathspec distinguish absent/false attributes from literal
+values such as `filter=unspecified` or `text=unset`.
+
+Ident, CRLF expansion, encoding and external filters retain Git conversion and
+its before/after input verification. Their bounded streaming remains a P0;
+identity conversion does not close that requirement. Both choices retain
+working-file/index publication checks, selected credentials and joined
+cancellation. A failed progress observer cancels and joins physical copying
+before the publication workspace is reclaimed. Progress callbacks run on joined
+blocking workers, preserving the transfer reporter's synchronous-to-async
+notification contract. Its regression rejects an async-context callback.
+
+Ten focused restoration tests pass (one existing matching-CLI test ignored),
+including thirteen Git-oracle configuration cases, reserved filter names,
+missing working attributes, scoped smudge credentials, corrupt/missing objects,
+concurrent edits, index replacement and cancellation across both choices.
+Production-agent lint passes with the same 149 existing warnings. The current
+release still fails the original 512 MiB restore guard at 1,213,399,040 bytes RSS.
+The canonical range actor now additionally restores real unstaged changes and
+checks exact bytes/index/close under the existing memory/deadline limits. It
+rejects the previous runtime at 1,153,974,272 bytes despite native exit zero.
+All three profiles enable restoration on the five native CI targets. Matching
+new-runtime memory and packaged confirmation/visible-result proof are pending.
+
 ### Verified local Git capture implementation
 
 Local Git sources now share an owned capture for selected ranges, complete
