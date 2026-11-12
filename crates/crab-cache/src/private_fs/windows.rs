@@ -1010,6 +1010,11 @@ impl TemporaryFile {
         &self.file
     }
 
+    pub(super) fn sync_identity(&self) -> Result<()> {
+        self.file.sync_all()?;
+        sync_directory(&self._directory.path)
+    }
+
     pub(super) fn name(&self) -> Result<&OsStr> {
         self.temporary_path
             .file_name()

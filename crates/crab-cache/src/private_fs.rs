@@ -405,6 +405,7 @@ pub(crate) struct PendingFile(platform::TemporaryFile);
 
 impl PendingFile {
     pub(crate) fn record(&self, destination: &Path) -> Result<(std::path::PathBuf, FileIdentity)> {
+        self.0.sync_identity()?;
         Ok((
             destination.with_file_name(self.0.name()?),
             FileIdentity::capture(self.0.file())?,
@@ -1025,6 +1026,16 @@ mod platform {
             &self.file
         }
 
+        pub(super) fn sync_identity(&self) -> Result<()> {
+            let _mutation = self.directory.mutation()?;
+            self.check_name()?;
+            // Persist the empty inode and name before SQL records their identity.
+            // Later payload writes must not outlive that creation metadata.
+            self.file.sync_all()?;
+            self.directory.file.sync_all()?;
+            Ok(())
+        }
+
         pub(super) fn name(&self) -> Result<&OsStr> {
             Ok(OsStr::from_bytes(self.temporary.as_bytes()))
         }
@@ -1642,6 +1653,10 @@ mod platform {
 
         pub(super) fn file(&self) -> &File {
             &self.0
+        }
+
+        pub(super) fn sync_identity(&self) -> Result<()> {
+            Err(unsupported(Path::new("cache")))
         }
 
         pub(super) fn name(&self) -> Result<&std::ffi::OsStr> {
