@@ -1,3 +1,4 @@
+import { ChatInput, type ChatMode } from "../../src/components/orchestrator/ChatInput";
 import { PasteConfirmDialog } from "../../src/components/PasteConfirmDialog";
 import type { PasteAnalysis } from "../../src/lib/terminal-paste-guard";
 import { useEffect, useState } from "react";
@@ -57,6 +58,45 @@ import { ToastManager } from "../../src/components/ToastManager";
 import { publishToast } from "../../src/lib/toasts";
 import "../../src/index.css";
 
+const theme = new URLSearchParams(location.search).get("theme") ?? "dark";
+if (["light", "dark", "hc-light", "hc-dark"].includes(theme)) document.documentElement.classList.add(`theme-${theme}`);
+
+// This fixture never reads the host clipboard or launches an agent.
+Object.defineProperty(navigator, "clipboard", { configurable: true, value: { readText: async () => "" } });
+
+function ComposerFixture() {
+  const [agent, setAgent] = useState("codex");
+  const [model, setModel] = useState("default");
+  const [mode, setMode] = useState<ChatMode>("instant");
+  const [streaming, setStreaming] = useState(false);
+  const [submitted, setSubmitted] = useState("Ready");
+  return (
+    <section aria-label="Chat composer" className="flex min-w-0 flex-col gap-3" data-chat-content>
+      <h2 className="font-medium">Chat composer</h2>
+      <ChatInput
+        agents={[{ type: "codex", name: "Codex", available: true }, { type: "claude-code", name: "Claude Code", available: true }]}
+        agentType={agent}
+        onAgentChange={setAgent}
+        models={[{ value: "default", label: "Default model" }, { value: "large", label: "Model with a longer display name" }]}
+        model={model}
+        onModelChange={setModel}
+        mode={mode}
+        onModeChange={setMode}
+        isStreaming={streaming}
+        onStop={() => setStreaming(false)}
+        onSubmit={(message) => {
+          setSubmitted(`${message.text} · ${message.mode} · ${message.attachments.map(attachment => attachment.label).join(", ")}`);
+          setStreaming(true);
+        }}
+        activeEditorFile="/fixture/README.md"
+        activeEditorLabel="README.md"
+        onPickContextFiles={async () => ["/fixture/notes.md"]}
+      />
+      <output data-testid="composer-result" className="whitespace-pre-wrap text-xs text-muted-foreground">{submitted}</output>
+    </section>
+  );
+}
+
 const pasteCases: Record<string, PasteAnalysis> = {
   multi: { requiresConfirmation: true, reasons: ["multi-line"], lineCount: 42, controlChars: [], dangerousPatterns: [], preview: "first\n...\nlast" },
   control: { requiresConfirmation: true, reasons: ["control-chars"], lineCount: 1, controlChars: ["^C", "^["], dangerousPatterns: [], preview: "hello^Cworld^[end" },
@@ -82,8 +122,9 @@ function Fixture() {
     return () => window.removeEventListener("keydown", handleKey);
   }, []);
   return (
-    <main className="mx-auto grid max-w-3xl gap-5 p-8">
+    <main className="mx-auto grid max-w-3xl grid-cols-1 gap-5 p-8">
       <h1 className="text-lg font-semibold">Crab shadcn controls</h1>
+      <ComposerFixture />
       <Select
         value={":" + value}
         onValueChange={(selected) => {
@@ -236,7 +277,7 @@ function Fixture() {
         <CollapsibleTrigger>Advanced settings</CollapsibleTrigger>
         <CollapsibleContent>Advanced content</CollapsibleContent>
       </Collapsible>
-      <div className="flex gap-2">{Object.keys(pasteCases).map(kind => <Button key={kind} onClick={() => setPasteCase(kind)}>Review {kind} paste</Button>)}</div>
+      <div className="flex flex-wrap gap-2">{Object.keys(pasteCases).map(kind => <Button key={kind} onClick={() => setPasteCase(kind)}>Review {kind} paste</Button>)}</div>
       {pasteCase && <PasteConfirmDialog analysis={pasteCases[pasteCase]} onCancel={() => { setPasteCase(null); setResult("Paste cancelled"); }} onConfirm={() => { setPasteCase(null); setResult("Paste confirmed"); }} />}
       <output
         data-testid="result"

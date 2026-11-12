@@ -46,7 +46,9 @@ or hand-positioned menus. System file pickers and terminal/editor engine
 internals remain platform integrations.
 
 Input groups own the shared border/focus indicator around a field and its addons.
-Compose `InputGroupInput` with `InputGroupAddon` to avoid nested input borders.
+Compose `InputGroupInput` or `InputGroupTextarea` with `InputGroupAddon` to avoid
+nested input borders. Chat composers use the same group around quick attachments,
+the auto-growing editor and toolbar; the group retains the measurement ref.
 Inputs keep their native change events and forwarded refs. Selection controls
 use value callbacks. Existing application selects namespace Radix item values
 with a leading colon, then remove it at the call site; this preserves selectable

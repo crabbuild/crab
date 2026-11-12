@@ -1,11 +1,13 @@
 import * as React from "react";
 
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 
-function InputGroup({ className, ...props }: React.ComponentProps<"div">) {
-  return (
+const InputGroup = React.forwardRef<HTMLDivElement, React.ComponentProps<"div">>(
+  ({ className, ...props }, ref) => (
     <div
+      ref={ref}
       role="group"
       data-slot="input-group"
       className={cn(
@@ -14,8 +16,9 @@ function InputGroup({ className, ...props }: React.ComponentProps<"div">) {
       )}
       {...props}
     />
-  );
-}
+  ),
+);
+InputGroup.displayName = "InputGroup";
 
 function InputGroupAddon({
   className,
@@ -23,7 +26,7 @@ function InputGroupAddon({
   onClick,
   ...props
 }: React.ComponentProps<"div"> & {
-  align?: "inline-start" | "inline-end";
+  align?: "inline-start" | "inline-end" | "block-start" | "block-end";
 }) {
   return (
     <div
@@ -32,13 +35,18 @@ function InputGroupAddon({
       data-align={align}
       className={cn(
         "flex shrink-0 items-center gap-0.5 text-muted-foreground",
-        align === "inline-start" ? "order-first pl-1" : "order-last pr-1",
+        align === "inline-start" && "order-first pl-1",
+        align === "inline-end" && "order-last pr-1",
+        align === "block-start" && "order-first w-full px-3 pt-2",
+        align === "block-end" && "order-last w-full px-3 pb-2",
         className,
       )}
       onClick={(event) => {
         onClick?.(event);
-        if (event.defaultPrevented || (event.target as HTMLElement).closest("button")) return;
-        event.currentTarget.parentElement?.querySelector("input")?.focus();
+        // Portalled menus keep their own focus scope outside the addon.
+        if (event.defaultPrevented || !event.currentTarget.contains(event.target as Node) || (event.target as HTMLElement).closest("button")) return;
+        // Hidden attachment inputs are not the composer editor.
+        event.currentTarget.parentElement?.querySelector<HTMLElement>('[data-slot="input-group-control"]')?.focus();
       }}
       {...props}
     />
@@ -61,4 +69,21 @@ const InputGroupInput = React.forwardRef<
 ));
 InputGroupInput.displayName = "InputGroupInput";
 
-export { InputGroup, InputGroupAddon, InputGroupInput };
+const InputGroupTextarea = React.forwardRef<
+  HTMLTextAreaElement,
+  React.ComponentPropsWithoutRef<typeof Textarea>
+>(({ className, ...props }, ref) => (
+  <Textarea
+    ref={ref}
+    data-slot="input-group-control"
+    className={cn(
+      // Auto-growing composers set height; an automatic basis preserves it.
+      "flex-auto resize-none rounded-none border-0 bg-transparent shadow-none focus-visible:ring-0",
+      className,
+    )}
+    {...props}
+  />
+));
+InputGroupTextarea.displayName = "InputGroupTextarea";
+
+export { InputGroup, InputGroupAddon, InputGroupInput, InputGroupTextarea };

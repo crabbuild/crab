@@ -12,7 +12,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
+import { InputGroup, InputGroupAddon, InputGroupTextarea } from "@/components/ui/input-group";
 import { Toggle } from "@/components/ui/toggle";
 import clsx from "clsx";
 import {
@@ -603,8 +603,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
   const canSubmit = text.trim().length > 0 && !isStreaming;
 
   return (
-    <div
+    <InputGroup
       ref={containerRef}
+      aria-label="Message composer"
       onBlur={(event) => {
         if (event.currentTarget.contains(event.relatedTarget)) return;
         // These popovers listen on document; hidden chat must not consume Skills input.
@@ -614,7 +615,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
       }}
       onDrop={handleDrop}
       onDragOver={(e) => e.preventDefault()}
-      className="relative isolate rounded-lg border border-border bg-background focus-within:border-primary/70 transition"
+      className="isolate h-auto flex-col items-stretch rounded-lg"
     >
       {/* Slash command dropdown (positioned above the input group) */}
       <SlashCommandDropdown
@@ -667,9 +668,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
       />
 
       {/* Textarea */}
-      <Textarea
+      <InputGroupTextarea
         ref={textareaRef}
-        className="block w-full resize-none bg-transparent px-3 pt-2.5 pb-1 text-xs leading-5 text-foreground placeholder:text-muted-foreground/60 focus:outline-none"
+        className="block w-full px-3 pt-2.5 pb-2 leading-5"
         placeholder={placeholder ?? "Type a message, / for commands, @ to add context, # for files…"}
         rows={1}
         value={text}
@@ -689,7 +690,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
       )}
 
       {/* Toolbar */}
-      <div className="flex items-center gap-1 px-2 pb-2 pt-1">
+      <InputGroupAddon align="block-end" aria-label="Message actions" className="flex-wrap gap-x-2 gap-y-1 px-2 pt-1">
+        <div className="flex min-w-0 items-center gap-1">
         {/* Toolbar */}
         <DropdownMenu
           open={openMenu === "agent"}
@@ -861,9 +863,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
           )}
         </DropdownMenu>
 
-        {/* Right cluster: model, mode, send */}
-        <div className="flex-1" />
-
+        </div>
+        <div className="ml-auto flex min-w-0 max-w-full items-center justify-end gap-1">
         {/* Right cluster: model, mode, send */}
         {models.length > 0 && (
           <DropdownMenu
@@ -873,11 +874,12 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
             <DropdownMenuTrigger asChild>
               <IconButton
                 ariaLabel="Select model and intelligence"
+                className="max-w-[240px]"
                 title={selectedModel ? `Model: ${selectedModel.label}${intelligence ? ` · ${intelligence}` : ""}` : "Model"}
                 active={openMenu === "model"}
               >
                 <Sparkles size={12} className="text-primary" />
-                <span className="text-[10px] font-medium">
+                <span className="truncate text-[10px] font-medium">
                   {selectedModel ? selectedModel.label : "Default"}
                   {intelligence && (
                     <span className="ml-1 text-muted-foreground">
@@ -912,10 +914,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
               : "Instant mode — agent acts immediately"
           }
           className={clsx(
-            "flex h-7 items-center gap-1 rounded-md border px-2 text-[10px] font-medium transition",
-            mode === "plan"
-              ? "border-warning/50 bg-warning/10 text-warning hover:bg-warning/15"
-              : "border-border bg-card text-muted-foreground hover:text-foreground",
+            "h-7 shrink-0 gap-1 px-2 text-[10px]",
+            mode === "plan" && "bg-warning/10 text-warning hover:bg-warning/15",
           )}
         >
           {mode === "plan" ? <ClipboardList size={11} /> : <Zap size={11} />}
@@ -928,7 +928,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
             size="compact"
             type="button"
             onClick={onStop}
-            className="ml-1 flex h-7 w-7 items-center justify-center rounded-md bg-destructive/20 text-destructive hover:bg-destructive/30 transition"
+            className="ml-1 flex size-7 shrink-0 items-center justify-center rounded-md bg-destructive/20 text-destructive hover:bg-destructive/30 transition"
             aria-label="Stop agent"
           >
             <Square size={13} />
@@ -941,7 +941,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
             onClick={handleSubmit}
             disabled={!canSubmit}
             className={clsx(
-              "ml-1 flex h-7 w-7 items-center justify-center rounded-md transition",
+              "ml-1 flex size-7 shrink-0 items-center justify-center rounded-md transition",
               canSubmit
                 ? "bg-primary text-primary-foreground hover:bg-primary-hover"
                 : "bg-card text-muted-foreground cursor-not-allowed",
@@ -951,7 +951,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
             <Send size={13} />
           </Button>
         )}
-      </div>
+        </div>
+      </InputGroupAddon>
 
       {/* Popovers ───────────────────────────────────────────────── */}
 
@@ -988,7 +989,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
         onClose={handlePickerClose}
         onPick={handlePickerResult}
       />
-    </div>
+    </InputGroup>
   );
 });
 
@@ -1083,10 +1084,8 @@ const IconButton = forwardRef<
     aria-label={ariaLabel}
     {...props}
     className={clsx(
-      "h-7 gap-1 rounded-md border px-2 text-muted-foreground",
-      active
-        ? "border-primary/60 bg-primary/10 text-foreground"
-        : "border-transparent hover:border-border hover:bg-card",
+      "h-7 min-w-0 gap-1 px-2 text-muted-foreground",
+      active && "bg-accent text-accent-foreground",
       className,
     )}
   />
@@ -1166,7 +1165,7 @@ function AttachmentChip({
 }) {
   const Icon = iconForAttachment(attachment.kind);
   return (
-    <span className="inline-flex items-center gap-1 rounded border border-border bg-card px-1.5 py-0.5 text-[10px] text-foreground">
+    <span className="inline-flex max-w-full items-center gap-1 rounded-md bg-accent px-1.5 py-0.5 text-[10px] text-foreground">
       <Icon size={10} className="text-primary" />
       <span className="max-w-[160px] truncate">{attachment.label}</span>
       <Button
@@ -1174,7 +1173,7 @@ function AttachmentChip({
         size="compact"
         type="button"
         onClick={onRemove}
-        className="ml-0.5 text-muted-foreground hover:text-foreground"
+        className="ml-0.5 size-5 p-0 text-muted-foreground hover:text-foreground"
         aria-label={`Remove ${attachment.label}`}
       >
         <X size={10} />

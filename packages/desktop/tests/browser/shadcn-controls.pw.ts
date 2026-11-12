@@ -235,3 +235,28 @@ test("dangerous paste stays blocked until the user acknowledges its risks", asyn
   await expect(dialog).toBeHidden();
   await expect(page.getByTestId("result")).toHaveText("Paste confirmed");
 });
+
+
+test("chat composer shares one frame while preserving multiline input, attachments and send/stop", async ({ page }) => {
+  const composer = page.getByRole("group", { name: "Message composer", exact: true });
+  const message = composer.getByRole("textbox", { name: "Chat message input" });
+  const initialHeight = await message.evaluate(field => field.clientHeight);
+  await message.fill("Line\n".repeat(10));
+  await expect.poll(() => message.evaluate(field => field.clientHeight)).toBeGreaterThan(initialHeight);
+  await message.fill("First line");
+  await message.press("Shift+Enter");
+  await message.pressSequentially("Second line");
+  expect(await message.evaluate(field => ({
+    border: getComputedStyle(field).borderTopWidth,
+    frame: getComputedStyle(field.closest('[role="group"]')!).borderTopWidth,
+  }))).toEqual({ border: "0px", frame: "1px" });
+  await composer.getByRole("button", { name: "README.md", exact: true }).click();
+  await expect(composer.getByRole("button", { name: "Remove README.md" })).toBeVisible();
+  await composer.getByRole("button", { name: /^Instant mode/ }).click();
+  await message.press("ControlOrMeta+Enter");
+  await expect(page.getByTestId("composer-result")).toHaveText("First line\nSecond line · plan · README.md");
+  await expect(message).toBeDisabled();
+  await expect(message).toHaveValue("");
+  await composer.getByRole("button", { name: "Stop agent", exact: true }).click();
+  await expect(message).toBeEnabled();
+});
