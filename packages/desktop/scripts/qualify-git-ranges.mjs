@@ -139,7 +139,8 @@ try {
     }
     assert.equal(result.offset, offset); assert.equal(result.length, expected.length); assert.equal(result.file_size, size);
     assert.deepEqual(Buffer.from(result.bytes_b64, "base64"), expected);
-    report.ranges.push({ offset, length: expected.length, elapsedMs: performance.now() - started });
+    const phase = report.ranges.length === 0 ? "first capture read" : "subsequent capture read";
+    report.ranges.push({ offset, length: expected.length, elapsedMs: performance.now() - started, phase });
   };
   for (const offset of [0, size / 2 - 17, size - 4096]) await read(offset);
 

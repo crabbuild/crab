@@ -25,9 +25,14 @@ async fn indexed_git_source(
     Ok((directory, repo, source))
 }
 
-async fn corrupted_git_source() -> Result<(tempfile::TempDir, BrowseSession, FileSource)> {
+async fn corrupted_git_source(
+    warm: bool,
+) -> Result<(tempfile::TempDir, BrowseSession, FileSource)> {
     let original = vec![b'a'; 1024 * 1024];
     let (directory, repo, source) = indexed_git_source(&original).await?;
+    if warm {
+        assert_eq!(source.read_range(0, 32).await?.as_ref(), &original[..32]);
+    }
     let root = directory.path();
     let Source::Git { oid, .. } = source.source.as_ref() else {
         return Err(AgentError::Other("expected a captured Git blob".into()));
@@ -61,7 +66,7 @@ async fn corrupted_git_source() -> Result<(tempfile::TempDir, BrowseSession, Fil
 
 #[tokio::test]
 async fn captured_git_blob_rejects_wrong_object_bytes_in_complete_read() -> Result<()> {
-    let (_directory, repo, source) = corrupted_git_source().await?;
+    let (_directory, repo, source) = corrupted_git_source(false).await?;
     let result = source.read_complete(2 * 1024 * 1024).await;
     assert!(
         result.is_err(),
@@ -81,7 +86,7 @@ async fn captured_git_blob_rejects_wrong_object_bytes_in_complete_read() -> Resu
 
 #[tokio::test]
 async fn captured_git_blob_rejects_wrong_object_bytes_in_file_copy() -> Result<()> {
-    let (_directory, repo, source) = corrupted_git_source().await?;
+    let (_directory, repo, source) = corrupted_git_source(false).await?;
     let result = source.copy_complete_to_file(tempfile::tempfile()?).await;
     assert!(
         result.is_err(),
@@ -101,8 +106,13 @@ async fn captured_git_blob_rejects_wrong_object_bytes_in_file_copy() -> Result<(
 
 #[tokio::test]
 async fn captured_git_ranges_reject_wrong_object_bytes() -> Result<()> {
-    for offset in [0, 1024 * 1024 - 32] {
-        let (_directory, repo, source) = corrupted_git_source().await?;
+    for (warm, offset) in [
+        (false, 0),
+        (false, 1024 * 1024 - 32),
+        (true, 0),
+        (true, 1024 * 1024 - 32),
+    ] {
+        let (_directory, repo, source) = corrupted_git_source(warm).await?;
         let result = source.read_range(offset, 32).await;
         assert!(
             result.is_err(),

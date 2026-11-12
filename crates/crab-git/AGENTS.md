@@ -52,6 +52,8 @@ Trace one path: `crates/crab-server/src/git/receive/validate.rs` → `validate` 
 - Batch verification, small-object visits and whole-blob copies share the same
   checksum/framing owner. Copy output remains untrusted until successful EOF;
   callers discard failed output and drain their process workers before cleanup.
+  SHA-1 uses the same hardware-accelerated collision detector as generated
+  objects, preserving Gitoxide's collision error and unmodified digest.
   Source: `crates/crab-git/src/batch.rs`.
 
 ## Features and platform

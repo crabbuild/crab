@@ -96,10 +96,10 @@ and checksum verification, so later caller writes cannot mutate installed packs.
 Thin-pack repair canonicalizes the owning object directory into a native-Git
 compatible Windows path before supplying external bases.
 
-Generated objects use `sha1dc` for hardware-accelerated SHA-1 with collision
-detection. Their IDs include the standard Git loose-object header; a detected
+Generated objects and raw batch reads use `sha1dc` for hardware-accelerated SHA-1
+with collision detection. Their IDs include the standard Git loose-object header; a detected
 collision returns the existing Gitoxide collision error and standard digest.
-Incoming packs and other Gitoxide hashing retain their existing verification.
+Other incoming-pack and Gitoxide hashing retain their existing verification.
 
 ## Usage
 

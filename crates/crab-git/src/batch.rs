@@ -218,12 +218,8 @@ fn read_object(
     Ok(body)
 }
 
-#[expect(
-    clippy::large_enum_variant,
-    reason = "Only one stack hasher is live; boxing adds an allocation for every streamed object"
-)]
 enum ObjectHasher {
-    Sha1(gix_hash::Hasher),
+    Sha1(sha1dc::Hasher),
     Sha256(sha2::Sha256),
 }
 
@@ -233,7 +229,7 @@ impl ObjectHasher {
             return Err(invalid("Git batch request has an invalid object ID"));
         }
         match oid.len() {
-            40 => Ok(Self::Sha1(gix_hash::hasher(gix_hash::Kind::Sha1))),
+            40 => Ok(Self::Sha1(sha1dc::Hasher::new())),
             64 => Ok(Self::Sha256(sha2::Sha256::new())),
             _ => Err(invalid("Git batch request has an unsupported object ID")),
         }
@@ -248,7 +244,19 @@ impl ObjectHasher {
 
     fn finalize(self) -> io::Result<String> {
         match self {
-            Self::Sha1(hasher) => Ok(hasher.try_finalize().map_err(io::Error::other)?.to_string()),
+            Self::Sha1(hasher) => {
+                hasher
+                    .finalize()
+                    .map(|digest| digest.to_string())
+                    .map_err(|collision| {
+                        // Match generated-object hashing's Gitoxide error contract;
+                        // hardware acceleration must retain collision rejection and
+                        // the original digest rather than a mitigated object ID.
+                        io::Error::other(gix_hash::hasher::Error::CollisionAttack {
+                            digest: gix_hash::ObjectId::Sha1(*collision.digest().as_bytes()),
+                        })
+                    })
+            }
             Self::Sha256(hasher) => Ok(format!("{:x}", hasher.finalize())),
         }
     }

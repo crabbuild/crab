@@ -286,3 +286,30 @@ fn sha256_blob_identity_is_verified_without_enabling_native_sha256_transport() {
         .is_err()
     );
 }
+
+#[test]
+fn sha1_collision_errors_preserve_the_gitoxide_source_and_digest() {
+    for input in [
+        include_bytes!("../tests/fixtures/sha1-collisions/sha-mbles-1.bin").as_slice(),
+        include_bytes!("../tests/fixtures/sha1-collisions/sha-mbles-2.bin").as_slice(),
+    ] {
+        for chunk_size in [1, 7, 63, 64, 65, 4096] {
+            let mut original = gix_hash::hasher(gix_hash::Kind::Sha1);
+            let mut batch = ObjectHasher::new(&"0".repeat(40)).unwrap();
+            for bytes in input.chunks(chunk_size) {
+                original.update(bytes);
+                batch.update(bytes);
+            }
+            let gix_hash::hasher::Error::CollisionAttack { digest: expected } =
+                original.try_finalize().unwrap_err();
+            let error = batch.finalize().unwrap_err();
+            let source = error
+                .get_ref()
+                .unwrap()
+                .downcast_ref::<gix_hash::hasher::Error>()
+                .unwrap();
+            let gix_hash::hasher::Error::CollisionAttack { digest } = source;
+            assert_eq!((error.kind(), *digest), (io::ErrorKind::Other, expected));
+        }
+    }
+}
