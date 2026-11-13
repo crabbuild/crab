@@ -75,7 +75,10 @@ if (testing) {
   const extension = process.platform === "win32" ? ".exe" : "";
   // Tests need writable private scratch even when the runner's home is absent
   // or belongs to the container's root user. Never touch the user's cache.
-  const cache = await mkdtemp(path.join(target, "native-test-cache-"));
+  const fixture = await mkdtemp(path.join(target, "native-test-cache-"));
+  // Leave the leaf absent so native code creates its protected Windows DACL;
+  // Node's mkdtemp inherits broader permissions from the runner directory.
+  const cache = path.join(fixture, "cache");
   const env = { ...environment, CRAB_CACHE_DIR: cache, CRAB_BIN: path.join(desktop, "resources", "native", `${platform}-${process.arch}`, `crab${extension}`) };
   try {
     // Linux target/linker configuration belongs to this producer environment;
@@ -92,7 +95,7 @@ if (testing) {
     }
     await run("cargo", ["test", "--release", "-p", "crab-git", "--locked", "--features", "process", "--lib", "process::tests"], env);
   } finally {
-    await rm(cache, { recursive: true, force: true });
+    await rm(fixture, { recursive: true, force: true });
   }
   process.exit(0);
 }

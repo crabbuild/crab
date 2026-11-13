@@ -665,9 +665,42 @@ output stat is captured before rename and refreshed after successful publication
 Staged object IDs, modes, paths and sibling staging remain exact. Failure and
 cancellation still preserve the complete index bytes. Twelve native restoration
 tests and four shared stat tests pass, including native Git clean status and
-replaced-index fences through both small-byte and OID inputs. The new runtime
-build and packaged repeat remain required. This does not close the dense
-deadline, encoding/filter streaming, durable offline versions or the full matrix.
+replaced-index fences through both small-byte and OID inputs. All 48 applicable
+native content cases pass (nine existing ignored). Strict shared all-target
+lint with `facade`, production-agent lint (149 existing warnings), touched E2E
+types and formatting pass.
+
+Native producer `131a0f016f91` builds the complete CLI/sidecar/renderer/Electron
+application. Its canonical combined checkout guard passes at 141,099,008 bytes
+RSS in 104.37 seconds, with 32.28-second restoration and 1–2 ms warm ranges.
+Cancellation after 22,020,140 output bytes preserves the dirty working file and
+complete index, removes scratch, and retries exact 536,870,957-byte output.
+Successful publication preserves all staged entries while updating advisory
+stats. Timing varies on the shared local volume; no throughput improvement is
+claimed and the dense deadline remains open.
+
+Two fresh unsigned packaged macOS workflows pass in 28.8 seconds. The confirmed
+palette action publishes exact ident/CRLF bytes, native Git reports clean, and
+the modified badge clears. Visible integrity failure/repair, retained listing,
+SQLite value 17, 16-second audio seeking/playback, selected SQLite/WAL/Crab/LFS
+SQL, cancellation/native restart and query cleanup stay asserted. Screenshots
+are inspected. All 869 assets, 1,725 frozen native inputs and local/SSH pairs
+match producer `131a0f016f91`, native digest
+`df2b3c2c73b070b0d60a57aaac45444f37e39132428611e0541619a67802eb9e`.
+The packaged app does not contain the CI-only native test-runner script.
+
+Published desktop run `43334601082` passes both Linux native targets but the
+Windows integration job fails three capture cases: its Node-created cache root
+has a broader DACL and the private-root guard rejects it. Node 22.23.4's
+[Windows mkdtemp](https://github.com/nodejs/node/blob/v22.23.4/deps/uv/src/win/fs.c#L1294)
+calls `CreateDirectoryW` without a protected descriptor. The runner now creates an owned
+container and leaves its cache leaf absent for native protected creation;
+cleanup removes that container. No security check or test is relaxed. Five
+focused macOS cases pass with this topology; Windows execution remains required.
+The published run predates the new checkout producers and does not qualify them.
+
+This does not close the dense deadline, encoding/filter streaming, durable
+offline versions or the complete qualification matrix.
 
 ### Verified local Git capture implementation
 
