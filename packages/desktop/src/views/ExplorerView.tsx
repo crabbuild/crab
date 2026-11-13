@@ -58,9 +58,24 @@ export const ExplorerView = memo(function ExplorerView({
   const repoPath = useActiveRepoKey();
 
   const [refs, setRefs] = useState<RefEntry[] | null>(null);
-  const [entries, setEntries] = useState<DirEntry[] | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const selection = useMemo(() => ({
+    repoId: repo.repo_id,
+    sessionId: repo.native_session_id,
+    rev,
+  }), [repo.repo_id, repo.native_session_id, rev]);
+  const [listing, setListing] = useState<{
+    selection: typeof selection;
+    entries: DirEntry[] | null;
+    loading: boolean;
+    error: string | null;
+  } | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+  // Retained paths belong to one repository/session/revision; never display
+  // another selection's list while its request or effect cleanup is pending.
+  const currentListing = listing?.selection === selection ? listing : null;
+  const entries = currentListing?.entries ?? null;
+  const loading = currentListing?.loading ?? Boolean(selection.sessionId);
+  const error = currentListing?.error ?? null;
   const [filter, setFilter] = useState("");
   const [trackFilter, setTrackFilter] = useState<"all" | "tracked" | "untracked">("all");
   const [collapseKey, setCollapseKey] = useState(0);
@@ -190,10 +205,13 @@ export const ExplorerView = memo(function ExplorerView({
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    setError(null);
-    setEntries(null);
-    if (!repo.native_session_id) { setLoading(false); return; }
+    setListing((previous) => ({
+      selection,
+      entries: previous?.selection === selection ? previous.entries : null,
+      error: previous?.selection === selection ? previous.error : null,
+      loading: Boolean(selection.sessionId),
+    }));
+    if (!selection.sessionId) return;
 
     (async () => {
       // Peel annotated tags to a commit before listing: the SDK's
@@ -201,29 +219,33 @@ export const ExplorerView = memo(function ExplorerView({
       // peel is a no-op. We keep the user-facing dropdown value as
       // the ref name so the UI reads "v3.7.1" rather than a sha.
       let pinned: string | undefined;
-      if (rev) {
+      if (selection.rev) {
         try {
-          const r = await rpc.resolveRef(repo.repo_id, rev);
+          const r = await rpc.resolveRef(selection.repoId, selection.rev);
           pinned = r.sha;
         } catch {
-          pinned = rev; // URL-opened repos; let SDK error surface below
+          pinned = selection.rev; // URL-opened repos; let SDK error surface below
         }
       }
+      if (cancelled) return;
 
       try {
-        const res = await rpc.list(repo.repo_id, pinned ? { rev: pinned } : {});
-        if (!cancelled) setEntries(res.entries);
+        const res = await rpc.list(selection.repoId, pinned ? { rev: pinned } : {});
+        if (!cancelled) setListing({ selection, entries: res.entries, error: null, loading: false });
       } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
-      } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) setListing((previous) => ({
+          selection,
+          entries: previous?.selection === selection ? previous.entries : null,
+          error: e instanceof Error ? e.message : String(e),
+          loading: false,
+        }));
       }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [repo.repo_id, repo.native_session_id, rev]);
+  }, [selection, refreshKey]);
 
   const branches = useMemo(() => refs?.filter((r) => r.kind === "branch") ?? [], [refs]);
   const tags = useMemo(() => refs?.filter((r) => r.kind === "tag") ?? [], [refs]);
@@ -283,23 +305,11 @@ export const ExplorerView = memo(function ExplorerView({
     return result;
   }, [entries, filter, trackFilter, gitStatus]);
 
-  const refresh = useCallback(async () => {
-    let pinned: string | undefined;
-    if (rev) {
-      try {
-        const r = await rpc.resolveRef(repo.repo_id, rev);
-        pinned = r.sha;
-      } catch {
-        pinned = rev;
-      }
-    }
-    rpc
-      .list(repo.repo_id, pinned ? { rev: pinned } : {})
-      .then((res) => setEntries(res.entries))
-      .catch((e: Error) => setError(e.message));
+  const refresh = useCallback(() => {
+    setRefreshKey((key) => key + 1);
     // Also refresh git status so newly created/deleted files appear.
     onRefreshGitStatus?.();
-  }, [repo.repo_id, rev, onRefreshGitStatus]);
+  }, [onRefreshGitStatus]);
 
   // Auto-refresh file tree when files change on disk. Uses a moderate
   // debounce since listing the full tree is a non-trivial RPC.
@@ -484,17 +494,22 @@ export const ExplorerView = memo(function ExplorerView({
             </form>
           </div>
         )}
-        {loading && (
+        {loading && !entries && (
           <div className="flex items-center gap-2 p-3 text-xs text-muted-foreground">
             <Loader2 size={12} className="animate-spin" /> Loading tree…
           </div>
         )}
         {error && (
-          <div className="m-3 rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
+          <div
+            role={entries ? "status" : "alert"}
+            aria-label="File list refresh failed"
+            className="m-3 shrink-0 rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive [overflow-wrap:anywhere]"
+          >
+            {entries && <p className="mb-1">File refresh failed. Showing the last loaded list.</p>}
             {error}
           </div>
         )}
-        {!loading && !error && filtered && (
+        {filtered && (
           <MaybeTransferDropZone
             isRemote={repo.is_remote}
             profileId={remoteProfileId}

@@ -93,6 +93,9 @@ test("captured Git text and SQLite reject wrong object bodies and recover after 
       chmodSync(object.object, 0o600);
       writeFileSync(object.object, readFileSync(replacement));
     }
+    await page.getByRole("button", { name: "Refresh file tree", exact: true }).click();
+    await expect(page.getByText(/Git blob checksum differs/).first()).toBeVisible();
+    await expect(page.locator('[role="treeitem"][data-item-path="data.txt"]')).toBeVisible();
     await open("data.txt");
     await expect(page.getByText(/Failed to read data.txt:.*checksum differs/)).toBeVisible();
     await expect(page.getByText("replaced incorrect row", { exact: true })).toHaveCount(0);
@@ -119,6 +122,8 @@ test("captured Git text and SQLite reject wrong object bodies and recover after 
     await expect(mediaPreview.getByRole("alert").filter({ hasText: "checksum differs" })).toBeVisible();
     await page.screenshot({ path: test.info().outputPath("git-media-checksum-error.png") });
     for (const object of objects) writeFileSync(object.object, object.original);
+    await page.getByRole("button", { name: "Refresh file tree", exact: true }).click();
+    await expect(page.getByLabel("File list refresh failed", { exact: true })).toHaveCount(0);
     const close = (file: string) => page.getByRole("button", { name: file, exact: true }).locator("..").getByRole("button", { name: "Close tab", exact: true }).click();
     await close("data.wav");
     await close("pointer.txt");
@@ -156,6 +161,11 @@ test("captured Git text and SQLite reject wrong object bodies and recover after 
 
     await chooseSelect(page.getByRole("combobox").filter({ hasText: "captured" }), { label: "HEAD (default)" });
     writeFileSync(path.join(source, "data.txt"), "unstaged edit before confirmed restoration\n");
+    const restoredRow = page.locator('[role="treeitem"][data-item-path="data.txt"]');
+    await expect(restoredRow.getByText("M", { exact: true })).toBeVisible();
+    // Revision selection returns focus to a shared control. The global palette
+    // shortcut must still reach confirmation without moving focus elsewhere.
+    await expect(page.getByRole("combobox").filter({ hasText: "HEAD (default)" })).toBeFocused();
     await page.keyboard.press(process.platform === "darwin" ? "Meta+Shift+P" : "Control+Shift+P");
     const palette = page.getByRole("dialog", { name: "Command palette", exact: true });
     await palette.getByRole("combobox").fill("Git: Discard File Changes");
@@ -166,12 +176,14 @@ test("captured Git text and SQLite reject wrong object bodies and recover after 
     await expect(page.getByText("Restored data.txt from the index", { exact: true })).toBeVisible();
     expect(readFileSync(path.join(source, "data.txt"), "utf8")).toBe(originalText);
     expect(readFileSync(path.join(source, ".git/index"))).toEqual(index);
+    await expect(restoredRow.getByText("M", { exact: true })).toHaveCount(0);
     await open("data.txt");
     await expect(page.getByText("captured original body", { exact: true }).first()).toBeVisible();
     await page.screenshot({ path: test.info().outputPath("git-index-restored.png") });
     writeFileSync(test.info().outputPath("git-integrity-proof.json"), JSON.stringify({
       textBytes: Buffer.byteLength(originalText), databaseBytes: originalDatabase.length, mediaBytes: originalMedia.length,
-      rejected: objects.map(({ file, oid }) => ({ file, oid })), repairedValue: 17, snapshotRemoved: true, indexPreserved: true, restoredThroughUi: true,
+      rejected: objects.map(({ file, oid }) => ({ file, oid })), repairedValue: 17, snapshotRemoved: true,
+      indexPreserved: true, listingRecovered: true, restoredThroughUi: true, dirtyStatusCleared: true,
     }, null, 2));
   } catch (error) {
     const page = await application?.firstWindow();
