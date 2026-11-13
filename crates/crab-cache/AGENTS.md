@@ -28,21 +28,48 @@ semantics rather than treating every cache object as interchangeable.
 | Disk fill or cleanup | `crates/crab-cache/src/local_cache.rs` | `crates/crab-cache/src/lifecycle.rs` |
 | Remote client contract | `crates/crab-cache/src/cache_client.rs` | `crates/crab-cache-server/src/state.rs` |
 
-Namespace cleanup enters through `clean_cache_namespaces` in
-`crates/crab-cache/src/clean.rs`. The shared Unix/Windows implementation in
-`crates/crab-cache/src/private_fs/platform/cleanup.rs`
-keeps each child beneath the captured parent and uses that child's catalog.
-Never enumerate namespaces and reopen them by ambient pathname. Preview uses
-the private read-only catalog snapshot to preserve logical leases without writes.
-`clean::namespace_tests` covers catalog accounting, retained state and active
-leases; the pinned-directory replacement regression lives beside the traversal.
+`LocalCache::namespaced` stores identity-specific payloads beneath
+`namespaces/<64-hex>/`, sharing the supplied root catalog. Range construction,
+prune and verification require that explicit catalog owner. Never infer an
+owner from path names or reopen a namespace through an ambient pathname.
+`clean_cache` traverses the fixed namespace layout beneath the captured root;
+its read-only preview preserves root-wide logical leases without writes.
+`clean::namespace_tests`, object/range namespace tests and pinned-tree
+replacement regressions protect this boundary.
+
+Root policy is saved by `CacheCatalog::set_retention_budget`, serialized with
+maintenance before the SQLite writer. Reservations read that policy under their
+writer in addition to caller ceilings. Policy changes do not replace live range
+handles. Changing policy and applying maintenance are separate operations;
+products must refresh the saved policy even when maintenance fails.
+
+Complete LFS payloads use native SHA-256 in `local_cache/lfs_file.rs`. Fills
+share the root journal and policy. Captured readers hand descriptors to the LFS
+integrity owner; they must drain verification readers before
+finishing the cache claim. Keep this family in health, stats, verification,
+prune and explicit cleanup. Disposable retention does not grant offline pins.
 
 Unpublished reserved fills enter `catalog::pending` before payload writes.
 The journal's exact file ID and birth time, captured root, catalog writer and
 file lock must agree before recovery can unlink. Names and PIDs are never
-deletion authority. Keep clean previews read-only; ordinary maintenance and
-explicit cleanup share recovery. Preserve unrecorded/replaced files and the
+deletion authority. New catalog admissions recover abandoned fills under their
+writer without waiting for budget pressure, including a declined root-zero
+admission. Caller-ceiling rejection can still bypass disk initialization. Keep
+clean previews read-only; admission, ordinary maintenance and explicit cleanup
+share recovery. Preserve unrecorded/replaced files and the
 payload cleanup contract when a disposable index is unavailable.
+
+Identity insertion and explicit root-budget changes use FULL WAL commits;
+disposable accounting stays NORMAL. Do not expose a payload writer before its
+identity commit succeeds. Flush the empty inode/name before capturing that
+identity, or creation metadata can be lost while partial bytes survive.
+The private publication owner flushes complete bytes,
+then rename and its captured parent. Creation and unlink flush their parent;
+retiring an absent temporary requires persisted absence at the nearest existing
+parent. Keep async writers drained with `flush` before handing off to commit.
+HTTP completion uses journaled `responses/` temporaries through final file close,
+including Windows' deferred deletion. Process-death proof does not establish filesystem
+rename/unlink durability through power loss.
 
 ## Invariants
 

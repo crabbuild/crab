@@ -28,10 +28,10 @@ export function HydratePage({ repo }: { repo: OpenRepo }) {
   const { runFileTransfer } = useStore();
   const lines = useJobLines(jobId);
 
-  const enabled = !!repo.path || repo.is_remote;
   const canHydrate = !!repo.native_session_id && !!repo.capabilities?.canHydrateSelection;
   const canDehydrate = !!repo.native_session_id && !!repo.capabilities?.canDehydrateSelection;
-  const { byPath, summary, loading: loadingStatus, error: statusError } = useHydrationStatus(repo.repo_id, enabled);
+  const { byPath, summary, loading: loadingStatus, error: statusError, storageSnapshot } = useHydrationStatus(repo);
+  const enabled = !repo.deferred && !storageSnapshot;
   const tracked = useTrackedPatterns(repo, enabled);
 
   const entries = useMemo(() => Array.from(byPath.values()), [byPath]);

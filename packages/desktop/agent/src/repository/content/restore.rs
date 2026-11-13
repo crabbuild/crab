@@ -1,7 +1,5 @@
-use std::io::Read;
-
 use super::materialize::MaterializationTarget;
-use super::publication::{IndexFile, WorkingFile};
+use super::publication::{IndexFile, WorkingFile, refresh_stat_cache};
 use super::workspace::Workspace;
 use super::*;
 
@@ -47,21 +45,6 @@ impl Restoration {
         let size = command::blob_size(root, &index.oid, &scope).await?;
         if size < crab_git::MAX_LFS_POINTER_SIZE as u64 {
             let bytes = command::blob(root, &index.oid, 0, size as usize, size, &scope).await?;
-            // Authenticate the exact pointer bytes retained by the SDK reader,
-            // rather than trusting a syntactically valid but corrupt Git blob.
-            let header = format!("{} blob {size}\n", index.oid);
-            let body = Read::chain(
-                std::io::Cursor::new(header),
-                std::io::Cursor::new(bytes.as_ref()),
-            );
-            let input = Read::chain(body, std::io::Cursor::new(b"\n"));
-            crab_git::batch::visit_small_blobs(
-                input,
-                [index.oid.as_str()],
-                0,
-                &|| scope.check().is_err(),
-                |_, _| Ok(()),
-            )?;
             if let Some((size, identity)) = pointer_metadata(&bytes) {
                 let target = MaterializationTarget {
                     working,
@@ -123,27 +106,24 @@ impl GitRestoration {
         } = self.as_ref();
         scope.check()?;
         working.check_metadata()?;
-        let source_index = command::index_path(&index.root, scope).await?;
+        let source_index = command::git_path(&index.root, "index", scope).await?;
         let (workspace, temporary) =
             Workspace::create(&index.root, working.temporary_parent()?, scope).await?;
         let (workspace, private_index) = workspace.additional_temporary().await?;
         let result = async {
-            command::verify_blob(&index.root, &index.oid, *size, scope).await?;
             let mut input = tokio::fs::File::open(source_index).await?;
             let mut output = tokio::fs::File::from_std(private_index.as_file().try_clone()?);
             tokio::io::copy(&mut input, &mut output).await?;
             output.flush().await?;
-            command::converted_blob_to_file(
+            command::conversion::copy(
                 index,
                 private_index.path(),
+                *size,
                 temporary.as_file().try_clone()?,
                 scope,
                 progress,
             )
             .await?;
-            // Verify the immutable input again before publishing Git's converted
-            // bytes. The recorded temporary stays owned until pipe workers join.
-            command::verify_blob(&index.root, &index.oid, *size, scope).await?;
             let runtime = tokio::runtime::Handle::current();
             let captured = self.clone();
             tokio::task::spawn_blocking(move || {
@@ -158,11 +138,22 @@ impl GitRestoration {
                     let written = temporary.as_file().metadata()?.len();
                     let permissions = working.check(scope)?;
                     index.apply_mode(temporary.as_file(), permissions)?;
+                    let update = crab_git::index_stat::IndexStatUpdate::from_file_oid(
+                        index.path.clone().into(),
+                        temporary.as_file(),
+                        &index.oid,
+                    )
+                    .map_err(std::io::Error::other)?;
                     runtime.block_on(index.check(scope))?;
                     scope.check()?;
-                    Ok::<_, AgentError>(written)
+                    Ok::<_, AgentError>((written, update))
                 })();
-                working.publish(temporary, scope, prepared)
+                let (written, update) = working.publish(temporary, scope, prepared)?;
+                // Git treats a changed nonzero cached size as modified without
+                // re-cleaning. Capture the verified output stat before rename;
+                // refreshing a later edit could incorrectly mark it clean.
+                refresh_stat_cache(&index.root, update);
+                Ok(written)
             })
             .await
             .map_err(std::io::Error::other)?

@@ -103,16 +103,20 @@ pub(crate) async fn compare(p: Params) -> Result<Value> {
 
 async fn git(cwd: &Path, args: &[&str], index: Option<&Path>) -> Result<String> {
     let mut command = crate::shellout::git_command()?;
+    if let Some(index) = index {
+        // Intent entries need stat refresh for raw paths to agree with patches.
+        // This private index belongs to the comparison; refreshing the user's
+        // real index remains disabled by the shared command owner.
+        command
+            .args(["-c", "diff.autoRefreshIndex=true"])
+            .env("GIT_INDEX_FILE", index);
+    }
     command
         .args(args)
         .current_dir(cwd)
-        .env("GIT_OPTIONAL_LOCKS", "0")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    if let Some(index) = index {
-        command.env("GIT_INDEX_FILE", index);
-    }
     let mut child = command.spawn()?;
     let stdout = child
         .stdout

@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, renameSync, readFileSync, writeFileSync, rmSync
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import type { AgentEvent } from "../../src/ipc";
-import { call, packagedExecutable } from "./packaged-app";
+import { isNativeAgentCommand, call, packagedExecutable } from "./packaged-app";
 
 for (const { view, configured, parquet } of [{ view: "Dashboard", configured: false, parquet: false }, { view: "Datasets", configured: true, parquet: false }, { view: "Datasets", configured: false, parquet: false }, { view: "Datasets", configured: false, parquet: true }] as const) test(`${view} recovers metadata without losing its UI state after same-ID native repair (${configured ? "Crab configured" : "Git only"}, ${parquet ? "Parquet" : "Safetensors"})`, async () => {
   test.skip(process.platform === "win32", "The native process fixture uses POSIX process enumeration");
@@ -84,7 +84,7 @@ for (const { view, configured, parquet } of [{ view: "Dashboard", configured: fa
     }
     renameSync(config, offline);
     const rows = execFileSync("ps", ["-axo", "pid=,ppid=,command="], { encoding: "utf8" }).split("\n").map(line => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line));
-    const native = rows.find(row => row && Number(row[2]) === application!.process().pid && row[3].includes("/agent/crab-desktop-agent "));
+    const native = rows.find(row => row && Number(row[2]) === application!.process().pid && isNativeAgentCommand(row[3]));
     if (!native) throw new Error("Test application's native child was not found");
     process.kill(Number(native[1]), "SIGKILL");
     await expect(page.getByRole("button", { name: "Retry reopening repository", exact: true })).toBeVisible();

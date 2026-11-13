@@ -59,7 +59,7 @@ impl Workspace {
         parent: PathBuf,
         scope: &ReadScope,
     ) -> Result<(Self, tempfile::NamedTempFile)> {
-        let index = command::index_path(root, scope).await?;
+        let index = command::git_path(root, "index", scope).await?;
         let control = index.parent().ok_or_else(changed)?.to_owned();
         let root = tokio::fs::canonicalize(root).await?;
         let registry = crate::file_publications::registry(&root).await;

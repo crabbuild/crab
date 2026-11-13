@@ -76,6 +76,54 @@ jobs:
       - name: Test native desktop integration
         # Compilation, real CLI tests and Linux tests share the producer toolchain.
         run: node scripts/build-native.mjs --test
+      - name: Set up native range measurement
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Qualify dense 2 GiB loose Git ranges and cancellation
+        run: |
+          python ../../crab/scripts/qualify_sdk.py run \
+            --backend desktop-native-git \
+            --fixture-digest 515a224ca4c51ce3dbabf555d1d1da8d2fceeccfc9d0b24903b74dba1f6a2731 \
+            --output "$CARGO_TARGET_DIR/git-range-proof/loose-report.json" \
+            --require-rss-below 536870912 --timeout-seconds 600 -- \
+            node packages/desktop/scripts/qualify-git-ranges.mjs packages/desktop/resources/native/${{ matrix.target }} --restore
+      - name: Qualify dense 2 GiB packed Git ranges and cancellation
+        run: |
+          python ../../crab/scripts/qualify_sdk.py run \
+            --backend desktop-native-git-packed \
+            --fixture-digest 515a224ca4c51ce3dbabf555d1d1da8d2fceeccfc9d0b24903b74dba1f6a2731 \
+            --output "$CARGO_TARGET_DIR/git-range-proof/packed-report.json" \
+            --require-rss-below 536870912 --timeout-seconds 600 -- \
+            node packages/desktop/scripts/qualify-git-ranges.mjs packages/desktop/resources/native/${{ matrix.target }} --packed --restore
+      - name: Prepare real 512 MiB packed delta outside read measurement
+        run: node scripts/prepare-git-delta.mjs "$CARGO_TARGET_DIR/git-range-proof/delta-fixture.json"
+      - name: Qualify packed delta ranges and cancellation
+        run: |
+          python ../../crab/scripts/qualify_sdk.py run \
+            --backend desktop-native-git-delta \
+            --fixture-digest "$(node -p 'require(process.env.CARGO_TARGET_DIR + "/git-range-proof/delta-fixture.json").sha256')" \
+            --output "$CARGO_TARGET_DIR/git-range-proof/delta-report.json" \
+            --require-rss-below 536870912 --timeout-seconds 600 -- \
+            node packages/desktop/scripts/qualify-git-ranges.mjs packages/desktop/resources/native/${{ matrix.target }} --delta "$CARGO_TARGET_DIR/git-range-proof/delta-fixture.json" --restore
+      - name: Prepare Git ident and automatic CRLF checkout outside measurement
+        run: node scripts/prepare-git-delta.mjs --checkout "$CARGO_TARGET_DIR/git-range-proof/checkout-fixture.json"
+      - name: Qualify bounded Git checkout conversion and captured ranges
+        run: |
+          python ../../crab/scripts/qualify_sdk.py run \
+            --backend desktop-native-git-checkout \
+            --fixture-digest "$(node -p 'require(process.env.CARGO_TARGET_DIR + "/git-range-proof/checkout-fixture.json").checkout.sha256')" \
+            --output "$CARGO_TARGET_DIR/git-range-proof/checkout-report.json" \
+            --require-rss-below 536870912 --timeout-seconds 600 -- \
+            node packages/desktop/scripts/qualify-git-ranges.mjs packages/desktop/resources/native/${{ matrix.target }} --delta "$CARGO_TARGET_DIR/git-range-proof/checkout-fixture.json" --restore
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Crab-git-range-proof-${{ matrix.target }}
+          path: |
+            ${{ env.CARGO_TARGET_DIR }}/git-range-proof/*
+            ${{ env.CARGO_TARGET_DIR }}/git-range-qualification-*/result.json
+            ${{ env.CARGO_TARGET_DIR }}/git-range-qualification-*/agent.log
       - name: Qualify Linux runtime ABI and repository operations
         if: runner.os == 'Linux'
         run: node scripts/qualify-linux-runtime.mjs
@@ -299,11 +347,16 @@ jobs:
             npx playwright test tests/e2e/notebook-kernel.spec.ts tests/e2e/notebook-remote-kernel.spec.ts --project=e2e-smoke --workers=1
           fi
       - name: Install isolated storage qualification tools
-        if: matrix.os == 'macos-15' || runner.os == 'Windows'
+        if: matrix.os == 'macos-15' || runner.os == 'Windows' || runner.os == 'Linux'
         run: python -m pip install awscli
       - name: Qualify native v2 storage through the packaged app
-        if: matrix.os == 'macos-15' || runner.os == 'Windows'
-        run: python scripts/qualify-v2.py
+        if: matrix.os == 'macos-15' || runner.os == 'Windows' || runner.os == 'Linux'
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a python scripts/qualify-v2.py
+          else
+            python scripts/qualify-v2.py
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: Crab-desktop-${{ runner.os }}-${{ runner.arch }}

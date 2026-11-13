@@ -52,6 +52,17 @@ remain if later catalog accounting fails. Git semantics and visibility remain
 outside this byte cache. Concurrent fills may duplicate work; this path does
 not yet provide per-key single-flight or remote cache-service pack retention.
 
+Complete LFS files use native SHA-256 under `lfs/aa/<sha256>`, including identity
+namespaces. A fill reserves its full declared length, streams bounded buffers,
+checks size and SHA-256, then publishes through the common private journal.
+Health, stats, prune, verification and cleanup include this family. A captured
+`LfsCacheFile` supplies descriptors to the LFS integrity owner; callers keep it
+alive through verification/delivery and release retained verification descriptors
+before finishing. Only a failed captured source grants exact repair authority.
+Cancellation and a conflicting caller length do not establish corruption.
+These files remain eligible for eviction and explicit cleanup; no offline pin
+or cache-service LFS route is implied.
+
 ## Cleanup and catalog retirement
 
 `clean_cache` is the shared explicit cleanup boundary. It streams recognized
@@ -88,7 +99,12 @@ then closes that handle before checking temporary absence. Windows
 [defers deletion until all file-object handles close](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/ns-ntddk-_file_disposition_information);
 checking earlier leaves a stale journal after successful cancellation.
 
-Explicit cleanup and ordinary maintenance share that journal authority. A
+Admissions, explicit cleanup and ordinary maintenance share that journal authority.
+Before retaining another fill, admission recovers recorded dead fills and retires
+stale SQL owners under the same writer used for its capacity decision. Recovery
+commits even if root policy declines the new body; unlimited retention does not
+wait for capacity pressure. A cheap caller-ceiling rejection can still avoid
+initializing disk state. A
 temporary-looking name or dead PID alone never authorizes deletion. Recovery
 holds the captured directory, catalog writer and nonblocking file ownership
 through identity comparison and unlink. Live fills, replaced files and unknown
@@ -98,8 +114,14 @@ dies following rename. A missing or unusable journal retains temporaries while
 preserving the shipped payload-cleanup-without-a-usable-index contract.
 
 Creation interrupted before identity registration can still leave empty,
-unclaimed files; recovery does not guess their ownership. Anonymous streams
-unlink before writing and keep their existing descriptor lifetime. Packaged
+unclaimed files; recovery does not guess their ownership. A packaged macOS
+allocation-boundary probe observes one such file with zero logical bytes and
+zero allocated payload blocks. Its reservation is retired by retry, exact
+source reads succeed, and cleanup preserves the unrecorded inode. This is
+bounded process-death evidence, not cross-platform or power-loss qualification.
+HTTP response streams journal their exact scratch identity before writing and
+retain that authority through final descriptor close. Unix unlinks the name
+before writing; Windows deletion can remain pending while the stream is open. Packaged
 process-death recovery has bounded macOS proof, including exact source bytes and
 actual orphan removal. Focused native cache checks pass on Windows and Linux;
 packaged cross-platform qualification remains required. This does not establish
@@ -135,7 +157,7 @@ child token. This does not qualify catalog reservation protection, database
 ownership, complete physical accounting, or bounded-time LRU reconciliation.
 
 Decoded-range handles are canonicalized by cache directory within one process.
-Every live handle for that directory must use the same byte budget; a conflicting
+Every live handle for that directory must use the same catalog owner and caller ceiling; a conflicting
 caller receives a typed configuration error and uses its existing verified-origin
 fallback instead of silently inheriting the first caller's limit. After the last
 handle closes, the same persisted directory may reopen with a new budget.
@@ -206,6 +228,33 @@ copy. Request-bound misses, existence/size probes, and manifest/ETag reads keep
 their existing no-touch behavior. This fixes recency identity, not all-family
 LRU policy or batched catalog access accounting. Atomic manifest body/ETag
 pairing and catalog-generation changes during a read remain separate work.
+
+## Shared root retention
+
+Identity-specific object and decoded-range payloads use
+`namespaces/<64-hex>/<payload-layout>`. `LocalCache::namespaced` receives the
+physical root catalog; range construction and maintenance receive that explicit
+owner too. There is no child catalog or inferred owner. Traversal stays beneath
+captured directories. Root object inventory and verification include namespace
+payloads; decoded ranges reuse their existing streaming verifier when enabled.
+Unknown namespace names, nested layouts and retained control state remain outside
+payload deletion authority.
+
+`CacheCatalog::set_retention_budget` saves the physical-root limit separately
+from each caller ceiling. Missing policy retains the existing unlimited default;
+malformed policy fails admission and is reported unavailable. Every reservation
+reads the effective minimum under its SQLite writer, including handles opened
+before the policy changed. A nonblocking maintenance lock serializes updates
+with existing eviction passes; busy updates leave the old policy unchanged.
+A zero root cap stops new retention; unlimited removes only that cap.
+
+The setter does not run maintenance. CLI `cache budget` and Settings save policy,
+run maintenance, then report actual usage. A later maintenance/inspection failure
+does not undo the saved policy; Settings refreshes it on error. Retained state,
+metadata and active payloads can keep disk usage over the cap. This is retention
+policy, not a filesystem quota or an operation read limit. A missing catalog
+initializes the default policy; deleting cache/catalog state resets this policy.
+Offline pins and power-loss persistence remain unqualified.
 
 ## Catalog eviction
 
@@ -349,10 +398,53 @@ Catalog writers retain their generation-bound WAL when short connections
 close. Reservation creation, owner release and payload removal use the same
 close policy; closing one SQL operation no longer requests a full checkpoint
 of the catalog. SQLite's existing automatic checkpoint policy remains enabled
-(the pinned dependency defaults to 1,000 pages), and synchronization settings,
-payload flushes, private filesystem checks and accounting transactions remain
-unchanged. A long active reader can still defer an automatic checkpoint under
+(the pinned dependency defaults to 1,000 pages). A long active reader can still defer an automatic checkpoint under
 SQLite's existing WAL rules.
+
+Disposable accounting uses WAL/NORMAL. Pending-file identity insertion and
+explicit root-budget changes instead commit with FULL synchronization: recovery
+authority must be flushed before exposing a payload writer, and a confirmed
+user policy must outlive process exit. A failed identity commit prevents writer
+admission. Journal retirement remains disposable; a stale record still requires
+the same exact-file comparison. SQLite documents the
+[WAL durability distinction](https://www.sqlite.org/pragma.html#pragma_synchronous).
+Temporary allocation flushes its empty inode and parent before SQL captures
+identity; payload bytes cannot precede that durable creation metadata.
+File publication now flushes complete bytes before rename and its captured
+parent afterward. New directories and unlink also flush the parent. A temporary
+that is already absent cannot retire its journal until absence is flushed at the
+nearest existing parent; a failed flush retains recovery authority. The shared
+owner handles decoded ranges, objects, hints and copied Git packs. Async writers
+drain before this publication worker. Preview/cleanup dry runs remain read-only.
+
+Windows directory chains keep their existing deny-delete pins. A writable
+handle reopens that pinned directory for `FlushFileBuffers`, whose API requires
+[GENERIC_WRITE](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers).
+The [owned NTFS probe](https://github.com/crabbuild/crab/actions/runs/43178147526)
+confirms that the read-only handle fails while the writable handle flushes.
+Deletion reaches the directory only after the final file-object clone closes.
+HTTP completion therefore journals exact scratch identity in `responses/`
+through that lifetime; cleanup recognizes this directory without treating raw
+responses as immutable object payloads. Unrecorded/replaced files stay retained.
+
+A packaged macOS trace reproduces the earlier gap: two decoded-range renames
+had no corresponding parent flush after their journals were retired. The same
+assertions pass on the rebuilt package: both captured parents flush before
+journal retirement. Injected post-rename directory-sync failures retain pending
+records, and Settings cleanup shows the I/O error without reporting success.
+After fault removal, cleanup retires the records and an exact-content read
+succeeds with no origin writes. Exact-source focused native checks pass on
+[Linux and Windows](https://github.com/crabbuild/crab/actions/runs/43183402196);
+Windows HTTP-body cases are gated out, while the shared scratch-lifetime case runs.
+The later desktop build `f2f7e171511` repeats the directory-sync failure/repair
+scenario with unchanged cache source: Settings retains a pending record on
+failure, then cleanup retires it and exact reads succeed after repair.
+These checks do not establish physical drive power-loss behavior.
+The macOS sync-image probe replays the last successful flush and finds the exact
+pending identity before the first payload write; its unchanged assertion fails
+on the earlier package. Settings has bounded real sync-failure/retry proof.
+An I/O error during commit does not prove rollback: callers refresh saved policy
+before reporting its value or retrying maintenance.
 
 Committed catalog state may remain in WAL after all catalog handles close.
 Inspection reads that WAL through the existing read-only private VFS. Copying

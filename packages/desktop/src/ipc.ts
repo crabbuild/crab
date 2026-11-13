@@ -46,12 +46,20 @@ export interface CacheStats {
   root: string;
   root_state: "missing" | "present" | "unavailable";
   budget_bytes: number | null;
+  budget_available: boolean;
+  catalog: { state: "missing" | "unavailable" } | { state: "readable"; stats: { retention_budget_bytes: number | null } };
   observed: CacheUsage;
   scan_complete: boolean;
   over_budget: boolean | null;
   families: Record<string, CacheUsage & { complete: boolean; issues: number }>;
   issues: Array<{ family: string | null; path: string; kind: string; error: string }>;
   omitted_issues: number;
+}
+
+export interface CacheBudgetResult {
+  usage: CacheStats;
+  reclaimed_bytes: number;
+  maintenance_pending: boolean;
 }
 
 export interface CacheCleanResult {
@@ -2084,6 +2092,8 @@ export const rpc = {
     call<IndexerStatus>("indexer_status"),
 
   cacheStats: (repo_id?: string) => call<CacheStats>("cache_stats", { repo_id }),
+  cacheSetBudget: (repo_id: string | undefined, max_bytes: number | null) =>
+    call<CacheBudgetResult>("cache_set_budget", { repo_id, max_bytes }),
 
   cacheClean: (repo_id?: string, dry_run = false) =>
     call<CacheCleanResult>("cache_clean", { repo_id, dry_run }),

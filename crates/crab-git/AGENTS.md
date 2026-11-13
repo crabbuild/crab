@@ -49,6 +49,38 @@ Trace one path: `crates/crab-server/src/git/receive/validate.rs` → `validate` 
   repacking retains its deliberately selected shallow frontier.
   Source: `crates/crab-git/src/lib.rs`.
 
+- Batch verification, small-object visits and whole-blob copies share the same
+  checksum/framing owner. Copy output remains untrusted until successful EOF;
+  callers discard failed output and drain their process workers before cleanup.
+  SHA-1 uses the same hardware-accelerated collision detector as generated
+  objects, preserving Gitoxide's collision error and unmodified digest.
+  Source: `crates/crab-git/src/batch.rs`.
+- Loose-object copies stream zlib input through the same body verifier without
+  mapping the compressed object. Require the declared header, size, Git checksum,
+  zlib StreamEnd and physical EOF. Alternates preserve native Git path bytes,
+  quoting, relative bases, cycles and recursion limits within a metadata budget.
+  Source: `batch::open_loose_blob / copy_loose_blob`; desktop range and file-copy
+  requests share this descriptor/worker owner.
+- Local packed copies read bounded index windows and collect delta ancestry
+  iteratively. One admitted anonymous program file and seekable bases/results
+  avoid whole-object RAM and recursive stack/descriptor growth. Reference bases
+  prefer their source pack. Final target checksums authorize delivery; callers
+  supply scratch policy and retain joined I/O through cancellation.
+  Sources: `batch/packed.rs`, `batch/pack_index.rs`, `delta::copy`.
+- Captured local Git ranges retain admitted anonymous bytes with block proofs
+  authenticated by the complete Git checksum. Origin metadata may invalidate
+  reuse but never authorize returned bytes. Callers own idle eviction, shared
+  operational disk admission and draining before close. Storage decline uses
+  the same complete physical verifier; source corruption must remain visible.
+  Sources: `batch/capture.rs`; desktop `content/git_capture.rs`.
+- Built-in checkout streams linear EOL conversion through the raw EOF verifier.
+  Ident and auto text classification use authenticated capture windows; long
+  ident candidates replay owned seekable input instead of growing a token buffer.
+  Auto text classification follows ident expansion. Cancellation must not be
+  retried as ordinary interrupted I/O. Callers retain encoding/filter and
+  publication ownership; converted output is untrusted until successful EOF.
+  Source: `batch/capture/checkout.rs`.
+
 ## Features and platform
 
 `facade` enables the optional high-level gix dependency. `process` enables the shared `process::OwnedChild` group/job lifetime owner used by CLI and desktop. Neither is enabled by default. Git-spawning tests need Git on PATH; inspect locked dependency source before altering validation or process contracts.
@@ -56,6 +88,8 @@ Trace one path: `crates/crab-server/src/git/receive/validate.rs` → `validate` 
 `index_stat` also uses `facade`. CLI and desktop publication share its locked
 stat-cache writer. Retain the stat captured during verification and fence native
 updates with the expected blob; never stamp a later external edit as clean.
+Large verified blobs supply their OID instead of retaining complete bytes.
+Checkout may refresh advisory stats while preserving staged IDs/modes/siblings.
 
 ## Verification
 

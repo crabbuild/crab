@@ -27,9 +27,12 @@ pub(crate) fn git_command() -> Result<Command> {
     // The agent owns stdin for NDJSON. Git must never inherit that pipe;
     // commands that consume data supply their own stdin explicitly.
     command.stdin(Stdio::null());
-    // Inspection must not take optional index-refresh locks while the user
-    // stages or commits. Git's mandatory mutation locks remain enabled.
-    command.env("GIT_OPTIONAL_LOCKS", "0");
+    // Git 2.50 diff refreshes the index without checking optional locks.
+    // Inspection must not compete with staging; explicit mutations retain
+    // their mandatory locks.
+    command
+        .args(["-c", "diff.autoRefreshIndex=false"])
+        .env("GIT_OPTIONAL_LOCKS", "0");
     // Status and diff can invoke clean filters too. Every Git child needs the
     // selected repository's credentials, without changing the process environment.
     crate::storage_auth::configure_command(&mut command)?;
@@ -419,6 +422,7 @@ mod tests {
         git(root, &["init", "--quiet"]).await;
         git(root, &["config", "user.name", "Fixture"]).await;
         git(root, &["config", "user.email", "test@example.invalid"]).await;
+        git(root, &["config", "diff.autoRefreshIndex", "true"]).await;
         std::fs::write(root.join("file.txt"), "original\n").expect("file");
         git(root, &["add", "file.txt"]).await;
         git(
@@ -438,12 +442,16 @@ mod tests {
         std::fs::rename(root.join("file.txt"), root.join("previous.txt")).expect("replace");
         std::fs::write(root.join("file.txt"), "original\n").expect("replacement");
         let status = git(root, &["status", "--porcelain", "--", "file.txt"]).await;
+        let diff = crate::git_hunks::diff_index_patch(root, Some("file.txt"), false)
+            .await
+            .expect("diff");
         assert_eq!(
             (
                 status,
+                diff,
                 std::fs::read(root.join(".git/index")).expect("index")
             ),
-            (Vec::new(), before)
+            (Vec::new(), serde_json::json!({ "patch": "" }), before)
         );
     }
 

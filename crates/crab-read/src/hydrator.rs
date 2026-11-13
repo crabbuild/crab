@@ -87,8 +87,8 @@ impl ReadRuntimeBuilder {
         let concurrency = fixed_hydrate_concurrency(self.download_concurrency)?;
         let local = self.store.local_cache();
         let directory = local.root().join("chunks");
-        let chunk_cache = match crab_cache::XetChunkCacheHandle::open(&directory, local.max_bytes())
-        {
+        let catalog = local.catalog().clone();
+        let chunk_cache = match crab_cache::XetChunkCacheHandle::open(&directory, catalog) {
             Ok(handle) => Some(handle.cache),
             Err(error) => {
                 tracing::warn!(

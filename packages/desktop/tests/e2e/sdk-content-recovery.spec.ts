@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import type { StorageConnectionInput } from "../../electron/storage-connection-types";
 import type { AgentEvent } from "../../src/ipc";
-import { call, packagedExecutable } from "./packaged-app";
+import { isNativeAgentCommand, call, packagedExecutable } from "./packaged-app";
 
 interface Fixture {
   url: string;
@@ -15,9 +15,14 @@ interface Fixture {
 }
 
 for (const kind of ["crab", "lfs"] as const) {
-  const outcomes = kind === "crab" ? ["cancel", "native-crash", "app-crash", "cleanup"] as const : ["cancel", "native-crash", "app-crash"] as const;
+  const outcomes = kind === "crab" ? ["cancel", "native-crash", "app-crash", "cleanup", "budget", "missing", "corrupt"] as const : ["cancel", "native-crash", "app-crash", "missing", "corrupt", "retention", "cleanup", "budget"] as const;
   for (const outcome of outcomes) {
-    test(outcome === "cleanup" ? "SDK cache cleanup removes verified payloads and preserves retained state" : `SDK ${kind} partial response ${outcome} retries exact content`, async () => {
+    const contentFailure = outcome === "missing" || outcome === "corrupt";
+    const title = outcome === "retention" ? "SDK LFS retained content survives restart without its origin payload"
+      : outcome === "budget" ? `SDK ${kind === "lfs" ? "LFS " : ""}identities and CLI share the saved desktop retention budget`
+      : outcome === "cleanup" ? `SDK ${kind === "lfs" ? "LFS " : ""}cache cleanup removes verified payloads and preserves retained state`
+      : `SDK ${kind} ${contentFailure ? "content failure" : "partial response"} ${outcome} retries exact content`;
+    test(title, async () => {
       const descriptor = process.env.CRAB_DESKTOP_STORAGE_IDENTITY_FIXTURE;
       test.skip(!descriptor || (outcome === "native-crash" && process.platform === "win32"), "Requires the owned storage fixture; native process lookup requires POSIX");
       test.setTimeout(120_000);
@@ -38,7 +43,7 @@ for (const kind of ["crab", "lfs"] as const) {
       const transport = async (action: string) => {
         const response = await fetch(`${connection.endpoint}/__fixture_${action}`);
         expect(response.ok).toBe(true);
-        return await response.json() as { get: number; writes: number; stream_blocked: number; streamed_bytes: number; paused: boolean };
+        return await response.json() as { get: number; writes: number; stream_blocked: number; streamed_bytes: number; paused: boolean; faulted: number };
       };
       const inventory = () => {
         const entries: Array<{ path: string; bytes: number }> = [];
@@ -66,19 +71,21 @@ for (const kind of ["crab", "lfs"] as const) {
           await page.getByRole("button", { name: "No thanks", exact: true }).click();
           return page;
         }
-        await page.getByTitle("Toggle Activity (background jobs)", { exact: true }).waitFor();
+        // A first-run modal can cover the shell after an interrupted session.
+        // Wait beneath it, then dismiss the accessible prompt before acting.
+        await page.getByRole("button", { name: "Activity", exact: true, includeHidden: true }).waitFor();
         for (const name of ["Skip", "No thanks"]) {
           const button = page.getByRole("button", { name, exact: true });
           if (await button.isVisible()) await button.click();
         }
         return page;
       };
-      const openSnapshot = async (page: Awaited<ReturnType<typeof launch>>) => {
+      const openSnapshot = async (page: Awaited<ReturnType<typeof launch>>, selected = connection) => {
         await page.getByRole("button", { name: "More actions", exact: true }).click();
-        await page.getByRole("button", { name: "Open storage snapshot", exact: true }).click();
+        await page.getByRole("menuitem", { name: "Open storage snapshot", exact: true }).click();
         const dialog = page.getByRole("dialog", { name: "Open storage snapshot", exact: true });
         await dialog.getByLabel("Repository URL", { exact: true }).fill(fixture.url);
-        await dialog.getByRole("button", { name: `Edit ${connection.name}`, exact: true }).locator("..").getByRole("button", { name: "Use connection", exact: true }).click();
+        await dialog.getByRole("button", { name: `Edit ${selected.name}`, exact: true }).locator("..").getByRole("button", { name: "Use connection", exact: true }).click();
         await dialog.getByRole("button", { name: "Open snapshot", exact: true }).click();
         await expect(dialog).toHaveCount(0);
       };
@@ -91,6 +98,133 @@ for (const kind of ["crab", "lfs"] as const) {
         expect(repoId).toBeTruthy();
         await expect.poll(() => Boolean(epoch(repoId!))).toBe(true);
         const initialEpoch = epoch(repoId!);
+        if (outcome === "retention") {
+          const exact = async () => {
+            await page.locator(`[role="treeitem"][data-item-path="${filename}"]`).click();
+            await expect(page.getByText(payload.marker, { exact: false }).first()).toBeVisible();
+            const content = await call(page, "read_bytes", { repo_id: repoId, path: filename, max_bytes: payload.size + 1 });
+            const bytes = Buffer.from(String(content.bytes_b64), "base64");
+            expect({ size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") }).toEqual({ size: payload.size, sha256: payload.sha256 });
+          };
+          await exact();
+          const retained = inventory().filter(entry => /^namespaces\/[a-f0-9]{64}\/lfs\//.test(entry.path));
+          await application!.close();
+          application = undefined;
+          const before = await transport("missing_lfs");
+          page = await launch();
+          await openSnapshot(page);
+          repoId = await page.evaluate(() => localStorage.getItem("crab.activeRepoPath.v1"));
+          await exact();
+          expect(retained).toHaveLength(1);
+          expect(retained[0].bytes).toBe(payload.size);
+          const after = await transport("stats");
+          expect(after.faulted).toBe(before.faulted);
+          expect(after.writes).toBe(0);
+          await page.screenshot({ animations: "disabled", path: test.info().outputPath("sdk-lfs-retained.png") });
+          writeFileSync(test.info().outputPath("sdk-lfs-retention-proof.json"), JSON.stringify({ retained, before, after, exactBytesAfterRestart: true, originPayloadUnavailable: true }, null, 2));
+          return;
+        }
+        if (contentFailure) {
+          const before = await transport(`${outcome}_${kind}`);
+          await page.locator(`[role="treeitem"][data-item-path="${filename}"]`).click();
+          const message = outcome === "missing" ? /repository content was not found/ : /content failed integrity verification/;
+          const visibleError = page.getByRole("main").getByText(message).first();
+          await expect(visibleError).toBeVisible();
+          await expect(page.getByText(payload.marker, { exact: false })).toHaveCount(0);
+          const failedRead = await page.evaluate(async params => {
+            try { await window.crab.rpc("read_bytes", params); return null; }
+            catch (error) { return error as { message?: string; code?: unknown; data?: unknown }; }
+          }, { repo_id: repoId, path: filename, max_bytes: payload.size + 1 });
+          expect(failedRead).toMatchObject({ code: 1001, data: { kind: "sdk", code: outcome === "missing" ? "not_found" : "corruption" } });
+          const failed = await transport("stats");
+          expect(failed.faulted).toBeGreaterThan(before.faulted);
+          await page.screenshot({ animations: "disabled", path: test.info().outputPath("sdk-content-error.png") });
+          await transport("clear_fault");
+          await page.getByRole("button", { name: "Close tab", exact: true }).click();
+          await page.locator(`[role="treeitem"][data-item-path="${filename}"]`).click();
+          await expect(page.getByText(payload.marker, { exact: false }).first()).toBeVisible();
+          const content = await call(page, "read_bytes", { repo_id: repoId, path: filename, max_bytes: payload.size + 1 });
+          const bytes = Buffer.from(String(content.bytes_b64), "base64");
+          expect({ size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") }).toEqual({ size: payload.size, sha256: payload.sha256 });
+          const after = await transport("stats");
+          expect(after.writes).toBe(0);
+          await page.screenshot({ animations: "disabled", path: test.info().outputPath("sdk-content-repaired.png") });
+          writeFileSync(test.info().outputPath("sdk-content-failure-proof.json"), JSON.stringify({ kind, outcome, before, failed, failedRead, after, exactBytesAfterRepair: true }, null, 2));
+          return;
+        }
+        if (outcome === "budget") {
+          await expect(page.getByText("Read-only storage snapshot", { exact: true })).toBeVisible();
+          await expect(page.getByRole("button", { name: "Refresh hydration status", exact: true })).toHaveCount(0);
+          const payloads = () => inventory().filter(entry => /^namespaces\/[a-f0-9]{64}\/(?:chunks|xorbs|shards|ref-transactions|git-packs|lfs)\//.test(entry.path));
+          const showExact = async (expected: typeof payload) => {
+            await page.locator(`[role="treeitem"][data-item-path="${filename}"]`).click();
+            await expect(page.getByText(expected.marker, { exact: false }).first()).toBeVisible();
+            const content = await call(page, "read_bytes", { repo_id: repoId, path: filename, max_bytes: expected.size + 1 });
+            expect(createHash("sha256").update(Buffer.from(String(content.bytes_b64), "base64")).digest("hex")).toBe(expected.sha256);
+            await page.getByRole("button", { name: "Close tab", exact: true }).click();
+          };
+          const settings = async () => {
+            await page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Settings", exact: true }).click();
+            await page.getByRole("button", { name: "Storage & Cache", exact: true }).click();
+            return page.getByRole("region", { name: "Cache usage", exact: true });
+          };
+          await showExact(payload);
+          await call(page, "storage_connections_save", { connection: fixture.profiles[1] });
+          await openSnapshot(page, fixture.profiles[1]);
+          repoId = await page.evaluate(() => localStorage.getItem("crab.activeRepoPath.v1"));
+          await showExact(fixture.payloads[1]);
+          const before = payloads();
+          expect(new Set(before.map(entry => entry.path.split("/")[1])).size).toBe(2);
+          expect(inventory().filter(entry => entry.path.endsWith(".catalog.sqlite")).map(entry => entry.path)).toEqual([".catalog.sqlite"]);
+          const retained = path.join(cache, "desktop-content", "database-query", "retained.bin");
+          mkdirSync(path.dirname(retained), { recursive: true, mode: 0o700 });
+          writeFileSync(retained, "retain query state", { mode: 0o600 });
+          const usageBefore = await call(page, "cache_stats", { repo_id: repoId });
+          let section = await settings();
+          await section.getByRole("combobox", { name: "Cache retention", exact: true }).click();
+          await page.getByRole("option", { name: "Limit disk retention", exact: true }).click();
+          await section.getByLabel("Cache limit in MiB", { exact: true }).fill("0");
+          await section.getByRole("button", { name: "Save budget", exact: true }).click();
+          await expect(section.getByRole("status")).toContainText("Budget saved.");
+          await expect(section.getByRole("button", { name: "Refresh usage", exact: true })).toBeEnabled();
+          expect(payloads()).toEqual([]);
+          expect(readFileSync(retained, "utf8")).toBe("retain query state");
+          const zero = await call(page, "cache_stats", { repo_id: repoId });
+          expect({ available: zero.budget_available, budget: zero.budget_bytes, over: zero.over_budget }).toEqual({ available: true, budget: 0, over: true });
+          const beforeAllocated = (usageBefore.observed as { allocated_bytes: number }).allocated_bytes;
+          const afterAllocated = (zero.observed as { allocated_bytes: number }).allocated_bytes;
+          expect(afterAllocated).toBeLessThan(beforeAllocated);
+          await page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Files", exact: true }).click();
+          await showExact(fixture.payloads[1]);
+          expect(payloads()).toEqual([]);
+          section = await settings();
+          await section.getByLabel("Cache limit in MiB", { exact: true }).fill("64");
+          await section.getByRole("button", { name: "Save budget", exact: true }).click();
+          await expect(section.getByRole("status")).toContainText("Budget saved.");
+          await application!.close();
+          application = undefined;
+          page = await launch();
+          section = await settings();
+          await expect(section.getByLabel("Cache limit in MiB", { exact: true })).toHaveValue("64");
+          const resources = await application!.evaluate(() => process.resourcesPath);
+          const cli = path.join(resources, "agent", process.platform === "win32" ? "crab.exe" : "crab");
+          const external = JSON.parse(execFileSync(cli, ["cache", "budget", "--max-bytes", "0", "--json"], { cwd: root, env, encoding: "utf8" })) as { data: { usage: { budget_bytes: number } } };
+          expect(external.data.usage.budget_bytes).toBe(0);
+          await section.getByRole("button", { name: "Refresh usage", exact: true }).click();
+          await expect(section.getByLabel("Cache limit in MiB", { exact: true })).toHaveValue("0");
+          await section.getByRole("button", { name: "Save budget", exact: true }).scrollIntoViewIfNeeded();
+          await page.screenshot({ animations: "disabled", path: test.info().outputPath("shared-cache-retention.png") });
+          await section.screenshot({ animations: "disabled", path: test.info().outputPath("shared-cache-controls.png") });
+          await page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Files", exact: true }).click();
+          repoId = await page.evaluate(() => localStorage.getItem("crab.activeRepoPath.v1"));
+          await showExact(fixture.payloads[1]);
+          expect(payloads()).toEqual([]);
+          expect((await transport("stats")).writes).toBe(0);
+          const second = await (await fetch(fixture.profiles[1].endpoint + "/__fixture_stats")).json() as { writes: number };
+          expect(second.writes).toBe(0);
+          writeFileSync(test.info().outputPath("shared-cache-budget-proof.json"), JSON.stringify({ before, usageBefore, zero, beforeAllocated, afterAllocated, externalCliObservedByLiveDesktop: true, exactReadsAtZero: true, savedBudgetSurvivesRestart: true, retainedStatePreserved: true }, null, 2));
+          return;
+        }
         if (outcome === "cleanup") {
           await page.locator(`[role="treeitem"][data-item-path="${filename}"]`).click();
           await expect(page.getByText(payload.marker, { exact: false }).first()).toBeVisible();
@@ -98,7 +232,7 @@ for (const kind of ["crab", "lfs"] as const) {
           await page.getByRole("button", { name: "Close tab", exact: true }).click();
           // SDK payloads include decoded ranges, whose filenames are not chunk
           // hashes. Count those alongside the shard before checking exact removal.
-          const cached = inventory().filter(entry => /^desktop-content\/[a-f0-9]{64}\/(?:chunks|xorbs|shards|ref-transactions|git-packs)\//.test(entry.path));
+          const cached = inventory().filter(entry => /^namespaces\/[a-f0-9]{64}\/(?:chunks|xorbs|shards|ref-transactions|git-packs|lfs)\//.test(entry.path));
           expect(cached.length).toBeGreaterThan(0);
           const retained = path.join(cache, "desktop-content", "database-query", "retained.bin");
           mkdirSync(path.dirname(retained), { recursive: true, mode: 0o700 });
@@ -116,7 +250,8 @@ for (const kind of ["crab", "lfs"] as const) {
           await expect(settings.getByRole("alert")).toHaveCount(0);
           expect(cached.some(entry => existsSync(path.join(cache, entry.path)))).toBe(false);
           expect(readFileSync(retained, "utf8")).toBe("retain query state");
-          expect(inventory().some(entry => entry.path.startsWith("desktop-content/") && entry.path.endsWith("/.catalog.sqlite"))).toBe(true);
+          expect(existsSync(path.join(cache, ".catalog.sqlite"))).toBe(true);
+          expect(inventory().some(entry => entry.path.startsWith("namespaces/") && entry.path.endsWith("/.catalog.sqlite"))).toBe(false);
           await settings.getByRole("status").scrollIntoViewIfNeeded();
           await page.screenshot({ animations: "disabled", path: test.info().outputPath("sdk-cache-cleanup.png") });
           const remaining = inventory();
@@ -141,7 +276,7 @@ for (const kind of ["crab", "lfs"] as const) {
           const parent = application!.process().pid;
           const native = execFileSync("ps", ["-axo", "pid=,ppid=,command="], { encoding: "utf8" })
             .split("\n").map(line => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line))
-            .find(row => row && Number(row[2]) === parent && /\/agent\/crab-desktop-agent(?:\s|$)/.test(row[3]));
+            .find(row => row && Number(row[2]) === parent && isNativeAgentCommand(row[3]));
           if (!native) throw new Error("Owned native process was not found");
           process.kill(Number(native[1]), "SIGKILL");
         } else {
@@ -178,8 +313,16 @@ for (const kind of ["crab", "lfs"] as const) {
         expect(after.writes).toBe(0);
         await page.screenshot({ animations: "disabled", path: test.info().outputPath("sdk-recovered.png") });
         writeFileSync(test.info().outputPath("sdk-cache-proof.json"), JSON.stringify({ kind, outcome, before, after, interruptedCache, recoveredCache: inventory(), exactBytes: true }, null, 2));
+      } catch (error) {
+        const failedPage = application?.windows()[0];
+        if (failedPage && !failedPage.isClosed()) {
+          await failedPage.screenshot({ path: test.info().outputPath("sdk-recovery-failure.png") }).catch(() => {});
+          await failedPage.locator("body").innerText().then(text => writeFileSync(test.info().outputPath("sdk-recovery-failure.txt"), text)).catch(() => {});
+        }
+        if (existsSync(cache)) writeFileSync(test.info().outputPath("sdk-recovery-failure-inventory.json"), JSON.stringify(inventory(), null, 2));
+        throw error;
       } finally {
-        try { await transport("release"); }
+        try { await transport("clear_fault"); await transport("release"); }
         finally { await application?.close(); }
         writeFileSync(test.info().outputPath("application-stderr.log"), stderr);
         rmSync(root, { recursive: true, force: true });

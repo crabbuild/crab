@@ -7,7 +7,7 @@ import * as path from "node:path";
 import { tmpdir } from "node:os";
 import type { StorageConnectionInput } from "../../electron/storage-connection-types";
 import type { AgentEvent } from "../../src/ipc";
-import { call, packagedExecutable, prepareFixtureSsh } from "./packaged-app";
+import { answerConfirmation, call, packagedExecutable, prepareFixtureSsh } from "./packaged-app";
 import { sshFixture } from "./ssh-fixture";
 import type { RepoHandle } from "../../src/ipc";
 import type { FileTransferActivity, FileTransferSource } from "../../electron/file-transfers";
@@ -197,7 +197,7 @@ test("device storage identities reach SSH cold reads, replacement and saved rest
     await page.getByRole("button", { name: "Refresh hydration status", exact: true }).click();
     await page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Large Files", exact: true }).click();
     await page.getByRole("button", { name: "Hydrate", exact: true }).last().click();
-    await page.getByRole("tab", { name: "Custom", exact: true }).click();
+    await page.getByRole("radio", { name: "Custom", exact: true }).click();
     for (const file of bulkPaths) await page.getByRole("checkbox", { name: new RegExp(file) }).check();
     await page.getByRole("button", { name: /^Hydrate 2 files/ }).click();
     await expect(page.getByRole("main").getByText("Hydrated weights.safetensors", { exact: true })).toBeVisible();
@@ -225,13 +225,15 @@ test("device storage identities reach SSH cold reads, replacement and saved rest
     await paletteFile("Crab: Hydrate File");
     await expect(page.getByText("Hydrated 1 file", { exact: true })).toBeVisible();
     expect(sha(readFileSync(path.join(directories[0], "lfs.safetensors")))).toBe(source.payloads[0].sha256);
-    await application!.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 1, checkboxChecked: false }); });
+
     await paletteFile("Crab: Dehydrate File");
+    await answerConfirmation(page, /^Dehydrate /);
     await expect(page.getByText("Dehydrated 1 file", { exact: true })).toBeVisible();
     expect(readFileSync(path.join(directories[0], "lfs.safetensors"))).toEqual(git(directories[0], ["show", ":lfs.safetensors"]));
     expect(git(directories[0], ["ls-files", "--stage", "-z"])).toEqual(batchIndex);
     writeFileSync(path.join(directories[0], "lfs.safetensors"), "unstaged remote edit");
     await paletteFile("Git: Discard File Changes");
+    await answerConfirmation(page, /^Restore /);
     await expect(page.getByText("Restored lfs.safetensors from the index", { exact: true })).toBeVisible();
     expect(sha(readFileSync(path.join(directories[0], "lfs.safetensors")))).toBe(source.payloads[0].sha256);
     expect(git(directories[0], ["ls-files", "--stage", "-z"])).toEqual(batchIndex);
@@ -263,7 +265,7 @@ test("device storage identities reach SSH cold reads, replacement and saved rest
     }
     const nestedIndex = git(directories[0], ["ls-files", "--stage", "-z"]);
     await page.getByRole("button", { name: "Refresh hydration status", exact: true }).click();
-    await page.getByRole("tab", { name: "Custom", exact: true }).click();
+    await page.getByRole("radio", { name: "Custom", exact: true }).click();
     for (const file of nested) await page.getByRole("checkbox", { name: new RegExp(`^${file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`) }).check();
     await page.getByRole("button", { name: /^Hydrate 2 files/ }).click();
     await expect(page.getByRole("main").getByText(`Hydrated ${nested[1]}`, { exact: true })).toBeVisible();
@@ -387,7 +389,7 @@ test("device storage identities reach SSH cold reads, replacement and saved rest
           await expect.poll(async () => (
                   (await (await fetch(source.profiles[index].endpoint + "/__fixture_stats")).json()) as { blocked: number }).blocked,
             ).toBeGreaterThan(0);
-          await page.getByTitle("Toggle Activity (background jobs)", { exact: true }).click();
+          await page.getByRole("button", { name: "Activity", exact: true }).click();
           await expect(page.getByRole("button", { name: "Cancel materialization", exact: true })).toBeInViewport();
           await page.getByRole("button", { name: "Cancel materialization", exact: true }).click();
           await expect.poll(async () => (await history()).jobs.find(job => job.intent.paths.includes("cold.safetensors"))?.status).toBe("cancelled");
@@ -398,8 +400,9 @@ test("device storage identities reach SSH cold reads, replacement and saved rest
           expect(git(directories[index], ["ls-files", "--stage", "-z"])).toEqual(indexBefore);
           await page.screenshot({ path: test.info().outputPath("ssh-activity-cold-cancellation.png") });
         } finally { await fetch(source.profiles[index].endpoint + "/__fixture_release"); }
-        await application!.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 1, checkboxChecked: false }); });
+
         await page.getByRole("button", { name: "Retry transfer", exact: true }).first().click();
+        await answerConfirmation(page, /Hydrate 1 file/);
         await expect.poll(() => sha(readFileSync(path.join(directories[index], "cold.safetensors")))).toBe(source.cold_payloads[index].sha256);
         await expect.poll(async () => (await history()).jobs.find(job => job.intent.paths.includes("cold.safetensors") && job.status === "done")?.transfer?.files_published).toBe(1);
         const completed = (await history()).jobs.find(job => job.intent.paths.includes("cold.safetensors") && job.status === "done")!;
@@ -409,6 +412,7 @@ test("device storage identities reach SSH cold reads, replacement and saved rest
         await page.screenshot({ path: test.info().outputPath("ssh-activity-cold-retry.png") });
         await page.getByRole("button", { name: "Close activity drawer", exact: true }).click();
         await paletteFile("Crab: Dehydrate File", "cold.safetensors");
+        await answerConfirmation(page, /^Dehydrate /);
         await expect.poll(() => readFileSync(path.join(directories[index], "cold.safetensors")).equals(pointer)).toBe(true);
       }
       const content = await call(page, "read_bytes", { repo_id: repoId, path: "cold.safetensors", max_bytes: source.cold_payloads[index].size + 1 });
@@ -666,7 +670,7 @@ test("GUI snapshots at the same URL restore separate saved identities and cold c
       if (index === 0) {
         await fetch(connection.endpoint + "/__fixture_pause");
         await page.getByRole("button", { name: "More actions", exact: true }).click();
-        await page.getByRole("button", { name: "Open storage snapshot", exact: true }).click();
+        await page.getByRole("menuitem", { name: "Open storage snapshot", exact: true }).click();
         const pending = page.getByRole("dialog", { name: "Open storage snapshot", exact: true });
         await pending.getByLabel("Repository URL", { exact: true }).fill(fixture.url);
         await pending.getByRole("button", { name: "Edit Alpha", exact: true }).locator("..").getByRole("button", { name: "Use connection", exact: true }).click();
@@ -683,7 +687,7 @@ test("GUI snapshots at the same URL restore separate saved identities and cold c
         await fetch(connection.endpoint + "/__fixture_release");
       }
       await page.getByRole("button", { name: "More actions", exact: true }).click();
-      await page.getByRole("button", { name: "Open storage snapshot", exact: true }).click();
+      await page.getByRole("menuitem", { name: "Open storage snapshot", exact: true }).click();
       const dialog = page.getByRole("dialog", { name: "Open storage snapshot", exact: true });
       await dialog.getByLabel("Repository URL", { exact: true }).fill(fixture.url);
       await dialog.getByLabel("Name (optional)", { exact: true }).fill(connection.name + " snapshot");
@@ -692,7 +696,7 @@ test("GUI snapshots at the same URL restore separate saved identities and cold c
       await expect(dialog).toHaveCount(0);
       await view(page, "weights.safetensors", fixture.payloads[index].marker);
       await page.keyboard.press(process.platform === "darwin" ? "Meta+," : "Control+,");
-      await expect(page.getByRole("tab", { name: "Workspace", exact: true })).toHaveAttribute("aria-disabled", "true");
+      await expect(page.getByRole("radiogroup", { name: "Settings scope", exact: true }).getByRole("radio", { name: "Workspace", exact: true })).toBeDisabled();
       await page.getByRole("button", { name: /^Task list:/ }).click();
       const tasks = page.getByRole("dialog", { name: "Task list", exact: true });
       await expect(tasks.getByRole("textbox", { name: "New task title", exact: true })).toBeDisabled();

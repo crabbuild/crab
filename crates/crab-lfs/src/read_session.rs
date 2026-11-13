@@ -17,7 +17,7 @@ use super::read_cache::{LOCAL_BLOCK_BYTES, LfsReadCache};
 // The full SHA-256 authenticates these block proofs. Subsequent reads verify
 // copied bytes against them, never file timestamps or a reusable pathname.
 pub(super) struct VerifiedLocal {
-    file: File,
+    file: Option<File>,
     blocks: Vec<blake3::Hash>,
 }
 
@@ -90,6 +90,39 @@ impl LfsReadSession {
         range: Range<u64>,
         cancel: &CancellationToken,
     ) -> crate::Result<Option<Bytes>> {
+        let path = crate::local::object_path(storage, oid);
+        self.read_range(path, None, oid, size, range, cancel).await
+    }
+
+    /// Read a captured file using whole-object and retained block verification.
+    ///
+    /// `key` identifies the caller's selected source in this proof cache; the
+    /// descriptor supplies bytes without reopening that path. Only bounded block
+    /// proofs survive this operation; keep the external cache lease until session
+    /// close drains its jobs. Later reads check their newly captured descriptors.
+    pub async fn read_opened_range(
+        &self,
+        key: &Path,
+        file: File,
+        oid: &[u8; 32],
+        size: u64,
+        range: Range<u64>,
+        cancel: &CancellationToken,
+    ) -> crate::Result<Bytes> {
+        self.read_range(key.to_owned(), Some(file), oid, size, range, cancel)
+            .await?
+            .ok_or_else(|| std::io::Error::other("captured LFS source is unavailable").into())
+    }
+
+    async fn read_range(
+        &self,
+        path: std::path::PathBuf,
+        opened: Option<File>,
+        oid: &[u8; 32],
+        size: u64,
+        range: Range<u64>,
+        cancel: &CancellationToken,
+    ) -> crate::Result<Option<Bytes>> {
         if range.start > range.end || range.end > size {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -102,12 +135,13 @@ impl LfsReadSession {
             () = cancel.cancelled() => return Err(cancelled().into()),
             result = crate::object_store::origin::verification_permit() => result?,
         };
-        let path = crate::local::object_path(storage, oid);
-        let entry = self.cache()?.local(path.clone(), size)?;
+        let captured = opened.is_some();
+        let entry = self.cache()?.local(path.clone(), *oid, size, captured)?;
         let oid = *oid;
         let cancel = cancel.clone();
         self.spawn_blocking(move || {
             let _permit = permit;
+            let mut opened = opened;
             let mut entry = entry
                 .as_ref()
                 .map(|entry| {
@@ -120,7 +154,15 @@ impl LfsReadSession {
                 && let Some(source) = guard.as_mut()
             {
                 let mut bytes = range_buffer(&range)?;
+                if captured {
+                    source.file = opened.take();
+                }
                 let result = source.read_range(&oid, size, range, &cancel, &mut bytes);
+                // Captured cache reads retain hashes, not handles or eviction
+                // leases. Local worktree reads retain their selected source.
+                if captured {
+                    source.file = None;
+                }
                 if result.is_err() {
                     // This read fails against the selected source. A later read
                     // may freshly verify a repaired path; it never hides this error.
@@ -129,15 +171,16 @@ impl LfsReadSession {
                 result?;
                 return Ok(Some(Bytes::from(bytes)));
             }
-            let file = match File::open(path) {
+            let mut file = match opened.map(Ok).unwrap_or_else(|| File::open(path)) {
                 Ok(file) => file,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
                 Err(error) => return Err(error.into()),
             };
+            file.rewind()?;
             // Absence selects remote before allocating another range buffer.
             // Otherwise remote-only reads allocate and discard local output first.
             let mut bytes = range_buffer(&range)?;
-            let source = VerifiedLocal::verify(
+            let mut source = VerifiedLocal::verify(
                 file,
                 &oid,
                 size,
@@ -146,6 +189,9 @@ impl LfsReadSession {
                 &mut bytes,
                 entry.is_some(),
             )?;
+            if captured {
+                source.file = None;
+            }
             if let Some(mut guard) = entry {
                 *guard = Some(source);
             }
@@ -207,7 +253,10 @@ impl VerifiedLocal {
         if file.read(&mut [0; 1])? != 0 || sha256.finalize().as_slice() != oid {
             return Err(corrupt(oid));
         }
-        Ok(Self { file, blocks })
+        Ok(Self {
+            file: Some(file),
+            blocks,
+        })
     }
 
     fn read_range(
@@ -218,18 +267,21 @@ impl VerifiedLocal {
         cancel: &CancellationToken,
         output: &mut Vec<u8>,
     ) -> crate::Result<()> {
-        if self.file.metadata()?.len() != size {
+        let file = self
+            .file
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("LFS source is not captured"))?;
+        if file.metadata()?.len() != size {
             return Err(corrupt(oid));
         }
         let first = range.start / LOCAL_BLOCK_BYTES as u64;
         let end = range.end.div_ceil(LOCAL_BLOCK_BYTES as u64);
         let mut buffer = vec![0; LOCAL_BLOCK_BYTES];
-        self.file
-            .seek(SeekFrom::Start(first * LOCAL_BLOCK_BYTES as u64))?;
+        file.seek(SeekFrom::Start(first * LOCAL_BLOCK_BYTES as u64))?;
         for index in first..end {
             let offset = index * LOCAL_BLOCK_BYTES as u64;
             let length = (size - offset).min(LOCAL_BLOCK_BYTES as u64) as usize;
-            read_block(&mut self.file, &mut buffer[..length], oid, cancel)?;
+            read_block(file, &mut buffer[..length], oid, cancel)?;
             if self.blocks.get(index as usize) != Some(&blake3::hash(&buffer[..length])) {
                 return Err(corrupt(oid));
             }
@@ -296,6 +348,66 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn captured_proofs_check_the_new_descriptor_after_operation_close() {
+        let root = tempfile::tempdir().unwrap();
+        let key = root.path().join("source");
+        std::fs::write(&key, b"first").unwrap();
+        let proofs = LfsReadCache::default();
+        let first = LfsReadSession::new(proofs.clone());
+        let cancel = CancellationToken::new();
+        let oid = Sha256::digest(b"first").into();
+        first
+            .read_opened_range(&key, File::open(&key).unwrap(), &oid, 5, 0..5, &cancel)
+            .await
+            .unwrap();
+        first.close().await;
+        std::fs::remove_file(&key).unwrap();
+        std::fs::write(&key, b"other").unwrap();
+        let second = LfsReadSession::new(proofs);
+        let result = second
+            .read_opened_range(&key, File::open(&key).unwrap(), &oid, 5, 0..5, &cancel)
+            .await;
+        second.close().await;
+        assert!(matches!(result, Err(crate::LfsError::ObjectCorrupt { .. })));
+    }
+
+    #[tokio::test]
+    async fn captured_sources_do_not_reopen_paths_or_reuse_another_oid_proof() {
+        let root = tempfile::tempdir().unwrap();
+        let key = root.path().join("source");
+        std::fs::write(&key, b"first").unwrap();
+        let captured = File::open(&key).unwrap();
+        let replacement = root.path().join("replacement");
+        std::fs::write(&replacement, b"other").unwrap();
+        #[cfg(unix)]
+        std::fs::rename(&replacement, &key).unwrap();
+        let session = LfsReadSession::default();
+        let cancel = CancellationToken::new();
+        let oid = Sha256::digest(b"first").into();
+        let bytes = session
+            .read_opened_range(&key, captured, &oid, 5, 0..5, &cancel)
+            .await
+            .unwrap();
+        assert_eq!(bytes, b"first".as_slice());
+        let wrong_oid = [0; 32];
+        let invalid = session
+            .read_opened_range(
+                &key,
+                File::open(&key).unwrap(),
+                &wrong_oid,
+                5,
+                0..5,
+                &cancel,
+            )
+            .await;
+        session.close().await;
+        assert!(matches!(
+            invalid,
+            Err(crate::LfsError::ObjectCorrupt { .. })
+        ));
+    }
+
+    #[tokio::test]
     async fn shared_proofs_survive_operation_close_until_the_cache_owner_releases_them() {
         let root = tempfile::tempdir().unwrap();
         let body = b"retained payload";
@@ -312,7 +424,12 @@ mod tests {
             .unwrap();
         first.close().await;
         std::fs::remove_file(&path).unwrap();
-        let source = Arc::downgrade(&cache.local(path, body.len() as u64).unwrap().unwrap());
+        let source = Arc::downgrade(
+            &cache
+                .local(path, oid, body.len() as u64, false)
+                .unwrap()
+                .unwrap(),
+        );
         let second = LfsReadSession::new(cache.clone());
         let bytes = second
             .read_local_range(root.path(), &oid, body.len() as u64, 4..8, &cancel)

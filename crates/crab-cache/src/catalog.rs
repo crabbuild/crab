@@ -16,6 +16,7 @@ use crate::private_fs::{Database, DatabaseLease, DatabaseMode, PinnedRoot};
 use crate::{CacheError, Result};
 
 mod pending;
+mod policy;
 mod removal;
 #[cfg(feature = "local-cache")]
 pub(crate) use removal::remove_file;
@@ -47,6 +48,7 @@ pub struct CacheCatalogStats {
     pub total_bytes: u64,
     pub temporary_bytes: u64,
     pub reservations_bytes: u64,
+    pub retention_budget_bytes: Option<u64>,
     pub last_maintenance_unix_ms: Option<u64>,
 }
 
@@ -119,13 +121,14 @@ impl CacheReservation {
     #[cfg(all(feature = "remote-client", feature = "local-cache"))]
     pub(crate) async fn anonymous_file(self) -> Result<(std::fs::File, Self)> {
         tokio::task::spawn_blocking(move || {
-            self.generation
-                .validate(&self.root, Path::new(CATALOG_FILE))?;
-            let file = self
-                .root
-                .pending_file(&self.relative_path)?
-                .into_unlinked_file()?;
-            Ok((file, self))
+            let ReservedFile {
+                pending,
+                reservation,
+            } = self.pending_file_sync()?;
+            let file = pending.into_unlinked_file()?;
+            // Windows defers unlink until the stream's final handle closes.
+            // Keep its exact journal authority through that stream lifetime.
+            Ok((file, reservation))
         })
         .await
         .map_err(|error| CacheError::Io(std::io::Error::other(error)))?
@@ -155,7 +158,7 @@ impl CacheReservation {
         let pending = self.pending_file().await?;
         let mut writer = pending.file()?;
         writer.write_all(data).await?;
-        writer.sync_all().await?;
+        writer.flush().await?;
         drop(writer);
         pending.commit().await
     }
@@ -210,7 +213,7 @@ impl CacheCatalog {
         &self.root
     }
 
-    /// Product-wide byte budget.
+    /// Caller admission ceiling, further constrained by the persisted root policy.
     #[must_use]
     pub fn max_bytes(&self) -> Option<u64> {
         self.max_bytes
@@ -260,7 +263,9 @@ impl CacheCatalog {
         // Keep this bound connection through accounting and eviction. Reopening
         // by name after owner release could maintain an unrelated generation.
         let total = self.total_registered_bytes_sync(&connection)?;
-        if self.max_bytes.is_some_and(|max| total > max) {
+        if policy::effective_budget(&connection, &catalog_path, self.max_bytes)?
+            .is_some_and(|max| total > max)
+        {
             self.maintain_at(&root, 0, &mut connection)
         } else {
             Ok(CacheMaintenanceStats {
@@ -418,6 +423,7 @@ impl CacheCatalog {
             total_bytes,
             temporary_bytes,
             reservations_bytes,
+            retention_budget_bytes: policy::retention_budget(&connection, &path)?,
             last_maintenance_unix_ms,
         }))
     }
@@ -478,6 +484,25 @@ impl CacheCatalog {
             let transaction = connection
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(|source| index_error(&catalog_path, source))?;
+            let max_bytes = policy::effective_budget(&transaction, &catalog_path, self.max_bytes)?;
+            // Retry must reclaim exact abandoned fills even without capacity
+            // pressure. Reuse journal recovery under this writer; never sweep
+            // names or let a fresh reservation inherit a dead owner's charge.
+            pending::recover(
+                &root,
+                &transaction,
+                &catalog_path,
+                &mut CacheMaintenanceStats::default(),
+            )?;
+            remove_stale_owners(&transaction, &catalog_path)?;
+            if max_bytes.is_some_and(|max| size > max) {
+                // Recovery survives a declined admission; removed files must
+                // not retain their journal or dead reservation charge.
+                transaction
+                    .commit()
+                    .map_err(|source| index_error(&catalog_path, source))?;
+                return Ok(None);
+            }
             let total: u64 = transaction
                 .query_row(
                     "SELECT
@@ -487,10 +512,7 @@ impl CacheCatalog {
                     |row| row.get(0),
                 )
                 .map_err(|source| index_error(&catalog_path, source))?;
-            if self
-                .max_bytes
-                .is_none_or(|max| size <= max && total <= max - size)
-            {
+            if max_bytes.is_none_or(|max| total <= max - size) {
                 let id = next_owner("reservation");
                 transaction
                     .execute(
@@ -512,7 +534,9 @@ impl CacheCatalog {
                     id,
                 }));
             }
-            drop(transaction);
+            transaction
+                .commit()
+                .map_err(|source| index_error(&catalog_path, source))?;
             if attempt == 0 && !self.maintain_at(&root, size, &mut connection)?.coalesced {
                 continue;
             }
@@ -572,6 +596,9 @@ impl CacheCatalog {
         let transaction = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|source| index_error(&catalog_path, source))?;
+        // The maintenance lock prevents a policy update during this pass.
+        // Read its limit under the writer used for inventory and owner checks.
+        let max_bytes = policy::effective_budget(&transaction, &catalog_path, self.max_bytes)?;
         let mut result = CacheMaintenanceStats::default();
         pending::recover(root, &transaction, &catalog_path, &mut result)?;
         remove_stale_owners(&transaction, &catalog_path)?;
@@ -605,7 +632,7 @@ impl CacheCatalog {
         result.scanned_bytes = total_bytes;
         // Unlimited retention still reconciles accounting and stale owners,
         // but never selects healthy payloads for capacity eviction.
-        let Some(max_bytes) = self.max_bytes else {
+        let Some(max_bytes) = max_bytes else {
             result.final_bytes = total_bytes;
             return Ok(result);
         };
@@ -627,14 +654,13 @@ impl CacheCatalog {
         let mut cursor = (0u64, String::new());
         while remaining > target {
             let page = {
-                // A cache-root path alone is not eviction authority: mirror
-                // repositories and in-flight workspaces also live here today.
-                // Only owned immutable payload families are currently eligible.
+                // Select bounded LRU candidates. Fixed path ownership is
+                // checked under the writer before unlink; family hints must
+                // neither authorize unknown files nor omit eligible payloads.
                 let mut statement = connection
                     .prepare(
                         "SELECT relative_path, size, last_access_ns FROM cache_entries
-                         WHERE family IN ('chunk', 'decoded-range', 'xorb', 'shard', 'manifest', 'stage')
-                           AND NOT EXISTS (
+                         WHERE NOT EXISTS (
                              SELECT 1 FROM leases
                              WHERE leases.relative_path = cache_entries.relative_path
                            )
@@ -883,7 +909,14 @@ pub(crate) fn classify_family(relative: &str) -> &'static str {
     // Filesystem walkers supply native paths; catalog keys already use '/'.
     // Keep Unix backslashes literal so unrelated files are not misclassified.
     #[cfg(windows)]
-    let relative = relative.replace('\\', "/");
+    let normalized = relative.replace('\\', "/");
+    #[cfg(windows)]
+    let relative = normalized.as_str();
+    let relative = relative
+        .strip_prefix("namespaces/")
+        .and_then(|path| path.split_once('/'))
+        .filter(|(namespace, _)| crate::clean::hex(namespace, 64))
+        .map_or(relative, |(_, payload)| payload);
     if relative == CATALOG_FILE || relative.starts_with(&format!("{CATALOG_FILE}-")) {
         return "catalog";
     }
@@ -904,6 +937,7 @@ pub(crate) fn classify_family(relative: &str) -> &'static str {
         "xorbs" => "xorb",
         "shards" => "shard",
         "git-packs" => "git-pack",
+        "lfs" => "lfs",
         "manifests" => "manifest",
         "stages" => "stage",
         "buckets" | "repos" => "chunk-index",

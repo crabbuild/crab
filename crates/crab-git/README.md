@@ -56,6 +56,9 @@ The main surfaces are:
   Git objects and pack mechanics;
 - `pack_writer` for checksummed SHA-1 pack construction from sized readers,
   with a caller-selected output limit and cooperative cancellation;
+- `batch` for bounded verification and copying of raw Git blobs against
+  captured object IDs, kinds and sizes; copy callers discard output on error
+  and own process cancellation and publication after successful verification;
 - `pointer_detect`, `lfs_pointer`, `pointer_ref`, and `filter_attr_cache` for
   pointer-aware repository behavior;
 - `tag` and `push_state` for annotated refs and push bookkeeping;
@@ -93,10 +96,10 @@ and checksum verification, so later caller writes cannot mutate installed packs.
 Thin-pack repair canonicalizes the owning object directory into a native-Git
 compatible Windows path before supplying external bases.
 
-Generated objects use `sha1dc` for hardware-accelerated SHA-1 with collision
-detection. Their IDs include the standard Git loose-object header; a detected
+Generated objects and raw batch reads use `sha1dc` for hardware-accelerated SHA-1
+with collision detection. Their IDs include the standard Git loose-object header; a detected
 collision returns the existing Gitoxide collision error and standard digest.
-Incoming packs and other Gitoxide hashing retain their existing verification.
+Other incoming-pack and Gitoxide hashing retain their existing verification.
 
 ## Usage
 
@@ -149,6 +152,51 @@ response against their captured OIDs, kinds and sizes, hashing bodies through a
 64 KiB buffer with Git-compatible collision detection. Missing, reordered,
 truncated, extra and checksum-invalid responses fail.
 
+`batch::open_loose_blob` locates a regular object in the selected physical
+database or its alternates, preserving native path bytes and Git's quoting,
+relative roots, duplicate suppression and depth limit. Alternate metadata and
+retained paths share an 8 MiB budget. Opening is not verification:
+`batch::copy_loose_blob` streams the zlib file through the same body/checksum
+owner as batch reads, with fixed 64 KiB buffers. It requires the exact loose
+header, declared body, zlib end marker and input EOF. Failed output remains
+untrusted. Callers own cancellation, joined I/O and physical-source selection.
+
+`batch::copy_packed_blob` uses direct index windows and physical zlib reads for
+local SHA-1/SHA-256 packs, including version 1/2 indexes and large offsets.
+Delta ancestry is collected iteratively; one anonymous file holds the programs,
+and seekable bases/results share `ScratchSpace` growth admission. Deep chains do
+not multiply stack frames or file descriptors. Reference bases prefer their own
+pack before external stores; alternate lookup uses the same physical database
+rules as loose objects. Full target checksums remain the delivery authority.
+Callers provide the private scratch root/capacity and supervise blocked I/O.
+
+`batch::copy_local_blob` owns loose/packed selection for callers that support
+both formats. `batch::capture_blob` writes that same verified stream to admitted
+anonymous storage, retaining bounded BLAKE3 block proofs authenticated by the
+complete Git checksum. `CapturedBlob::copy_range` checks copied blocks without
+decoding the original object again. Observed source metadata changes invalidate
+reuse; metadata alone never authenticates bytes. Capture storage and decoding
+share scratch admission. Drop captures to release their file and reservation;
+callers own serialization, idle eviction and joined cancellation.
+
+`batch::copy_local_checkout` applies built-in ident and line-ending conversion.
+Linear forced EOL streams through that same physical verifier without a complete
+capture. Ident and global auto-text rules retain authenticated seekable input;
+the capture keeps the raw identity for expansion. Auto text classification
+examines the complete post-ident body; long candidate keywords replay input
+instead of retaining their text. Callers resolve Git attributes/configuration
+and retain encoding, external-filter and publication ownership. Interrupted
+input stops conversion instead of being retried by a generic I/O copier. Output
+remains untrusted until successful EOF. This API needs runtime qualification for
+total-process memory and subsequent stages.
+
+`IndexStatUpdate::from_file_oid` fences the shared advisory stat writer with an
+already verified Git identity, avoiding a retained large blob. Capture output
+stat before publication and refresh it only after successful rename. Git's
+checkout cache records the converted size; a stale nonzero size can report
+modified content without running clean conversion. Staged IDs, modes and
+unrelated entries remain unchanged; later edits retain different captured stats.
+
 The caller owns the process, disables replacements/filters and supervises blocked I/O; the parser
 does not spawn or detach workers. Mirror inspection/pre-push use this second
 step before trusting the pointer inventory. Other reachable-set APIs retain
@@ -188,8 +236,9 @@ user-facing decision without re-parsing error strings.
 
 ## Incoming pack boundary
 
-`delta::validate` and `delta::apply` share one instruction decoder, so metadata
-inspection and reconstruction enforce the same copy ranges and output sizes.
+`delta::validate`, `delta::apply` and seekable-base `delta::copy` share one
+instruction decoder, so metadata inspection and reconstruction enforce the same
+copy ranges and output sizes. Streaming copies retain source/writer errors.
 Validation does not allocate the reconstructed object; application also checks
 the supplied base length and reserves output fallibly.
 

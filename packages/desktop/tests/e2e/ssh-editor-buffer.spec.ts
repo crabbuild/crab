@@ -53,7 +53,7 @@ test("SSH editor retains failed edits across tabs and writes the latest buffer a
     const settingsFile = path.join(source, ".crab/desktop/settings.json");
     expect(existsSync(settingsFile)).toBe(false);
     await page.keyboard.press(process.platform === "darwin" ? "Meta+," : "Control+,");
-    await page.getByRole("tab", { name: "Workspace", exact: true }).click();
+    await page.getByRole("radiogroup", { name: "Settings scope", exact: true }).getByRole("radio", { name: "Workspace", exact: true }).click();
     await chooseSelect(
       page.getByRole("group", { name: "Theme", exact: true }).getByRole("combobox"),
       "light",

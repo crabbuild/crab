@@ -1,10 +1,21 @@
-//! Exact-identity verification of native Git's raw object batch stream.
+//! Bounded identity verification of raw Git object streams.
 
+use bstr::ByteSlice as _;
 use gix_object::Kind;
 use sha2::Digest as _;
+use std::borrow::Cow;
+use std::collections::HashSet;
+use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Seek, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
+
+mod packed;
+pub use packed::copy_packed_blob;
+mod capture;
+pub use capture::{
+    CapturedBlob, Checkout, CheckoutEol, capture_blob, copy_local_blob, copy_local_checkout,
+};
 
 /// A captured blob header whose body still requires identity verification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,11 +42,241 @@ pub fn verify_blob_batch(
             &oid,
             Some(blob.size),
             0,
+            None,
             &mut buffer,
             cancelled,
         )?;
     }
     finish(&mut reader, cancelled)
+}
+
+/// Copy one raw Git blob batch response while verifying its captured identity.
+///
+/// Errors can follow partial writes; callers must discard output on failure
+/// and supervise blocked I/O and process cancellation separately.
+pub fn copy_blob(
+    input: impl Read,
+    oid: &str,
+    size: u64,
+    output: &mut impl Write,
+    cancelled: &dyn Fn() -> bool,
+) -> io::Result<()> {
+    let mut reader = BufReader::new(input);
+    let mut buffer = [0u8; 64 * 1024];
+    read_object(
+        &mut reader,
+        oid,
+        Some(size),
+        0,
+        Some(output),
+        &mut buffer,
+        cancelled,
+    )?;
+    finish(&mut reader, cancelled)
+}
+
+/// Copy one loose zlib blob with bounded buffers and captured Git identity checks.
+///
+/// The complete header, body, zlib footer and input EOF must verify. Errors can
+/// follow partial writes; callers discard output and supervise blocked I/O.
+pub fn copy_loose_blob(
+    input: impl Read,
+    oid: &str,
+    size: u64,
+    output: &mut impl Write,
+    cancelled: &dyn Fn() -> bool,
+) -> io::Result<()> {
+    let mut reader = BufReader::with_capacity(64 * 1024, input);
+    let expected = format!("blob {size}\0");
+    let mut header_bytes = 0;
+    let mut body = ObjectBody::new(
+        ObjectHeader {
+            oid,
+            kind: Kind::Blob,
+            size,
+        },
+        0,
+        Some(output),
+    )?;
+    let accept = |bytes: &[u8]| {
+        let count = (expected.len() - header_bytes).min(bytes.len());
+        if bytes[..count] != expected.as_bytes()[header_bytes..header_bytes + count] {
+            return Err(invalid("Git loose blob header differs from captured size"));
+        }
+        header_bytes += count;
+        body.push(&bytes[count..])
+    };
+    inflate(&mut reader, cancelled, accept)?;
+    if header_bytes != expected.len() {
+        return Err(invalid("incomplete Git loose blob header"));
+    }
+    body.finish()?;
+    finish(&mut reader, cancelled)
+}
+
+fn inflate(
+    reader: &mut impl BufRead,
+    cancelled: &dyn Fn() -> bool,
+    mut accept: impl FnMut(&[u8]) -> io::Result<()>,
+) -> io::Result<u64> {
+    let mut decoder = flate2::Decompress::new(true);
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        check_cancelled(cancelled)?;
+        let before_in = decoder.total_in();
+        let before_out = decoder.total_out();
+        let status = decoder
+            .decompress(
+                reader.fill_buf()?,
+                &mut buffer,
+                flate2::FlushDecompress::None,
+            )
+            .map_err(|source| io::Error::new(io::ErrorKind::InvalidData, source))?;
+        let consumed = (decoder.total_in() - before_in) as usize;
+        let produced = (decoder.total_out() - before_out) as usize;
+        reader.consume(consumed);
+        accept(&buffer[..produced])?;
+        if status == flate2::Status::StreamEnd {
+            return Ok(decoder.total_out());
+        }
+        // Only StreamEnd authenticates the footer. Keep cancellation outside
+        // high-level read adapters, which may retry Interrupted or accept EOF.
+        if consumed == 0 && produced == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "incomplete Git zlib object",
+            ));
+        }
+    }
+}
+
+/// Open a regular loose object in the primary or a reachable alternate database.
+///
+/// Only absence selects another database. Paths follow Git's quoting, relative
+/// bases, duplicate suppression and recursion limit; environment overrides belong
+/// to the caller that selected `objects_directory`. Returned bytes are unverified;
+/// use `copy_loose_blob` before delivery. Metadata and retained paths share 8 MiB.
+pub fn open_loose_blob(
+    objects_directory: &Path,
+    oid: &str,
+    cancelled: &dyn Fn() -> bool,
+) -> io::Result<Option<File>> {
+    Ok(open_loose_at(objects_directory, oid, cancelled)?.map(|(file, _)| file))
+}
+
+fn open_loose_at(
+    objects_directory: &Path,
+    oid: &str,
+    cancelled: &dyn Fn() -> bool,
+) -> io::Result<Option<(File, PathBuf)>> {
+    if !matches!(oid.len(), 40 | 64) || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(invalid("Git loose lookup requires a hexadecimal object ID"));
+    }
+    find_in_databases(objects_directory, cancelled, |directory| {
+        let path = directory.join(&oid[..2]).join(&oid[2..]);
+        match path.metadata() {
+            Ok(metadata) if !metadata.is_file() => {
+                return Err(invalid("Git loose object is not a regular file"));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        }
+        match File::open(&path) {
+            Ok(file) if file.metadata()?.is_file() => Ok(Some((file, path))),
+            Ok(_) => Err(invalid("Git loose object is not a regular file")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    })
+}
+
+fn find_in_databases<T>(
+    objects_directory: &Path,
+    cancelled: &dyn Fn() -> bool,
+    mut find: impl FnMut(&Path) -> io::Result<Option<T>>,
+) -> io::Result<Option<T>> {
+    let mut pending = vec![(objects_directory.to_owned(), 0)];
+    let mut visited = HashSet::new();
+    const MAX_ALTERNATE_BYTES: usize = 8 * 1024 * 1024;
+    let mut remaining = MAX_ALTERNATE_BYTES;
+    let mut spend = |bytes: usize| {
+        remaining = remaining
+            .checked_sub(bytes)
+            .ok_or_else(|| invalid("Git alternates exceed the 8 MiB metadata budget"))?;
+        Ok::<_, io::Error>(())
+    };
+    while let Some((directory, depth)) = pending.pop() {
+        check_cancelled(cancelled)?;
+        let directory = match directory.canonicalize() {
+            Ok(directory) => directory,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if !visited.insert(directory.clone()) {
+            continue;
+        }
+        spend(directory.as_os_str().as_encoded_bytes().len())?;
+        if let Some(value) = find(&directory)? {
+            return Ok(Some(value));
+        }
+        // Git links entries at depths 0..=5, then searches those databases
+        // without following their own alternates. Cycles are duplicate paths.
+        if depth > 5 {
+            continue;
+        }
+        let alternates = match File::open(directory.join("info/alternates")) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        let mut bytes = Vec::new();
+        alternates
+            .take(MAX_ALTERNATE_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        spend(bytes.len())?;
+        for path in alternate_paths(&bytes)?.into_iter().rev() {
+            let path = directory.join(path);
+            spend(path.as_os_str().as_encoded_bytes().len())?;
+            pending.push((path, depth + 1));
+        }
+    }
+    Ok(None)
+}
+
+fn alternate_paths(mut input: &[u8]) -> io::Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    while !input.is_empty() {
+        let end = input
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .unwrap_or(input.len());
+        let next_line = (end + 1).min(input.len());
+        if input[0] == b'#' || end == 0 {
+            input = &input[next_line..];
+            continue;
+        }
+        // Native Git treats failed C quoting as a literal path beginning with
+        // a quote; valid quoted entries consume exactly their closing quote.
+        let (path, consumed) = if input[0] == b'"' {
+            match gix_quote::ansi_c::undo(input.as_bstr()) {
+                Ok((path, consumed)) if input.get(consumed - 1) == Some(&b'"') => {
+                    (path, (consumed + 1).min(input.len()))
+                }
+                _ => (Cow::Borrowed(input[..end].as_bstr()), next_line),
+            }
+        } else {
+            (Cow::Borrowed(input[..end].as_bstr()), next_line)
+        };
+        if !path.is_empty() {
+            let path = path
+                .to_os_str()
+                .map_err(|source| io::Error::new(io::ErrorKind::InvalidData, source))?;
+            paths.push(PathBuf::from(path));
+        }
+        input = &input[consumed..];
+    }
+    Ok(paths)
 }
 
 /// Stream and verify exact blob bodies from one local Git object database.
@@ -112,6 +353,7 @@ pub fn visit_small_blobs<'a>(
             oid,
             None,
             capture_limit,
+            None,
             &mut buffer,
             cancelled,
         )? {
@@ -121,11 +363,12 @@ pub fn visit_small_blobs<'a>(
     finish(&mut reader, cancelled)
 }
 
-fn read_object(
+fn read_object<'a>(
     reader: &mut impl BufRead,
-    oid: &str,
+    oid: &'a str,
     blob_size: Option<u64>,
     capture_limit: usize,
+    output: Option<&'a mut dyn Write>,
     buffer: &mut [u8],
     cancelled: &dyn Fn() -> bool,
 ) -> io::Result<Option<Vec<u8>>> {
@@ -158,27 +401,14 @@ fn read_object(
     {
         return Err(mismatch());
     }
-    let mut hasher = ObjectHasher::new(oid)?;
-    hasher.update(format!("{} {size}\0", parts[1]).as_bytes());
-    let mut body = (kind == Kind::Blob && size <= capture_limit as u64)
-        .then(|| Vec::with_capacity(size as usize));
-    let mut remaining = size;
-    while remaining != 0 {
+    let mut body = ObjectBody::new(ObjectHeader { oid, kind, size }, capture_limit, output)?;
+    while body.remaining != 0 {
         check_cancelled(cancelled)?;
-        let wanted = remaining.min(buffer.len() as u64) as usize;
+        let wanted = body.remaining.min(buffer.len() as u64) as usize;
         reader.read_exact(&mut buffer[..wanted])?;
-        hasher.update(&buffer[..wanted]);
-        if let Some(body) = &mut body {
-            body.extend_from_slice(&buffer[..wanted]);
-        }
-        remaining -= wanted as u64;
+        body.push(&buffer[..wanted])?;
     }
-    if hasher.finalize()? != oid {
-        return Err(invalid(format!(
-            "Git {} checksum differs from {oid}",
-            parts[1]
-        )));
-    }
+    let body = body.finish()?;
     let mut terminator = [0];
     reader.read_exact(&mut terminator)?;
     if terminator != *b"\n" {
@@ -187,12 +417,87 @@ fn read_object(
     Ok(body)
 }
 
-#[expect(
-    clippy::large_enum_variant,
-    reason = "Only one stack hasher is live; boxing adds an allocation for every streamed object"
-)]
+struct ObjectHeader<'a> {
+    oid: &'a str,
+    kind: Kind,
+    size: u64,
+}
+
+struct ObjectBody<'a> {
+    oid: &'a str,
+    kind: Kind,
+    remaining: u64,
+    hasher: ObjectHasher,
+    output: Option<&'a mut dyn Write>,
+    captured: Option<Vec<u8>>,
+}
+
+impl<'a> ObjectBody<'a> {
+    fn new(
+        header: ObjectHeader<'a>,
+        capture_limit: usize,
+        output: Option<&'a mut dyn Write>,
+    ) -> io::Result<Self> {
+        let ObjectHeader { oid, kind, size } = header;
+        let mut hasher = ObjectHasher::new(oid)?;
+        hasher.update(format!("{kind} {size}\0").as_bytes());
+        let captured = (kind == Kind::Blob && size <= capture_limit as u64)
+            .then(|| Vec::with_capacity(size as usize));
+        Ok(Self {
+            oid,
+            kind,
+            remaining: size,
+            hasher,
+            output,
+            captured,
+        })
+    }
+
+    fn push(&mut self, bytes: &[u8]) -> io::Result<()> {
+        if bytes.len() as u64 > self.remaining {
+            return Err(invalid("Git object body exceeds captured size"));
+        }
+        self.hasher.update(bytes);
+        if let Some(output) = &mut self.output {
+            output.write_all(bytes)?;
+        }
+        if let Some(captured) = &mut self.captured {
+            captured.extend_from_slice(bytes);
+        }
+        self.remaining -= bytes.len() as u64;
+        Ok(())
+    }
+
+    fn finish(self) -> io::Result<Option<Vec<u8>>> {
+        if self.remaining != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "incomplete Git object body",
+            ));
+        }
+        if self.hasher.finalize()? != self.oid {
+            return Err(invalid(format!(
+                "Git {} checksum differs from {}",
+                self.kind, self.oid
+            )));
+        }
+        Ok(self.captured)
+    }
+}
+
+impl Write for ObjectBody<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.push(bytes)?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 enum ObjectHasher {
-    Sha1(gix_hash::Hasher),
+    Sha1(sha1dc::Hasher),
     Sha256(sha2::Sha256),
 }
 
@@ -202,7 +507,7 @@ impl ObjectHasher {
             return Err(invalid("Git batch request has an invalid object ID"));
         }
         match oid.len() {
-            40 => Ok(Self::Sha1(gix_hash::hasher(gix_hash::Kind::Sha1))),
+            40 => Ok(Self::Sha1(sha1dc::Hasher::new())),
             64 => Ok(Self::Sha256(sha2::Sha256::new())),
             _ => Err(invalid("Git batch request has an unsupported object ID")),
         }
@@ -217,7 +522,19 @@ impl ObjectHasher {
 
     fn finalize(self) -> io::Result<String> {
         match self {
-            Self::Sha1(hasher) => Ok(hasher.try_finalize().map_err(io::Error::other)?.to_string()),
+            Self::Sha1(hasher) => {
+                hasher
+                    .finalize()
+                    .map(|digest| digest.to_string())
+                    .map_err(|collision| {
+                        // Match generated-object hashing's Gitoxide error contract;
+                        // hardware acceleration must retain collision rejection and
+                        // the original digest rather than a mitigated object ID.
+                        io::Error::other(gix_hash::hasher::Error::CollisionAttack {
+                            digest: gix_hash::ObjectId::Sha1(*collision.digest().as_bytes()),
+                        })
+                    })
+            }
             Self::Sha256(hasher) => Ok(format!("{:x}", hasher.finalize())),
         }
     }
@@ -226,7 +543,7 @@ impl ObjectHasher {
 fn finish(reader: &mut impl Read, cancelled: &dyn Fn() -> bool) -> io::Result<()> {
     check_cancelled(cancelled)?;
     if reader.read(&mut [0])? != 0 {
-        return Err(invalid("Git object batch contains an unrequested response"));
+        return Err(invalid("Git object stream has trailing bytes"));
     }
     check_cancelled(cancelled)
 }

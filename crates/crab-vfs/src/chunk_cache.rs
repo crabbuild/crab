@@ -72,9 +72,11 @@ impl ChunkCache {
     /// cache-only initialization failures now return a non-storing handle.
     pub fn open(dir: PathBuf, max_bytes: Option<u64>) -> Result<Self> {
         let max_bytes = max_bytes.unwrap_or(DEFAULT_MAX_BYTES);
+        let root = dir.parent().unwrap_or(&dir).to_owned();
+        let catalog = crab_cache::CacheCatalog::new(root, max_bytes);
 
         let inner: Arc<dyn XetChunkCacheTrait> =
-            match crab_cache::XetChunkCacheHandle::open(dir.clone(), max_bytes) {
+            match crab_cache::XetChunkCacheHandle::open(dir.clone(), catalog) {
                 Ok(handle) => {
                     debug!(dir = %dir.display(), max_bytes, "chunk cache opened");
                     handle.cache

@@ -1,5 +1,5 @@
 import { spawn, execFileSync } from "node:child_process";
-import { access, copyFile, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
@@ -73,20 +73,30 @@ const compiler = process.platform === "linux" && process.arch === "arm64"
 const environment = { ...process.env, ...compiler };
 if (testing) {
   const extension = process.platform === "win32" ? ".exe" : "";
-  const env = { ...environment, CRAB_BIN: path.join(desktop, "resources", "native", `${platform}-${process.arch}`, `crab${extension}`) };
-  // Linux target/linker configuration belongs to this producer environment;
-  // host Cargo commands can neither reuse its toolchain nor qualify its output.
-  for (const filter of ["namespace_", "catalog::", "private_fs::platform::tests"]) {
-    await run("cargo", ["test", "--release", "--locked", "-p", "crab-cache", "--lib", "--features", "local-cache,xet-chunk-cache", filter], env);
+  // Tests need writable private scratch even when the runner's home is absent
+  // or belongs to the container's root user. Never touch the user's cache.
+  const fixture = await mkdtemp(path.join(target, "native-test-cache-"));
+  // Leave the leaf absent so native code creates its protected Windows DACL;
+  // Node's mkdtemp inherits broader permissions from the runner directory.
+  const cache = path.join(fixture, "cache");
+  const env = { ...environment, CRAB_CACHE_DIR: cache, CRAB_BIN: path.join(desktop, "resources", "native", `${platform}-${process.arch}`, `crab${extension}`) };
+  try {
+    // Linux target/linker configuration belongs to this producer environment;
+    // host Cargo commands can neither reuse its toolchain nor qualify its output.
+    for (const filter of ["namespace_", "catalog::", "private_fs::platform::tests"]) {
+      await run("cargo", ["test", "--release", "--locked", "-p", "crab-cache", "--lib", "--features", "local-cache,xet-chunk-cache", filter], env);
+    }
+    await run("cargo", ["test", "--release", "-p", "crab-workflow", "--locked", "--lib"], env);
+    await run("cargo", ["test", "--release", "-p", "crab", "--locked", "--no-default-features", "--lib", "cmd::run::tests::sole_workflow_file_keeps_discovery_target_identity"], env);
+    await run("cargo", ["test", "--release", "-p", "crab", "--locked", "--no-default-features", "--lib", "cmd::run::tests::local_execution_does_not_resolve_the_repository_remote"], env);
+    await run("cargo", ["test", "--release", "-p", "crab-desktop-agent", "--locked"], env);
+    for (const filter of ["native_crab_and_lfs_pointer_previews_use_staging_without_hydrating", "native_crab_comparison_", "materialization_", "restoration_", "native_cleanup_reports_usage_and_preserves_busy_and_retained_state"]) {
+      await run("cargo", ["test", "--release", "-p", "crab-desktop-agent", "--locked", filter, "--", "--ignored", "--test-threads=1"], env);
+    }
+    await run("cargo", ["test", "--release", "-p", "crab-git", "--locked", "--features", "process", "--lib", "process::tests"], env);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
   }
-  await run("cargo", ["test", "--release", "-p", "crab-workflow", "--locked", "--lib"], env);
-  await run("cargo", ["test", "--release", "-p", "crab", "--locked", "--no-default-features", "--lib", "cmd::run::tests::sole_workflow_file_keeps_discovery_target_identity"], env);
-  await run("cargo", ["test", "--release", "-p", "crab", "--locked", "--no-default-features", "--lib", "cmd::run::tests::local_execution_does_not_resolve_the_repository_remote"], env);
-  await run("cargo", ["test", "--release", "-p", "crab-desktop-agent", "--locked"], env);
-  for (const filter of ["native_crab_and_lfs_pointer_previews_use_staging_without_hydrating", "native_crab_comparison_", "materialization_", "restoration_", "native_cleanup_reports_usage_and_preserves_busy_and_retained_state"]) {
-    await run("cargo", ["test", "--release", "-p", "crab-desktop-agent", "--locked", filter, "--", "--ignored", "--test-threads=1"], env);
-  }
-  await run("cargo", ["test", "--release", "-p", "crab-git", "--locked", "--features", "process", "--lib", "process::tests"], env);
   process.exit(0);
 }
 

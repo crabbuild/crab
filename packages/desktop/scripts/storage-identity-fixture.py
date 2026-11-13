@@ -40,11 +40,17 @@ def stop(server: subprocess.Popen) -> None:
 
 
 def proxy(port: int) -> http.server.ThreadingHTTPServer:
-    counts = {"get": 0, "head": 0, "writes": 0, "blocked": 0, "stream_blocked": 0, "streamed_bytes": 0}
+    counts = {"get": 0, "head": 0, "writes": 0, "blocked": 0, "stream_blocked": 0, "streamed_bytes": 0, "faulted": 0}
     gate = threading.Event()
     gate.set()
     paused_path = None
     streaming = False
+    fault = None
+    faults = {
+        f"/__fixture_{outcome}_{kind}": (prefix, outcome)
+        for kind, prefix in (("crab", "/xorbs/"), ("lfs", "/lfs/objects/"))
+        for outcome in ("missing", "corrupt")
+    }
 
     class Handler(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -59,9 +65,13 @@ def proxy(port: int) -> http.server.ThreadingHTTPServer:
         do_PUT = do_POST = do_DELETE = do_PATCH = reject
 
         def forward(self):
-            nonlocal paused_path, streaming
-            if self.path in ("/__fixture_stats", "/__fixture_pause", "/__fixture_pause_lfs", "/__fixture_stream_lfs", "/__fixture_stream_crab", "/__fixture_release"):
-                if self.path in ("/__fixture_pause", "/__fixture_pause_lfs"):
+            nonlocal paused_path, streaming, fault
+            if self.path in faults or self.path in ("/__fixture_stats", "/__fixture_pause", "/__fixture_pause_lfs", "/__fixture_stream_lfs", "/__fixture_stream_crab", "/__fixture_release", "/__fixture_clear_fault"):
+                if self.path in faults:
+                    fault = faults[self.path]
+                elif self.path == "/__fixture_clear_fault":
+                    fault = None
+                elif self.path in ("/__fixture_pause", "/__fixture_pause_lfs"):
                     streaming = False
                     paused_path = "/lfs/objects/" if self.path.endswith("_lfs") else None
                     gate.clear()
@@ -78,6 +88,11 @@ def proxy(port: int) -> http.server.ThreadingHTTPServer:
                 self.wfile.write(body)
                 return
             counts["get" if self.command == "GET" else "head"] += 1
+            selected_fault = fault if fault and fault[0] in self.path else None
+            if selected_fault and selected_fault[1] == "missing":
+                counts["faulted"] += 1
+                self.send_error(404, "Qualification object unavailable")
+                return
             if not streaming and not gate.is_set() and (paused_path is None or paused_path in self.path):
                 counts["blocked"] += 1
                 try:
@@ -104,6 +119,12 @@ def proxy(port: int) -> http.server.ThreadingHTTPServer:
                 body = response.read(16 * 1024 * 1024 + 1)
                 if len(body) > 16 * 1024 * 1024:
                     raise RuntimeError("Fixture response exceeded its bound")
+                if selected_fault and self.command == "GET" and response.status in (200, 206) and body:
+                    # Preserve response framing and validators so the real reader
+                    # must reject incorrect content, not a transport truncation.
+                    offset = len(body) // 2
+                    body = body[:offset] + bytes([body[offset] ^ 1]) + body[offset + 1:]
+                    counts["faulted"] += 1
                 self.send_response(response.status)
                 for key, value in response.getheaders():
                     if key.lower() not in ("transfer-encoding", "connection", "server", "date", "content-length"):

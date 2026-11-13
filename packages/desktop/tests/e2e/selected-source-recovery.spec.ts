@@ -6,7 +6,7 @@ import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, renameSync
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import type { AgentEvent } from "../../src/ipc";
-import { call, packagedExecutable } from "./packaged-app";
+import { isNativeAgentCommand, call, packagedExecutable } from "./packaged-app";
 
 for (const target of ["text preview", "Markdown editor", "pending text", "pending Markdown", "notebook preview", "Changes file", "text diff", "LFS diff", "notebook diff"] as const) test(`${target} recaptures its selection after same-ID native repair`, async () => {
   test.skip(process.platform === "win32", "Requires POSIX process enumeration");
@@ -92,16 +92,20 @@ for (const target of ["text preview", "Markdown editor", "pending text", "pendin
         const gate = new Promise<void>(resolve => { release = resolve; });
         const state = globalThis as typeof globalThis & { selectedSave: { hits: number; release: () => void } };
         state.selectedSave = { hits: 0, release: () => { fs.writeFile = original; fs.open = open; release(); } };
-        fs.writeFile = async (...args: Parameters<typeof fs.writeFile>) => {
-          if (String(args[0]) === file || String(args[0]) === physical || (typeof args[0] === "object" && owned.has(args[0]))) {
-            const first = ++state.selectedSave.hits === 1;
-            if (first) {
-              await gate;
-              if (file.endsWith(".md")) throw Object.assign(new Error("Fixture save denied"), { code: "EACCES" });
+        // A proxy preserves Node's overloads while forwarding untouched writes.
+        fs.writeFile = new Proxy(original, {
+          async apply(write, receiver: unknown, args: unknown[]) {
+            const destination = args[0];
+            if (String(destination) === file || String(destination) === physical || (destination !== null && typeof destination === "object" && owned.has(destination))) {
+              const first = ++state.selectedSave.hits === 1;
+              if (first) {
+                await gate;
+                if (file.endsWith(".md")) throw Object.assign(new Error("Fixture save denied"), { code: "EACCES" });
+              }
             }
-          }
-          return original(...args);
-        };
+            return Reflect.apply(write, receiver, args);
+          },
+        });
       }, path.join(source, file));
       await page.locator(".monaco-editor .view-lines").click();
       await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A");
@@ -115,7 +119,7 @@ for (const target of ["text preview", "Markdown editor", "pending text", "pendin
       expect(await application.evaluate(() => (globalThis as typeof globalThis & { selectedSave: { hits: number } }).selectedSave.hits)).toBe(1);
     }
     renameSync(metadata, offline);
-    const row = execFileSync("ps", ["-axo", "pid=,ppid=,command="], { encoding: "utf8" }).split("\n").map(line => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line)).find(row => row && Number(row[2]) === application!.process().pid && row[3].includes("/agent/crab-desktop-agent "));
+    const row = execFileSync("ps", ["-axo", "pid=,ppid=,command="], { encoding: "utf8" }).split("\n").map(line => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line)).find(row => row && Number(row[2]) === application!.process().pid && isNativeAgentCommand(row[3]));
     if (!row) throw new Error("Owned native agent not found");
     process.kill(Number(row[1]), "SIGKILL");
     await expect(page.getByRole("button", { name: "Retry reopening repository", exact: true })).toBeVisible();

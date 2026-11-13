@@ -1,21 +1,70 @@
 """Protect native qualification's backend isolation and executable pinning."""
 
 import importlib.util
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 SCRIPT = Path(__file__).resolve().parents[1] / "qualify_sdk_native_rustfs.py"
 SPEC = importlib.util.spec_from_file_location("qualify_sdk_native_rustfs", SCRIPT)
 RUNNER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(RUNNER)
+DESKTOP_SPEC = importlib.util.spec_from_file_location(
+    "qualify_desktop_v2", SCRIPT.parents[2] / "packages/desktop/scripts/qualify-v2.py",
+)
+DESKTOP = importlib.util.module_from_spec(DESKTOP_SPEC)
+DESKTOP_SPEC.loader.exec_module(DESKTOP)
 
 
 class NativeRustfsTests(unittest.TestCase):
+    def test_desktop_storage_smoke_uses_the_platform_bundle_and_owned_fixture(self):
+        for platform, system, bundle, cli in (
+            ("linux", "posix", "linux-unpacked/crab", "linux-unpacked/resources/agent/crab"),
+            ("darwin", "posix", "mac-arm64/Crab.app/Contents/MacOS/Crab", "mac-arm64/Crab.app/Contents/Resources/agent/crab"),
+            ("win32", "nt", "win-unpacked/Crab.exe", "win-unpacked/resources/agent/crab.exe"),
+        ):
+            with self.subTest(platform=platform), tempfile.TemporaryDirectory() as directory:
+                target = Path(directory).resolve()
+                executable = DESKTOP.DESKTOP / "release" / bundle
+                crab = DESKTOP.DESKTOP / "release" / cli
+                environment = {"AWS_ACCESS_KEY_ID": "fixture-access", "AWS_SECRET_ACCESS_KEY": "fixture-secret"}
+                fixture = SimpleNamespace(
+                    install_rustfs=Mock(return_value=(target / "rustfs", "asset", "digest")),
+                    rustfs_work_location=Mock(return_value=(target, "storage-", "data")),
+                    fixture_environment=Mock(return_value=environment),
+                )
+                descriptor = target / "fixture.json"
+
+                @contextmanager
+                def prepare(*arguments):
+                    self.assertEqual(arguments, (target, crab, target / "rustfs"))
+                    yield descriptor
+
+                identity = SimpleNamespace(prepare=prepare)
+                server = Mock()
+                result = SimpleNamespace(returncode=0)
+                loader = SimpleNamespace(loader=SimpleNamespace(exec_module=lambda _module: None))
+                with patch.object(DESKTOP, "os", SimpleNamespace(name=system, environ={"CARGO_TARGET_DIR": str(target)})), \
+                        patch.object(DESKTOP, "sys", SimpleNamespace(platform=platform), create=True), \
+                        patch.object(DESKTOP.importlib.util, "spec_from_file_location", return_value=loader), \
+                        patch.object(DESKTOP.importlib.util, "module_from_spec", side_effect=[fixture, identity]), \
+                        patch.object(DESKTOP.shutil, "which", side_effect=lambda name: name), \
+                        patch.object(DESKTOP.subprocess, "Popen", return_value=server), \
+                        patch.object(DESKTOP.subprocess, "run", return_value=result) as run:
+                    DESKTOP.main()
+                self.assertEqual(fixture.fixture_environment.call_args.args[5], crab)
+                smoke = run.call_args
+                self.assertEqual(smoke.args[0], ["node", "scripts/smoke.mjs"])
+                self.assertEqual(smoke.kwargs["env"]["CRAB_PACKAGED_APP"], str(executable))
+                self.assertEqual(smoke.kwargs["env"]["CRAB_DESKTOP_STORAGE_IDENTITY_FIXTURE"], str(descriptor))
+                server.terminate.assert_called_once_with()
+                server.wait.assert_called_once_with(timeout=15)
+
     def test_windows_fixture_leaves_room_for_deep_object_paths(self):
         with tempfile.TemporaryDirectory() as directory:
             runner_temp = Path(directory) / "runner-temp"

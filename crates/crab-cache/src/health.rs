@@ -17,6 +17,7 @@ const FAMILIES: &[&str] = &[
     "xorb",
     "shard",
     "git-pack",
+    "lfs",
     "manifest",
     "stage",
     "chunk-index",
@@ -134,8 +135,9 @@ pub struct CacheHealthReport {
     #[serde(serialize_with = "serialize_path")]
     pub root: PathBuf,
     pub root_state: CacheRootState,
-    /// Configured disk-retention cap; `None` means unlimited, not unknown.
+    /// Effective caller/root cap; meaningful only when `budget_available` is true.
     pub budget_bytes: Option<u64>,
+    pub budget_available: bool,
     pub observed: CacheUsage,
     pub scan_complete: bool,
     pub over_budget: Option<bool>,
@@ -151,6 +153,7 @@ impl CacheHealthReport {
             root,
             root_state: CacheRootState::Missing,
             budget_bytes,
+            budget_available: true,
             observed: CacheUsage::default(),
             scan_complete: true,
             over_budget: Some(false),
@@ -206,10 +209,14 @@ impl CacheHealthReport {
         // Raw chunks and range-key directories share three path components.
         // An unreadable entry there can hide either representation.
         // Mark every affected family incomplete without hiding unrelated rows.
-        let shared_chunks = relative == Path::new("chunks")
-            || (relative.starts_with("chunks") && relative.components().count() <= 3);
+        let payload = crate::clean::payload_path(relative).unwrap_or(relative);
+        let namespace_container = relative == Path::new("namespaces")
+            || relative.starts_with("namespaces") && payload.as_os_str().is_empty();
+        let shared_chunks = payload == Path::new("chunks")
+            || (payload.starts_with("chunks") && payload.components().count() <= 3);
         for (name, stats) in &mut self.families {
-            if family.is_none()
+            if namespace_container
+                || family.is_none()
                 || family == Some(*name)
                 || (shared_chunks && matches!(*name, "chunk" | "decoded-range"))
                 || (scan_failure && matches!(*name, "directory" | "temporary"))
@@ -268,7 +275,8 @@ fn inspect(
             report.root_state = CacheRootState::Unavailable;
             report.catalog = CacheCatalogHealth::Unavailable;
             report.issue(Path::new(""), None, error, true)?;
-            report.over_budget = budget_bytes.is_none().then_some(false);
+            report.budget_available = false;
+            report.over_budget = None;
             return Ok(report);
         }
     };
@@ -310,6 +318,16 @@ fn inspect(
             CacheCatalogHealth::Unavailable
         }
     };
+    match &report.catalog {
+        CacheCatalogHealth::Readable { stats } => {
+            report.budget_bytes = match (budget_bytes, stats.retention_budget_bytes) {
+                (Some(caller), Some(root)) => Some(caller.min(root)),
+                (caller, root) => caller.or(root),
+            };
+        }
+        CacheCatalogHealth::Missing => {}
+        CacheCatalogHealth::Unavailable => report.budget_available = false,
+    }
     check_cancelled(cancel)?;
     #[cfg(feature = "local-cache")]
     if let Err(error) = crate::shard_hints::inspect_database_at(&pinned, root, cancel) {
@@ -321,9 +339,14 @@ fn inspect(
         )?;
     }
     check_cancelled(cancel)?;
-    report.over_budget = if budget_bytes.is_some_and(|max| report.observed.allocated_bytes > max) {
+    report.over_budget = if !report.budget_available {
+        None
+    } else if report
+        .budget_bytes
+        .is_some_and(|max| report.observed.allocated_bytes > max)
+    {
         Some(true)
-    } else if budget_bytes.is_none() || report.scan_complete {
+    } else if report.budget_bytes.is_none() || report.scan_complete {
         Some(false)
     } else {
         None

@@ -38,16 +38,16 @@ export function useCommandPaletteShortcuts({
   isChangesViewFocusedRef.current = isChangesViewFocused;
 
   useEffect(() => {
+    function openPalette(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === "p") {
+        e.preventDefault();
+        onOpenPaletteRef.current();
+      }
+    }
+
     function handleKeyDown(e: KeyboardEvent) {
       const meta = e.metaKey || e.ctrlKey;
       if (!meta) return;
-
-      // Cmd+Shift+P / Ctrl+Shift+P → open palette
-      if (e.shiftKey && !e.altKey && e.key.toLowerCase() === "p") {
-        e.preventDefault();
-        onOpenPaletteRef.current();
-        return;
-      }
 
       // Cmd+Shift+K / Ctrl+Shift+K → Git: Push
       if (e.shiftKey && !e.altKey && e.key.toLowerCase() === "k") {
@@ -80,7 +80,13 @@ export function useCommandPaletteShortcuts({
       }
     }
 
+    // Controls scope bubbling keys for their own navigation. Opening the global
+    // palette must work from those controls; Git mutations keep that boundary.
+    window.addEventListener("keydown", openPalette, true);
     window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", openPalette, true);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
   }, []);
 }

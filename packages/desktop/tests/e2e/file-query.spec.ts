@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { call, packagedExecutable } from "./packaged-app";
+import { isNativeAgentCommand, call, packagedExecutable } from "./packaged-app";
 
 test("SQL uses selected SQLite, WAL, LFS and Crab sources and joins cancellation", async () => {
   test.setTimeout(90_000);
@@ -108,7 +108,7 @@ test("SQL uses selected SQLite, WAL, LFS and Crab sources and joins cancellation
     const handle = await call(page, "open_local", { repo_id: "file-query", path: source });
     await page.evaluate(({ handle, source }) => window.dispatchEvent(new CustomEvent("crab:repo-opened", { detail: { handle, path: source } })), { handle, source });
     await page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Files", exact: true }).click();
-    const revision = page.getByRole("combobox").filter({ has: page.getByRole("option", { name: "HEAD (default)", exact: true }) });
+    const revision = page.getByRole("combobox").filter({ hasText: /HEAD \(default\)|query-before/ });
     await chooseSelect(revision, { label: "query-before" });
     const open = (file: string) => page.locator(`[role="treeitem"][data-item-path="${file}"]`).click();
     const editor = page.getByRole("textbox", { name: "SQL query", exact: true });
@@ -121,7 +121,7 @@ test("SQL uses selected SQLite, WAL, LFS and Crab sources and joins cancellation
         .find(row => row && Number(row[2]) === parent && matches(row[3]));
       return native ? Number(native[1]) : undefined;
     };
-    const nativePid = () => childPid(application!.process().pid!, command => /\/agent\/crab-desktop-agent(?:\s|$)/.test(command));
+    const nativePid = () => childPid(application!.process().pid!, isNativeAgentCommand);
     await open("data.sqlite");
     await expect(cell("before")).toBeVisible();
     await sql.click();

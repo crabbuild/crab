@@ -109,11 +109,10 @@ impl BrowseSession {
         scope.check()?;
         let cache = token_cache_directory()?;
         let managed = crab_sdk::managed::Options::new(&cache)?;
-        let content_root = crate::cache::content_root();
-        crab_cache::ensure_private_cache_directory(&content_root)?;
+        let content_root = crab_cache::default_cache_root();
         // Remote reconstruction uses the same product root inspected and cleaned
         // by Settings; each storage identity retains a separate SDK namespace.
-        let content = ContentCache::new(&content_root, 512 * 1024 * 1024)?;
+        let content = ContentCache::new(&content_root, None)?;
         let mut builder = Client::builder().managed(managed).content_cache(content);
         let locator = if let Some(connection) = crate::storage_auth::current() {
             builder = builder.direct_store(connection.options()?);

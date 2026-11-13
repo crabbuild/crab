@@ -35,7 +35,7 @@ pub use cache_client::{CacheClient, CacheObjectStream, build_cache_service_http_
 #[cfg(any(feature = "local-cache", feature = "xet-chunk-cache"))]
 pub use catalog::{CacheCatalog, CacheCatalogStats, CacheMaintenanceStats};
 #[cfg(any(feature = "local-cache", feature = "xet-chunk-cache"))]
-pub use clean::{CacheCleanReport, clean_cache, clean_cache_namespaces};
+pub use clean::{CacheCleanReport, clean_cache};
 pub use error::{CacheError, Result};
 pub use key::CacheKey;
 #[cfg(feature = "local-cache")]

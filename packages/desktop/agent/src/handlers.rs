@@ -295,6 +295,11 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
             )
             .await
         },
+        "cache_set_budget" => {
+            let params: CacheBudgetParams = decode(&method, params)?;
+            let operation = crate::cache::Operation::Budget { max_bytes: params.max_bytes };
+            cache_operation(state, CacheParams { repo_id: params.repo_id, dry_run: false }, operation).await
+        },
         "cache_clean" => {
             let params: CacheParams = decode(&method, params)?;
             let operation = crate::cache::Operation::Clean {
@@ -3659,6 +3664,12 @@ async fn about() -> Result<Value> {
         "os": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
     }))
+}
+
+#[derive(Deserialize)]
+struct CacheBudgetParams {
+    repo_id: Option<String>,
+    max_bytes: Option<u64>,
 }
 
 #[derive(Deserialize)]

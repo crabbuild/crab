@@ -17,6 +17,7 @@ Manage the local chunk cache.
 crab cache stats [--json]
 crab cache verify
 crab cache clean [--dry-run] [--json]
+crab cache budget (--max-bytes <BYTES> | --unlimited) [--json]
 ```
 
 ## Description
@@ -27,10 +28,10 @@ downloads from cloud storage.
 
 For conceptual background, see [Local Cache](/docs/cli/storage/local-cache).
 
-Clean, verify, and [`crab prune`](/docs/cli/reference/crab-prune) reject a cache
+Budget changes, clean, verify, and [`crab prune`](/docs/cli/reference/crab-prune) reject a cache
 root that resolves to the filesystem root, home directory, current directory,
 or an ancestor of the current directory. The corresponding `crab optimize cache`
-commands use the same safeguard. Missing cache roots are left missing; private
+commands use the same safeguard. Inspection and cleanup leave missing roots missing; saving a budget creates its private catalog. Private
 payload I/O independently rejects symlinked or non-private roots.
 
 ## Subcommands
@@ -64,7 +65,9 @@ in `data` with a nonzero exit; failures before inspection use the normal `error`
 envelope. `crab optimize cache stats` uses the same report and option.
 
 Retention is unlimited by default. Text reports show `budget: unlimited`;
-JSON uses `budget_bytes: null` for no configured cap, not unknown usage.
+JSON uses `budget_bytes: null` for no effective cap when `budget_available` is
+true. An unavailable catalog sets `budget_available: false` and reports unknown
+budget status, even when the caller has no configured ceiling.
 Numeric caps remain byte counts. Unlimited reports are not over budget, but
 unsafe paths and incomplete inspections still produce diagnostics and failure.
 
@@ -81,6 +84,34 @@ crab cache stats
 crab cache stats --json
 crab optimize cache stats --json
 ```
+
+### budget
+
+Save a retention limit shared by CLI payloads and desktop storage snapshots in
+this physical cache root. Existing readers and new fills observe the same policy.
+
+```bash
+crab cache budget --max-bytes 8589934592
+crab cache budget --max-bytes 0 --json
+crab cache budget --unlimited
+```
+
+Zero stops new cache retention. Unlimited removes the root cap; configured
+`cache.max_bytes` and tagged repository ceilings remain additional limits.
+Policy changes do not reduce the amount a read can fetch or validate.
+
+After saving, maintenance reclaims eligible oldest payloads. Active reads,
+reservations, unknown data, catalogs and retained workspaces remain protected,
+so actual disk usage can stay above the limit. A busy policy writer leaves the
+previous limit unchanged. A failure after saving does not roll back the policy;
+inspect current state with `crab cache stats`. Deleting the cache catalog resets
+its saved root policy. Offline retention and power-loss behavior require separate
+qualification.
+
+`--json` emits `cache.budget` version `1.0`: `usage` is the current stats report,
+`reclaimed_bytes` counts removed payload bytes, and `maintenance_pending` reports
+another maintenance owner. Partial inspection remains visible with a nonzero
+exit. `crab optimize cache budget` has identical behavior.
 
 ### clean
 
@@ -117,8 +148,9 @@ chunks, and range lengths, offset headers, CRCs, and applicable chunk identities
 Verification streams recognized private entries and holds locks through each
 check and removal. Unknown files and busy entries are retained and excluded
 from checked totals. Operational I/O failures fail the command, rather than
-authorizing deletion. SQLite/root ownership and full reservation protection
-remain hardening work.
+authorizing deletion. Root-level verification includes recognized SDK namespace objects and decoded
+ranges. Logical leases and reservations use the shared root catalog; configured
+external range directories retain their separate explicit owner.
 
 ## Remote Cache Service
 

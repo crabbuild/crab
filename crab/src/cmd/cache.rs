@@ -34,15 +34,62 @@ pub async fn run_cache_stats(mode: OutputMode, cancel: &CancellationToken) -> Re
     Ok(report.is_available())
 }
 
+/// Result of saving policy and completing or coalescing cache maintenance.
+#[derive(serde::Serialize)]
+pub struct CacheBudgetResult {
+    pub usage: CacheHealthReport,
+    pub reclaimed_bytes: u64,
+    pub maintenance_pending: bool,
+}
+
+/// Save a host-wide retention cap, maintain eligible payloads and inspect actual usage.
+pub async fn run_cache_budget(
+    max_bytes: Option<u64>,
+    mode: OutputMode,
+    cancel: &CancellationToken,
+) -> Result<CacheBudgetResult> {
+    check_cancelled(cancel)?;
+    let config = Config::resolve_local()?;
+    let root = crate::cache::default_cache_root();
+    validate_destructive_cache_root(&root)?;
+    let catalog = crab_cache::CacheCatalog::new(root.clone(), None);
+    catalog.set_retention_budget(max_bytes).await?;
+    // The policy is durable before maintenance. A later failure does not roll
+    // it back; Settings refreshes the actual saved limit even on this error.
+    let maintenance = catalog.maintain().await?;
+    let usage = inspect_cache(&root, config.cache.max_bytes, cancel).await?;
+    let result = CacheBudgetResult {
+        usage,
+        reclaimed_bytes: maintenance.evicted_bytes,
+        maintenance_pending: maintenance.coalesced,
+    };
+    if mode.is_machine() {
+        emit_json("cache.budget", "1.0", &result)?;
+    } else {
+        print_cache_stats(&result.usage);
+        println!(
+            "Budget saved; reclaimed {} reusable payload bytes{}.",
+            result.reclaimed_bytes,
+            if result.maintenance_pending {
+                "; maintenance already running"
+            } else {
+                ""
+            }
+        );
+    }
+    Ok(result)
+}
+
 fn print_cache_stats(report: &CacheHealthReport) {
     println!(
         "Local cache: {} ({:?})",
         report.root.display(),
         report.root_state
     );
-    match report.budget_bytes {
-        Some(bytes) => println!("  budget: {bytes} bytes"),
-        None => println!("  budget: unlimited"),
+    match (report.budget_available, report.budget_bytes) {
+        (false, _) => println!("  budget: unknown (catalog unavailable)"),
+        (true, Some(bytes)) => println!("  budget: {bytes} bytes"),
+        (true, None) => println!("  budget: unlimited"),
     }
     println!(
         "  observed: {} logical bytes, {} allocated bytes ({})",
@@ -131,9 +178,15 @@ pub async fn run_cache_clean(
     let clean_range_separately = !existing_paths_match(&root.join("chunks"), &range_root)?;
     let mut report = clean_root(&root, dry_run, cancel).await?;
     if clean_range_separately {
-        let range =
-            crate::cache::prune_xet_chunk_cache_with_cancel(&range_root, 0, dry_run, false, cancel)
-                .await?;
+        let range = crate::cache::prune_xet_chunk_cache_with_cancel(
+            &range_root,
+            &crate::cache::xet_chunk_cache::catalog_from_config(&config),
+            0,
+            dry_run,
+            false,
+            cancel,
+        )
+        .await?;
         report.files_removed = report.files_removed.saturating_add(range.entries_evicted);
         report.bytes_reclaimed = report.bytes_reclaimed.saturating_add(range.bytes_freed);
     }
@@ -228,11 +281,19 @@ pub async fn run_cache_verify_with_cancel(
         result = &mut local_verify => result?,
     };
     check_cancelled(cancel)?;
-    let xet = crate::cache::verify_xet_chunk_cache_with_cancel(
-        &config.effective_chunk_cache_dir(),
-        cancel,
-    )
-    .await?;
+    let range_root = config.effective_chunk_cache_dir();
+    let xet = if existing_paths_match(&cache.root().join("chunks"), &range_root)? {
+        // The root verifier includes flat and namespaced decoded ranges.
+        // Only a tagged external range directory needs a separate scope.
+        crate::cache::XetChunkCacheVerifyStats::default()
+    } else {
+        crate::cache::verify_xet_chunk_cache_with_cancel(
+            &range_root,
+            &crate::cache::xet_chunk_cache::catalog_from_config(&config),
+            cancel,
+        )
+        .await?
+    };
     check_cancelled(cancel)?;
     let summary = CacheVerifySummary {
         objects_checked: report.total.saturating_add(xet.total),

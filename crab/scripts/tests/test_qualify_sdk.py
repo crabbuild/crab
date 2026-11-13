@@ -1,14 +1,22 @@
 """Tests for the SDK qualification report contract."""
 
+import hashlib
+import http.client
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
+import runpy
 import subprocess
 import tempfile
+import threading
 import unittest
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = ROOT / "crab/scripts/qualify_sdk.py"
 DIGEST = "38f0f2ca3cd8afbb9d29853c2f8cfd77ceac0caa37b23f1b43d5153041266b15"
+QUALIFICATION = runpy.run_path(str(SCRIPT))
 
 
 class QualificationRunnerTests(unittest.TestCase):
@@ -175,6 +183,70 @@ class QualificationRunnerTests(unittest.TestCase):
 
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("duplicate", result.stderr)
+
+
+class ReadDiagnosticTests(unittest.TestCase):
+    def test_origin_retains_pending_and_completed_range_without_credentials(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+
+        class Upstream(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def do_GET(self):
+                started.set()
+                if not release.wait(5):
+                    return
+                self.send_response(206)
+                self.send_header("Content-Length", "3")
+                self.end_headers()
+                self.wfile.write(b"abc")
+
+        upstream = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
+        proxy = QUALIFICATION["ReadOrigin"](urlsplit(f"http://127.0.0.1:{upstream.server_port}"))
+        workers = [threading.Thread(target=server.serve_forever) for server in (upstream, proxy)]
+        for worker in workers:
+            worker.start()
+        connection = http.client.HTTPConnection("127.0.0.1", proxy.server_port, timeout=5)
+        try:
+            connection.request("GET", "/object?credential=private", headers={
+                "Range": "bytes=1-3", "Authorization": "private",
+            })
+            self.assertTrue(started.wait(5))
+            counts, size, failures, reads = proxy.snapshot()
+            self.assertEqual((counts["GET"], size, failures, reads[0]["complete"]), (1, 0, 0, False))
+            release.set()
+            body = connection.getresponse().read()
+        finally:
+            release.set()
+            connection.close()
+            for server in (proxy, upstream):
+                server.shutdown()
+                server.server_close()
+            for worker in workers:
+                worker.join()
+        counts, size, failures, reads = proxy.snapshot()
+        self.assertEqual((body, counts["GET"], size, failures, reads), (b"abc", 1, 3, 0, [{
+            "method": "GET", "path_sha256": hashlib.sha256(b"/object").hexdigest(),
+            "range": "bytes=1-3", "complete": True,
+            "status": 206, "response_bytes": 3, "failed": False,
+        }]))
+
+    @unittest.skipUnless(os.name == "posix", "symlinks need Windows developer privileges")
+    def test_cache_inventory_does_not_follow_payload_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache = root / "cache"
+            cache.mkdir()
+            outside = root / "outside"
+            outside.write_bytes(b"external payload")
+            (cache / "link").symlink_to(outside)
+            (cache / "owned").write_bytes(b"owned")
+            inventory = QUALIFICATION["cache_inventory"](cache)
+            self.assertEqual((inventory["bytes"], [(entry["path"], entry["bytes"])
+                                                   for entry in inventory["files"]]),
+                             (5, [("owned", 5)]))
 
 
 if __name__ == "__main__":

@@ -61,7 +61,7 @@ export function DashboardView({ repo, onSelectCommit, onSelectBranch }: Props) {
   const [branchHealth, setBranchHealth] = useState<BranchHealthResult | null>(null);
   const [releaseTimeline, setReleaseTimeline] = useState<ReleaseTimelineResult | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const hydration = useHydrationStatus(repo.repo_id, (!!repo.path || repo.is_remote) && !repo.deferred);
+  const hydration = useHydrationStatus(repo);
   const isMobile = useIsMobile();
 
   // Stale-while-revalidate for expensive metrics — shows cached data

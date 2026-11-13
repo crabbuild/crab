@@ -3,6 +3,211 @@ use super::*;
 
 const NAME: &str = "models/deep/data[1].bin";
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restoration_progress_can_publish_on_the_async_runtime() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    for attributes in ["", "*.bin ident text eol=crlf\n"] {
+        let body = b"INDEX\n$Id$\n".repeat(100_000);
+        let (directory, repo) = ordinary(NAME, &body, attributes).await;
+        let root = directory.path();
+        let expected = git(root, &["cat-file", "--filters", &format!(":{NAME}")]);
+        let expected_len = expected.len() as u64;
+        std::fs::write(root.join(NAME), b"dirty").unwrap();
+        let source = Arc::new(
+            Restoration::capture(&repo, NAME, repo.read_scope())
+                .await
+                .unwrap(),
+        );
+        let reported = Arc::new(AtomicU64::new(0));
+        let observed = reported.clone();
+        let runtime = tokio::runtime::Handle::current();
+        source
+            .clone()
+            .run(move |written| {
+                // The transfer reporter synchronously publishes an async frame.
+                runtime.block_on(async {
+                    tokio::task::yield_now().await;
+                    observed.store(written, Ordering::Release);
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        source.release_reader().await.unwrap();
+        assert_eq!(
+            (
+                std::fs::read(root.join(NAME)).unwrap(),
+                reported.load(Ordering::Acquire)
+            ),
+            (expected, expected_len)
+        );
+        repo.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn converted_restoration_refreshes_status_and_preserves_staging() {
+    let (directory, repo) = ordinary(NAME, b"$Id$\noriginal\n", "").await;
+    let root = directory.path();
+    std::fs::write(root.join(".gitattributes"), "*.bin ident text eol=crlf\n").unwrap();
+    let expected = git(root, &["cat-file", "--filters", &format!(":{NAME}")]);
+    let staged = git(root, &["ls-files", "--stage", "-z"]);
+    std::fs::write(root.join(NAME), b"dirty").unwrap();
+    let source = Arc::new(
+        Restoration::capture(&repo, NAME, repo.read_scope())
+            .await
+            .unwrap(),
+    );
+    source.run(|_| Ok(())).await.unwrap();
+    assert_eq!(
+        (
+            std::fs::read(root.join(NAME)).unwrap(),
+            git(
+                root,
+                &["--no-optional-locks", "status", "--porcelain", "--", NAME]
+            ),
+            git(root, &["ls-files", "--stage", "-z"]),
+        ),
+        (expected, Vec::new(), staged)
+    );
+    repo.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restoration_matches_git_for_attributes_and_checkout_configuration() {
+    let name = "models/deep/content[1].txt";
+    for (attributes, autocrlf) in [
+        ("", "false"),
+        ("", "off"),
+        ("", "input"),
+        ("", "InPuT"),
+        ("", "true"),
+        ("*.txt diff\n", "false"),
+        ("*.txt -text\n", "true"),
+        ("*.txt text\n", "false"),
+        ("*.txt text=unset\n", "true"),
+        ("*.txt ident\n", "false"),
+        ("*.txt -ident\n", "false"),
+        ("*.txt ident=set\n", "false"),
+        ("*.txt ident=unset\n", "false"),
+        ("*.txt text eol=crlf\n", "false"),
+        ("*.txt text eol=lf\n", "true"),
+        ("*.txt crlf=input\n", "true"),
+        ("*.txt crlf\n", "false"),
+        ("*.txt crlf=auto\n", "false"),
+        ("*.txt text=auto eol=crlf\n", "false"),
+        ("*.txt text=auto\n", "false"),
+        ("*.txt -text eol=crlf\n", "true"),
+        ("*.txt -filter text eol=crlf\n", "false"),
+        ("*.txt filter text eol=crlf\n", "false"),
+        ("*.txt working-tree-encoding=UTF-16LE\n", "false"),
+    ] {
+        let (directory, repo) = ordinary(name, b"INDEX\n$Id$\n", "").await;
+        let root = directory.path();
+        std::fs::write(root.join(".gitattributes"), attributes).unwrap();
+        git(root, &["add", "--", ".gitattributes"]);
+        git(root, &["config", "core.autocrlf", autocrlf]);
+        git(root, &["config", "core.eol", "crlf"]);
+        let expected = git(root, &["cat-file", "--filters", &format!(":{name}")]);
+        let index = git(root, &["ls-files", "--stage", "-z"]);
+        std::fs::write(root.join(name), b"dirty").unwrap();
+        let source = Arc::new(
+            Restoration::capture(&repo, name, repo.read_scope())
+                .await
+                .unwrap(),
+        );
+        source.clone().run(|_| Ok(())).await.unwrap();
+        source.release_reader().await.unwrap();
+        assert_eq!(
+            (
+                std::fs::read(root.join(name)).unwrap(),
+                git(root, &["ls-files", "--stage", "-z"]),
+                scratch(root)
+            ),
+            (expected, index, Vec::new()),
+            "attributes={attributes:?}, autocrlf={autocrlf}"
+        );
+        repo.close().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restoration_progress_failure_retains_the_working_file() {
+    for attributes in ["", "*.bin ident text eol=crlf\n"] {
+        let (directory, repo) = ordinary(NAME, &b"$Id$\n".repeat(100_000), attributes).await;
+        let root = directory.path();
+        let index = std::fs::read(root.join(".git/index")).unwrap();
+        std::fs::write(root.join(NAME), b"retain dirty work").unwrap();
+        let source = Arc::new(
+            Restoration::capture(&repo, NAME, repo.read_scope())
+                .await
+                .unwrap(),
+        );
+        let error = source
+            .clone()
+            .run(|_| {
+                Err(AgentError::OpCancelled {
+                    op_id: "progress-closed".into(),
+                })
+            })
+            .await
+            .unwrap_err();
+        source.release_reader().await.unwrap();
+        assert_eq!(
+            (
+                error.is_cancelled(),
+                std::fs::read(root.join(NAME)).unwrap(),
+                std::fs::read(root.join(".git/index")).unwrap(),
+                scratch(root)
+            ),
+            (true, b"retain dirty work".to_vec(), index, Vec::new())
+        );
+        repo.close().await.unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restoration_keeps_filters_with_names_that_match_attribute_states() {
+    let name = "models/deep/content[1].txt";
+    for driver in ["set", "unset", "unspecified"] {
+        let (directory, repo) = ordinary(name, b"INDEX\n", "").await;
+        let root = directory.path();
+        std::fs::write(
+            root.join(".gitattributes"),
+            format!("*.txt filter={driver}\n"),
+        )
+        .unwrap();
+        git(root, &["add", "--", ".gitattributes"]);
+        git(
+            root,
+            &[
+                "config",
+                &format!("filter.{driver}.smudge"),
+                "sed 's/INDEX/WORK/g'",
+            ],
+        );
+        git(
+            root,
+            &["config", &format!("filter.{driver}.required"), "true"],
+        );
+        std::fs::write(root.join(name), b"dirty").unwrap();
+        let source = Arc::new(
+            Restoration::capture(&repo, name, repo.read_scope())
+                .await
+                .unwrap(),
+        );
+        source.clone().run(|_| Ok(())).await.unwrap();
+        source.release_reader().await.unwrap();
+        assert_eq!(
+            std::fs::read(root.join(name)).unwrap(),
+            b"WORK\n",
+            "{driver}"
+        );
+        repo.close().await.unwrap();
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restoration_keeps_custom_smudge_filters_in_the_selected_storage_scope() {
@@ -227,93 +432,127 @@ async fn restoration_preserves_split_indexes_and_recreates_missing_parent_trees(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restoration_rejects_concurrent_writers_cancellation_and_index_replacement() {
-    for outcome in ["edit", "cancel", "index", "new-file"] {
-        let content = vec![0; 1024 * 1024];
-        let (directory, repo) = ordinary(NAME, &content, "*.bin -text\n").await;
-        let root = directory.path();
-        let dirty = b"original working changes";
-        std::fs::write(root.join(NAME), dirty).unwrap();
-        if outcome == "new-file" {
-            std::fs::remove_dir_all(root.join("models")).unwrap();
-        }
-        let scope = repo.read_scope();
-        let source = Arc::new(
-            Restoration::capture(&repo, NAME, scope.clone())
-                .await
-                .unwrap(),
-        );
-        let target = root.join(NAME);
-        let edited = target.clone();
-        let work_dir = root.to_owned();
-        let other = String::from_utf8(git(root, &["rev-parse", ":other.txt"])).unwrap();
-        let sibling = git(root, &["ls-files", "--stage", "-z", "--", "other.txt"]);
-        let mut changed = false;
-        let result = source
-            .clone()
-            .run(move |written| {
-                if written == content.len() as u64 && !changed {
-                    changed = true;
-                    match outcome {
-                        "cancel" => scope.cancel(),
-                        "index" => {
-                            git(
-                                &work_dir,
-                                &["update-index", "--cacheinfo", "100644", other.trim(), NAME],
-                            );
-                        }
-                        _ => {
-                            std::fs::create_dir_all(edited.parent().unwrap())?;
-                            std::fs::write(&edited, b"concurrent user content")?;
+    for attributes in ["", "*.bin -text\n"] {
+        for outcome in ["edit", "cancel", "index", "new-file"] {
+            let content = vec![0; 1024 * 1024];
+            let (directory, repo) = ordinary(NAME, &content, attributes).await;
+            let root = directory.path();
+            let dirty = b"original working changes";
+            std::fs::write(root.join(NAME), dirty).unwrap();
+            if outcome == "new-file" {
+                std::fs::remove_dir_all(root.join("models")).unwrap();
+            }
+            let scope = repo.read_scope();
+            let source = Arc::new(
+                Restoration::capture(&repo, NAME, scope.clone())
+                    .await
+                    .unwrap(),
+            );
+            let target = root.join(NAME);
+            let edited = target.clone();
+            let work_dir = root.to_owned();
+            let other = String::from_utf8(git(root, &["rev-parse", ":other.txt"])).unwrap();
+            let sibling = git(root, &["ls-files", "--stage", "-z", "--", "other.txt"]);
+            let mut changed = false;
+            let result = source
+                .clone()
+                .run(move |written| {
+                    if written == content.len() as u64 && !changed {
+                        changed = true;
+                        match outcome {
+                            "cancel" => scope.cancel(),
+                            "index" => {
+                                git(
+                                    &work_dir,
+                                    &["update-index", "--cacheinfo", "100644", other.trim(), NAME],
+                                );
+                            }
+                            _ => {
+                                std::fs::create_dir_all(edited.parent().unwrap())?;
+                                std::fs::write(&edited, b"concurrent user content")?;
+                            }
                         }
                     }
-                }
-                Ok(())
-            })
-            .await;
-        source.release_reader().await.unwrap();
-        assert!(result.is_err(), "{outcome}");
-        let expected = if matches!(outcome, "edit" | "new-file") {
-            b"concurrent user content".as_slice()
-        } else {
-            dirty.as_slice()
-        };
-        assert_eq!(
-            (
-                std::fs::read(target).unwrap(),
-                git(root, &["ls-files", "--stage", "-z", "--", "other.txt"]),
-                scratch(root)
-            ),
-            (expected.to_vec(), sibling, Vec::new())
-        );
-        repo.close().await.unwrap();
+                    Ok(())
+                })
+                .await;
+            source.release_reader().await.unwrap();
+            assert!(result.is_err(), "{outcome}");
+            let expected = if matches!(outcome, "edit" | "new-file") {
+                b"concurrent user content".as_slice()
+            } else {
+                dirty.as_slice()
+            };
+            assert_eq!(
+                (
+                    std::fs::read(target).unwrap(),
+                    git(root, &["ls-files", "--stage", "-z", "--", "other.txt"]),
+                    scratch(root)
+                ),
+                (expected.to_vec(), sibling, Vec::new())
+            );
+            repo.close().await.unwrap();
+        }
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restoration_does_not_publish_when_the_index_object_is_unavailable_or_corrupt() {
-    for corrupt in [false, true] {
-        let (directory, repo) = ordinary(NAME, &vec![0; 1024 * 1024], "*.bin -text\n").await;
-        let root = directory.path();
-        std::fs::write(root.join(NAME), b"retain working edits").unwrap();
-        let source = Arc::new(
-            Restoration::capture(&repo, NAME, repo.read_scope())
-                .await
-                .unwrap(),
-        );
-        let oid = String::from_utf8(git(root, &["rev-parse", &format!(":{NAME}")])).unwrap();
-        let oid = oid.trim();
-        let object = root.join(".git/objects").join(&oid[..2]).join(&oid[2..]);
-        std::fs::remove_file(&object).unwrap();
-        if corrupt {
-            std::fs::write(&object, b"corrupt Git object").unwrap();
+    for attributes in [
+        "",
+        "*.bin -text\n",
+        "*.bin text eol=crlf\n",
+        "*.bin ident text=auto eol=crlf\n",
+    ] {
+        for fault in ["missing", "framing", "checksum"] {
+            let content = b"row\n".repeat(256 * 1024);
+            let (directory, repo) = ordinary(NAME, &content, attributes).await;
+            let root = directory.path();
+            let index = std::fs::read(root.join(".git/index")).unwrap();
+            std::fs::write(root.join(NAME), b"retain working edits").unwrap();
+            let source = Arc::new(
+                Restoration::capture(&repo, NAME, repo.read_scope())
+                    .await
+                    .unwrap(),
+            );
+            let oid = String::from_utf8(git(root, &["rev-parse", &format!(":{NAME}")])).unwrap();
+            let oid = oid.trim();
+            let object = root.join(".git/objects").join(&oid[..2]).join(&oid[2..]);
+            std::fs::remove_file(&object).unwrap();
+            match fault {
+                "framing" => std::fs::write(&object, b"corrupt Git object").unwrap(),
+                "checksum" => {
+                    let mut changed = content;
+                    *changed.last_mut().unwrap() ^= 1;
+                    std::fs::write(root.join("replacement.bin"), changed).unwrap();
+                    let replacement = String::from_utf8(git(
+                        root,
+                        &["hash-object", "--no-filters", "-w", "replacement.bin"],
+                    ))
+                    .unwrap();
+                    let replacement = replacement.trim();
+                    let bytes = std::fs::read(
+                        root.join(".git/objects")
+                            .join(&replacement[..2])
+                            .join(&replacement[2..]),
+                    )
+                    .unwrap();
+                    std::fs::write(&object, bytes).unwrap();
+                }
+                _ => {}
+            }
+            assert!(source.clone().run(|_| Ok(())).await.is_err());
+            source.release_reader().await.unwrap();
+            assert_eq!(
+                (
+                    std::fs::read(root.join(NAME)).unwrap(),
+                    std::fs::read(root.join(".git/index")).unwrap(),
+                    scratch(root)
+                ),
+                (b"retain working edits".to_vec(), index, Vec::new())
+            );
+            repo.close().await.unwrap();
         }
-        assert!(source.clone().run(|_| Ok(())).await.is_err());
-        source.release_reader().await.unwrap();
-        assert_eq!(
-            (std::fs::read(root.join(NAME)).unwrap(), scratch(root)),
-            (b"retain working edits".to_vec(), Vec::new())
-        );
-        repo.close().await.unwrap();
     }
 }
 

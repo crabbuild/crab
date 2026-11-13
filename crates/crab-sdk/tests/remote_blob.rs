@@ -228,7 +228,6 @@ async fn verify_native_reads(bucket: Option<String>) {
     #[cfg(feature = "files")]
     let builder = {
         let cache = directory.path().join("content-cache");
-        std::fs::create_dir(&cache).unwrap();
         builder
             .content_cache(crab_sdk::storage::ContentCache::new(&cache, 4 * 1024 * 1024).unwrap())
     };
@@ -619,7 +618,19 @@ async fn verify_native_reads(bucket: Option<String>) {
     ranges::verify_controls(&current, &filename).await;
     ranges::verify_progress(&current, &filename).await;
     #[cfg(feature = "files")]
-    lfs::verify(&current, &fixture_store, lfs_oid, second_bytes).await;
+    {
+        // Origin integrity/admission checks require cold reads. Retained immutable
+        // bytes are qualified independently, including a new client after restart.
+        lfs::verify_origin(options.clone(), &fixture_store, lfs_oid, second_bytes).await;
+        lfs::verify_retention(
+            options.clone(),
+            &fixture_store,
+            lfs_oid,
+            second_bytes,
+            &directory.path().join("lfs-cache"),
+        )
+        .await;
+    }
     #[cfg(feature = "files")]
     crab::verify(&current, second_bytes).await;
     #[cfg(feature = "files")]
@@ -729,7 +740,6 @@ async fn verify_native_reads(bucket: Option<String>) {
             #[cfg(feature = "files")]
             let hydrated = {
                 let cache = directory.path().join("example-cache");
-                std::fs::create_dir(&cache).unwrap();
                 ["z-crab", "z-lfs"].map(|path| {
                     serde_json::json!({
                         "args": [bucket, "repository", "main", path, "hydrated", cache],
@@ -784,7 +794,6 @@ async fn verify_native_reads(bucket: Option<String>) {
         #[cfg(feature = "files")]
         if std::env::var_os("CRAB_SDK_TEST_READ_GUARD").is_none() {
             let cache = directory.path().join("example-cache");
-            std::fs::create_dir(&cache).unwrap();
             for path in ["z-crab", "z-lfs"] {
                 let read = Command::new(
                     examples.join(format!("remote_read{}", std::env::consts::EXE_SUFFIX)),

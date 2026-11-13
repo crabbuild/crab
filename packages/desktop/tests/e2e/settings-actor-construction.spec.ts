@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import * as path from "node:path";
-import { call, packagedExecutable } from "./packaged-app";
+import { isNativeAgentCommand, call, packagedExecutable } from "./packaged-app";
 
 for (const fault of ["blocked shell", "log directory"] as const) test(`device settings survive ${fault} before actor construction and repair live`, async () => {
   test.skip(process.platform !== "darwin" || !userInfo().shell?.endsWith("/zsh"), "Requires macOS secure storage and a real zsh startup gate");
@@ -29,7 +29,7 @@ for (const fault of ["blocked shell", "log directory"] as const) test(`device se
   let launches = 0;
   let admitted = "", cancelled = "";
   const release = () => rmSync(gate, { force: true });
-  const nativeChildren = () => execFileSync("ps", ["-axo", "pid=,ppid=,command="], { encoding: "utf8" }).split("\n").map(line => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line)).filter(row => row && Number(row[2]) === application?.process().pid && row[3].includes("/agent/crab-desktop-agent ")).map(row => Number(row![1]));
+  const nativeChildren = () => execFileSync("ps", ["-axo", "pid=,ppid=,command="], { encoding: "utf8" }).split("\n").map(line => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line)).filter(row => row && Number(row[2]) === application?.process().pid && isNativeAgentCommand(row[3])).map(row => Number(row![1]));
   async function launch() {
     writeFileSync(gate, "held"); rmSync(marker, { force: true });
     application = await electron.launch({ executablePath: packagedExecutable(), args: [`--user-data-dir=${profile}`], env: Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === "string")) });

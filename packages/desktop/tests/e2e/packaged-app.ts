@@ -1,5 +1,5 @@
 import { expect, type ElectronApplication, type Page } from "@playwright/test";
-import { createReadStream, existsSync, readFileSync, rmSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
 import { Readable } from "node:stream";
@@ -62,11 +62,28 @@ export function packagedExecutable(): string {
   return executablePath;
 }
 
+export function isNativeAgentCommand(command: string): boolean {
+  const directory = path.dirname(packagedExecutable());
+  const resources = process.platform === "darwin" ? path.resolve(directory, "../Resources") : path.resolve(directory, "resources");
+  const executable = realpathSync(path.join(resources, "agent", process.platform === "win32" ? "crab-desktop-agent.exe" : "crab-desktop-agent"));
+  // Electron resolves bundle symlinks and launches this actor without arguments.
+  // Canonicalize before matching its whole executable; callers also bind its PID.
+  return command === executable || command.startsWith(`${executable} `);
+}
+
 export async function call(page: Page, method: string, params: unknown): Promise<Record<string, unknown>> {
   return page.evaluate(async ({ method, params }) => {
     const bridge = (window as unknown as { crab: { rpc: (method: string, params: unknown) => Promise<Record<string, unknown>> } }).crab;
-    return bridge.rpc(method, params);
+    try { return await bridge.rpc(method, params); }
+    catch (error) {
+      const detail = error as { code?: unknown; message?: unknown } | null;
+      throw new Error(`${method} failed (${String(detail?.code ?? "unknown")}): ${String(detail?.message ?? error)}`);
+    }
   }, { method, params });
+}
+
+export async function answerConfirmation(page: Page, message: RegExp, accept = true): Promise<void> {
+  await page.getByRole("alertdialog", { name: message }).getByRole("button", { name: accept ? "Confirm" : "Cancel", exact: true }).click();
 }
 
 export async function closeFixtureDaemon(home: string): Promise<void> {

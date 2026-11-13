@@ -4,10 +4,27 @@ use std::io::{Read as _, Write as _};
 use tokio_util::sync::CancellationToken;
 
 use super::*;
-use crate::clean::{EntryKind, object_entry_kind};
+use crate::clean::{EntryKind, entry_kind, payload_path};
 use crate::private_fs::{FileStat, PinnedRoot, check_cancelled, with_pinned_root};
 
-const OBJECT_FAMILIES: &[&str] = &["chunks", "xorbs", "shards", "ref-transactions", "git-packs"];
+const OBJECT_FAMILIES: &[&str] = &[
+    "chunks",
+    "xorbs",
+    "shards",
+    "ref-transactions",
+    "git-packs",
+    "lfs",
+];
+const VERIFIABLE_FAMILIES: &[&str] = &[
+    "chunks",
+    "xorbs",
+    "shards",
+    "ref-transactions",
+    "git-packs",
+    "lfs",
+    #[cfg(feature = "xet-chunk-cache")]
+    "decoded-range",
+];
 const MAX_CACHE_LRU_ENTRIES: usize = 1_000_000;
 
 impl LocalCache {
@@ -21,26 +38,32 @@ impl LocalCache {
             .strip_prefix(&self.root)
             .map_err(|error| CacheError::Io(std::io::Error::other(error)))?
             .to_owned();
-        let root_path = self.root.clone();
+        let owner_path = self.catalog.root().to_owned();
+        let prefix = self.relative_root.clone();
         with_pinned_root(
-            &self.root,
+            self.catalog.root(),
             &CancellationToken::new(),
-            move |root, cancel| {
+            move |owner, cancel| {
                 let mut removal =
-                    crate::catalog::PayloadRemoval::open(Some(root), &root_path, false)?;
-                let result = removal.remove(&relative, || {
-                    root.remove_file_if(&relative, false, &mut |file| {
-                        let valid = verify_file(file, &relative, PruneObjectKind::Xorb, cancel)?;
-                        check_cancelled(cancel)?;
-                        Ok(!valid)
-                    })
-                });
-                match result {
-                    Err(CacheError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                        Ok(())
+                    crate::catalog::PayloadRemoval::open(Some(owner), &owner_path, &prefix, false)?;
+                owner.with_subdirectory(&prefix, |root| {
+                    let result = removal.remove(&relative, || {
+                        root.remove_file_if(&relative, false, &mut |file| {
+                            let valid =
+                                verify_file(file, &relative, PruneObjectKind::Xorb, cancel)?;
+                            check_cancelled(cancel)?;
+                            Ok(!valid)
+                        })
+                    });
+                    match result {
+                        Err(CacheError::Io(error))
+                            if error.kind() == std::io::ErrorKind::NotFound =>
+                        {
+                            Ok(())
+                        }
+                        result => result.map(|_| ()),
                     }
-                    result => result.map(|_| ()),
-                }
+                })
             },
         )
         .await
@@ -59,23 +82,29 @@ impl LocalCache {
             return Ok(PruneStats::default());
         }
         let root_path = self.root.clone();
+        let owner_path = self.catalog.root().to_owned();
+        let prefix = self.relative_root.clone();
         with_pinned_root(
-            &self.root,
+            self.catalog.root(),
             &CancellationToken::new(),
-            move |root, cancel| {
-                let mut entries = collect_objects(root, cancel)?;
-                entries.sort_unstable_by(|a, b| (a.modified, &a.path).cmp(&(b.modified, &b.path)));
+            move |owner, cancel| {
                 let mut removal =
-                    crate::catalog::PayloadRemoval::open(Some(root), &root_path, false)?;
-                evict_oldest(
-                    root,
-                    &mut removal,
-                    &root_path,
-                    &entries,
-                    target_bytes,
-                    PruneOptions::default(),
-                    cancel,
-                )
+                    crate::catalog::PayloadRemoval::open(Some(owner), &owner_path, &prefix, false)?;
+                owner.with_subdirectory(&prefix, |root| {
+                    let mut entries = collect_objects(root, cancel)?;
+                    entries
+                        .sort_unstable_by(|a, b| (a.modified, &a.path).cmp(&(b.modified, &b.path)));
+
+                    evict_oldest(
+                        root,
+                        &mut removal,
+                        &root_path,
+                        &entries,
+                        target_bytes,
+                        PruneOptions::default(),
+                        cancel,
+                    )
+                })
             },
         )
         .await
@@ -86,57 +115,66 @@ impl LocalCache {
     /// Unknown and busy entries are retained. Unsafe recognized paths fail closed.
     pub async fn prune_with_options(&self, options: PruneOptions) -> Result<PruneStats> {
         let root_path = self.root.clone();
+        let owner_path = self.catalog.root().to_owned();
+        let prefix = self.relative_root.clone();
         let large_max = self.chunk_max_bytes;
         let shard_max = self.shard_max_bytes;
         if large_max.is_none() && shard_max.is_none() {
             return Ok(PruneStats::default());
         }
         with_pinned_root(
-            &self.root,
+            self.catalog.root(),
             &CancellationToken::new(),
-            move |root, cancel| {
-                let mut entries = collect_objects(root, cancel)?;
-                entries.sort_unstable_by(|a, b| {
-                    (uses_shard_budget(a.kind), a.modified, &a.path).cmp(&(
-                        uses_shard_budget(b.kind),
-                        b.modified,
-                        &b.path,
-                    ))
-                });
-                let boundary = entries.partition_point(|entry| !uses_shard_budget(entry.kind));
-                let (large, metadata) = entries.split_at(boundary);
-                let mut removal =
-                    crate::catalog::PayloadRemoval::open(Some(root), &root_path, options.dry_run)?;
-                let target = large_max.map_or(Ok(0), |max| {
-                    total_bytes(large).map(|total| total.saturating_sub(max))
-                })?;
-                let mut stats = evict_oldest(
-                    root,
-                    &mut removal,
-                    &root_path,
-                    large,
-                    target,
-                    options,
-                    cancel,
+            move |owner, cancel| {
+                let mut removal = crate::catalog::PayloadRemoval::open(
+                    Some(owner),
+                    &owner_path,
+                    &prefix,
+                    options.dry_run,
                 )?;
-                if let Some(max) = shard_max {
-                    let target = total_bytes(metadata)?.saturating_sub(max);
-                    let metadata_stats = evict_oldest(
+                owner.with_subdirectory(&prefix, |root| {
+                    let mut entries = collect_objects(root, cancel)?;
+                    entries.sort_unstable_by(|a, b| {
+                        (uses_shard_budget(a.kind), a.modified, &a.path).cmp(&(
+                            uses_shard_budget(b.kind),
+                            b.modified,
+                            &b.path,
+                        ))
+                    });
+                    let boundary = entries.partition_point(|entry| !uses_shard_budget(entry.kind));
+                    let (large, metadata) = entries.split_at(boundary);
+
+                    let target = large_max.map_or(Ok(0), |max| {
+                        total_bytes(large).map(|total| total.saturating_sub(max))
+                    })?;
+                    let mut stats = evict_oldest(
                         root,
                         &mut removal,
                         &root_path,
-                        metadata,
+                        large,
                         target,
                         options,
                         cancel,
                     )?;
-                    stats.shards_evicted = metadata_stats.shards_evicted;
-                    stats.ref_transactions_evicted = metadata_stats.ref_transactions_evicted;
-                    stats.bytes_freed =
-                        stats.bytes_freed.saturating_add(metadata_stats.bytes_freed);
-                    stats.entries.extend(metadata_stats.entries);
-                }
-                Ok(stats)
+                    if let Some(max) = shard_max {
+                        let target = total_bytes(metadata)?.saturating_sub(max);
+                        let metadata_stats = evict_oldest(
+                            root,
+                            &mut removal,
+                            &root_path,
+                            metadata,
+                            target,
+                            options,
+                            cancel,
+                        )?;
+                        stats.shards_evicted = metadata_stats.shards_evicted;
+                        stats.ref_transactions_evicted = metadata_stats.ref_transactions_evicted;
+                        stats.bytes_freed =
+                            stats.bytes_freed.saturating_add(metadata_stats.bytes_freed);
+                        stats.entries.extend(metadata_stats.entries);
+                    }
+                    Ok(stats)
+                })
             },
         )
         .await
@@ -148,39 +186,39 @@ impl LocalCache {
     /// failures return errors; they do not authorize deletion. Manifests and
     /// workflow stages have logical keys and are not content-hash verified here.
     pub async fn verify(&self) -> Result<VerifyReport> {
-        let root_path = self.root.clone();
+        let owner_path = self.catalog.root().to_owned();
+        let prefix = self.relative_root.clone();
         with_pinned_root(
-            &self.root,
+            self.catalog.root(),
             &CancellationToken::new(),
-            move |root, cancel| {
+            move |owner, cancel| {
                 let mut removal =
-                    crate::catalog::PayloadRemoval::open(Some(root), &root_path, false)?;
-                let mut report = VerifyReport::default();
-                visit_objects(root, OBJECT_FAMILIES, cancel, &mut |path, _| {
-                    let Some(kind) = object_kind(path) else {
-                        return Ok(());
-                    };
-                    let result = removal.remove(path, || {
-                        root.remove_file_if(path, false, &mut |file| {
-                            let valid = verify_file(file, path, kind, cancel)?;
-                            check_cancelled(cancel)?;
-                            Ok(!valid)
-                        })
-                    });
-                    let removed = match result {
-                        Ok(removed) => removed.is_some(),
-                        Err(CacheError::Io(error)) if unavailable(&error) => return Ok(()),
-                        Err(error) => return Err(error),
-                    };
-                    if removed {
-                        report.corrupt += 1;
-                    } else {
-                        report.valid += 1;
-                    }
-                    report.total += 1;
-                    Ok(())
-                })?;
-                Ok(report)
+                    crate::catalog::PayloadRemoval::open(Some(owner), &owner_path, &prefix, false)?;
+                owner.with_subdirectory(&prefix, |root| {
+                    let mut report = VerifyReport::default();
+                    visit_payloads(root, VERIFIABLE_FAMILIES, cancel, &mut |path, _| {
+                        let result = removal.remove(path, || {
+                            root.remove_file_if(path, false, &mut |file| {
+                                let valid = verify_payload(file, path, cancel)?;
+                                check_cancelled(cancel)?;
+                                Ok(!valid)
+                            })
+                        });
+                        let removed = match result {
+                            Ok(removed) => removed.is_some(),
+                            Err(CacheError::Io(error)) if unavailable(&error) => return Ok(()),
+                            Err(error) => return Err(error),
+                        };
+                        if removed {
+                            report.corrupt += 1;
+                        } else {
+                            report.valid += 1;
+                        }
+                        report.total += 1;
+                        Ok(())
+                    })?;
+                    Ok(report)
+                })
             },
         )
         .await
@@ -191,48 +229,59 @@ impl LocalCache {
     /// Missing roots remain missing. Unknown paths, range files, and SQLite
     /// state are outside these family totals; unsafe recognized paths error.
     pub async fn stats(&self) -> Result<CacheStats> {
-        with_pinned_root(&self.root, &CancellationToken::new(), |root, cancel| {
-            let mut stats = CacheStats::default();
-            visit_objects(
-                root,
-                &[
-                    "chunks",
-                    "shards",
-                    "xorbs",
-                    "ref-transactions",
-                    "git-packs",
-                    "stages",
-                    "manifests",
-                ],
-                cancel,
-                &mut |path, metadata| {
-                    let (bytes, count) = match family(path) {
-                        Some("chunks") => (&mut stats.chunk_bytes, &mut stats.chunk_count),
-                        Some("shards") => (&mut stats.shard_bytes, &mut stats.shard_count),
-                        Some("xorbs") => (&mut stats.xorb_bytes, &mut stats.xorb_count),
-                        Some("ref-transactions") => (
-                            &mut stats.ref_transaction_bytes,
-                            &mut stats.ref_transaction_count,
-                        ),
-                        Some("git-packs") => (&mut stats.git_pack_bytes, &mut stats.git_pack_count),
-                        Some("stages") => (&mut stats.stage_bytes, &mut stats.stage_count),
-                        Some("manifests") => {
-                            if path.extension().is_some_and(|ext| ext == "json") {
-                                stats.manifest_count += 1;
-                            }
-                            return Ok(());
-                        }
-                        _ => return Ok(()),
-                    };
-                    *bytes = bytes
-                        .checked_add(metadata.size)
-                        .ok_or_else(|| CacheError::Internal("cache byte total overflow".into()))?;
-                    *count += 1;
-                    Ok(())
-                },
-            )?;
-            Ok(stats)
-        })
+        let prefix = self.relative_root.clone();
+        with_pinned_root(
+            self.catalog.root(),
+            &CancellationToken::new(),
+            move |owner, cancel| {
+                owner.with_subdirectory(&prefix, |root| {
+                    let mut stats = CacheStats::default();
+                    visit_payloads(
+                        root,
+                        &[
+                            "chunks",
+                            "shards",
+                            "xorbs",
+                            "ref-transactions",
+                            "git-packs",
+                            "lfs",
+                            "stages",
+                            "manifests",
+                        ],
+                        cancel,
+                        &mut |path, metadata| {
+                            let (bytes, count) = match family(path) {
+                                Some("chunks") => (&mut stats.chunk_bytes, &mut stats.chunk_count),
+                                Some("shards") => (&mut stats.shard_bytes, &mut stats.shard_count),
+                                Some("xorbs") => (&mut stats.xorb_bytes, &mut stats.xorb_count),
+                                Some("ref-transactions") => (
+                                    &mut stats.ref_transaction_bytes,
+                                    &mut stats.ref_transaction_count,
+                                ),
+                                Some("git-packs") => {
+                                    (&mut stats.git_pack_bytes, &mut stats.git_pack_count)
+                                }
+                                Some("lfs") => (&mut stats.lfs_bytes, &mut stats.lfs_count),
+                                Some("stages") => (&mut stats.stage_bytes, &mut stats.stage_count),
+                                Some("manifests") => {
+                                    if path.extension().is_some_and(|ext| ext == "json") {
+                                        stats.manifest_count += 1;
+                                    }
+                                    return Ok(());
+                                }
+                                _ => return Ok(()),
+                            };
+                            *bytes = bytes.checked_add(metadata.size).ok_or_else(|| {
+                                CacheError::Internal("cache byte total overflow".into())
+                            })?;
+                            *count += 1;
+                            Ok(())
+                        },
+                    )?;
+                    Ok(stats)
+                })
+            },
+        )
         .await
     }
 }
@@ -246,7 +295,7 @@ struct ObjectEntry {
 
 fn collect_objects(root: &PinnedRoot, cancel: &CancellationToken) -> Result<Vec<ObjectEntry>> {
     let mut entries = Vec::new();
-    visit_objects(root, OBJECT_FAMILIES, cancel, &mut |path, stat| {
+    visit_payloads(root, OBJECT_FAMILIES, cancel, &mut |path, stat| {
         let Some(kind) = object_kind(path) else {
             return Ok(());
         };
@@ -266,32 +315,24 @@ fn collect_objects(root: &PinnedRoot, cancel: &CancellationToken) -> Result<Vec<
     Ok(entries)
 }
 
-fn visit_objects(
+fn visit_payloads(
     root: &PinnedRoot,
     families: &[&str],
     cancel: &CancellationToken,
     visitor: &mut dyn FnMut(&Path, FileStat) -> Result<()>,
 ) -> Result<()> {
-    let kind = |path: &Path| {
-        let Some(parts) = path
-            .iter()
-            .map(|name| name.to_str())
-            .collect::<Option<Vec<_>>>()
-        else {
-            return EntryKind::Retain;
-        };
-        object_entry_kind(&parts)
-    };
     root.visit_selected_files(
         &|path| {
             check_cancelled(cancel)?;
-            Ok(
-                family(path).is_some_and(|family| families.contains(&family))
-                    && !matches!(kind(path), EntryKind::Retain),
-            )
+            let namespace_container = path == Path::new("namespaces")
+                || path.starts_with("namespaces")
+                    && payload_path(path).is_some_and(|path| path.as_os_str().is_empty());
+            Ok(namespace_container
+                || family(path).is_some_and(|family| families.contains(&family))
+                    && !matches!(entry_kind(path), EntryKind::Retain))
         },
         &mut |path, metadata| {
-            if matches!(kind(path), EntryKind::Payload) {
+            if matches!(entry_kind(path), EntryKind::Payload) {
                 visitor(path, metadata)?;
             }
             Ok(())
@@ -300,7 +341,14 @@ fn visit_objects(
 }
 
 fn family(path: &Path) -> Option<&str> {
-    path.iter().next().and_then(|name| name.to_str())
+    let path = payload_path(path)?;
+    let mut parts = path.iter();
+    let family = parts.next()?.to_str()?;
+    if family == "chunks" && parts.count() >= 3 {
+        Some("decoded-range")
+    } else {
+        Some(family)
+    }
 }
 
 fn object_kind(path: &Path) -> Option<PruneObjectKind> {
@@ -310,6 +358,7 @@ fn object_kind(path: &Path) -> Option<PruneObjectKind> {
         Some("xorbs") => Some(PruneObjectKind::Xorb),
         Some("ref-transactions") => Some(PruneObjectKind::RefTransaction),
         Some("git-packs") => Some(PruneObjectKind::GitPack),
+        Some("lfs") => Some(PruneObjectKind::Lfs),
         _ => None,
     }
 }
@@ -389,6 +438,7 @@ fn evict_oldest(
             PruneObjectKind::Xorb => stats.xorbs_evicted += 1,
             PruneObjectKind::RefTransaction => stats.ref_transactions_evicted += 1,
             PruneObjectKind::GitPack => stats.git_packs_evicted += 1,
+            PruneObjectKind::Lfs => stats.lfs_objects_evicted += 1,
         }
         stats.bytes_freed = stats.bytes_freed.saturating_add(bytes);
         if options.record_entries {
@@ -400,6 +450,20 @@ fn evict_oldest(
         }
     }
     Ok(stats)
+}
+
+fn verify_payload(file: &mut File, path: &Path, cancel: &CancellationToken) -> Result<bool> {
+    if let Some(kind) = object_kind(path) {
+        return verify_file(file, path, kind, cancel);
+    }
+    #[cfg(feature = "xet-chunk-cache")]
+    if family(path) == Some("decoded-range") {
+        return crate::xet_chunk_cache::verify_xet_chunk_cache_entry(file, path, cancel);
+    }
+    Err(CacheError::UnsafeRoot {
+        path: path.display().to_string(),
+        reason: "cache payload has no supported verifier".into(),
+    })
 }
 
 fn verify_file(
@@ -433,6 +497,34 @@ fn verify_file(
             && file.metadata()?.len() == bytes
             && actual.finalize() == expected);
     }
+    if kind == PruneObjectKind::Lfs {
+        use sha2::Digest as _;
+        let expected = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| CacheError::Internal("LFS cache object has no filename".into()))?;
+        let mut hash = sha2::Sha256::new();
+        let mut buffer = vec![0; 64 * 1024];
+        let mut received = 0u64;
+        loop {
+            check_cancelled(cancel)?;
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            let Some(length) = received
+                .checked_add(read as u64)
+                .filter(|received| *received <= bytes)
+            else {
+                return Ok(false);
+            };
+            received = length;
+            hash.update(&buffer[..read]);
+        }
+        return Ok(received == bytes
+            && file.metadata()?.len() == bytes
+            && format!("{:x}", hash.finalize()) == expected);
+    }
     let expected = object_hash(path)?;
     if kind == PruneObjectKind::Xorb {
         return match super::xorb_file::verify(file, path, bytes, &expected, cancel) {
@@ -450,7 +542,7 @@ fn verify_file(
     let limit = match kind {
         PruneObjectKind::Chunk => MAX_CACHE_CHUNK_BYTES,
         PruneObjectKind::Shard => MAX_CACHE_SHARD_BYTES,
-        PruneObjectKind::RefTransaction | PruneObjectKind::GitPack => {
+        PruneObjectKind::RefTransaction | PruneObjectKind::GitPack | PruneObjectKind::Lfs => {
             return Err(CacheError::Internal(
                 "plain-Blake3 object bypassed its native hash verifier".into(),
             ));

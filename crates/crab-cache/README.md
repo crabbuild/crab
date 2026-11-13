@@ -53,9 +53,24 @@ and hash, then materialize an independent copy-on-write clone when the
 filesystem supports it, falling back to a bounded copy; they never hard-link a
 repository pack to mutable cache state.
 
+Complete LFS objects use `lfs/aa/<sha256>` and the same root catalog, budget,
+temporary journal, leases and cleanup. `begin_lfs_fill` streams and checks exact
+size/SHA-256 before publication. `open_lfs_file` captures a private descriptor;
+the consuming LFS reader must verify complete identity and delivered ranges.
+It releases its verification descriptors before `finish` retires the read.
+Neither a matching filename nor a size check establishes a verified hit.
+LFS storage is disposable retention, not an offline pin or an origin receipt.
+
 Fills reserve capacity and publish
 privately through the shared catalog. Before writing payload bytes, reserved
-files record their exact temporary identity for process-death recovery.
+files durably record their exact temporary identity before exposing a writer.
+Saved root budgets use the same FULL WAL synchronization policy; disposable
+accounting retains NORMAL synchronization. The private publication owner flushes
+file contents before rename and the captured parent afterward. Parent creation,
+unlink and journal retirement after observed absence also require directory
+flushes. HTTP completion keeps exact journal authority for `responses/` scratch
+until its final handle closes. Full filesystem power-loss recovery
+remains a separate qualification gate.
 The family participates in stats,
 health, prune, verification, and cleanup. Git structure, sidecars, visible
 object closure, and authorization are reader responsibilities.
@@ -117,12 +132,18 @@ Directory guards coordinate cooperating local owners. Callers must join their
 workers before dropping a guard. Cache contents remain disposable; cleanup
 retains unknown state and does not authorize recursive deletion.
 
-Products with separate hash-named cache namespaces use `clean_cache_namespaces`.
-It retains the parent directory handle, opens each namespace beneath that
-captured parent, and applies payload cleanup through the namespace's own catalog.
-Unknown siblings, databases and workspaces remain untouched. Preview and apply
-both honor catalog leases and in-progress reservations; preview uses the existing
-private read-only SQLite snapshot and does not create or repair catalog state.
+Products isolate storage identities with `LocalCache::namespaced(catalog, hash)`.
+Payloads live under `namespaces/<64-hex>/` and share one root catalog, budget and
+lease authority. `clean_cache` traverses those fixed layouts under the captured
+root, retaining unknown siblings, databases and workspaces. Range handles and
+maintenance receive that same explicit catalog owner.
+
+`CacheCatalog::set_retention_budget` persists the host-root limit. Each admission
+and maintenance pass combines it with its caller ceiling; zero stops new
+retention and `None` removes only the root cap. Setting policy does not reclaim
+files by itself. Run maintenance and inspect actual usage afterward; active
+readers and retained state can keep usage above the limit. Read-only inspection
+reports an unavailable policy as unknown rather than unlimited.
 
 For remote caches, enable `remote-client`, configure `CacheClient` authentication,
 and inspect health/capabilities before service-specific operations. Credential

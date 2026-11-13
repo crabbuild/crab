@@ -11,11 +11,17 @@ pub use crab_cache::{
 
 /// Opens the shared xet-core chunk cache from CLI configuration.
 ///
-/// The reusable cache Module only needs a directory and byte budget. Resolving
-/// those from Crab config belongs in the CLI crate.
+/// Resolve tagged placement and caller limits above the shared cache owner.
 pub fn xet_chunk_cache_from_config(config: &Config) -> Result<XetChunkCacheHandle> {
+    let directory = config.effective_chunk_cache_dir();
     Ok(XetChunkCacheHandle::open(
-        config.effective_chunk_cache_dir(),
-        config.effective_chunk_cache_max_bytes(),
+        directory,
+        catalog_from_config(config),
     )?)
+}
+
+pub(crate) fn catalog_from_config(config: &Config) -> crab_cache::CacheCatalog {
+    let directory = config.effective_chunk_cache_dir();
+    let root = directory.parent().unwrap_or(&directory).to_owned();
+    crab_cache::CacheCatalog::new(root, config.effective_chunk_cache_max_bytes())
 }

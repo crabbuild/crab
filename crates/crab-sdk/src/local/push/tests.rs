@@ -390,7 +390,7 @@ async fn direct_push_publishes_staged_pointer_dependencies_first() {
     let cache = tempfile::tempdir().unwrap();
     let client = crate::client::memory_local_client_with_cache(
         tools,
-        crate::ContentCache::new(cache.path(), 4 * 1024 * 1024).unwrap(),
+        crate::ContentCache::new(&cache.path().join("content"), 4 * 1024 * 1024).unwrap(),
     );
     git(
         checkout.path(),

@@ -4,7 +4,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { existsSync, chmodSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, renameSync, rmSync } from "node:fs";
 import * as path from "node:path";
 import { tmpdir } from "node:os";
-import { call, packagedExecutable } from "./packaged-app";
+import { answerConfirmation, call, packagedExecutable } from "./packaged-app";
 import type { ChunkDiffMetrics } from "../../src/ipc";
 import type { FileTransferActivity, FileTransferSource } from "../../electron/file-transfers";
 
@@ -70,26 +70,34 @@ test("whole-file restoration protects literal selections, staging and pending ed
     await page.evaluate(({ handle, source }) => window.dispatchEvent(new CustomEvent("crab:repo-opened", { detail: { handle, path: source } })), { handle, source });
     const primary = page.getByRole("navigation", { name: "Primary", exact: true });
     const changes = async () => { await primary.getByRole("button", { name: "Git", exact: true }).click(); await page.getByRole("button", { name: "Changes", exact: true }).click(); };
-    const row = (file: string) => page.getByText(file, { exact: true }).and(page.locator(":visible")).first();
-    const discard = async (file: string) => { await row(file).hover(); await page.getByRole("button", { name: `Discard changes in ${file}`, exact: true }).click(); };
+    // Inactive panels and the editor retain the filename. Use a visible row
+    // that owns the requested action before revealing its hover controls.
+    const row = (file: string) => page.locator("div[title]").filter({
+      has: page.getByRole("button", { name: `Discard changes in ${file}`, exact: true, includeHidden: true }),
+    }).and(page.locator(":visible")).first();
+    const discard = async (file: string) => { await row(file).hover(); await row(file).getByRole("button", { name: `Discard changes in ${file}`, exact: true }).click(); };
     await changes();
-    await application.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 0, checkboxChecked: false }); });
+
     await discard(files[0]);
+    await answerConfirmation(page, /^Restore /, false);
     expect(readFileSync(path.join(source, files[0]))).toEqual(dirty);
-    await application.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 1, checkboxChecked: false }); });
+
     await discard(files[0]);
+    await answerConfirmation(page, /^Restore /);
     await expect.poll(() => readFileSync(path.join(source, files[0])).equals(staged)).toBe(true);
     expect(readFileSync(path.join(source, files[1]))).toEqual(dirty);
     await row(files[1]).click();
     await page.getByRole("button", { name: "Discard entire file change", exact: true }).click();
+    await answerConfirmation(page, /^Restore /);
     await expect.poll(() => readFileSync(path.join(source, files[1])).equals(staged)).toBe(true);
     expect(git(["ls-files", "--stage", "-z"])).toEqual(index);
     await expect(page.getByText("Index vs HEAD", { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "Discard entire file change", exact: true })).toBeDisabled();
     for (const file of files) writeFileSync(path.join(source, file), dirty);
-    await page.getByRole("radiogroup", { name: "View mode", exact: true }).locator("..").getByTitle("Refresh", { exact: true }).click();
+    await page.getByRole("radiogroup", { name: "View mode", exact: true }).locator("..").getByRole("button", { name: "Refresh", exact: true }).click();
     for (const file of files.slice(0, 2)) await row(file).click({ modifiers: [process.platform === "darwin" ? "Meta" : "Control"] });
-    await page.getByTitle("Discard selected files (Delete)", { exact: true }).click();
+    await page.getByRole("button", { name: "Discard selected files", exact: true }).click();
+    await answerConfirmation(page, /^Restore /);
     for (const file of files.slice(0, 2)) await expect.poll(() => readFileSync(path.join(source, file)).equals(staged)).toBe(true);
     expect(readFileSync(path.join(source, files[2]))).toEqual(dirty);
     expect(readFileSync(path.join(source, "untracked.bin"))).toEqual(dirty);
@@ -134,8 +142,9 @@ test("whole-file restoration protects literal selections, staging and pending ed
     }, enabled);
     await receiptFault(true);
     await discard(files[2]);
+    await answerConfirmation(page, /^Restore /);
     expect(readFileSync(path.join(source, files[2]))).toEqual(dirty);
-    await page.getByTitle("Toggle Activity (background jobs)", { exact: true }).click();
+    await page.getByRole("button", { name: "Activity", exact: true }).click();
     const activityFailure = page.getByRole("alert").filter({ has: page.getByRole("button", { name: "Reload Activity", exact: true }) });
     await expect(activityFailure).toContainText("Activity could not save");
     await expect(activityFailure).toBeInViewport();
@@ -145,6 +154,7 @@ test("whole-file restoration protects literal selections, staging and pending ed
     await expect(activityFailure).toHaveCount(0);
     await page.getByRole("button", { name: "Close activity drawer", exact: true }).click();
     await discard(files[2]);
+    await answerConfirmation(page, /^Restore /);
     await expect.poll(() => readFileSync(path.join(source, files[2])).equals(staged)).toBe(true);
     expect(git(["ls-files", "--stage", "-z"])).toEqual(index);
 
@@ -167,6 +177,7 @@ test("whole-file restoration protects literal selections, staging and pending ed
     await page.getByRole("button", { name: "Retry saving", exact: true }).click();
     await expect.poll(() => readFileSync(path.join(source, "note.md"), "utf8")).toBe("PENDING_EDITOR_DRAFT");
     await changes(); await discard("note.md");
+    await answerConfirmation(page, /^Restore /);
     await expect.poll(() => readFileSync(path.join(source, "note.md"), "utf8")).toBe("INDEX_NOTE\n");
     await primary.getByRole("button", { name: "Files", exact: true }).click();
     await expect(editor).toContainText("INDEX_NOTE");
@@ -263,7 +274,7 @@ test("Crab and LFS UI lifecycle preserves bytes and staging across edits, rename
     expect(firstXorbs.size).toBeGreaterThan(0);
     await page.screenshot({ path: test.info().outputPath("ui-lifecycle-published.png") });
 
-    await page.getByTitle("Clone Repository", { exact: true }).click();
+    await page.getByRole("button", { name: "Clone Repository", exact: true }).click();
     const dialog = page.getByRole("dialog", { name: "Clone Repository", exact: true });
     await dialog.getByRole("button", { name: "Crab Storage", exact: true }).click();
     await dialog.getByPlaceholder("crab://bucket/repo", { exact: true }).fill(url);
@@ -287,7 +298,7 @@ test("Crab and LFS UI lifecycle preserves bytes and staging across edits, rename
       await dialog.getByRole("option").filter({ hasText: label }).click();
       await expect(dialog).toHaveCount(0);
     };
-    const holdPreparation = async () => application!.evaluate(({ app, dialog }) => {
+    const holdPreparation = async () => application!.evaluate(({ app }) => {
       const modules = process.getBuiltinModule("node:module") as typeof import("node:module");
       const require = modules.createRequire(`${app.getAppPath()}/package.json`);
       const { Agent } = require(`${app.getAppPath()}/dist-electron/agent.cjs`) as typeof import("../../electron/agent");
@@ -303,13 +314,12 @@ test("Crab and LFS UI lifecycle preserves bytes and staging across edits, rename
         try { return await original.call(this, method, params); }
         finally { state.transferPreparation.settled++; }
       };
-      dialog.showMessageBox = async () => ({ response: 1, checkboxChecked: false });
     });
     const history = async () => await call(page, "activity_file_transfers", {}) as unknown as FileTransferActivity;
     const preparationEntered = async () => expect.poll(() => application!.evaluate(() =>
       (globalThis as typeof globalThis & { transferPreparation: { arrivals: number } }).transferPreparation.arrivals)).toBe(1);
     const activity = async () => {
-      await page.getByTitle("Toggle Activity (background jobs)", { exact: true }).click();
+      await page.getByRole("button", { name: "Activity", exact: true }).click();
       await expect(page.getByRole("button", { name: "Close activity drawer", exact: true })).toBeInViewport();
     };
     await holdPreparation();
@@ -338,6 +348,7 @@ test("Crab and LFS UI lifecycle preserves bytes and staging across edits, rename
 
     await holdPreparation();
     await page.getByRole("button", { name: "Retry transfer", exact: true }).click();
+    await answerConfirmation(page, /Hydrate 2 files/);
     await preparationEntered();
     const interrupted = (await history()).jobs.find(job => job.status === "running")!;
     expect(interrupted.job_id).not.toBe(admitted.job_id);
@@ -356,8 +367,9 @@ test("Crab and LFS UI lifecycle preserves bytes and staging across edits, rename
     await activity();
     await expect(page.getByText("Outcome unknown. Check the working files.", { exact: true })).toBeInViewport();
     await page.screenshot({ path: test.info().outputPath("ui-activity-restart-unknown.png") });
-    await application.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 1, checkboxChecked: false }); });
+
     await page.getByRole("button", { name: "Retry transfer", exact: true }).first().click();
+    await answerConfirmation(page, /Hydrate 2 files/);
     for (const file of files) await expect.poll(() => digest(readFileSync(path.join(clone, file))), { timeout: 40_000 }).toBe(digest(content));
     await expect.poll(async () => (await history()).jobs.filter(job => job.op === "hydrate" && job.status === "done").length).toBe(1);
     const completedTransfer = (await history()).jobs.find(job => job.op === "hydrate" && job.status === "done")!;
@@ -370,12 +382,12 @@ test("Crab and LFS UI lifecycle preserves bytes and staging across edits, rename
     await page.screenshot({ path: test.info().outputPath("ui-lifecycle-cold-hydration.png") });
 
     // Exercise the auxiliary entry points against real stored Crab/LFS content.
-    // Only the native confirmation response is scripted; transfers use the app.
-    await application.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 0, checkboxChecked: false }); });
     await palette("Crab: Dehydrate All");
+    await answerConfirmation(page, /^Dehydrate /, false);
     for (const file of files) expect(readFileSync(path.join(clone, file))).toEqual(content);
-    await application.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 1, checkboxChecked: false }); });
+
     await palette("Crab: Dehydrate All");
+    await answerConfirmation(page, /^Dehydrate /);
     await expect(page.getByText("Dehydrated 2 files", { exact: true })).toBeVisible();
     for (let index = 0; index < files.length; index++) expect(readFileSync(path.join(clone, files[index]))).toEqual(pointers[index]);
     await page.getByRole("button", { name: "Settings", exact: true }).click();
@@ -405,7 +417,7 @@ test("Crab and LFS UI lifecycle preserves bytes and staging across edits, rename
     expect(git(auxiliary, ["status", "--porcelain"]).toString()).toBe("");
     await expect(page.getByText("2 hydrated", { exact: true })).toBeVisible();
     await page.screenshot({ path: test.info().outputPath("ui-lifecycle-auxiliary-worktree.png") });
-    await page.getByTitle("Close detail panel", { exact: true }).click();
+    await page.getByRole("button", { name: "Close", exact: true }).click();
 
     for (const file of files) writeFileSync(path.join(source, file), edited);
     await openSource();
@@ -420,12 +432,14 @@ test("Crab and LFS UI lifecycle preserves bytes and staging across edits, rename
     }
     const stagedIndexBeforeRestore = git(source, ["ls-files", "--stage", "-z"]);
     for (const file of files) writeFileSync(path.join(source, file), content);
-    await page.getByRole("radiogroup", { name: "View mode", exact: true }).locator("..").getByTitle("Refresh", { exact: true }).click();
+    await page.getByRole("radiogroup", { name: "View mode", exact: true }).locator("..").getByRole("button", { name: "Refresh", exact: true }).click();
     await page.getByText(files[0], { exact: true }).and(page.locator(":visible")).first().click({ button: "right" });
     await page.getByRole("menuitem", { name: "Discard Changes", exact: true }).click();
+    await answerConfirmation(page, /^Restore /);
     await expect.poll(() => readFileSync(path.join(source, files[0])).equals(edited), { timeout: 30_000 }).toBe(true);
     await page.getByText(files[1], { exact: true }).and(page.locator(":visible")).first().click();
     await page.getByRole("button", { name: /Discard entire (?:pointer|file) change/ }).click();
+    await answerConfirmation(page, /^Restore /);
     await expect.poll(() => readFileSync(path.join(source, files[1])).equals(edited), { timeout: 30_000 }).toBe(true);
     expect(git(source, ["ls-files", "--stage", "-z"])).toEqual(stagedIndexBeforeRestore);
     await page.screenshot({ path: test.info().outputPath("ui-lifecycle-managed-restore.png") });
@@ -479,7 +493,7 @@ test("Crab and LFS UI lifecycle preserves bytes and staging across edits, rename
     await page.getByRole("button", { name: "Fetch all remotes", exact: true }).click();
     await expect.poll(() => git(clone, ["rev-parse", "origin/main"]).toString().trim(), { timeout: 30_000 }).toBe(second);
     await page.getByRole("button", { name: "Pull main", exact: true }).click();
-    await page.getByRole("menuitem", { name: /Fast-forward only$/ }).click();
+    await page.getByRole("menuitemradio", { name: "Fast-forward only", exact: true }).click();
     await expect(page.getByRole("menu")).toHaveCount(0);
     await expect.poll(() => git(clone, ["rev-parse", "HEAD"]).toString().trim(), { timeout: 30_000 }).toBe(second);
     for (const file of files) expect(git(clone, ["show", `HEAD:${file}`])).toEqual(git(source, ["show", `HEAD:${file}`]));
@@ -543,7 +557,7 @@ test("Crab and LFS UI lifecycle preserves bytes and staging across edits, rename
     git(clone, ["branch", "menu-refresh-proof"]);
     await expect(page.getByText("menu-refresh-proof", { exact: true }).and(page.locator(":visible"))).toBeVisible();
     await page.screenshot({ path: test.info().outputPath("pull-menu-survives-refresh.png") });
-    await page.getByRole("menuitem", { name: /Fast-forward only$/ }).click();
+    await page.getByRole("menuitemradio", { name: "Fast-forward only", exact: true }).click();
     await expect(page.getByRole("menu")).toHaveCount(0);
     await expect.poll(() => git(clone, ["rev-parse", "HEAD"]).toString().trim(), { timeout: 30_000 }).toBe(third);
     for (const file of files) expect(existsSync(path.join(clone, file))).toBe(false);

@@ -17,9 +17,9 @@ record historical evidence rather than separate work queues.
 | Diffs | Correct text/binary/pointer classification across working tree, index, commits, branches and reviews. Actual chunk reuse/change metrics and format comparisons; size delta is not changed bytes. | Captured Crab/LFS and nbformat 4 comparisons have packaged macOS and real RustFS proof. Notebook versions, errors, 40,000 cells, output paging and actual worker cancellation are qualified locally. Ordinary Git capture validation, inline reviews, modes, other formats and remaining profiles are open. |
 | Repository operations | Track, stage, commit, push, fetch, pull, clone, hydrate and dehydrate through the UI. Preserve attribute routing and LFS identity; explicit migration and supported lock/verification operations. | Exact-path tracking and scoped commits have packaged macOS and real-store local/SSH proof, including plain clones, partial retry, LFS routing, extensionless/literal paths and unrelated staging. Captured single-file and exact-selection Crab/LFS hydration have packaged macOS and real lazy-clone proof. Verified exact-selection dehydration has packaged macOS and real-store SSH proof, including protected/modified/corrupt content and partial retry. A continuous packaged macOS Crab/LFS track, stage, commit, push, lazy-clone, cold-hydrate, small-edit, fetch/pull, literal-path rename and removal sequence is qualified against writable RustFS. Nested missing-parent restoration now has packaged macOS local/SSH Crab/LFS proof. Confirmed index restoration now has packaged macOS Crab/LFS/Git and selected-identity SSH proof. Extensions/profiles remain open. |
 | Transfers | Shared operation ownership, real logical/network counters, acknowledged cancellation, supported retry/resume, restart recovery and visible terminal failures. | Single-file and selection transfers now share main-process durable intent, native receipts, cancellation and repository drain. Packaged macOS Crab/LFS proof covers renderer reload, cancellation during preparation, process interruption and explicit Activity retry with a fresh session. Packaged selected-identity SSH proof cancels a held cold LFS request before storage release, preserves pointer/index state and retries exact bytes through Activity. Cold-response cancellation, native/main-process interruption and explicit retry now have bounded packaged macOS Crab/LFS proof. Owned scratch is recovered by the next publication; foreign/replaced objects are retained with visible errors and actual publication counts. Both native and main-process publication/receipt-loss boundaries have bounded Crab/LFS proof. Captured per-file versions have packaged local/SSH and restart proof, including source-record read errors and recovery. Origin-body counters now share storage admission across CLI and direct SDK reads, with independent Activity receipts. Warm local transfers, SDK cold/warm ranges and packaged local/SSH interrupted-attempt receipts have bounded macOS/RustFS proof. SDK on-disk fill process-death recovery has final-package macOS proof and focused native Windows/Linux proof; packaged cross-platform qualification, allocation-before-record and remaining publishing surfaces remain open. |
-| Storage | Inspect usage/budget, retain offline content, pin active reads and safely evict cache. Never remove dirty working files or referenced staging. | Native usage/cleanup and packaged Settings preview/cleanup are qualified; retained workspace data and subsequent staged previews survive. SDK namespace cleanup now removes verified shards and decoded ranges while retaining catalogs and query workspaces. Recorded abandoned fills now have shared recovery and bounded packaged macOS proof. Budget editing/enforcement, remaining crash boundaries and offline retention remain open. |
+| Storage | Inspect usage/budget, retain offline content, pin active reads and safely evict cache. Never remove dirty working files or referenced staging. | SDK identities and CLI payloads share one physical-root catalog and retention policy. Packaged macOS Settings proof covers zero/unlimited/limited policy, actual disk reclamation, restart persistence, external CLI updates and byte-identical reads with retention disabled. Active leases, retained workspace data and query workspaces survive cleanup. Recorded abandoned fills have automatic admission recovery and bounded packaged macOS proof. Offline retention, remaining crash boundaries and other platform/provider profiles remain open. |
 | Connections | The same supported operations work through local and SSH connections with the selected storage identity. | Packaged macOS arm64 SSH trust, paired deployment, remote open, preview/materialization, independent sessions, reconnect replay, empty-start access and saved-repository restart/retry are qualified. Local/direct-SDK and SSH saved identities have real two-store proof, including replacement/removal and cold restoration. SDK GUI opening, separate same-URL identities, active/deferred restart and blocked cancellation are qualified. Device connection editing survives native startup and construction failure, including blocked shell discovery; repaired construction retries in the running app. Complete RPC parity, real multi-hop cancellation and other targets/providers remain open. |
-| Qualification | Native Crab and LFS byte-identical round trips; multi-GiB bounded previews; small-edit dedup; interruption/cancel/restart; missing/corrupt objects and changed range validators; visible app results. | Focused native, S3-compatible and packaged macOS preview/integrity/cleanup proof passed. The continuous macOS edit/rename/removal round trip and storage-measured small-edit dedup pass. Whole-file restoration now has bounded macOS local/SSH proof. Cold storage response interruption/restart has bounded macOS proof. Power-loss, allocation-before-record, SDK disk-fill interruption and cross-platform/provider evidence remain required. |
+| Qualification | Native Crab and LFS byte-identical round trips; multi-GiB bounded previews; small-edit dedup; interruption/cancel/restart; missing/corrupt objects and changed range validators; visible app results. | Focused native, S3-compatible and packaged macOS preview/integrity/cleanup proof passed. The continuous macOS edit/rename/removal round trip and storage-measured small-edit dedup pass. Whole-file restoration now has bounded macOS local/SSH proof. Cold storage response interruption/restart has bounded macOS proof. SDK disk-fill process interruption now has bounded packaged macOS proof. Power-loss, allocation-before-record and cross-platform/provider evidence remain required. |
 
 ## Remaining priorities
 
@@ -29,12 +29,13 @@ The acceptance matrix defines completion. The checkpoints below record evidence.
 
 | Priority | Next closure | Canonical boundary | Required proof |
 | --- | --- | --- | --- |
-| P0 | Finish transfer and cache recovery | The main-process [Activity owner](../electron/file-transfers.ts), native publication owner and captured storage readers. | Durable intent, preparation cancellation, renderer reload and explicit restart retry have bounded macOS proof. Cold storage response interruption, completed-sibling preservation, scratch recovery and cleanup-failure counts now have bounded macOS proof. Both rename/receipt process boundaries now have Crab/LFS proof; captured-source provenance has packaged local/SSH and restart proof. Origin-response accounting is implemented through the shared transport boundary. Packaged local/SSH receipt and restart proof is complete for the bounded Crab/LFS fixture. The Windows restoration/index correction and scratch replacement fixture now pass all 11 applicable focused Windows tests; matching-CLI and packaged platform gates remain open. The actual pre-publication SDK cache-file crash now has durable exact-identity recovery and a bounded packaged macOS pass: retry maintenance removes the abandoned 262,160-byte temporary. Native cache recovery now passes focused Windows/Linux checks and the final macOS package. Next: qualify packaged Windows/Linux recovery and allocation-before-record gaps. SDK partial-response retry and namespace cleanup now have bounded macOS proof. An intermittent final-file bulk hydration stall reproduced in the rebased package, then passed three unchanged diagnostic retries; its cause remains open. Exercise missing/corrupt objects and remaining component-owned publishing. |
-| P0 | Enforce storage policy | Existing verified read/cache owners; Settings remains the policy UI. | The desktop currently gives each SDK namespace 512 MiB while CLI policy defaults to unlimited and supplies the budget shown in Settings. Enforce canonical cache.max_bytes through one capacity authority across CLI and SDK namespaces, retain chosen offline content, and evict only unpinned verified cache. Disk retention and operation read limits are separate policies. Active reads, dirty working files and referenced staging must survive pressure, restart and cleanup failure. Measure SDK namespace retention and actual disk reclamation. |
+| P0 | Bound native Git object memory | The [shared blob verifier](../../../crates/crab-git/src/batch.rs), [captured command owner](../agent/src/repository/content/command.rs) and physical Git object reader. | Local raw reads now qualify dense 2 GiB loose, full-pack and delta sources on macOS ARM. The captured reader qualifies a 512 MiB delta at 142,180,352 bytes RSS and a dense 2 GiB delta at 134,414,336 bytes, replacing the earlier 1,195,114,496-byte native allocation. The current restoration producer repeats warm ranges at 1–25 ms across loose/full-pack/delta profiles. Disk rejection, cancellation, capture-output process death/restart and zero-retention active cleanup preserve exact bytes and ownership. Identity restoration now passes the canonical 512 MiB delta and dense 2 GiB loose/full-pack profiles at 108–149 MB RSS. Built-in CRLF, ident and automatic text conversion now pass the 512 MiB profiles at 141–146 MB RSS, including mid-output cancellation and exact retry. The current linear-EOL producer restores exact dense 2 GiB CRLF output at 146 MB RSS, with first reported output at 1.07 seconds and terminal completion at 24.22 seconds under the unchanged 60-second RPC limit. The earlier timeout remains unexplained. Next: encoding/external/process-filter streaming, dense alternate/cross-pack and missing/promisor profiles, and remaining GUI/platform/CLI/SDK owners. The five-target CI gate now adds actual checkout conversion to the three raw range/restoration profiles; final-head execution remains required. |
+| P0 | Finish transfer and cache recovery | The main-process [Activity owner](../electron/file-transfers.ts), native publication owner and captured storage readers. | Durable intent, preparation cancellation, renderer reload and explicit restart retry have bounded macOS proof. Cold storage response interruption, completed-sibling preservation, scratch recovery and cleanup-failure counts now have bounded macOS proof. Both rename/receipt process boundaries now have Crab/LFS proof; captured-source provenance has packaged local/SSH and restart proof. Origin-response accounting is implemented through the shared transport boundary. Packaged local/SSH receipt and restart proof is complete for the bounded Crab/LFS fixture. The Windows restoration/index correction and scratch replacement fixture now pass all 11 applicable focused Windows tests; matching-CLI and packaged platform gates remain open. A corrected packaged macOS probe verifies the recorded 262,160-byte temporary is removed by retry before Settings cleanup, with exact source bytes and zero origin writes. Admission regressions cover bounded/unlimited/zero-root policy, live fills and replacements. The earlier published head established explicit cleanup only. Next: qualify packaged Windows/Linux recovery and allocation-before-record gaps. SDK partial-response retry and namespace cleanup now have bounded macOS proof. The rebased package exceeded the existing five-second visible bulk-hydration deadline, although its failure capture already displayed all three hydrated results. The later durable package passes the canonical case with the unchanged deadline, and passive diagnostics pass. These results do not establish the earlier failure's cause or rule out the previously observed final-file stall. Cold SDK Crab/LFS missing/corrupt reads now have visible typed-error, rejected-read, exact-repair and zero-origin-write macOS proof. Extend those profiles to local/SSH publication and remaining component-owned publishing. The rebased SSH scenario also once switched unexpectedly to Settings after hydration; passive diagnostics and canonical repeats pass, but the navigation cause remains open. |
+| P0 | Enforce storage policy | Existing verified read/cache owners; Settings remains the policy UI. | SDK identity namespaces share the physical root catalog with CLI payloads, replacing separate 512 MiB namespace caps. Root policy constrains existing handles and new fills; configured CLI caller ceilings remain additional limits. Two published 1 GiB SDK read gates expose excess warm origin traffic, including one warm timing failure. The next exact-branch run passes all unchanged ratios with exact bytes and bounded RSS; the prior failures remain unexplained. Retain physical cache inventories and redacted origin ranges to diagnose admission/eviction against the core reader. Packaged macOS proof covers Settings editing, zero-budget exact reads, cross-identity cleanup, physical reclamation, restart persistence and external CLI updates. Retain chosen offline content and qualify eviction of only unpinned cache. Disk retention and operation read limits are separate policies. Active reads, dirty working files and referenced staging must survive pressure, restart and cleanup failure. Cross-platform policy qualification remains required. |
 | P0 | Complete recovery parity | [ProviderRegistry](../electron/provider-registry.ts), local/SSH readiness owners, the encrypted vault and existing document/read owners. | The Intel two-MiB transport deadline is resolved in focused CI without changing its deadline; its matching runtime download/deployment/startup case passed on the earlier head. Complete the final-head platform matrix. Drive auxiliary worktree and cross-repository comparisons, read-only model isolation, Dashboard, Datasets and shared hydration state through their UI entry points during storage rebind and SSH reconnect. Request-owned Git children and native Apply workers now carry the selected saved identity, including filters and hooks. Qualify remaining background Git/status work, removal during SDK opening, real jump-host cancellation and repeated shutdown. |
-| P1 | Scale database and notebook workloads | The [captured reader](../agent/src/repository/content.rs), [native query owner](../agent/src/preview/query.rs), [file query session](../src/lib/file-query.ts) and [kernel owner](../electron/jupyter-kernel.ts). | Measure dense multi-GiB scan memory and use captured ranges for selective Parquet scans. Extend WAL and crash qualification across platforms. Exercise notebook installer failure, worker death, output budgets and network loss, including retry during native-reader outage. |
+| P1 | Scale database and notebook workloads | The [captured reader](../agent/src/repository/content.rs), [native query owner](../agent/src/preview/query.rs), [file query session](../src/lib/file-query.ts) and [kernel owner](../electron/jupyter-kernel.ts). | Verified anonymous captures qualify native dense 2 GiB loose/full-pack/delta warm ranges at 1–11 ms, replacing the earlier 15–30-second repeated verification, including unread-suffix rejection and repair. Large packaged UI workloads remain to qualify. Preserve captured identity; Git exit status or filesystem identity alone cannot authenticate bytes. Measure dense scans and selective Parquet ranges through the packaged UI and main-process deadlines. Extend WAL and crash qualification across platforms. Exercise notebook installer failure, worker death, output budgets and network loss, including retry during native-reader outage. |
 | P1 | Complete advanced repository workflows | Existing provider mutations, [captured diffs](../agent/src/repository/content/diff.rs) and workspace operation owners. | Finish standalone editor RPC parity and task-worktree ownership. Qualify LFS migration, extensions and supported locks, ordinary Git captures, review and mode diffs, plain Git patch cancellation and crash drafts. Distinguish optional SDK configuration absence from missing content objects. |
-| P1 | Finish truthful inspection and bounded formats | Captured native/storage metadata, format parsers and exact filesystem-publication ownership. | Report local/cache/available/pending bytes accurately; retain unknown measurements as unknown. Read-only snapshots should show their availability without probing working-tree-only hydration status. Bound plain-text pointers and decoded formats, and show malformed/oversized failures. Load picker profiles from the canonical `crab.toml` policy, removing the retired `.crab/prefetch.toml` parser. Complete remaining format comparisons and consolidate duplicate command/Activity completion notifications. Dataset mtime filtering needs a native timestamp contract and recursive catalog proof. Apply exact temporary-file ownership to workspace polling and native batch dirty counts; qualify very large inventories, network filesystems and external linked-worktree Git-control changes. |
+| P1 | Finish truthful inspection and bounded formats | Captured native/storage metadata, format parsers and exact filesystem-publication ownership. | Report local/cache/available/pending bytes accurately; retain unknown measurements as unknown. Read-only storage snapshots now skip working-tree hydration subscriptions through the shared hook and show their mode in the footer; packaged macOS snapshot, local hydration and selected-identity SSH cold read/hydration/restart checks pass. Other targets and providers remain open. Bound plain-text pointers and decoded formats, and show malformed/oversized failures. Load picker profiles from the canonical `crab.toml` policy, removing the retired `.crab/prefetch.toml` parser. Complete remaining format comparisons and consolidate duplicate command/Activity completion notifications. Dataset mtime filtering needs a native timestamp contract and recursive catalog proof. Apply exact temporary-file ownership to workspace polling and native batch dirty counts; qualify very large inventories, network filesystems and external linked-worktree Git-control changes. |
 
 File details, Activity and Settings remain the consolidation points. Reuse one
 captured read/reconstruction path, one vault, one repository operation owner and
@@ -99,21 +100,783 @@ buttons do not trigger repeated-file activation. Both Crab/LFS cases fail on
 the earlier package and pass after the fix. The six-case fixture is included in
 the canonical packaged smoke runner.
 
-Settings composes the existing CLI cleanup report with the shared cache owner's
-namespace cleanup. It captures the private `desktop-content` parent, traverses
-only hash-named SDK namespaces and applies each namespace's catalog ownership.
-Unknown siblings, catalogs and query workspaces remain retained. Preview uses
-the private read-only catalog snapshot, so live logical leases are reported busy
-without writes; actual deletion also serializes catalog retirement. The same
-owner check protects the CLI's flat cache. Namespace enumeration and deletion
-stay under captured directory descriptors, including after a parent replacement.
+Settings uses the CLI cleanup report from the shared physical root. SDK payloads
+live under `namespaces/<identity-hash>/`; their SQL owners, reservations and
+policy use that same root catalog. Unknown siblings, catalogs and query
+workspaces remain retained. Preview uses the private read-only catalog snapshot,
+so live logical leases are reported busy without writes; actual deletion also
+serializes catalog retirement. Namespace traversal stays under captured directory
+descriptors. The former separate SDK namespace cleanup pass is removed.
 
 A seventh packaged case removes three real SDK payloads (a shard and two decoded
 ranges), verifies exact preview/removal counts and physical reclamation, retains
 catalog/query state and reopens byte-identical content with no origin writes.
 Cache coordination markers use private permissions so cleanup does not make
-subsequent usage inspection report its own marker unsafe. One enforced retention
-budget and cache-file interruption remain open in the priority table.
+subsequent usage inspection report its own marker unsafe.
+
+An eighth packaged case fills two saved identities for the same repository URL,
+then changes their shared retention budget through Settings. Zero removes eligible
+payloads while retaining query state; complete reads remain byte-identical without
+new retained payloads. A limited budget survives application restart, and an
+external bundled CLI update is visible to the already-running application.
+Inventories, allocated disk blocks and zero origin writes are checked. Root policy
+is persisted in the catalog; deleting the catalog resets it. Retained metadata and
+active reads can exceed this soft retention limit. Durable offline retention is
+still unimplemented.
+
+### Complete LFS disk retention
+
+SDK `ContentCache` now retains complete verified LFS bodies in its existing
+identity namespace, using native SHA-256 and the shared physical-root catalog.
+Fills reserve the declared size and use the common exact-temporary journal;
+incomplete, canceled or hash-invalid bodies never publish. Partial origin reads
+continue through the canonical LFS verifier without retaining an incomplete body.
+Cached reads use captured descriptors through that same whole-file and bounded
+block verifier. Between operations, captured proofs retain only hashes; each
+later read checks its newly supplied descriptor. Idle snapshots therefore permit
+eviction. Delivery batches cache reads in 1 MiB while emitting at most 64 KiB
+per stream item. Verification and admitted cache writes drain before close
+acknowledgement. Cancellation preserves healthy cached bytes. Source key,
+SHA-256, size and captured-source mode jointly scope retained proofs.
+
+Native checks cover accounting, exact cleanup, corruption, caller size conflicts,
+active reads under pressure and zero retention. Real SDK integration covers a new
+client reading exact complete/ranged bytes after the origin payload is removed,
+corrupt-cache repair, canceled-fill drain, response limits and zero-budget reads.
+The live-snapshot check retains block proofs while maintenance reclaims the file.
+An exact descriptor-replacement regression fails before the proof ownership
+correction and passes afterward. Origin corruption/admission assertions
+retain cold reads with a zero-retention cache; they cannot use a warm immutable
+object as evidence about the current origin. The existing archive-close test
+caught a cached cancellation being reported as I/O; the source now preserves
+cancellation and the unchanged close assertion passes.
+
+The earlier unsigned macOS package reproduces the visible restart failure when
+only the LFS origin payload is unavailable. The new package passes all fifteen
+SDK cases. Three new LFS cases prove exact 4,194,413-byte reuse after application
+restart with that origin payload unavailable, real Settings preview/cleanup and
+physical reclamation, and a shared zero/limited budget across two identities.
+Budget persistence and external CLI changes are visible after restart; zero
+retention still permits exact reads. The fixture records zero origin writes.
+All 869 packaged assets, 1,717 frozen native inputs and the local/SSH native pair
+match the qualification inputs. These are bounded macOS checks against the
+owned S3-compatible fixture; other platforms/providers remain unqualified.
+This is disposable content retention, not durable offline selection:
+repository metadata reopening and protected offline versions remain
+P0 work. Local worktree/CLI readers keep their existing `.git/lfs` source and
+verification path; no second reconstruction implementation or remote receipt
+writer is introduced.
+
+The SDK platform matrix now runs the cache owner's complete applicable library
+tests with local, HTTP and decoded-range persistence on Linux, macOS and Windows,
+alongside the SDK's real storage integration. This exercises LFS publication,
+leases, journal recovery and cleanup on each native filesystem. Adding the gate
+does not qualify those platforms; its new-head results are still required, as
+are packaged UI recovery and provider-specific profiles.
+
+The packaged storage runner now admits Linux to the same owned RustFS fixture
+and complete smoke selection used by macOS ARM and Windows, under Xvfb in CI.
+It selects the Linux bundle and adjacent resources instead of the macOS layout;
+the full bootstrap regression fails before that correction and passes afterward.
+Linux x86-64 and ARM64 archives retain the existing RustFS 1.0.3 release and are
+checked against its official archive digests before extraction. Both downloaded
+archives and their ELF architectures are verified; seven fixture tests and YAML
+validation pass. New-head native execution and packaged Linux recovery remain
+required. Intel macOS has no native fixture asset in this pinned release.
+
+Transfer admission also validates the current native repository epoch before
+looking up captures or saving an Activity intent. Expired single-file and batch
+hydrate/dehydrate/restore calls retain the shared `NATIVE_SESSION_LOST` error;
+they cannot create an Activity record or dispatch work. Four regressions fail
+before this ordering correction; all 53 focused transfer tests pass afterward.
+The packaged stale-reader check supplies a valid operation identity so it reaches
+session validation rather than failing the transfer request's prerequisites.
+The updated unsigned package passes native recovery and both SDK native-crash
+cases: stale captures are rejected, old media URLs expire and fresh Crab/LFS
+captures materialize correctly. Both pending text/Markdown save cases also pass.
+
+Recovery fixtures now use the named Settings radio group and a shared matcher
+for the canonical packaged native executable. The parent PID remains required.
+Passive process captures show the same agent survives a canceled Quit and Git
+metadata relocation; the fixture mismatch was the mounted-volume path alias and
+an assumed trailing argument. Local and SSH editor/publication cases pass after
+the fixture correction, with data, mode, index, failure, reconnect and timing
+assertions retained. Notebook/runtime and other platform qualification remain
+separate from these control-selector and process-identity corrections.
+
+The shared ownership/policy cache checks pass on macOS (234), Windows (117)
+and Linux (235), using each platform's applicable tests. The Windows run initially
+stopped before range operations because two fixtures set mtime through read-only
+handles. Their opens now request the write access required by `SetFileTime`;
+integrity, eviction, recency and deadline assertions are unchanged. This is native
+cache evidence, not packaged Windows/Linux qualification.
+
+After the shared-control/theme rebase, the unsigned macOS package repeats all
+eight SDK cases, the exact filled-temporary crash, unavailable-policy repair,
+local whole-file restoration and the complete selected-identity SSH scenario.
+All twelve Crab/LFS transfer-recovery cases and the continuous writable-store
+edit/rename/removal lifecycle also pass. First-run consent now
+waits for the welcome tour to finish; two simultaneous modal dialogs had made
+the visible Skip control inaccessible. Tests drive the actual in-app
+confirmations and shared menu/radio/button roles without changing byte, staging,
+receipt, cancellation or timing assertions.
+
+### Offline retention boundary
+
+Permanent offline selections cannot use an indefinite row in the disposable
+cache catalog. The shipped cleanup contract in
+[`catalog/removal.rs`](../../../crates/crab-cache/src/catalog/removal.rs)
+permits safe payload reclamation when that catalog is absent or corrupt. A pin
+stored only there could silently lose the content it promises to protect.
+Retained selections need a durable owner outside disposable eviction authority,
+while continuing through the existing verified read/reconstruction path.
+
+Saved bodies alone also cannot reopen a remote snapshot. SDK
+[`capture_repository`](../../../crates/crab-sdk/src/client.rs) loads the root,
+ref frontiers and browse indexes before constructing the captured Git reader;
+Crab content additionally needs its captured pointer catalog. Offline admission
+must bind the saved storage identity, exact commit, selected byte paths and
+required metadata/content closure. Reopening must explicitly select that saved
+capture without probing the origin or silently substituting a newer revision.
+Settings owns selection/removal and usage; Files opens the saved capture and
+Activity owns preparation, cancellation and visible failure. Completion requires
+restart with the entire origin unavailable, budget pressure and explicit cleanup
+preserving selected bytes, exact reads/diffs/previews, and interrupted preparation
+never presenting an incomplete selection as ready. This remains unimplemented
+P0 scope in the priority table, not a claim made by disposable LFS retention.
+
+A packaged macOS probe confirms the missing boundary: after an exact complete
+LFS read and application restart, the retained 4,194,413-byte body still matches
+its SHA-256, but rejecting all origin reads causes two `/v2/root` requests and
+a visible snapshot-opening failure. The probe observes the current gap; it
+does not qualify offline reopening. The canonical retention test continues to
+cover the narrower case where only the origin LFS payload is unavailable.
+
+### SDK warm origin-traffic regression
+
+The published SDK 1 GiB performance run `43321651900` fails only the warm
+origin-body ratio: median paired SDK/core ratio 1.9998656 versus the allowed
+1.10. All twenty cold/warm trials return exact bytes and hash with zero origin
+writes; peak RSS is 469,118,976 bytes under 512 MiB. Cold origin bytes have ratio
+1.0, warm wall time 1.0274 and warm requests 1.0833. Both paths use the shared
+read runtime and a 2 GiB physical catalog limit. SDK cache defaults do not
+replace the supplied catalog limit. These facts do not establish the excess
+traffic's cause: physical admission, reservations, eviction and encoded/decoded
+retention need comparable inventories. Keep the failing gate and thresholds;
+local restoration results do not close this separate SDK regression.
+
+The repeated run `43334601074`, merge source `78647e8b753b`, fails both warm
+wall time (paired ratio 1.1073904) and origin bytes (1.4999664). All twenty reads
+again verify exact 1 GiB bytes/hash, with zero origin writes/failures and
+463,183,872 bytes peak RSS. Its official artifact SHA-256 is
+`5d105239ff3b47ab6e91b67d8bc16db6b69f6b8f1665b053f2470f85a3a105dc`.
+The shared cache completion tests already hold real fills until completion;
+origin range GETs are not automatically retained as encoded files. Neither an
+unjoined final fill nor duplicate encoded/decoded retention is established as
+the cause. Obtain physical inventories before changing admission or eviction.
+That published head's SDK stable, Linux/macOS/Windows, contracts/packages,
+shared recovery and RustFS/minimum-Git jobs pass; they do not qualify later
+checkout source changes. Live provider jobs are skipped.
+
+Exact-branch run `43354455098` at `bc009f6318e8` passes all twenty exact 1 GiB
+reads with zero origin writes/failures and 465,588,224 bytes peak RSS. Median
+paired cold wall ratio is 1.0012211; warm wall is 0.9718693. All request and
+response-byte ratios are 1.0. The official artifact SHA-256 is
+`68a35fa2b76b648da0ecec869742a5d6f0fee2c9a17a789dd7be16ccf7a4eea7`.
+This passing repeat does not identify or fix the two earlier failures. The
+qualification runner now records retained relative filenames/logical/allocated
+sizes and hashed origin paths, requested ranges and request completion state.
+Inventory capture runs after each measured reader exits and before owned cache
+deletion; signed query strings and authorization headers are excluded. Nine
+scoped Python cases pass, including actual pending/completed HTTP forwarding
+and refusal to follow payload symlinks. The next controlled run must qualify
+these diagnostics before drawing an admission/eviction conclusion.
+
+### Complete ordinary Git body verification
+
+Complete Git-backed reads, small-pointer classification and database snapshot
+copies authenticate the captured object ID, kind, size, body terminator and EOF through the shared Git batch
+verifier. The native copier also handles restoration's pre/post-conversion proof
+using a sink. Git may return a valid compressed body under the wrong object
+filename and exit successfully; length and process status alone cannot authorize
+a decoded preview or publication. Buffered reads expose no bytes on failure,
+and temporary-file callers retain cleanup ownership until the copier returns.
+
+The same bounded checksum loop handles copying, administrative blob verification
+and small-object visits. Working-file descriptor checks, Crab/LFS reconstruction
+and SDK remote Git decoding retain their existing owners. Partial Git ranges
+now use that same whole-object verifier, retaining only selected bytes and
+requiring successful EOF and process exit. The unchecked early-success path
+is removed. Each range scans the complete decoded Git body; Rust body buffers
+retain the selected range and the verifier's 64 KiB buffer. This guarantees
+integrity but repeats whole-object work on warm reads. Durable offline captures
+remain unimplemented. Native Git's own memory needs separate qualification.
+
+The complete-read, file-copy and small-pointer regressions fail before their
+source corrections. Nine shared Git tests and 34 focused native content tests
+pass; nine existing store/CLI cases remain ignored in that focused selection.
+Strict Git-crate lint, production-agent lint, Rust formatting, product types
+and strict touched E2E types pass. Production-agent warnings remain. All-targets
+agent lint remains red on 1,377 errors in pre-existing test code under its
+crate-level panic rule; no primary error span intersects changed lines, and
+the new regression module has no diagnostics. No lint suppression is added.
+
+The unsigned macOS ARM package passes both the new corruption/repair case and
+the canonical SQL workflow (two cases, 19.5 seconds). Files shows checksum
+errors for an 11,776-byte text body, a 274,432-byte SQLite body and a small LFS
+pointer whose replacement payload is otherwise valid. Repair restores exact
+bytes, the original LFS identity and SQLite value 17. Failed copies leave no
+query snapshots; working files and the real index remain unchanged. The SQL
+workflow also covers selected revisions, WAL, Crab/LFS sources, cancellation,
+native restart and read-only queries. Its revision selector now targets the
+current Radix trigger rather than retired descendant native options.
+
+Native producer `7b586510e05060703effb7508042f4a5cad27c82` matches all 869
+packaged assets and 1,718 frozen native inputs, including the staged local/SSH
+runtime pair. Native input digest:
+`9320b02f56fccf4eb61048debb43ffe96c4bb85152ed44ad71b2fc09dc1063ed`.
+Earlier cache/SDK/platform receipts retain their own producer attribution.
+This package qualifies the complete Git paths on macOS; partial Git ranges,
+durable offline versions and the remaining platform/provider matrix stay open.
+
+The subsequent native producer `0a6c98b1f21be7b2726c02d493659f263ee19af1`
+qualifies partial Git reads on macOS ARM. All 37 focused content tests pass,
+with nine existing ignored cases. The release-built native qualifier reads
+4 KiB at the head, unaligned middle and tail of a 2 GiB object, rejects a changed
+unread suffix, then proves repair, typed cancellation and a fresh exact read.
+The process tree peaks at 135,430,144 bytes RSS; the complete fixture takes
+33.56 seconds. Its sparse source produces a 2,087,325-byte compressed object,
+and setup warms the OS cache. This is bounded-memory integrity evidence,
+not dense or cold-origin performance proof. Each successful range takes
+3.65–3.71 seconds: warm range efficiency remains P1 work. Its owner must retain
+bounded authenticated proofs or verified bytes; a successful earlier Git exit,
+path identity or matching size cannot authenticate a later selected range.
+
+The matching unsigned package passes the selected SQL workflow and the extended
+corruption/repair case (two cases, 29.3 seconds). The latter checks a direct
+captured range and a 3,072,044-byte WAV with corruption beyond the media window.
+Audio shows a checksum error before repair, then reports its 16-second duration,
+seeks and plays after repair. All 869 packaged assets, 1,718 frozen native inputs
+and the local/SSH pair match. Native input digest:
+`422c339854eab7e6feb9990a5ee5865fa148a5b1ab60457e98cb909789eedaee`.
+The qualifier is wired into all five native CI targets with the existing SDK
+memory reporter; their new-head results remain required.
+
+The subsequent SHA-1 correction uses the existing locked `sha1dc` backend shared
+with generated Git objects. All ten shared verifier tests pass, including typed
+Gitoxide collision-error and unmodified-digest parity across update boundaries.
+All 37 native content tests pass; warmed captures also reject changed suffixes.
+The release-built compressible 2 GiB fixture passes with 162,791,424 bytes peak
+RSS and 1.20–2.30-second selected reads, versus 3.65–3.71 seconds in the prior
+run. Its 24.90-second total includes fixture setup. A separate hash-only probe
+measures a 3.23× median speedup; that is not an end-to-end I/O measurement.
+The source adds no retained proof cache or new dependency/API.
+
+Its unsigned macOS ARM package passes the selected SQL workflow and the
+text/SQLite/pointer/audio corruption-and-repair case (two cases, 34.1 seconds).
+All 869 assets, 1,718 frozen native inputs and the local/SSH pair match native
+producer `4450f88e12fd1067eaf7316fff00571e2ccd0a03`; input digest:
+`7e60a8e657c3f2c520b665049533bd406fc4e973270d4688645ae8969a01c5a5`.
+
+A separate dense 2 GiB probe of that producer exposes a physical-reader memory boundary. Its valid
+level-zero zlib loose object occupies 2,147,729,435 bytes. Selected bytes, suffix
+corruption rejection, repair, typed cancellation, index/source preservation and
+close all pass, but process-tree RSS reaches 2,197,651,456 bytes. The 512 MiB
+qualification therefore fails despite a successful native exit. The first read
+takes 19.29 seconds; later reads vary from 1.40 to 8.57 seconds. Setup warms the
+OS cache, so this does not qualify cold physical I/O. Git's
+[loose-object stream](https://github.com/git/git/blob/v2.50.1/streaming.c#L215-L246)
+maps the compressed object, matching the per-process measurements below. The
+hashing improvement does not close this memory failure; it motivates the
+streaming reader below.
+
+An instrumented repeat attributes 2,141,782,016 bytes RSS to one native Git child;
+at the process-tree peak the sidecar uses 17,235,968 bytes and the Node harness
+35,373,056 bytes. The new loose-object reader streams physical input through the
+shared body/checksum owner, requiring a complete zlib footer and physical EOF.
+Ranges and full copies share descriptor ownership and joined cancellation.
+Lookup preserves native Git's nested relative alternates, cycles, quoted paths
+and native bytes, with a shared 8 MiB metadata/path budget. Packed non-delta
+reads retain supervised Git with a streaming threshold and 32 MiB windows under
+a 64 MiB mapping limit; these settings affect only the captured read process.
+Fifteen shared tests and 38 native content tests pass, including packed/alternate
+byte parity, truncated-footer rejection and cancellation. Strict shared-crate and production
+agent lint pass. One direct edge records the already-locked `gix-quote` 0.7.2;
+no dependency version or checksum changes.
+
+Native producer `cc90d6706d9ee0f0ec4d67a4d6c1d3893778e0eb` passes the strengthened
+repository qualifier with that same dense 2 GiB object. Process-tree peak RSS is
+124,157,952 bytes under the unchanged 512 MiB ceiling; the sidecar's individual
+peak is 21,299,200 bytes. Exact head/middle/tail ranges, unread-suffix rejection,
+repair, typed cancellation, a fresh read, index/source preservation and owned
+cleanup all pass. The complete fixture takes 163.51 seconds, including writing
+and replacing physical objects. Successful 4 KiB reads take 1.40–9.38 seconds;
+the first takes 4.81 seconds. Whole-body decoding and verification still happen
+on every request, and setup warms the OS cache: efficient warm ranges and cold
+physical I/O remain unqualified. The same dense fixture now runs on all five
+native CI targets with the original limits and integrity assertions.
+
+Frozen native inputs: 1,718 files, digest
+`087a967eca0aaac9dd00c4b1513ada11f3783a635e55ca23600385e99993086f`.
+The matching unsigned macOS ARM package passes the selected SQLite/WAL/Crab/LFS
+query workflow and text/SQLite/pointer/audio corruption-and-repair case (two
+cases, 24.4 seconds). Screenshots show the checksum error, repaired SQLite value
+17 and repaired 16-second audio with seeking/playback. All 869 packaged assets
+and the local/SSH native pair match the frozen producer inputs.
+
+The [native qualifier](../scripts/qualify-git-ranges.mjs) also accepts `--packed`
+to exercise a real single-blob pack created by Git. It checks the physical pack
+header and absence of a loose copy. A same-sized valid compressed replacement
+retains the captured pack/index trailer relationship; full blob authentication
+must reject its changed unread suffix. The dense 2 GiB pack occupies
+2,147,811,371 bytes and passes at 124,567,552 bytes process-tree RSS in 142.28
+seconds. The same updated harness repeats loose qualification at 123,109,376
+bytes in 140.61 seconds. Both preserve range bytes, checksum failure, repair,
+typed cancellation, fresh reads, index/source identity and owned cleanup.
+Setup warms the OS cache; successful packed requests take 2.28–17.26 seconds.
+Both physical-format profiles now run serially against the same native producer
+on all five CI targets, each retaining the 512 MiB ceiling and original deadlines.
+This establishes macOS ARM native non-delta pack behavior. Packed deltas, dense
+alternate workloads, filtered restoration, other CLI/SDK object-reading entry
+points and remaining GUI/platform profiles still require qualification.
+
+A separate two-phase delta probe confirms that the non-delta settings do not
+bound delta reconstruction. Preparation and native Git pack verification finish
+before measurement. A valid depth-one 512 MiB blob uses a 24,311-byte delta
+program in a 2,359,920-byte pack. Exact head/middle/tail reads, typed cancellation,
+a fresh read, index/source preservation and close pass in 3.81 seconds, but the
+measured native read process tree peaks at 1,195,114,496 bytes and fails the same
+512 MiB budget. One Git child reaches 1,080,623,104 bytes; the sidecar stays below
+22 MiB. Git's [stream source selection](https://github.com/git/git/blob/v2.50.1/streaming.c#L390-L420)
+uses its in-core reader for deltas. That producer's shared delta decoder also
+materializes complete base/result buffers. The replacement must retain one delta
+instruction validator while decoding through bounded buffers and admitted,
+owned scratch, preserve full target checksum verification, and qualify both
+offset and reference bases, cancellation and cleanup. This is an observed P0
+memory failure, not completed delta support.
+
+The subsequent local implementation adds bounded physical packed reads. Index
+versions 1/2, 64-bit offsets and SHA-1/SHA-256 use direct file windows. Offset and
+reference delta ancestry is collected iteratively; reference bases prefer the
+source pack before external aliases. One anonymous admitted file holds all
+programs, while seekable base/result files share the same scratch authority.
+This bounds descriptors and avoids recursive stack growth. The existing delta
+walker now supports buffered validation/application and seekable copying; the
+existing full-object verifier still authorizes delivery. Files close before the
+joined read returns, including cancellation or disk rejection. Desktop scratch
+has an 8 GiB operation ceiling and a 1,024-entry ancestry limit, independent of
+retention policy; zero retention continues to permit exact reads.
+
+Twenty-three shared batch/physical-read tests, nine delta tests, 17 incoming-pack
+consumer tests and the sibling I/O source-mapping test pass. Native content has
+39 passing cases and nine existing ignored cases. Proof includes native-verified
+128-link ancestry, large index offsets, both hash/base forms, index version one,
+in-pack reference priority, disk rejection and cancellation after output starts.
+Strict shared lint and production agent lint pass with the latter's existing
+warnings.
+
+Native producer `a5b0b808f92935b7180dd4aaad7d0456b7bae3d0` passes the exact
+512 MiB delta reproducer at 115,982,336 bytes process-tree RSS, versus the prior
+1,195,114,496 bytes. The complete read/cancel/retry fixture takes 7.36 seconds.
+The dense 2 GiB delta also passes, at 133,513,216 bytes RSS in 100.03 seconds.
+Its native-verified 2,147,745,518-byte pack has a 97,943-byte program at offset
+2,147,647,516, exercising the large-offset table. Both preserve exact ranges,
+typed cancellation, fresh reads, source/index identity and close. Preparation is
+excluded from measurement. Successful dense reads take 15.49–29.61 seconds:
+bounded memory is established, efficient warm ranges are not.
+
+An owned-process fault observes 18,812,839 bytes of unlinked admitted scratch
+before killing only the probe agent. No anonymous temporary paths survive.
+A fresh agent reopens the same metadata and passes exact reads/cancellation/
+cleanup at 112,902,144 bytes RSS. This is process-death evidence, not physical
+power-loss simulation. The canonical dense full-pack and loose profiles also
+pass on this producer at 139,755,520 and 121,372,672 bytes respectively, including
+unread-suffix rejection, repair and cleanup.
+
+Saving and inspecting the existing CLI retention budget at zero still permits
+the exact 512 MiB delta read/cancel/retry sequence: 119,291,904 bytes peak RSS,
+7.87 seconds, source/index preserved and owned files cleaned. Operational
+scratch does not become retained cache content or inherit its zero ceiling.
+
+The matching unsigned macOS ARM package passes both selected SQL and
+text/SQLite/pointer/audio corruption-and-repair workflows (two cases, 24.9
+seconds). Inspected screenshots retain repaired SQLite value 17 and 16-second
+audio seeking/playback. Native input count: 1,721; digest
+`b6c5d40a541621986b41f3e3542f2358b5dd4a54f97bc8ea4f00f0557e0c6fd7`.
+Earlier package receipts retain their exact producer attribution. The dedicated
+2 GiB delta, process-death and zero-retention probes remain local evidence;
+filtered conversion, remaining physical aliases/entry points and platform/
+provider/UI profiles remain open.
+
+The native platform workflow now prepares a real 512 MiB delta with
+[`prepare-git-delta.mjs`](../scripts/prepare-git-delta.mjs) before invoking the
+measured reader. Native Git verifies the delta and reconstructed size, and no
+loose body may shadow its pack. Preparation is excluded because Git's builder
+itself allocates complete delta bases. The shared
+[`qualify-git-ranges.mjs`](../scripts/qualify-git-ranges.mjs) actor retains exact
+head/middle/tail, typed cancellation, fresh read, source/index preservation and
+close/cleanup assertions. Existing dense loose/full-pack profiles retain their
+unread-suffix rejection and repair checks. The new guard rejects the preceding
+reader at 1,209,516,032 bytes RSS despite passing native assertions; the bounded
+reader passes at 132,677,632 bytes with the unchanged 512 MiB ceiling. Dense
+loose/full-pack repeats through this actor pass at 113,524,736 and 122,322,944
+bytes, including fault/repair assertions. Five native targets are wired; local
+execution alone does not establish their results.
+
+A real `files_restore` operation on that 512 MiB delta still reaches
+1,194,983,424 bytes RSS with the bounded reader. It restores exact bytes,
+preserves the index and closes/cleans successfully, but fails the memory gate.
+The conversion owner invokes Git `cat-file --filters`, which loads the complete
+object even when no attributes require conversion. Locked `gix-filter` 0.30.0
+also requires a complete slice for `convert_to_worktree`; substituting its
+pipeline does not resolve the allocation. Filtered restoration therefore
+remains a measured P0 owner, including EOL, ident, encoding and custom-filter
+semantics. The raw-read memory result must not be relabeled as restoration
+support.
+
+### Git restoration conversion ownership
+
+Restoration now selects conversion under its private index through the
+[conversion owner](../agent/src/repository/content/command/conversion.rs).
+When checkout bytes are unchanged, one bounded physical copy authenticates its
+own output; it avoids Git's whole-object allocation and the two surrounding
+verification passes. The identity cases include absent conversion attributes
+with autocrlf disabled/input, explicit `eol=lf`, and typed `-text`. Git resolves
+working/index attributes and boolean configuration. `--all` plus an exact
+literal attribute pathspec distinguish absent/false attributes from literal
+values such as `filter=unspecified` or `text=unset`.
+
+Ident, CRLF expansion, encoding and external filters retain Git conversion and
+its before/after input verification. Their bounded streaming remains a P0;
+identity conversion does not close that requirement. Both choices retain
+working-file/index publication checks, selected credentials and joined
+cancellation. A failed progress observer cancels and joins physical copying
+before the publication workspace is reclaimed. Progress callbacks run on joined
+blocking workers, preserving the transfer reporter's synchronous-to-async
+notification contract. Its regression rejects an async-context callback.
+
+Ten focused restoration tests pass, including thirteen Git-oracle
+configuration cases, reserved filter names, missing working attributes, scoped
+smudge credentials, corrupt/missing objects, concurrent edits, index replacement
+and cancellation across both choices. The separate matching-CLI Crab/LFS test
+also passes its reconstruction and concurrent-work cases. The actual transfer
+reporter's blocking notification pattern fails before the callback correction
+and passes afterward. Production-agent lint passes with the same 149 existing
+warnings. The preceding runtime fails the original 512 MiB restore guard at
+1,213,399,040 bytes RSS. The canonical range actor now additionally restores real
+unstaged changes and checks exact bytes/index/close under the existing limits;
+it rejects the previous runtime at 1,153,974,272 bytes despite native exit zero.
+
+Native producer `b1bfa9c1f0554c8492b4f2c25462dd20d28ed8de` passes all three
+range/cancellation/restore profiles:
+
+| Physical source | Restored bytes | Peak process-tree RSS | Restoration time | Complete actor time |
+| --- | ---: | ---: | ---: | ---: |
+| Real 512 MiB delta | 536,870,912 | 148,733,952 | 5.38 s | 11.09 s |
+| Dense 2 GiB loose, explicit `-text` | 2,147,483,648 | 108,314,624 | 14.02 s | 128.05 s |
+| Dense 2 GiB full pack | 2,147,483,648 | 120,324,096 | 27.49 s | 204.00 s |
+
+Exact ranges, full restored SHA-256, typed cancellation/fresh read, source/index
+preservation, close and owned cleanup pass. Loose/full-pack unread-suffix
+corruption and repair assertions remain. Setup warms the OS cache; these are
+not cold-disk throughput measurements. All three profiles enable restoration
+on the five native CI targets with the unchanged 512 MiB memory, 60-second RPC
+and 600-second actor limits. Other target execution remains required.
+
+The complete native/renderer/Electron build and unsigned macOS ARM package pass.
+Frozen native inputs: 1,724 files, digest
+`b82166cdaa0c4a81ff5b4159b43b1afba6b36248d318d90255b1bc3c4afc6be5`.
+Warm 4 KiB ranges repeat at 1–25 ms on this producer; first captures take
+2.14–25.73 seconds. Actual conversion streaming and its multi-GiB proof remain
+P0 work.
+
+The extended packaged regression exposes two UI ownership defects before their
+corrections. A background listing checksum error hid all loaded paths and a
+successful retry left the error set. Explorer now has one request path keyed by
+repository, native session and revision. It retains that selection's last list
+with a visible refresh failure, clears the failure on success and rejects stale
+results. Retained paths never authorize content: fresh previews still reject
+text, SQLite, pointer and media corruption. The shared revision selector also
+stopped the global palette shortcut while focused. Only palette opening now
+runs before the control boundary; push/pull/commit retain bubbling routing.
+
+The final unsigned macOS ARM package passes the selected SQLite/WAL/Crab/LFS SQL
+workflow and extended Git integrity/recovery/restoration workflow: two cases,
+27.2 seconds. The latter proves the retained tree and visible listing error,
+explicit repair/retry, palette opening from the focused revision control,
+confirmed restoration, exact disk bytes, unchanged index and cleared modified
+badge. All thirteen shared-control browser cases also pass, preserving scoped
+typeahead, navigation, focus restoration and accessibility. Product types,
+strict touched E2E types and Rust formatting pass. SQLite returns 17, repaired audio seeks/plays for the same 16-second
+fixture, query workspaces are removed, and cancellation/native restart checks
+remain. Screenshots inspected. The local and SSH runtime pair and all 869 assets
+match the package; its native producer remains `b1bfa9c1f055` above. This bounded
+GUI case does not qualify multi-GiB conversion or the full platform matrix.
+
+### Built-in checkout conversion qualification
+
+The subsequent implementation uses authenticated capture windows for built-in
+ident and line-ending conversion. It retains the raw Git OID for SHA-1/SHA-256
+identifier expansion, replays long candidate spans from owned seekable bytes and
+applies Git's complete post-ident auto-text classification before CRLF expansion.
+Typed private-index attributes distinguish booleans from reserved-looking values;
+Git normalizes configuration booleans, including case-insensitive `input`.
+No raw-object decoder or dependency is added. Encoding and actual external/process
+filters still retain Git's existing conversion owner and unbounded allocation.
+
+The real forced-CRLF baseline at published `2d0389b566f2` restores the exact
+536,870,914 converted bytes and preserves the index/close/cleanup, but peaks at
+1,470,988,288 bytes RSS in 8.11 seconds, failing the unchanged 512 MiB gate.
+Fixture preparation and the independent Git oracle are outside measurement.
+The new source has 34 passing shared batch/capture tests, including global
+text/ident oracle cases, long candidates across windows, SHA-256, corrupted and
+empty captures, and generated fragmented tokens. A cancellation regression fails
+before replacing the generic copier's `Interrupted` retry and passes afterward.
+Eleven native restoration tests pass with one existing ignored matching-CLI case;
+callback tests cover actual async notifications and typed failure without
+publication. The broader native content selection passes all 47 applicable tests
+with nine existing ignored cases. Strict shared all-target lint passes; production
+agent lint passes with the same 149 existing warnings. The separate matching-CLI
+Crab/LFS restoration case also passes against the new native pair.
+
+Native producer `e47f928f0dcd` passes actual 512 MiB delta restoration against
+independent Git checkout oracles:
+
+| Conversion | Converted bytes | Peak process-tree RSS | Complete actor |
+| --- | ---: | ---: | ---: |
+| Forced CRLF | 536,870,914 | 140,738,560 B | 9.51s |
+| Ident | 536,870,955 | 144,293,888 B | 13.49s |
+| Automatic CRLF, dense ASCII | 536,870,914 | 145,506,304 B | 10.25s |
+| Ident + automatic CRLF, canonical range/cancel/restore actor | 536,870,957 | 145,899,520 B | 23.21s |
+
+The combined actor cancels after 50,200,620 converted output bytes. Typed
+acknowledgement follows joined cleanup; dirty work and index survive and no
+publication scratch remains. Retry publishes exact Git bytes in 6.74 seconds.
+Raw warm ranges take 1–2 ms; raw read cancellation/fresh capture and final
+close/owned cleanup also pass. `prepare-git-delta.mjs --checkout` computes its
+Git oracle outside measurement; the existing range actor checks the converted
+SHA-256 without changing its 512 MiB/60s/600s/5s limits. The CI matrix now runs
+this additional case on all five native targets; execution remains required.
+
+Producer `e47f928f0dcd` fails a separate dense 2 GiB full-pack forced-CRLF
+profile with a 2,154,954,754-byte independent streaming Git oracle. RSS stays at
+128,106,496 bytes, but `files_restore` exceeds the unchanged 60-second RPC
+deadline; close and owned cleanup pass. Later phase-aware and linear-checkout
+receipts below qualify exact publication on their own producers. They do not
+establish the earlier timeout's cause.
+
+The first packaged repeat on `e47f928f0dcd` passes selected SQL and restores
+exact ident/CRLF bytes, but its modified badge remains. A passive diagnostic
+proves native Git itself still reports `M`, with the exact original index bytes.
+Git's [cached-size check](https://github.com/git/git/blob/v2.50.1/read-cache.c#L443)
+can report changed content immediately for a different nonzero stat-cache size;
+its [checkout owner](https://github.com/git/git/blob/v2.50.1/entry.c#L413) updates
+that advisory cache after writing.
+
+The subsequent source reuses the shared stat writer already used by CLI and
+pointer publication. A verified OID fence avoids retaining the large raw body;
+output stat is captured before rename and refreshed after successful publication.
+Staged object IDs, modes, paths and sibling staging remain exact. Failure and
+cancellation still preserve the complete index bytes. Twelve native restoration
+tests and four shared stat tests pass, including native Git clean status and
+replaced-index fences through both small-byte and OID inputs. All 48 applicable
+native content cases pass (nine existing ignored). Strict shared all-target
+lint with `facade`, production-agent lint (149 existing warnings), touched E2E
+types and formatting pass.
+
+Native producer `131a0f016f91` builds the complete CLI/sidecar/renderer/Electron
+application. Its canonical combined checkout guard passes at 141,099,008 bytes
+RSS in 104.37 seconds, with 32.28-second restoration and 1–2 ms warm ranges.
+Cancellation after 22,020,140 output bytes preserves the dirty working file and
+complete index, removes scratch, and retries exact 536,870,957-byte output.
+Successful publication preserves all staged entries while updating advisory
+stats. Timing varies on the shared local volume; no throughput improvement is
+claimed and the dense deadline remains open.
+
+Two fresh unsigned packaged macOS workflows pass in 28.8 seconds. The confirmed
+palette action publishes exact ident/CRLF bytes, native Git reports clean, and
+the modified badge clears. Visible integrity failure/repair, retained listing,
+SQLite value 17, 16-second audio seeking/playback, selected SQLite/WAL/Crab/LFS
+SQL, cancellation/native restart and query cleanup stay asserted. Screenshots
+are inspected. All 869 assets, 1,725 frozen native inputs and local/SSH pairs
+match producer `131a0f016f91`, native digest
+`df2b3c2c73b070b0d60a57aaac45444f37e39132428611e0541619a67802eb9e`.
+The packaged app does not contain the CI-only native test-runner script.
+
+Published desktop run `43334601082` passes both Linux native targets but the
+Windows integration job fails three capture cases: its Node-created cache root
+has a broader DACL and the private-root guard rejects it. Node 22.23.4's
+[Windows mkdtemp](https://github.com/nodejs/node/blob/v22.23.4/deps/uv/src/win/fs.c#L1294)
+calls `CreateDirectoryW` without a protected descriptor. The runner now creates an owned
+container and leaves its cache leaf absent for native protected creation;
+cleanup removes that container. No security check or test is relaxed. Five
+focused macOS cases pass with this topology; Windows execution remains required.
+The published run predates the new checkout producers and does not qualify them.
+
+This does not close the dense deadline, encoding/filter streaming, durable
+offline versions or the complete qualification matrix.
+
+### Linear checkout qualification
+
+Native producer `1dd4e7e0419`, qualified source `ae2ff0e4f6e9`, removes complete
+capture from linear forced-EOL conversion. Default raw copies retain their
+canonical physical verifier; ident and global auto-text rules retain
+authenticated seekable input. Output stays provisional until raw EOF/checksum
+success. Native built-ins share the joined file-length progress observer; the
+duplicate progress writer and native-result blocking adapter are removed. The
+unused unshipped public capture checkout method becomes private behind
+`batch::copy_local_checkout`.
+
+The dense 2 GiB full-pack profile matches the independent Git oracle's exact
+2,154,954,754 bytes and SHA-256, preserving staged entries, close and owned
+source/cache cleanup. Peak process-tree RSS is 145,506,304 bytes; the complete
+actor takes 36.99 seconds. First reported output is 17,415,663 bytes at 1.07
+seconds; terminal restoration completes at 24.22 seconds. The preceding
+`131a0f016f91` repeat first reports output at 29.68 seconds and completes at
+45.75 seconds. Those are bounded local repeats with OS caches warmed by setup;
+no general throughput or original-timeout cause is inferred.
+
+The canonical 512 MiB delta/ident/automatic-CRLF actor passes at 137,052,160
+bytes RSS in 49.26 seconds. Restoration takes 21.46 seconds; warm 4 KiB reads
+take 1–2 ms. Cancellation after 21,954,604 converted bytes preserves dirty work
+and the complete index and removes scratch; retry publishes exact Git output.
+The original 512 MiB RSS, 60-second RPC, 600-second actor and five-second warm
+limits remain unchanged. Preparation and independent oracles are excluded from
+measurement. The matching-CLI Crab/LFS restoration case passes separately.
+
+Thirty-five shared batch/capture cases and all 48 applicable native content
+cases pass; nine existing qualification-only cases remain excluded from that
+selection. Failure coverage includes forced/global conversion and valid-zlib
+wrong-body checks at EOF, preserving dirty work, index bytes and scratch cleanup.
+Shared all-target facade Clippy passes with warnings denied; agent Clippy passes
+with 149 existing warnings. Touched E2E types, formatting and the complete native,
+renderer and Electron build pass. All 1,725 frozen native inputs and local/SSH
+runtime hashes match. The matching unsigned macOS ARM package verifies all 869
+renderer/Electron assets and passes both packaged workflows in 34.8 seconds.
+The integrity case confirms forced-EOL and ident/automatic-EOL restoration
+through the palette, exact disk bytes, preserved staging, clean native Git and
+Explorer status, and a refreshed open preview. Both screenshots are inspected.
+Selected SQLite/WAL/Crab/LFS SQL, corruption/repair and media assertions remain
+enabled. Encoding/external/process-filter streaming, durable offline versions
+and the final-head platform matrix remain open.
+
+### Verified local Git capture implementation
+
+Local Git sources now share an owned capture for selected ranges, complete
+buffers and query copies. The first read uses the canonical loose/packed reader
+and full Git checksum, writing admitted anonymous bytes and bounded BLAKE3 block
+proofs. Later ranges check the copied blocks. Observed origin metadata changes
+invalidate reuse; file metadata never authenticates returned bytes. Original
+warm unread-suffix corruption tests remain unchanged and pass.
+
+One process-wide 8 GiB operational budget includes captures, delta programs and
+bases. Complete capture size is admitted before decoding; at most 128 captures
+are registered. Pressure evicts idle captures without waiting for active readers
+or holding the registry lock during file close. Cancellation drains its worker
+and preserves a healthy verified capture for independent scopes. Close releases
+its bytes. OS anonymous-file lifetime remains the process-death cleanup owner.
+This is active read ownership, separate from disposable retention and durable
+offline selection.
+
+Capture storage is optional, matching the existing read-cache contract. Unavailable
+private storage or scratch admission declines reuse; the same physical decoder
+still verifies the complete object before delivery. Found source corruption and
+corrupt owned blocks remain visible failures. The original unsafe-root guard is
+preserved. Seven unchanged native integrity cases pass with deliberately
+unavailable private capture storage; delta decoding still requires operational
+scratch. Missing local objects use supervised Git `cat-file -e` promisor
+resolution, then return to the bounded physical reader. The body-decoding native
+batch child is removed from this path; a real filtered-clone fetch test passes.
+
+Implementation proof: 28 shared batch/physical tests, strict shared lint and
+43 native content tests (nine existing ignored) pass. This includes idle
+reclamation, active-read pressure, independent cancellation and actual promisor
+fetch. No dependency, feature or SDK snapshot change is required. The native
+range actor now reopens a cold capture before cancellation, preserving the
+existing interruption/cleanup assertion after warm reads become fast. It also
+adds a five-second warm-range limit; the existing 512 MiB RSS, 60-second RPC and
+600-second outer limits remain.
+
+Native producer `49b5ab07ced86c507031294be039c184e0c20ef8` passes the full
+release/renderer/Electron build with 1,723 frozen native inputs (digest
+`4b4fd3a7e69ae369657eb283b0e43b36706055a5aad3af64ebba86f9854134b2`).
+Its 512 MiB delta passes at 142,180,352 bytes RSS; first capture 3.97 seconds,
+then 1.87/1.08 ms ranges. The same dense 2 GiB delta used by the earlier
+15–30-second-per-range probe passes at 134,414,336 bytes RSS; first capture
+16.22 seconds, then 6.19/1.26 ms ranges. A fresh read after cold cancellation
+takes 18.41 seconds. Exact bytes, source/index identity and close/cleanup pass.
+
+The canonical dense 2 GiB loose/full-pack profiles also pass with every
+corruption/repair assertion: 135,757,824 / 110,608,384 bytes RSS. Their first
+captures take 7.99 / 24.69 seconds; warm ranges take 1.25–11.21 ms. Setup warms
+OS caches and remains inside the original full-profile measurement; delta
+preparation is separate. These are native capture measurements, not cold-disk
+throughput or packaged large-format UI proof.
+
+The promisor test now checks physical object absence/presence directly. The
+recent `--no-lazy-fetch` test flag is unavailable on older Git versions; production
+`cat-file -e` preserves fetch behavior in the inspected
+[Git 2.27](https://github.com/git/git/blob/v2.27.0/sha1-file.c),
+[2.43](https://github.com/git/git/blob/v2.43.0/object-file.c) and
+[2.50](https://github.com/git/git/blob/v2.50.1/builtin/cat-file.c) implementations
+without decoding a body. The portable test passes on the current
+Git. Historical receipts retain their exact producers.
+
+Final native producer `6044fc90dd90f2e2824c61d7f7b0151001f1292c` passes the
+release/renderer/Electron build and unsigned macOS ARM package. Its 1,723 frozen
+native inputs match the package source (digest
+`5e011390d658364cf936477791cb347afe15081769dce1a9fc5c138b9f2dc366`).
+All 869 packaged assets and local/SSH executable pairs match. The agent is
+byte-identical to the measured `49b5ab07ced86` agent; the CLI has its own final
+producer stamp. The package passes the two selected SQL/WAL/Crab/LFS and Git
+corruption/repair cases in 24.2 seconds, with unchanged deadlines. Screenshots
+show repaired SQLite value 17 and the 16-second audio preview; cancellation,
+native restart, query cleanup and source/index preservation remain asserted.
+This is bounded GUI proof, not packaged multi-GiB format qualification.
+
+An external observer kills only the owned probe agent after anonymous delta-base
+and pending capture-output files reach 536,870,912 and 26,935,296 bytes. The
+expected interrupted read leaves no anonymous pathname. Restarting on the same
+source/cache passes exact ranges, cancellation, source/index checks and cleanup
+at 126,713,856 bytes RSS. This proves process-death recovery, not power-loss
+persistence. A separately saved zero retention policy passes exact delta reads
+at 133,578,752 bytes RSS. Running the matching CLI's real cache cleanup while the
+capture is active removes zero files/bytes; the next exact range takes 1.17 ms,
+and close releases the capture.
+
+The earlier published Linux CI producer fails its delta test because its
+container cannot write the default home cache. The canonical native test runner
+now gives all test children a private per-run cache under its external target
+and removes it on success or failure. The real delta regression passes with
+that environment; production cache permissions and privacy guards are unchanged.
+Remaining-target execution still requires the new CI producer.
+
+### Missing and corrupt SDK content
+
+The desktop RPC boundary distinguishes SDK `NotFound` and `Corruption` without
+exposing private dependency diagnostics. Both retain SDK response code 1001 and
+`data.kind = "sdk"`; `data.code` identifies `not_found` or `corruption` and the
+visible message names the failure. Other SDK error categories retain their
+existing response. Shared read failures reach this same boundary after their
+native reader drains, including format preview errors.
+
+The two-store fixture can return 404s for Crab xorbs or LFS objects, or alter
+successful object responses without changing their size or validators. Four
+cold packaged macOS cases establish visible failure, rejected complete reads and
+byte-identical recovery after repairing the fixture, with no origin writes.
+The earlier package rejects incorrect bytes but reports the same generic SDK
+message for missing and corrupt content. Its stronger missing-content message
+assertion fails. The rebuilt native/renderer package passes all twelve SDK
+cases, including the four typed failures, partial-response cancellation and
+process interruption, cleanup and the shared budget. All 869 packaged assets
+and the local/SSH native pair match the frozen build inputs. Other platforms,
+providers and publication/error profiles remain open.
+
+That same package repeats the selected-identity SSH scenario and continuous
+writable-store Crab/LFS edit, push/pull, rename and removal workflow. The earlier
+SSH repeat once switched unexpectedly to Settings after hydration; passive
+navigation capture and subsequent canonical repeats pass, but the cause remains
+open. Passing repeats do not resolve the earlier hydration timing failure.
 
 ### SDK on-disk fill recovery
 
@@ -129,9 +892,19 @@ Reserved fills now journal exact file identity before exposing their writer.
 Shared cache maintenance and Settings cleanup conditionally reclaim that same
 object; a temporary name or dead PID alone grants no deletion authority. The
 packaged macOS probe reaches the same filled temporary, kills its native owner,
-reopens and verifies the complete source hash with zero origin writes. Retry
-maintenance removes the abandoned temporary before Settings cleanup. Settings
-then removes four other eligible payloads and reports zero busy or unsafe entries.
+reopens and verifies the complete source hash with zero origin writes. The earlier
+receipt claiming removal before cleanup was calculated after cleanup using
+inconsistent path aliases; its inventories show the temporary was still present.
+That published head established explicit Settings cleanup only.
+
+Admission now recovers recorded dead fills under its SQL writer before deciding
+capacity, including unlimited retention and a declined zero-root-budget write.
+It commits that recovery even when no new fill fits. A regression fails before
+this change and passes afterward. The corrected package probe captures file
+absence and inventory before cleanup: retry removes the exact abandoned object,
+then returns all 4,194,413 source bytes by SHA-256 with zero origin writes. Live
+fills, replacements and unrecorded files remain protected. The allocation-before-
+record boundary remains open.
 
 Focused regressions cover real child-process death, live owners, replacement
 files, unknown neighbors, read-only previews and both cleanup entry points. A
@@ -146,11 +919,102 @@ reclamation. Full packaged Windows/Linux and provider qualification remain
 release gates.
 
 Creation interrupted before identity registration can still leave empty,
-unclaimed files. Allocation-before-record and power-loss qualification remain
-separate gaps; this bounded probe does not establish global disk-budget or
+unclaimed files. A packaged macOS probe now pauses immediately after exclusive
+allocation, before identity registration: it observes zero logical bytes and
+zero allocated payload blocks. Retry retires the reservation and returns exact
+source bytes with zero origin writes; cleanup retains the unrecorded inode.
+Other platforms and power-loss qualification remain separate gaps.
+Identity insertion and saved retention-policy changes now request FULL WAL
+synchronization, while disposable cache accounting stays NORMAL. Native sync
+image replay finds the exact pending path, identity, owner and PID before the
+first payload write; the same probe fails on the earlier package. The macOS
+Settings probe also injects a real WAL sync failure, shows the error without a
+success message, repairs the fault and retries through persistence and exact
+zero-retention reads. A sync error can leave a written policy visible; Settings
+refreshes the actual value instead of claiming rollback. These checks do not
+establish filesystem rename/unlink ordering through physical power loss.
+This bounded probe does not establish global disk-budget or
 offline-retention behavior.
 The fault library and diagnostic test remain external qualification artifacts;
 no production fault hook, cache-name deletion rule or new setting is added.
+
+### Cache filesystem ordering
+
+A packaged native trace found two decoded-range renames whose journals had
+retired without flushing their captured parent. SQL durability alone did not
+establish that ordering. The private cache owner now flushes the empty temporary
+inode and name before recording identity, complete bytes before rename, and
+the parent after creation, rename and unlink. Cancellation and recovery must
+persist observed absence before retiring a record, including missing ancestors.
+Writers drain async buffers before entering this shared publication worker.
+
+The [owned Windows NTFS probe](https://github.com/crabbuild/crab/actions/runs/43178147526)
+confirms that directory flush needs a writable handle and that deletion remains
+pending until the final file-object close. Captured Windows directory chains
+retain their deny-delete pins while the flush opens the required writable
+handle. HTTP completion now uses journaled `responses/` scratch through final
+close, retaining its existing stream/reservation ownership. Unknown and replaced
+entries remain protected; no compatibility reader or runtime option is added.
+
+The local combined-feature cache checks pass 60 catalog, 46 private-filesystem,
+five HTTP completion and four Git-pack cases, plus strict Clippy. The
+[exact-source native probe](https://github.com/crabbuild/crab/actions/runs/43183402196)
+passes 239 applicable Linux and 120 Windows checks; Windows HTTP-body cases
+are gated out, while the shared scratch-lifetime case runs on both targets.
+The rebuilt unsigned macOS package matches all 1,716 frozen native inputs,
+869 renderer/Electron assets and its local/SSH runtime pair.
+
+The unchanged ordering assertions now observe parent flushes after both decoded-
+range renames, with no pending records left. A real post-rename directory-sync
+fault retains recovery records while validated origin reads still succeed.
+Settings cleanup displays the I/O error without a success message. Removing the
+fault permits cleanup and an exact SHA-256 reread, retires pending records and
+produces zero origin writes. A failed cleanup can already have unlinked files;
+the retry reports its actual remaining inventory rather than claiming rollback.
+All twelve canonical SDK interruption, cleanup, budget and content-error cases
+pass on this package. Its first selected-identity SSH run fails at the Git diff
+after nested hydration with an unserialized RPC error. A passive diagnostic
+repeat passes; the original failure remains unexplained and does not qualify
+as fixed. A subsequent canonical repeat collides with `index.lock` during a
+fixture mutation; a trace repeat also exceeds the unchanged five-second
+tracking-completion deadline. Passing repeats do not close those failures.
+Physical drive power-loss behavior and other filesystems remain separate
+qualification profiles.
+
+### Read-only Git inspection
+
+The SSH trace identifies native Git diffs refreshing the real index even with
+`GIT_OPTIONAL_LOCKS=0`. Git 2.50's
+[diff implementation](https://github.com/git/git/blob/v2.50.1/builtin/diff.c)
+does not consult that flag before its automatic refresh. An isolated real-Git
+probe returns an empty patch while changing index bytes; disabling
+[`diff.autoRefreshIndex`](https://git-scm.com/docs/diff-config) preserves both
+the empty patch and the index. The native caller regression fails before the
+fix and passes afterward, including an explicitly enabled repository setting.
+
+The shared native Git command builder disables automatic diff refresh while
+retaining mandatory mutation locks. Captured reads now reuse that builder and
+its scoped credentials instead of duplicating command policy. Task comparisons
+permit stat refresh only in their private index, keeping raw filenames consistent
+with patches; checkpoint comparisons use staged or committed content. All 37
+focused command, credential, captured-diff, hunk and task-comparison cases pass.
+New-package qualification
+passes on native/renderer build `f2f7e171511`: the canonical selected-identity
+SSH workflow records 13 diff commands, zero diff writes to the real index and
+ten explicit index writes. All twelve SDK cases pass in 42.8 seconds, and the
+continuous writable-store Crab/LFS lifecycle passes in 1.9 minutes. Its 4 KiB
+edit of an 8 MiB file reuses 139 of 140 chunks and adds 36,943 stored xorb bytes;
+this is storage growth, not measured network traffic.
+
+The final package also repeats the real directory-sync fault: cleanup shows
+the I/O error with a pending recovery record and no success message. Repair
+allows cleanup, retires the record and returns exact source bytes with zero
+origin writes. All 1,716 frozen native inputs, 869 renderer/Electron assets and
+the local/SSH runtime pair match this build. The earlier syscall-order trace
+remains attributed to `936d8b34267`; the cache source is unchanged in this
+follow-up. This closes the proven index-mutation defect without claiming the
+unexplained RPC, index-lock or tracking timing failures are fixed. Offline
+retention and the remaining acceptance matrix stay open.
 
 ### Intel SFTP qualification boundary
 

@@ -4,7 +4,7 @@ import { cpSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writ
 import { createHash } from "node:crypto";
 import * as path from "node:path";
 import { tmpdir } from "node:os";
-import { call, packagedExecutable } from "./packaged-app";
+import { isNativeAgentCommand, answerConfirmation, call, packagedExecutable } from "./packaged-app";
 import type { FileTransferActivity, FileTransferJob, FileTransferSource } from "../../electron/file-transfers";
 import type { StorageConnectionInput } from "../../electron/storage-connection-types";
 import type { RepoHandle } from "../../src/ipc";
@@ -62,7 +62,7 @@ for (const kind of ["crab", "lfs"] as const) for (const outcome of ["cancel", "n
     const killNative = () => {
       const parent = application!.process().pid;
       const rows = execFileSync("ps", ["-axo", "pid=,ppid=,command="], { encoding: "utf8" }).split("\n");
-      const native = rows.map(row => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(row)).find(row => row && Number(row[2]) === parent && /\/agent\/crab-desktop-agent(?:\s|$)/.test(row[3]));
+      const native = rows.map(row => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(row)).find(row => row && Number(row[2]) === parent && isNativeAgentCommand(row[3]));
       if (!native) throw new Error("Owned native writer was not found");
       process.kill(Number(native[1]), "SIGKILL");
     };
@@ -96,17 +96,19 @@ for (const kind of ["crab", "lfs"] as const) for (const outcome of ["cancel", "n
         application = await electron.launch({ executablePath: packagedExecutable(), args: [`--user-data-dir=${profile}`], env });
         application.process().stderr?.on("data", bytes => { stderr = (stderr + bytes.toString()).slice(-32_000); });
         page = await application.firstWindow();
-        await page.getByTitle("Toggle Activity (background jobs)", { exact: true }).waitFor();
+        // A first-run modal can cover the shell after an interrupted session.
+        // Wait beneath it, then dismiss the accessible prompt before acting.
+        await page.getByRole("button", { name: "Activity", exact: true, includeHidden: true }).waitFor();
         // A hard kill can lose Chromium preferences/recent tabs. Durable Activity
         // must support fresh retry from an empty start as well as a restored tab.
         if (await page.getByRole("button", { name: "Skip", exact: true }).isVisible()) await page.getByRole("button", { name: "Skip", exact: true }).click();
         if (await page.getByRole("button", { name: "No thanks", exact: true }).isVisible()) await page.getByRole("button", { name: "No thanks", exact: true }).click();
-        await page.getByTitle("Toggle Activity (background jobs)", { exact: true }).click();
+        await page.getByRole("button", { name: "Activity", exact: true }).click();
       };
       const before = await transport(`stream_${outcome === "native-receipt-gap" ? publishedKind : kind}`);
       await page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Large Files", exact: true }).click();
       await page.getByRole("button", { name: "Hydrate", exact: true }).last().click();
-      await page.getByRole("tab", { name: "Custom", exact: true }).click();
+      await page.getByRole("radio", { name: "Custom", exact: true }).click();
       for (const file of files) await page.getByRole("checkbox", { name: new RegExp(file) }).check();
       let lostReceipt: Promise<void> | undefined;
       if (outcome === "receipt-gap") {
@@ -161,7 +163,7 @@ for (const kind of ["crab", "lfs"] as const) for (const outcome of ["cancel", "n
         killNative();
         await releaseJournal();
         await expect.poll(async () => (await history()).jobs.find(job => job.job_id === original.job_id)?.status).toBe("interrupted");
-        await page.getByTitle("Toggle Activity (background jobs)", { exact: true }).click();
+        await page.getByRole("button", { name: "Activity", exact: true }).click();
         await expect(page.getByText("Outcome unknown. Check the working files.", { exact: true })).toBeInViewport();
       } else {
         await expect.poll(async () => (await transport("stats")).stream_blocked).toBeGreaterThan(0);
@@ -177,7 +179,7 @@ for (const kind of ["crab", "lfs"] as const) for (const outcome of ["cancel", "n
         const status = await call(page, "git_status_porcelain", { repo_id: "recovery" });
         expect((status.entries as Array<{ path: string }>).some(entry => artifacts().some(name => entry.path.startsWith(name + "/")))).toBe(false);
         expect((status.entries as Array<{ path: string }>).some(entry => entry.path === ".crab-publication-user-file")).toBe(true);
-        await page.getByTitle("Toggle Activity (background jobs)", { exact: true }).click();
+        await page.getByRole("button", { name: "Activity", exact: true }).click();
         await expect(page.getByText("1 of 2 files materialized", { exact: true })).toBeInViewport();
         if (outcome === "cleanup-failure") {
           const foreign = path.join(source, artifacts()[0], "foreign.txt");
@@ -196,7 +198,7 @@ for (const kind of ["crab", "lfs"] as const) for (const outcome of ["cancel", "n
           // publication. Recovery must dispose of the now-empty owned directory.
           rmSync(foreign);
           await page.getByRole("button", { name: "Close activity drawer", exact: true }).click();
-          await application.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 1, checkboxChecked: false }); });
+
           await page.keyboard.press(process.platform === "darwin" ? "Meta+Shift+P" : "Control+Shift+P");
           const palette = page.getByRole("dialog", { name: "Command palette", exact: true });
           await palette.getByRole("combobox").fill("Crab: Dehydrate File");
@@ -205,6 +207,7 @@ for (const kind of ["crab", "lfs"] as const) for (const outcome of ["cancel", "n
           await fileInput.fill(files[1]);
           await fileInput.press("Enter");
           await expect(palette).toHaveCount(0);
+          await answerConfirmation(page, /^Dehydrate /);
           await expect.poll(() => readFileSync(path.join(source, files[1])).equals(pointer)).toBe(true);
           await expect.poll(async () => (await history()).jobs.some(job => job.op === "dehydrate" && job.status === "done")).toBe(true);
           expect(artifacts()).toHaveLength(0);
@@ -246,8 +249,9 @@ for (const kind of ["crab", "lfs"] as const) for (const outcome of ["cancel", "n
         const recoveredStatus = await call(page, "git_status_porcelain", { repo_id: "recovery" });
         expect((recoveredStatus.entries as Array<{ path: string }>).some(entry => artifacts().some(name => entry.path.startsWith(name + "/")))).toBe(false);
       }
-      await application.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 1, checkboxChecked: false }); });
+
       await page.getByRole("button", { name: "Retry transfer", exact: true }).first().click();
+      await answerConfirmation(page, /Hydrate 1 file/);
       await expect.poll(() => sha(readFileSync(path.join(source, files[1]))), { timeout: 40_000 }).toBe(hashes[1]);
       await expect.poll(async () => (await history()).jobs.some(job => job.job_id !== original.job_id && job.status === "done" && job.intent.paths.length === 1 && job.intent.paths[0] === files[1])).toBe(true);
       const retry = (await history()).jobs.find(job => job.job_id !== original.job_id && job.status === "done" && job.intent.paths.length === 1 && job.intent.paths[0] === files[1])!;

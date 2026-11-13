@@ -797,6 +797,11 @@ Acceptance:
   Alternate execution order within each numbered pair and publish both absolute
   measurements and paired ratios with fixture/runner details. If the baseline
   violates an absolute limit, fix before promoting the cell.
+  Retain each trial's cache file inventory before deleting its owned cache.
+  Origin evidence records hashed object paths, requested ranges and completion
+  state so admission/eviction and traffic crossing trial boundaries can be
+  investigated without credentials or payload copies. Capture these diagnostics
+  outside the reader's measured interval; keep the performance limits unchanged.
 - Quickstart, local prerequisites, async shutdown, pointer/content distinction,
   conflict recovery, credentials and indeterminate push examples compile.
 - Public docs are served at `https://crab.build/docs/sdk`; run web typecheck,

@@ -321,7 +321,7 @@ export function RepoDetail({ repo, restoreEntry, onNavigate }: RepoDetailProps) 
   const [quickOpen, setQuickOpen] = useState(false);
 
   const { map: gitStatus, refresh: refreshGitStatus } = useGitStatusMap(repo.repo_id, !!repo.path && !repo.deferred);
-  const hydration = useHydrationStatus(repo.repo_id, (!!repo.path || repo.is_remote) && !repo.deferred);
+  const hydration = useHydrationStatus(repo);
 
   // Branch info for the StatusBar toolbar (ahead/behind/upstream).
   const [branchInfo, setBranchInfo] = useState<{
@@ -1020,6 +1020,7 @@ export function RepoDetail({ repo, restoreEntry, onNavigate }: RepoDetailProps) 
 
       <div className={activeView === "terminal" ? "hidden" : undefined}>
         <StatusBar
+          storageSnapshot={hydration.storageSnapshot}
           summary={hydration.summary}
           loading={hydration.loading}
           error={hydration.error}
