@@ -1,4 +1,5 @@
 import { Button } from "@/components/ui/button";
+import { tabVariants } from "@/components/ui/tabs";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Select,
@@ -370,12 +371,7 @@ export function CrabFlowView({ repo, onSelectCommit, onOpenFile }: Props) {
           variant="ghost"
           size="compact"
           type="button"
-          className={clsx(
-            "px-4 py-2.5 text-xs font-medium transition",
-            tab === "files"
-              ? "border-b-2 border-primary text-foreground"
-              : "text-muted-foreground hover:text-foreground",
-          )}
+          className={tabVariants({ active: tab === "files" })}
           onClick={() => setTab("files")}
         >
           <span className="flex items-center gap-1.5">
@@ -386,12 +382,7 @@ export function CrabFlowView({ repo, onSelectCommit, onOpenFile }: Props) {
           variant="ghost"
           size="compact"
           type="button"
-          className={clsx(
-            "px-4 py-2.5 text-xs font-medium transition",
-            tab === "storage-map"
-              ? "border-b-2 border-primary text-foreground"
-              : "text-muted-foreground hover:text-foreground",
-          )}
+          className={tabVariants({ active: tab === "storage-map" })}
           onClick={() => setTab("storage-map")}
         >
           <span className="flex items-center gap-1.5">
@@ -402,12 +393,7 @@ export function CrabFlowView({ repo, onSelectCommit, onOpenFile }: Props) {
           variant="ghost"
           size="compact"
           type="button"
-          className={clsx(
-            "px-4 py-2.5 text-xs font-medium transition",
-            tab === "hydrate"
-              ? "border-b-2 border-primary text-foreground"
-              : "text-muted-foreground hover:text-foreground",
-          )}
+          className={tabVariants({ active: tab === "hydrate" })}
           onClick={() => setTab("hydrate")}
         >
           <span className="flex items-center gap-1.5">
@@ -418,12 +404,7 @@ export function CrabFlowView({ repo, onSelectCommit, onOpenFile }: Props) {
           variant="ghost"
           size="compact"
           type="button"
-          className={clsx(
-            "px-4 py-2.5 text-xs font-medium transition",
-            tab === "datasets"
-              ? "border-b-2 border-primary text-foreground"
-              : "text-muted-foreground hover:text-foreground",
-          )}
+          className={tabVariants({ active: tab === "datasets" })}
           onClick={() => setTab("datasets")}
         >
           <span className="flex items-center gap-1.5">

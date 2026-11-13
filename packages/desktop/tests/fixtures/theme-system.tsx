@@ -18,6 +18,8 @@ import {
   type WorkflowTab,
 } from "../../src/components/workflow/WorkflowTabs";
 import { ConfirmHydrateDialog } from "../../src/components/ConfirmHydrateDialog";
+import { ToastManager } from "../../src/components/ToastManager";
+import { publishToast } from "../../src/lib/toasts";
 import { StoreProvider } from "../../src/state";
 import {
   SettingsProvider,
@@ -47,6 +49,7 @@ function Fixture() {
     <main className="mx-auto max-w-5xl space-y-6 p-6">
       <header className="flex items-center justify-between border-b border-border pb-4">
         <h1 className="text-lg font-semibold">Crab desktop theme</h1>
+        <Button onClick={() => publishToast({ kind: "success", title: "Theme notification", body: "Changes saved successfully.", duration: 0 })}>Show notification</Button>
         <div className="flex items-center gap-3 text-muted-foreground">
           <label htmlFor="theme">Theme</label>
           <Select
@@ -203,6 +206,7 @@ function Fixture() {
           setResult("Disk change confirmed");
         }}
       />
+      <ToastManager />
     </main>
   );
 }

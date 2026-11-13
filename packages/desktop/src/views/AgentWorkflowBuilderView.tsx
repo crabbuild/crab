@@ -1,3 +1,4 @@
+import { ResizableHandle } from "@/components/ui/resizable";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
@@ -82,7 +83,7 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
-import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
+import { Panel, PanelGroup } from "react-resizable-panels";
 
 import type { AgentModel } from "../../electron/orchestrator-adapters";
 import { intelligenceLabel, modelOptions, useAgentModels } from "../components/orchestrator/model-catalog";
@@ -775,17 +776,6 @@ function CommandButton({
       {children}
       <span>{label}</span>
     </Button>
-  );
-}
-
-function ResizeHandle({ direction = "horizontal" }: { direction?: "horizontal" | "vertical" }) {
-  return (
-    <PanelResizeHandle
-      className={clsx(
-        "bg-transparent transition-colors hover:bg-primary/50",
-        direction === "horizontal" ? "w-[3px] cursor-col-resize" : "h-[3px] cursor-row-resize",
-      )}
-    />
   );
 }
 
@@ -2395,7 +2385,7 @@ function AgentWorkflowBuilderInner({ repo }: AgentWorkflowBuilderViewProps) {
 
         {propertiesOpen ? (
           <>
-            <ResizeHandle />
+            <ResizableHandle aria-label="Resize workflow panels" />
             <Panel
               defaultSize={readPanelSize(LS_PROPERTIES_SIZE_KEY, 20)}
               minSize={16}
@@ -2429,7 +2419,7 @@ function AgentWorkflowBuilderInner({ repo }: AgentWorkflowBuilderViewProps) {
 
         {runPaneOpen ? (
           <>
-            <ResizeHandle />
+            <ResizableHandle aria-label="Resize workflow panels" />
             <Panel
               defaultSize={readPanelSize(LS_RUN_SIZE_KEY, 24)}
               minSize={20}
@@ -2456,7 +2446,7 @@ function AgentWorkflowBuilderInner({ repo }: AgentWorkflowBuilderViewProps) {
                         onClose={() => setSchedulesOpen(false)}
                       />
                     </Panel>
-                    <ResizeHandle direction="vertical" />
+                    <ResizableHandle aria-label="Resize workflow panels" aria-orientation="horizontal" />
                     <Panel minSize={32} className="min-h-0">
                       <RunPanel
                         run={latestRun}

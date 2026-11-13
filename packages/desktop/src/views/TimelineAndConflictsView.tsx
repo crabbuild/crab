@@ -138,15 +138,7 @@ function TabButton({
   badge?: number;
 }) {
   return (
-    <TabsTrigger
-      className={clsx(
-        "relative flex items-center gap-1.5 px-3 py-2 text-xs font-medium transition",
-        active
-          ? "text-foreground"
-          : "text-muted-foreground hover:text-foreground",
-      )}
-      value={value}
-    >
+    <TabsTrigger value={value}>
       {icon}
       {label}
       {badge !== undefined && badge > 0 && (

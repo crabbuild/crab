@@ -1,4 +1,5 @@
 import { Button } from "@/components/ui/button";
+import { tabVariants } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -306,16 +307,11 @@ function SettingsScopeToggle({
           if (value) onScopeChange(value as SettingsScope);
         }}
         aria-label="Settings scope"
-        className="inline-flex items-center rounded-md border border-border bg-card p-0.5"
+        className="inline-flex items-center gap-1 bg-card p-0.5"
       >
         <ToggleGroupItem
           value={"user"}
-          className={clsx(
-            "flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium transition",
-            scope === "user"
-              ? "bg-primary/15 text-foreground shadow-sm"
-              : "text-muted-foreground hover:text-foreground",
-          )}
+          className={tabVariants({ active: scope === "user" })}
         >
           <User size={12} />
           User
@@ -329,11 +325,8 @@ function SettingsScopeToggle({
               : "Open a repository to edit workspace settings"
           }
           className={clsx(
-            "flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium transition",
+            tabVariants({ active: scope === "workspace" }),
             !hasRepo && "cursor-not-allowed opacity-50",
-            scope === "workspace"
-              ? "bg-primary/15 text-foreground shadow-sm"
-              : "text-muted-foreground hover:text-foreground",
           )}
         >
           <Folder size={12} />

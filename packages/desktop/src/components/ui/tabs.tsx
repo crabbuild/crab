@@ -1,9 +1,17 @@
 import * as React from "react";
 import * as TabsPrimitive from "@radix-ui/react-tabs";
+import { cva } from "class-variance-authority";
 
 import { cn } from "@/lib/utils";
 
 const Tabs = TabsPrimitive.Root;
+
+// Radix owns data-state; document/session tabs own their active flag.
+// Both use the same appearance without changing keyboard or lifecycle owners.
+export const tabVariants = cva(
+  "inline-flex h-8 shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md border-0 px-3 text-xs font-medium shadow-none transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 data-[state=active]:bg-accent data-[state=active]:text-foreground",
+  { variants: { active: { true: "bg-accent text-foreground", false: "bg-transparent text-muted-foreground" } }, defaultVariants: { active: false } },
+);
 
 const TabsList = React.forwardRef<
   React.ElementRef<typeof TabsPrimitive.List>,
@@ -12,7 +20,7 @@ const TabsList = React.forwardRef<
   <TabsPrimitive.List
     ref={ref}
     className={cn(
-      "inline-flex h-9 items-center justify-center rounded-lg bg-muted p-1 text-muted-foreground",
+      "inline-flex h-9 items-center justify-start gap-1 bg-transparent p-0.5 text-muted-foreground",
       className,
     )}
     {...props}
@@ -27,7 +35,7 @@ const TabsTrigger = React.forwardRef<
   <TabsPrimitive.Trigger
     ref={ref}
     className={cn(
-      "inline-flex items-center justify-center whitespace-nowrap rounded-md px-3 py-1 text-sm font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow",
+      tabVariants(),
       className,
     )}
     {...props}

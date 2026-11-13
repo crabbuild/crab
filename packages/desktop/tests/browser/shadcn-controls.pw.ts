@@ -210,6 +210,70 @@ test("notifications preserve actions and dismiss through the shadcn toaster", as
   await expect(page.getByText("Saved", { exact: true })).toBeHidden();
 });
 
+for (const theme of ["light", "dark", "hc-light", "hc-dark"] as const) {
+  test(`${theme}: toast text remains readable when the system theme differs`, async ({ page }) => {
+    await page.emulateMedia({ colorScheme: theme.endsWith("light") ? "dark" : "light" });
+    await page.goto(`/tests/fixtures/shadcn-controls.html?theme=${theme}`);
+    // Packaged renderer CSS loads before Sonner injects its own stylesheet.
+    await page.addStyleTag({ path: require.resolve("sonner/dist/styles.css") });
+    await page.getByRole("button", { name: "Notify", exact: true }).click();
+    await expect(page.locator("[data-description]")).toHaveText("Your changes are saved.");
+    await expect(page.locator("[data-sonner-toast]")).toHaveCSS("opacity", "1");
+    const result = await new AxeBuilder({ page })
+      .include("[data-sonner-toaster]")
+      .withRules(["color-contrast"])
+      .analyze();
+    expect(result.violations.map(({ id, nodes }) => ({ id, nodes: nodes.map(node => node.failureSummary) }))).toEqual([]);
+    await page.screenshot({ path: test.info().outputPath(`toast-${theme}.png`) });
+  });
+}
+
+test("workspace dividers stay visible and resize by pointer and keyboard", async ({ page }) => {
+  await page.goto("/tests/fixtures/shadcn-controls.html?theme=light");
+  const divider = page.getByRole("separator", { name: "Resize workspace sidebar", exact: true });
+  const line = await divider.evaluate(element => {
+    const style = getComputedStyle(element, "::after");
+    return { color: style.backgroundColor, width: style.width };
+  });
+  expect(line.color).not.toBe("rgba(0, 0, 0, 0)");
+  expect(line.width).toBe("1px");
+  await divider.scrollIntoViewIfNeeded();
+  const before = Number(await divider.getAttribute("aria-valuenow"));
+  const box = await divider.boundingBox();
+  if (!box) throw new Error("Workspace divider has no drag target");
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 60, box.y + box.height / 2, { steps: 5 });
+  await page.mouse.up();
+  await expect.poll(async () => Number(await divider.getAttribute("aria-valuenow"))).toBeGreaterThan(before);
+  const dragged = Number(await divider.getAttribute("aria-valuenow"));
+  await divider.focus();
+  await divider.press("ArrowRight");
+  await expect.poll(async () => Number(await divider.getAttribute("aria-valuenow"))).toBeGreaterThan(dragged);
+  const persisted = await page.evaluate(() => localStorage.getItem("crab.sidebarPct"));
+  await page.reload();
+  expect(await page.evaluate(() => localStorage.getItem("crab.sidebarPct"))).toBe(persisted);
+  const horizontal = page.getByRole("separator", { name: "Resize workflow output", exact: true });
+  await expect(horizontal).toHaveAttribute("aria-orientation", "horizontal");
+  expect(await horizontal.evaluate(element => getComputedStyle(element, "::after").height)).toBe("1px");
+});
+
+test("workspace and workflow tabs share borderless selection styles", async ({ page }) => {
+  await page.goto("/tests/fixtures/shadcn-controls.html?theme=light");
+  const explorer = page.getByRole("navigation", { name: "Files", exact: true }).getByRole("button", { name: "Explorer", exact: true });
+  const editor = page.getByRole("tab", { name: "Editor", exact: true });
+  const appearance = (element: Element) => {
+    const css = getComputedStyle(element);
+    return [css.borderTopWidth, css.borderRightWidth, css.borderBottomWidth, css.borderLeftWidth, css.boxShadow, css.backgroundColor, css.color];
+  };
+  await expect.poll(() => explorer.evaluate(appearance)).toEqual(await editor.evaluate(appearance));
+  expect((await editor.evaluate(appearance)).slice(0, 4)).toEqual(["0px", "0px", "0px", "0px"]);
+  await editor.focus();
+  await editor.press("ArrowRight");
+  await expect(page.getByRole("tab", { name: "Status", exact: true })).toBeFocused();
+  await expect(page.getByRole("tabpanel")).toHaveText("Workflow status");
+});
+
 test("controls expose accessible names and contrast", async ({ page }) => {
   const result = await new AxeBuilder({ page })
     .withTags(["wcag2a", "wcag2aa"])

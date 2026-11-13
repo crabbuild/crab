@@ -59,10 +59,45 @@ import {
 import { ToastManager } from "../../src/components/ToastManager";
 import { publishToast } from "../../src/lib/toasts";
 import { PtyModeProvider, usePtyMode } from "../../src/lib/pty-mode-context";
+import { StoreProvider } from "../../src/state";
+import { WorkspaceShell } from "../../src/components/WorkspaceShell";
+import type { SidebarView } from "../../src/lib/navigation";
+import { Tabs, TabsContent } from "../../src/components/ui/tabs";
+import { WorkflowTabs, type WorkflowTab } from "../../src/components/workflow/WorkflowTabs";
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "../../src/components/ui/resizable";
+import { SettingsProvider, useSettings, type Settings } from "../../src/settings";
 import "../../src/index.css";
 
 const theme = new URLSearchParams(location.search).get("theme") ?? "dark";
 if (["light", "dark", "hc-light", "hc-dark"].includes(theme)) document.documentElement.classList.add(`theme-${theme}`);
+
+function FixtureTheme({ children }: { children: React.ReactNode }) {
+  const { update } = useSettings();
+  useEffect(() => { update("theme", theme as Settings["theme"]); }, [update]);
+  return children;
+}
+
+function WorkspaceFixture() {
+  const [view, setView] = useState<SidebarView>("explorer");
+  const [tab, setTab] = useState<WorkflowTab>("editor");
+  return <section aria-label="Workspace layout" className="h-72 border border-border">
+    <WorkspaceShell activeView={view} onViewChange={setView}
+      views={{ explorer: <p>Repository files</p>, search: <p>Search repository files</p> }}
+      main={<ResizablePanelGroup direction="vertical">
+        <ResizablePanel defaultSize={60} minSize={20}>
+          <Tabs value={tab} onValueChange={value => setTab(value as WorkflowTab)}>
+            <WorkflowTabs />
+            <TabsContent value="editor">Workflow editor</TabsContent>
+            <TabsContent value="status">Workflow status</TabsContent>
+            <TabsContent value="experiments">Workflow experiments</TabsContent>
+          </Tabs>
+        </ResizablePanel>
+        <ResizableHandle aria-label="Resize workflow output" aria-orientation="horizontal" />
+        <ResizablePanel minSize={20}>Workflow output</ResizablePanel>
+      </ResizablePanelGroup>}
+    />
+  </section>;
+}
 
 // This fixture never reads the host clipboard or launches an agent.
 Object.defineProperty(navigator, "clipboard", { configurable: true, value: { readText: async () => "" } });
@@ -230,6 +265,7 @@ function Fixture() {
             publishToast({
               kind: "success",
               title: "Saved",
+              body: "Your changes are saved.",
               duration: 0,
               action: {
                 label: "Undo",
@@ -304,6 +340,7 @@ function Fixture() {
         {String(checked)} · {String(enabled)} · {mode}
       </p>
       <ApplicationDialogs />
+      <WorkspaceFixture />
       <ToastManager />
     </main>
   );
@@ -325,6 +362,8 @@ if (startupMode) {
   } as typeof window.crab;
 } else {
   window.crab = {
+    updateMainSettings: async () => ({}), setDevtools: async () => {},
+    onEvent: () => () => {}, rpc: async () => ({ exists: false, version: 0, jobs: [], error: null }),
     orchestrator: { detectAgents: async () => ({ success: true, agents: [
       { type: "claude-code", name: "Claude Code", binary: "claude", path: "/fixture/claude", version: "1.0", available: true },
       { type: "aider", name: "Aider", binary: "aider", path: "", version: "", available: false },
@@ -335,4 +374,5 @@ if (startupMode) {
   } as typeof window.crab;
 }
 createRoot(document.getElementById("root")!).render(startupMode
-  ? <PtyModeProvider><StartupModeFixture /></PtyModeProvider> : <Fixture />);
+  ? <PtyModeProvider><StartupModeFixture /></PtyModeProvider>
+  : <StoreProvider><SettingsProvider><FixtureTheme><Fixture /></FixtureTheme></SettingsProvider></StoreProvider>);

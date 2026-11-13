@@ -1,4 +1,5 @@
 import { Button } from "@/components/ui/button";
+import { tabVariants } from "@/components/ui/tabs";
 import clsx from "clsx";
 import { X } from "lucide-react";
 import { useCallback, useEffect } from "react";
@@ -53,10 +54,8 @@ export function TabBar({ tabs, activeRelativePath, onSelect, onClose }: TabBarPr
             role="tab"
             aria-selected={isActive}
             className={clsx(
-              "group relative flex h-[26px] max-w-[180px] shrink-0 cursor-pointer items-center gap-1 rounded px-2 text-xs transition select-none",
-              isActive
-                ? "bg-background text-foreground shadow-sm"
-                : "text-muted-foreground hover:bg-accent hover:text-foreground",
+              tabVariants({ active: isActive }),
+              "group relative h-[26px] max-w-[180px] cursor-pointer gap-1 px-2 select-none",
             )}
             onClick={() => onSelect(entry.relativePath)}
             onAuxClick={(e) => handleAuxClick(e, entry.relativePath)}

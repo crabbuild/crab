@@ -1,5 +1,7 @@
 import { Toaster } from "@/components/ui/sonner";
+import { useEffectiveTheme } from "@/hooks/useEffectiveTheme";
 
 export function ToastManager() {
-  return <Toaster position="bottom-right" closeButton visibleToasts={5} />;
+  const theme = useEffectiveTheme();
+  return <Toaster theme={theme} position="bottom-right" closeButton visibleToasts={5} />;
 }

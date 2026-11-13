@@ -1,8 +1,9 @@
 import { Button } from "@/components/ui/button";
+import { ResizableHandle } from "@/components/ui/resizable";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { OpenRepo, repositoryKey } from "../state";
 import { CommitRow, DirEntry, HydratedWorktreeEntry, WorktreeStatus, isStorageRepositoryUrl, rpc } from "../ipc";
-import { PanelGroup, Panel, PanelResizeHandle } from "react-resizable-panels";
+import { PanelGroup, Panel } from "react-resizable-panels";
 import { WorkspaceShell } from "./WorkspaceShell";
 import { isSidebarView, type SidebarView } from "../lib/navigation";
 import { useSession } from "../lib/session-context";
@@ -979,7 +980,7 @@ export function RepoDetail({ repo, restoreEntry, onNavigate }: RepoDetailProps) 
                     renderDiff={activeDiff ? <DiffView repo={repo} path={activeDiff.path} /> : null}
                   />
                 </Panel>
-                <PanelResizeHandle className="w-1 bg-border hover:bg-primary transition-colors" />
+                <ResizableHandle aria-label="Resize file comparison" />
                 <Panel minSize={20}>
                   <EditorPane
                     repo={repo}

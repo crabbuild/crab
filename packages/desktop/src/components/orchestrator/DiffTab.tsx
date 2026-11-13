@@ -1,3 +1,4 @@
+import { ResizableHandle } from "@/components/ui/resizable";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -48,7 +49,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
+import { Panel, PanelGroup } from "react-resizable-panels";
 import { useEffectiveTheme } from "../../hooks/useEffectiveTheme";
 import { diffOptions } from "../../lib/diffTheme";
 import type { CommentsByLine, DiffComment } from "../CommentGutter";
@@ -562,7 +563,7 @@ export function DiffTab({ task, workspaceRevision, repo: _repo, active, initialA
           )}
         </Panel>
 
-        <PanelResizeHandle className="w-[3px] cursor-col-resize bg-transparent transition-colors hover:bg-primary/50" />
+        <ResizableHandle aria-label="Resize agent changes" />
 
         {/* Right panel: diff content */}
         <Panel minSize={30}>

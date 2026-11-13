@@ -1,3 +1,4 @@
+import { tabVariants } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import {
   CommandGroup,
@@ -277,10 +278,8 @@ export function BrowserToolbar({
             <div
               key={tab.id}
               className={clsx(
-                "group flex shrink-0 items-center gap-1.5 rounded-t-md px-3 py-1.5 text-xs cursor-pointer select-none max-w-[180px] transition",
-                isActive
-                  ? "bg-background text-foreground border border-border border-b-0"
-                  : "text-muted-foreground hover:text-foreground hover:bg-accent",
+                tabVariants({ active: isActive }),
+                "group cursor-pointer select-none max-w-[180px]",
               )}
               onClick={() => onSelectTab(tab.id)}
               role="tab"
