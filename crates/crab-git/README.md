@@ -179,14 +179,16 @@ reuse; metadata alone never authenticates bytes. Capture storage and decoding
 share scratch admission. Drop captures to release their file and reservation;
 callers own serialization, idle eviction and joined cancellation.
 
-`CapturedBlob::copy_checkout` applies built-in ident and line-ending conversion
-over those authenticated windows. The capture retains its verified Git identity
-for expansion. Auto text classification examines the complete post-ident body;
-long candidate keywords replay seekable input instead of retaining their text.
-Callers resolve Git attributes/configuration and retain encoding, external-filter
-and publication ownership. Interrupted input stops conversion instead of being
-retried by a generic I/O copier. This API does not qualify total-process memory
-or those subsequent stages without runtime evidence.
+`batch::copy_local_checkout` applies built-in ident and line-ending conversion.
+Linear forced EOL streams through that same physical verifier without a complete
+capture. Ident and global auto-text rules retain authenticated seekable input;
+the capture keeps the raw identity for expansion. Auto text classification
+examines the complete post-ident body; long candidate keywords replay input
+instead of retaining their text. Callers resolve Git attributes/configuration
+and retain encoding, external-filter and publication ownership. Interrupted
+input stops conversion instead of being retried by a generic I/O copier. Output
+remains untrusted until successful EOF. This API needs runtime qualification for
+total-process memory and subsequent stages.
 
 `IndexStatUpdate::from_file_oid` fences the shared advisory stat writer with an
 already verified Git identity, avoiding a retained large blob. Capture output

@@ -4,7 +4,7 @@ use std::io::SeekFrom;
 use std::ops::Range;
 
 mod checkout;
-pub use checkout::{Checkout, CheckoutEol};
+pub use checkout::{Checkout, CheckoutEol, copy_local_checkout};
 
 const BLOCK_BYTES: usize = 1024 * 1024;
 

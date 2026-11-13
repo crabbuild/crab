@@ -161,50 +161,61 @@ test("captured Git text and SQLite reject wrong object bodies and recover after 
     await page.screenshot({ path: test.info().outputPath("git-content-repaired.png") });
 
     await chooseSelect(page.getByRole("combobox").filter({ hasText: "captured" }), { label: "HEAD (default)" });
-    writeFileSync(path.join(source, ".gitattributes"), "data.txt ident text eol=crlf\n");
-    const checkoutText = git(["cat-file", "--filters", ":data.txt"]).toString("utf8");
     const checkoutOid = git(["rev-parse", ":data.txt"]).toString().trim();
-    expect(checkoutText).toContain(`$Id: ${checkoutOid} $\r\n`);
-    writeFileSync(path.join(source, "data.txt"), "unstaged edit before confirmed restoration\n");
     const restoredRow = page.locator('[role="treeitem"][data-item-path="data.txt"]');
-    await expect(restoredRow.getByText("M", { exact: true })).toBeVisible();
+    const revision = page.getByRole("combobox").filter({ hasText: "HEAD (default)" });
     // Revision selection returns focus to a shared control. The global palette
     // shortcut must still reach confirmation without moving focus elsewhere.
-    await expect(page.getByRole("combobox").filter({ hasText: "HEAD (default)" })).toBeFocused();
-    await page.keyboard.press(process.platform === "darwin" ? "Meta+Shift+P" : "Control+Shift+P");
-    const palette = page.getByRole("dialog", { name: "Command palette", exact: true });
-    await palette.getByRole("combobox").fill("Git: Discard File Changes");
-    await palette.getByRole("option").filter({ hasText: "Git: Discard File Changes" }).click();
-    await palette.getByRole("combobox").fill("data.txt");
-    await palette.getByRole("combobox").press("Enter");
-    await answerConfirmation(page, /^Restore /);
-    await expect(page.getByText("Restored data.txt from the index", { exact: true })).toBeVisible();
-    expect(readFileSync(path.join(source, "data.txt"), "utf8")).toBe(checkoutText);
-    // Checkout refreshes advisory stat fields when converted size changes.
-    // Preserve every staged object/mode, while native Git and the UI both clean.
-    expect(git(["ls-files", "--stage", "-z"])).toEqual(stagedEntries);
-    expect(git(["--no-optional-locks", "status", "--porcelain=v1", "-z", "--", "data.txt"])).toEqual(Buffer.alloc(0));
-    try {
-      await expect(restoredRow.getByText("M", { exact: true })).toHaveCount(0);
-    } catch (error) {
-      writeFileSync(test.info().outputPath("git-restored-status-failure.json"), JSON.stringify({
-        git: git(["--no-optional-locks", "status", "--porcelain=v1", "-z", "-uall"]).toString(),
-        native: await call(page, "git_status_porcelain", { repo_id: "git-integrity" }),
-        hidden: await page.evaluate(() => document.hidden),
-        attributes: git(["check-attr", "--all", "--", "data.txt"]).toString(),
-        indexEntriesPreserved: git(["ls-files", "--stage", "-z"]).equals(stagedEntries),
-        exactCheckout: readFileSync(path.join(source, "data.txt"), "utf8") === checkoutText,
-      }, null, 2));
-      throw error;
+    await expect(revision).toBeFocused();
+    const checkouts: Array<{ kind: string; bytes: number; sha256: string }> = [];
+    for (const [position, [kind, attributes, ident]] of ([
+      ["linear-eol", "data.txt text eol=crlf\n", false],
+      ["ident-auto", "data.txt ident text=auto eol=crlf\n", true],
+    ] as const).entries()) {
+      writeFileSync(path.join(source, ".gitattributes"), attributes);
+      const checkoutText = git(["cat-file", "--filters", ":data.txt"]).toString("utf8");
+      const checkoutPrefix = ident ? `$Id: ${checkoutOid} $` : "$Id$";
+      expect(checkoutText).toContain(checkoutPrefix + "\r\n");
+      writeFileSync(path.join(source, "data.txt"), "unstaged edit before confirmed restoration\n");
+      await expect(restoredRow.getByText("M", { exact: true })).toBeVisible();
+      if (position > 0) await revision.focus();
+      await expect(revision).toBeFocused();
+      await page.keyboard.press(process.platform === "darwin" ? "Meta+Shift+P" : "Control+Shift+P");
+      const palette = page.getByRole("dialog", { name: "Command palette", exact: true });
+      await palette.getByRole("combobox").fill("Git: Discard File Changes");
+      await palette.getByRole("option").filter({ hasText: "Git: Discard File Changes" }).click();
+      await palette.getByRole("combobox").fill("data.txt");
+      await palette.getByRole("combobox").press("Enter");
+      await answerConfirmation(page, /^Restore /);
+      await expect.poll(() => readFileSync(path.join(source, "data.txt"), "utf8")).toBe(checkoutText);
+      // Checkout refreshes advisory stats; every staged object/mode stays exact.
+      expect(git(["ls-files", "--stage", "-z"])).toEqual(stagedEntries);
+      expect(git(["--no-optional-locks", "status", "--porcelain=v1", "-z", "--", "data.txt"])).toEqual(Buffer.alloc(0));
+      try {
+        await expect(restoredRow.getByText("M", { exact: true })).toHaveCount(0);
+      } catch (error) {
+        writeFileSync(test.info().outputPath("git-restored-status-failure.json"), JSON.stringify({
+          kind, git: git(["--no-optional-locks", "status", "--porcelain=v1", "-z", "-uall"]).toString(),
+          native: await call(page, "git_status_porcelain", { repo_id: "git-integrity" }),
+          hidden: await page.evaluate(() => document.hidden),
+          attributes: git(["check-attr", "--all", "--", "data.txt"]).toString(),
+          indexEntriesPreserved: git(["ls-files", "--stage", "-z"]).equals(stagedEntries),
+          exactCheckout: readFileSync(path.join(source, "data.txt"), "utf8") === checkoutText,
+        }, null, 2));
+        throw error;
+      }
+      await open("data.txt");
+      await expect(page.getByText(checkoutPrefix, { exact: true }).first()).toBeVisible();
+      await expect(page.getByText("captured original body", { exact: true }).first()).toBeVisible();
+      await page.screenshot({ path: test.info().outputPath(`git-index-restored-${kind}.png`) });
+      checkouts.push({ kind, bytes: Buffer.byteLength(checkoutText), sha256: createHash("sha256").update(checkoutText).digest("hex") });
     }
-    await open("data.txt");
-    await expect(page.getByText("captured original body", { exact: true }).first()).toBeVisible();
-    await page.screenshot({ path: test.info().outputPath("git-index-restored.png") });
+    await expect(page.getByText("Restored data.txt from the index", { exact: true }).last()).toBeVisible();
     writeFileSync(test.info().outputPath("git-integrity-proof.json"), JSON.stringify({
       textBytes: Buffer.byteLength(originalText), databaseBytes: originalDatabase.length, mediaBytes: originalMedia.length,
       rejected: objects.map(({ file, oid }) => ({ file, oid })), repairedValue: 17, snapshotRemoved: true,
       indexEntriesPreserved: true, listingRecovered: true, restoredThroughUi: true, dirtyStatusCleared: true,
-      checkoutConvertedBytes: Buffer.byteLength(checkoutText), checkoutIdent: checkoutOid,
+      checkouts, checkoutOid,
     }, null, 2));
   } catch (error) {
     const page = await application?.firstWindow();

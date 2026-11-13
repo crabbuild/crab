@@ -22,13 +22,47 @@ pub struct Checkout {
     pub ident: bool,
 }
 
+/// Copy verified local checkout bytes without capturing linear conversions.
+///
+/// Linear EOL conversion streams through the raw identity verifier. Ident and
+/// automatic text rules use an authenticated seekable capture. Only absence
+/// returns false; discard output on error and retain joined publication ownership.
+pub fn copy_local_checkout(
+    objects: &Path,
+    oid: &str,
+    size: u64,
+    output: &mut impl Write,
+    checkout: Checkout,
+    scratch: impl FnOnce() -> io::Result<ScratchSpace>,
+    cancelled: &dyn Fn() -> bool,
+) -> io::Result<bool> {
+    if checkout == Checkout::default() {
+        return copy_local_blob(objects, oid, size, output, scratch, cancelled);
+    }
+    if checkout.ident || checkout.eol == CheckoutEol::AutoCrLf {
+        let scratch = scratch()?;
+        let Some(mut captured) = capture_blob(objects, oid, size, &scratch, cancelled)? else {
+            return Ok(false);
+        };
+        captured.copy_checkout(checkout, output, cancelled)?;
+        return Ok(true);
+    }
+    // Forced EOL needs no global scan or replay. Authenticate the same input
+    // while writing converted temporary bytes; full EOF still gates publication.
+    let mut buffered = BufWriter::with_capacity(64 * 1024, output);
+    let mut converted = LineEndings {
+        output: &mut buffered,
+        crlf: true,
+        previous_cr: false,
+    };
+    let found = copy_local_blob(objects, oid, size, &mut converted, scratch, cancelled)?;
+    buffered.flush()?;
+    check_cancelled(cancelled)?;
+    Ok(found)
+}
+
 impl CapturedBlob {
-    /// Copy built-in checkout bytes through bounded authenticated input windows.
-    ///
-    /// The caller resolves checkout policy and owns output publication. Auto text
-    /// decisions inspect the complete post-ident body; encoding and external
-    /// filters belong to subsequent caller-owned stages. Discard output on error.
-    pub fn copy_checkout(
+    fn copy_checkout(
         &mut self,
         checkout: Checkout,
         output: &mut impl Write,
@@ -379,10 +413,6 @@ mod tests {
             );
             assert_eq!(String::from_utf8(stored).unwrap().trim(), oid);
             let scratch = ScratchSpace::new(objects.path(), 4 * body.len() as u64 + 4096);
-            let mut captured =
-                capture_blob(objects.path(), &oid, body.len() as u64, &scratch, &|| false)
-                    .unwrap()
-                    .unwrap();
             for eol in [
                 CheckoutEol::Preserve,
                 CheckoutEol::CrLf,
@@ -406,9 +436,18 @@ mod tests {
                         b"",
                     );
                     let mut converted = Vec::new();
-                    captured
-                        .copy_checkout(Checkout { eol, ident }, &mut converted, &|| false)
-                        .unwrap();
+                    assert!(
+                        copy_local_checkout(
+                            objects.path(),
+                            &oid,
+                            body.len() as u64,
+                            &mut converted,
+                            Checkout { eol, ident },
+                            || Ok(scratch.clone()),
+                            &|| false,
+                        )
+                        .unwrap()
+                    );
                     assert_eq!(
                         converted,
                         expected,
@@ -417,6 +456,27 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn linear_checkout_does_not_require_capture_storage() {
+        let body = b"a\r\nb\n";
+        let (objects, oid) = super::super::tests::fixture(body);
+        for eol in [CheckoutEol::Preserve, CheckoutEol::CrLf] {
+            let checkout = Checkout { eol, ident: false };
+            assert!(
+                copy_local_checkout(
+                    objects.path(),
+                    &oid,
+                    body.len() as u64,
+                    &mut io::sink(),
+                    checkout,
+                    || Err(io::Error::other("capture storage unavailable")),
+                    &|| false,
+                )
+                .unwrap()
+            );
         }
     }
 
@@ -505,9 +565,16 @@ mod tests {
             .unwrap();
         blob.file.write_all(b"changed").unwrap();
         assert_eq!(
-            blob.copy_checkout(Checkout::default(), &mut io::sink(), &|| false)
-                .unwrap_err()
-                .kind(),
+            blob.copy_checkout(
+                Checkout {
+                    eol: CheckoutEol::AutoCrLf,
+                    ident: false
+                },
+                &mut io::sink(),
+                &|| false,
+            )
+            .unwrap_err()
+            .kind(),
             io::ErrorKind::InvalidData
         );
     }
@@ -531,7 +598,7 @@ mod tests {
         let error = blob
             .copy_checkout(
                 Checkout {
-                    eol: CheckoutEol::CrLf,
+                    eol: CheckoutEol::AutoCrLf,
                     ident: false,
                 },
                 &mut io::sink(),

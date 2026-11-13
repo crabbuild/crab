@@ -498,10 +498,17 @@ async fn restoration_rejects_concurrent_writers_cancellation_and_index_replaceme
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restoration_does_not_publish_when_the_index_object_is_unavailable_or_corrupt() {
-    for attributes in ["", "*.bin -text\n"] {
-        for corrupt in [false, true] {
-            let (directory, repo) = ordinary(NAME, &vec![0; 1024 * 1024], attributes).await;
+    for attributes in [
+        "",
+        "*.bin -text\n",
+        "*.bin text eol=crlf\n",
+        "*.bin ident text=auto eol=crlf\n",
+    ] {
+        for fault in ["missing", "framing", "checksum"] {
+            let content = b"row\n".repeat(256 * 1024);
+            let (directory, repo) = ordinary(NAME, &content, attributes).await;
             let root = directory.path();
+            let index = std::fs::read(root.join(".git/index")).unwrap();
             std::fs::write(root.join(NAME), b"retain working edits").unwrap();
             let source = Arc::new(
                 Restoration::capture(&repo, NAME, repo.read_scope())
@@ -512,14 +519,37 @@ async fn restoration_does_not_publish_when_the_index_object_is_unavailable_or_co
             let oid = oid.trim();
             let object = root.join(".git/objects").join(&oid[..2]).join(&oid[2..]);
             std::fs::remove_file(&object).unwrap();
-            if corrupt {
-                std::fs::write(&object, b"corrupt Git object").unwrap();
+            match fault {
+                "framing" => std::fs::write(&object, b"corrupt Git object").unwrap(),
+                "checksum" => {
+                    let mut changed = content;
+                    *changed.last_mut().unwrap() ^= 1;
+                    std::fs::write(root.join("replacement.bin"), changed).unwrap();
+                    let replacement = String::from_utf8(git(
+                        root,
+                        &["hash-object", "--no-filters", "-w", "replacement.bin"],
+                    ))
+                    .unwrap();
+                    let replacement = replacement.trim();
+                    let bytes = std::fs::read(
+                        root.join(".git/objects")
+                            .join(&replacement[..2])
+                            .join(&replacement[2..]),
+                    )
+                    .unwrap();
+                    std::fs::write(&object, bytes).unwrap();
+                }
+                _ => {}
             }
             assert!(source.clone().run(|_| Ok(())).await.is_err());
             source.release_reader().await.unwrap();
             assert_eq!(
-                (std::fs::read(root.join(NAME)).unwrap(), scratch(root)),
-                (b"retain working edits".to_vec(), Vec::new())
+                (
+                    std::fs::read(root.join(NAME)).unwrap(),
+                    std::fs::read(root.join(".git/index")).unwrap(),
+                    scratch(root)
+                ),
+                (b"retain working edits".to_vec(), index, Vec::new())
             );
             repo.close().await.unwrap();
         }

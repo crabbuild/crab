@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crab_git::process::OwnedChild;
+use crab_git::{batch::Checkout, process::OwnedChild};
 
 use super::*;
 
@@ -167,7 +167,7 @@ pub(super) async fn copy_range<W: std::io::Write + Send + 'static>(
         remaining: range.end - range.start,
         output,
     };
-    read_blob(root, oid, size, output, scope)
+    read_blob(root, oid, size, output, Checkout::default(), scope)
         .await
         .map(|output| output.output)
 }
@@ -177,6 +177,7 @@ async fn read_blob<W: std::io::Write + Send + 'static>(
     oid: &str,
     size: u64,
     mut output: W,
+    checkout: Checkout,
     scope: &ReadScope,
 ) -> Result<W> {
     let objects = git_path(root, "objects", scope).await?;
@@ -184,11 +185,12 @@ async fn read_blob<W: std::io::Write + Send + 'static>(
         let objects = objects.clone();
         let captured_oid = oid.to_owned();
         let (found, next) = blocking(scope, move |cancelled| {
-            let found = crab_git::batch::copy_local_blob(
+            let found = crab_git::batch::copy_local_checkout(
                 &objects,
                 &captured_oid,
                 size,
                 &mut output,
+                checkout,
                 super::git_capture::scratch,
                 cancelled,
             )?;
@@ -257,16 +259,6 @@ pub(super) async fn blocking<T: Send + 'static>(
     scope: &ReadScope,
     copy: impl FnOnce(&dyn Fn() -> bool) -> std::io::Result<T> + Send + 'static,
 ) -> Result<T> {
-    blocking_result(scope, move |cancelled| {
-        copy(cancelled).map_err(AgentError::from)
-    })
-    .await
-}
-
-async fn blocking_result<T: Send + 'static>(
-    scope: &ReadScope,
-    copy: impl FnOnce(&dyn Fn() -> bool) -> Result<T> + Send + 'static,
-) -> Result<T> {
     let cancellation = scope.clone();
     let copied = tokio::task::spawn_blocking(move || {
         let deadline = Instant::now() + READ_TIMEOUT;
@@ -281,7 +273,7 @@ async fn blocking_result<T: Send + 'static>(
             }
             false
         };
-        let copied = copy(&cancelled);
+        let copied = copy(&cancelled).map_err(AgentError::from);
         if timed_out.get() {
             return Err(
                 std::io::Error::new(std::io::ErrorKind::TimedOut, "Git read timed out").into(),
@@ -336,7 +328,9 @@ pub(super) async fn copy_blob(
     output: impl std::io::Write + Send + 'static,
     scope: &ReadScope,
 ) -> Result<()> {
-    read_blob(root, oid, size, output, scope).await.map(drop)
+    read_blob(root, oid, size, output, Checkout::default(), scope)
+        .await
+        .map(drop)
 }
 
 pub(super) async fn git_path(root: &Path, name: &str, scope: &ReadScope) -> Result<PathBuf> {

@@ -1,7 +1,6 @@
 use super::super::publication::IndexFile;
 use super::*;
 use crab_git::batch::{Checkout, CheckoutEol};
-use std::io::Write;
 
 pub(in crate::repository::content) async fn copy(
     index: &IndexFile,
@@ -29,34 +28,7 @@ pub(in crate::repository::content) async fn copy(
         return Err(changed());
     }
     if let Plan::Builtin(checkout) = plan(index, private_index, scope).await? {
-        if checkout == Checkout::default() {
-            return copy_blob_to_file(index, size, file, scope, progress).await;
-        }
-        let mut captured = capture_blob(
-            &index.root,
-            &index.oid,
-            size,
-            super::super::git_capture::scratch()?,
-            scope,
-        )
-        .await?;
-        return blocking_result(scope, move |cancelled| {
-            let mut output = Reporter {
-                file,
-                progress,
-                error: None,
-                written: 0,
-                last: Instant::now(),
-            };
-            let copied = captured.copy_checkout(checkout, &mut output, cancelled);
-            if let Some(error) = output.error {
-                return Err(error);
-            }
-            copied?;
-            (output.progress)(output.written)?;
-            Ok(())
-        })
-        .await;
+        return copy_checkout_to_file(index, size, file, checkout, scope, progress).await;
     }
     copy_blob(&index.root, &index.oid, size, std::io::sink(), scope).await?;
     let path = format!(":{}", index.path);
@@ -266,49 +238,23 @@ async fn config(root: &Path, name: &str, scope: &ReadScope) -> Result<Option<Vec
     Ok(Some(value.to_vec()))
 }
 
-struct Reporter<F> {
-    file: std::fs::File,
-    progress: F,
-    error: Option<AgentError>,
-    written: u64,
-    last: Instant,
-}
-
-impl<F: FnMut(u64) -> Result<()>> Write for Reporter<F> {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        let count = self.file.write(bytes)?;
-        self.written += count as u64;
-        if self.last.elapsed() >= Duration::from_millis(100) {
-            if let Err(error) = (self.progress)(self.written) {
-                self.error = Some(error);
-                // write_all retries Interrupted. Stop copying here; the joined
-                // caller returns the retained typed callback error below.
-                return Err(std::io::Error::other("checkout progress failed"));
-            }
-            self.last = Instant::now();
-        }
-        Ok(count)
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.file.flush()
-    }
-}
-
-async fn copy_blob_to_file(
+async fn copy_checkout_to_file(
     index: &IndexFile,
     size: u64,
     file: std::fs::File,
+    checkout: Checkout,
     scope: &ReadScope,
     mut progress: impl FnMut(u64) -> Result<()> + Send + 'static,
 ) -> Result<()> {
     let observed = file.try_clone()?;
-    let copied = copy_blob(&index.root, &index.oid, size, file, scope);
+    let copied = read_blob(&index.root, &index.oid, size, file, checkout, scope);
     tokio::pin!(copied);
     loop {
         tokio::select! {
             result = &mut copied => {
                 result?;
-                drop(report_progress(progress, size).await?);
+                let written = observed.metadata()?.len();
+                drop(report_progress(progress, written).await?);
                 return scope.check();
             }
             () = tokio::time::sleep(Duration::from_millis(100)) => {

@@ -13,7 +13,9 @@ use std::process::Stdio;
 mod packed;
 pub use packed::copy_packed_blob;
 mod capture;
-pub use capture::{CapturedBlob, Checkout, CheckoutEol, capture_blob, copy_local_blob};
+pub use capture::{
+    CapturedBlob, Checkout, CheckoutEol, capture_blob, copy_local_blob, copy_local_checkout,
+};
 
 /// A captured blob header whose body still requires identity verification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
