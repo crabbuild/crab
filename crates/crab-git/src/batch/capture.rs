@@ -3,6 +3,9 @@ use crate::incoming_pack::{ScratchSpace, scratch::ScratchFile};
 use std::io::SeekFrom;
 use std::ops::Range;
 
+mod checkout;
+pub use checkout::{Checkout, CheckoutEol};
+
 const BLOCK_BYTES: usize = 1024 * 1024;
 
 /// Verified immutable bytes owned by an admitted anonymous file.
@@ -11,6 +14,7 @@ const BLOCK_BYTES: usize = 1024 * 1024;
 /// verified at capture. Retain the scratch admission until this owner drops;
 /// callers serialize access and supervise cancellation and delivery.
 pub struct CapturedBlob {
+    oid: String,
     file: ScratchFile,
     blocks: Vec<blake3::Hash>,
     size: u64,
@@ -125,6 +129,7 @@ pub fn capture_blob(
     }
     check_cancelled(cancelled)?;
     Ok(Some(CapturedBlob {
+        oid: oid.to_owned(),
         file: output.file,
         blocks: output.blocks,
         size,
@@ -229,7 +234,7 @@ impl CapturedBlob {
 mod tests {
     use super::*;
 
-    fn fixture(bytes: &[u8]) -> (tempfile::TempDir, String) {
+    pub(super) fn fixture(bytes: &[u8]) -> (tempfile::TempDir, String) {
         let root = tempfile::tempdir().unwrap();
         let oid = gix_object::compute_hash(gix_hash::Kind::Sha1, Kind::Blob, bytes)
             .unwrap()

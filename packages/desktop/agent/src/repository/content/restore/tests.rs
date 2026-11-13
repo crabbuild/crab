@@ -6,39 +6,43 @@ const NAME: &str = "models/deep/data[1].bin";
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restoration_progress_can_publish_on_the_async_runtime() {
     use std::sync::atomic::{AtomicU64, Ordering};
-    let body = vec![0; 1024 * 1024];
-    let (directory, repo) = ordinary(NAME, &body, "").await;
-    let root = directory.path();
-    std::fs::write(root.join(NAME), b"dirty").unwrap();
-    let source = Arc::new(
-        Restoration::capture(&repo, NAME, repo.read_scope())
-            .await
-            .unwrap(),
-    );
-    let reported = Arc::new(AtomicU64::new(0));
-    let observed = reported.clone();
-    let runtime = tokio::runtime::Handle::current();
-    source
-        .clone()
-        .run(move |written| {
-            // The transfer reporter synchronously publishes an async frame.
-            runtime.block_on(async {
-                tokio::task::yield_now().await;
-                observed.store(written, Ordering::Release);
-                Ok(())
+    for attributes in ["", "*.bin ident text eol=crlf\n"] {
+        let body = b"INDEX\n$Id$\n".repeat(100_000);
+        let (directory, repo) = ordinary(NAME, &body, attributes).await;
+        let root = directory.path();
+        let expected = git(root, &["cat-file", "--filters", &format!(":{NAME}")]);
+        let expected_len = expected.len() as u64;
+        std::fs::write(root.join(NAME), b"dirty").unwrap();
+        let source = Arc::new(
+            Restoration::capture(&repo, NAME, repo.read_scope())
+                .await
+                .unwrap(),
+        );
+        let reported = Arc::new(AtomicU64::new(0));
+        let observed = reported.clone();
+        let runtime = tokio::runtime::Handle::current();
+        source
+            .clone()
+            .run(move |written| {
+                // The transfer reporter synchronously publishes an async frame.
+                runtime.block_on(async {
+                    tokio::task::yield_now().await;
+                    observed.store(written, Ordering::Release);
+                    Ok(())
+                })
             })
-        })
-        .await
-        .unwrap();
-    source.release_reader().await.unwrap();
-    assert_eq!(
-        (
-            std::fs::read(root.join(NAME)).unwrap(),
-            reported.load(Ordering::Acquire)
-        ),
-        (body, 1024 * 1024)
-    );
-    repo.close().await.unwrap();
+            .await
+            .unwrap();
+        source.release_reader().await.unwrap();
+        assert_eq!(
+            (
+                std::fs::read(root.join(NAME)).unwrap(),
+                reported.load(Ordering::Acquire)
+            ),
+            (expected, expected_len)
+        );
+        repo.close().await.unwrap();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -48,15 +52,26 @@ async fn restoration_matches_git_for_attributes_and_checkout_configuration() {
         ("", "false"),
         ("", "off"),
         ("", "input"),
+        ("", "InPuT"),
         ("", "true"),
         ("*.txt diff\n", "false"),
         ("*.txt -text\n", "true"),
         ("*.txt text\n", "false"),
         ("*.txt text=unset\n", "true"),
         ("*.txt ident\n", "false"),
+        ("*.txt -ident\n", "false"),
+        ("*.txt ident=set\n", "false"),
+        ("*.txt ident=unset\n", "false"),
         ("*.txt text eol=crlf\n", "false"),
         ("*.txt text eol=lf\n", "true"),
         ("*.txt crlf=input\n", "true"),
+        ("*.txt crlf\n", "false"),
+        ("*.txt crlf=auto\n", "false"),
+        ("*.txt text=auto eol=crlf\n", "false"),
+        ("*.txt text=auto\n", "false"),
+        ("*.txt -text eol=crlf\n", "true"),
+        ("*.txt -filter text eol=crlf\n", "false"),
+        ("*.txt filter text eol=crlf\n", "false"),
         ("*.txt working-tree-encoding=UTF-16LE\n", "false"),
     ] {
         let (directory, repo) = ordinary(name, b"INDEX\n$Id$\n", "").await;
@@ -83,6 +98,41 @@ async fn restoration_matches_git_for_attributes_and_checkout_configuration() {
             ),
             (expected, index, Vec::new()),
             "attributes={attributes:?}, autocrlf={autocrlf}"
+        );
+        repo.close().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restoration_progress_failure_retains_the_working_file() {
+    for attributes in ["", "*.bin ident text eol=crlf\n"] {
+        let (directory, repo) = ordinary(NAME, &b"$Id$\n".repeat(100_000), attributes).await;
+        let root = directory.path();
+        let index = std::fs::read(root.join(".git/index")).unwrap();
+        std::fs::write(root.join(NAME), b"retain dirty work").unwrap();
+        let source = Arc::new(
+            Restoration::capture(&repo, NAME, repo.read_scope())
+                .await
+                .unwrap(),
+        );
+        let error = source
+            .clone()
+            .run(|_| {
+                Err(AgentError::OpCancelled {
+                    op_id: "progress-closed".into(),
+                })
+            })
+            .await
+            .unwrap_err();
+        source.release_reader().await.unwrap();
+        assert_eq!(
+            (
+                error.is_cancelled(),
+                std::fs::read(root.join(NAME)).unwrap(),
+                std::fs::read(root.join(".git/index")).unwrap(),
+                scratch(root)
+            ),
+            (true, b"retain dirty work".to_vec(), index, Vec::new())
         );
         repo.close().await.unwrap();
     }

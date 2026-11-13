@@ -586,6 +586,33 @@ remain. Screenshots inspected. The local and SSH runtime pair and all 869 assets
 match the package; its native producer remains `b1bfa9c1f055` above. This bounded
 GUI case does not qualify multi-GiB conversion or the full platform matrix.
 
+### Built-in checkout conversion qualification
+
+The subsequent implementation uses authenticated capture windows for built-in
+ident and line-ending conversion. It retains the raw Git OID for SHA-1/SHA-256
+identifier expansion, replays long candidate spans from owned seekable bytes and
+applies Git's complete post-ident auto-text classification before CRLF expansion.
+Typed private-index attributes distinguish booleans from reserved-looking values;
+Git normalizes configuration booleans, including case-insensitive `input`.
+No raw-object decoder or dependency is added. Encoding and actual external/process
+filters still retain Git's existing conversion owner and unbounded allocation.
+
+The real forced-CRLF baseline at published `2d0389b566f2` restores the exact
+536,870,914 converted bytes and preserves the index/close/cleanup, but peaks at
+1,470,988,288 bytes RSS in 8.11 seconds, failing the unchanged 512 MiB gate.
+Fixture preparation and the independent Git oracle are outside measurement.
+The new source has 34 passing shared batch/capture tests, including global
+text/ident oracle cases, long candidates across windows, SHA-256, corrupted and
+empty captures, and generated fragmented tokens. A cancellation regression fails
+before replacing the generic copier's `Interrupted` retry and passes afterward.
+Eleven native restoration tests pass with one existing ignored matching-CLI case;
+callback tests cover actual async notifications and typed failure without
+publication. The broader native content selection passes all 47 applicable tests
+with nine existing ignored cases. Strict shared all-target lint passes; production
+agent lint passes with the same 149 existing warnings. New production-runtime memory and packaged UI proof remain required.
+This does not close encoding/filter streaming, durable offline versions or the
+full qualification matrix.
+
 ### Verified local Git capture implementation
 
 Local Git sources now share an owned capture for selected ranges, complete

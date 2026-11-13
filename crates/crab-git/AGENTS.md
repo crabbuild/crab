@@ -73,6 +73,11 @@ Trace one path: `crates/crab-server/src/git/receive/validate.rs` → `validate` 
   operational disk admission and draining before close. Storage decline uses
   the same complete physical verifier; source corruption must remain visible.
   Sources: `batch/capture.rs`; desktop `content/git_capture.rs`.
+- Built-in checkout reads authenticated capture windows. Auto text classification
+  follows ident expansion; long ident candidates replay owned seekable input
+  instead of growing a token buffer. Cancellation must not be retried as ordinary
+  interrupted I/O. Callers retain encoding/filter and publication ownership.
+  Source: `batch/capture/checkout.rs`.
 
 ## Features and platform
 

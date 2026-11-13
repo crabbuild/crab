@@ -257,6 +257,16 @@ pub(super) async fn blocking<T: Send + 'static>(
     scope: &ReadScope,
     copy: impl FnOnce(&dyn Fn() -> bool) -> std::io::Result<T> + Send + 'static,
 ) -> Result<T> {
+    blocking_result(scope, move |cancelled| {
+        copy(cancelled).map_err(AgentError::from)
+    })
+    .await
+}
+
+async fn blocking_result<T: Send + 'static>(
+    scope: &ReadScope,
+    copy: impl FnOnce(&dyn Fn() -> bool) -> Result<T> + Send + 'static,
+) -> Result<T> {
     let cancellation = scope.clone();
     let copied = tokio::task::spawn_blocking(move || {
         let deadline = Instant::now() + READ_TIMEOUT;
@@ -277,7 +287,7 @@ pub(super) async fn blocking<T: Send + 'static>(
                 std::io::Error::new(std::io::ErrorKind::TimedOut, "Git read timed out").into(),
             );
         }
-        copied.map_err(AgentError::from)
+        copied
     })
     .await
     .map_err(std::io::Error::other)?;

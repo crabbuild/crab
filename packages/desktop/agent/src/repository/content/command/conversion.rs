@@ -1,5 +1,7 @@
 use super::super::publication::IndexFile;
 use super::*;
+use crab_git::batch::{Checkout, CheckoutEol};
+use std::io::Write;
 
 pub(in crate::repository::content) async fn copy(
     index: &IndexFile,
@@ -26,8 +28,35 @@ pub(in crate::repository::content) async fn copy(
     if entry.0.as_deref() != Some(&index.mode) || entry.1.as_deref() != Some(&index.oid) {
         return Err(changed());
     }
-    if !requires_git_conversion(index, private_index, scope).await? {
-        return copy_blob_to_file(index, size, file, scope, progress).await;
+    if let Plan::Builtin(checkout) = plan(index, private_index, scope).await? {
+        if checkout == Checkout::default() {
+            return copy_blob_to_file(index, size, file, scope, progress).await;
+        }
+        let mut captured = capture_blob(
+            &index.root,
+            &index.oid,
+            size,
+            super::super::git_capture::scratch()?,
+            scope,
+        )
+        .await?;
+        return blocking_result(scope, move |cancelled| {
+            let mut output = Reporter {
+                file,
+                progress,
+                error: None,
+                written: 0,
+                last: Instant::now(),
+            };
+            let copied = captured.copy_checkout(checkout, &mut output, cancelled);
+            if let Some(error) = output.error {
+                return Err(error);
+            }
+            copied?;
+            (output.progress)(output.written)?;
+            Ok(())
+        })
+        .await;
     }
     copy_blob(&index.root, &index.oid, size, std::io::sink(), scope).await?;
     let path = format!(":{}", index.path);
@@ -51,22 +80,50 @@ pub(in crate::repository::content) async fn copy(
     copy_blob(&index.root, &index.oid, size, std::io::sink(), scope).await
 }
 
-async fn requires_git_conversion(
-    index: &IndexFile,
-    private_index: &Path,
-    scope: &ReadScope,
-) -> Result<bool> {
+enum Plan {
+    Builtin(Checkout),
+    Git,
+}
+
+enum Attribute {
+    Set,
+    Unset,
+    Value(Vec<u8>),
+}
+
+#[derive(Clone, Copy, Default, PartialEq)]
+enum Text {
+    #[default]
+    Unspecified,
+    Binary,
+    Forced,
+    Auto,
+    Input,
+}
+
+impl From<Attribute> for Text {
+    fn from(attribute: Attribute) -> Self {
+        match attribute {
+            Attribute::Set => Self::Forced,
+            Attribute::Unset => Self::Binary,
+            Attribute::Value(value) if value == b"auto" => Self::Auto,
+            Attribute::Value(value) if value == b"input" => Self::Input,
+            _ => Self::Unspecified,
+        }
+    }
+}
+
+async fn plan(index: &IndexFile, private_index: &Path, scope: &ReadScope) -> Result<Plan> {
     let mut command = git_command(
         &index.root,
         &["check-attr", "--all", "-z", "--", &index.path],
     )?;
     command.env("GIT_INDEX_FILE", private_index);
     let attributes = checked_stdout(execute(command, scope, capture, None).await?)?;
-    // --all distinguishes an absent attribute from a literal value such as
-    // filter=unspecified. Named queries print the same text for both states.
-    let mut eol_conversion = false;
-    let mut lf_only = false;
-    let mut unset_text = false;
+    let mut text = Text::Unspecified;
+    let mut crlf = Text::Unspecified;
+    let mut eol = None;
+    let mut ident = false;
     if !attributes.is_empty() {
         let fields = attributes
             .strip_suffix(&[0])
@@ -82,23 +139,104 @@ async fn requires_git_conversion(
                 return Err(std::io::Error::other("Git attribute path differs").into());
             }
             match record[1] {
-                b"ident" | b"filter" | b"working-tree-encoding" => return Ok(true),
-                b"crlf" | b"eol" | b"text" => {
-                    eol_conversion = true;
-                    lf_only |= record[1] == b"eol" && record[2] == b"lf";
-                    unset_text |= record[1] == b"text" && record[2] == b"unset";
+                // These stages retain Git's existing semantics until their own
+                // bounded replacements cover encoding and process-filter contracts.
+                b"working-tree-encoding" => return Ok(Plan::Git),
+                b"filter" => {
+                    if matches!(
+                        attribute(index, private_index, "filter", record[2], scope).await?,
+                        Attribute::Value(_)
+                    ) {
+                        return Ok(Plan::Git);
+                    }
+                }
+                b"eol" => eol = Some(record[2].to_vec()),
+                b"text" => {
+                    text = attribute(index, private_index, "text", record[2], scope)
+                        .await?
+                        .into()
+                }
+                b"crlf" => {
+                    crlf = attribute(index, private_index, "crlf", record[2], scope)
+                        .await?
+                        .into()
+                }
+                b"ident" => {
+                    ident = matches!(
+                        attribute(index, private_index, "ident", record[2], scope).await?,
+                        Attribute::Set
+                    )
                 }
                 _ => {}
             }
         }
     }
-    if lf_only {
-        return Ok(false);
+    if text == Text::Unspecified {
+        text = crlf;
     }
-    if unset_text {
-        // A typed attribute pathspec distinguishes -text from text=unset.
-        // Literal/top magic keeps the user's exact path while testing its state.
-        let selector = format!(":(top,literal,attr:-text){}", index.path);
+    let explicit = match (text, eol.as_deref()) {
+        (Text::Binary, _) | (_, Some(b"lf")) => Some(CheckoutEol::Preserve),
+        (Text::Auto, Some(b"crlf")) => Some(CheckoutEol::AutoCrLf),
+        (_, Some(b"crlf")) => Some(CheckoutEol::CrLf),
+        (Text::Input, _) => Some(CheckoutEol::Preserve),
+        _ => None,
+    };
+    let eol = if let Some(eol) = explicit {
+        eol
+    } else {
+        let autocrlf = config(&index.root, "core.autocrlf", scope).await?;
+        let input_only = autocrlf
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case(b"input"));
+        let enabled = if autocrlf.is_some() && !input_only {
+            run(
+                &index.root,
+                &["config", "--null", "--bool", "--get", "core.autocrlf"],
+                scope,
+            )
+            .await?
+                == b"true\0"
+        } else {
+            false
+        };
+        let crlf = if enabled {
+            true
+        } else if input_only {
+            false
+        } else if matches!(text, Text::Forced | Text::Auto) {
+            match config(&index.root, "core.eol", scope).await?.as_deref() {
+                Some(value) if value.eq_ignore_ascii_case(b"crlf") => true,
+                Some(value) if value.eq_ignore_ascii_case(b"lf") => false,
+                _ => cfg!(windows),
+            }
+        } else {
+            false
+        };
+        match (crlf, text) {
+            (false, _) => CheckoutEol::Preserve,
+            (true, Text::Forced) => CheckoutEol::CrLf,
+            (true, _) => CheckoutEol::AutoCrLf,
+        }
+    };
+    Ok(Plan::Builtin(Checkout { eol, ident }))
+}
+
+async fn attribute(
+    index: &IndexFile,
+    private_index: &Path,
+    name: &str,
+    value: &[u8],
+    scope: &ReadScope,
+) -> Result<Attribute> {
+    let state = match value {
+        b"set" => Some(name.to_owned()),
+        b"unset" => Some(format!("-{name}")),
+        _ => None,
+    };
+    if let Some(state) = state {
+        // --all preserves absence; a typed literal pathspec distinguishes true
+        // and false from strings literally named set/unset without parsing files.
+        let selector = format!(":(top,literal,attr:{state}){}", index.path);
         let mut command = git_command(
             &index.root,
             &["--no-literal-pathspecs", "ls-files", "-z", "--", &selector],
@@ -106,36 +244,53 @@ async fn requires_git_conversion(
         command.env("GIT_INDEX_FILE", private_index);
         let selected = checked_stdout(execute(command, scope, capture, None).await?)?;
         if selected == format!("{}\0", index.path).as_bytes() {
-            return Ok(false);
+            return Ok(if value == b"set" {
+                Attribute::Set
+            } else {
+                Attribute::Unset
+            });
         }
     }
-    if eol_conversion {
-        return Ok(true);
-    }
-    let configured = output(
-        &index.root,
-        &["config", "--null", "--get", "core.autocrlf"],
-        scope,
-    )
-    .await?;
+    Ok(Attribute::Value(value.to_vec()))
+}
+
+async fn config(root: &Path, name: &str, scope: &ReadScope) -> Result<Option<Vec<u8>>> {
+    let configured = output(root, &["config", "--null", "--get", name], scope).await?;
     if configured.status.code() == Some(1) {
-        return Ok(false);
+        return Ok(None);
     }
-    if checked_stdout(configured)? == b"input\0" {
-        return Ok(false);
+    let value = checked_stdout(configured)?;
+    let value = value
+        .strip_suffix(&[0])
+        .ok_or_else(|| std::io::Error::other("invalid Git configuration framing"))?;
+    Ok(Some(value.to_vec()))
+}
+
+struct Reporter<F> {
+    file: std::fs::File,
+    progress: F,
+    error: Option<AgentError>,
+    written: u64,
+    last: Instant,
+}
+
+impl<F: FnMut(u64) -> Result<()>> Write for Reporter<F> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let count = self.file.write(bytes)?;
+        self.written += count as u64;
+        if self.last.elapsed() >= Duration::from_millis(100) {
+            if let Err(error) = (self.progress)(self.written) {
+                self.error = Some(error);
+                // write_all retries Interrupted. Stop copying here; the joined
+                // caller returns the retained typed callback error below.
+                return Err(std::io::Error::other("checkout progress failed"));
+            }
+            self.last = Instant::now();
+        }
+        Ok(count)
     }
-    // Let Git interpret its boolean spellings. With no conversion attributes,
-    // false/input never alter checkout bytes, independently of core.eol.
-    let normalized = run(
-        &index.root,
-        &["config", "--null", "--bool", "--get", "core.autocrlf"],
-        scope,
-    )
-    .await?;
-    match normalized.as_slice() {
-        b"false\0" => Ok(false),
-        b"true\0" => Ok(true),
-        _ => Err(std::io::Error::other("invalid Git autocrlf value").into()),
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
     }
 }
 

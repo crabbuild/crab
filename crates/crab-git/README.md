@@ -179,6 +179,15 @@ reuse; metadata alone never authenticates bytes. Capture storage and decoding
 share scratch admission. Drop captures to release their file and reservation;
 callers own serialization, idle eviction and joined cancellation.
 
+`CapturedBlob::copy_checkout` applies built-in ident and line-ending conversion
+over those authenticated windows. The capture retains its verified Git identity
+for expansion. Auto text classification examines the complete post-ident body;
+long candidate keywords replay seekable input instead of retaining their text.
+Callers resolve Git attributes/configuration and retain encoding, external-filter
+and publication ownership. Interrupted input stops conversion instead of being
+retried by a generic I/O copier. This API does not qualify total-process memory
+or those subsequent stages without runtime evidence.
+
 The caller owns the process, disables replacements/filters and supervises blocked I/O; the parser
 does not spawn or detach workers. Mirror inspection/pre-push use this second
 step before trusting the pointer inventory. Other reachable-set APIs retain

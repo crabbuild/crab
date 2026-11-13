@@ -23,8 +23,8 @@ test("captured Git text and SQLite reject wrong object bodies and recover after 
   let application: Awaited<ReturnType<typeof electron.launch>> | undefined;
   try {
     git(["init", "--initial-branch=main"]);
-    const originalText = "captured original body\n".repeat(512);
-    const wrongText = "replaced incorrect row\n".repeat(512);
+    const originalText = "$Id$\n" + "captured original body\n".repeat(512);
+    const wrongText = "$Id$\n" + "replaced incorrect row\n".repeat(512);
     expect(Buffer.byteLength(wrongText)).toBe(Buffer.byteLength(originalText));
     writeFileSync(path.join(source, "data.txt"), originalText);
     const originalMedia = Buffer.alloc(44 + 16 * 192000);
@@ -160,6 +160,10 @@ test("captured Git text and SQLite reject wrong object bodies and recover after 
     await page.screenshot({ path: test.info().outputPath("git-content-repaired.png") });
 
     await chooseSelect(page.getByRole("combobox").filter({ hasText: "captured" }), { label: "HEAD (default)" });
+    writeFileSync(path.join(source, ".gitattributes"), "data.txt ident text eol=crlf\n");
+    const checkoutText = git(["cat-file", "--filters", ":data.txt"]).toString("utf8");
+    const checkoutOid = git(["rev-parse", ":data.txt"]).toString().trim();
+    expect(checkoutText).toContain(`$Id: ${checkoutOid} $\r\n`);
     writeFileSync(path.join(source, "data.txt"), "unstaged edit before confirmed restoration\n");
     const restoredRow = page.locator('[role="treeitem"][data-item-path="data.txt"]');
     await expect(restoredRow.getByText("M", { exact: true })).toBeVisible();
@@ -174,7 +178,7 @@ test("captured Git text and SQLite reject wrong object bodies and recover after 
     await palette.getByRole("combobox").press("Enter");
     await answerConfirmation(page, /^Restore /);
     await expect(page.getByText("Restored data.txt from the index", { exact: true })).toBeVisible();
-    expect(readFileSync(path.join(source, "data.txt"), "utf8")).toBe(originalText);
+    expect(readFileSync(path.join(source, "data.txt"), "utf8")).toBe(checkoutText);
     expect(readFileSync(path.join(source, ".git/index"))).toEqual(index);
     await expect(restoredRow.getByText("M", { exact: true })).toHaveCount(0);
     await open("data.txt");
@@ -184,6 +188,7 @@ test("captured Git text and SQLite reject wrong object bodies and recover after 
       textBytes: Buffer.byteLength(originalText), databaseBytes: originalDatabase.length, mediaBytes: originalMedia.length,
       rejected: objects.map(({ file, oid }) => ({ file, oid })), repairedValue: 17, snapshotRemoved: true,
       indexPreserved: true, listingRecovered: true, restoredThroughUi: true, dirtyStatusCleared: true,
+      checkoutConvertedBytes: Buffer.byteLength(checkoutText), checkoutIdent: checkoutOid,
     }, null, 2));
   } catch (error) {
     const page = await application?.firstWindow();
