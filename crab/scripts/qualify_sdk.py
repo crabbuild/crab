@@ -13,6 +13,7 @@ import os
 import platform
 import re
 import statistics
+import stat
 import subprocess
 import sys
 import threading
@@ -358,11 +359,13 @@ class ReadOrigin(ThreadingHTTPServer):
         self.counts = Counter()
         self.response_bytes = 0
         self.failures = 0
+        self.reads = []
         self.lock = threading.Lock()
 
-    def snapshot(self) -> tuple[Counter, int, int]:
+    def snapshot(self) -> tuple[Counter, int, int, list[dict]]:
         with self.lock:
-            return self.counts.copy(), self.response_bytes, self.failures
+            return (self.counts.copy(), self.response_bytes, self.failures,
+                    [record.copy() for record in self.reads])
 
 
 class ReadOriginHandler(BaseHTTPRequestHandler):
@@ -386,17 +389,29 @@ class ReadOriginHandler(BaseHTTPRequestHandler):
     do_PUT = do_POST = do_DELETE = do_PATCH = reject_write
 
     def forward_read(self) -> None:
+        # Persist only object-path identity and range, never signed queries or
+        # credentials. Pending records expose traffic crossing trial boundaries.
+        record = {
+            "method": self.command,
+            "path_sha256": hashlib.sha256(urlsplit(self.path).path.encode()).hexdigest(),
+            "range": self.headers.get("Range"),
+            "complete": False,
+        }
         with self.server.lock:
             self.server.counts[self.command] += 1
+            self.server.reads.append(record)
         connection = http.client.HTTPConnection(
             self.server.upstream.hostname, self.server.upstream.port, timeout=180
         )
         headers = dict(self.headers.items())
         headers["Connection"] = "close"
         transferred = 0
+        status = None
+        failed = False
         try:
             connection.request(self.command, self.path, headers=headers)
             response = connection.getresponse()
+            status = response.status
             self.send_response_only(response.status)
             for name, value in response.getheaders():
                 if name.lower() not in {"connection", "transfer-encoding"}:
@@ -408,15 +423,37 @@ class ReadOriginHandler(BaseHTTPRequestHandler):
                     self.wfile.write(data)
                     transferred += len(data)
         except (OSError, http.client.HTTPException):
+            failed = True
             with self.server.lock:
                 self.server.failures += 1
         finally:
             connection.close()
             with self.server.lock:
                 self.server.response_bytes += transferred
+                record.update(status=status, response_bytes=transferred,
+                              failed=failed, complete=True)
             self.close_connection = True
 
     do_GET = do_HEAD = forward_read
+
+
+def cache_inventory(root: Path) -> dict:
+    files = []
+    for directory, _directories, names in os.walk(root, followlinks=False):
+        for name in names:
+            path = Path(directory) / name
+            metadata = path.lstat()
+            if stat.S_ISREG(metadata.st_mode):
+                files.append({
+                    "path": path.relative_to(root).as_posix(),
+                    "bytes": metadata.st_size,
+                    "allocated_bytes": metadata.st_blocks * 512,
+                })
+    return {
+        "files": sorted(files, key=lambda entry: entry["path"]),
+        "bytes": sum(entry["bytes"] for entry in files),
+        "allocated_bytes": sum(entry["allocated_bytes"] for entry in files),
+    }
 
 
 def benchmark_read(args: argparse.Namespace) -> None:
@@ -469,7 +506,7 @@ def benchmark_read(args: argparse.Namespace) -> None:
                 try:
                     for cache_state in ("cold", "warm"):
                         stem = f"{implementation}-{cache_state}-{trial + 1}"
-                        before_counts, before_bytes, before_failures = proxy.snapshot()
+                        before_counts, before_bytes, before_failures, before_reads = proxy.snapshot()
                         command = [
                             sys.executable, str(ROOT / "crab/scripts/measure-sdk-read.py"),
                             str(executable), args.bucket, args.repository, args.branch,
@@ -482,7 +519,7 @@ def benchmark_read(args: argparse.Namespace) -> None:
                         measurement_path = output / f"{stem}.json"
                         measurement_path.write_text(result.stdout)
                         (output / f"{stem}.stderr.log").write_text(result.stderr)
-                        after_counts, after_bytes, after_failures = proxy.snapshot()
+                        after_counts, after_bytes, after_failures, after_reads = proxy.snapshot()
                         delta = after_counts - before_counts
                         origin_path = output / f"{stem}-origin.json"
                         origin_path.write_text(json.dumps({
@@ -491,13 +528,21 @@ def benchmark_read(args: argparse.Namespace) -> None:
                             "write_requests": sum(count for method, count in delta.items()
                                                   if method not in {"GET", "HEAD"}),
                             "failures": after_failures - before_failures,
+                            "active_before": sum(not read["complete"] for read in before_reads),
+                            "active_after": sum(not read["complete"] for read in after_reads),
+                            "reads": after_reads[len(before_reads):],
                         }, indent=2) + "\n")
+                        # Readers have exited; inspect retention outside their
+                        # measured interval and before the owned cache is deleted.
+                        inventory_path = output / f"{stem}-cache.json"
+                        inventory_path.write_text(json.dumps(cache_inventory(cache), indent=2) + "\n")
                         manifest["trials"].append({
                             "trial": trial + 1,
                             "implementation": implementation,
                             "cache_state": cache_state,
                             "measurement": measurement_path.name,
                             "origin_metrics": origin_path.name,
+                            "cache_inventory": inventory_path.name,
                         })
                         if result.returncode != 0:
                             raise SystemExit(1)
