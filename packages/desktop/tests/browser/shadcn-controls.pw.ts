@@ -253,6 +253,12 @@ test("workspace dividers stay visible and resize by pointer and keyboard", async
   const persisted = await page.evaluate(() => localStorage.getItem("crab.sidebarPct"));
   await page.reload();
   expect(await page.evaluate(() => localStorage.getItem("crab.sidebarPct"))).toBe(persisted);
+  const primary = page.getByRole("navigation", { name: "Primary", exact: true });
+  await primary.getByRole("button", { name: "Settings", exact: true }).click();
+  await expect(divider).toBeHidden();
+  await primary.getByRole("button", { name: "Files", exact: true }).click();
+  await expect(divider).toBeVisible();
+  await expect.poll(async () => Number(await divider.getAttribute("aria-valuenow"))).toBeCloseTo(Number(persisted), 0);
   const horizontal = page.getByRole("separator", { name: "Resize workflow output", exact: true });
   await expect(horizontal).toHaveAttribute("aria-orientation", "horizontal");
   expect(await horizontal.evaluate(element => getComputedStyle(element, "::after").height)).toBe("1px");

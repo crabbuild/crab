@@ -81,7 +81,7 @@ function WorkspaceFixture() {
   const [view, setView] = useState<SidebarView>("explorer");
   const [tab, setTab] = useState<WorkflowTab>("editor");
   return <section aria-label="Workspace layout" className="h-72 border border-border">
-    <WorkspaceShell activeView={view} onViewChange={setView}
+    <WorkspaceShell activeView={view} onViewChange={setView} fullPaneViews={["settings"]}
       views={{ explorer: <p>Repository files</p>, search: <p>Search repository files</p> }}
       main={<ResizablePanelGroup direction="vertical">
         <ResizablePanel defaultSize={60} minSize={20}>
