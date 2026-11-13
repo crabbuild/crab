@@ -86,6 +86,8 @@ Trace one path: `crates/crab-server/src/git/receive/validate.rs` → `validate` 
 `index_stat` also uses `facade`. CLI and desktop publication share its locked
 stat-cache writer. Retain the stat captured during verification and fence native
 updates with the expected blob; never stamp a later external edit as clean.
+Large verified blobs supply their OID instead of retaining complete bytes.
+Checkout may refresh advisory stats while preserving staged IDs/modes/siblings.
 
 ## Verification
 

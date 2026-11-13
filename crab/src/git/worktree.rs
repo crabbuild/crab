@@ -233,7 +233,7 @@ fn write_index_stats(root: &Path, updates: &HashMap<Vec<u8>, IndexStatUpdate>) -
         selected.push(crab_git::index_stat::IndexStatUpdate {
             path: gix::path::from_bstr(path).into_owned(),
             stat: update.stat,
-            expected_blob: blob,
+            expected_blob: blob.map(crab_git::index_stat::ExpectedBlob::Bytes),
         });
     }
     crab_git::index_stat::refresh(root, &selected)

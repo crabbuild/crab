@@ -188,6 +188,13 @@ and publication ownership. Interrupted input stops conversion instead of being
 retried by a generic I/O copier. This API does not qualify total-process memory
 or those subsequent stages without runtime evidence.
 
+`IndexStatUpdate::from_file_oid` fences the shared advisory stat writer with an
+already verified Git identity, avoiding a retained large blob. Capture output
+stat before publication and refresh it only after successful rename. Git's
+checkout cache records the converted size; a stale nonzero size can report
+modified content without running clean conversion. Staged IDs, modes and
+unrelated entries remain unchanged; later edits retain different captured stats.
+
 The caller owns the process, disables replacements/filters and supervises blocked I/O; the parser
 does not spawn or detach workers. Mirror inspection/pre-push use this second
 step before trusting the pointer inventory. Other reachable-set APIs retain

@@ -7,16 +7,35 @@ use bstr::ByteSlice;
 
 use crate::facade::{FacadeError, Result};
 
+/// Expected index content supplied as small bytes or an already verified ID.
+pub enum ExpectedBlob {
+    /// Hash a small captured blob using the index's object format.
+    Bytes(Vec<u8>),
+    /// Reuse a verified identity without retaining a complete large blob.
+    Id(gix::hash::ObjectId),
+}
+
 /// A captured verified stat; the optional blob fences concurrent index changes.
 pub struct IndexStatUpdate {
     pub path: PathBuf,
     pub stat: gix::index::entry::Stat,
-    pub expected_blob: Option<Vec<u8>>,
+    pub expected_blob: Option<ExpectedBlob>,
 }
 
 impl IndexStatUpdate {
     /// Capture a verified output before publication, retaining its original stat.
     pub fn from_file(path: PathBuf, file: &std::fs::File, blob: &[u8]) -> Result<Self> {
+        Self::capture(path, file, ExpectedBlob::Bytes(blob.into()))
+    }
+
+    /// Capture output stat fenced by a verified hexadecimal Git blob identity.
+    pub fn from_file_oid(path: PathBuf, file: &std::fs::File, oid: &str) -> Result<Self> {
+        let oid = gix::hash::ObjectId::from_hex(oid.as_bytes())
+            .map_err(|error| operation("parse verified blob identity", error))?;
+        Self::capture(path, file, ExpectedBlob::Id(oid))
+    }
+
+    fn capture(path: PathBuf, file: &std::fs::File, expected_blob: ExpectedBlob) -> Result<Self> {
         let metadata = gix::index::fs::Metadata::from_file(file)
             .map_err(|error| operation("read published file metadata", error))?;
         let stat = gix::index::entry::Stat::from_fs(&metadata)
@@ -24,7 +43,7 @@ impl IndexStatUpdate {
         Ok(Self {
             path,
             stat,
-            expected_blob: Some(blob.into()),
+            expected_blob: Some(expected_blob),
         })
     }
 }
@@ -67,8 +86,13 @@ pub fn refresh(root: &Path, updates: &[IndexStatUpdate]) -> Result<usize> {
             continue;
         };
         if let Some(expected) = &update.expected_blob {
-            let id = gix::objs::compute_hash(repo.object_hash(), gix::objs::Kind::Blob, expected)
-                .map_err(|error| operation("hash expected blob for stat refresh", error))?;
+            let id = match expected {
+                ExpectedBlob::Bytes(bytes) => {
+                    gix::objs::compute_hash(repo.object_hash(), gix::objs::Kind::Blob, bytes)
+                        .map_err(|error| operation("hash expected blob for stat refresh", error))?
+                }
+                ExpectedBlob::Id(id) => *id,
+            };
             if entry.id != id {
                 continue;
             }
@@ -185,19 +209,26 @@ mod tests {
 
     #[test]
     fn refresh_skips_a_replaced_index_identity() {
-        let directory = repository();
-        let root = directory.path();
-        let file = std::fs::File::open(root.join("other.txt")).expect("file");
-        let update =
-            IndexStatUpdate::from_file("other.txt".into(), &file, b"original").expect("stat");
-        std::fs::write(root.join("other.txt"), "replacement").expect("edit");
-        git(root, &["add", "--", "other.txt"]);
-        let before = std::fs::read(root.join(".git/index")).expect("index");
-        assert_eq!(refresh(root, &[update]).expect("refresh"), 0);
-        assert_eq!(
-            std::fs::read(root.join(".git/index")).expect("index"),
-            before
-        );
+        for by_oid in [false, true] {
+            let directory = repository();
+            let root = directory.path();
+            let file = std::fs::File::open(root.join("other.txt")).expect("file");
+            let update = if by_oid {
+                let oid = git(root, &["rev-parse", ":other.txt"]);
+                IndexStatUpdate::from_file_oid("other.txt".into(), &file, oid.trim())
+            } else {
+                IndexStatUpdate::from_file("other.txt".into(), &file, b"original")
+            }
+            .expect("stat");
+            std::fs::write(root.join("other.txt"), "replacement").expect("edit");
+            git(root, &["add", "--", "other.txt"]);
+            let before = std::fs::read(root.join(".git/index")).expect("index");
+            assert_eq!(refresh(root, &[update]).expect("refresh"), 0);
+            assert_eq!(
+                std::fs::read(root.join(".git/index")).expect("index"),
+                before
+            );
+        }
     }
 
     #[test]

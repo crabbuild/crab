@@ -25,7 +25,7 @@ const size = delta ? delta.logicalBytes : 2 * 1024 ** 3;
 const head = delta ? Buffer.from(delta.head, "base64") : Buffer.from("verified-git-head\n");
 const tail = delta ? Buffer.from(delta.tail, "base64") : Buffer.from("verified-git-tail\n");
 const fixtureDigest = delta ? delta.sha256 : "515a224ca4c51ce3dbabf555d1d1da8d2fceeccfc9d0b24903b74dba1f6a2731";
-const pattern = delta ? Buffer.alloc(64 * 1024)
+const pattern = delta ? Buffer.alloc(64 * 1024, delta.fillByte)
   : Buffer.concat(Array.from({ length: 2048 }, (_, i) => createHash("sha256").update(`crab-dense-git-block-${i}`).digest()));
 const platform = { darwin: "mac", linux: "linux", win32: "win" }[process.platform];
 const directory = path.resolve(args[0] ?? `resources/native/${platform}-${process.arch}`);
@@ -51,6 +51,8 @@ if (delta) {
   assert.match(path.basename(delta.evidenceDirectory), /^git-range-qualification-/);
   assert.equal(delta.source, path.join(delta.evidenceDirectory, "source"));
   assert.ok(delta.depth > 0);
+  assert.ok(Number.isInteger(delta.fillByte) && delta.fillByte >= 0 && delta.fillByte <= 255);
+  assert.ok(!delta.checkout || restore, "Prepared checkout must be exercised by --restore");
 }
 const evidence = delta ? delta.evidenceDirectory : await mkdtemp(path.join(targetRoot, "git-range-qualification-"));
 const source = path.join(evidence, "source");
@@ -142,6 +144,7 @@ try {
     await git(["update-index", "--add", "--cacheinfo", "100644", oid, "large.bin"]);
   }
   const index = await readFile(path.join(source, ".git/index"));
+  const stagedEntries = await git(["ls-files", "--stage", "-z"]);
   object = stored.object;
   report.oid = oid;
   report.storedBytes = (await stat(object)).size;
@@ -149,7 +152,7 @@ try {
   child = spawn(agent, [], { cwd: source, env, stdio: ["pipe", "pipe", log.fd] });
   await log.close();
   const pending = new Map();
-  let next = 0, transportError;
+  let next = 0, transportError, notification;
   const fail = error => {
     transportError ??= error;
     for (const entry of pending.values()) { clearTimeout(entry.timer); entry.reject(error); }
@@ -160,7 +163,7 @@ try {
   lines.on("line", line => {
     try {
       const frame = JSON.parse(line), entry = pending.get(frame.id);
-      if (!entry) return;
+      if (!entry) { notification?.(frame); return; }
       pending.delete(frame.id); clearTimeout(entry.timer);
       if (frame.error) entry.reject(Object.assign(new Error(frame.error.message), { code: frame.error.code, data: frame.error.data }));
       else entry.resolve(frame.result);
@@ -254,16 +257,43 @@ try {
   report.cancellationAcknowledged = true;
   await read(0, "fresh capture read after cancellation");
   if (restore) {
-    await writeFile(file, "local working edit before confirmed restoration\n");
+    const dirty = "local working edit before confirmed restoration\n";
+    await writeFile(file, dirty);
+    if (delta?.checkout) {
+      const operation = randomUUID();
+      const converting = new Promise(resolve => {
+        notification = frame => {
+          if (frame.method === "progress/transfer" && frame.params?.job_id === operation
+            && frame.params.written_bytes >= 16 * 1024 ** 2) resolve(frame.params.written_bytes);
+        };
+      });
+      const restoring = rpc("files_restore", { repo_id: repo, paths: ["large.bin"], op_id: operation });
+      const cancelled = assert.rejects(restoring,
+        error => error.code === 1010 && error.data?.kind === "op_cancelled" && error.data.op_id === operation);
+      void cancelled.catch(() => {});
+      const written = await Promise.race([converting, restoring.then(() => {
+        throw new Error("Checkout completed before mid-output cancellation");
+      })]);
+      assert.ok(written < delta.checkout.bytes, "Cancellation must interrupt actual conversion");
+      assert.equal((await rpc("rpc/cancel", { op_id: operation })).ok, true);
+      await cancelled;
+      notification = undefined;
+      assert.equal(await readFile(file, "utf8"), dirty);
+      assert.deepEqual(await readFile(path.join(source, ".git/index")), index);
+      assert.deepEqual((await readdir(source)).filter(name => name.startsWith(".crab-publication-")), []);
+      report.checkoutCancellation = { written, acknowledged: true, workingFilePreserved: true, indexPreserved: true, scratchRemoved: true };
+    }
     const started = performance.now();
     const restored = await rpc("files_restore", { repo_id: repo, paths: ["large.bin"], op_id: randomUUID() });
-    assert.equal(restored.written_bytes, size);
+    assert.equal(restored.written_bytes, delta?.checkout?.bytes ?? size);
     report.restoredBytes = restored.written_bytes;
     report.restoreElapsedMs = performance.now() - started;
     report.restoreResult = restored;
+    report.checkout = delta?.checkout;
   }
-  assert.deepEqual(await readFile(path.join(source, ".git/index")), index);
-  assert.equal(await digest(file), fixtureDigest);
+  assert.equal(await git(["ls-files", "--stage", "-z"]), stagedEntries);
+  if (!restore) assert.deepEqual(await readFile(path.join(source, ".git/index")), index);
+  assert.equal(await digest(file), restore ? delta?.checkout?.sha256 ?? fixtureDigest : fixtureDigest);
   report.verified = true;
 } catch (error) { failure = error; }
 finally {

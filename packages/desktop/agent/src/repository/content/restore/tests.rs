@@ -45,6 +45,34 @@ async fn restoration_progress_can_publish_on_the_async_runtime() {
     }
 }
 
+#[tokio::test]
+async fn converted_restoration_refreshes_status_and_preserves_staging() {
+    let (directory, repo) = ordinary(NAME, b"$Id$\noriginal\n", "").await;
+    let root = directory.path();
+    std::fs::write(root.join(".gitattributes"), "*.bin ident text eol=crlf\n").unwrap();
+    let expected = git(root, &["cat-file", "--filters", &format!(":{NAME}")]);
+    let staged = git(root, &["ls-files", "--stage", "-z"]);
+    std::fs::write(root.join(NAME), b"dirty").unwrap();
+    let source = Arc::new(
+        Restoration::capture(&repo, NAME, repo.read_scope())
+            .await
+            .unwrap(),
+    );
+    source.run(|_| Ok(())).await.unwrap();
+    assert_eq!(
+        (
+            std::fs::read(root.join(NAME)).unwrap(),
+            git(
+                root,
+                &["--no-optional-locks", "status", "--porcelain", "--", NAME]
+            ),
+            git(root, &["ls-files", "--stage", "-z"]),
+        ),
+        (expected, Vec::new(), staged)
+    );
+    repo.close().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restoration_matches_git_for_attributes_and_checkout_configuration() {
     let name = "models/deep/content[1].txt";

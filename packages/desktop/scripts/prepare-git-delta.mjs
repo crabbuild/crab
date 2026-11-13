@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { copyFile, mkdir, mkdtemp, open, realpath, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, open, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
 // Git's fixture builder itself allocates full delta bases. Keep preparation
 // outside the measured reader process tree so its RSS cannot hide a regression.
-assert.equal(process.argv.length, 3, "Usage: prepare-git-delta.mjs <manifest>");
+const args = process.argv.slice(2), checkout = args[0] === "--checkout";
+if (checkout) args.shift();
+assert.equal(args.length, 1, "Usage: prepare-git-delta.mjs [--checkout] <manifest>");
 const target = process.env.CARGO_TARGET_DIR;
 assert.ok(target && path.isAbsolute(target), "Set an absolute per-checkout CARGO_TARGET_DIR");
 const evidence = await mkdtemp(path.join(await realpath(target), "git-range-qualification-"));
@@ -23,12 +25,23 @@ const git = async (args, input = "") => {
   return (await pending).stdout.trim();
 };
 await git(["init", "--template=", "--object-format=sha1", "--initial-branch=main"]);
-const size = 512 * 1024 ** 2, head = Buffer.from("verified-delta-head\n");
+const size = 512 * 1024 ** 2, head = Buffer.from(`${checkout ? "$Id$ " : ""}verified-delta-head\n`);
+const fillByte = checkout ? 0x78 : 0;
 const tails = [Buffer.from("verified-base-tail\n"), Buffer.from("verified-next-tail\n")], oids = [];
 for (const [index, tail] of tails.entries()) {
   const file = path.join(source, `body-${index}.bin`), descriptor = await open(file, "wx");
   try {
-    await descriptor.truncate(size);
+    if (checkout) {
+      const block = Buffer.alloc(1024 * 1024, fillByte);
+      for (let offset = 0; offset < size; offset += block.length) {
+        let written = 0;
+        while (written < block.length) {
+          const next = await descriptor.write(block, written, block.length - written, offset + written);
+          assert.ok(next.bytesWritten > 0, "Dense fixture write must make progress");
+          written += next.bytesWritten;
+        }
+      }
+    } else await descriptor.truncate(size);
     assert.equal((await descriptor.write(head, 0, head.length, 0)).bytesWritten, head.length);
     assert.equal((await descriptor.write(tail, 0, tail.length, size - tail.length)).bytesWritten, tail.length);
   } finally { await descriptor.close(); }
@@ -53,9 +66,32 @@ const hash = createHash("sha256");
 for await (const bytes of createReadStream(file)) hash.update(bytes);
 const manifest = { schema: "crab.desktop.git-delta-fixture", evidenceDirectory: evidence, source, logicalBytes: size,
   oid: delta[0], base: delta[6], depth: Number(delta[5]), deltaProgramBytes: Number(delta[2]),
-  head: head.toString("base64"), tail: tails[index].toString("base64"), sha256: hash.digest("hex"),
+  head: head.toString("base64"), tail: tails[index].toString("base64"), fillByte, sha256: hash.digest("hex"),
   object: path.join(packs, `pack-${pack}.pack`), packBytes: (await stat(path.join(packs, `pack-${pack}.pack`))).size, verification };
-const destination = path.resolve(process.argv[2]);
+if (checkout) {
+  // Git's independent checkout oracle also buffers the full object. Its cost
+  // belongs to preparation, outside the bounded desktop process measurement.
+  const attributes = "large.bin ident text=auto eol=crlf\n";
+  const originalIndex = await readFile(path.join(source, ".git/index"));
+  await writeFile(path.join(source, ".gitattributes"), attributes, { flag: "wx" });
+  const child = spawn("git", ["--no-replace-objects", "cat-file", "--filters", ":large.bin"],
+    { cwd: source, env, stdio: ["ignore", "pipe", "pipe"] });
+  let stderr = "", bytes = 0;
+  child.stderr.on("data", chunk => { stderr = (stderr + chunk).slice(-65536); });
+  const done = new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code, signal) => code === 0 ? resolve() : reject(new Error(`Checkout oracle exited ${code}/${signal}: ${stderr}`)));
+  });
+  void done.catch(() => {});
+  const converted = createHash("sha256");
+  for await (const chunk of child.stdout) { converted.update(chunk); bytes += chunk.length; }
+  await done;
+  assert.deepEqual(await readFile(path.join(source, ".git/index")), originalIndex);
+  assert.ok(bytes > size, "Checkout oracle must expand ident and line endings");
+  manifest.checkout = { attributes, bytes, sha256: converted.digest("hex"), oracle: await git(["--version"]) };
+  assert.notEqual(manifest.checkout.sha256, manifest.sha256);
+}
+const destination = path.resolve(args[0]);
 await mkdir(path.dirname(destination), { recursive: true });
 await writeFile(destination, JSON.stringify(manifest, null, 2) + "\n", { flag: "wx" });
 console.log(JSON.stringify(manifest));

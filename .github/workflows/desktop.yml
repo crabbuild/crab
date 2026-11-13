@@ -106,6 +106,16 @@ jobs:
             --output "$CARGO_TARGET_DIR/git-range-proof/delta-report.json" \
             --require-rss-below 536870912 --timeout-seconds 600 -- \
             node packages/desktop/scripts/qualify-git-ranges.mjs packages/desktop/resources/native/${{ matrix.target }} --delta "$CARGO_TARGET_DIR/git-range-proof/delta-fixture.json" --restore
+      - name: Prepare Git ident and automatic CRLF checkout outside measurement
+        run: node scripts/prepare-git-delta.mjs --checkout "$CARGO_TARGET_DIR/git-range-proof/checkout-fixture.json"
+      - name: Qualify bounded Git checkout conversion and captured ranges
+        run: |
+          python ../../crab/scripts/qualify_sdk.py run \
+            --backend desktop-native-git-checkout \
+            --fixture-digest "$(node -p 'require(process.env.CARGO_TARGET_DIR + "/git-range-proof/checkout-fixture.json").checkout.sha256')" \
+            --output "$CARGO_TARGET_DIR/git-range-proof/checkout-report.json" \
+            --require-rss-below 536870912 --timeout-seconds 600 -- \
+            node packages/desktop/scripts/qualify-git-ranges.mjs packages/desktop/resources/native/${{ matrix.target }} --delta "$CARGO_TARGET_DIR/git-range-proof/checkout-fixture.json" --restore
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -1,5 +1,5 @@
 use super::materialize::MaterializationTarget;
-use super::publication::{IndexFile, WorkingFile};
+use super::publication::{IndexFile, WorkingFile, refresh_stat_cache};
 use super::workspace::Workspace;
 use super::*;
 
@@ -138,11 +138,22 @@ impl GitRestoration {
                     let written = temporary.as_file().metadata()?.len();
                     let permissions = working.check(scope)?;
                     index.apply_mode(temporary.as_file(), permissions)?;
+                    let update = crab_git::index_stat::IndexStatUpdate::from_file_oid(
+                        index.path.clone().into(),
+                        temporary.as_file(),
+                        &index.oid,
+                    )
+                    .map_err(std::io::Error::other)?;
                     runtime.block_on(index.check(scope))?;
                     scope.check()?;
-                    Ok::<_, AgentError>(written)
+                    Ok::<_, AgentError>((written, update))
                 })();
-                working.publish(temporary, scope, prepared)
+                let (written, update) = working.publish(temporary, scope, prepared)?;
+                // Git treats a changed nonzero cached size as modified without
+                // re-cleaning. Capture the verified output stat before rename;
+                // refreshing a later edit could incorrectly mark it clean.
+                refresh_stat_cache(&index.root, update);
+                Ok(written)
             })
             .await
             .map_err(std::io::Error::other)?

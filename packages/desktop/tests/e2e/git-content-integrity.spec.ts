@@ -65,6 +65,7 @@ test("captured Git text and SQLite reject wrong object bodies and recover after 
     git(["-c", "user.name=Desktop test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "captured"]);
     git(["tag", "captured"]);
     const index = readFileSync(path.join(source, ".git/index"));
+    const stagedEntries = git(["ls-files", "--stage", "-z"]);
     const originalDatabase = readFileSync(path.join(source, "data.sqlite"));
     expect(originalDatabase.length).toBeGreaterThan(262144);
     expect(readFileSync(path.join(source, "replacement.sqlite")).length).toBe(originalDatabase.length);
@@ -179,15 +180,30 @@ test("captured Git text and SQLite reject wrong object bodies and recover after 
     await answerConfirmation(page, /^Restore /);
     await expect(page.getByText("Restored data.txt from the index", { exact: true })).toBeVisible();
     expect(readFileSync(path.join(source, "data.txt"), "utf8")).toBe(checkoutText);
-    expect(readFileSync(path.join(source, ".git/index"))).toEqual(index);
-    await expect(restoredRow.getByText("M", { exact: true })).toHaveCount(0);
+    // Checkout refreshes advisory stat fields when converted size changes.
+    // Preserve every staged object/mode, while native Git and the UI both clean.
+    expect(git(["ls-files", "--stage", "-z"])).toEqual(stagedEntries);
+    expect(git(["--no-optional-locks", "status", "--porcelain=v1", "-z", "--", "data.txt"])).toEqual(Buffer.alloc(0));
+    try {
+      await expect(restoredRow.getByText("M", { exact: true })).toHaveCount(0);
+    } catch (error) {
+      writeFileSync(test.info().outputPath("git-restored-status-failure.json"), JSON.stringify({
+        git: git(["--no-optional-locks", "status", "--porcelain=v1", "-z", "-uall"]).toString(),
+        native: await call(page, "git_status_porcelain", { repo_id: "git-integrity" }),
+        hidden: await page.evaluate(() => document.hidden),
+        attributes: git(["check-attr", "--all", "--", "data.txt"]).toString(),
+        indexEntriesPreserved: git(["ls-files", "--stage", "-z"]).equals(stagedEntries),
+        exactCheckout: readFileSync(path.join(source, "data.txt"), "utf8") === checkoutText,
+      }, null, 2));
+      throw error;
+    }
     await open("data.txt");
     await expect(page.getByText("captured original body", { exact: true }).first()).toBeVisible();
     await page.screenshot({ path: test.info().outputPath("git-index-restored.png") });
     writeFileSync(test.info().outputPath("git-integrity-proof.json"), JSON.stringify({
       textBytes: Buffer.byteLength(originalText), databaseBytes: originalDatabase.length, mediaBytes: originalMedia.length,
       rejected: objects.map(({ file, oid }) => ({ file, oid })), repairedValue: 17, snapshotRemoved: true,
-      indexPreserved: true, listingRecovered: true, restoredThroughUi: true, dirtyStatusCleared: true,
+      indexEntriesPreserved: true, listingRecovered: true, restoredThroughUi: true, dirtyStatusCleared: true,
       checkoutConvertedBytes: Buffer.byteLength(checkoutText), checkoutIdent: checkoutOid,
     }, null, 2));
   } catch (error) {
