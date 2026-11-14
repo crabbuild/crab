@@ -1,9 +1,11 @@
 import { Button } from "@/components/ui/button";
+import { tabVariants } from "@/components/ui/tabs";
+import { ResizableHandle } from "@/components/ui/resizable";
 import { DropdownMenuItem, PointMenu } from "@/components/ui/dropdown-menu";
 import clsx from "clsx";
 import { GitCompareArrows, Pin, X } from "lucide-react";
 import { useCallback, useMemo, useRef, useState } from "react";
-import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
+import { Panel, PanelGroup } from "react-resizable-panels";
 import { publishToast } from "../lib/toasts";
 import { FileIcon } from "./FileIcon";
 
@@ -244,7 +246,7 @@ function GroupPanel({
         </EditorGroup>
       </Panel>
       {!isLast && (
-        <PanelResizeHandle className="w-1 bg-border hover:bg-primary transition-colors" />
+        <ResizableHandle aria-label="Resize editor groups" />
       )}
     </>
   );
@@ -597,10 +599,8 @@ function Tab({
     <>
       <div
         className={clsx(
-          "group relative flex h-9 shrink-0 items-center gap-2 border-r border-border px-3 text-[12px] transition select-none cursor-grab active:cursor-grabbing",
-          active
-            ? "bg-background text-foreground"
-            : "text-muted-foreground hover:bg-accent",
+          tabVariants({ active }),
+          "group relative h-9 gap-2 select-none cursor-grab active:cursor-grabbing",
           tab.pinned && "italic",
         )}
         onMouseDown={handleMouseDown}
@@ -615,11 +615,6 @@ function Tab({
         {/* Drop indicator — vertical accent line on the left edge */}
         {showLeftIndicator && (
           <div className="absolute left-0 top-1 bottom-1 w-[2px] rounded bg-primary z-10" />
-        )}
-
-        {/* Active tab accent border */}
-        {active && (
-          <div className="absolute inset-x-0 bottom-0 h-[2px] bg-primary" />
         )}
 
         {/* Pin indicator */}

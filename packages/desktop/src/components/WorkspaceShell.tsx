@@ -1,11 +1,12 @@
 import { Toggle } from "@/components/ui/toggle";
+import { tabVariants } from "@/components/ui/tabs";
+import { ResizableHandle } from "@/components/ui/resizable";
 import clsx from "clsx";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ImperativePanelHandle,
   Panel,
   PanelGroup,
-  PanelResizeHandle,
 } from "react-resizable-panels";
 import {
   navigationGroup,
@@ -168,11 +169,8 @@ export function WorkspaceShell({
               setOpen(true);
             }}
             className={clsx(
-              "rounded px-2 text-xs focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary",
-              group === "files" ? "shrink-0 py-1" : "py-1.5",
-              activeView === view
-                ? "bg-primary/15 text-foreground"
-                : "text-muted-foreground hover:bg-accent hover:text-foreground",
+              tabVariants({ active: activeView === view }),
+              "px-2",
             )}
           >
             {VIEW_LABELS[view]}
@@ -234,12 +232,7 @@ export function WorkspaceShell({
               )}
             </div>
           </Panel>
-          <PanelResizeHandle
-            className={clsx(
-              "w-[3px] cursor-col-resize bg-transparent transition-colors hover:bg-primary/50",
-              !sidebarVisible && "pointer-events-none w-0",
-            )}
-          />
+          <ResizableHandle aria-label="Resize workspace sidebar" className={!sidebarVisible ? "hidden" : undefined} />
           <Panel minSize={20} className="min-h-0 min-w-0">
             {main}
           </Panel>

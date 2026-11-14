@@ -1,173 +1,182 @@
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
+import { isValidSkillName } from "../../../electron/skill-validation";
 import { publishToast } from "../../lib/toasts";
 import { useSkills } from "../../state/skills-store";
 
-function isValidName(name: string): boolean {
-  return (
-    /^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]?$/.test(name) && !name.includes("--")
-  );
-}
-
-interface Props {
+export function SkillCreateModal({
+  open,
+  onClose,
+}: {
   open: boolean;
   onClose: () => void;
-}
-
-export function SkillCreateModal({ open, onClose }: Props) {
+}) {
   const { createSkill } = useSkills();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [body, setBody] = useState("");
   const [creating, setCreating] = useState(false);
-  const nameRef = useRef<HTMLInputElement>(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (open) {
       setName("");
       setDescription("");
       setBody("");
-      setCreating(false);
-      setTimeout(() => nameRef.current?.focus(), 50);
+      setError(null);
     }
   }, [open]);
 
-  const handleCreate = async () => {
-    const trimmedName = name.trim();
-    if (!trimmedName) {
-      publishToast({ kind: "error", title: "Name required", body: "Enter a skill name." });
-      return;
-    }
-    if (!isValidName(trimmedName)) {
-      publishToast({
-        kind: "error",
-        title: "Invalid name",
-        body: "Use lowercase letters, numbers, and hyphens (1-64 chars).",
-      });
+  async function handleCreate() {
+    if (creating) return;
+    if (!isValidSkillName(name.trim())) {
+      setError(
+        "Use 1–64 lowercase letters, numbers or hyphens. Start with a letter or number; avoid consecutive hyphens.",
+      );
       return;
     }
     if (!description.trim()) {
-      publishToast({ kind: "error", title: "Description required", body: "Enter a short description." });
+      setError("Add a description so you can find this skill later.");
       return;
     }
-
+    setError(null);
     setCreating(true);
-    const result = await createSkill({
-      name: trimmedName,
-      description: description.trim(),
-      body: body.trim() || undefined,
-      scope: "user",
-    });
-    setCreating(false);
-
-    if (result.success) {
-      publishToast({ kind: "success", title: "Skill created", body: `${trimmedName} is ready.` });
+    try {
+      const result = await createSkill({
+        name: name.trim(),
+        description: description.trim(),
+        body: body.trim() || undefined,
+        scope: "user",
+      });
+      if (!result.success) {
+        setError(result.error ?? "Could not create this skill.");
+        return;
+      }
+      publishToast({
+        kind: "success",
+        title: "Skill created",
+        body: "Review its instructions and agent links below.",
+      });
       onClose();
-    } else {
-      publishToast({ kind: "error", title: "Failed to create", body: result.error ?? "Unknown error" });
+    } finally {
+      setCreating(false);
     }
-  };
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") handleCreate();
-  };
-
-  if (!open) return null;
+  }
 
   return (
     <Dialog
-      open
-      onOpenChange={(open) => { if (!open) onClose(); }}
+      open={open}
+      onOpenChange={(value) => {
+        if (!value && !creating) onClose();
+      }}
     >
       <DialogContent
-        onKeyDown={handleKeyDown}
-        showCloseButton={false}
-        aria-describedby={undefined}
-        className="block gap-0 p-0 w-full max-w-lg rounded-xl border border-border bg-background shadow-2xl"
+        className="max-h-[90vh] overflow-y-auto"
+        onKeyDown={(event) => {
+          if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+            event.preventDefault();
+            void handleCreate();
+          }
+        }}
       >
-        {/* Header */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-border">
-          <DialogTitle className="text-sm font-semibold text-foreground">
-            New Skill
-          </DialogTitle>
-          <Button
-            variant="ghost"
-            size="compact"
-            className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
-            onClick={onClose}
-          >
-            <X size={16} />
-          </Button>
-        </div>
-
-        {/* Body */}
-        <div className="px-4 py-3 space-y-3">
-          <div>
-            <label className="block text-xs font-medium text-muted-foreground mb-1">
+        <DialogHeader>
+          <DialogTitle>New skill</DialogTitle>
+          <DialogDescription>
+            Save reusable Markdown instructions in your user library. Crab links
+            them to the agent folders it finds.
+          </DialogDescription>
+        </DialogHeader>
+        <form
+          className="space-y-4"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void handleCreate();
+          }}
+        >
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium" htmlFor="skill-name">
               Name
             </label>
             <Input
-              ref={nameRef}
-              type="text"
-              placeholder="my-skill"
+              className="w-full"
+              id="skill-name"
+              autoComplete="off"
+              placeholder="code-review"
               value={name}
-              onChange={(e) => setName(e.target.value)}
-              className="w-full rounded border border-border bg-accent px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary"
+              onChange={(event) => setName(event.target.value)}
+              aria-describedby="skill-name-hint"
+              disabled={creating}
             />
-            <p className="text-[10px] text-muted-foreground mt-0.5">
-              Lowercase letters, numbers, and hyphens. 1-64 characters.
+            <p id="skill-name-hint" className="text-xs text-muted-foreground">
+              Lowercase letters, numbers and hyphens; 1–64 characters.
             </p>
           </div>
-          <div>
-            <label className="block text-xs font-medium text-muted-foreground mb-1">
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium" htmlFor="skill-description">
               Description
             </label>
             <Input
-              type="text"
-              placeholder="A short description of what this skill does"
+              className="w-full"
+              id="skill-description"
+              placeholder="Review changes for bugs and missing tests"
               value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              className="w-full rounded border border-border bg-accent px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary"
+              onChange={(event) => setDescription(event.target.value)}
+              disabled={creating}
             />
           </div>
-          <div>
-            <label className="block text-xs font-medium text-muted-foreground mb-1">
-              Body <span className="text-muted-foreground">(optional)</span>
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium" htmlFor="skill-instructions">
+              Instructions{" "}
+              <span className="font-normal text-muted-foreground">
+                (optional)
+              </span>
             </label>
             <Textarea
-              placeholder="Markdown content for the skill..."
+              id="skill-instructions"
+              rows={7}
+              className="font-mono text-xs"
+              placeholder="Describe when to use this skill and the steps the agent should follow…"
               value={body}
-              onChange={(e) => setBody(e.target.value)}
-              rows={6}
-              className="w-full rounded border border-border bg-accent px-2 py-1.5 text-xs text-foreground font-mono placeholder:text-muted-foreground focus:outline-none focus:border-primary resize-y"
+              onChange={(event) => setBody(event.target.value)}
+              disabled={creating}
             />
+            <p className="text-xs text-muted-foreground">
+              Supports Markdown. You can edit these instructions later.
+            </p>
           </div>
-        </div>
-
-        {/* Footer */}
-        <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-border">
-          <Button
-            variant="ghost"
-            size="compact"
-            className="rounded-md px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
-            onClick={onClose}
-          >
-            Cancel
-          </Button>
-          <Button
-            variant="default"
-            size="compact"
-            className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 transition-opacity disabled:opacity-50"
-            onClick={handleCreate}
-            disabled={creating}
-          >
-            {creating ? "Creating..." : "Create Skill"}
-          </Button>
-        </div>
+          {error && (
+            <p role="alert" className="text-sm text-destructive">
+              {error}
+            </p>
+          )}
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={onClose}
+              disabled={creating}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              variant="default"
+              disabled={creating || !name.trim() || !description.trim()}
+            >
+              {creating ? "Creating…" : "Create skill"}
+            </Button>
+          </DialogFooter>
+        </form>
       </DialogContent>
     </Dialog>
   );

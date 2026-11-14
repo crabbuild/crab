@@ -1,3 +1,4 @@
+import { ResizableHandle } from "@/components/ui/resizable";
 import { Button } from "@/components/ui/button";
 import {
   ChevronRight,
@@ -6,7 +7,7 @@ import {
   Loader2,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
+import { Panel, PanelGroup } from "react-resizable-panels";
 import { rpc } from "../ipc";
 import { OpenRepo } from "../state";
 import { DiffView } from "./DiffView";
@@ -172,7 +173,7 @@ export function WorktreeCompareView({
               </div>
             </Panel>
 
-            <PanelResizeHandle className="w-1 bg-border hover:bg-primary transition-colors" />
+            <ResizableHandle aria-label="Resize worktree comparison" />
 
             {/* Diff panel */}
             <Panel minSize={40}>

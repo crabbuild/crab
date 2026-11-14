@@ -26,7 +26,7 @@ export default defineConfig({
     {
       name: "theme-system",
       testDir: "./tests/browser",
-      testMatch: /(?:theme-system|shadcn-controls)\.pw\.ts$/,
+      testMatch: /(?:theme-system|shadcn-controls|skills)\.pw\.ts$/,
       use: { baseURL: "http://localhost:5173", browserName: "chromium", channel: process.env.CI ? undefined : "chrome" },
     },
     {

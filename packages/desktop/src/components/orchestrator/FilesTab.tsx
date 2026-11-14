@@ -1,4 +1,6 @@
 import { Button } from "@/components/ui/button";
+import { tabVariants } from "@/components/ui/tabs";
+import { ResizableHandle } from "@/components/ui/resizable";
 import { Input } from "@/components/ui/input";
 /**
  * Files Tab — Full file explorer for the agent's isolated worktree.
@@ -13,7 +15,7 @@ import { Input } from "@/components/ui/input";
 import clsx from "clsx";
 import { ChevronsDownUp, Loader2, Search, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
+import { Panel, PanelGroup } from "react-resizable-panels";
 import { DirEntry, mainProcess } from "../../ipc";
 import { CodeEditor } from "../CodeEditor";
 import { FileIcon } from "../FileIcon";
@@ -242,7 +244,7 @@ export function FilesTab({ task, selectedFile, onSelectFile }: Props) {
         </div>
       </Panel>
 
-      <PanelResizeHandle className="w-[3px] cursor-col-resize bg-transparent transition-colors hover:bg-primary/50" />
+      <ResizableHandle aria-label="Resize agent file explorer" />
 
       {/* Right: Tab strip + Editor */}
       <Panel minSize={30}>
@@ -311,10 +313,8 @@ function EditorTabPill({
   return (
     <div
       className={clsx(
-        "group flex shrink-0 items-center gap-1.5 border-r border-border/50 px-3 py-1.5 text-[11px] cursor-pointer transition select-none",
-        active
-          ? "bg-background text-foreground"
-          : "bg-card text-muted-foreground hover:text-foreground hover:bg-accent",
+        tabVariants({ active }),
+        "group cursor-pointer select-none",
       )}
       onClick={onActivate}
       title={tab.path}

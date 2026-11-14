@@ -814,7 +814,7 @@ function WorkflowEditorInner({ repo, onOpenSource }: Props) {
                       </TabsContent>
                     </div>
                   </ResizablePanel>
-                  <ResizableHandle aria-label="Resize workflow output" className={clsx(!outputOpen && "hidden")} />
+                  <ResizableHandle aria-label="Resize workflow output" aria-orientation="horizontal" className={clsx(!outputOpen && "hidden")} />
                   <ResizablePanel ref={outputPanel} id="workflow-output" order={2} defaultSize={0} minSize={22} maxSize={65} collapsible collapsedSize={0}
         onExpand={() => setOutputOpen(true)} onCollapse={() => setOutputOpen(false)}>
                     {outputOpen && (

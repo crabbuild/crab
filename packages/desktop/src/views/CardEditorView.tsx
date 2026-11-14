@@ -1,3 +1,4 @@
+import { ResizableHandle } from "@/components/ui/resizable";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -18,7 +19,7 @@ import {
 } from "lucide-react";
 import { marked } from "marked";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
+import { Panel, PanelGroup } from "react-resizable-panels";
 import { rpc } from "../ipc";
 import { inferCardType, lintCard, LintWarning } from "../lib/card-lint";
 import { OpenRepo } from "../state";
@@ -380,7 +381,7 @@ export function CardEditorView({ repo, path }: Props) {
           </div>
         </Panel>
 
-        <PanelResizeHandle className="w-1 bg-border/50 hover:bg-primary/50 transition" />
+        <ResizableHandle aria-label="Resize card preview" />
 
         {/* Right: Markdown preview */}
         <Panel defaultSize={55} minSize={25}>

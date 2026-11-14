@@ -16,13 +16,13 @@ const Toaster = ({ theme = "system", ...props }: ToasterProps) => {
       }
       toastOptions={{
         classNames: {
-          toast:
-            "group toast group-[.toaster]:bg-background group-[.toaster]:text-foreground group-[.toaster]:border-border group-[.toaster]:shadow-lg",
-          description: "group-[.toast]:text-muted-foreground",
+          // Sonner injects unlayered CSS after the packaged app stylesheet.
+          // Token overrides must win that order, including high-contrast themes.
+          description: "!text-muted-foreground",
           actionButton:
-            "group-[.toast]:bg-primary group-[.toast]:text-primary-foreground",
+            "!bg-primary !text-primary-foreground",
           cancelButton:
-            "group-[.toast]:bg-muted group-[.toast]:text-muted-foreground",
+            "!bg-muted !text-muted-foreground",
         },
       }}
       {...props}

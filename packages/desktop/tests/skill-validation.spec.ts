@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isValidSkillName, parseFrontmatter, generateSkillMd } from "../electron/skill-validation";
+import { isValidSkillName, parseFrontmatter, generateSkillMd, githubUrlToRaw } from "../electron/skill-validation";
 
 describe("isValidSkillName", () => {
   it("accepts valid lowercase names", () => {
@@ -224,5 +224,31 @@ describe("generateSkillMd", () => {
     expect(reParsed.frontmatter.name).toBe("round-trip");
     expect(reParsed.frontmatter.description).toBe("Testing round trip");
     expect(reParsed.body.trim()).toBe("# Body\n\nContent here.");
+  });
+});
+
+describe("githubUrlToRaw", () => {
+  it.each([
+    [
+      "owner/repo/skills/review/SKILL.md",
+      "https://raw.githubusercontent.com/owner/repo/main/skills/review/SKILL.md",
+    ],
+    [
+      "https://github.com/owner/repo/blob/dev/skills/SKILL.md?plain=1#L2",
+      "https://raw.githubusercontent.com/owner/repo/dev/skills/SKILL.md",
+    ],
+    [
+      "https://github.com/owner/repo/tree/dev/skills/review/",
+      "https://raw.githubusercontent.com/owner/repo/dev/skills/review/SKILL.md",
+    ],
+    [
+      " https://raw.githubusercontent.com/owner/repo/dev/SKILL.md ",
+      "https://raw.githubusercontent.com/owner/repo/dev/SKILL.md",
+    ],
+    ["https://example.com/repo/SKILL.md", null],
+    ["https://github.com/owner/repo", null],
+    ["", null],
+  ])("normalizes supported sources consistently: %s", (input, expected) => {
+    expect(githubUrlToRaw(input)).toBe(expected);
   });
 });

@@ -14,6 +14,9 @@ for (const mode of ["light", "dark", "hc-light", "hc-dark"] as const) {
     await page
       .getByRole("option", { name: mode, exact: true }).click();
     await expect(page.locator("html")).toHaveClass(new RegExp(`theme-${mode}`));
+    await page.getByRole("button", { name: "Show notification", exact: true }).click();
+    await expect(page.locator("[data-sonner-toaster]")).toHaveAttribute("data-sonner-theme", mode.endsWith("light") ? "light" : "dark");
+    await expect(page.locator("[data-sonner-toast]")).toHaveCSS("opacity", "1");
     const rgb = (value: string) => `rgb(${value.replaceAll(" ", ", ")})`;
     // Theme changes transition control colors. Assert the settled visual state.
     await expect.poll(() => page.getByRole("button", { name: "Save stage", exact: true }).evaluate(button => {
@@ -99,10 +102,13 @@ test("theme persists through reload and follows system preference", async ({
   await page.getByRole("option", { name: "hc-light", exact: true }).click();
   await page.reload();
   await expect(page.locator("html")).toHaveClass(/theme-hc-light/);
+  await page.getByRole("button", { name: "Show notification", exact: true }).click();
   await page.getByLabel("Theme", { exact: true }).click();
   await page.getByRole("option", { name: "system", exact: true }).click();
   await page.emulateMedia({ colorScheme: "dark" });
   await expect(page.locator("html")).toHaveClass(/theme-dark/);
+  await expect(page.locator("[data-sonner-toaster]")).toHaveAttribute("data-sonner-theme", "dark");
   await page.emulateMedia({ colorScheme: "light" });
   await expect(page.locator("html")).toHaveClass(/theme-light/);
+  await expect(page.locator("[data-sonner-toaster]")).toHaveAttribute("data-sonner-theme", "light");
 });

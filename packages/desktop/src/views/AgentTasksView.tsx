@@ -1,3 +1,4 @@
+import { tabVariants } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -159,10 +160,7 @@ export function AgentTasksView({ repo, onOpenAgentManager }: Props) {
             pressed={section === id}
             onClick={() => setSection(id)}
             className={clsx(
-              "flex items-center gap-1.5 border-b-2 px-4 py-2 text-xs transition focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-primary",
-              section === id
-                ? "border-primary text-foreground"
-                : "border-transparent text-muted-foreground hover:bg-accent hover:text-foreground",
+              tabVariants({ active: section === id }),
             )}
           >
             <Icon size={13} />
@@ -2163,12 +2161,7 @@ function TabButton({
       size="compact"
       type="button"
       onClick={onClick}
-      className={clsx(
-        "flex items-center gap-1.5 border-b-2 px-4 py-2 text-xs transition",
-        active
-          ? "border-primary text-foreground"
-          : "border-transparent text-muted-foreground hover:text-foreground",
-      )}
+      className={tabVariants({ active })}
       aria-selected={active}
       role="tab"
     >

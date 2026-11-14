@@ -6,8 +6,8 @@
  * horizontal and vertical splits.
  */
 
-import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
-import clsx from "clsx";
+import { Panel, PanelGroup } from "react-resizable-panels";
+import { ResizableHandle } from "@/components/ui/resizable";
 import type { SplitNode, BranchNode, LeafNode } from "../lib/terminal-split-tree";
 
 // ── Types ───────────────────────────────────────────────────────────
@@ -98,24 +98,7 @@ function ChildWithHandle({
 }) {
   return (
     <>
-      {!isFirst && (
-        <PanelResizeHandle
-          className={clsx(
-            "bg-border hover:bg-primary active:bg-primary transition-colors relative group",
-            direction === "horizontal" ? "w-1 hover:w-1.5" : "h-1 hover:h-1.5",
-          )}
-        >
-          {/* Drag affordance dot */}
-          <div
-            className={clsx(
-              "absolute opacity-0 group-hover:opacity-100 transition-opacity bg-primary rounded-full",
-              direction === "horizontal"
-                ? "top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-1 h-8"
-                : "top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 h-1 w-8",
-            )}
-          />
-        </PanelResizeHandle>
-      )}
+      {!isFirst && <ResizableHandle aria-label="Resize terminal panes" aria-orientation={direction === "horizontal" ? "vertical" : "horizontal"} />}
       <Panel id={panelId} minSize={10} defaultSize={defaultSize} className="min-w-0 min-h-0">
         {children}
       </Panel>

@@ -1,3 +1,4 @@
+import { tabVariants } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -3862,10 +3863,8 @@ function TerminalTabStrip({
               data-tab-id={t.id}
               onClick={() => onSetActiveTab(t.id)}
               className={clsx(
-                "group flex h-8 min-w-[128px] max-w-[240px] shrink-0 cursor-pointer items-center gap-1 border-r border-border px-2 text-[11px]",
-                activeTab === t.id
-                  ? "bg-background text-foreground"
-                  : "text-muted-foreground hover:bg-accent hover:text-foreground",
+                tabVariants({ active: activeTab === t.id }),
+                "group min-w-[128px] max-w-[240px] cursor-pointer gap-1 px-2",
               )}
               data-session-type={t.sshRemote ? "ssh" : sType}
             >

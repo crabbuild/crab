@@ -1,270 +1,206 @@
-import React, { createContext, useContext, useReducer, useCallback, useEffect, useMemo } from "react";
-import type { SkillListItem, SkillDetail, DetectedAgent, SkillOpResult } from "../ipc";
+import {
+  createContext,
+  useContext,
+  useState,
+  useCallback,
+  useEffect,
+  type ReactNode,
+} from "react";
+import type {
+  SkillListItem,
+  SkillDetail,
+  DetectedAgent,
+  SkillOpResult,
+} from "../ipc";
 
-// ── State ──
-export interface SkillsState {
-  skills: SkillListItem[];
-  loading: boolean;
-  error: string | null;
-  selectedSkillId: string | null;
-  selectedSkill: SkillDetail | null;
-  detailLoading: boolean;
-  detectedAgents: DetectedAgent[];
-  agentsLoading: boolean;
-}
+function useSkillsState(repoPath?: string) {
+  const [skills, setSkills] = useState<SkillListItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [selectedSkillId, selectSkill] = useState<string | null>(null);
+  const [selectedSkill, setSelectedSkill] = useState<SkillDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [detectedAgents, setDetectedAgents] = useState<DetectedAgent[]>([]);
+  const [agentsLoading, setAgentsLoading] = useState(true);
+  const [agentsError, setAgentsError] = useState<string | null>(null);
+  const [detailRevision, setDetailRevision] = useState(0);
 
-const initialState: SkillsState = {
-  skills: [],
-  loading: false,
-  error: null,
-  selectedSkillId: null,
-  selectedSkill: null,
-  detailLoading: false,
-  detectedAgents: [],
-  agentsLoading: false,
-};
+  const refreshSkills = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await window.crab.skills.listSkills(
+        repoPath ? { repoPath } : undefined,
+      );
+      if (!result.success || !result.data)
+        throw new Error(result.error ?? "Could not load skills.");
+      const items = result.data;
+      setSkills(items);
+      selectSkill((id) =>
+        id && items.some((item) => item.record.id === id) ? id : null,
+      );
+      return items;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      return null;
+    } finally {
+      setLoading(false);
+    }
+  }, [repoPath]);
 
-// ── Actions ──
-type SkillsAction =
-  | { type: "SET_LOADING"; loading: boolean }
-  | { type: "SET_ERROR"; error: string | null }
-  | { type: "SET_SKILLS"; skills: SkillListItem[] }
-  | { type: "SET_SELECTED_ID"; id: string | null }
-  | { type: "SET_SELECTED_SKILL"; skill: SkillDetail | null; loading: boolean }
-  | { type: "SET_AGENTS"; agents: DetectedAgent[] }
-  | { type: "ADD_SKILL"; skill: SkillListItem }
-  | { type: "UPDATE_SKILL"; skill: SkillListItem }
-  | { type: "REMOVE_SKILL"; id: string };
+  const refreshAgents = useCallback(async () => {
+    setAgentsLoading(true);
+    setAgentsError(null);
+    try {
+      setDetectedAgents(await window.crab.skills.detectAgents());
+    } catch (e) {
+      setAgentsError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAgentsLoading(false);
+    }
+  }, []);
 
-function reducer(state: SkillsState, action: SkillsAction): SkillsState {
-  switch (action.type) {
-    case "SET_LOADING":
-      return { ...state, loading: action.loading };
-    case "SET_ERROR":
-      return { ...state, error: action.error };
-    case "SET_SKILLS":
-      return { ...state, skills: action.skills, loading: false };
-    case "SET_SELECTED_ID":
-      return { ...state, selectedSkillId: action.id, selectedSkill: null };
-    case "SET_SELECTED_SKILL":
-      return { ...state, selectedSkill: action.skill, detailLoading: action.loading };
-    case "SET_AGENTS":
-      return { ...state, detectedAgents: action.agents, agentsLoading: false };
-    case "ADD_SKILL":
-      return { ...state, skills: [action.skill, ...state.skills] };
-    case "UPDATE_SKILL":
+  useEffect(() => {
+    void refreshSkills();
+    void refreshAgents();
+  }, [refreshSkills, refreshAgents]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setSelectedSkill((current) =>
+      current?.record.id === selectedSkillId ? current : null,
+    );
+    setDetailError(null);
+    setDetailLoading(Boolean(selectedSkillId));
+    if (!selectedSkillId) return;
+    // A slower request for the previous selection must never replace this detail.
+    void window.crab.skills
+      .getSkill(selectedSkillId)
+      .then((result) => {
+        if (cancelled) return;
+        if (result.success && result.data) setSelectedSkill(result.data);
+        else setDetailError(result.error ?? "Could not load this skill.");
+      })
+      .catch((e) => {
+        if (!cancelled)
+          setDetailError(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => {
+        if (!cancelled) setDetailLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedSkillId, skills, detailRevision]);
+
+  async function mutate<T>(
+    operation: () => Promise<SkillOpResult<T>>,
+  ): Promise<SkillOpResult<T>> {
+    try {
+      const result = await operation();
+      if (result.success) await refreshSkills();
+      return result;
+    } catch (e) {
       return {
-        ...state,
-        skills: state.skills.map((s) =>
-          s.record.id === action.skill.record.id ? action.skill : s,
-        ),
+        success: false,
+        error: e instanceof Error ? e.message : String(e),
       };
-    case "REMOVE_SKILL":
-      return {
-        ...state,
-        skills: state.skills.filter((s) => s.record.id !== action.id),
-        selectedSkillId: state.selectedSkillId === action.id ? null : state.selectedSkillId,
-        selectedSkill: state.selectedSkillId === action.id ? null : state.selectedSkill,
-      };
-    default:
-      return state;
+    }
   }
+
+  async function createSkill(
+    data: Parameters<typeof window.crab.skills.createSkill>[0],
+  ) {
+    const result = await mutate(() =>
+      window.crab.skills.createSkill({
+        ...data,
+        repoPath: data.repoPath ?? repoPath,
+      }),
+    );
+    if (result.success && result.data) selectSkill(result.data.record.id);
+    return result;
+  }
+
+  async function installFromUrl(url: string) {
+    const result = await mutate(() =>
+      window.crab.skills.installFromUrl(url, "user", repoPath),
+    );
+    if (result.success && result.data) selectSkill(result.data.record.id);
+    return result;
+  }
+
+  async function resyncAll() {
+    try {
+      const result = await window.crab.skills.resyncAll();
+      if (!result.success)
+        throw new Error(result.error ?? "Could not sync skills.");
+      // Per-agent failures are reflected in actual link status, not the backend's count.
+      const items = await refreshSkills();
+      if (!items)
+        throw new Error(
+          "Sync finished, but its status could not be refreshed. Retry loading skills.",
+        );
+      return items.reduce(
+        (count, item) =>
+          count +
+          Object.values(item.agentStatus).filter((status) => status === "error")
+            .length,
+        0,
+      );
+    } finally {
+      void refreshAgents();
+    }
+  }
+
+  return {
+    state: {
+      skills,
+      loading,
+      error,
+      selectedSkillId,
+      selectedSkill,
+      detailLoading,
+      detailError,
+      detectedAgents,
+      agentsLoading,
+      agentsError,
+    },
+    refreshSkills,
+    refreshAgents,
+    selectSkill,
+    createSkill,
+    installFromUrl,
+    resyncAll,
+    retryDetail: () => setDetailRevision((value) => value + 1),
+    updateSkill: (data: Parameters<typeof window.crab.skills.updateSkill>[0]) =>
+      mutate(() => window.crab.skills.updateSkill(data)),
+    deleteSkill: (id: string) =>
+      mutate(() => window.crab.skills.deleteSkill(id)),
+    toggleEnabled: (id: string, enabled: boolean) =>
+      mutate(() => window.crab.skills.toggleEnabled(id, enabled)),
+  };
 }
 
-// ── Context ──
-interface SkillsContextType {
-  state: SkillsState;
-  dispatch: React.Dispatch<SkillsAction>;
-  refreshSkills: (opts?: { scope?: string; repoPath?: string }) => Promise<void>;
-  selectSkill: (id: string | null) => Promise<void>;
-  createSkill: (data: {
-    name: string;
-    description: string;
-    body?: string;
-    scope: string;
-    repoPath?: string;
-  }) => Promise<SkillOpResult<SkillDetail>>;
-  updateSkill: (data: {
-    id: string;
-    updates: { name?: string; description?: string; body?: string };
-  }) => Promise<SkillOpResult<SkillDetail>>;
-  deleteSkill: (id: string) => Promise<SkillOpResult<void>>;
-  installFromUrl: (url: string) => Promise<SkillOpResult<SkillDetail>>;
-  toggleEnabled: (id: string, enabled: boolean) => Promise<void>;
-  setActivationPrefs: (id: string, prefs: { autoActivate: boolean; restrictToAgents: string[] }) => Promise<void>;
-  resyncAll: () => Promise<void>;
-}
-
-const SkillsContext = createContext<SkillsContextType | null>(null);
+const SkillsContext = createContext<ReturnType<typeof useSkillsState> | null>(
+  null,
+);
 
 export function SkillsProvider({
   children,
   repoPath,
 }: {
-  children: React.ReactNode;
+  children: ReactNode;
   repoPath?: string;
 }) {
-  const [state, dispatch] = useReducer(reducer, initialState);
-
-  const refreshSkills = useCallback(
-    async (opts?: { scope?: string; repoPath?: string }) => {
-      dispatch({ type: "SET_LOADING", loading: true });
-      try {
-        const result = await window.crab.skills.listSkills(opts);
-        if (result.success && result.data) {
-          dispatch({ type: "SET_SKILLS", skills: result.data });
-        } else {
-          dispatch({ type: "SET_ERROR", error: result.error ?? "Failed to load skills" });
-        }
-      } catch (e) {
-        dispatch({ type: "SET_ERROR", error: (e as Error).message });
-      }
-    },
-    [],
-  );
-
-  const selectSkill = useCallback(async (id: string | null) => {
-    dispatch({ type: "SET_SELECTED_ID", id });
-    if (!id) return;
-
-    dispatch({ type: "SET_SELECTED_SKILL", skill: null, loading: true });
-    try {
-      const result = await window.crab.skills.getSkill(id);
-      if (result.success && result.data) {
-        dispatch({ type: "SET_SELECTED_SKILL", skill: result.data, loading: false });
-      } else {
-        dispatch({ type: "SET_SELECTED_SKILL", skill: null, loading: false });
-      }
-    } catch {
-      dispatch({ type: "SET_SELECTED_SKILL", skill: null, loading: false });
-    }
-  }, []);
-
-  const createSkillFn = useCallback(
-    async (data: {
-      name: string;
-      description: string;
-      body?: string;
-      scope: string;
-      repoPath?: string;
-    }) => {
-      const effectiveRepoPath = data.repoPath ?? repoPath;
-      const result = await window.crab.skills.createSkill({ ...data, repoPath: effectiveRepoPath } as any);
-      if (result.success) {
-        await refreshSkills(repoPath ? { repoPath } : undefined);
-      }
-      return result;
-    },
-    [refreshSkills, repoPath],
-  );
-
-  const updateSkillFn = useCallback(
-    async (data: {
-      id: string;
-      updates: { name?: string; description?: string; body?: string };
-    }) => {
-      const result = await window.crab.skills.updateSkill(data as any);
-      if (result.success) {
-        await refreshSkills(repoPath ? { repoPath } : undefined);
-        if (state.selectedSkillId === data.id) {
-          await selectSkill(data.id);
-        }
-      }
-      return result;
-    },
-    [refreshSkills, selectSkill, state.selectedSkillId, repoPath],
-  );
-
-  const deleteSkillFn = useCallback(
-    async (id: string) => {
-      const result = await window.crab.skills.deleteSkill(id);
-      if (result.success) {
-        await refreshSkills(repoPath ? { repoPath } : undefined);
-      }
-      return result;
-    },
-    [refreshSkills, repoPath],
-  );
-
-  const installFromUrlFn = useCallback(
-    async (url: string) => {
-      const result = await window.crab.skills.installFromUrl(url, "user", repoPath);
-      if (result.success) {
-        await refreshSkills(repoPath ? { repoPath } : undefined);
-      }
-      return result;
-    },
-    [refreshSkills, repoPath],
-  );
-
-  const toggleEnabledFn = useCallback(
-    async (id: string, enabled: boolean) => {
-      await window.crab.skills.toggleEnabled(id, enabled);
-      await refreshSkills(repoPath ? { repoPath } : undefined);
-    },
-    [refreshSkills, repoPath],
-  );
-
-  const setActivationPrefsFn = useCallback(
-    async (id: string, prefs: { autoActivate: boolean; restrictToAgents: string[] }) => {
-      await window.crab.skills.setActivationPrefs(id, prefs as any);
-      await refreshSkills(repoPath ? { repoPath } : undefined);
-    },
-    [refreshSkills, repoPath],
-  );
-
-  const resyncAllFn = useCallback(async () => {
-    await window.crab.skills.resyncAll();
-    await refreshSkills(repoPath ? { repoPath } : undefined);
-  }, [refreshSkills, repoPath]);
-
-  // Load on mount
-  useEffect(() => {
-    refreshSkills(repoPath ? { repoPath } : undefined);
-
-    // Load detected agents
-    dispatch({ type: "SET_AGENTS", agents: [] });
-    window.crab.skills
-      .detectAgents()
-      .then((agents) => dispatch({ type: "SET_AGENTS", agents }))
-      .catch(() => dispatch({ type: "SET_AGENTS", agents: [] }));
-  }, [refreshSkills, repoPath]);
-
-  const value = useMemo(
-    () => ({
-      state,
-      dispatch,
-      refreshSkills,
-      selectSkill,
-      createSkill: createSkillFn,
-      updateSkill: updateSkillFn,
-      deleteSkill: deleteSkillFn,
-      installFromUrl: installFromUrlFn,
-      toggleEnabled: toggleEnabledFn,
-      setActivationPrefs: setActivationPrefsFn,
-      resyncAll: resyncAllFn,
-    }),
-    [
-      state,
-      refreshSkills,
-      selectSkill,
-      createSkillFn,
-      updateSkillFn,
-      deleteSkillFn,
-      installFromUrlFn,
-      toggleEnabledFn,
-      setActivationPrefsFn,
-      resyncAllFn,
-    ],
-  );
-
+  const value = useSkillsState(repoPath);
   return (
     <SkillsContext.Provider value={value}>{children}</SkillsContext.Provider>
   );
 }
 
-export function useSkills(): SkillsContextType {
-  const ctx = useContext(SkillsContext);
-  if (!ctx) throw new Error("useSkills used outside SkillsProvider");
-  return ctx;
+export function useSkills() {
+  const context = useContext(SkillsContext);
+  if (!context) throw new Error("useSkills used outside SkillsProvider");
+  return context;
 }

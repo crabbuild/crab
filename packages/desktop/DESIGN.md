@@ -8,6 +8,18 @@ Use Vercel Geist's neutral visual language with shadcn/ui composition. Primary a
 
 Shared controls live in `src/components/ui/`. Use shadcn Button, Input, Textarea, Tabs, and Dialog composition for their respective interactions. Keep existing keyboard, focus, disabled, form, and ref contracts during migration. Layout belongs at the call site; control appearance belongs in the shared component.
 
+Desktop tabs share `tabVariants` from `ui/tabs`: no individual borders,
+underlines, or shadows. The active tab uses the accent surface and foreground;
+inactive tabs use muted text. Keep focus rings, close buttons, dirty markers,
+drag indicators, and existing keyboard ownership. Tab-strip boundary lines are
+separate from individual tab styling.
+
+Resizable pane boundaries use `ui/resizable`: a visible one-pixel line in every
+theme, a wider drag target, and clear hover, drag, and keyboard focus states.
+Toasts follow the effective Crab theme, including workspace overrides and
+high-contrast settings. Their text and actions use semantic tokens even when
+Sonner injects its stylesheet after the packaged renderer CSS.
+
 Use bundled Geist Sans for interface text and Geist Mono for code and measurements. Terminal and editor font preferences remain authoritative. Keep the desktop density: compact controls, 36px tab rows, restrained borders, and visible keyboard focus. Respect reduced motion and high-contrast settings.
 
 View toolbars have at least 44px of height with 32px action targets and 16px

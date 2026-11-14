@@ -1,4 +1,5 @@
 import { Button } from "@/components/ui/button";
+import { tabVariants } from "@/components/ui/tabs";
 import {
   Collapsible,
   CollapsibleContent,
@@ -252,8 +253,8 @@ function TabPill({
     <>
       <div
         className={clsx(
-          "group flex h-9 shrink-0 items-center gap-2 border-r border-border px-3 text-[12px] transition",
-          active ? "bg-background text-foreground" : "text-muted-foreground hover:bg-accent",
+          tabVariants({ active }),
+          "group h-9 gap-2",
           pinned && "italic",
         )}
         onContextMenu={handleContextMenu}

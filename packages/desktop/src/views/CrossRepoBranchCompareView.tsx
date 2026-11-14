@@ -1,3 +1,4 @@
+import { ResizableHandle } from "@/components/ui/resizable";
 import { Button } from "@/components/ui/button";
 import {
   AlertTriangle,
@@ -11,7 +12,7 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
+import { Panel, PanelGroup } from "react-resizable-panels";
 import { rpc } from "../ipc";
 import { OpenRepo, useStore, WorkspaceRepoEntry } from "../state";
 import { DiffView } from "./DiffView";
@@ -307,7 +308,7 @@ export function CrossRepoBranchCompareView({ base, head, onClose }: Props) {
               </div>
             </Panel>
 
-            <PanelResizeHandle className="w-1 bg-border transition-colors hover:bg-primary" />
+            <ResizableHandle aria-label="Resize branch comparison" />
 
             {/* Diff panel */}
             <Panel minSize={40}>

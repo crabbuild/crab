@@ -1,8 +1,9 @@
+import { ResizableHandle } from "@/components/ui/resizable";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import clsx from "clsx";
 import { GitPullRequestArrow, Layers } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
+import { Panel, PanelGroup } from "react-resizable-panels";
 import { SafePatchDiff } from "../components/SafePatchDiff";
 import { StashesPanel } from "../components/StashesPanel";
 import { getWatchPath, useFileWatcher } from "../hooks/useFileWatcher";
@@ -178,15 +179,7 @@ function TabButton({
   badge?: number;
 }) {
   return (
-    <TabsTrigger
-      className={clsx(
-        "relative flex items-center gap-1.5 px-3 py-2 text-xs font-medium transition",
-        active
-          ? "text-foreground"
-          : "text-muted-foreground hover:text-foreground",
-      )}
-      value={value}
-    >
+    <TabsTrigger value={value}>
       {icon}
       {label}
       {badge !== undefined && badge > 0 && (
@@ -242,7 +235,7 @@ function StashesTabContent({
         />
       </Panel>
 
-      <PanelResizeHandle className="w-px bg-border hover:bg-primary/40 transition-colors" />
+      <ResizableHandle aria-label="Resize stash preview" />
 
       {/* Right: diff preview */}
       <Panel defaultSize={65} minSize={30}>

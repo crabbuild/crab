@@ -1,3 +1,4 @@
+import { ResizableHandle } from "@/components/ui/resizable";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -19,7 +20,7 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
+import { Panel, PanelGroup } from "react-resizable-panels";
 import { EditorPane, EditorTab } from "../components/EditorPane";
 import { FileTree } from "../components/FileTree";
 import { useFileTransfers } from "../hooks/useFileTransfers";
@@ -432,7 +433,7 @@ export function WorktreeDetailPanel({ repo, worktree, status, onClose }: Props) 
             </div>
           </Panel>
 
-          <PanelResizeHandle className="w-px cursor-col-resize bg-border hover:bg-primary/50 transition-colors" />
+          <ResizableHandle aria-label="Resize worktree explorer" />
 
           {/* Right: Multi-tab editor / diff view */}
           <Panel minSize={40}>

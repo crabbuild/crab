@@ -1,4 +1,5 @@
 import { Button } from "@/components/ui/button";
+import { tabVariants } from "@/components/ui/tabs";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   DropdownMenu,
@@ -392,10 +393,7 @@ function TabButton({ id, active, onClick, icon: Icon, label, count, badge }: {
       size="compact"
       type="button"
       onClick={() => onClick(id)}
-      className={clsx(
-        "relative flex items-center gap-1.5 px-3 py-2 text-xs font-medium transition-colors",
-        isActive ? "text-foreground" : "text-muted-foreground hover:text-foreground",
-      )}
+      className={tabVariants({ active: isActive })}
     >
       <Icon size={14} />
       {label}
@@ -405,9 +403,6 @@ function TabButton({ id, active, onClick, icon: Icon, label, count, badge }: {
         </span>
       )}
       {badge}
-      {isActive && (
-        <span className="absolute bottom-0 left-0 right-0 h-[2px] rounded-t bg-primary" />
-      )}
     </Button>
   );
 }

@@ -1,3 +1,4 @@
+import { ResizableHandle } from "@/components/ui/resizable";
 import { Button } from "@/components/ui/button";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { repositoryTreeTheme } from "@/lib/repository-tree-theme";
@@ -26,7 +27,7 @@ import {
   Undo2,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
+import { Panel, PanelGroup } from "react-resizable-panels";
 import { useSessionScroll } from "../hooks/useSessionScroll";
 
 import { BatchActionBar } from "../components/BatchActionBar";
@@ -1079,7 +1080,7 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
               onCommitSuccess={onCommitSuccess}
             />
           </Panel>
-          <PanelResizeHandle className="w-[3px] cursor-col-resize bg-transparent transition-colors hover:bg-primary/50" />
+          <ResizableHandle aria-label="Resize changes preview" />
           <Panel minSize={20} className="min-h-0 min-w-0">
             {openFilePath ? (
               <FileContentPane

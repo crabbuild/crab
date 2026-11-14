@@ -77,8 +77,8 @@ export function ResizeHandle({ direction = "horizontal", onResize, className }: 
       {/* Visual indicator line */}
       <div
         className={clsx(
-          "rounded-full bg-border transition-all group-hover:bg-primary/50",
-          isHorizontal ? "h-8 w-0.5" : "h-0.5 w-8",
+          "bg-muted-foreground/75 transition-colors group-hover:bg-primary",
+          isHorizontal ? "h-full w-px" : "h-px w-full",
           dragging && "bg-primary",
         )}
       />
