@@ -25,6 +25,7 @@ import {
 import { elicitationRequest, type PendingElicitation } from "./agent-elicitation";
 import { AgentSubmissionUncertainError } from "./orchestrator-adapters";
 import { CodexRpcClient, CodexRpcError, type CodexRequestId } from "./codex-rpc";
+import { CodexSubagents } from "./codex-subagents";
 import {
   CODEX_TRACE_LINE_RE,
   CODEX_NOISE_LINE_RE,
@@ -263,6 +264,7 @@ export class CodexAppServerAdapter extends AgentAdapter {
   cancel(): Promise<void> {
     if (this.cancelInProgress) return this.cancellation ?? Promise.resolve();
     this.cancelInProgress = true;
+    this.teamCalls.abort(new Error("Conversation stopped"));
     const child = this.proc;
     this.cancellation = this.processClosed;
     // Before initialization there is no turn to interrupt; retire a pending
@@ -430,7 +432,8 @@ export class CodexAppServerAdapter extends AgentAdapter {
     const method = this.resumeThreadId ? "thread/resume" : "thread/start";
     // Resume otherwise restores the old workspace from history. An owned
     // worktree may have been recreated at a different path since that turn.
-    const params = { cwd: this.cwd, ...(this.resumeThreadId ? { threadId: this.resumeThreadId } : {}) };
+    const params = { cwd: this.cwd, ...(this.resumeThreadId ? { threadId: this.resumeThreadId }
+      : this.teamTools ? { dynamicTools: this.teamTools.tools.map(tool => ({ type: "function", ...tool })) } : {}) };
     // Resume must load the stored thread before turn/start. A failure must
     // surface to the user; starting a fresh thread would silently lose context.
     const result = await this.rpc.send(method, params, { timeoutMs: 0 }) as { thread?: { id?: unknown }; model?: string; reasoningEffort?: string | null; collaborationMode?: { mode: string } | null } | null;
@@ -511,9 +514,11 @@ export class CodexAppServerAdapter extends AgentAdapter {
     if (!this.rpc) return;
 
     const state: CodexParseState = { agentMessages: new Map(), lastAgentMessage: "" };
+    const children = new CodexSubagents(this.rpc, () => this.threadId ?? this.resumeThreadId, event => this.emitEvent(event), this.teamCalls.signal);
     const onThreadNotification = (method: string, handler: (params: unknown) => void) => {
       const receive = (params: unknown) => {
         const p = params as Record<string, unknown> | undefined;
+        if (p && children.handle(method, p)) return;
         if (p?.threadId !== (this.threadId ?? this.resumeThreadId)) return;
         const review = this.reviewTurn;
         if (!review) { handler(params); return; }
@@ -541,6 +546,7 @@ export class CodexAppServerAdapter extends AgentAdapter {
     this.rpc.onNotification("thread/started", (params: unknown) => {
       const p = params as Record<string, unknown> | undefined;
       const thread = p?.thread as Record<string, unknown> | undefined;
+      if (thread) children.started(thread);
       const threadId = String(thread?.id ?? p?.threadId ?? "");
       if (threadId && this.threadId === null && (!this.resumeThreadId || threadId === this.resumeThreadId)) {
         this.threadId = threadId;
@@ -816,6 +822,19 @@ export class CodexAppServerAdapter extends AgentAdapter {
       if (this.pendingInputs.has(pendingId) || this.pendingApprovals.has(pendingId)) return;
       if (this.cancelInProgress) {
         this.rpc?.respondError(id, -32000, "Conversation stopped");
+        return;
+      }
+      if (method === "item/tool/call" && this.teamTools) {
+        const p = params as { threadId: string; tool: string; arguments: unknown };
+        if (p.threadId !== this.threadId || !this.teamTools.tools.some(tool => tool.name === p.tool)) {
+          this.rpc?.respondError(id, -32602, "Unknown team tool or owner");
+          return;
+        }
+        void this.teamTools.call(p.tool, p.arguments, this.teamCalls.signal).then(result => {
+          if (!this.cancelInProgress) this.rpc?.respond(id, { success: true, contentItems: [{ type: "inputText", text: JSON.stringify(result) }] });
+        }, (error: unknown) => {
+          if (!this.cancelInProgress) this.rpc?.respond(id, { success: false, contentItems: [{ type: "inputText", text: error instanceof Error ? error.message : String(error) }] });
+        });
         return;
       }
       if (method === "mcpServer/elicitation/request") {

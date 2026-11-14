@@ -15,6 +15,7 @@ docs/
 │   ├── agent-sidecar.md         Rust agent internals
 │   ├── event-system.md          File watching & event flow
 │   ├── orchestrator-system.md   Agent task orchestration
+│   ├── agent-teams.md           Sub-agent transcripts and mixed provider teams
 │   ├── lsp-integration.md       Language server protocol
 │   ├── terminal-subsystem.md    PTY management & shell integration
 │   └── build-and-packaging.md   Build pipeline & distribution

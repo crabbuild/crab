@@ -267,7 +267,10 @@ shares the asynchronous shell environment and remains cancellable.
 Credentials are encrypted with Electron's OS-backed `safeStorage` in the app's
 user-data directory. Only metadata and a connection ID return to the renderer.
 The OS keyring must be available; Linux's plaintext `basic_text` backend is
-refused. Unsaved form values clear on save, cancel, or provider change. Credentials
+refused. Listing connection metadata initializes the keyring only when an
+encrypted vault must be read. Repositories using environment credentials can
+retry transfers without initializing an unused keyring.
+Unsaved form values clear on save, cancel, or provider change. Credentials
 never belong in repository URLs. Connections and local checkout selections
 survive restart; cloning records the selection for the destination checkout.
 Two endpoints with the same bucket name retain separate identities.

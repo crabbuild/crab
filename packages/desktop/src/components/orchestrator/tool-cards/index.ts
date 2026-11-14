@@ -24,7 +24,7 @@
  *     implementing ToolCardRendererProps and register it below.
  *
  * Coverage (Claude Code built-in tools):
- *   ✓ Agent           → AgentCard
+ *   ✓ Agent           → SubAgentCard
  *   ✓ AskUserQuestion → AskUserCard (interactive: approve/reject/freeform)
  *   ✓ Bash            → BashCard
  *   ✓ CronCreate      → CronCard
@@ -46,7 +46,7 @@
  *   ✓ Read            → ReadCard
  *   ✓ ReadMcpResource → McpCard
  *   ✓ RemoteTrigger   → NotificationCard
- *   ✓ SendMessage     → AgentCard
+ *   ✓ SendMessage     → SubAgentCard
  *   ✓ ShareOnboardingGuide → SkillCard (generic plugin style)
  *   ✓ Skill           → SkillCard
  *   ✓ Task            → SubAgentCard (legacy)
@@ -56,8 +56,8 @@
  *   ✓ TaskOutput      → SubAgentCard (legacy)
  *   ✓ TaskStop        → SubAgentCard (legacy, also TaskManagement)
  *   ✓ TaskUpdate      → TaskManagementCard
- *   ✓ TeamCreate      → AgentCard
- *   ✓ TeamDelete      → AgentCard
+ *   ✓ TeamCreate      → SubAgentCard
+ *   ✓ TeamDelete      → SubAgentCard
  *   ✓ TodoWrite       → TodoWriteCard (handled separately in dispatcher)
  *   ✓ ToolSearch      → SkillCard
  *   ✓ WebFetch        → WebFetchCard
@@ -75,7 +75,6 @@ export { SearchCard } from "./SearchCard";
 export { WebFetchCard } from "./WebFetchCard";
 export { SubAgentCard } from "./SubAgentCard";
 export { PlanModeCard } from "./PlanCard";
-export { AgentCard } from "./AgentCard";
 export { AskUserCard } from "./AskUserCard";
 export { MonitorCard } from "./MonitorCard";
 export { LSPCard } from "./LSPCard";
@@ -99,7 +98,6 @@ import { SearchCard } from "./SearchCard";
 import { WebFetchCard } from "./WebFetchCard";
 import { SubAgentCard } from "./SubAgentCard";
 import { PlanModeCard } from "./PlanCard";
-import { AgentCard } from "./AgentCard";
 import { AskUserCard } from "./AskUserCard";
 import { MonitorCard } from "./MonitorCard";
 import { LSPCard } from "./LSPCard";
@@ -155,10 +153,10 @@ TOOL_CARD_REGISTRY.set("EnterPlanMode", PlanModeCard);
 TOOL_CARD_REGISTRY.set("ExitPlanMode", PlanModeCard);
 
 // ─── Agent / sub-agent ──────────────────────────────────────────────
-TOOL_CARD_REGISTRY.set("Agent", AgentCard);
-TOOL_CARD_REGISTRY.set("SendMessage", AgentCard);
-TOOL_CARD_REGISTRY.set("TeamCreate", AgentCard);
-TOOL_CARD_REGISTRY.set("TeamDelete", AgentCard);
+for (const tool of ["Agent", "SendMessage", "TeamCreate", "TeamDelete", "CodexAgent",
+  "crab_spawn_agent", "crab_list_agents", "crab_send_message", "crab_read_agent", "crab_wait_agent", "crab_stop_agent"]) {
+  TOOL_CARD_REGISTRY.set(tool, SubAgentCard);
+}
 
 // ─── Legacy sub-agent (Task/TaskOutput/TaskStop) ────────────────────
 TOOL_CARD_REGISTRY.set("Task", SubAgentCard);
@@ -250,7 +248,7 @@ TOOL_CARD_REGISTRY.set("list_dir", SearchCard);
 export function resolveToolCard(
   toolName: string,
 ): React.ComponentType<ToolCardRendererProps> | undefined {
-  return TOOL_CARD_REGISTRY.get(toolName);
+  return TOOL_CARD_REGISTRY.get(toolName.startsWith("mcp__crab_team__") ? toolName.slice("mcp__crab_team__".length) : toolName);
 }
 
 /**

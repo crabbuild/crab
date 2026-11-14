@@ -249,7 +249,9 @@ export class StorageConnections {
       const vault = await this.read();
       const repoId = text(payload.repo_id);
       const selected_id = vault.bindings[this.sessions.get(repoId)?.key ?? repoId] ?? null;
-      return { connections: vault.connections.map(info), selected_id, secure_storage: await this.available() };
+      // Availability can await user input. Metadata reads must not initialize an
+      // unused keyring; encrypted vault loading and mutations enforce encryption.
+      return { connections: vault.connections.map(info), selected_id };
     }
     if (method === "storage_connections_save") {
       const next = connection(payload.connection);

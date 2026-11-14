@@ -79,11 +79,11 @@ describe.skipIf(!liveRoot)("official agent chat live qualification", () => {
       const saved = reloaded.getTask(child.id);
       expect({
         file: await readFile(path.join(cwd, "child-proof.txt"), "utf8"),
-        parentStatus: parent.status, parentEvents: parent.events,
+        parentStatus: parent.status, childOutput: parent.events.some(event => event.subagent?.id === child.id && event.subagent.event?.type === "text"),
         eventOwners: [...new Set(events.map(payload => payload.taskId))],
         session: Boolean(agent === "codex" ? saved?.codexThreadId : saved?.claudeSessionId),
         status: saved?.status, mode: saved?.worktreeMode,
-      }).toEqual({ file: "child-proof", parentStatus: "created", parentEvents: [], eventOwners: [child.id], session: true, status: "reviewing", mode: "existing" });
+      }).toEqual({ file: "child-proof", parentStatus: "created", childOutput: true, eventOwners: [child.id, parent.id], session: true, status: "reviewing", mode: "existing" });
     } finally {
       if (childId) await orchestrator.cancelTask(childId);
       vi.unstubAllEnvs();

@@ -1376,6 +1376,7 @@ declare global {
       openUrl: (url: string) => Promise<void>;
       // Orchestrator (agent task management)
       orchestrator: {
+        cancelTask: (taskId: string) => Promise<{ success: boolean; error?: string }>;
         getDiff: (taskId: string, checkpointSha?: string, checkpointFromSha?: string) => Promise<{ success: boolean; diff?: import("../electron/orchestrator-diff").TaskDiff; error?: string }>;
         restoreFiles: (taskId: string, sourceRef: string) => Promise<{ success: boolean; error?: string }>;
         revertFile: (taskId: string, filePath: string) => Promise<{ success: boolean; error?: string }>;

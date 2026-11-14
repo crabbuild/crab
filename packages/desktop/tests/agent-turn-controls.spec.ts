@@ -84,7 +84,7 @@ describe("native agent turn controls", () => {
       { threadId: "thread", input: [{ type: "text", text: "Original prompt" }], collaborationMode: { mode: "plan", settings: { model: "selected-model", reasoning_effort: "high", developer_instructions: null } } },
       { threadId: "thread", input: [{ type: "text", text: "Unchanged follow-up" }], collaborationMode: { mode: "default", settings: { model: "configured-default", reasoning_effort: "low", developer_instructions: null } } },
     ] : [
-      { subtype: "initialize", supportedDialogKinds: [] }, { subtype: "set_permission_mode", mode: "plan" },
+      { subtype: "initialize", supportedDialogKinds: [], forwardSubagentText: true }, { subtype: "set_permission_mode", mode: "plan" },
       { subtype: "set_model", model: "selected-model" }, { subtype: "apply_flag_settings", settings: { effortLevel: "high" } }, { role: "user", content: "Original prompt" },
       { subtype: "set_permission_mode", mode: "default" }, { subtype: "set_model" }, { subtype: "apply_flag_settings", settings: { effortLevel: null } }, { role: "user", content: "Unchanged follow-up" },
     ]);

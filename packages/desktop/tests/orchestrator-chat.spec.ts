@@ -19,6 +19,19 @@ function journal() {
 }
 
 describe("main-process transcript ownership", () => {
+  it("restores complete sub-agent output and command bytes under its stable identity", () => {
+    const { db, task, chat } = journal();
+    const content = "Detailed finding\n".repeat(600) + "COMPLETE_RESULT_END";
+    chat.event(task.id, { type: "subagent", timestamp: 2, subagent: { id: "tool", name: "Reviewer", prompt: "Review ownership" } });
+    chat.event(task.id, { type: "subagent", timestamp: 3, subagent: { id: "stable", toolCallId: "tool", status: "running" } });
+    chat.event(task.id, { type: "subagent", timestamp: 4, subagent: { id: "stable", event: { type: "text", timestamp: 4, content } } });
+    chat.event(task.id, { type: "subagent", timestamp: 5, subagent: { id: "stable", event: { type: "command_output", timestamp: 5, commandSessionId: "command", content: "FULL_COMMAND_BYTES" } } });
+    const restored = new ChatJournal(db, () => task).snapshot(task.id).messages.filter(message => message.subagent);
+    expect(restored.map(message => ({ id: message.subagent?.id, name: message.subagent?.name, prompt: message.subagent?.prompt,
+      output: message.messages?.map(entry => entry.content || entry.providerEvent?.content) })))
+      .toEqual([{ id: "stable", name: "Reviewer", prompt: "Review ownership", output: [content, "FULL_COMMAND_BYTES"] }]);
+  });
+
   it("removes only a definitively rejected send from durable history, search, and renderer patches", () => {
     const { db, task, chat } = journal();
     const submission = { taskId: task.id, id: "send", content: "rejectedword" };

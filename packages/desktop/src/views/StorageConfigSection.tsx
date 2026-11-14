@@ -122,7 +122,7 @@ export function StorageConfigSection({ repo, onSelect, selectedId }: Props = {})
           <h3 className="text-sm font-semibold">Storage connections</h3>
           <p className="text-xs text-muted-foreground">
             Save credentials for S3-compatible storage, Google Cloud Storage,
-            and Azure Blob.
+            and Azure Blob. Saving credentials may prompt to unlock your operating system keyring.
           </p>
         </div>
         <Button variant="outline" type="button" className="text-xs" onClick={() => { setAdding(value => !value); setEditingId(null); setForm(EMPTY); setError(null); setResult(null); }} disabled={Boolean(busy)}>
@@ -138,12 +138,6 @@ export function StorageConfigSection({ repo, onSelect, selectedId }: Props = {})
       {message && (
         <p role="status" className="text-xs text-success">
           {message}
-        </p>
-      )}
-      {status && !status.secure_storage && (
-        <p role="alert" className="text-xs text-warning">
-          Unlock or configure your operating system keyring to save credentials
-          securely.
         </p>
       )}
       {!status && !error && (
@@ -314,7 +308,7 @@ export function StorageConfigSection({ repo, onSelect, selectedId }: Props = {})
               )}
               Test connection
             </Button>
-            <Button variant="default" type="submit" className="text-xs" disabled={Boolean(busy) || !status?.secure_storage}>
+            <Button variant="default" type="submit" className="text-xs" disabled={Boolean(busy) || !status}>
               {busy === "save" && (
                 <Loader2 size={13} className="animate-spin" />
               )}

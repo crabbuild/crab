@@ -133,6 +133,7 @@ interface ChatWindow {
 /** Registers the transcript owner and its submission/read IPC boundary. */
 export function registerChatIpc(ipc: Pick<IpcMain, "handle">, orchestrator: Orchestrator, db: ChatDatabase, window: () => ChatWindow | null): ChatJournal {
   const chat = new ChatJournal(db, id => orchestrator.getTask(id));
+  orchestrator.readTeamTranscript = id => chat.snapshot(id).messages;
   const failures = new Map<string, string>();
   const relay = (channel: string, payload: unknown) => {
     const target = window();
