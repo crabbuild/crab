@@ -1022,6 +1022,23 @@ describe("Orchestrator", () => {
   });
 
   describe("child conversations", () => {
+    it("stops descendants and queued children before returning parent cancellation", async () => {
+      const parent = await orchestrator.createTask("Lead", "codex", "/tmp/repo", "main");
+      await orchestrator.startTask(parent.id);
+      const child = orchestrator.createChildTaskForAgent(parent.id, "claude-code", "Review");
+      await orchestrator.startTask(child.id);
+      const queued = orchestrator.createChildTaskForAgent(child.id, "codex", "Verify");
+      await orchestrator.cancelTask(parent.id);
+      expect({ statuses: [parent.status, child.status, queued.status], closed: mockAdapterInstances.map(adapter => adapter.cancelled) })
+        .toEqual({ statuses: ["stopped", "stopped", "stopped"], closed: [true, true] });
+    });
+
+    it("rejects parenting a task beneath its own descendant", async () => {
+      const parent = await orchestrator.createTask("Lead", "codex", "/tmp/repo", "main");
+      const child = orchestrator.createChildTaskForAgent(parent.id, "claude-code", "Review");
+      await expect(orchestrator.setTaskParent(parent.id, child.id)).rejects.toThrow("descendants");
+    });
+
     it("migrates the owning task's control metadata before a borrowing conversation starts", async () => {
       const { migrateWorktreeMetadata } = await import("../electron/orchestrator-worktree");
       const parent = await orchestrator.createTask("Owner", "codex", "/tmp/repo", "main");
@@ -1048,11 +1065,12 @@ describe("Orchestrator", () => {
         await vi.advanceTimersByTimeAsync(0);
 
         expect({
-          cwd: adapter.spawnCwd, options: adapter.spawnOptions, parentStatus: parent.status, parentEvents: parent.events,
+          cwd: adapter.spawnCwd, options: adapter.spawnOptions, parentStatus: parent.status, parentEvents: parent.events.filter(event => event.type !== "subagent"),
+          childOutput: parent.events.filter(event => event.subagent?.event?.type === "text").map(event => event.subagent?.event?.content),
           childStatus: child.status, events: child.events.map(event => event.type),
           approvals: adapter.respondApprovalCalls, inputs: adapter.respondInputCalls,
         }).toEqual({
-          cwd: workspace, options: { model: "selected-model", reasoningLevel: "selected-effort" }, parentStatus: "created", parentEvents: [], childStatus: "reviewing", events: ["text", "done"],
+          cwd: workspace, options: { model: "selected-model", reasoningLevel: "selected-effort" }, parentStatus: "created", parentEvents: [], childOutput: ["child reply"], childStatus: "reviewing", events: ["text", "done"],
           approvals: [{ requestId: "approval", decision: "allow_once" }],
           inputs: [{ requestId: "question", response: { kind: "questions", answers: { mode: ["Thorough"] } } }],
         });

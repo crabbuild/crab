@@ -15,8 +15,10 @@ export interface ChatMessage {
   outcome?: AgentEvent["outcome"];
   toolResult?: AgentEvent;
   providerEvent?: AgentEvent;
+  subagent?: AgentEvent["subagent"];
+  messages?: ChatMessage[];
   /** Semantic type for agent messages — prevents merging different kinds. */
-  kind?: "text" | "thinking" | "error" | "tool" | "done" | "turn_started";
+  kind?: "text" | "thinking" | "error" | "tool" | "done" | "turn_started" | "subagent";
   /** Inline tool-use events rendered within agent messages. */
   events?: ToolEvent[];
 }
@@ -94,6 +96,21 @@ function toolType(tool: string): ToolEvent["type"] {
 
 /** Projects provider events into the one persisted, rendered transcript. */
 export function applyAgentEvent(messages: ChatMessage[], raw: AgentEvent, id: string, workspacePaths: string[] = []): ChatMessage[] {
+  if (raw.type === "subagent" && raw.subagent) {
+    const { event, transcript, ...agent } = raw.subagent;
+    const index = messages.findIndex(message => message.subagent?.id === agent.id || agent.toolCallId && message.subagent?.id === agent.toolCallId);
+    const previous = messages[index];
+    const history = transcript
+      ? transcript.reduce((items, entry, position) => applyAgentEvent(items, entry, `${id}:${position}`, workspacePaths), [] as ChatMessage[])
+      : previous?.messages ?? [];
+    const nested = event ? applyAgentEvent(history, event, `${id}:event`, workspacePaths) : history;
+    const update: ChatMessage = { id: previous?.id ?? id, role: "agent", kind: "subagent", content: "", timestamp: raw.timestamp,
+      sequence: previous?.sequence, subagent: { ...previous?.subagent, ...agent }, messages: nested };
+    const updated = index < 0 ? [...messages, update] : messages.map((message, position) => position === index ? update : message);
+    return agent.toolCallId && agent.toolCallId !== agent.id ? updated.map(message => message.subagent && message.subagent.parentId === agent.toolCallId
+      ? { ...message, subagent: { ...message.subagent, parentId: agent.id } } : message) : updated;
+  }
+  if (raw.type === "agent_message") return [...messages, { id, role: "agent", kind: "tool", content: "", timestamp: raw.timestamp, providerEvent: raw }];
   const start = last(messages, message => message.kind === "turn_started");
   const event = { ...raw, turnId: raw.turnId ?? start?.turnId };
   const message = (fields: Partial<ChatMessage>): ChatMessage => ({
@@ -145,7 +162,8 @@ export function applyAgentEvent(messages: ChatMessage[], raw: AgentEvent, id: st
     const tool = messages[index].events![toolIndex];
     const detail = object(raw.input).final === true ? output : (tool.detail ?? "") + output;
     const result = { ...raw, output: detail, input: { ...object(raw.input), final: true } };
-    return replaceTool(index, toolIndex, { ...tool, detail }, result);
+    return replaceTool(index, toolIndex, { ...tool, detail,
+      input: { ...object(tool.input), ...object(raw.input), ...(raw.error ? { error: raw.error } : {}) } }, result);
   }
   let tool: ToolEvent;
   if (raw.type === "approval_request" && raw.approval) {

@@ -16,6 +16,7 @@ import * as fs from "node:fs/promises";
 import { constants } from "node:fs";
 import { getExpandedEnv } from "./env/userShellEnv";
 import { readSettings, type StoredAgentConfig } from "./orchestrator-settings";
+import type { AgentTeamTools } from "./agent-team";
 
 // ─── macOS Path Normalization ─────────────────────────────────────────────────
 
@@ -112,6 +113,8 @@ export interface CodexGoalMutation {
 
 export interface AgentEvent {
   type:
+    | "subagent"
+    | "agent_message"
     | "text"
     | "user_message"
     | "tool_use"
@@ -140,6 +143,20 @@ export interface AgentEvent {
     | "filesystem_change"
     | "done";
   timestamp: number;
+  subagent?: {
+    id: string;
+    toolCallId?: string;
+    name?: string;
+    provider?: string;
+    parentId?: string;
+    taskId?: string;
+    prompt?: string;
+    status?: "starting" | "queued" | "running" | "completed" | "failed" | "stopped" | "interrupted";
+    event?: AgentEvent;
+    /** Authoritative provider history, used to fill subscription gaps. */
+    transcript?: AgentEvent[];
+  };
+  agentMessage?: { from: string; to: string; content: string; delivery: "accepted" | "unconfirmed" | "failed" };
   goal?: CodexGoal | null;
   content?: string;
   /** A completed text block replaces its partial stream, keyed by itemId. */
@@ -226,6 +243,8 @@ export abstract class AgentAdapter {
   abstract readonly binary: string;
 
   protected proc: AgentProcess | null = null;
+  teamTools?: AgentTeamTools;
+  protected teamCalls = new AbortController();
   protected eventListeners: Set<EventListener> = new Set();
   protected exitListeners: Set<ExitListener> = new Set();
   /** Guards against emitting a second `done` event from the exit handler

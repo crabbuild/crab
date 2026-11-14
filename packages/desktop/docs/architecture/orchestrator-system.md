@@ -5,6 +5,9 @@ Crab Desktop. It provides isolated execution environments, lifecycle
 management, checkpoint/rollback capabilities, and multi-agent
 coordination.
 
+See [Agent teams](agent-teams.md) for native sub-agent transcripts,
+mixed Codex/Claude delegation, communication tools and qualification.
+
 ## System Overview
 
 ```

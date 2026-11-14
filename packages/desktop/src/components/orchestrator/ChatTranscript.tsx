@@ -37,6 +37,7 @@ import { deriveTurns } from "../../lib/turn-derivation";
 import { TimelineRail } from "./TimelineRail";
 import { HunkActionsProvider } from "./tool-cards/HunkActionsContext";
 import { Turn } from "./Turn";
+import { AgentTeamPanel } from "./AgentTeamPanel";
 
 // ─── Props ───────────────────────────────────────────────────────────────────
 
@@ -71,7 +72,7 @@ function messagesToAgentEvents(messages: ChatMessage[]): AgentEvent[] {
       initialUser = false;
       continue;
     }
-    if (message.providerEvent) events.push(message.providerEvent);
+    if (message.providerEvent && message.providerEvent.type !== "agent_message") events.push(message.providerEvent);
     if (message.kind === "turn_started") events.push({ ...base, type: "turn_started" });
     if (message.content && (message.kind === "text" || message.kind === undefined || message.kind === "done")) {
       events.push({ ...base, type: "text", content: message.content, textMode: "replace" });
@@ -189,6 +190,16 @@ const OVERSCAN_COUNT = 5;
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export function ChatTranscript({
+  ...props
+}: ChatTranscriptProps) {
+  return <>
+    <AgentTeamPanel taskId={props.taskId} messages={props.messages}
+      renderTranscript={(messages, taskId) => <TranscriptBody {...props} taskId={taskId} messages={messages} />} />
+    <TranscriptBody {...props} />
+  </>;
+}
+
+function TranscriptBody({
   taskId,
   messages,
   onReview,

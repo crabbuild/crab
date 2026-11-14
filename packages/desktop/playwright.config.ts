@@ -32,7 +32,7 @@ export default defineConfig({
     {
       name: "agent-requests",
       testDir: "./tests/browser",
-      testMatch: /agent-requests\.pw\.ts$/,
+      testMatch: /agent-(?:requests|team)\.pw\.ts$/,
       use: { baseURL: "http://localhost:5173", browserName: "chromium", channel: "chrome" },
     },
     {

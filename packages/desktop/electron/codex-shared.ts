@@ -413,8 +413,10 @@ export function parseCodexItem(
           type: "tool_result",
           timestamp,
           tool: String(item.tool ?? item.name ?? ""),
-          output: item.output ?? item.result,
-          error: item.error != null ? String(item.error) : undefined,
+          itemId: String(item.id),
+          input: { final: true },
+          output: item.contentItems ?? item.output ?? item.result,
+          error: item.success === false ? "Tool call failed" : item.error != null ? String(item.error) : undefined,
         }];
       }
       if (envelope === "item.started") {
@@ -422,9 +424,27 @@ export function parseCodexItem(
           type: "tool_use",
           timestamp,
           tool: String(item.tool ?? item.name ?? ""),
+          itemId: String(item.id),
           input: item.arguments ?? item.input,
         }];
       }
+      return [];
+
+    case "collab_agent_tool_call": {
+      const tool = String(item.tool);
+      const itemId = String(item.id);
+      if (envelope === "item.started") return [{ type: "task", timestamp, tool: "CodexAgent", itemId, input: item }];
+      if (envelope !== "item.completed") return [];
+      const result: AgentEvent[] = [{ type: "tool_result", timestamp, itemId, input: { final: true }, output: JSON.stringify(item.agentsStates ?? {}),
+        error: item.status === "failed" ? "Agent operation failed" : undefined }];
+      if (["sendInput", "sendMessage", "followupTask"].includes(tool) && item.prompt && Array.isArray(item.receiverThreadIds)) {
+        for (const to of item.receiverThreadIds) result.push({ type: "agent_message", timestamp, itemId,
+          agentMessage: { from: String(item.senderThreadId), to: String(to), content: String(item.prompt), delivery: item.status === "completed" ? "accepted" : "failed" } });
+      }
+      return result;
+    }
+
+    case "sub_agent_activity":
       return [];
 
     case "todo_list":

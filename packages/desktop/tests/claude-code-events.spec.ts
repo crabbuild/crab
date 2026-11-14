@@ -12,7 +12,9 @@ describe("Claude Code stream-json events", () => {
       parser.parse({ type: "assistant", message: { id: "message-1", content: [{ type: "text", text: "Initial text" }] } }),
       parser.parse({ type: "assistant", parent_tool_use_id: "agent-tool", message: { id: "subagent-message", content: [{ type: "text", text: "Subagent result" }] } }),
     ].flat();
-    expect(events.filter(event => event.type === "text").map(event => event.content)).toEqual(["Initial ", "text", "Subagent result"]);
+    expect({ parent: events.filter(event => event.type === "text").map(event => event.content),
+      child: events.filter(event => event.subagent?.event).map(event => [event.subagent?.id, event.subagent?.event?.content]) })
+      .toEqual({ parent: ["Initial ", "text"], child: [["agent-tool", "Subagent result"]] });
   });
 
   it("deduplicates thinking and resets stream state at turn completion", () => {

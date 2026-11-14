@@ -34,7 +34,6 @@ export {
   WebFetchCard,
   SubAgentCard,
   PlanModeCard,
-  AgentCard,
   AskUserCard,
   MonitorCard,
   LSPCard,

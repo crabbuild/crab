@@ -4,6 +4,7 @@ import { createInterface } from "node:readline";
 import { AgentAdapter, AgentSubmissionUncertainError, type AgentQuestionInput, type AgentInputResponse, type AgentTurnOptions, type AgentModel } from "./orchestrator-adapters";
 import { elicitationRequest, type PendingElicitation } from "./agent-elicitation";
 import { ClaudeEventParser } from "./claude-code-events";
+import { teamMcpResponse } from "./agent-team";
 
 interface ClaudeApproval {
   input: Record<string, unknown>;
@@ -63,6 +64,7 @@ export class ClaudeCodeAdapter extends AgentAdapter {
     const owner = this.processFactory(this.binary, [
       "--print", "--verbose", "--output-format", "stream-json",
       "--input-format", "stream-json", "--include-partial-messages",
+      ...(this.teamTools ? ["--mcp-config", JSON.stringify({ mcpServers: { crab_team: { type: "sdk", name: "crab_team" } } })] : []),
       "--permission-prompt-tool", "stdio", ...this.extraArgs, ...resumeArgs,
     ], { cwd, env });
     const child = owner.process;
@@ -121,7 +123,7 @@ export class ClaudeCodeAdapter extends AgentAdapter {
     this.initId = randomUUID();
     // Startup hooks and native controls can outlive a local transport deadline.
     // Task timeouts or the discovery owner cancel the connection and its waits.
-    this.write({ type: "control_request", request_id: this.initId, request: { subtype: "initialize", supportedDialogKinds: [] } });
+    this.write({ type: "control_request", request_id: this.initId, request: { subtype: "initialize", supportedDialogKinds: [], forwardSubagentText: true } });
   }
 
   private sendMessage(text: string): void {
@@ -231,6 +233,7 @@ export class ClaudeCodeAdapter extends AgentAdapter {
   cancel(): Promise<void> {
     if (this.cancelled) return this.cancellation ?? Promise.resolve();
     this.cancelled = true;
+    this.teamCalls.abort(new Error("Conversation stopped"));
     const child = this.proc;
     if (!child) return Promise.resolve();
     this.cancellation = this.processClosed;
@@ -291,6 +294,15 @@ export class ClaudeCodeAdapter extends AgentAdapter {
     const requestId = String(raw.request_id);
     const request = raw.request as Record<string, unknown> | undefined;
     if (this.seenRequests.has(requestId)) return true;
+    if (!this.cancelled && request?.subtype === "mcp_message" && request.server_name === "crab_team" && this.teamTools) {
+      this.seenRequests.add(requestId);
+      void teamMcpResponse(this.teamTools, request.message as Record<string, unknown>, this.teamCalls.signal).then(response => {
+        if (!this.cancelled) this.write({ type: "control_response", response: { subtype: "success", request_id: requestId, response: { mcp_response: response } } });
+      }).catch((error: unknown) => {
+        if (!this.cancelled) this.write({ type: "control_response", response: { subtype: "error", request_id: requestId, error: error instanceof Error ? error.message : String(error) } });
+      });
+      return true;
+    }
     if (request?.subtype === "request_user_dialog") {
       // No opaque dialog kinds are advertised. On shared transports an
       // undeclared dialog belongs to another client and must remain unanswered.

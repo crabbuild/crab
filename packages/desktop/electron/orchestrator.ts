@@ -7,6 +7,8 @@
  */
 
 import { EventEmitter } from "node:events";
+import { createAgentTeamTools } from "./agent-team";
+import type { ChatMessage } from "./agent-chat-messages";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import * as crypto from "node:crypto";
@@ -318,6 +320,7 @@ export class Orchestrator extends EventEmitter {
   private readonly taskDb: OrchestratorTaskDatabase;
   private rpcRouter: RpcRouter | undefined;
   private remoteScriptRunner: RemoteScriptRunner | undefined;
+  readTeamTranscript?: (taskId: string) => ChatMessage[];
 
   constructor(options?: OrchestratorOptions) {
     super();
@@ -338,6 +341,10 @@ export class Orchestrator extends EventEmitter {
       // Migration is best-effort — failures shouldn't block startup.
     }
     this.loadTasks();
+    this.on("orchestrator:task-status", ({ taskId }: { taskId: string }) => {
+      const task = this.tasks.get(taskId);
+      if (task) this.publishChildActivity(task);
+    });
   }
 
   // ─── Public API ──────────────────────────────────────────────────────────
@@ -776,10 +783,31 @@ export class Orchestrator extends EventEmitter {
       }
     }
     this.emit("orchestrator:event", { taskId, event, ...(completionId ? { completionId } : {}) });
+    this.publishChildActivity(task, event);
     if (completed) {
       this.emit("orchestrator:task-status", { taskId, status: task.status });
       this.processQueue();
     }
+  }
+
+  /** Record coordination in the same journal as provider output. */
+  recordTeamEvent(taskId: string, event: AgentEvent): void {
+    const task = this.tasks.get(taskId);
+    if (!task) throw new Error(`Task not found: ${taskId}`);
+    task.events.push(event);
+    this.publishTaskEvent(task, event);
+  }
+
+  private publishChildActivity(task: Task, event?: AgentEvent): void {
+    if (!task.parentTaskId || !this.tasks.has(task.parentTaskId)) return;
+    const status = ["created", "queued"].includes(task.status) ? "queued"
+      : ["running", "iterating"].includes(task.status) ? "running"
+      : task.status === "failed" ? "failed" : task.status === "interrupted" ? "interrupted"
+      : task.status === "stopped" ? "stopped" : "completed";
+    this.recordTeamEvent(task.parentTaskId, { type: "subagent", timestamp: event?.timestamp ?? Date.now(), subagent: {
+      id: task.id, taskId: task.id, name: task.spawnedRole ?? task.title, provider: task.agentType,
+      parentId: task.parentTaskId, prompt: task.prompt, status, event,
+    } });
   }
 
   private async launchTask(task: Task, skipCheckpoint: boolean, startup: TaskStartup): Promise<void> {
@@ -831,6 +859,12 @@ export class Orchestrator extends EventEmitter {
       buildTaskAgentArgs(task.agentType, configuredTask, agentConfig.extraArgs),
       { env: agentConfig.env, optOutNotifications: agentConfig.optOutNotifications, processFactory },
     );
+    if (task.agentType === "codex" || task.agentType === "claude-code") {
+      adapter.teamTools = createAgentTeamTools(this, task, id => {
+        if (!this.readTeamTranscript) throw new Error("The chat journal is unavailable");
+        return this.readTeamTranscript(id);
+      });
+    }
 
     await this.persistTasks();
 
@@ -1057,7 +1091,8 @@ export class Orchestrator extends EventEmitter {
       };
       // Join the enclosing jobs as well as their current process. Cancellation
       // can still owe private-index cleanup or accepted-input publication.
-      const results = await Promise.allSettled([closeAdapter(), ...preparation, ...submissions,
+      const children = [...this.tasks.values()].filter(child => child.parentTaskId === taskId && !["discarded", "applied", "archived"].includes(child.status));
+      const results = await Promise.allSettled([closeAdapter(), ...children.map(child => this.cancelTask(child.id)), ...preparation, ...submissions,
         startup?.promise.catch(() => {}), this.closeGoalReaders(taskId),
         this.goalControls.get(taskId)?.promise.catch(() => {})]);
       const checkpoints = await Promise.allSettled([this.postTurnSnapshots.get(taskId), this.inputRecovery.get(taskId), this.waitCheckpointJobs([task])]);
@@ -1894,6 +1929,13 @@ export class Orchestrator extends EventEmitter {
     }
     if (normalizedParentId && !this.tasks.has(normalizedParentId)) {
       throw new Error(`Parent task not found: ${normalizedParentId}`);
+    }
+    const ancestors = new Set([taskId]);
+    let ancestor = normalizedParentId;
+    while (ancestor) {
+      if (ancestors.has(ancestor)) throw new Error("A task cannot be parented beneath its descendants");
+      ancestors.add(ancestor);
+      ancestor = this.tasks.get(ancestor)?.parentTaskId;
     }
     task.parentTaskId = normalizedParentId;
     task.lastActivityAt = Date.now();
