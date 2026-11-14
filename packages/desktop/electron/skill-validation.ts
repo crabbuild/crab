@@ -77,3 +77,33 @@ description: "${escapedDesc}"
 ${content}
 `;
 }
+
+export function githubUrlToRaw(inputUrl: string): string | null {
+  const s = inputUrl.trim();
+  if (!s) return null;
+
+  if (s.startsWith("https://raw.githubusercontent.com/")) {
+    return s;
+  }
+
+  const ghMatch = s.match(
+    /^https?:\/\/(?:www\.)?github\.com\/([^/]+)\/([^/]+)\/(blob|tree)\/([^/]+)\/(.+)$/i,
+  );
+  if (ghMatch) {
+    const [, owner, repo, kind, ref, rest] = ghMatch;
+    const cleanPath = rest.split("#")[0].split("?")[0];
+    const resolved =
+      kind === "tree"
+        ? cleanPath.replace(/\/+$/, "") + "/SKILL.md"
+        : cleanPath;
+    return `https://raw.githubusercontent.com/${owner}/${repo}/${ref}/${resolved}`;
+  }
+
+  const shorthand = s.match(/^([^/\s]+)\/([^/\s]+)\/(.+)$/);
+  if (shorthand) {
+    const [, owner, repo, rest] = shorthand;
+    return `https://raw.githubusercontent.com/${owner}/${repo}/main/${rest}`;
+  }
+
+  return null;
+}

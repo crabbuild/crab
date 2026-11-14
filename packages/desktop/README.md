@@ -20,6 +20,16 @@ Forge discovery probes Git network remotes; local paths, file URLs, and
 object-store remotes open without forge network requests.
 
 Skills live inside Chat. Health & Diagnostics lives in Settings → Diagnostics.
+The Skills library manages reusable Markdown instructions. Create a user skill
+or install a GitHub file/folder URL, raw URL, or `owner/repo/path/to/SKILL.md`
+shorthand (main branch). New skills open automatically for review and editing.
+**Agent folders** shows the local configuration folders Crab found, with names
+and paths; it does not check CLI installation or sign-in. **Scan again** repeats
+that check. **Sync skills** retries links and reports any that need attention;
+existing non-link folders are preserved. **Available in Crab chat** controls the
+chat skill picker independently of agent links. Skills managed outside Crab are
+not imported into this library automatically.
+
 Terminal opens as a full page from its rail entry or the title-bar control.
 Ctrl+` switches between Terminal and the previous view. Navigating away keeps
 its sessions alive; agent chat terminals remain scoped to their tasks.

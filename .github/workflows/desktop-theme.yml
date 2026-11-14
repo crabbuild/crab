@@ -22,10 +22,11 @@ jobs:
       - run: npm run typecheck
       - run: npm run build:renderer
       - run: npm run build:electron
-      - run: npx vitest run tests/theme-tokens.spec.ts tests/application-dialogs.spec.ts tests/control-composition.spec.ts tests/terminal-presets.spec.ts
+      - run: npx vitest run tests/theme-tokens.spec.ts tests/application-dialogs.spec.ts tests/control-composition.spec.ts tests/terminal-presets.spec.ts tests/skill-validation.spec.ts
       - run: npx vite-node src/lib/vscode-theme-import.test.ts
       - run: npx playwright install --with-deps chromium
-      - run: npx playwright test --project=theme-system --workers=1
+      - run: node node_modules/electron/install.js
+      - run: xvfb-run -a npx playwright test --project=theme-system --workers=1
       - uses: actions/upload-artifact@v4
         if: always()
         with:
