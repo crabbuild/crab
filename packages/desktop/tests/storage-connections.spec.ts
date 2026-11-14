@@ -160,6 +160,13 @@ describe("built-in storage connections", () => {
     await expect(call("open_local", { repo_id: "local", path: directory })).resolves.toMatchObject({ repo_id: "local" });
   }, 1_000);
 
+  it.each([false, true])("lists admitted storage metadata without probing the keyring (saved: %s)", async saved => {
+    const selected = saved ? await save() : undefined;
+    await call("open_local", { repo_id: "local", path: directory, ...(selected ? { storage_connection_id: selected.id } : {}) });
+    crypto.isAsyncEncryptionAvailable.mockRejectedValue(new Error("Key provider needs user input"));
+    await expect(list("local")).resolves.toEqual({ connections: selected ? [selected] : [], selected_id: selected?.id ?? null });
+  });
+
   it("reopens unbound local browsing while the keyring is locked", async () => {
     await call("open_local", { repo_id: "local", path: directory });
     crypto.isAsyncEncryptionAvailable.mockResolvedValue(false);

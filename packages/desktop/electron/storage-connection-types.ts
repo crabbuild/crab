@@ -19,5 +19,4 @@ export type StorageConnectionInput = Omit<StorageConnection, "id"> & { id?: stri
 export interface StorageConnectionStatus {
   connections: StorageConnectionInfo[];
   selected_id: string | null;
-  secure_storage: boolean;
 }
