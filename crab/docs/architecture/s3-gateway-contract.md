@@ -430,7 +430,9 @@ both to succeed, and both drain before writer fences are released on failure.
 Shutdown stops mutation admission and drains workers, follow-up catalog and
 readability maintenance, and attribute checkpoints before closing the read runtime.
 Warm directory edits reuse canonical encoded ranges with entry offsets charged
-to the warm-state budget. Full tree hashing and pack verification still apply.
+to the warm-state budget. Independent append preparation shares both verified
+tree bytes and their offset indexes with the serial builder, avoiding another
+directory-sized index copy. Full tree hashing and pack verification still apply.
 Cold reconstruction uses independent read-operation budgets for each mutation
 against the same pinned view. Batching does not combine unrelated requests'
 allowances; an over-budget mutation returns `SlowDown` without consuming a

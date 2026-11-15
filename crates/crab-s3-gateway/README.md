@@ -533,6 +533,10 @@ across packs, repack preserves the complete object universe, and client fetch
 materializes required bases. The depth-eight and cold-start full entries bound
 both reconstruction and recovery cost.
 
+Independent appends prepare verified tree bytes and entry offset indexes on the
+bounded hash workers. The serial builder shares both results only for an exact
+base and suffix match. Shared indexes remain fully charged to the warm-state budget.
+
 Prefer load-balancer affinity on repository plus branch (the
 bucket and first key component) so same-branch requests reach one process-local
 batch;

@@ -11,7 +11,7 @@ use gix_object::{Kind, bstr::BString, tree};
 use tokio::sync::Semaphore;
 
 use super::{
-    Change, DirectoryState, Error, MutableTree, Mutation, Result, TreeEntryEdit,
+    Change, DirectoryState, Error, MutableTree, Mutation, Result, TreeEncoding, TreeEntryEdit,
     append_only_entries, append_tree_entry, encoded_tree_entry_bytes,
 };
 
@@ -24,7 +24,7 @@ static HASH_WORKERS: LazyLock<Arc<Semaphore>> = LazyLock::new(|| {
 #[derive(Default)]
 pub(super) struct PreparedAppends {
     blobs: HashMap<usize, GeneratedObject>,
-    trees: HashMap<(ObjectId, Bytes), GeneratedObject>,
+    trees: HashMap<(ObjectId, Bytes), (TreeEncoding, GeneratedObject)>,
 }
 
 impl PreparedAppends {
@@ -37,7 +37,11 @@ impl PreparedAppends {
             .cloned()
     }
 
-    pub(super) fn tree(&self, base: ObjectId, suffix: &Bytes) -> Option<GeneratedObject> {
+    pub(super) fn tree(
+        &self,
+        base: ObjectId,
+        suffix: &Bytes,
+    ) -> Option<(TreeEncoding, GeneratedObject)> {
         // Exact bytes and a verified base bind the full resulting tree, even
         // when earlier FIFO edits invalidate the speculative directory state.
         self.trees.get(&(base, suffix.clone())).cloned()
@@ -49,6 +53,7 @@ struct AppendWork {
     inherited: Bytes,
     entry: tree::Entry,
     contents: Bytes,
+    encoding: TreeEncoding,
 }
 
 impl AppendWork {
@@ -81,6 +86,7 @@ impl AppendWork {
             inherited: state.encoding.bytes.slice(base.data().len()..),
             entry,
             contents: bytes.clone(),
+            encoding: state.encoding.clone(),
         })
     }
 
@@ -93,11 +99,22 @@ impl AppendWork {
         append_tree_entry(&mut suffix, &self.entry);
         let suffix = Bytes::from(suffix);
         let tree = GeneratedObject::append(&self.base, &suffix)?;
+        // Copy the growing offset index beside the parallel tree hash. The
+        // serial builder reuses both only for this exact verified byte sequence.
+        let mut offsets = Vec::with_capacity(self.encoding.offsets.len() + 1);
+        offsets.extend_from_slice(&self.encoding.offsets);
+        offsets.push(tree.data().len());
+        let encoding = TreeEncoding {
+            bytes: tree.shared_data(),
+            offsets: Arc::new(offsets),
+            allocated_bytes: tree.data().len(),
+        };
         Ok(PreparedAppend {
             base: self.base.oid(),
             suffix,
             blob,
             tree,
+            encoding,
         })
     }
 }
@@ -107,6 +124,7 @@ struct PreparedAppend {
     suffix: Bytes,
     blob: GeneratedObject,
     tree: GeneratedObject,
+    encoding: TreeEncoding,
 }
 
 pub(super) async fn prepare(tree: &MutableTree, mutations: &[Mutation]) -> Result<PreparedAppends> {
@@ -161,7 +179,7 @@ pub(super) async fn prepare(tree: &MutableTree, mutations: &[Mutation]) -> Resul
             .insert(append.blob.data().as_ptr() as usize, append.blob);
         prepared
             .trees
-            .insert((append.base, append.suffix), append.tree);
+            .insert((append.base, append.suffix), (append.encoding, append.tree));
     }
     Ok(prepared)
 }
@@ -331,22 +349,23 @@ mod tests {
         let suffix = Bytes::from(suffix);
         let cached = prepared.tree(base, &suffix).unwrap();
         let mut objects = Vec::new();
-        encode_tree_with_edits(
-            state,
-            &[TreeEntryEdit {
-                name: b"object-00000001".to_vec(),
-                replacement: Some(tree::Entry {
-                    mode: tree::EntryKind::Blob.into(),
-                    filename: "object-00000001".into(),
-                    oid: blob.oid(),
-                }),
-            }],
-            &mut objects,
-            &mut Vec::new(),
-            &prepared,
-        )
-        .unwrap();
-        assert_eq!(objects[0].data().as_ptr(), cached.data().as_ptr());
+        let edits = [TreeEntryEdit {
+            name: b"object-00000001".to_vec(),
+            replacement: Some(tree::Entry {
+                mode: tree::EntryKind::Blob.into(),
+                filename: "object-00000001".into(),
+                oid: blob.oid(),
+            }),
+        }];
+        let encodings = (0..2)
+            .map(|_| {
+                encode_tree_with_edits(state, &edits, &mut objects, &mut Vec::new(), &prepared)
+                    .unwrap()
+                    .2
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(encodings[0].offsets.as_ptr(), encodings[1].offsets.as_ptr());
+        assert_eq!(objects[0].data().as_ptr(), cached.1.data().as_ptr());
         assert!(prepared.tree(ObjectId::from([9; 20]), &suffix).is_none());
         assert!(
             prepared
