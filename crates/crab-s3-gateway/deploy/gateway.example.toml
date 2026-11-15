@@ -1,3 +1,5 @@
+# For the single-bucket Docker setup, supply AWS_BUCKET and AWS credentials
+# instead; the image generates configuration and a private gateway credential.
 listen = "0.0.0.0:8080"
 # Keep this management listener private to the workload network. It serves
 # unauthenticated process liveness and repository readiness probes only.

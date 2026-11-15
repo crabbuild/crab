@@ -35,66 +35,105 @@ AWS bucket version IDs. Git history remains the version model. See the
 [protocol contract](../../crab/docs/architecture/s3-gateway-contract.md) for
 the exact supported and excluded surface.
 
-## Quick start with Docker Compose
+## Run your own Docker container
 
-The checked Compose stack runs two gateway instances against an isolated
-RustFS backend. It is a development and qualification environment, not a
-production configuration.
+Only three settings are required: an existing AWS S3 bucket,
+`AWS_ACCESS_KEY_ID`, and `AWS_SECRET_ACCESS_KEY`. The AWS identity needs bucket
+listing and object read/write/delete permissions. Temporary AWS credentials
+also need `AWS_SESSION_TOKEN`.
 
-From the repository root:
+From the repository root, build the image:
 
 ```sh
-mkdir -p /path/to/crab-s3-gateway-smoke
+docker build -f crates/crab-s3-gateway/deploy/Dockerfile \
+  -t crab-s3-gateway:local .
+```
+
+With your AWS credentials already exported in your shell, start the container:
+
+```sh
+docker run -d --name crab-s3-gateway --restart unless-stopped \
+  -p 127.0.0.1:8080:8080 \
+  -v crab-s3-gateway-state:/var/lib/crab/gateway \
+  -e AWS_BUCKET=your-existing-bucket \
+  -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN \
+  crab-s3-gateway:local
+```
+
+The container discovers the AWS bucket region, generates separate gateway
+client credentials, initializes an empty Crab v2 repository, and starts serving.
+There is no TOML file, secret mount, ownership change, or separate initialization
+command to prepare. Existing v2 data is reopened; incompatible or corrupt
+repository data fails startup without being converted.
+
+The defaults are:
+
+| Setting | Value |
+| --- | --- |
+| S3 endpoint | `http://127.0.0.1:8080` |
+| Client region | `us-east-1` (independent of the backend region) |
+| Logical S3 bucket | `repository` |
+| Default branch | `main` |
+| Backing Crab repository | `crab://your-existing-bucket/repositories/default` |
+| Local read cache | 2 GiB, disposable |
+| Management listener | Container loopback only, port 8081 |
+
+Retrieve the generated client environment into a private local file, then try
+a signed upload and download:
+
+```sh
 umask 077
-printf '%s' 'gateway-qualification-secret' \
-  > /path/to/crab-s3-gateway-smoke/gateway-secret
-sudo chown 10001:10001 /path/to/crab-s3-gateway-smoke/gateway-secret
-chmod 0600 /path/to/crab-s3-gateway-smoke/gateway-secret
+client_dir="$HOME/.config/crab-s3-gateway"
+mkdir -p "$client_dir"
+docker exec crab-s3-gateway cat /var/lib/crab/gateway/client.env > "$client_dir/client.env"
 
-export RUSTFS_ACCESS_KEY=crab
-export RUSTFS_SECRET_KEY=crab
-export CRAB_S3_GATEWAY_IMAGE=crab-s3-gateway:local
-export CRAB_S3_GATEWAY_CONFIG="$PWD/crates/crab-s3-gateway/deploy/compose.gateway.toml"
-export CRAB_S3_GATEWAY_SECRET_FILE=/path/to/crab-s3-gateway-smoke/gateway-secret
-
-docker build \
-  -f crates/crab-s3-gateway/deploy/Dockerfile \
-  -t "$CRAB_S3_GATEWAY_IMAGE" .
-docker compose -f crates/crab-s3-gateway/deploy/compose.yaml up -d rustfs
+# Use a client subshell so your backend AWS credentials remain in the parent shell.
+(
+  . "$client_dir/client.env"
+  aws --endpoint-url http://127.0.0.1:8080 \
+    s3 cp ./example.parquet s3://repository/main/data/example.parquet
+  aws --endpoint-url http://127.0.0.1:8080 \
+    s3 cp s3://repository/main/data/example.parquet ./downloaded.parquet
+)
 ```
 
-Create the isolated physical bucket, initialize the Crab repository, and start
-the gateway:
+Keep the generated client file private and outside source control. Keep the
+named Docker volume when replacing or upgrading the container: it preserves
+the gateway credentials and bucket binding. Repository contents and multipart
+recovery state live in the backing bucket. A different backing bucket requires
+a separate state volume.
+
+Check backend readiness with:
 
 ```sh
-AWS_ACCESS_KEY_ID="$RUSTFS_ACCESS_KEY" \
-AWS_SECRET_ACCESS_KEY="$RUSTFS_SECRET_KEY" \
-AWS_DEFAULT_REGION=us-east-1 \
-aws --endpoint-url http://127.0.0.1:19000 s3api create-bucket \
-  --bucket crab-s3-gateway-qualification
-
-docker compose -f crates/crab-s3-gateway/deploy/compose.yaml \
-  --profile initialize run --rm gateway-init
-docker compose -f crates/crab-s3-gateway/deploy/compose.yaml up -d gateway
-docker compose -f crates/crab-s3-gateway/deploy/compose.yaml exec gateway \
-  crab-s3-gateway --config /etc/crab/s3-gateway.toml --readiness-check
+docker exec crab-s3-gateway crab-s3-gateway \
+  --config /etc/crab/s3-gateway.toml --readiness-check
 ```
 
-The S3 endpoint is now `http://127.0.0.1:18080`. Use logical bucket
-`gateway-repository`, region `us-east-1`, access key `gateway-qualification`,
-secret `gateway-qualification-secret`, and path-style addressing.
+`AWS_REGION` or `AWS_DEFAULT_REGION` can explicitly select a backend region,
+including environments that cannot reach AWS's global region-discovery endpoint.
+For S3-compatible storage, also pass `AWS_ENDPOINT_URL_S3`; its default signing
+region is `us-east-1`. Plain HTTP test endpoints additionally require
+`AWS_ALLOW_HTTP=true`. These are backend settings; clients still use the gateway
+endpoint and generated credentials.
 
-```sh
-AWS_ACCESS_KEY_ID=gateway-qualification \
-AWS_SECRET_ACCESS_KEY=gateway-qualification-secret \
-AWS_DEFAULT_REGION=us-east-1 \
-aws --endpoint-url http://127.0.0.1:18080 \
-  s3 cp ./example.parquet s3://gateway-repository/main/data/example.parquet
-```
+For remote access, terminate HTTPS at your ingress and publish only port 8080
+to that private network. The management port must remain private.
 
-The [Compose qualification guide](deploy/README.md) covers the second gateway,
-multipart recovery, metrics, retained evidence, workload tests, and safe
-teardown.
+## Explicit configuration and qualification
+
+For multiple repositories, GCS/Azure backends, issued client keys, branch
+protection, or tuned resource limits, use
+[`deploy/gateway.example.toml`](deploy/gateway.example.toml) and start the same
+image with `--config /etc/crab/s3-gateway.toml`, mounting that file and its private
+credential files. Explicit configuration serves only; initialize empty
+repository prefixes separately with `--initialize`.
+
+The [Compose qualification guide](deploy/README.md) runs two gateway instances
+against an isolated RustFS backend and covers multipart recovery, metrics,
+retained evidence, workload tests, and safe teardown. Helm/EKS and ECS profiles
+also use explicit configuration and keep their existing initialization and
+credential ownership.
 
 ## Configure a client
 
@@ -113,21 +152,19 @@ import boto3
 
 s3 = boto3.client(
     "s3",
-    endpoint_url="http://127.0.0.1:18080",
-    region_name="us-east-1",
-    aws_access_key_id="gateway-qualification",
-    aws_secret_access_key="gateway-qualification-secret",
+    endpoint_url="http://127.0.0.1:8080",
+    region_name="us-east-1",  # Source the generated client.env before running this script.
 )
 
 s3.put_object(
-    Bucket="gateway-repository",
+    Bucket="repository",
     Key="main/data/example.json",
     Body=b'{"ready":true}\n',
     ContentType="application/json",
 )
 
 response = s3.get_object(
-    Bucket="gateway-repository",
+    Bucket="repository",
     Key="main/data/example.json",
     Range="bytes=0-14",
 )

@@ -99,6 +99,29 @@ compatibility limits, never silent transformations.
 
 ## Authentication and authorization
 
+### Single-bucket Docker setup
+
+The image's no-argument entrypoint takes `AWS_BUCKET` and the standard backend
+AWS credentials. It discovers the bucket's region through the dependency's
+`HeadBucket` resolver unless `AWS_REGION` or `AWS_DEFAULT_REGION` is set. An
+explicit S3-compatible endpoint uses its configured region or `us-east-1`.
+Discovery failure aborts setup rather than guessing an AWS bucket region.
+
+Setup writes the canonical configuration for logical bucket `repository`,
+backing prefix `repositories/default`, default branch `main`, and client region
+`us-east-1`. It generates a private gateway secret from operating-system entropy
+and persists its identity and bucket binding in `/var/lib/crab/gateway`.
+Generated config and client exports are owner-only files; backend AWS secrets
+are never copied into them. Reusing that volume for a different bucket fails.
+
+The entrypoint explicitly runs the canonical initializer before executing the
+server. Empty prefixes initialize; existing v2 roots reopen; incompatible or
+corrupt data fails closed. The serving path itself never initializes storage.
+The management listener binds to container loopback. Explicit `--config`
+deployments retain operator-owned configuration, credentials, and initialization.
+
+### Signed client identity
+
 The gateway requires Crab-issued access-key credentials and accepts S3 SigV4
 header signing, SigV4 presigned queries, SigV4 streaming payloads supported by
 the selected protocol library, SigV2 headers, and SigV2 presigned queries.

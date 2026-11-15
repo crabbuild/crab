@@ -6,7 +6,7 @@ use std::{
 
 use crab_storage::StorageProviderKind;
 use object_store::path::Path as ObjectStorePath;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{Error, Result};
 
@@ -16,7 +16,7 @@ const DEFAULT_GIT_BLOB_MAX_BYTES: u64 = 1024 * 1024;
 const MAX_CONFIGURABLE_GIT_BLOB_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Listener, credentials, and logical repository catalog.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub listen: SocketAddr,
@@ -36,7 +36,7 @@ pub struct Config {
 }
 
 /// Process-local cache policy shared by every repository served by this process.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LocalCacheConfig {
     pub directory: PathBuf,
@@ -44,7 +44,7 @@ pub struct LocalCacheConfig {
 }
 
 /// One Crab-issued S3 access key mapped to a logical principal.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CredentialConfig {
     pub access_key: String,
@@ -57,7 +57,7 @@ pub struct CredentialConfig {
 }
 
 /// One logical S3 bucket backed by a Crab repository placement.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RepositoryConfig {
     pub name: String,
@@ -86,7 +86,7 @@ pub struct RepositoryConfig {
 }
 
 /// One principal's repository permission.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RepositoryMember {
     pub principal: String,
@@ -94,7 +94,7 @@ pub struct RepositoryMember {
 }
 
 /// Repository permission ordered from reads through administration.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RepositoryAccess {
     Read,
@@ -293,7 +293,7 @@ fn validate_secret_permissions(_metadata: &std::fs::Metadata) -> Result<()> {
     Ok(())
 }
 
-fn valid_bucket_name(value: &str) -> bool {
+pub(crate) fn valid_bucket_name(value: &str) -> bool {
     let bytes = value.as_bytes();
     (3..=63).contains(&bytes.len())
         && bytes.first().is_some_and(u8::is_ascii_alphanumeric)

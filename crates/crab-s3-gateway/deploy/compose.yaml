@@ -38,6 +38,7 @@ services:
 
   gateway:
     image: ${CRAB_S3_GATEWAY_IMAGE:-crab-s3-gateway:local}
+    command: ["--config", "/etc/crab/s3-gateway.toml"]
     depends_on:
       rustfs:
         condition: service_started
@@ -55,6 +56,7 @@ services:
 
   gateway-standby:
     image: ${CRAB_S3_GATEWAY_IMAGE:-crab-s3-gateway:local}
+    command: ["--config", "/etc/crab/s3-gateway.toml"]
     depends_on:
       rustfs:
         condition: service_started

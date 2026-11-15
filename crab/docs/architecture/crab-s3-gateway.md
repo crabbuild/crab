@@ -12,6 +12,13 @@ SDK capability delivered beyond the shared contracts used by the gateway.
 Where this phased plan retains proposed or future work, the frozen contract is
 the authority for the currently delivered behavior.
 
+Single-container deployment starts from `AWS_BUCKET` and backend AWS credentials;
+the image generates a canonical single-repository config and separate client
+identity, then explicitly initializes before serving. The
+[Docker quick start](../../../crates/crab-s3-gateway/README.md#run-your-own-docker-container)
+documents defaults, the persistent credential volume, client setup, and the
+explicit-config boundary for managed deployments.
+
 ## Outcome and ownership
 
 Create `crates/crab-s3-gateway` as a separate server composition boundary,
