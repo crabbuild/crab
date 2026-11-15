@@ -9,6 +9,33 @@ Alertmanager delivery still require evidence from the target cluster. The ECS
 template is statically linted and contract-checked; live Fargate qualification
 is still required before either platform is advertised as supported.
 
+## Single-container setup
+
+The image's no-argument entrypoint uses `AWS_BUCKET` and the backend AWS
+credential chain, discovers the AWS bucket region, generates private client
+credentials, and explicitly initializes before serving. See the
+[Docker quick start](../README.md#run-your-own-docker-container).
+
+Preserve the named volume at `/var/lib/crab/gateway` across container replacement;
+it owns the generated gateway secret and bucket binding. Back up its contents
+as secrets. Copy `client.env` privately to configure clients; never add it to
+support bundles. Backend AWS credentials remain separate and are not persisted
+in generated files. Use a separate volume for another backing bucket. Cache
+and scratch remain disposable; repository and multipart recovery state stay in
+object storage.
+
+The generated management listener binds to container loopback. Probe it with
+`docker exec` and `--config /etc/crab/s3-gateway.toml --readiness-check`.
+The image's healthcheck probes process liveness; readiness proves backend access.
+For read-only root filesystems, supply writable UID/GID 10001 tmpfs mounts for
+`/etc/crab` and `/var/lib/crab/tmp`, a writable cache volume at
+`/var/lib/crab/cache-volume`, and the persistent credential volume.
+
+Helm/EKS, ECS, and the qualification Compose stack explicitly select `--config`
+and retain operator-owned credentials and initialization. The entrypoint passes
+explicit arguments directly to the binary without generating files or touching
+repository storage.
+
 ## Safety invariants
 
 - Preserve multipart records, part payloads, completion plans, receipts, and

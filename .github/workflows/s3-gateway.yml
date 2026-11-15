@@ -66,6 +66,8 @@ jobs:
         env:
           RUST_MIN_STACK: "8388608"
         run: cargo test --locked --lib -p crab-remote -p crab-remote-git -p crab-read -p crab-s3-gateway
+      - name: Verify gateway CLI modes
+        run: cargo test --locked -p crab-s3-gateway --bin crab-s3-gateway
       - name: Verify capsule checkpoint publication
         env:
           RUST_MIN_STACK: "8388608"
@@ -351,6 +353,11 @@ jobs:
           docker run --rm crab-s3-gateway:test --help | grep -F -- "--healthcheck"
           docker run --rm crab-s3-gateway:test --help | grep -F -- "--readiness-check"
 
+      - name: Qualify single-container setup and replacement
+        run: >-
+          python3 -B crab/scripts/e2e/s3_gateway_container.py
+          --image crab-s3-gateway:test --rustfs-image "${RUSTFS_IMAGE}"
+
       - name: Start RustFS and initialize repository
         id: initialize
         run: |
@@ -467,7 +474,7 @@ jobs:
             --volume "${config_root}/gateway-secret:/run/secrets/crab-s3-secret:ro" \
             --volume "${config_root}/gateway-session-secret:/run/secrets/crab-s3-session-secret:ro" \
             --volume "${config_root}/gateway-session-token:/run/secrets/crab-s3-session-token:ro" \
-            crab-s3-gateway:test
+            crab-s3-gateway:test --config /etc/crab/s3-gateway.toml
           for attempt in $(seq 1 30); do
             if curl --fail --silent http://127.0.0.1:18081/livez >/dev/null; then
               break
@@ -624,7 +631,7 @@ jobs:
             --volume "${config_root}/gateway-secret:/run/secrets/crab-s3-secret:ro" \
             --volume "${config_root}/gateway-session-secret:/run/secrets/crab-s3-session-secret:ro" \
             --volume "${config_root}/gateway-session-token:/run/secrets/crab-s3-session-token:ro" \
-            crab-s3-gateway:test
+            crab-s3-gateway:test --config /etc/crab/s3-gateway.toml
 
           for attempt in $(seq 1 60); do
             if docker exec crab-s3-gateway \

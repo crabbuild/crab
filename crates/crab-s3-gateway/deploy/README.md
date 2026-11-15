@@ -1,5 +1,11 @@
 # Docker Compose qualification
 
+To run one container against your own AWS bucket, start with the
+[Docker quick start](../README.md#run-your-own-docker-container). It requires
+only the bucket and backend AWS credentials and generates the gateway config
+and client identity. This guide retains the explicit configuration used for
+multi-instance qualification.
+
 This stack is an isolated local smoke environment, not a production credential
 or storage configuration. It defines two independently runnable packaged
 gateway instances with non-root users, read-only root filesystems, dropped

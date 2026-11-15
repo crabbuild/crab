@@ -3088,6 +3088,7 @@ dependencies = [
  "flate2",
  "fs4",
  "futures-util",
+ "getrandom 0.4.2",
  "gix-hash",
  "gix-object",
  "gix-pack",

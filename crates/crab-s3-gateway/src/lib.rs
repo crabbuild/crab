@@ -12,12 +12,14 @@ mod mutation;
 mod namespace;
 mod repository;
 mod server;
+mod setup;
 
 pub use config::{
     Config, CredentialConfig, LocalCacheConfig, RepositoryAccess, RepositoryConfig,
     RepositoryMember,
 };
 pub use server::{check_liveness, check_readiness, initialize, serve};
+pub use setup::setup_container;
 
 /// Gateway startup, configuration, and runtime failures.
 #[derive(Debug, thiserror::Error)]
@@ -28,6 +30,12 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("invalid gateway TOML configuration")]
     Toml(#[from] toml::de::Error),
+    #[error("gateway configuration serialization failed")]
+    TomlSerialize(#[from] toml::ser::Error),
+    #[error("gateway credential generation failed")]
+    Random(#[from] getrandom::Error),
+    #[error("AWS bucket region discovery failed; check the bucket or set AWS_REGION")]
+    BucketRegion(#[source] object_store::Error),
     #[error("invalid S3 endpoint domain")]
     Host(#[from] s3s::host::DomainError),
     #[error("object storage configuration failed")]

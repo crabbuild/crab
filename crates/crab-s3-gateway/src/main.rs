@@ -7,8 +7,11 @@ use tracing_subscriber::{Layer as _, layer::SubscriberExt as _, util::Subscriber
 #[derive(Debug, Parser)]
 #[command(about = "Serve Crab repositories through the S3 protocol")]
 struct Args {
-    #[arg(long, default_value = "crab-s3-gateway.toml")]
+    #[arg(long, default_value = "crab-s3-gateway.toml", conflicts_with = "setup")]
     config: PathBuf,
+    /// Prepare the single-bucket Docker profile from AWS_BUCKET and print its backend region.
+    #[arg(long, conflicts_with_all = ["initialize", "healthcheck", "readiness_check"])]
+    setup: bool,
     /// Initialize configured repository prefixes and exit.
     #[arg(long)]
     initialize: bool,
@@ -36,6 +39,10 @@ async fn main() -> Result<(), Box<crab_s3_gateway::Error>> {
             source: Box::new(source),
         })?;
     let args = Args::parse();
+    if args.setup {
+        println!("{}", crab_s3_gateway::setup_container().await?);
+        return Ok(());
+    }
     let config = crab_s3_gateway::Config::read(&args.config)?;
     if args.initialize {
         crab_s3_gateway::initialize(config).await?;
@@ -63,6 +70,23 @@ fn dependency_event_is_safe(target: &str, level: &Level) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setup_is_exclusive_with_explicit_runtime_actions() {
+        assert!(Args::try_parse_from(["gateway", "--setup"]).is_ok());
+        for flag in [
+            "--initialize",
+            "--healthcheck",
+            "--readiness-check",
+            "--config",
+        ] {
+            let mut args = vec!["gateway", "--setup", flag];
+            if flag == "--config" {
+                args.push("gateway.toml");
+            }
+            assert!(Args::try_parse_from(args).is_err(), "{flag}");
+        }
+    }
 
     #[test]
     fn dependency_filter_cannot_expose_signed_requests_or_malformed_bodies() {
