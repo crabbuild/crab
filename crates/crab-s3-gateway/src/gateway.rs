@@ -1706,6 +1706,9 @@ impl S3 for Gateway {
                 .contains(ObjectAttributes::OBJECT_SIZE)
                 .then(|| i64::try_from(object.size).map_err(|_| s3_error!(InternalError)))
                 .transpose()?,
+            storage_class: requested
+                .contains(ObjectAttributes::STORAGE_CLASS)
+                .then(|| StorageClass::from_static("STANDARD")),
             ..Default::default()
         }))
     }

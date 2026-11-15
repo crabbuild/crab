@@ -645,7 +645,10 @@ cargo fmt --check -p crab-s3-gateway
 The packaged-image qualification exercises signed AWS CLI and Boto3 requests,
 checksums, streaming uploads, multipart restart and multi-instance recovery,
 large-object full and range reads, Xet deduplication, bounded listing, and
-cleanup. It also runs write/read fixtures through DuckDB, LanceDB, Spark S3A,
+cleanup. The Boto3 client exercises all 23 supported operation names, including
+bucket discovery, selective object attributes, V1/V2 listing pages, multipart
+listing, part replacement through range copy, and abort visibility. The packaged
+job also runs write/read fixtures through DuckDB, LanceDB, Spark S3A,
 Arrow and dataframe libraries, table formats, alternative S3 clients, and the
 Java and Go AWS SDKs.
 

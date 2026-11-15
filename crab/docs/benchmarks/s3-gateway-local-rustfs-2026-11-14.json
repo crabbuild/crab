@@ -1,0 +1,353 @@
+{
+  "cases": {
+    "abrupt_crash_recovery": {
+      "acknowledged_part_survives_sigkill": true,
+      "bytes": 5242893,
+      "cold_cache_restart_readback": true,
+      "commit": "bf4943a89e77ac0d6145fffbd48f55ea4fd780cf",
+      "completion_retry_preserves_commit": true,
+      "elapsed_seconds": 5.001,
+      "sha256": "1d604e317bf5791d880f414fa2909088f6016c2dc1ab7fa4819377c49194e2d4",
+      "standby_completion": true,
+      "status": "passed"
+    },
+    "all_operations": {
+      "checks": {
+        "bucket_apis": true,
+        "conditions": true,
+        "copy": true,
+        "copy_destination_conditions": true,
+        "get_and_range": true,
+        "head": true,
+        "large_object_range": true,
+        "list": true,
+        "list_v1_v2_pagination_and_delimiter": true,
+        "literal_bytes": true,
+        "multi_delete": true,
+        "multi_delete_conditions": true,
+        "multipart": true,
+        "multipart_listing_copy_replacement_and_abort": true,
+        "object_attributes_and_overrides": true,
+        "put": true,
+        "tagging": true,
+        "xet_reads_and_copy": true
+      },
+      "elapsed_seconds": 203.114,
+      "large_object": {
+        "bytes": 536870912,
+        "full_get_elapsed_ms": 1969,
+        "full_get_sha256": "3bbeca74559e74d9765c759257a60252e57b7cddf00e579326adfd4875866399",
+        "part_bytes": 67108864,
+        "parts": 8,
+        "range_bytes": 67117056,
+        "range_exact": true,
+        "range_get_elapsed_ms": 37,
+        "range_sha256": "8daf9034fad49f1e3079e6b06bd4802674229608d9e265aa89fb781defe2e36c",
+        "range_source_sha256": "8daf9034fad49f1e3079e6b06bd4802674229608d9e265aa89fb781defe2e36c",
+        "range_start": 67104768,
+        "source_sha256": "3bbeca74559e74d9765c759257a60252e57b7cddf00e579326adfd4875866399",
+        "upload_elapsed_ms": 78627
+      },
+      "multipart_bytes": 5242896,
+      "multipart_parts": 2,
+      "object_bytes": 1048604,
+      "operation_count": 23,
+      "operations": {
+        "AbortMultipartUpload": 1,
+        "CompleteMultipartUpload": 5,
+        "CopyObject": 7,
+        "CreateMultipartUpload": 6,
+        "DeleteObject": 2,
+        "DeleteObjectTagging": 1,
+        "DeleteObjects": 5,
+        "GetBucketLocation": 1,
+        "GetBucketVersioning": 1,
+        "GetObject": 29,
+        "GetObjectAttributes": 2,
+        "GetObjectTagging": 3,
+        "HeadBucket": 1,
+        "HeadObject": 14,
+        "ListBuckets": 1,
+        "ListMultipartUploads": 2,
+        "ListObjects": 3,
+        "ListObjectsV2": 5,
+        "ListParts": 2,
+        "PutObject": 8,
+        "PutObjectTagging": 1,
+        "UploadPart": 12,
+        "UploadPartCopy": 2
+      },
+      "phase": "full",
+      "schema": "crab.s3-gateway-boto3-smoke",
+      "status": "passed",
+      "xet_object": {
+        "bytes": 67108864,
+        "copies_exact": true,
+        "full_and_ranges_exact": true,
+        "sha256": "a1ce7837cb4b27045008cd7f4b073e17cdcf85ac18bc0782d53dd258a89f5af5"
+      }
+    },
+    "auth_and_checksums": {
+      "authorization_and_protection": true,
+      "checksums": 5,
+      "elapsed_seconds": 10.815,
+      "malformed_xml_and_digest_rejection": true,
+      "operations": {
+        "GetObject": 10,
+        "HeadObject": 5,
+        "ListBuckets": 1,
+        "PutObject": 6
+      },
+      "phase": "security",
+      "presigning": true,
+      "signed_streaming_atomicity": true,
+      "static_temporary_and_sigv2_auth": true,
+      "status": "passed",
+      "virtual_host": true
+    },
+    "aws_cli": {
+      "client": "aws-cli/2.39.3 Python/3.15.2 Darwin/25.5.0 source/arm64",
+      "commands": 9,
+      "elapsed_seconds": 12.854,
+      "fixture_bytes": 262144,
+      "fixture_sha256": "c2539bfc39ae767340d93e13c141efe8fc201e370b350557a65b0f87dae550d9",
+      "put_head_attributes_range_and_bidirectional_sync": true,
+      "status": "passed"
+    },
+    "concurrent_writes": {
+      "conditional_winners": 1,
+      "cross_repository_copy": true,
+      "elapsed_seconds": 25.548,
+      "exact_readback": true,
+      "objects": 16,
+      "operations": {
+        "CopyObject": 1,
+        "GetObject": 17,
+        "ListObjectsV2": 1,
+        "PutObject": 17
+      },
+      "phase": "concurrency",
+      "status": "passed",
+      "writers": 8
+    },
+    "default_client_timeout": {
+      "checks": {
+        "bucket_apis": true,
+        "conditions": true,
+        "copy": true,
+        "copy_destination_conditions": true,
+        "get_and_range": true,
+        "head": true,
+        "large_object_range": true,
+        "list": true,
+        "list_v1_v2_pagination_and_delimiter": true,
+        "literal_bytes": true,
+        "multi_delete": true,
+        "multi_delete_conditions": true,
+        "multipart": true,
+        "multipart_listing_copy_replacement_and_abort": true,
+        "object_attributes_and_overrides": true,
+        "put": true,
+        "tagging": true
+      },
+      "client_read_timeout_seconds": 60,
+      "elapsed_seconds": 34.161,
+      "large_object": {
+        "bytes": 536870912,
+        "full_get_elapsed_ms": 1628,
+        "full_get_sha256": "3bbeca74559e74d9765c759257a60252e57b7cddf00e579326adfd4875866399",
+        "part_bytes": 67108864,
+        "parts": 8,
+        "range_bytes": 67117056,
+        "range_exact": true,
+        "range_get_elapsed_ms": 47,
+        "range_sha256": "8daf9034fad49f1e3079e6b06bd4802674229608d9e265aa89fb781defe2e36c",
+        "range_source_sha256": "8daf9034fad49f1e3079e6b06bd4802674229608d9e265aa89fb781defe2e36c",
+        "range_start": 67104768,
+        "source_sha256": "3bbeca74559e74d9765c759257a60252e57b7cddf00e579326adfd4875866399",
+        "upload_elapsed_ms": 17934
+      },
+      "multipart_bytes": 5242896,
+      "multipart_parts": 2,
+      "object_bytes": 1048604,
+      "operations": {
+        "AbortMultipartUpload": 1,
+        "CompleteMultipartUpload": 4,
+        "CopyObject": 6,
+        "CreateMultipartUpload": 5,
+        "DeleteObject": 2,
+        "DeleteObjectTagging": 1,
+        "DeleteObjects": 5,
+        "GetBucketLocation": 1,
+        "GetBucketVersioning": 1,
+        "GetObject": 23,
+        "GetObjectAttributes": 2,
+        "GetObjectTagging": 3,
+        "HeadBucket": 1,
+        "HeadObject": 13,
+        "ListBuckets": 1,
+        "ListMultipartUploads": 2,
+        "ListObjects": 3,
+        "ListObjectsV2": 5,
+        "ListParts": 2,
+        "PutObject": 8,
+        "PutObjectTagging": 1,
+        "UploadPart": 12,
+        "UploadPartCopy": 1
+      },
+      "schema": "crab.s3-gateway-boto3-smoke",
+      "status": "passed",
+      "xet_object": null
+    },
+    "graceful_replacement": {
+      "bytes": 5242916,
+      "elapsed_seconds": 16.964,
+      "identical_completion_retry": true,
+      "independent_caches": true,
+      "operations": {
+        "CompleteMultipartUpload": 2,
+        "CreateMultipartUpload": 1,
+        "GetObject": 2,
+        "ListParts": 1,
+        "UploadPart": 2
+      },
+      "phase": "recovery",
+      "process_replacement": true,
+      "standby_completion": true,
+      "status": "passed"
+    },
+    "namespace_and_history": {
+      "conditional_read_precedence": true,
+      "encoded_ref_unicode_percent_and_copy": true,
+      "historical_commit_preserves_original_lfs_bytes": true,
+      "status": "passed",
+      "url_encoded_listing": true,
+      "wrong_signature_rejected": true
+    },
+    "native_sdk_visibility": {
+      "elapsed_seconds": 12.56,
+      "native_sdk_reads": [
+        {
+          "blake3": "adb29c4fb77c2a2b4f1a2818f8138db4be61d9347ed9f0c782434f7a4ef1aaa3",
+          "bytes": 42,
+          "commit": "f01adb0f0fc3f748e6bdbe41c99f917a220e0f33",
+          "mode": "git"
+        },
+        {
+          "blake3": "cb37fbf6801d74ccb2d977e619258eb621bf7e736c2b8e759f7209ed86077736",
+          "bytes": 2097184,
+          "commit": "cbc5e95a1f5a8fa314fce7c088172b192e736838",
+          "mode": "hydrated"
+        }
+      ],
+      "operations": {
+        "PutObject": 2
+      },
+      "phase": "independent",
+      "status": "passed"
+    },
+    "terminal": {
+      "both_instances_ready": true,
+      "open_multipart_uploads": 0,
+      "repositories_without_open_multipart_uploads": 3,
+      "scratch_live_gauges": {
+        "a": {
+          "crab_s3_gateway_scratch_bytes{purpose=\"content_spool\"}": 0,
+          "crab_s3_gateway_scratch_bytes{purpose=\"git_pack\"}": 0,
+          "crab_s3_gateway_scratch_bytes{purpose=\"xet_reconstruction\"}": 0,
+          "crab_s3_gateway_scratch_files{purpose=\"content_spool\"}": 0,
+          "crab_s3_gateway_scratch_files{purpose=\"git_pack\"}": 0,
+          "crab_s3_gateway_scratch_files{purpose=\"xet_reconstruction\"}": 0,
+          "crab_s3_gateway_scratch_pending_bytes": 0
+        },
+        "b": {
+          "crab_s3_gateway_scratch_bytes{purpose=\"content_spool\"}": 0,
+          "crab_s3_gateway_scratch_bytes{purpose=\"git_pack\"}": 0,
+          "crab_s3_gateway_scratch_bytes{purpose=\"xet_reconstruction\"}": 0,
+          "crab_s3_gateway_scratch_files{purpose=\"content_spool\"}": 0,
+          "crab_s3_gateway_scratch_files{purpose=\"git_pack\"}": 0,
+          "crab_s3_gateway_scratch_files{purpose=\"xet_reconstruction\"}": 0,
+          "crab_s3_gateway_scratch_pending_bytes": 0
+        }
+      },
+      "status": "passed"
+    }
+  },
+  "checks": {
+    "clippy_all_targets_warnings_denied": "passed",
+    "gateway_library_tests": {
+      "failed": 0,
+      "ignored": 1,
+      "ignored_reason": "Explicit 122880-write CPU scaling diagnostic requiring CRAB_S3_GATEWAY_PROFILE_ROOT",
+      "passed": 225
+    },
+    "patch_whitespace": "passed",
+    "python_qualification_tests": {
+      "failed": 0,
+      "passed": 32
+    },
+    "python_syntax": "passed",
+    "rust_format": "passed"
+  },
+  "completed_at": "2026-11-15T02:52:41+00:00",
+  "earlier_attempts": [
+    {
+      "observed_error": "NoSuchUpload surfaced during abort cleanup; the original exception was not retained by the CLI runner.",
+      "profile": "debug",
+      "qualification": "Not counted as passing. Both optimized runs passed, including the default 60-second client timeout.",
+      "status": "failed"
+    }
+  ],
+  "regression": {
+    "after": "Returns STANDARD when requested and omits it when not requested",
+    "before": "HTTP 200 omitted the requested attribute",
+    "contract_source": "https://docs.aws.amazon.com/cli/latest/reference/s3api/get-object-attributes.html#examples",
+    "operation": "GetObjectAttributes",
+    "requested_attribute": "StorageClass"
+  },
+  "remaining_release_qualification": [
+    "Live AWS S3, GCS, and Azure backend matrix",
+    "Packaged-image/Linux/Windows and deployment ingress qualification",
+    "Exhaustive request-option conformance and production-scale limits/performance"
+  ],
+  "runtime": {
+    "architecture": "arm64",
+    "clients": {
+      "awscrt": "0.38.1",
+      "boto3": "1.43.75",
+      "botocore": "1.43.127"
+    },
+    "gateway": {
+      "profile": "release",
+      "sha256": "d611d4a463d51b65ce89f2fd8871b8033c71f9395269e59ff32b5e482c193999"
+    },
+    "native_sdk_publisher_sha256": "67761b836e079775b7a529ddbd8329407487d275242ef69bcd4e74d2662b8efc",
+    "native_sdk_reader_sha256": "6e1f8791868aad291b0cd1d0f3ddba3e63a93fa6db507b259810be22c4e01d2c",
+    "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+    "rustfs": {
+      "commit": "778f1dfa2155cbbc61ad54e6896de9e29d2c4d8d",
+      "execution": "native binary",
+      "version": "1.0.0-rc.1"
+    }
+  },
+  "schema": "crab.s3-gateway-local-rustfs",
+  "schema_version": 1,
+  "scope": "All 23 advertised operation names and selected failure/lifecycle cases in the frozen S3 profile; native loopback HTTP only.",
+  "shutdown": {
+    "gateway_instances": "stopped",
+    "owned_listeners_closed": true,
+    "rustfs": "stopped"
+  },
+  "source": {
+    "commit": "1488f5c232b22e7c942c8d70fe82bc1eb6bf540d",
+    "dirty": true,
+    "input_patch_sha256": "48e6b99264ab99256bd4746cf4dba102da40a4a359f293157965fdc3fed02e72",
+    "inputs": {
+      "crab/docs/architecture/s3-gateway-contract.md": "8e567eef5ba70c5f67ffcddebf95186b2a8f957af24c7e44bd61fc2f49554f2b",
+      "crab/scripts/e2e/s3_gateway_boto3.py": "5fc849fd11f8ba2bdbc244ff4386c83551b9a3ee28a3462f2673d6ced94492ed",
+      "crates/crab-s3-gateway/README.md": "282fa21d864a2d3d96c710e8103977962268d12058c87241e93694914b65ec10",
+      "crates/crab-s3-gateway/src/gateway.rs": "dc60b65ae6b7531b8720d71a991d2e4ff73938806b73b6eee1752d2e8debc09d"
+    }
+  },
+  "status": "passed"
+}
