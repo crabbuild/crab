@@ -514,6 +514,13 @@ pub fn build_static_env_store(bucket: &str, provider: StorageProviderKind) -> Re
     Ok(store_from_built(identity, built))
 }
 
+/// Builds an S3 store with a fixed signing region and the refreshable default credential chain.
+pub fn build_static_env_s3_store(bucket: &str, region: &str) -> Result<Store> {
+    let built = build_static_env_s3_object_store(bucket, Some(region))?;
+    let identity = BucketIdentity::new(StorageProviderKind::S3, bucket, bucket);
+    Ok(store_from_built(identity, built))
+}
+
 /// Build a store from explicit credentials and transport policy without provider environment overrides.
 ///
 /// Rejects default credential-chain selection; endpoint validation remains owned
@@ -639,18 +646,7 @@ fn build_static_env_object_store(
     provider: StorageProviderKind,
 ) -> Result<BuiltObjectStore> {
     match provider {
-        StorageProviderKind::S3 => {
-            let endpoint = s3_endpoint_from_env();
-            build_s3_object_store(
-                bucket,
-                AmazonS3Builder::from_env()
-                    .with_bucket_name(bucket)
-                    .with_client_options(default_client_options()),
-                None,
-                endpoint.as_deref(),
-                true,
-            )
-        }
+        StorageProviderKind::S3 => build_static_env_s3_object_store(bucket, None),
         StorageProviderKind::Gcs => {
             let builder = GoogleCloudStorageBuilder::from_env()
                 .with_bucket_name(bucket)
@@ -697,6 +693,20 @@ fn build_static_env_object_store(
         }
         StorageProviderKind::Local => Err(StorageError::UnsupportedProvider { provider }),
     }
+}
+
+fn build_static_env_s3_object_store(
+    bucket: &str,
+    region: Option<&str>,
+) -> Result<BuiltObjectStore> {
+    let endpoint = s3_endpoint_from_env();
+    let mut builder = AmazonS3Builder::from_env()
+        .with_bucket_name(bucket)
+        .with_client_options(default_client_options());
+    if let Some(region) = region {
+        builder = builder.with_region(region);
+    }
+    build_s3_object_store(bucket, builder, None, endpoint.as_deref(), true)
 }
 
 fn build_s3_object_store(
@@ -854,6 +864,13 @@ fn normalize_env_option_key(key: &str) -> Option<String> {
 #[expect(clippy::expect_used, reason = "test assertions")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_static_env_region_binds_transport_identity() {
+        let first = build_static_env_s3_store("test-bucket", "eu-central-1").unwrap();
+        let second = build_static_env_s3_store("test-bucket", "us-west-2").unwrap();
+        assert_ne!(first.target_identity(), second.target_identity());
+    }
 
     #[tokio::test]
     async fn disabled_conditional_put_rejects_large_create_without_network() {

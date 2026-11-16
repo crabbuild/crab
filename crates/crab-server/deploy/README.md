@@ -57,6 +57,84 @@ source, image, SDK version, and provider configuration. The container workflow
 builds candidates and retains process-smoke receipts; it does not publish a
 qualified server release.
 
+## Run one container with your AWS bucket
+
+The private single-operator profile requires an existing S3 bucket and standard
+AWS credentials. It generates its own configuration and peer TLS identity,
+prepares the native account directory, and runs the embedded UI behind a
+bundled streaming proxy. The server and management listeners stay on container
+loopback; publish only the proxy to host loopback.
+
+From the repository root:
+
+```sh
+docker build -f crates/crab-server/deploy/Dockerfile -t crab-server:local .
+
+docker run -d --name crab-server --restart unless-stopped --stop-timeout 180 \
+  -p 127.0.0.1:8788:8080 \
+  -v crab-server-data:/var/lib/crab \
+  -e AWS_BUCKET=your-existing-bucket \
+  -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN \
+  crab-server:local
+```
+
+Export the AWS credentials in your shell before running this command. Temporary
+credentials also require `AWS_SESSION_TOKEN`. The bucket must already exist;
+the identity needs list/read/write/delete access under `repositories/`.
+The server discovers the AWS region and persists it in its generated config,
+so later `docker exec` administration commands use the same signing region.
+`AWS_REGION` or `AWS_DEFAULT_REGION` can explicitly select that region. An
+S3-compatible service additionally needs `AWS_ENDPOINT_URL_S3`; its default
+region is `us-east-1`. Plain HTTP test endpoints need `AWS_ALLOW_HTTP=true`.
+
+Open <http://127.0.0.1:8788>. A new bucket starts with an empty repository catalog.
+Create your first repository, then open `/team/project`:
+
+```sh
+docker exec crab-server crab-server --config /etc/crab/server.toml \
+  repository create --owner team --name project --prefix team/project
+```
+
+The repository command initializes v2 Git and native collaboration state before
+publishing the ready catalog entry. Existing repositories can be cataloged with
+`repository adopt` instead. Ordinary serving does not convert old application
+schemas; existing deployments still require their documented explicit preparation.
+
+| Default | Value |
+| --- | --- |
+| Published UI/Git endpoint | `http://127.0.0.1:8788` |
+| Storage root | `s3://your-existing-bucket/repositories` |
+| Config and stable peer identity | `/var/lib/crab/server` |
+| Disposable native cache | `/var/lib/crab/cells` |
+| Staging admission limit | 32 GiB, further bounded by filesystem capacity |
+| Native mutation durability | Object-storage proof before acknowledgement |
+
+Keep `crab-server-data` across container replacement. It preserves the peer
+identity and bucket binding; a different bucket requires a separate volume.
+The generated peer identity lasts ten years and is never silently replaced;
+back it up privately and plan explicit rotation before certificate expiry.
+Catalog, repository and account data remain authoritative in object storage.
+
+Check readiness or stop without deleting the volume:
+
+```sh
+docker exec crab-server crab-server --config /etc/crab/server.toml healthcheck
+docker logs --follow crab-server
+docker stop --time 180 crab-server
+```
+
+The entrypoint supervises both processes and drains the server on stop or proxy
+failure. The native runtime may need up to 110 seconds to shut down; preserve
+the termination grace when replacing containers. Building the embedded Cellar
+SDK requires a Docker build environment with sufficient memory; use at least
+16 GiB for the checked native image build.
+
+This profile trusts one local operator. Internet-facing or team service requires
+an explicit config with OIDC/GitHub sign-in and a canonical HTTPS origin; use
+`--config /etc/crab/server.toml` with the managed profiles below. Explicit
+arguments bypass container setup and retain operator-owned TLS and initialization.
+Native provider, restore, fault and scale qualification gates still apply.
+
 ## Start locally with Docker Compose
 
 Docker Engine with Compose v2 is the only prerequisite. From the repository

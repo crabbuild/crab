@@ -8,6 +8,26 @@ fn command_line_contract_is_valid() {
 }
 
 #[test]
+fn container_setup_requires_no_config_and_excludes_runtime_commands() {
+    assert!(Arguments::try_parse_from(["crab-server", "--container-setup"]).is_ok());
+    for args in [
+        vec!["crab-server", "--container-setup", "serve"],
+        vec![
+            "crab-server",
+            "--container-setup",
+            "--config",
+            "server.toml",
+        ],
+        vec!["crab-server", "serve"],
+    ] {
+        let accepted = Arguments::try_parse_from(args)
+            .ok()
+            .is_some_and(|arguments| arguments.validate().is_ok());
+        assert!(!accepted);
+    }
+}
+
+#[test]
 fn peer_advertise_host_is_a_global_option() {
     let arguments = Arguments::try_parse_from([
         "crab-server",
@@ -65,6 +85,7 @@ fn healthcheck_uses_the_stable_tls_name_against_the_local_listener() {
         management_listen: "0.0.0.0:8789".parse().unwrap(),
         storage: crab_server::StorageConfig {
             url: "s3://bucket/root".into(),
+            region: None,
         },
         cells: crab_server::CellsConfig {
             data_dir: "/var/lib/crab/cells".into(),

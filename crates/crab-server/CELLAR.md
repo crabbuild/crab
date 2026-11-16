@@ -17,6 +17,14 @@ against state written by 0.1.1 are not qualified.
 
 ## Execution and persistence
 
+The private single-container profile uses `cells.durability = "object"`, requiring
+bucket proof before native mutation acknowledgement. It generates and preserves
+its peer CA/key in the named data volume and prepares Directory through the
+explicit private command before admitting browser traffic. Its persisted
+`storage.region` is shared by repository storage and Cellar, including fresh
+`docker exec` administration processes. The managed profiles retain their
+explicit identity, preparation and durability configuration.
+
 The compiled application binds `REPOSITORIES` to one native `Repository` Cell
 per catalog UUID, `DIRECTORY` to a shared native `Directory` Cell, and
 `ORGANIZATIONS` to independent native `Organization` Cells. Directory stores

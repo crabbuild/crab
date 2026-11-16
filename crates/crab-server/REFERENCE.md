@@ -246,6 +246,19 @@ build output so those inputs cannot enter a remote BuildKit cache. The runtime
 installs no packages, runs as UID/GID 10001, embeds the frontend, and uses a
 dedicated temporary directory.
 
+### Use your existing AWS bucket
+
+The [single-container quick start](deploy/README.md#run-one-container-with-your-aws-bucket)
+requires only `AWS_BUCKET` and standard AWS credentials. The no-argument image
+entrypoint generates config and a stable private TLS identity, prepares Directory
+through the explicit management command, and supervises the server and bundled
+proxy. Configured S3 signing regions are shared by the Git/catalog store and
+native Cellar, including administration through `docker exec`.
+
+This is a local single-operator profile with host-loopback publication. Explicit
+`--config` deployments retain their authentication, TLS, initialization and
+orchestrator lifecycle contracts.
+
 ### Start the complete local stack
 
 Docker Compose provides the shortest path from checkout to a usable server:

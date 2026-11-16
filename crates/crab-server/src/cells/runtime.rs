@@ -25,9 +25,13 @@ pub(crate) fn bucket(config: &Config) -> Result<Bucket> {
     let selection =
         crate::storage_root::StorageRoot::selection(&config.storage).map_err(Error::sdk)?;
     let prefix = format!("{}/.crab/cellar", selection.repo_prefix);
-    let region = std::env::var("AWS_REGION")
-        .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
-        .unwrap_or_else(|_| "us-east-1".into());
+    let region = config
+        .storage
+        .region
+        .clone()
+        .or_else(|| std::env::var("AWS_REGION").ok())
+        .or_else(|| std::env::var("AWS_DEFAULT_REGION").ok())
+        .unwrap_or_else(|| "us-east-1".into());
     match selection.target {
         crab_storage::StaticEnvStoreTarget::Bucket { provider, bucket } => {
             let scheme = match provider {
@@ -311,6 +315,7 @@ pub(crate) async fn test_node_with_application(
         management_listen: address,
         storage: crate::StorageConfig {
             url: "s3://test/repositories".into(),
+            region: None,
         },
         cells: crate::CellsConfig {
             data_dir: directory.join("node"),

@@ -172,6 +172,7 @@ jobs:
             /src/crates/crab-server/tests/qualify_backup_restore.sh \
             /src/crates/crab-server/tests/hash_backup_restore_objects.sh \
             /src/crates/crab-server/deploy/generate-release-manifest.sh \
+            /src/crates/crab-server/deploy/entrypoint.sh \
             /src/crates/crab-server/deploy/helm/crab-server/qualification/test-load-report.sh \
             /src/crates/crab-server/deploy/helm/crab-server/qualification/verify-workload-identity.sh \
             /src/crates/crab-server/deploy/helm/crab-server/qualification/test-workload-identity.sh \
@@ -727,6 +728,12 @@ jobs:
           "${RUNNER_TEMP}/crab-process-tools/bin/python" -m pip install \
             --requirement crates/crab-server/tests/process-requirements.txt
           echo "${RUNNER_TEMP}/crab-process-tools/bin" >> "$GITHUB_PATH"
+      - name: Qualify private single-container setup and cold replacement
+        run: >-
+          python3 crates/crab-server/tests/qualify_container_setup.py
+          --image crab-server:test
+          --artifacts "${RUNNER_TEMP}/crab-server-container-setup"
+
       - name: Qualify the native image against RustFS and process restart
         run: |
           python3 crates/crab-server/tests/qualify_cellar_process.py \
@@ -785,6 +792,14 @@ jobs:
           name: cellar-process-qualification-${{ github.run_id }}
           path: ${{ runner.temp }}/crab-cellar-process-qualification
           if-no-files-found: error
+          retention-days: 14
+      - name: Retain single-container setup evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: container-setup-${{ github.run_id }}
+          path: ${{ runner.temp }}/crab-server-container-setup
+          if-no-files-found: warn
           retention-days: 14
       - name: Retain failed process diagnostics
         if: failure()

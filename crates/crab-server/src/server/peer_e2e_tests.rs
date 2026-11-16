@@ -41,6 +41,7 @@ impl Host {
             management_listen: management.local_addr().unwrap(),
             storage: crate::StorageConfig {
                 url: "s3://test/repositories".into(),
+                region: None,
             },
             cells,
             import: Default::default(),

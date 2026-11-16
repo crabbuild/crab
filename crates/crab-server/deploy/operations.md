@@ -7,6 +7,16 @@ scale, and upgrade matrix is qualified against an exact source and image.
 
 ## Know the state boundaries
 
+The [single-container profile](README.md#run-one-container-with-your-aws-bucket)
+persists its generated config, signing region and peer identity in
+`/var/lib/crab/server` on its named volume. Preserve that directory during cache
+cleanup and replacement; incomplete identity or a changed bucket binding fails
+startup. Peer certificates have a ten-year lifetime and require explicit
+rotation before expiry. Object durability keeps cloud storage authoritative.
+Keep publication on host loopback, and allow 180 seconds for container stop so
+the proxy and native server drain together. Managed `--config` deployments
+bypass this bootstrap and retain their own identity and lifecycle configuration.
+
 The configured storage root contains the repository catalog, identity state,
 Git objects, shared xorbs/shards, and native `.crab/cellar/` objects. Protect the
 complete root as one recovery unit. A different prefix creates another
