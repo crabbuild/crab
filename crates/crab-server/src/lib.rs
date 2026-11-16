@@ -61,6 +61,8 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("invalid TOML configuration")]
     Toml(#[from] toml::de::Error),
+    #[error("AWS bucket region discovery failed; check the bucket or set AWS_REGION")]
+    BucketRegion(#[source] object_store::Error),
     #[error("JSON encoding failed")]
     Json(#[from] serde_json::Error),
     #[error("object storage configuration failed")]

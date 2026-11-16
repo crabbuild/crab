@@ -270,6 +270,13 @@ contract.
 Reads use the authoritative owner; configurable replicas and explicit replica
 reads are retired in the Cellar migration.
 
+To run one private container with your own S3 bucket, use the
+[single-container quick start](deploy/README.md#run-one-container-with-your-aws-bucket).
+Only `AWS_BUCKET` and standard AWS credentials are required. The image generates
+configuration and a persistent peer identity, discovers the region, prepares the
+account directory, and runs the embedded UI through its bundled proxy. Publish
+only on host loopback; team deployments require explicit browser authentication.
+
 For the fastest local start, use Docker Engine with Compose v2:
 
 ```sh

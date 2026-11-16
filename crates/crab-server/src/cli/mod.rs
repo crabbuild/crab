@@ -11,13 +11,17 @@ use tracing_subscriber::EnvFilter;
 mod assignments;
 mod ecs;
 mod lifecycle;
+mod setup;
 mod teams;
 
 #[derive(Parser)]
 #[command(version, about = "Serve and administer Crab repositories")]
 struct Arguments {
-    #[arg(long)]
-    config: PathBuf,
+    #[arg(long, required_unless_present = "container_setup")]
+    config: Option<PathBuf>,
+    /// Prepare the private single-container profile from AWS_BUCKET and AWS credentials.
+    #[arg(long, exclusive = true)]
+    container_setup: bool,
     #[arg(long, global = true)]
     peer_advertise_host: Option<String>,
     #[arg(
@@ -31,6 +35,19 @@ struct Arguments {
     cell_failure_zone: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
+}
+
+impl Arguments {
+    fn validate(&self) -> crab_server::Result<()> {
+        // Clap's exclusive arguments do not exclude subcommands. Reject this
+        // combination before setup can suppress an intended runtime command.
+        if self.container_setup && self.command.is_some() {
+            return Err(crab_server::Error::Config(
+                "--container-setup cannot be combined with a command",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Subcommand)]
@@ -277,7 +294,16 @@ pub(super) async fn run() -> crab_server::Result<()> {
         .try_init()
         .map_err(|source| crab_server::Error::Logging { source })?;
     let arguments = Arguments::parse();
-    let mut config = crab_server::Config::read(&arguments.config)?;
+    arguments.validate()?;
+    if arguments.container_setup {
+        setup::run().await?;
+        return Ok(());
+    }
+    let path = arguments
+        .config
+        .as_deref()
+        .ok_or(crab_server::Error::Config("--config is required"))?;
+    let mut config = crab_server::Config::read(path)?;
     if let Some(host) = arguments.peer_advertise_host.as_deref() {
         config.set_peer_advertise_host(host)?;
     } else if arguments.peer_advertise_host_from_ecs_metadata {

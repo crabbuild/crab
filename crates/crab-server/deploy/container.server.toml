@@ -1,0 +1,15 @@
+listen = "127.0.0.1:8788"
+management_listen = "127.0.0.1:8789"
+
+[storage]
+url = "s3://${AWS_BUCKET}/repositories"
+region = "${AWS_REGION}"
+
+[cells]
+data_dir = "/var/lib/crab/cells"
+local_disk_limit_bytes = 34359738368
+peer_advertise = "https://localhost:8789"
+peer_certificate = "/var/lib/crab/server/peer/peer.crt"
+peer_private_key = "/var/lib/crab/server/peer/peer.key"
+peer_ca = "/var/lib/crab/server/peer/ca.crt"
+durability = "object"

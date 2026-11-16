@@ -14,6 +14,11 @@ integrity-aware errors.
 interactive connection tests. Normal store construction keeps its retry policy;
 callers still own the probe's overall deadline and credential-safe diagnostics.
 
+`build_static_env_s3_store` pins a caller-resolved signing region while retaining
+the default refreshable AWS credential chain, endpoint/addressing policy,
+multipart support and transport identity. This lets generated server config
+carry its discovered region into independent administration processes.
+
 ## Why it exists
 
 Every higher layer needs object storage, but none should duplicate provider

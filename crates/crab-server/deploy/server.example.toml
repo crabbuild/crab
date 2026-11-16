@@ -13,6 +13,8 @@ peer_ca = "/run/secrets/crab-peer/ca.crt"
 
 [storage]
 url = "s3://my-git-bucket/repositories"
+# The single-container profile discovers and persists this for later exec commands.
+# region = "us-west-2"
 
 [import]
 allowed_hosts = ["github.com", "git.example.com"]

@@ -51,6 +51,9 @@ fn default_import_allowed_hosts() -> Vec<String> {
 #[serde(deny_unknown_fields)]
 pub struct StorageConfig {
     pub url: String,
+    /// S3 signing region; when absent, use the provider environment configuration.
+    #[serde(default)]
+    pub region: Option<String>,
 }
 
 /// Local Cell storage and private fleet identity configuration.
@@ -190,6 +193,16 @@ impl Config {
             return Err(Error::Config(
                 "storage.url must use s3://, gs://, or az:// with a nonempty root prefix",
             ));
+        }
+        if let Some(region) = &self.storage.region
+            && (storage.cloud != crab_storage::StorageProviderKind::S3
+                || region.is_empty()
+                || region.len() > 63
+                || !region
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'))
+        {
+            return Err(Error::Config("storage.region must be an S3 signing region"));
         }
         if let Some(auth) = &self.auth {
             validate_identity_url(&auth.public_url, true)?;

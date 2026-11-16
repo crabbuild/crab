@@ -11,6 +11,7 @@ x-cluster-storage-environment: &cluster-storage-environment
 
 x-cluster-server: &cluster-server
   image: ${CRAB_SERVER_IMAGE:-crab-server:local}
+  command: ["--config", "/etc/crab/server.toml"]
   environment: *cluster-storage-environment
   network_mode: service:cluster-network
   read_only: true

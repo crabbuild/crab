@@ -17,6 +17,7 @@ x-storage-environment: &storage-environment
 
 x-server-service: &server-service
   image: ${CRAB_SERVER_IMAGE:-crab-server:local}
+  command: ["--config", "/etc/crab/server.toml"]
   build: *server-build
   environment: *storage-environment
   volumes:

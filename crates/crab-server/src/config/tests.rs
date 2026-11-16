@@ -9,6 +9,21 @@ fn local_config(storage_url: &str) -> Config {
     .unwrap()
 }
 
+#[test]
+fn signing_region_is_explicit_and_s3_only() {
+    for (url, region, valid) in [
+        ("s3://bucket/repositories", "eu-central-1", true),
+        ("gs://bucket/repositories", "eu-central-1", false),
+        ("az://account/container/repositories", "eu-central-1", false),
+        ("s3://bucket/repositories", "", false),
+        ("s3://bucket/repositories", "bad region", false),
+    ] {
+        let mut config = local_config(url);
+        config.storage.region = Some(region.into());
+        assert_eq!(config.validate().is_ok(), valid, "{url} {region:?}");
+    }
+}
+
 fn repository() -> RepositoryConfig {
     toml::from_str("owner='team'\nname='project'\nbucket='bucket'\nprefix='project'").unwrap()
 }

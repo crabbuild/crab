@@ -1,8 +1,8 @@
 use crab_git::url::{ObjectUrl, UrlForm};
 use crab_storage::{
     StaticEnvStoreTarget, StaticEnvStoreTargetSelection, StaticEnvStoreUrlForm,
-    StaticEnvStoreUrlParts, StorageProviderKind, Store, StoreLayout, build_static_env_target_store,
-    static_env_target_selection_for_provider,
+    StaticEnvStoreUrlParts, StorageProviderKind, Store, StoreLayout, build_static_env_s3_store,
+    build_static_env_target_store, static_env_target_selection_for_provider,
 };
 
 use crate::{Error, Result, StorageConfig};
@@ -22,7 +22,19 @@ impl StorageRoot {
             StaticEnvStoreTarget::Bucket { bucket, .. } => bucket.clone(),
             StaticEnvStoreTarget::AzureAccountContainer { container, .. } => container.clone(),
         };
-        let store = build_static_env_target_store(selection.target)?;
+        // Docker exec starts with the container's original environment. Use the
+        // persisted region for both repository storage and the native Cellar SDK.
+        let store = match (&selection.target, config.region.as_deref()) {
+            (
+                StaticEnvStoreTarget::Bucket {
+                    provider: StorageProviderKind::S3,
+                    bucket,
+                },
+                Some(region),
+            ) => build_static_env_s3_store(bucket, region)?,
+            (_, None) => build_static_env_target_store(selection.target)?,
+            (_, Some(_)) => return Err(Error::Config("storage.region is only supported for S3")),
+        };
         let identity = store.bucket_identity();
         let provider = match identity.cloud {
             StorageProviderKind::S3 => "s3",

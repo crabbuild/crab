@@ -21,6 +21,8 @@ COPY packages/desktop/agent/ packages/desktop/agent/
 COPY --from=frontend /build/packages/ui/dist/ packages/ui/dist/
 RUN cargo build --release --locked -p crab-server
 
+FROM caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0 AS proxy
+
 FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
 
 RUN apt-get update \
@@ -28,22 +30,28 @@ RUN apt-get update \
         apt=2.6.2 \
         libapt-pkg6.0=2.6.2 \
         git \
+        openssl \
         libpcre2-8-0=10.42-1+deb12u2 \
     && rm -rf /var/lib/apt/lists/* \
     && printf 'crab:x:10001:\n' >> /etc/group \
     && printf 'crab:x:10001:10001:Crab server:/var/lib/crab:/bin/false\n' >> /etc/passwd \
-    && install -d -o 10001 -g 10001 /etc/crab /var/lib/crab/tmp /var/lib/crab/cells
+    && install -d -o 10001 -g 10001 /etc/crab /var/lib/crab /var/lib/crab/tmp /var/lib/crab/cells /var/lib/crab/server
 
 COPY --from=builder /build/target/release/crab-server /usr/local/bin/crab-server
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=proxy /usr/bin/caddy /usr/local/bin/caddy
+COPY crates/crab-server/deploy/compose.Caddyfile /etc/crab/container.Caddyfile
+COPY --chmod=0755 crates/crab-server/deploy/entrypoint.sh /usr/local/bin/crab-server-entrypoint
 
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
-    TMPDIR=/var/lib/crab/tmp
+    TMPDIR=/var/lib/crab/tmp \
+    XDG_CONFIG_HOME=/var/lib/crab/tmp/caddy/config \
+    XDG_DATA_HOME=/var/lib/crab/tmp/caddy/data
 USER crab:crab
-EXPOSE 8788 8789
+EXPOSE 8080 8788 8789
 STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=30s --timeout=12s --start-period=15s --retries=3 \
     CMD ["/usr/local/bin/crab-server", "--config", "/etc/crab/server.toml", "healthcheck"]
 
-ENTRYPOINT ["/usr/local/bin/crab-server"]
-CMD ["--config", "/etc/crab/server.toml"]
+ENTRYPOINT ["/usr/local/bin/crab-server-entrypoint"]
+CMD []

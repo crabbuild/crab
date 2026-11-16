@@ -22,6 +22,7 @@ packages/*
 !packages/ui/
 !packages/ui/package.json
 !packages/ui/package-lock.json
+!packages/ui/.npmrc
 !packages/ui/index.html
 !packages/ui/tsconfig.json
 !packages/ui/vite.config.ts
