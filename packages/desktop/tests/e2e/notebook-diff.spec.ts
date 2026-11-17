@@ -66,7 +66,7 @@ test("packaged notebooks compare captured versions, page content and expose fail
     const openDiff = async (file: string) => {
       await primary.getByRole("button", { name: "Git", exact: true }).click();
       await page.getByRole("navigation", { name: "Git", exact: true }).getByRole("button", { name: "Changes", exact: true }).click();
-      await page.getByRole("radio", { name: "List", exact: true }).click();
+      await page.getByLabel("List view", { exact: true }).and(page.locator(":visible")).click();
       await page.getByRole("listbox", { name: "Changed files", exact: true }).getByRole("option").filter({ has: page.getByText(file, { exact: true }) }).dblclick();
     };
     await openDiff("analysis.ipynb");

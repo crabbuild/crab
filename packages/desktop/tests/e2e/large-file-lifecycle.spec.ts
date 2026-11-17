@@ -94,7 +94,7 @@ test("whole-file restoration protects literal selections, staging and pending ed
     await expect(page.getByText("Index vs HEAD", { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "Discard entire file change", exact: true })).toBeDisabled();
     for (const file of files) writeFileSync(path.join(source, file), dirty);
-    await page.getByRole("radiogroup", { name: "View mode", exact: true }).locator("..").getByRole("button", { name: "Refresh", exact: true }).click();
+    await page.getByLabel("View mode", { exact: true }).and(page.locator(":visible")).locator("..").getByRole("button", { name: "Refresh", exact: true }).click();
     for (const file of files.slice(0, 2)) await row(file).click({ modifiers: [process.platform === "darwin" ? "Meta" : "Control"] });
     await page.getByRole("button", { name: "Discard selected files", exact: true }).click();
     await answerConfirmation(page, /^Restore /);
@@ -432,7 +432,7 @@ test("Crab and LFS UI lifecycle preserves bytes and staging across edits, rename
     }
     const stagedIndexBeforeRestore = git(source, ["ls-files", "--stage", "-z"]);
     for (const file of files) writeFileSync(path.join(source, file), content);
-    await page.getByRole("radiogroup", { name: "View mode", exact: true }).locator("..").getByRole("button", { name: "Refresh", exact: true }).click();
+    await page.getByLabel("View mode", { exact: true }).and(page.locator(":visible")).locator("..").getByRole("button", { name: "Refresh", exact: true }).click();
     await page.getByText(files[0], { exact: true }).and(page.locator(":visible")).first().click({ button: "right" });
     await page.getByRole("menuitem", { name: "Discard Changes", exact: true }).click();
     await answerConfirmation(page, /^Restore /);
