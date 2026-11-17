@@ -1,5 +1,5 @@
 import { expect, type ElectronApplication, type Page } from "@playwright/test";
-import { createReadStream, existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
 import { Readable } from "node:stream";
@@ -89,26 +89,36 @@ export async function answerConfirmation(page: Page, message: RegExp, accept = t
 export async function closeFixtureDaemon(home: string): Promise<void> {
   // Only callers that created this HOME own its daemon. Tests inheriting the
   // developer's HOME must leave that durable process running.
-  const socketDir = path.join(home, ".crab", "desktop", "daemon");
-  const base = path.join(socketDir, `daemon-v${PROTOCOL_VERSION}`);
-  const { pid } = JSON.parse(readFileSync(`${base}.pid`, "utf8")) as { pid: number };
-  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("Fixture daemon has no process identity");
-  const client = new DaemonClient({
-    socketDir, daemonEntryPath: "",
-    onSessionData: () => {}, onSessionExit: () => {}, onAgentStateChange: () => {},
-  });
-  try {
-    expect(await client.request("shutdown", { killSessions: true })).toEqual({ acknowledged: true });
-  } finally { client.disconnect(); }
-  await expect.poll(() => {
-    try { process.kill(pid, 0); return false; }
-    catch (error: unknown) {
-      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
-      return true;
+  const root = path.join(home, ".crab", "desktop", "daemon");
+  const runtimes = path.join(root, "runtimes");
+  // App replacements retain previous owners. This HOME belongs to the fixture,
+  // so shut down every owned runtime rather than leaking detached daemons.
+  const directories = [root, ...(existsSync(runtimes) ? readdirSync(runtimes, { withFileTypes: true })
+    .filter(entry => entry.isDirectory() && /^[a-f0-9]{16}$/.test(entry.name))
+    .map(entry => path.join(runtimes, entry.name)) : [])]
+    .filter(directory => existsSync(path.join(directory, `daemon-v${PROTOCOL_VERSION}.pid`)));
+  expect(directories.length).toBeGreaterThan(0);
+  for (const socketDir of directories) {
+    const base = path.join(socketDir, `daemon-v${PROTOCOL_VERSION}`);
+    const { pid } = JSON.parse(readFileSync(`${base}.pid`, "utf8")) as { pid: number };
+    if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("Fixture daemon has no process identity");
+    const client = new DaemonClient({
+      socketDir, daemonEntryPath: "",
+      onSessionData: () => {}, onSessionExit: () => {}, onAgentStateChange: () => {},
+    });
+    try {
+      expect(await client.request("shutdown", { killSessions: true })).toEqual({ acknowledged: true });
+    } finally { client.disconnect(); }
+    await expect.poll(() => {
+      try { process.kill(pid, 0); return false; }
+      catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+        return true;
+      }
+    }, { timeout: 10_000 }).toBe(true);
+    const address = socketAddress(`${base}.sock`);
+    if (process.platform !== "win32" && address !== `${base}.sock`) {
+      rmSync(path.dirname(address), { recursive: true });
     }
-  }, { timeout: 10_000 }).toBe(true);
-  const address = socketAddress(`${base}.sock`);
-  if (process.platform !== "win32" && address !== `${base}.sock`) {
-    rmSync(path.dirname(address), { recursive: true });
   }
 }
