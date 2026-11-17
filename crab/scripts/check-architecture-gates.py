@@ -433,6 +433,9 @@ CACHE_MODULE_TEST_LINES = {
     "crates/crab-cache/src/clean.rs": {
         "use xet_client::cas_types::{ChunkRange, Key};",
     },
+    "crates/crab-cache/src/local_cache/tests/namespaces.rs": {
+        "use xet_client::cas_types::{ChunkRange, Key};",
+    },
     "crates/crab-cache/src/private_fs/platform/database/lifetime_tests.rs": {
         'println!("writer-ready");',
         "std::io::stdout().flush().unwrap();",
@@ -3301,7 +3304,7 @@ def check_cache_feature_budget(root: Path, cargo: str, metadata: dict) -> bool:
             "active-probe": ["dep:reqwest"],
             "local-cache": [
                 "dep:errno", "dep:filetime", "dep:fs4", "dep:libc",
-                "dep:rusqlite", "rusqlite?/hooks", "dep:tokio", "dep:tokio-util",
+                "dep:rusqlite", "rusqlite?/hooks", "dep:sha2", "dep:tokio", "dep:tokio-util",
             ],
             "remote-client": ["active-probe", "dep:futures-util", "dep:tokio"],
             "xet-chunk-cache": [
@@ -3328,6 +3331,7 @@ def check_cache_feature_budget(root: Path, cargo: str, metadata: dict) -> bool:
         "libc",
         "reqwest",
         "rusqlite",
+        "sha2",
         "tokio",
         "tokio-util",
         "xet-client",
@@ -3362,7 +3366,7 @@ def check_cache_feature_budget(root: Path, cargo: str, metadata: dict) -> bool:
                 "--depth",
                 "2",
             ],
-            required={"errno", "filetime", "fs4", "libc", "rusqlite", "tokio", "tokio-util"},
+            required={"errno", "filetime", "fs4", "libc", "rusqlite", "sha2", "tokio", "tokio-util"},
             forbidden={"crab-cache-server", "crab-storage", "object_store", "reqwest", "xet-client"},
         ),
         check_tree_packages(

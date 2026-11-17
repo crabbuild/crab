@@ -29,6 +29,8 @@ task terminal toggle renders the production task shell. Check normal, bold,
 and italic text, CJK, emoji, box drawing, font-size changes, and pane resizing;
 the renderer must keep the selected font even if canvas font parsing fails.
 The automated smoke inspects rendered fonts in repository and task terminals.
+Run the recovery smoke with `CRAB_PTY_MODE=daemon`: Normal terminals deliberately
+end when their renderer closes, so they cannot preserve a PID across eviction.
 The `agent.cjs` fixture is an interactive alternate-screen program: it records its
 PID, input, cwd and resize events to a supplied disposable JSONL proof file.
 Type `stop` to end that process.
