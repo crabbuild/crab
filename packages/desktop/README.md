@@ -336,7 +336,9 @@ npm run test:e2e-smoke
 Keep `CARGO_TARGET_DIR` set for all Cargo invocations. Run broad tests, packaged
 smoke, and cross-platform qualification in CI or a dedicated test environment.
 The packaged smoke opens a real Git repository through the real v2 sidecar and
-checks renderer-visible repository state. The Rust browse tests also exercise a
+checks renderer-visible repository state. The renderer lifecycle gate also
+verifies that pending saves cannot recreate renamed or deleted workflow files
+before React commits the saved state. The Rust browse tests also exercise a
 native v2 object-store snapshot against an isolated S3-compatible fixture. Set
 `CRAB_SDK_TEST_S3_BUCKET` and provider environment variables to enable the
 packaged add/push/reconstruction/clone/hydrate test. The fixture must own its
