@@ -218,6 +218,7 @@ jobs:
               free -m
               df -h "$GITHUB_WORKSPACE"
               ps -eo pid,ppid,rss,comm --sort=-rss | sed -n '1,8p'
+              ps -eo pid,ppid,rss,comm,args --sort=-rss | awk 'NR == 1 || ($4 ~ /^crab_vfs-/ && shown++ < 8)'
               sleep 30
             done
           ) &
