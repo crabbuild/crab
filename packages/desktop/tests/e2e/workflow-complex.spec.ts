@@ -124,7 +124,8 @@ test("complex workflows preserve templates, execute dependencies, cache, retry, 
     );
     await expect(inspector.getByRole("textbox", { name: "Stage name", exact: true })).toHaveValue("stage_63");
     await expect.poll(async () => (await page.locator('.react-flow__node[data-id="stage_63"]').boundingBox())?.width ?? 0).toBeGreaterThan(150);
-    await expect(page.locator('.react-flow__node[data-id="stage_63"]')).toBeInViewport({ ratio: 1 });
+    // IntersectionObserver can round a fully visible node just below one.
+    await expect(page.locator('.react-flow__node[data-id="stage_63"]')).toBeInViewport({ ratio: 0.999999 });
     await page.screenshot({ path: test.info().outputPath("complex-workflow-focused-stage.png") });
     await page.getByRole("button", { name: "Run All", exact: true }).click();
     await expect(page.getByRole("tabpanel", { name: "Editor", exact: true }).getByText("Completed", { exact: true })).toBeVisible({ timeout: 45_000 });
