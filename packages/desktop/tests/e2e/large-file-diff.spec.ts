@@ -66,7 +66,7 @@ test("packaged desktop compares actual Crab chunks and LFS identities across ver
     const openDiff = async (file: string) => {
       await primary.getByRole("button", { name: "Git", exact: true }).click();
       await page.getByRole("navigation", { name: "Git", exact: true }).getByRole("button", { name: "Changes", exact: true }).click();
-      await page.getByRole("radio", { name: "List", exact: true }).click();
+      await page.getByLabel("List view", { exact: true }).and(page.locator(":visible")).click();
       await page.getByRole("listbox", { name: "Changed files", exact: true }).getByRole("option").filter({ hasText: file }).dblclick();
     };
     await openDiff("dataset.bin");

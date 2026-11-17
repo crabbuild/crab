@@ -77,7 +77,7 @@ describe.skipIf(!liveRoot)("selected Apply in the task view", () => {
       server: { host: "127.0.0.1", port: 0 }, clearScreen: false });
     try {
       await run("git", ["init", "--template=", "--initial-branch=main", repo]);
-      for (const [key, value] of [["user.name", "Fixture"], ["user.email", "fixture@example.invalid"], ["commit.gpgSign", "false"]]) await run("git", ["config", key, value], { cwd: repo });
+      for (const [key, value] of [["user.name", "Fixture"], ["user.email", "fixture@example.invalid"], ["commit.gpgSign", "false"], ["core.autocrlf", "false"]]) await run("git", ["config", key, value], { cwd: repo });
       for (const [file, content] of [["old.txt", "rename original\n"], ["remove.txt", "delete original\n"], ["unchanged.txt", "before\n"]]) await writeFile(path.join(repo, file), content);
       await run("git", ["add", "old.txt", "remove.txt", "unchanged.txt"], { cwd: repo });
       await run("git", ["commit", "-m", "Baseline"], { cwd: repo });

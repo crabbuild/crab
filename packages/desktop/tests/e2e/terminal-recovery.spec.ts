@@ -41,6 +41,7 @@ test("real terminal components recover processes and nested layouts across owner
   const records = () => existsSync(proof) ? readFileSync(proof, "utf8").trim().split("\n").map(line => JSON.parse(line)) : [];
   try {
     let page = await app.firstWindow();
+    await page.waitForURL(url => url.pathname === "/tests/fixtures/terminal-recovery/index.html");
     await expect(page.locator(".xterm-helper-textarea:visible")).toHaveCount(1);
     await expectRenderedFont(page);
     const quote = (value: string) => process.platform === "win32" ? `"${value}"` : `'${value.replace(/'/g, "'\\''")}'`;
@@ -87,6 +88,7 @@ test("real terminal components recover processes and nested layouts across owner
     writeFileSync(entry, `require(${JSON.stringify(path.join(desktop, "dist-electron/daemon/daemon-main.cjs"))});`);
     app = await launch(["--daemon-entry", entry]);
     page = await app.firstWindow();
+    await page.waitForURL(url => url.pathname === "/tests/fixtures/terminal-recovery/index.html");
     await expect(page.locator(".xterm-helper-textarea:visible")).toHaveCount(3);
     await expect(page.getByRole("separator").first()).toHaveAttribute("aria-valuenow", "30");
     await page.locator(".xterm-helper-textarea:visible").first().focus();
