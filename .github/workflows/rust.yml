@@ -121,9 +121,9 @@ jobs:
   rust:
     name: Rust quality and tests
     runs-on: ubuntu-latest
-    # Full test compilation exhausted the 45-minute job budget. Keep the
-    # complete workspace suite and leave time for execution and cache upload.
-    timeout-minutes: 75
+    # Cold workspace compilation and the serialized reconstruction corpus need
+    # time for the complete suite and cache upload; retain every test.
+    timeout-minutes: 150
     needs: [changes, actionlint]
     if: needs.changes.outputs.rust == 'true'
     env:
