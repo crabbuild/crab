@@ -76,6 +76,13 @@ jobs:
       - name: Install Linux native build dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+      - name: Qualify Windows index ownership before building the CLI
+        if: runner.os == 'Windows'
+        run: |
+          mkdir -p "$CARGO_TARGET_DIR/restoration-test"
+          CRAB_CACHE_DIR="$CARGO_TARGET_DIR/restoration-test/cache" \
+            cargo test --release -p crab-desktop-agent --locked \
+              repository::content::restore::tests -- --test-threads=2
       - name: Build the matching native CLI and sidecar
         run: node scripts/build-native.mjs
       - name: Test native desktop integration
@@ -141,6 +148,11 @@ jobs:
           mkdir -p "$RUNNER_TEMP/crab-ssh-runtime"
           CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-ssh-runtime" npx vitest run tests/ssh-deployer.spec.ts --maxWorkers 1
       - uses: actions/upload-artifact@v4
+        if: ${{ always() && runner.os != 'Windows' }}
+        with:
+          name: Crab-ssh-runtime-proof-${{ matrix.target }}
+          path: ${{ runner.temp }}/crab-ssh-runtime/*.json
+      - uses: actions/upload-artifact@v4
         with:
           name: Crab-native-${{ matrix.target }}
           path: packages/desktop/resources/native/${{ matrix.target }}/
@@ -167,9 +179,10 @@ jobs:
           - { os: windows-2022, target: win-x64 }
     env:
       CARGO_INCREMENTAL: 0
-      # Every release channel needs a stable signing identity for auto-updates.
-      SIGN_RELEASE: ${{ inputs.release }}
-      CSC_IDENTITY_AUTO_DISCOVERY: ${{ inputs.release && 'true' || 'false' }}
+      # Alpha downloads retain their shipped unsigned installation contract.
+      # Later channels require a stable signing identity for auto-updates.
+      SIGN_RELEASE: ${{ inputs.release && !contains(inputs.version, '-alpha.') }}
+      CSC_IDENTITY_AUTO_DISCOVERY: ${{ inputs.release && !contains(inputs.version, '-alpha.') && 'true' || 'false' }}
     defaults:
       run:
         shell: bash
@@ -262,6 +275,8 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           export E2E_SMOKE=1
+          # This gate verifies durable recovery; Normal terminals end on eviction.
+          export CRAB_PTY_MODE=daemon
           if [ "$RUNNER_OS" = Linux ]; then
             xvfb-run -a npx playwright test tests/e2e/terminal-recovery.spec.ts --project=e2e-smoke --workers=1
           else

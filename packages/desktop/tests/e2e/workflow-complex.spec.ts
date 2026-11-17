@@ -83,7 +83,7 @@ test("complex workflows preserve templates, execute dependencies, cache, retry, 
     edited[2] += ";console.log('edited-template')";
     await inspector.getByRole("textbox", { name: "Stage command", exact: true }).fill(JSON.stringify(edited));
     await page.getByRole("button", { name: "Run All", exact: true }).click();
-    await expect(page.getByText("Completed", { exact: true })).toBeVisible({ timeout: 45_000 });
+    await expect(page.getByRole("tabpanel", { name: "Editor", exact: true }).getByText("Completed", { exact: true })).toBeVisible({ timeout: 45_000 });
     expect(readFileSync(path.join(repo, "result.txt"), "utf8")).toBe("ab-verified");
     expect(readFileSync(path.join(repo, "attempts"), "utf8")).toBe("2");
     expect(existsSync(path.join(repo, "optional.txt"))).toBe(false);
@@ -103,7 +103,7 @@ test("complex workflows preserve templates, execute dependencies, cache, retry, 
     await page.screenshot({ path: test.info().outputPath("complex-workflow-completed.png") });
     await page.getByRole("button", { name: "Run All", exact: true }).click();
     await expect(output).toContainText("publish: Cached");
-    await expect(page.getByText("Completed", { exact: true })).toBeVisible();
+    await expect(page.getByRole("tabpanel", { name: "Editor", exact: true }).getByText("Completed", { exact: true })).toBeVisible();
     await expect(output).toContainText("prepare@a: Cached");
     expect(readFileSync(path.join(repo, "attempts"), "utf8")).toBe("2");
 
@@ -127,12 +127,12 @@ test("complex workflows preserve templates, execute dependencies, cache, retry, 
     await expect(page.locator('.react-flow__node[data-id="stage_63"]')).toBeInViewport({ ratio: 1 });
     await page.screenshot({ path: test.info().outputPath("complex-workflow-focused-stage.png") });
     await page.getByRole("button", { name: "Run All", exact: true }).click();
-    await expect(page.getByText("Completed", { exact: true })).toBeVisible({ timeout: 45_000 });
+    await expect(page.getByRole("tabpanel", { name: "Editor", exact: true }).getByText("Completed", { exact: true })).toBeVisible({ timeout: 45_000 });
     expect(readFileSync(path.join(repo, "large_63.txt"), "utf8")).toBe("63");
 
     await select("failure.workflow.yaml");
     await page.getByRole("button", { name: "Run All", exact: true }).click();
-    await expect(page.getByText("Failed", { exact: true })).toBeVisible();
+    await expect(page.getByRole("tabpanel", { name: "Editor", exact: true }).getByText("Failed", { exact: true })).toBeVisible();
     await expect(output).toContainText("intentional-failure");
     expect(existsSync(path.join(repo, "must-not-exist.txt"))).toBe(false);
     await page.getByRole("button", { name: "Edit YAML", exact: true }).click();
@@ -149,7 +149,7 @@ test("complex workflows preserve templates, execute dependencies, cache, retry, 
     await openWorkflows();
     await expect(page.locator('.react-flow__node[data-id="report"]')).toBeVisible();
     await page.getByRole("button", { name: "Run All", exact: true }).click();
-    await expect(page.getByText("Completed", { exact: true })).toBeVisible();
+    await expect(page.getByRole("tabpanel", { name: "Editor", exact: true }).getByText("Completed", { exact: true })).toBeVisible();
     expect(readFileSync(path.join(solo, "work/single.txt"), "utf8")).toBe("single-file");
     expect(errors).toEqual([]);
   } finally {
@@ -191,13 +191,13 @@ test("workflow cancellation stops the stage process and releases the execution l
     await expect(output).toContainText("waiting-for-cancel");
     stagePid = Number(readFileSync(path.join(repo, "stage.pid"), "utf8"));
     await page.getByRole("button", { name: "Cancel", exact: true }).click();
-    await expect(page.getByText("Cancelled", { exact: true })).toBeVisible({ timeout: 12_000 });
+    await expect(page.getByRole("tabpanel", { name: "Editor", exact: true }).getByText("Cancelled", { exact: true })).toBeVisible({ timeout: 12_000 });
     await expect.poll(() => { try { process.kill(stagePid!, 0); return false; } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; return true; } }, { timeout: 12_000 }).toBe(true);
     stagePid = undefined;
     writeFileSync(path.join(repo, "crab.yaml"), definition("require('fs').writeFileSync('result.txt','recovered')"));
     await page.getByRole("button", { name: "Refresh workflows", exact: true }).click();
     await page.getByRole("button", { name: "Run All", exact: true }).click();
-    await expect(page.getByText("Completed", { exact: true })).toBeVisible();
+    await expect(page.getByRole("tabpanel", { name: "Editor", exact: true }).getByText("Completed", { exact: true })).toBeVisible();
     expect(readFileSync(path.join(repo, "result.txt"), "utf8")).toBe("recovered");
   } finally {
     if (stagePid) { try { process.kill(stagePid, "SIGKILL"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; } }
@@ -281,11 +281,11 @@ test("workflow studio resizes, retains a dismissible output dock, and runs local
     await expect(output).toBeHidden();
     await toggle.click();
     expect(Math.abs((await output.boundingBox())!.height - expandedHeight)).toBeLessThan(3);
-    await page.getByRole("button", { name: "Status", exact: true }).click();
+    await page.getByRole("tab", { name: "Status" }).click();
     await expect(output).toBeVisible();
     await expect(page.getByRole("row").filter({ hasText: "example" })).toBeVisible();
     await expect(page.getByRole("row").filter({ hasText: "other.other" })).toBeHidden();
-    await page.getByRole("button", { name: "Editor", exact: true }).click();
+    await page.getByRole("tab", { name: "Editor", exact: true }).click();
     await output.getByRole("button", { name: "Hide workflow output", exact: true }).click();
     await page.getByRole("button", { name: "Run All", exact: true }).click();
     await expect(output).toContainText("hello");
@@ -295,18 +295,18 @@ test("workflow studio resizes, retains a dismissible output dock, and runs local
     await toggle.click();
     await expect(output).toContainText("hello");
     await sidebar.getByRole("button").filter({ hasText: "other.workflow.yaml" }).click();
-    await page.getByRole("button", { name: "Status", exact: true }).click();
+    await page.getByRole("tab", { name: "Status" }).click();
     await expect(page.getByRole("row").filter({ hasText: "other" })).toBeVisible();
     await page.getByRole("button", { name: "Run All", exact: true }).last().click();
     await expect(output).toContainText("local-result");
     expect(readFileSync(path.join(repo, "result.txt"), "utf8")).toBe("local");
     await sidebar.getByRole("button").filter({ hasText: "wait.workflow.yaml" }).click();
-    await page.getByRole("button", { name: "Editor", exact: true }).click();
+    await page.getByRole("tab", { name: "Editor", exact: true }).click();
     await page.getByRole("button", { name: "Run All", exact: true }).click();
     await expect(output).toContainText("waiting-for-release");
     await output.getByRole("button", { name: "Hide workflow output", exact: true }).click();
     writeFileSync(path.join(repo, "release"), "continue");
-    await expect(page.getByText("Failed", { exact: true })).toBeVisible();
+    await expect(page.getByRole("tabpanel", { name: "Editor", exact: true }).getByText("Failed", { exact: true })).toBeVisible();
     await expect(output).toBeHidden();
     await toggle.click();
     await expect(output).toContainText("intentional-studio-failure");

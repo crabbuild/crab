@@ -5,6 +5,56 @@ integration surfaces should be recorded here before release.
 
 ## Unreleased
 
+## 2.0.0-alpha.2 - 2026-11-16
+
+The second Crab v2 alpha includes the changes since `v2.0.0-alpha.1`.
+Download the platform CLI archive or desktop installer from the GitHub
+prerelease. Stable downloads and Homebrew remain on the current stable release.
+Alpha installers remain unsigned: macOS requires manual installation and may
+require approval in Privacy & Security; Windows may show a publisher warning.
+macOS automatic update installation requires a future signed release.
+
+### Desktop
+
+- Added native Codex and Claude sub-agent transcripts, tool output, and agent
+  messages, plus mixed Codex/Claude teams with shared delegation and messaging.
+- Aligned native agent start, resume, cancellation, and task ownership, with
+  durable child transcripts and full-text output access.
+- Added complex workflow editing and execution, resizable Workflow Studio
+  panels, local runs, and restored workflow output.
+- Simplified workspace, repository, Explorer, Search, and Git navigation;
+  standardized controls, themes, and terminal font rendering.
+- Unified normal, durable daemon, and SSH terminal controls, preserving sessions
+  across reconnects and recovering stale daemon owners.
+- Shared the large-file cache across desktop consumers and streamed Git checkout
+  content without buffering complete large blobs.
+- Released Git index copy handles before converted-file publication so Windows
+  can update the stat cache without leaving restored files marked as modified.
+- Improved Xet and LFS hydration, selective reads, transfer recovery, and visible
+  retry results. Passive storage metadata reads no longer initialize an unused
+  OS keyring provider and block environment-credential retries.
+- Fixed terminal packaging and mount startup, and expanded native, packaged-app,
+  and cross-platform qualification.
+- Kept chat navigation reachable while completion menus are open in compact
+  windows, preserving drafts when switching to Skills.
+
+### Git and storage
+
+- Preserved repository history across forced pushes.
+- Reduced concurrent push discovery, startup work, redundant scratch syncs, and
+  remote-helper asynchronous worker overhead.
+- Added large LFS and Xet file admission to the repository server and expanded
+  native crash, restore, and Kubernetes recovery qualification.
+- Upgraded the embedded Cellar runtime to 0.1.1.
+- Added first-run Docker setup for the repository HTTP server and S3 gateway,
+  including generated configuration and client identity.
+
+### Rust SDK
+
+- Renamed Cargo features: `write` becomes `publish`, `content` becomes `files`,
+  and `managed` becomes `service`. Update SDK dependency feature lists before
+  building against this alpha; retired feature names are not accepted.
+
 ## 2.0.0-alpha.1 - 2026-11-02
 
 This is the first Crab v2 alpha. Download the platform CLI archive or desktop

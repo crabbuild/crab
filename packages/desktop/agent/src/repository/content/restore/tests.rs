@@ -101,9 +101,45 @@ async fn converted_restoration_refreshes_status_and_preserves_staging() {
             ),
             git(root, &["ls-files", "--stage", "-z"]),
         ),
-        (expected, Vec::new(), staged)
+        (expected, Vec::new(), staged),
+        "index stat: {}; published metadata: {:?}",
+        String::from_utf8_lossy(&git(root, &["ls-files", "--debug", "--", NAME])),
+        std::fs::metadata(root.join(NAME)).unwrap(),
     );
     repo.close().await.unwrap();
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restoration_releases_index_reader_before_progress() {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let (directory, repo) =
+        ordinary(NAME, b"$Id$\noriginal\n", "*.bin ident text eol=crlf\n").await;
+    let root = directory.path();
+    std::fs::write(root.join(NAME), b"dirty").unwrap();
+    let source = Arc::new(
+        Restoration::capture(&repo, NAME, repo.read_scope())
+            .await
+            .unwrap(),
+    );
+    let index = root.join(".git/index");
+    let reported = Arc::new(AtomicBool::new(false));
+    let observed = reported.clone();
+    source
+        .run(move |_| {
+            let _index = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(&index)?;
+            observed.store(true, Ordering::Release);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    repo.close().await.unwrap();
+    assert!(reported.load(Ordering::Acquire));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

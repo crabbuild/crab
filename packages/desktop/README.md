@@ -206,8 +206,9 @@ its private index; disconnect waits for its cleanup acknowledgement.
 The `Desktop v2` GitHub Actions workflow builds macOS arm64/x64, Linux x64, and
 Windows x64 artifacts. Pull requests build unsigned installers and test the
 unpacked application from the same build. The Crab release workflow calls it
-again for the tagged source. All release channels, including alpha, require
-signed and notarized macOS builds and a signed Windows installer. `scripts/package.mjs` selects the matching update channel for all
+again for the tagged source. Alpha installers remain unsigned downloads.
+Beta, RC, and stable releases require signed and notarized macOS builds and a
+signed Windows installer. `scripts/package.mjs` selects the matching update channel for all
 packaging commands. Publication runs only through the release workflow.
 
 Configure these repository Actions secrets before creating a signed Crab release:
@@ -223,8 +224,10 @@ Configure these repository Actions secrets before creating a signed Crab release
 Signed releases must use the same macOS signing identity and Windows publisher
 identity as installed builds so their platform updaters accept the replacement.
 If a signing secret is missing, a signed release fails before publication.
-Previously published unsigned alpha builds require one manual installation of a
-signed release on macOS before automatic installation can work. Local unsigned
+Unsigned alpha builds require manual installation on macOS, including approval
+in Privacy & Security after the first launch attempt. Windows may show a
+publisher warning. A signed release requires one manual installation over an
+unsigned alpha on macOS before automatic installation can work. Local unsigned
 builds can check the release feed but cannot verify macOS update installation.
 
 ## Desktop updates

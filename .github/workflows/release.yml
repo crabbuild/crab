@@ -1106,7 +1106,8 @@ jobs:
     name: Protocol v2 packaged Git compatibility (${{ matrix.label }})
     needs: [prepare, build, protocol-v2-release-gate]
     if: ${{ always() && needs.prepare.result == 'success' && needs.build.result == 'success' && needs.protocol-v2-release-gate.result == 'success' }}
-    runs-on: ubuntu-latest
+    # Match qualification: Git 2.30 requires the older curl headers.
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -1193,7 +1194,8 @@ jobs:
             (
               cd "$source_dir"
               make configure
-              ./configure --prefix="$prefix" --without-tcltk
+              # These Git releases predate C23's unreachable() macro.
+              ./configure --prefix="$prefix" --without-tcltk CFLAGS="-O2 -std=gnu99"
               make -j"$(nproc)" all
               make install
             )
