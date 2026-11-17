@@ -163,10 +163,11 @@ export {
 
 // Completions keep typing focus in their owning editor. Radix owns positioning
 // and dismissal; cmdk owns item selection without moving focus out of the editor.
+// Prefer below the editor so a short conversation's navigation stays reachable.
 export function CommandPopover({
   anchorRef,
   onClose,
-  side = "top",
+  side = "bottom",
   className,
   children,
   ...props

@@ -210,9 +210,19 @@ jobs:
           # Desktop worktree integration tests invoke the real CLI. Cargo's
           # binary test harness is not the executable required by that contract.
           cargo build -p crab --locked
-          # Bound independent VFS fixtures to hosted memory; each test retains
-          # its concurrent workers. Stream assertions before runner termination
-          # and report resources for the complete workspace suite.
+          # Bound concurrent storage fixtures and retain readings if the runner
+          # kills the process before Cargo can report a test result.
+          (
+            while true; do
+              date -u
+              free -m
+              df -h "$GITHUB_WORKSPACE"
+              ps -eo pid,ppid,rss,comm --sort=-rss | sed -n '1,8p'
+              sleep 30
+            done
+          ) &
+          monitor_pid=$!
+          trap 'kill "$monitor_pid" 2>/dev/null || true' EXIT
           /usr/bin/time -v cargo test --workspace --locked --no-fail-fast -- --nocapture --test-threads=2
 
       - name: Check managed OpenAPI contract
