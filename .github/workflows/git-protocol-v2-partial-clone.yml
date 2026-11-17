@@ -412,7 +412,8 @@ jobs:
 
   release-build:
     name: Build shared protocol release artifact
-    runs-on: ubuntu-latest
+    # The artifact must also run on the legacy Git qualification baseline.
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - name: Checkout
@@ -458,7 +459,8 @@ jobs:
 
   real-git-version-matrix:
     name: Real Git compatibility (${{ matrix.label }})
-    runs-on: ubuntu-latest
+    # Historical Git needs pre-C23 GCC and the older libcurl header aliases.
+    runs-on: ubuntu-24.04
     needs: [unit-and-transcript, release-build]
     timeout-minutes: 90
     strategy:
