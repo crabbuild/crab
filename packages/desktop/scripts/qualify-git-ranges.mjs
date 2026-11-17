@@ -180,7 +180,9 @@ try {
   rpc = (method, params) => new Promise((resolve, reject) => {
     if (transportError) { reject(transportError); return; }
     const id = ++next;
-    const timer = setTimeout(() => { pending.delete(id); reject(new Error(`${method} response timed out`)); }, 60_000);
+    // Native Git verification permits five minutes of joined IO. The caller
+    // must await corruption/cancellation results; warm ranges keep their 5s gate.
+    const timer = setTimeout(() => { pending.delete(id); reject(new Error(`${method} response timed out`)); }, 5 * 60_000);
     pending.set(id, { resolve, reject, timer });
     child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
   });
