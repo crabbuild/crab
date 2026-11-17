@@ -888,15 +888,7 @@ fn unavailable_test_crab_binary_path() -> String {
 }
 
 fn is_cargo_test_harness(path: &Path) -> bool {
-    if path
-        .parent()
-        .and_then(|parent| parent.file_name())
-        .and_then(|name| name.to_str())
-        != Some("deps")
-    {
-        return false;
-    }
-
+    // Cargo owns the artifact directory layout; only the harness name matters.
     let Some(stem) = path.file_stem().and_then(|name| name.to_str()) else {
         return false;
     };
@@ -1336,6 +1328,13 @@ mod tests {
         )));
         assert!(!is_cargo_test_harness(Path::new(
             "/tmp/crab-target/debug/deps/crab"
+        )));
+    }
+
+    #[test]
+    fn detects_cargo_test_harness_outside_deps() {
+        assert!(is_cargo_test_harness(Path::new(
+            "target/debug/build/crab/0123456789abcdef/out/crab-0123456789abcdef"
         )));
     }
 

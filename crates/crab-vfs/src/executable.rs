@@ -34,15 +34,7 @@ pub fn crab_binary_path() -> String {
 }
 
 fn is_cargo_test_harness(path: &Path) -> bool {
-    if path
-        .parent()
-        .and_then(|parent| parent.file_name())
-        .and_then(|name| name.to_str())
-        != Some("deps")
-    {
-        return false;
-    }
-
+    // Cargo owns the artifact directory layout; only the harness name matters.
     let Some(stem) = path.file_stem().and_then(|name| name.to_str()) else {
         return false;
     };
@@ -51,4 +43,27 @@ fn is_cargo_test_harness(path: &Path) -> bool {
     };
 
     suffix.len() >= 8 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cargo_harness_detection_does_not_depend_on_artifact_directory() {
+        for directory in [
+            "target/debug/deps",
+            "target/debug/build/crab-vfs/0123456789abcdef/out",
+        ] {
+            assert!(is_cargo_test_harness(
+                &Path::new(directory).join("crab_vfs-0123456789abcdef")
+            ));
+        }
+    }
+
+    #[test]
+    fn coordinator_binary_never_resolves_to_the_current_test_process() {
+        let current = std::env::current_exe().unwrap().canonicalize().unwrap();
+        assert_ne!(crab_binary_path(), current.to_string_lossy());
+    }
 }
