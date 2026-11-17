@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Workflow autosave lifecycle fixture</title></head>
+<body><div id="root"></div><script type="module">
+import React, { act, useState } from "react";
+import { createRoot } from "react-dom/client";
+import { flushSync } from "react-dom";
+import { useWorkflowEditor } from "/src/hooks/useWorkflowEditor.ts";
+
+const definition = { path: "draft.workflow.yaml", params: [], metrics: [], plots: [], defaults: {},
+  stages: [{ name: "example", cmd: "before", deps: [], outs: [] }] };
+const files = new Map([[definition.path, definition]]);
+window.crab = {
+  onEvent: () => () => {},
+  async rpc(method, { workflow, path }) {
+    if (method === "workflow_list") return { files: [...files.keys()] };
+    if (method === "workflow_get") return structuredClone(files.get(path));
+    if (method === "workflow_save") { files.set(workflow.path, structuredClone(workflow)); return { saved: true }; }
+    if (method === "workflow_delete") { files.delete(path); return { deleted: true }; }
+    throw new Error(`Unexpected workflow operation: ${method}`);
+  },
+  async fsRename(repo, oldPath, newPath) {
+    const old = oldPath.slice("/repo/".length), next = newPath.slice("/repo/".length);
+    files.set(next, { ...files.get(old), path: next }); files.delete(old);
+    return { oldPath, newPath };
+  },
+};
+function Fixture() {
+  const editor = useWorkflowEditor("repo", "/repo");
+  const [result, setResult] = useState(null);
+  const change = async operation => {
+    flushSync(() => editor.actions.updateStage({ ...editor.state.workflow.stages[0], cmd: "edited" }));
+    // Hold React's commit until management completes to expose a second flush
+    // reading the dirty input after the file has already moved or disappeared.
+    let success;
+    await act(async () => {
+      success = operation === "rename"
+        ? await editor.actions.renameWorkflow(definition.path, "report.workflow.yaml")
+        : await editor.actions.deleteWorkflow(definition.path);
+    });
+    setResult(JSON.stringify({ success, files: [...files.values()] }));
+  };
+  return React.createElement("main", null,
+    ...["rename", "delete"].map(operation => React.createElement("button", {
+      key: operation, disabled: editor.state.phase !== "editing", onClick: () => change(operation),
+    }, operation)), React.createElement("output", null, result));
+}
+createRoot(document.getElementById("root")).render(React.createElement(Fixture));
+</script></body></html>
