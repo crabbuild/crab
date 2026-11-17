@@ -130,6 +130,8 @@ jobs:
       # Workspace test linking exhausted runner disk. Retain file/line
       # backtraces without type/variable debug data; runtime checks stay on.
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      # Publication fixtures use the same explicit root as the build cache.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -193,7 +195,9 @@ jobs:
           # Desktop worktree integration tests invoke the real CLI. Cargo's
           # binary test harness is not the executable required by that contract.
           cargo build -p crab --locked
-          cargo test --workspace --locked --no-fail-fast
+          # Keep failure details visible if a runner stops before an executable
+          # finishes and libtest releases its captured diagnostics.
+          cargo test --workspace --locked --no-fail-fast -- --nocapture
 
       - name: Check managed OpenAPI contract
         run: cargo run -p crab-auth --example generate_managed_openapi --locked -- --check
