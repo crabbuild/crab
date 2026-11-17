@@ -1494,6 +1494,7 @@ function FileContentPane({
           onClick={onClose}
           className="ml-2 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground transition"
           title="Close file view and return to diff"
+          aria-label="Close file view and return to diff"
         >
           ✕
         </Button>
