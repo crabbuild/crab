@@ -179,13 +179,15 @@ jobs:
             /src/crates/crab-server/deploy/helm/crab-server/qualification/test-workload-identity.sh \
             /src/crates/crab-server/tests/qualify_lfs_locking.sh \
             /src/crates/crab-server/tests/qualify_lfs_range_resume.sh
+          docker build --file crates/crab-server/deploy/Dockerfile \
+            --target proxy --tag crab-server-caddy:test .
           docker run --rm \
             --volume "$PWD/crates/crab-server/deploy/compose.Caddyfile:/etc/caddy/Caddyfile:ro" \
-            caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d \
+            crab-server-caddy:test \
             caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
           docker run --rm \
             --volume "$PWD/crates/crab-server/deploy/compose.cluster.Caddyfile:/etc/caddy/Caddyfile:ro" \
-            caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d \
+            crab-server-caddy:test \
             caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
@@ -691,16 +693,14 @@ jobs:
           fi
           printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
       - name: Reject fixable high-severity image vulnerabilities
-        run: >-
-          docker run --rm
-          --volume /var/run/docker.sock:/var/run/docker.sock
-          aquasec/trivy@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969
-          image
-          --scanners vuln
-          --severity HIGH,CRITICAL
-          --ignore-unfixed
-          --exit-code 1
-          crab-server:test
+        run: |
+          for image in crab-server:test crab-server-caddy:test; do
+            docker run --rm \
+              --volume /var/run/docker.sock:/var/run/docker.sock \
+              aquasec/trivy@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969 \
+              image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
+              --exit-code 1 "$image"
+          done
       - name: Verify runtime contract
         run: |
           test "$(docker image inspect crab-server:test --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$(git rev-parse HEAD)"

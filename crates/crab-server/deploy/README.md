@@ -228,13 +228,21 @@ Colima startup, bucket creation, peer certificate initialization and the
 HTTP/mTLS remote-owner publication/recovery test. Full GA fleet measurements
 remain a separate gate.
 
-The dependency images are version- and digest-pinned. `RUSTFS_IMAGE`,
-`AWS_CLI_IMAGE`, and `CADDY_IMAGE` exist for controlled mirrors; keep them
-pinned when overriding. To use a prebuilt server image, set
-`CRAB_SERVER_IMAGE` to its manifest digest and add `--no-build` to `up`:
+The server image and both Compose proxies share the Dockerfile's `proxy` target.
+It builds Caddy 2.11.9 with `golang.org/x/net` 0.62.0 to fix
+[GO-2026-6860](https://pkg.go.dev/vuln/GO-2026-6860); the official Caddy image
+still contains 0.60.0. Remove this override once a stable Caddy includes the fix.
+Cloudflare reuses the same binary from its qualified server base.
+
+The dependency images are version- and digest-pinned. `RUSTFS_IMAGE` and
+`AWS_CLI_IMAGE` exist for controlled mirrors. `CADDY_IMAGE` selects a prebuilt
+image of the qualified `proxy` target. Keep overrides pinned. To use prebuilt
+images, set both `CRAB_SERVER_IMAGE` and `CADDY_IMAGE` to their manifest digests
+and add `--no-build` to `up`:
 
 ```sh
 CRAB_SERVER_IMAGE=ghcr.io/crabbuild/crab-server@sha256:qualified_digest_here \
+CADDY_IMAGE=your-registry/crab-server-caddy@sha256:qualified_proxy_digest_here \
   docker compose --file crates/crab-server/deploy/compose.yaml \
     up --detach --no-build --wait
 ```
