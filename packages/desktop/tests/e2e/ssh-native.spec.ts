@@ -140,8 +140,9 @@ test("packaged SSH reader drains cancelled staging admission and materializes ex
       await router.route(repo_id, "open_local", { repo_id, path: source });
       return { repo_id, channel, child: children[children.length - 1] };
     };
+    const sourceIndex = readFileSync(path.join(source, ".git/index"));
     const first = await connect("one"), second = await connect("two");
-    for (const index of [0, 1]) await expect.poll(() => existsSync(path.join(root, `index-${index}`))).toBe(true);
+    expect(readFileSync(path.join(source, ".git/index"))).toEqual(sourceIndex);
     expect(await router.route(first.repo_id, "read_text", { repo_id: first.repo_id, path: "unicode.txt" })).toMatchObject({ text, truncated: false });
     expect(await router.batchRpc(first.repo_id, [{ method: "ping", params: {} }, { method: "does_not_exist", params: {} }])).toMatchObject([{ result: { pong: expect.any(String) } }, { error: { code: -32601 } }]);
     // The live writer PID prevents stale-lock recovery from invalidating this

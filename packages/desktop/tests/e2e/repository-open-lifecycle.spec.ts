@@ -49,7 +49,7 @@ for (const terminal of ["cancel", "application close"] as const) test(`pending n
     await expect.poll(() => {
       const rows = execFileSync("ps", ["-axo", "pid=,ppid=,command="], { encoding: "utf8" }).split("\n").map(line => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line));
       const native = rows.find(row => row && Number(row[2]) === application!.process().pid && isNativeAgentCommand(row[3]));
-      const child = rows.find(row => row && native && row[2] === native[1] && row[3].includes("git --literal-pathspecs rev-parse"));
+      const child = rows.find(row => row && native && row[2] === native[1] && row[3].includes("--literal-pathspecs rev-parse"));
       childPid = child ? Number(child[1]) : undefined;
       return childPid;
     }).toBeDefined();

@@ -62,7 +62,7 @@ for (const target of ["text preview", "Markdown editor", "pending text", "pendin
     } else {
       await navigation.getByRole("button", { name: "Git", exact: true }).click();
       await page.getByRole("navigation", { name: "Git", exact: true }).getByRole("button", { name: "Changes", exact: true }).click();
-      await page.getByRole("radio", { name: "List", exact: true }).click();
+      await page.getByLabel("List view", { exact: true }).and(page.locator(":visible")).click();
       if (target === "Changes file") {
         await page.getByRole("listbox", { name: "Changed files", exact: true }).getByRole("option").filter({ has: page.getByText(file, { exact: true }) }).hover();
         await page.getByRole("button", { name: `Open file ${file}`, exact: true }).click();

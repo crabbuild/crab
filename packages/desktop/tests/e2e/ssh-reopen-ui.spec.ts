@@ -157,7 +157,7 @@ for (const localNativeAvailable of [true, false]) test(`saved SSH repositories s
       }
       const owned = rows.filter(row => row && descendants.has(Number(row[1])));
       writeFileSync(test.info().outputPath("ssh-blocked-process-tree.json"), JSON.stringify(owned));
-      const child = owned.find(row => row && row[3].includes("git --literal-pathspecs rev-parse"));
+      const child = owned.find(row => row && row[3].includes("--literal-pathspecs rev-parse"));
       if (!child) throw new Error("Healthy repository did not recover while its sibling's Git read was blocked");
       const pid = Number(child[1]);
       await page.screenshot({ path: test.info().outputPath("ssh-healthy-sibling-during-blocked-open.png") });
@@ -183,7 +183,7 @@ for (const localNativeAvailable of [true, false]) test(`saved SSH repositories s
 
     fixture.setAccepting(false);
     page = await launch();
-    const failure = page.getByRole("alert").filter({ hasText: "Could not reopen repository" });
+    const failure = page.getByRole("listitem").filter({ hasText: "Could not reopen repository" });
     await expect(failure).toBeVisible();
     expect(await page.evaluate(() => JSON.parse(localStorage.getItem("crab.recentRepos.v1") ?? "[]").map((value: { path: string }) => value.path))).toEqual(expect.arrayContaining([firstId, secondId]));
     expect(await page.evaluate(() => localStorage.getItem("crab.activeRepoPath.v1"))).toBe(firstId);
