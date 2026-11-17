@@ -607,7 +607,7 @@ function FormField({
   children: React.ReactNode;
 }) {
   const fieldId = useId();
-  const control = isValidElement<{ id?: string }>(children) && typeof children.type === "string" && ["input", "select", "textarea"].includes(children.type) ? children : null;
+  const control = isValidElement<{ id?: string }>(children) && children.type === Input ? children : null;
   const controlId = control?.props.id ?? fieldId;
   return (
     <div role={control ? undefined : "group"} aria-labelledby={control ? undefined : `${fieldId}-label`}>
