@@ -40,7 +40,8 @@ jobs:
   runtime:
     name: Native runtime (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 180
+    # Intel macOS needs time for both cold release and native test builds.
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
