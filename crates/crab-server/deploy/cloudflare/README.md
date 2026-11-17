@@ -35,7 +35,8 @@ Local container disk is disposable: `durability = "object"` is required.
 
 Use a Linux amd64 server image built from the intended source and verified by
 the container workflow. Load and tag it `crab-server:cloudflare-base` locally.
-The Dockerfile adds Caddy to that image; it does not compile Rust.
+The Dockerfile reuses the qualified Caddy binary from that image and adds the
+Cloudflare configuration; it does not compile Rust or replace the proxy.
 
 ```sh
 cd crates/crab-server/deploy/cloudflare

@@ -21,7 +21,13 @@ COPY packages/desktop/agent/ packages/desktop/agent/
 COPY --from=frontend /build/packages/ui/dist/ packages/ui/dist/
 RUN cargo build --release --locked -p crab-server
 
+FROM caddy:2.11.9-builder-alpine@sha256:646fee578e680989ca5c7fd1ce6f1de574d19fd71ef2221810cc0510a9f40c86 AS proxy-builder
+
+# Remove the dependency override when a stable Caddy includes the GO-2026-6860 fix.
+RUN xcaddy build v2.11.9 --replace golang.org/x/net=golang.org/x/net@v0.62.0 --output /usr/bin/caddy
+
 FROM caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0 AS proxy
+COPY --from=proxy-builder /usr/bin/caddy /usr/bin/caddy
 
 FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
 
