@@ -5,7 +5,7 @@ integration surfaces should be recorded here before release.
 
 ## Unreleased
 
-## 2.0.0-alpha.2 - 2026-11-16
+## 2.0.0-alpha.2 - 2026-11-18
 
 The second Crab v2 alpha includes the changes since `v2.0.0-alpha.1`.
 Download the platform CLI archive or desktop installer from the GitHub
