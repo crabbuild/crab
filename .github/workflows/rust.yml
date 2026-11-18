@@ -195,9 +195,10 @@ jobs:
           # Desktop worktree integration tests invoke the real CLI. Cargo's
           # binary test harness is not the executable required by that contract.
           cargo build -p crab --locked
-          # Keep failure details visible if a runner stops before an executable
-          # finishes and libtest releases its captured diagnostics.
-          cargo test --workspace --locked --no-fail-fast -- --nocapture
+          # Bound independent VFS fixtures to hosted memory; each test retains
+          # its concurrent workers. Stream assertions before runner termination
+          # and report resources for the complete workspace suite.
+          /usr/bin/time -v cargo test --workspace --locked --no-fail-fast -- --nocapture --test-threads=2
 
       - name: Check managed OpenAPI contract
         run: cargo run -p crab-auth --example generate_managed_openapi --locked -- --check
