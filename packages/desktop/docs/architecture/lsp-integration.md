@@ -39,8 +39,13 @@ lightweight IDE experience within the desktop client.
 The LSP manager discovers available language servers through:
 
 1. **Bundled servers** — `typescript-language-server` ships with the app
-2. **PATH scanning** — looks for known server binaries in the user's PATH
-3. **Configuration** — user-specified servers in settings
+2. **Downloaded servers** — binaries installed under `~/.crab/lsp/`
+3. **PATH scanning** — looks for known server binaries in the user's PATH
+
+Discovery shares an asynchronous scan across callers. Version probes retain
+their five-second timeout without blocking Electron's main process or editor
+controls. App shutdown aborts and joins active probes; a language stopped during
+discovery cannot start when that pending scan completes.
 
 ### Discovered Server Interface
 
@@ -48,8 +53,9 @@ The LSP manager discovers available language servers through:
 interface DiscoveredServer {
   language: string;       // e.g., "typescript", "rust", "python"
   command: string;        // e.g., "typescript-language-server"
-  args: string[];         // e.g., ["--stdio"]
-  available: boolean;     // Whether the binary was found
+  path: string;           // Resolved binary or bundled entrypoint
+  version?: string;      // First output line of a successful version probe
+  source?: "bundled" | "installed" | "system";
 }
 ```
 
