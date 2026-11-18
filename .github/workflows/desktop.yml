@@ -428,7 +428,7 @@ jobs:
             packages/desktop/release/rc*.yml
           if-no-files-found: error
       - name: Broad desktop regression suite
-        run: CRAB_TEST_JUPYTER_PYTHON="$(python -c 'import sys; print(sys.executable)')" npm test -- --maxWorkers 2 --minWorkers 1
+        run: CRAB_TEST_JUPYTER_PYTHON="$(python -c 'import sys; print(sys.executable)')" npm test -- --maxWorkers 2
       - name: Retain packaged app failure context
         if: failure()
         uses: actions/upload-artifact@v4
