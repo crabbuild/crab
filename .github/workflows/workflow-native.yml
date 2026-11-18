@@ -5,14 +5,13 @@ permissions:
   contents: read
   actions: read
 jobs:
-  source-readiness:
-    name: macOS workflow source readiness diagnosis
-    runs-on: macos-15
-    timeout-minutes: 25
+  windows-query:
+    name: Windows captured query fixture diagnosis
+    runs-on: windows-2022
+    timeout-minutes: 30
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: false
       E2E_SMOKE: 1
-      PLAYWRIGHT_JSON_OUTPUT_NAME: workflow-report.json
     defaults:
       run:
         shell: bash
@@ -20,79 +19,51 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 59eb8b383a37b17c5a2ae2679c468b976f5d6b35
+          ref: 8bbceef61a0772b880b5c9b4f80aea954db37d31
       - uses: actions/setup-node@v4
         with:
           node-version-file: packages/desktop/.nvmrc
-      - name: Prepare isolated fixture target
+      - name: Prepare isolated target
         run: |
-          mkdir -p "$RUNNER_TEMP/crab-source-readiness"
-          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crab-source-readiness" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/crab-query-fixture"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crab-query-fixture" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@v4
         with:
-          name: Crab-native-mac-arm64
-          run-id: 44196737874
+          name: Crab-native-win-x64
+          run-id: 44249218814
           github-token: ${{ github.token }}
-          path: packages/desktop/resources/native/mac-arm64
-      - name: Restore producer permissions
-        run: chmod +x resources/native/mac-arm64/{crab,crab-nfs-mount,crab-desktop-agent,git-remote-crab}
-      - name: Install renderer and Electron dependencies
-        run: npm ci
-      - name: Build the same renderer and packaged application
+          path: packages/desktop/resources/native/win-x64
+      - run: npm ci
+      - name: Build the same Windows application
         run: |
           npm run build:renderer
           npm run build:electron
-          node scripts/package.mjs --dir --arm64
-      - name: Instrument request and view boundaries
-        run: |
-          cat > "$RUNNER_TEMP/workflow-nav.cjs" <<'JS'
-          const fs=require('node:fs');
-          const req=require('node:module').createRequire(process.cwd()+'/package.json');
-          const electron=req('playwright-core')._electron, launch=electron.launch.bind(electron);
-          const file=process.env.CARGO_TARGET_DIR+'/workflow-navigation-events.jsonl';
-          electron.launch=async function(options){
-           const application=await launch(options);
-           await application.evaluate(({app},file)=>{
-            const fs=process.getBuiltinModule('node:fs');
-            const req=process.getBuiltinModule('node:module').createRequire(app.getAppPath()+'/package.json');
-            const prototype=req(app.getAppPath()+'/dist-electron/agent.cjs').Agent.prototype;
-            const request=prototype.request;
-            prototype.request=async function(method,params,...args){
-             const time=Date.now(); const log=(state)=>fs.appendFileSync(file,JSON.stringify({time:Date.now(),event:'[DEBUG-wf-nav] rpc',state,method,path:params?.path,duration:Date.now()-time})+'\n');
-             log('start');try{const result=await request.call(this,method,params,...args);log('done');return result;}catch(error){log('error');throw error;}
-            };
-           },file);
-           if(process.env.WF_UNTHROTTLED==='1')await application.evaluate(({BrowserWindow})=>{for(const window of BrowserWindow.getAllWindows())window.webContents.setBackgroundThrottling(false);});
-           const page=await application.firstWindow();
-           page.on('console',msg=>{if(msg.text().startsWith('[DEBUG-wf-nav]'))fs.appendFileSync(file,JSON.stringify({time:Date.now(),event:msg.text()})+'\n');});
-           page.on('pageerror',error=>fs.appendFileSync(file,JSON.stringify({time:Date.now(),event:'[DEBUG-wf-nav] pageerror',error:error.message})+'\n'));
-           await page.evaluate(()=>{
-            console.log('[DEBUG-wf-nav] visibility '+JSON.stringify({time:Date.now(),visibility:document.visibilityState,focus:document.hasFocus()}));
-            document.addEventListener('visibilitychange',()=>console.log('[DEBUG-wf-nav] visibility '+JSON.stringify({time:Date.now(),visibility:document.visibilityState,focus:document.hasFocus()})));
-            window.addEventListener('crab:active-view-changed',e=>console.log('[DEBUG-wf-nav] view '+JSON.stringify(e.detail)));
-            document.addEventListener('click',e=>{if(e.target.closest('button')?.textContent?.includes('Edit YAML')){console.log('[DEBUG-wf-nav] Edit YAML click '+JSON.stringify({time:Date.now(),visibility:document.visibilityState,focus:document.hasFocus()}));const clicked=Date.now();requestAnimationFrame(()=>console.log('[DEBUG-wf-nav] frame '+JSON.stringify({time:Date.now(),delay:Date.now()-clicked})));let n=0;const timer=setInterval(()=>{console.log('[DEBUG-wf-nav] state '+JSON.stringify({time:Date.now(),visibility:document.visibilityState,files:document.querySelector('nav[aria-label="Primary"] button[aria-label="Files"]')?.getAttribute('aria-pressed'),monaco:document.querySelectorAll('.monaco-editor .view-lines').length,status:[...document.querySelectorAll('[role="status"]')].map(e=>e.textContent),alert:[...document.querySelectorAll('[role="alert"]')].map(e=>e.textContent)}));if(++n===30)clearInterval(timer);},200);}},true);
-           });
-           return application;
-          };
-          JS
-      - name: Control with normal background throttling
+          node scripts/package.mjs --dir --win
+      - name: Reproduce unchanged query fixture
         continue-on-error: true
         env:
-          PLAYWRIGHT_JSON_OUTPUT_NAME: workflow-control.json
-        run: NODE_OPTIONS="--require=$RUNNER_TEMP/workflow-nav.cjs" npx playwright test tests/e2e/workflow-complex.spec.ts --project=e2e-smoke --workers=1 --grep "complex workflows preserve templates" --repeat-each=3 --trace retain-on-failure --reporter=line,json --output test-results/control
-      - name: Repeat with Electron automation background throttling disabled
+          PLAYWRIGHT_JSON_OUTPUT_NAME: query-control.json
+        run: npx playwright test tests/e2e/file-query.spec.ts --project=e2e-smoke --workers=1 --reporter=line,json --output test-results/control
+      - name: Apply candidate fixture exclusion in diagnostic checkout
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('tests/e2e/file-query.spec.ts')
+          s=p.read_text()
+          old='"/live.sqlite-wal\\n/live.sqlite-shm\\n"'
+          assert s.count(old)==1
+          p.write_text(s.replace(old,'".crab/\\n/live.sqlite-wal\\n/live.sqlite-shm\\n"'))
+          PY
+      - name: Repeat complete query assertions after exclusion
         env:
-          WF_UNTHROTTLED: "1"
-          PLAYWRIGHT_JSON_OUTPUT_NAME: workflow-unthrottled.json
-        run: NODE_OPTIONS="--require=$RUNNER_TEMP/workflow-nav.cjs" npx playwright test tests/e2e/workflow-complex.spec.ts --project=e2e-smoke --workers=1 --grep "complex workflows preserve templates" --repeat-each=3 --trace retain-on-failure --reporter=line,json --output test-results/unthrottled
+          PLAYWRIGHT_JSON_OUTPUT_NAME: query-candidate.json
+        run: npx playwright test tests/e2e/file-query.spec.ts --project=e2e-smoke --workers=1 --repeat-each=3 --reporter=line,json --output test-results/candidate
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: alpha2-workflow-throttling-diagnosis
+          name: alpha2-windows-query-fixture-diagnosis
           path: |
-            ${{ env.CARGO_TARGET_DIR }}/workflow-navigation-events.jsonl
-            packages/desktop/workflow-*.json
-            packages/desktop/test-results/**/trace.zip
+            packages/desktop/query-*.json
             packages/desktop/test-results/**/error-context.md
             packages/desktop/test-results/**/*.png
           retention-days: 7
