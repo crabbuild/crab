@@ -5,14 +5,18 @@ permissions:
   contents: read
   actions: read
 jobs:
-  media-readiness:
-    name: Linux retained media readiness diagnosis
-    runs-on: ubuntu-24.04
-    timeout-minutes: 25
-    env:
-      CSC_IDENTITY_AUTO_DISCOVERY: false
-      E2E_SMOKE: 1
-      PLAYWRIGHT_JSON_OUTPUT_NAME: media-report.json
+  broad:
+    name: Desktop broad suite (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15-intel
+            target: mac-x64
+          - os: windows-2022
+            target: win-x64
     defaults:
       run:
         shell: bash
@@ -24,60 +28,364 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version-file: packages/desktop/.nvmrc
-      - name: Prepare Linux and isolated target
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Set private native fixture directory
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-3-0 libnss3 libasound2t64 libgbm1 xvfb
-          mkdir -p "$RUNNER_TEMP/crab-media-readiness"
-          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crab-media-readiness" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/crab-broad-suite"
+          echo "CARGO_TARGET_DIR=$(node -p 'process.env.RUNNER_TEMP.replaceAll(String.fromCharCode(92),"/")')/crab-broad-suite" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@v4
         with:
-          name: Crab-native-linux-x64
+          name: Crab-native-${{ matrix.target }}
           run-id: 44249218814
           github-token: ${{ github.token }}
-          path: packages/desktop/resources/native/linux-x64
-      - name: Restore producer permissions
-        run: chmod +x resources/native/linux-x64/{crab,crab-nfs-mount,crab-desktop-agent,git-remote-crab}
-      - run: npm ci
-      - name: Build and package exact source
-        run: |
-          npm run build:renderer
-          npm run build:electron
-          node scripts/package.mjs --dir --linux --x64
-      - name: Observe media selection and browser state
-        run: |
-          cat > "$RUNNER_TEMP/media-state.cjs" <<'JS'
-          const fs=require('node:fs');
-          const req=require('node:module').createRequire(process.cwd()+'/package.json');
-          const electron=req('playwright-core')._electron, launch=electron.launch.bind(electron);
-          const file=process.env.CARGO_TARGET_DIR+'/media-events.jsonl';
-          electron.launch=async function(options){
-            const application=await launch(options);
-            const page=await application.firstWindow();
-            page.on('console',msg=>{if(msg.text().startsWith('[DEBUG-media]'))fs.appendFileSync(file,msg.text().slice(13)+'\n')});
-            await page.evaluate(()=>{
-              const report=(type,node)=>console.log('[DEBUG-media]'+JSON.stringify({time:Date.now(),type,tag:node.tagName,source:node.getAttribute('src'),current:node.currentSrc,connected:node.isConnected,duration:node.duration,ready:node.readyState,title:document.querySelector('section[aria-label$="preview"] p')?.textContent}));
-              for(const type of ['loadedmetadata','durationchange','emptied','loadstart','error','seeked','pause','volumechange']){
-                document.addEventListener(type,event=>{if(event.target instanceof HTMLMediaElement)report(type,event.target)},true);
-              }
-              const time=Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype,'currentTime');
-              Object.defineProperty(HTMLMediaElement.prototype,'currentTime',{...time,set(value){report('seek '+String(value),this);return time.set.call(this,value)}});
-              document.addEventListener('click',event=>{const row=event.composedPath().find(node=>node instanceof HTMLElement&&node.dataset.itemPath);if(row)console.log('[DEBUG-media]'+JSON.stringify({time:Date.now(),type:'click',file:row.dataset.itemPath}));},true);
-              const descriptor=Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype,'duration');
-              Object.defineProperty(HTMLMediaElement.prototype,'duration',{...descriptor,get(){const value=descriptor.get.call(this); console.log('[DEBUG-media]'+JSON.stringify({time:Date.now(),type:'duration-read',duration:String(value),source:this.getAttribute('src'),connected:this.isConnected,title:document.querySelector('section[aria-label$="preview"] p')?.textContent}));return value}});
-            });
-            return application;
-          };
-          JS
-      - name: Repeat unchanged retained range and integrity scenario
-        run: xvfb-run -a env NODE_OPTIONS="--require=$RUNNER_TEMP/media-state.cjs" npx playwright test tests/e2e/media.spec.ts --project=e2e-smoke --workers=1 --repeat-each=3 --trace retain-on-failure --reporter=line,json
-      - uses: actions/upload-artifact@v4
-        if: always()
+          path: packages/desktop/resources/native/${{ matrix.target }}
+      - uses: actions/download-artifact@v4
+        if: runner.os != 'Windows'
         with:
-          name: alpha2-linux-media-diagnosis
-          path: |
-            ${{ env.CARGO_TARGET_DIR }}/media-events.jsonl
-            packages/desktop/media-report.json
-            packages/desktop/test-results/**/trace.zip
-            packages/desktop/test-results/**/error-context.md
-          retention-days: 7
+          name: Crab-remote-runtime-${{ runner.os }}-${{ runner.arch }}
+          run-id: 44249218814
+          github-token: ${{ github.token }}
+          path: packages/desktop/release/remote-runtime/
+      - name: Restore producer permissions and terminal dependency
+        if: runner.os != 'Windows'
+        run: |
+          chmod +x resources/native/${{ matrix.target }}/{crab,crab-nfs-mount,crab-desktop-agent,git-remote-crab}
+          command -v tmux || brew install tmux
+      - run: npm ci
+      - name: Apply production correction and its new regression
+        working-directory: .
+        run: |
+          git apply <<'PATCH'
+          diff --git a/packages/desktop/electron/lsp-discovery.ts b/packages/desktop/electron/lsp-discovery.ts
+          index 1086080f2d4..7cc98a8264b 100644
+          --- a/packages/desktop/electron/lsp-discovery.ts
+          +++ b/packages/desktop/electron/lsp-discovery.ts
+          @@ -1,5 +1,5 @@
+           import { app } from "electron";
+          -import { execSync } from "node:child_process";
+          +import { execFile } from "node:child_process";
+           import * as fs from "node:fs";
+           import * as path from "node:path";
+           import * as os from "node:os";
+          @@ -143,24 +143,29 @@ function resolveCommand(command: string, searchDirs: string[]): string | null {
+           /**
+            * Try to get the version string from a server binary.
+            */
+          -function getVersion(binaryPath: string, versionFlag?: string): string | undefined {
+          -  if (!versionFlag) return undefined;
+          -  try {
+          -    const output = execSync(`"${binaryPath}" ${versionFlag}`, {
+          -      encoding: "utf8",
+          -      timeout: 5000,
+          -      stdio: ["pipe", "pipe", "pipe"],
+          -    }).trim();
+          -    const firstLine = output.split("\n")[0].trim();
+          -    return firstLine || undefined;
+          -  } catch {
+          -    return undefined;
+          -  }
+          +function getVersion(binaryPath: string, versionFlag: string | undefined, signal: AbortSignal): Promise<string | undefined> {
+          +  if (!versionFlag) return Promise.resolve(undefined);
+          +  return new Promise((resolve, reject) => {
+          +    let version: string | undefined;
+          +    const child = execFile(binaryPath, [versionFlag], { encoding: "utf8", timeout: 5000, windowsHide: true, signal }, (error, stdout) => {
+          +      if (!error) version = stdout.trim().split("\n")[0].trim() || undefined;
+          +    });
+          +    // The abort callback can precede process exit. Own the pipes and child
+          +    // until close so application shutdown cannot leave a version probe behind.
+          +    child.once("close", () => signal.aborted ? reject(signal.reason) : resolve(version));
+          +  });
+           }
+           
+           // ── Cache ───────────────────────────────────────────────────────────
+           
+          -let cachedResults: DiscoveredServer[] | null = null;
+          +interface Discovery {
+          +  controller: AbortController;
+          +  result: Promise<DiscoveredServer[]>;
+          +}
+          +
+          +let cached: Discovery | null = null;
+          +let stopping = false;
+          +const active = new Set<Discovery>();
+           
+           /**
+            * Discover available language servers.
+          @@ -172,14 +177,24 @@ let cachedResults: DiscoveredServer[] | null = null;
+            *
+            * Results are cached in memory; call `refresh()` to re-scan.
+            */
+          -export function discoverServers(): DiscoveredServer[] {
+          -  if (cachedResults !== null) return cachedResults;
+          +export function discoverServers(): Promise<DiscoveredServer[]> {
+          +  if (stopping) return Promise.reject(new Error("Language server discovery is stopping"));
+          +  if (cached) return cached.result;
+          +  const controller = new AbortController();
+          +  const discovery = { controller, result: scanServers(controller.signal) };
+          +  cached = discovery;
+          +  active.add(discovery);
+          +  void discovery.result.then(() => active.delete(discovery), () => active.delete(discovery));
+          +  return discovery.result;
+          +}
+           
+          +async function scanServers(signal: AbortSignal): Promise<DiscoveredServer[]> {
+             const searchDirs = buildSearchPath();
+             const results: DiscoveredServer[] = [];
+             const seenLanguages = new Set<string>();
+           
+             for (const server of KNOWN_SERVERS) {
+          +    signal.throwIfAborted();
+               if (seenLanguages.has(server.language)) continue;
+           
+               // 1. Bundled (typescript only for now)
+          @@ -205,7 +220,7 @@ export function discoverServers(): DiscoveredServer[] {
+                   language: server.language,
+                   command: server.commands[0],
+                   path: installedPath,
+          -        version: getVersion(installedPath, server.versionFlag),
+          +        version: await getVersion(installedPath, server.versionFlag, signal),
+                   source: "installed",
+                 });
+                 seenLanguages.add(server.language);
+          @@ -220,7 +235,7 @@ export function discoverServers(): DiscoveredServer[] {
+                     language: server.language,
+                     command,
+                     path: resolved,
+          -          version: getVersion(resolved, server.versionFlag),
+          +          version: await getVersion(resolved, server.versionFlag, signal),
+                     source: "system",
+                   });
+                   seenLanguages.add(server.language);
+          @@ -229,10 +244,19 @@ export function discoverServers(): DiscoveredServer[] {
+               }
+             }
+           
+          -  cachedResults = results;
+          +  signal.throwIfAborted();
+             return results;
+           }
+           
+          +/** Cancel and join discovery children before the application exits. */
+          +export async function stopDiscovery(): Promise<void> {
+          +  stopping = true;
+          +  const scans = [...active];
+          +  for (const scan of scans) scan.controller.abort(new Error("Language server discovery stopped"));
+          +  await Promise.allSettled(scans.map(scan => scan.result));
+          +  cached = null;
+          +}
+          +
+           /**
+            * Check whether a language server has been downloaded to ~/.crab/lsp/.
+            * Synchronous sibling of `lsp-installer.findInstalledBinary`.
+          @@ -259,8 +283,8 @@ function findInstalledBinary(language: string): string | null {
+           /**
+            * Clear the discovery cache and re-scan.
+            */
+          -export function refresh(): DiscoveredServer[] {
+          -  cachedResults = null;
+          +export function refresh(): Promise<DiscoveredServer[]> {
+          +  cached = null;
+             return discoverServers();
+           }
+           
+          diff --git a/packages/desktop/electron/lsp-manager.ts b/packages/desktop/electron/lsp-manager.ts
+          index c39929ef6a4..4de53b84fcb 100644
+          --- a/packages/desktop/electron/lsp-manager.ts
+          +++ b/packages/desktop/electron/lsp-manager.ts
+          @@ -1,6 +1,6 @@
+           import { EventEmitter } from "node:events";
+           import { LspServer, LspServerConfig, ServerCapabilities } from "./lsp-server";
+          -import { discoverServers, refresh as refreshDiscovery, resolveSpawnSpec, DiscoveredServer } from "./lsp-discovery";
+          +import { discoverServers, refresh as refreshDiscovery, resolveSpawnSpec, stopDiscovery, DiscoveredServer } from "./lsp-discovery";
+           import { lspInstaller } from "./lsp-installer";
+           
+           /**
+          @@ -25,6 +25,8 @@ export class LspManager extends EventEmitter {
+             private servers = new Map<string, LspServer>();
+             private serverConfigs = new Map<string, LspServerConfig>();
+             private crashTimestamps = new Map<string, number[]>();
+          +  private stopped = false;
+          +  private revisions = new Map<string, number>();
+             private static readonly CRASH_WINDOW_MS = 30_000;
+             private static readonly MAX_AUTO_RESTARTS = 1;
+           
+          @@ -37,6 +39,8 @@ export class LspManager extends EventEmitter {
+              * Checks discovery cache, reads config overrides, spawns LspServer.
+              */
+             async start(language: string, rootPath: string): Promise<ServerCapabilities> {
+          +    if (this.stopped) throw new Error("Language server manager is stopping");
+          +    const revision = this.revisions.get(language);
+               // If already running, return existing capabilities
+               const existing = this.servers.get(language);
+               if (existing && existing.isRunning()) {
+          @@ -45,7 +49,10 @@ export class LspManager extends EventEmitter {
+               }
+           
+               // Find the server config
+          -    const config = this.resolveConfig(language);
+          +    const config = await this.resolveConfig(language);
+          +    // Stop may arrive while a version probe is running. Discovery completing
+          +    // must never turn that cancelled request into a newly spawned server.
+          +    if (this.stopped || this.revisions.get(language) !== revision) throw new Error("Language server startup was stopped");
+               if (!config) {
+                 throw new Error(`No language server found for "${language}"`);
+               }
+          @@ -72,6 +79,10 @@ export class LspManager extends EventEmitter {
+           
+               // Start the server
+               const capabilities = await server.start();
+          +    if (this.stopped || this.revisions.get(language) !== revision) {
+          +      await server.shutdown();
+          +      throw new Error("Language server startup was stopped");
+          +    }
+               this.servers.set(language, server);
+               this.serverConfigs.set(language, config);
+               this.emitStatus(language, "running", config.command);
+          @@ -95,6 +106,8 @@ export class LspManager extends EventEmitter {
+              * Graceful shutdown of all running servers.
+              */
+             async stopAll(): Promise<void> {
+          +    this.stopped = true;
+          +    await stopDiscovery();
+               const shutdowns: Promise<void>[] = [];
+               for (const [language, server] of this.servers) {
+                 shutdowns.push(
+          @@ -113,6 +126,7 @@ export class LspManager extends EventEmitter {
+              * Stop a specific language server.
+              */
+             async stop(language: string): Promise<void> {
+          +    this.revisions.set(language, (this.revisions.get(language) ?? 0) + 1);
+               const server = this.servers.get(language);
+               if (!server) return;
+               await server.shutdown();
+          @@ -123,8 +137,8 @@ export class LspManager extends EventEmitter {
+             /**
+              * Return status of all configured servers.
+              */
+          -  status(): LspServerStatus[] {
+          -    const discovered = discoverServers();
+          +  async status(): Promise<LspServerStatus[]> {
+          +    const discovered = await discoverServers();
+               const statuses: LspServerStatus[] = [];
+           
+               // Include running servers
+          @@ -154,7 +168,7 @@ export class LspManager extends EventEmitter {
+             /**
+              * Refresh the discovery cache.
+              */
+          -  refreshDiscovery(): DiscoveredServer[] {
+          +  refreshDiscovery(): Promise<DiscoveredServer[]> {
+               return refreshDiscovery();
+             }
+           
+          @@ -164,8 +178,8 @@ export class LspManager extends EventEmitter {
+              * Resolve the config for a language: check user overrides, then
+              * fall back to discovery.
+              */
+          -  private resolveConfig(language: string): LspServerConfig | null {
+          -    const discovered = discoverServers();
+          +  private async resolveConfig(language: string): Promise<LspServerConfig | null> {
+          +    const discovered = await discoverServers();
+               const match = discovered.find((s) => s.language === language);
+               if (!match) return null;
+           
+          @@ -190,8 +204,7 @@ export class LspManager extends EventEmitter {
+             /** Install a language server on demand and refresh discovery. */
+             async installLanguage(language: string): Promise<DiscoveredServer> {
+               await lspInstaller.install(language);
+          -    refreshDiscovery();
+          -    const discovered = discoverServers();
+          +    const discovered = await refreshDiscovery();
+               const match = discovered.find((s) => s.language === language);
+               if (!match) {
+                 throw new Error(`Installation succeeded but discovery couldn't find "${language}"`);
+          diff --git a/packages/desktop/tests/lsp-discovery.spec.ts b/packages/desktop/tests/lsp-discovery.spec.ts
+          new file mode 100644
+          index 00000000000..495c9a253c4
+          --- /dev/null
+          +++ b/packages/desktop/tests/lsp-discovery.spec.ts
+          @@ -0,0 +1,75 @@
+          +import { expect, it, vi } from "vitest";
+          +import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+          +import { tmpdir } from "node:os";
+          +import path from "node:path";
+          +
+          +vi.mock("electron", () => ({ app: { getAppPath: () => process.cwd() } }));
+          +
+          +function fixture() {
+          +  const root = mkdtempSync(path.join(tmpdir(), "crab-lsp-discovery-"));
+          +  const bin = path.join(root, "bin with spaces");
+          +  const release = path.join(root, "release");
+          +  const entry = path.join(root, "version.cjs");
+          +  mkdirSync(bin);
+          +  const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
+          +  writeFileSync(entry, `
+          +    const fs = require('node:fs');
+          +    if (!process.argv.includes('--version')) {
+          +      fs.writeFileSync(${JSON.stringify(path.join(root, "server-started"))}, 'started');
+          +      process.exit();
+          +    }
+          +    fs.writeFileSync(${JSON.stringify(path.join(root, "probe.pid"))}, String(process.pid));
+          +    const timer = setInterval(() => {
+          +      if (!fs.existsSync(${JSON.stringify(release)})) return;
+          +      clearInterval(timer);
+          +      process.stdout.write('fixture 1.0\\n');
+          +    }, 10);
+          +    setTimeout(() => process.exit(), 6_000).unref();
+          +  `);
+          +  writeFileSync(path.join(bin, "rust-analyzer"), `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec ${quote(process.execPath)} ${quote(entry)} "$@"\n`, { mode: 0o700 });
+          +  vi.stubEnv("PATH", bin + path.delimiter + (process.env.PATH ?? ""));
+          +  vi.stubEnv("HOME", root);
+          +  vi.resetModules();
+          +  return { root, release, cleanup: () => { vi.unstubAllEnvs(); rmSync(root, { recursive: true, force: true }); } };
+          +}
+          +
+          +it.skipIf(process.platform === "win32")("keeps the event loop available while a server reports its version", async () => {
+          +  const { release, cleanup } = fixture();
+          +  let heartbeat: ReturnType<typeof setTimeout> | undefined;
+          +  const { discoverServers, stopDiscovery } = await import("../electron/lsp-discovery");
+          +  try {
+          +    heartbeat = setTimeout(() => writeFileSync(release, "ready"), 50);
+          +    const servers = await discoverServers();
+          +    expect(servers.find(server => server.language === "rust")?.version).toBe("fixture 1.0");
+          +  } finally {
+          +    clearTimeout(heartbeat);
+          +    if (!existsSync(release)) writeFileSync(release, "ready");
+          +    await stopDiscovery();
+          +    cleanup();
+          +  }
+          +}, 20_000);
+          +
+          +it.skipIf(process.platform === "win32").each(["language", "all"])("stopping %s during discovery prevents a late server and drains the version child", async scope => {
+          +  const { root, release, cleanup } = fixture();
+          +  const { LspManager } = await import("../electron/lsp-manager");
+          +  const manager = new LspManager();
+          +  const started = manager.start("rust", root).then(() => false, () => true);
+          +  try {
+          +    await expect.poll(() => existsSync(path.join(root, "probe.pid"))).toBe(true);
+          +    const pid = Number(readFileSync(path.join(root, "probe.pid"), "utf8"));
+          +    if (scope === "all") await manager.stopAll();
+          +    else await manager.stop("rust");
+          +    writeFileSync(release, "ready");
+          +    const cancelled = await started;
+          +    let alive = true;
+          +    try { process.kill(pid, 0); } catch (error) {
+          +      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+          +      alive = false;
+          +    }
+          +    expect({ cancelled, alive, spawned: existsSync(path.join(root, "server-started")) }).toEqual({ cancelled: true, alive: false, spawned: false });
+          +  } finally {
+          +    await manager.stopAll();
+          +    await started;
+          +    cleanup();
+          +  }
+          +}, 20_000);
+          PATCH
+      - name: Build application source
+        run: npm run build:renderer && npm run build:electron
+      - name: Install same kernel qualification runtime
+        run: python -m pip install jupyter_client==8.6.3 ipykernel==6.29.5 jupyter_server==2.17.0
+      - name: Run complete broad suite with supported worker argument
+        run: CRAB_TEST_JUPYTER_PYTHON="$(python -c 'import sys; print(sys.executable)')" npm test -- --maxWorkers 2
