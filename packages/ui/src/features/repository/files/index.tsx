@@ -14,7 +14,7 @@ import {
   type CodeSymbol,
 } from "@/features/repository/files/symbols";
 import { CodeSymbolsPanel } from "@/features/repository/files/symbols/panel";
-import { SourceWorkspace } from "./symbols/workspace";
+import { FileWorkspace } from "./workspace";
 import {
   endpoint,
   navigate,
@@ -44,6 +44,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type ReactNode,
 } from "react";
 
 const FilePreview = lazy(() =>
@@ -57,6 +58,8 @@ type Props = {
   blameView?: boolean;
   path: string;
   name: string;
+  navigation: ReactNode;
+  header: ReactNode;
   theme: "light" | "dark";
   codeThemes: CodeThemes;
   write?: { branch: string };
@@ -80,6 +83,8 @@ export function FileView({
   blameView = false,
   path,
   name,
+  navigation,
+  header,
   theme,
   codeThemes,
   write,
@@ -245,7 +250,22 @@ export function FileView({
     (state.data?.text === null
       ? { kind: "generic", label: "File inspector" }
       : null);
-  return (
+  const symbols =
+    view === "code" &&
+    symbolsOpen &&
+    symbolLanguage &&
+    state.data?.text != null ? (
+      <CodeSymbolsPanel
+        state={symbolState}
+        active={activeSymbol}
+        file={file}
+        theme={codeThemes[theme]}
+        onActivate={navigateToSymbol}
+        onClearActive={() => setActiveSymbol(null)}
+        onClose={() => setSymbolsOpen(false)}
+      />
+    ) : null;
+  const contents = (
     <Result state={state}>
       {(content) => (
         <section className="panel file-panel" aria-label={`File ${name}`}>
@@ -544,33 +564,25 @@ export function FileView({
               </div>
             ) : null
           ) : (
-            <SourceWorkspace
-              symbols={
-                symbolsOpen &&
-                symbolLanguage && (
-                  <CodeSymbolsPanel
-                    state={symbolState}
-                    active={activeSymbol}
-                    file={file}
-                    theme={codeThemes[theme]}
-                    onActivate={navigateToSymbol}
-                    onClearActive={() => setActiveSymbol(null)}
-                    onClose={() => setSymbolsOpen(false)}
-                  />
-                )
-              }
-            >
-              <div className="file-source-code">
-                <File
-                  key={`${theme}:${codeThemes.light}:${codeThemes.dark}:${symbolLanguage ?? "plain"}`}
-                  file={file}
-                  options={options}
-                />
-              </div>
-            </SourceWorkspace>
+            <div className="file-source-code">
+              <File
+                key={`${theme}:${codeThemes.light}:${codeThemes.dark}:${symbolLanguage ?? "plain"}`}
+                file={file}
+                options={options}
+              />
+            </div>
           )}
         </section>
       )}
     </Result>
+  );
+  return (
+    <FileWorkspace symbols={symbols}>
+      <div className="file-viewer">
+        {navigation}
+        {header}
+        {contents}
+      </div>
+    </FileWorkspace>
   );
 }

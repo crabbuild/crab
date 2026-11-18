@@ -1,30 +1,46 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useLayoutEffect, useState, type ReactNode } from "react";
+import { useWorkspaceHeight } from "@/components/layout/use-workspace-height";
 import {
   ResizableHandle,
   ResizablePanel,
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
 
-export function SourceWorkspace({
+export function FileWorkspace({
   children,
   symbols,
 }: {
   children: ReactNode;
   symbols: ReactNode;
 }) {
+  const [workspace, setWorkspace] = useState<HTMLDivElement | null>(null);
+  useWorkspaceHeight(workspace);
   const [stacked, setStacked] = useState(
     () => matchMedia("(max-width: 900px)").matches,
   );
-  useEffect(() => {
-    const media = matchMedia("(max-width: 900px)");
-    const update = () => setStacked(media.matches);
-    media.addEventListener("change", update);
-    return () => media.removeEventListener("change", update);
-  }, []);
+  useLayoutEffect(() => {
+    const parent = workspace?.parentElement;
+    if (!workspace || !parent) return;
+    // An open explorer can leave a narrow file column on a wide screen.
+    // Stack before the Symbols pane squeezes navigation out of that column.
+    const update = () => {
+      const width = workspace.clientWidth;
+      if (width === 0) return;
+      setStacked(width < 700 || matchMedia("(max-width: 900px)").matches);
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(parent);
+    return () => observer.disconnect();
+  }, [workspace]);
 
   if (!symbols || stacked)
     return (
-      <div className="file-source-workspace">
+      <div
+        ref={setWorkspace}
+        className="file-source-workspace"
+        data-stacked={stacked || undefined}
+      >
         {children}
         {symbols}
       </div>
@@ -34,6 +50,7 @@ export function SourceWorkspace({
   // Resizable owns widths; it must not introduce a nested vertical scrollport.
   return (
     <ResizablePanelGroup
+      elementRef={setWorkspace}
       orientation="horizontal"
       className="file-source-workspace"
       style={{ overflow: "visible" }}
@@ -47,7 +64,8 @@ export function SourceWorkspace({
         aria-label="Resize symbols pane"
       />
       <ResizablePanel
-        defaultSize="30%"
+        defaultSize={320}
+        groupResizeBehavior="preserve-pixel-size"
         minSize={200}
         maxSize="60%"
         style={{ overflow: "visible" }}

@@ -4543,7 +4543,7 @@ main {
 .repo-file-workspace .tree-resizer {
   position: sticky;
   top: 0;
-  height: 100dvh;
+  height: var(--workspace-available-height, 100dvh);
   align-self: start;
 }
 .repo-file-workspace .tree-sidebar {
@@ -4855,7 +4855,7 @@ main {
 }
 .file-navigation {
   display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr) minmax(220px, 320px) auto;
+  grid-template-columns: auto auto minmax(0, 1fr) minmax(220px, 360px);
   align-items: center;
   gap: --spacing(2.5);
   min-height: 36px;
@@ -4865,6 +4865,28 @@ main {
   min-width: 0;
   min-height: 32px;
   margin: 0;
+}
+.file-navigation.tree-open {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+.file-navigation-actions {
+  display: flex;
+  gap: --spacing(2.5);
+}
+.file-navigation-actions .file-search-opener {
+  flex: 1;
+}
+.file-scroll-top {
+  display: none;
+}
+.file-navigation[data-stuck]:not(.tree-open) {
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
+}
+.file-navigation[data-stuck] .file-navigation-actions {
+  display: none;
+}
+.file-navigation[data-stuck] .file-scroll-top {
+  display: inline-flex;
 }
 .file-search-opener {
   display: flex;
@@ -4896,17 +4918,17 @@ main {
   min-height: 46px;
   padding: --spacing(2) --spacing(2.5);
 }
-.code-main-file > .breadcrumb {
+.code-main-file .file-navigation {
   position: sticky;
   top: 0;
-  z-index: 1;
+  z-index: 2;
   min-height: 48px;
   margin-bottom: 0;
   background: var(--background);
 }
 .code-main-file .file-panel > .panel-header {
   position: sticky;
-  top: 48px;
+  top: var(--file-navigation-height);
   z-index: 1;
 }
 .file-panel .button-link {
@@ -4914,6 +4936,10 @@ main {
 }
 .file-source-workspace {
   min-width: 0;
+}
+.file-viewer {
+  min-width: 0;
+  container-type: inline-size;
 }
 .file-source-code {
   min-width: 0;
@@ -4923,26 +4949,30 @@ main {
   display: flex;
   flex-direction: column;
   position: sticky;
-  top: var(--code-symbols-sticky-top, 0);
+  top: 0;
   align-self: start;
   min-width: 0;
-  height: var(--code-symbols-available-height, 100dvh);
+  max-height: var(--workspace-available-height, 100dvh);
+  margin-inline-start: --spacing(4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
   overflow: hidden;
   color: var(--foreground);
   background: var(--background);
+}
+.file-source-workspace[data-stacked] > .code-symbols-panel {
+  position: static;
+  height: auto;
+  max-height: 360px;
+  margin: --spacing(4) 0 0;
 }
 .code-symbols-resizer {
   align-items: flex-start;
 }
 .code-symbols-resizer > div {
   position: sticky;
-  top: calc(
-    var(--code-symbols-sticky-top, 0px) +
-      var(--code-symbols-available-height, 100dvh) / 2 - 12px
-  );
-  margin-top: calc(
-    var(--code-symbols-available-height, 100dvh) / 2 - --spacing(3)
-  );
+  top: calc(var(--code-symbols-panel-height, 100dvh) / 2 - 12px);
+  margin-top: calc(var(--code-symbols-panel-height, 100dvh) / 2 - --spacing(3));
 }
 .code-symbols-header {
   display: flex;
@@ -4980,6 +5010,7 @@ main {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
   overscroll-behavior: contain;
   padding-bottom: --spacing(3);
 }
@@ -5937,7 +5968,7 @@ main {
   .repo-file-workspace .code-main {
     padding: --spacing(4);
   }
-  .file-navigation {
+  .file-navigation:not(.tree-open) {
     grid-template-columns: auto auto minmax(0, 1fr) auto;
   }
   .file-navigation .file-search-opener {
@@ -5962,12 +5993,20 @@ main {
   .data-workbench-badges {
     justify-content: flex-start;
   }
-  .code-symbols-panel {
-    position: static;
-    height: auto;
-    max-height: 360px;
-    border-top: 1px solid var(--border);
-    border-left: 0;
+}
+
+@container (max-width: 600px) {
+  .file-navigation:not(.tree-open) {
+    grid-template-columns: auto auto minmax(0, 1fr) auto;
+  }
+  .file-navigation .file-search-opener {
+    width: 32px;
+    padding: 0;
+    justify-content: center;
+  }
+  .file-navigation .file-search-opener span,
+  .file-navigation .file-search-opener kbd {
+    display: none;
   }
 }
 
@@ -6013,7 +6052,7 @@ main {
   .repo-file-workspace .code-main {
     padding: 0;
   }
-  .code-main-file > .breadcrumb,
+  .code-main-file .file-navigation,
   .code-main-file .file-panel > .panel-header {
     position: static;
   }

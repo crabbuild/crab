@@ -133,9 +133,19 @@ grant, and this consolidation does not establish full GitHub Enterprise parity.
   stay mounted until their discussion unmounts.
 - `src/features/repository/`: browsing, refs, tree, file rendering, commit details,
   and diffs. Preview engines, workers, and their tests stay under `files/`.
-  `files/symbols/` owns parsing and the Symbols workspace. Its shadcn Resizable
-  divider supports pointer and keyboard resizing; narrow layouts stack the pane
-  below source. Tablet layouts retain separate tree, divider, and source columns;
+  `files/symbols/` owns parsing and the Symbols panel. `files/workspace.tsx`
+  places that panel beside the complete file viewer, with its own viewport-aligned
+  header and scrolling list. Its shadcn Resizable divider supports pointer and
+  keyboard resizing; narrow layouts stack the pane below source. File navigation
+  and Code/Blame form one continuous sticky header with the explorer open or
+  closed; the controls follow the navigation row's measured height. Scrolled
+  navigation keeps the branch and path available and exposes **Top**.
+  The Symbols column starts at 320px and retains its width when the viewer grows.
+  Its outlined panel fits short outlines and scrolls longer lists internally.
+  Both sticky sidebars stay inside the visible file workspace when the footer
+  appears, keeping their headers and search controls reachable. Columns too
+  narrow for the split place Symbols below the viewer.
+  Tablet layouts retain separate tree, divider, and source columns;
   mobile layouts stack the tree above the file. Symbol and line-hash navigation
   scroll the document vertically without changing horizontal source scrolling.
   The symbol outline uses compact kind/name/line rows. Symbol details put

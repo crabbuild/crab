@@ -8,7 +8,7 @@ import {
 } from "@/components/ui/input-group";
 import {
   useDeferredValue,
-  useEffect,
+  useLayoutEffect,
   useId,
   useMemo,
   useRef,
@@ -92,44 +92,23 @@ export function CodeSymbolsPanel({
     return [...grouped];
   }, [definitions]);
 
-  useEffect(() => {
-    let frame = 0;
-    const fitToViewport = () => {
-      cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(() => {
-        const node = panel.current;
-        if (!node) return;
-        const workspace = node.closest<HTMLElement>(".file-source-workspace");
-        if (!workspace) return;
-        const fileHeader = node
-          .closest(".file-panel")
-          ?.querySelector<HTMLElement>(":scope > .panel-header");
-        // The file navigation stays above this pane while the document scrolls.
-        // Reserve its measured edge so the Symbols header remains reachable.
-        const stickyTop = Math.max(
-          0,
-          fileHeader?.getBoundingClientRect().bottom ?? 0,
-        );
-        workspace.style.setProperty(
-          "--code-symbols-sticky-top",
-          `${stickyTop}px`,
-        );
-        // The pane grows as it becomes sticky; a fixed viewport fraction either
-        // truncates tall screens or overflows below the fold before it sticks.
-        const top = Math.max(0, node.getBoundingClientRect().top);
-        workspace.style.setProperty(
-          "--code-symbols-available-height",
-          `${window.innerHeight - top}px`,
-        );
-      });
-    };
-    fitToViewport();
-    window.addEventListener("resize", fitToViewport);
-    window.addEventListener("scroll", fitToViewport, { passive: true });
+  useLayoutEffect(() => {
+    const node = panel.current;
+    const workspace = node?.closest<HTMLElement>(".file-source-workspace");
+    if (!node || !workspace) return;
+    // Sparse outlines stay compact; keep the resize grip centered on the
+    // actual panel as filtering and symbol details change its height.
+    const measure = () =>
+      workspace.style.setProperty(
+        "--code-symbols-panel-height",
+        `${node.offsetHeight}px`,
+      );
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
     return () => {
-      cancelAnimationFrame(frame);
-      window.removeEventListener("resize", fitToViewport);
-      window.removeEventListener("scroll", fitToViewport);
+      observer.disconnect();
+      workspace.style.removeProperty("--code-symbols-panel-height");
     };
   }, []);
 
