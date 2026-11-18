@@ -15,12 +15,7 @@ import {
   useState,
 } from "react";
 
-import {
-  ChevronLeftIcon,
-  CodeIcon,
-  SearchIcon,
-  XIcon,
-} from "@primer/octicons-react";
+import { ArrowLeftIcon, SearchIcon, XIcon } from "@primer/octicons-react";
 import type { CodeSymbol, CodeSymbolsState } from ".";
 
 type Props = {
@@ -34,18 +29,20 @@ type Props = {
 function SymbolRow({
   symbol,
   onActivate,
+  current = false,
 }: {
   symbol: CodeSymbol;
   onActivate: (symbol: CodeSymbol) => void;
+  current?: boolean;
 }) {
   return (
     <button
       className="code-symbol-row"
       type="button"
       onClick={() => onActivate(symbol)}
+      aria-current={current ? "location" : undefined}
       title={`${symbol.kind} ${symbol.name}, line ${symbol.line}`}
     >
-      <CodeIcon size={14} aria-hidden="true" />
       <span className="code-symbol-name">{symbol.name}</span>
       <span className="code-symbol-kind">{symbol.kind}</span>
       <span className="code-symbol-line">{symbol.line}</span>
@@ -136,10 +133,22 @@ export function CodeSymbolsPanel({
   return (
     <aside ref={panel} className="code-symbols-panel" aria-label="Code symbols">
       <header className="code-symbols-header">
-        <div>
-          <strong>Symbols</strong>
-          <span>Current file</span>
-        </div>
+        {active === null ? (
+          <div>
+            <strong>Symbols</strong>
+            <span>Current file</span>
+          </div>
+        ) : (
+          <Button
+            className="code-symbol-back"
+            size="sm"
+            variant="ghost"
+            onClick={onClearActive}
+          >
+            <ArrowLeftIcon data-icon="inline-start" />
+            All symbols
+          </Button>
+        )}
         <Button
           size="icon-sm"
           variant="ghost"
@@ -198,17 +207,9 @@ export function CodeSymbolsPanel({
         </>
       ) : (
         <div className="code-symbol-detail">
-          <button
-            className="code-symbol-back"
-            type="button"
-            onClick={onClearActive}
-          >
-            <ChevronLeftIcon size={16} aria-hidden="true" /> All symbols
-          </button>
           <div className="code-symbol-detail-title">
-            <CodeIcon size={16} aria-hidden="true" />
-            <strong>{active.name}</strong>
             <span>{active.kind}</span>
+            <strong>{active.name}</strong>
           </div>
           {(["definition", "reference"] as const).map((role) => {
             const symbols = related.filter((symbol) => symbol.role === role);
@@ -226,6 +227,7 @@ export function CodeSymbolsPanel({
                       key={symbol.id}
                       symbol={symbol}
                       onActivate={onActivate}
+                      current={symbol.id === active.id}
                     />
                   ))
                 )}

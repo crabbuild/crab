@@ -138,6 +138,9 @@ grant, and this consolidation does not establish full GitHub Enterprise parity.
   below source. Tablet layouts retain separate tree, divider, and source columns;
   mobile layouts stack the tree above the file. Symbol and line-hash navigation
   scroll the document vertically without changing horizontal source scrolling.
+  The symbol outline uses compact kind/name/line rows. Symbol details put
+  **All symbols** beside Close, with inset hover targets, grouped definitions
+  and references, and the current occurrence marked in the list.
   Breadcrumbs scroll horizontally while Copy path stays visible.
   File creation shares the repository tree workspace, with an inline filename
   and branch header. `files/code-editor.tsx` owns line numbers, undo history,
