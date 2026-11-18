@@ -16,11 +16,15 @@ import {
 } from "react";
 
 import { ArrowLeftIcon, SearchIcon, XIcon } from "@primer/octicons-react";
+import type { DiffsThemeNames, FileContents } from "@pierre/diffs";
 import type { CodeSymbol, CodeSymbolsState } from ".";
+import { CodeSymbolDetails } from "./detail";
 
 type Props = {
   state: CodeSymbolsState;
   active: CodeSymbol | null;
+  file: FileContents;
+  theme: DiffsThemeNames;
   onActivate: (symbol: CodeSymbol) => void;
   onClearActive: () => void;
   onClose: () => void;
@@ -29,18 +33,15 @@ type Props = {
 function SymbolRow({
   symbol,
   onActivate,
-  current = false,
 }: {
   symbol: CodeSymbol;
   onActivate: (symbol: CodeSymbol) => void;
-  current?: boolean;
 }) {
   return (
     <button
       className="code-symbol-row"
       type="button"
       onClick={() => onActivate(symbol)}
-      aria-current={current ? "location" : undefined}
       title={`${symbol.kind} ${symbol.name}, line ${symbol.line}`}
     >
       <span className="code-symbol-name">{symbol.name}</span>
@@ -53,6 +54,8 @@ function SymbolRow({
 export function CodeSymbolsPanel({
   state,
   active,
+  file,
+  theme,
   onActivate,
   onClearActive,
   onClose,
@@ -206,35 +209,13 @@ export function CodeSymbolsPanel({
           </div>
         </>
       ) : (
-        <div className="code-symbol-detail">
-          <div className="code-symbol-detail-title">
-            <span>{active.kind}</span>
-            <strong>{active.name}</strong>
-          </div>
-          {(["definition", "reference"] as const).map((role) => {
-            const symbols = related.filter((symbol) => symbol.role === role);
-            return (
-              <section className="code-symbol-group" key={role}>
-                <h3>
-                  {role === "definition" ? "Definitions" : "References"}{" "}
-                  <span>{symbols.length}</span>
-                </h3>
-                {symbols.length === 0 ? (
-                  <p className="code-symbol-empty">None in this file</p>
-                ) : (
-                  symbols.map((symbol) => (
-                    <SymbolRow
-                      key={symbol.id}
-                      symbol={symbol}
-                      onActivate={onActivate}
-                      current={symbol.id === active.id}
-                    />
-                  ))
-                )}
-              </section>
-            );
-          })}
-        </div>
+        <CodeSymbolDetails
+          symbols={related}
+          active={active}
+          file={file}
+          theme={theme}
+          onActivate={onActivate}
+        />
       )}
     </aside>
   );

@@ -141,6 +141,11 @@ grant, and this consolidation does not establish full GitHub Enterprise parity.
   The symbol outline uses compact kind/name/line rows. Symbol details put
   **All symbols** beside Close, with inset hover targets, grouped definitions
   and references, and the current occurrence marked in the list.
+  Details show full source-line previews in the selected code theme, with every
+  matching identifier highlighted. Multiple uses on a line share a preview;
+  reference counts include every occurrence. Parsing includes identifier uses
+  outside calls and excludes comment/string text. Results match names within
+  the current file; they do not resolve scopes, overloads, or other files.
   Breadcrumbs scroll horizontally while Copy path stays visible.
   File creation shares the repository tree workspace, with an inline filename
   and branch header. `files/code-editor.tsx` owns line numbers, undo history,
