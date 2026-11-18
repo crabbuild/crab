@@ -22,6 +22,8 @@ macOS automatic update installation requires a future signed release.
   durable child transcripts and full-text output access.
 - Added complex workflow editing and execution, resizable Workflow Studio
   panels, local runs, and restored workflow output.
+- Kept editor controls responsive during language-server version discovery and
+  cancelled pending probes during shutdown.
 - Simplified workspace, repository, Explorer, Search, and Git navigation;
   standardized controls, themes, and terminal font rendering.
 - Unified normal, durable daemon, and SSH terminal controls, preserving sessions
@@ -48,6 +50,8 @@ macOS automatic update installation requires a future signed release.
 - Upgraded the embedded Cellar runtime to 0.1.1.
 - Added first-run Docker setup for the repository HTTP server and S3 gateway,
   including generated configuration and client identity.
+- Patched Caddy's network dependency across server, Compose, and Cloudflare
+  runtime images.
 
 ### Rust SDK
 
