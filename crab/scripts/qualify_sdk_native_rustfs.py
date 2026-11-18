@@ -106,8 +106,9 @@ def fixture_environment(work: Path, output: Path, endpoint: str, bucket: str,
     credentials.touch()
     global_git = work / "gitconfig"
     global_git.touch()
+    # The native cache owner creates private permissions and Windows DACLs;
+    # precreating its root inherits permissions that capture/restore must reject.
     cache = work / "cache"
-    cache.mkdir()
     environment.update({
         "AWS_ACCESS_KEY_ID": secrets.token_hex(10),
         "AWS_SECRET_ACCESS_KEY": secrets.token_hex(24),
