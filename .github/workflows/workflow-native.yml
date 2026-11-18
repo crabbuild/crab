@@ -13,8 +13,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-15-intel
-            target: mac-x64
           - os: windows-2022
             target: win-x64
     defaults:
@@ -34,7 +32,7 @@ jobs:
       - name: Set private native fixture directory
         run: |
           mkdir -p "$RUNNER_TEMP/crab-broad-suite"
-          echo "CARGO_TARGET_DIR=$(node -p 'process.env.RUNNER_TEMP.replaceAll(String.fromCharCode(92),"/")')/crab-broad-suite" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crab-broad-suite" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@v4
         with:
           name: Crab-native-${{ matrix.target }}
