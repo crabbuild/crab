@@ -1,61 +1,57 @@
 name: Workflow native execution
-
 on:
   workflow_dispatch:
-
 permissions:
   contents: read
-
+  actions: read
 jobs:
-  environment-probe:
-    name: Windows workflow environment diagnosis
-    runs-on: windows-2022
-    timeout-minutes: 15
+  source-readiness:
+    name: macOS workflow source readiness diagnosis
+    runs-on: macos-15
+    timeout-minutes: 25
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: false
+      E2E_SMOKE: 1
+      PLAYWRIGHT_JSON_OUTPUT_NAME: workflow-report.json
+    defaults:
+      run:
+        shell: bash
+        working-directory: packages/desktop
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: 59eb8b383a37b17c5a2ae2679c468b976f5d6b35
       - uses: actions/setup-node@v4
         with:
           node-version-file: packages/desktop/.nvmrc
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.97.0
-      - name: Compare actual workflow sanitizer environments
-        shell: pwsh
+      - name: Prepare isolated fixture target
         run: |
-          $sanitizer = (Join-Path $env:GITHUB_WORKSPACE 'crates/crab-workflow/src/env.rs').Replace('\', '/')
-          $probe = @'
-          use std::{collections::HashMap, process::Command};
-          mod stage {
-              pub enum EnvSpec { Inherit, Allowlist(Vec<String>), Empty }
-          }
-          #[path = "__SANITIZER__"]
-          mod sanitizer;
-          fn run(node: &str, label: &str, env: HashMap<String, String>) -> (bool, bool) {
-              let result = Command::new(node)
-                  .args(["-e", "require('crypto').randomBytes(32);console.log('workflow-crypto-ok')"])
-                  .env_clear().envs(env).output().expect("run Node");
-              let success = result.status.success()
-                  && String::from_utf8_lossy(&result.stdout).trim() == "workflow-crypto-ok";
-              let seed_failure = String::from_utf8_lossy(&result.stderr).contains("CSPRNG");
-              println!("{label}: success={success} code={:?} csprng_failure={seed_failure}", result.status.code());
-              (success, seed_failure)
-          }
-          fn main() {
-              let node = std::env::args().nth(1).expect("absolute Node path");
-              let inherited = run(&node, "inherit", sanitizer::sanitize(&stage::EnvSpec::Inherit));
-              let empty = run(&node, "empty", sanitizer::sanitize(&stage::EnvSpec::Empty));
-              let allowlist = run(&node, "allowlist", sanitizer::sanitize(&stage::EnvSpec::Allowlist(vec![])));
-              let mut with_root = sanitizer::sanitize(&stage::EnvSpec::Empty);
-              with_root.insert("SystemRoot".into(), std::env::var("SystemRoot").expect("Windows root"));
-              let restored = run(&node, "empty_plus_SystemRoot", with_root);
-              assert!(inherited.0 && !empty.0 && empty.1 && !allowlist.0 && allowlist.1 && restored.0,
-                  "SystemRoot differential did not match the captured failure");
-          }
-          '@.Replace('__SANITIZER__', $sanitizer)
-          $file = Join-Path $env:RUNNER_TEMP 'crab-environment-probe.rs'
-          Set-Content -Path $file -Value $probe -Encoding utf8
-          $binary = Join-Path $env:RUNNER_TEMP 'crab-environment-probe.exe'
-          rustc --edition=2024 $file -o $binary
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $binary (Get-Command node).Source
-          exit $LASTEXITCODE
+          mkdir -p "$RUNNER_TEMP/crab-source-readiness"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crab-source-readiness" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v4
+        with:
+          name: Crab-native-mac-arm64
+          run-id: 44196737874
+          github-token: ${{ github.token }}
+          path: packages/desktop/resources/native/mac-arm64
+      - name: Restore producer permissions
+        run: chmod +x resources/native/mac-arm64/{crab,crab-nfs-mount,crab-desktop-agent,git-remote-crab}
+      - name: Install renderer and Electron dependencies
+        run: npm ci
+      - name: Build the same renderer and packaged application
+        run: |
+          npm run build:renderer
+          npm run build:electron
+          node scripts/package.mjs --dir --arm64
+      - name: Repeat the unchanged complex workflow scenario
+        run: npx playwright test tests/e2e/workflow-complex.spec.ts --project=e2e-smoke --workers=1 --grep "complex workflows preserve templates" --repeat-each=3 --trace retain-on-failure --reporter=line,json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: alpha2-workflow-readiness-diagnosis
+          path: |
+            packages/desktop/workflow-report.json
+            packages/desktop/test-results/**/trace.zip
+            packages/desktop/test-results/**/error-context.md
+            packages/desktop/test-results/**/*.png
+          retention-days: 7
