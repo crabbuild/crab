@@ -43,13 +43,43 @@ jobs:
           npm run build:renderer
           npm run build:electron
           node scripts/package.mjs --dir --arm64
+      - name: Instrument request and view boundaries
+        run: |
+          cat > "$RUNNER_TEMP/workflow-nav.cjs" <<'JS'
+          const fs=require('node:fs');
+          const req=require('node:module').createRequire(process.cwd()+'/package.json');
+          const electron=req('playwright-core')._electron, launch=electron.launch.bind(electron);
+          const file=process.env.CARGO_TARGET_DIR+'/workflow-navigation-events.jsonl';
+          electron.launch=async function(options){
+           const application=await launch(options);
+           await application.evaluate(({app},file)=>{
+            const fs=process.getBuiltinModule('node:fs');
+            const req=process.getBuiltinModule('node:module').createRequire(app.getAppPath()+'/package.json');
+            const prototype=req(app.getAppPath()+'/dist-electron/agent.cjs').Agent.prototype;
+            const request=prototype.request;
+            prototype.request=async function(method,params,...args){
+             const time=Date.now(); const log=(state)=>fs.appendFileSync(file,JSON.stringify({time:Date.now(),event:'[DEBUG-wf-nav] rpc',state,method,path:params?.path,duration:Date.now()-time})+'\n');
+             log('start');try{const result=await request.call(this,method,params,...args);log('done');return result;}catch(error){log('error');throw error;}
+            };
+           },file);
+           const page=await application.firstWindow();
+           page.on('console',msg=>{if(msg.text().startsWith('[DEBUG-wf-nav]'))fs.appendFileSync(file,JSON.stringify({time:Date.now(),event:msg.text()})+'\n');});
+           page.on('pageerror',error=>fs.appendFileSync(file,JSON.stringify({time:Date.now(),event:'[DEBUG-wf-nav] pageerror',error:error.message})+'\n'));
+           await page.evaluate(()=>{
+            window.addEventListener('crab:active-view-changed',e=>console.log('[DEBUG-wf-nav] view '+JSON.stringify(e.detail)));
+            document.addEventListener('click',e=>{if(e.target.closest('button')?.textContent?.includes('Edit YAML')){console.log('[DEBUG-wf-nav] Edit YAML click');let n=0;const timer=setInterval(()=>{console.log('[DEBUG-wf-nav] state '+JSON.stringify({files:document.querySelector('nav[aria-label="Primary"] button[aria-label="Files"]')?.getAttribute('aria-pressed'),monaco:document.querySelectorAll('.monaco-editor .view-lines').length,status:[...document.querySelectorAll('[role="status"]')].map(e=>e.textContent),alert:[...document.querySelectorAll('[role="alert"]')].map(e=>e.textContent)}));if(++n===30)clearInterval(timer);},200);}},true);
+           });
+           return application;
+          };
+          JS
       - name: Repeat the unchanged complex workflow scenario
-        run: npx playwright test tests/e2e/workflow-complex.spec.ts --project=e2e-smoke --workers=1 --grep "complex workflows preserve templates" --repeat-each=3 --trace retain-on-failure --reporter=line,json
+        run: NODE_OPTIONS="--require=$RUNNER_TEMP/workflow-nav.cjs" npx playwright test tests/e2e/workflow-complex.spec.ts --project=e2e-smoke --workers=1 --grep "complex workflows preserve templates" --repeat-each=3 --trace retain-on-failure --reporter=line,json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: alpha2-workflow-readiness-diagnosis
+          name: alpha2-workflow-navigation-diagnosis
           path: |
+            ${{ env.CARGO_TARGET_DIR }}/workflow-navigation-events.jsonl
             packages/desktop/workflow-report.json
             packages/desktop/test-results/**/trace.zip
             packages/desktop/test-results/**/error-context.md
