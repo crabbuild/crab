@@ -1524,6 +1524,95 @@ test("supported source files expose browser-parsed current-file symbols", async 
   }
 });
 
+test("symbol details show every current-file use with highlighted source previews", async ({
+  page,
+}) => {
+  const text = `fn build_metrics(value: i32) -> i32 { value + 1 }
+fn report() {
+    let callback = build_metrics;
+    let first = { let text = "🦀é"; build_metrics(1) };
+    let second = callback(build_metrics(2)) + build_metrics(3);
+    let description = "build_metrics"; // build_metrics
+}
+`;
+  await routePreviewFiles(page, {
+    "src/references.rs": { text, bytes: strToU8(text) },
+  });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto("/team/project/blob/main/src/references.rs");
+  const symbols = page.getByRole("complementary", { name: "Code symbols" });
+  await symbols
+    .getByRole("button", { name: "build_metrics function 1" })
+    .click();
+  await expect(
+    symbols.getByRole("heading", { name: "References 4" }),
+  ).toBeVisible();
+  const definition = symbols.getByRole("button", {
+    name: "build_metrics function 1",
+  });
+  await expect(definition).toContainText(
+    "fn build_metrics(value: i32) -> i32 { value + 1 }",
+  );
+  await expect(
+    symbols.getByRole("button", { name: "build_metrics identifier 3" }),
+  ).toContainText("let callback = build_metrics;");
+  await expect(
+    symbols
+      .getByRole("button", { name: "build_metrics call 4" })
+      .locator("mark"),
+  ).toHaveText("build_metrics");
+  const repeated = symbols.getByRole("button", {
+    name: "build_metrics call 5",
+  });
+  await expect(repeated).toContainText(
+    "let second = callback(build_metrics(2)) + build_metrics(3);",
+  );
+  await expect(repeated.locator("mark")).toHaveCount(2);
+  await repeated.click();
+  await expect(page).toHaveURL(/#L5$/);
+  await expect(repeated).toHaveAttribute("aria-current", "location");
+  await expect(symbols.locator(".code-symbol-detail-title")).toHaveText(
+    "functionbuild_metrics",
+  );
+  await expect
+    .poll(() =>
+      definition
+        .locator("code span")
+        .evaluateAll(
+          (nodes) =>
+            new Set(nodes.map((node) => getComputedStyle(node).color)).size,
+        ),
+    )
+    .toBeGreaterThan(1);
+  await expectNoAccessibilityViolations(page);
+  await selectDarkTheme(page);
+  await expect
+    .poll(() =>
+      definition
+        .locator("code span")
+        .evaluateAll(
+          (nodes) =>
+            new Set(nodes.map((node) => getComputedStyle(node).color)).size,
+        ),
+    )
+    .toBeGreaterThan(1);
+  await expectNoAccessibilityViolations(page);
+  await symbols.getByRole("button", { name: "Close symbols" }).click();
+  await page
+    .locator('.file-source-code [data-line="1"] span', {
+      hasText: /^build_metrics$/,
+    })
+    .click();
+  await expect(
+    symbols.getByRole("heading", { name: "References 4" }),
+  ).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(repeated).toBeVisible();
+  expect(
+    await page.evaluate(() => document.documentElement.scrollWidth),
+  ).toBeLessThanOrEqual(390);
+});
+
 test("source stays beside the file tree across tablet widths and remains reachable on mobile", async ({
   page,
 }) => {

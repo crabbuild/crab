@@ -5089,16 +5089,23 @@ main {
   width: calc(100% - --spacing(4));
   margin-inline: --spacing(2);
 }
-.code-symbol-detail .code-symbol-kind {
-  @apply sr-only;
-}
-.code-symbol-detail .code-symbol-name {
+.code-symbol-detail code {
+  overflow: hidden;
   font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: pre;
+}
+.code-symbol-detail mark {
+  color: var(--warning-foreground);
+  background: color-mix(in srgb, var(--warning) 20%, transparent);
 }
 .code-symbol-detail .code-symbol-line {
   grid-column: 1;
 }
-.code-symbol-empty {
+.code-symbol-empty,
+.code-symbol-scope {
   color: var(--muted-foreground);
   font-size: var(--text-xs);
   margin: 0;

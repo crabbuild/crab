@@ -183,6 +183,7 @@ export function FileView({
 
   function navigateToSymbol(symbol: CodeSymbol) {
     setActiveSymbol(symbol);
+    setSymbolsOpen(true);
     revealSourceLine(
       symbol.line,
       matchMedia("(prefers-reduced-motion: reduce)").matches
@@ -190,15 +191,6 @@ export function FileView({
         : "smooth",
     );
     window.history.replaceState(null, "", `#L${symbol.line}`);
-  }
-
-  function tokenSymbol(token: TokenEventBase) {
-    return findSymbolAt(
-      symbolsRef.current,
-      token.lineNumber,
-      token.lineCharStart,
-      token.tokenText,
-    );
   }
 
   const options = useMemo(
@@ -228,8 +220,8 @@ export function FileView({
               [data-code-symbol-hover] { background: color-mix(in srgb, var(--warning) 10%, transparent); border-radius: 3px; cursor: pointer; }
               [data-code-symbol-target] { background: color-mix(in srgb, var(--info) 5%, transparent); }
             `,
-            onTokenEnter: (token: TokenEventBase) => {
-              if (tokenSymbol(token)) {
+            onTokenEnter: (token: TokenEventBase, event: PointerEvent) => {
+              if (findSymbolAt(symbolsRef.current, token, event)) {
                 token.tokenElement.setAttribute(
                   "data-code-symbol-hover",
                   "true",
@@ -239,8 +231,8 @@ export function FileView({
             onTokenLeave: (token: TokenEventBase) => {
               token.tokenElement.removeAttribute("data-code-symbol-hover");
             },
-            onTokenClick: (token: TokenEventBase) => {
-              const symbol = tokenSymbol(token);
+            onTokenClick: (token: TokenEventBase, event: MouseEvent) => {
+              const symbol = findSymbolAt(symbolsRef.current, token, event);
               if (symbol) navigateToSymbol(symbol);
             },
           }
@@ -559,6 +551,8 @@ export function FileView({
                   <CodeSymbolsPanel
                     state={symbolState}
                     active={activeSymbol}
+                    file={file}
+                    theme={codeThemes[theme]}
                     onActivate={navigateToSymbol}
                     onClearActive={() => setActiveSymbol(null)}
                     onClose={() => setSymbolsOpen(false)}

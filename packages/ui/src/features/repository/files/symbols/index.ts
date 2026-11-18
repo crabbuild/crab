@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type { TokenEventBase } from "@pierre/diffs";
 
 export type CodeSymbolLanguage =
   | "c"
@@ -57,22 +58,45 @@ export function codeSymbolLanguage(name: string): CodeSymbolLanguage | null {
 
 export function findSymbolAt(
   symbols: CodeSymbol[],
-  line: number,
-  column: number,
-  tokenText: string,
+  token: TokenEventBase,
+  point: Pick<MouseEvent, "clientX" | "clientY">,
 ) {
-  const exact = symbols.find(
+  const candidates = symbols.filter(
     (symbol) =>
-      symbol.line === line &&
-      column < symbol.endColumn &&
-      column + tokenText.length > symbol.column,
+      symbol.line === token.lineNumber &&
+      token.lineCharStart < symbol.endColumn &&
+      token.lineCharEnd > symbol.column,
   );
-  return (
-    exact ??
-    symbols.find(
-      (symbol) => symbol.line === line && symbol.name === tokenText.trim(),
-    )
+  if (candidates.length === 0) return;
+  // A syntax token can contain an entire expression before colors load.
+  // Hit-test captured names so clicking a method cannot select its receiver.
+  const walker = document.createTreeWalker(
+    token.tokenElement,
+    NodeFilter.SHOW_TEXT,
   );
+  const range = document.createRange();
+  let column = token.lineCharStart;
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const length = node.textContent?.length ?? 0;
+    for (const symbol of candidates) {
+      const start = Math.max(0, symbol.column - column);
+      const end = Math.min(length, symbol.endColumn - column);
+      if (start >= end) continue;
+      range.setStart(node, start);
+      range.setEnd(node, end);
+      if (
+        [...range.getClientRects()].some(
+          (rect) =>
+            point.clientX >= rect.left &&
+            point.clientX <= rect.right &&
+            point.clientY >= rect.top &&
+            point.clientY <= rect.bottom,
+        )
+      )
+        return symbol;
+    }
+    column += length;
+  }
 }
 
 export function useCodeSymbols(
