@@ -4,8 +4,8 @@
 //! stage's [`EnvSpec`]. Inherit copies the whole parent environment
 //! (and omits it from the stage hash — see R7 warning path).
 //! Allowlist copies only the named vars. Empty still injects the
-//! minimum a reasonable child needs (`PATH`, `HOME`, `TMPDIR`) but
-//! those minimums do NOT participate in the stage hash either.
+//! minimum a reasonable child needs (`PATH`, `HOME`, `TMPDIR`, and
+//! `SystemRoot` on Windows). These do not participate in the stage hash.
 
 use std::collections::HashMap;
 
@@ -15,7 +15,15 @@ use crate::stage::EnvSpec;
 /// They are required for almost any process to run and never affect
 /// the stage hash — users who care about hermeticity should declare
 /// them explicitly via [`EnvSpec::Allowlist`].
-const MINIMUM_VARS: &[&str] = &["PATH", "HOME", "TMPDIR"];
+const MINIMUM_VARS: &[&str] = &[
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    // Windows native runtimes need the system directory even under an empty
+    // policy; dropping it can abort Node before the stage command executes.
+    #[cfg(windows)]
+    "SystemRoot",
+];
 
 /// Produce the environment block a stage will run with, based on its
 /// [`EnvSpec`].
@@ -156,6 +164,15 @@ mod tests {
                 assert!(!env.contains_key("CRAB_TEST_EMPTY_DROP"));
             },
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn restricted_policies_preserve_windows_system_root() {
+        let expected = std::env::var("SystemRoot").expect("Windows system directory");
+        for policy in [EnvSpec::Empty, EnvSpec::Allowlist(Vec::new())] {
+            assert_eq!(sanitize(&policy).get("SystemRoot"), Some(&expected));
+        }
     }
 
     #[test]

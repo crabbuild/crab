@@ -1443,7 +1443,7 @@ env:
   - CUDA_VISIBLE_DEVICES
   - PYTHONPATH
 
-# Option 2: empty (strictest; only PATH, HOME, TMPDIR injected)
+# Option 2: empty (PATH, HOME, TMPDIR, plus SystemRoot on Windows)
 env: empty
 
 # Option 3: inherit (full process env; EXCLUDED from hash)
