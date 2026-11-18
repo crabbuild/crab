@@ -1465,7 +1465,6 @@ test("supported source files expose browser-parsed current-file symbols", async 
   await expect(
     symbols.getByRole("button", { name: /open method 4/ }),
   ).toHaveCount(0);
-  await symbols.getByPlaceholder("Filter symbols").fill("");
 
   await symbols.getByRole("button", { name: /serve function 7/ }).click();
   await expect(page).toHaveURL(/#L7$/);
@@ -1473,10 +1472,23 @@ test("supported source files expose browser-parsed current-file symbols", async 
     "data-code-symbol-target",
     "true",
   );
+  const allSymbols = symbols.getByRole("button", {
+    name: "All symbols",
+    exact: true,
+  });
+  await allSymbols.focus();
+  await allSymbols.press("Enter");
+  await expect(symbols.getByPlaceholder("Filter symbols")).toHaveValue("serve");
+  await symbols.getByPlaceholder("Filter symbols").fill("");
 
   await page.locator('[data-line="8"] span', { hasText: "open" }).click();
   await expect(symbols.getByText("Definitions 1")).toBeVisible();
   await expect(symbols.getByText("References 1")).toBeVisible();
+  const reference = symbols.getByRole("button", { name: "open call 8" });
+  await reference.click();
+  await expect(reference).toHaveAttribute("aria-current", "location");
+  await expect(page).toHaveURL(/#L8$/);
+  await expectNoAccessibilityViolations(page);
 
   await symbols.getByRole("button", { name: "Close symbols" }).click();
   await expect(symbols).toHaveCount(0);
