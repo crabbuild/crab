@@ -268,7 +268,10 @@ describe("native goal task ownership", () => {
     notify(connection, "turn/started", { threadId: task.codexThreadId, turn: { id: "goal-cycle" } });
     notify(connection, "turn/completed", { threadId: task.codexThreadId, turn: { id: "goal-cycle", status: "completed" } });
     const count = connections.length;
-    const restored = new Orchestrator({ persistPath: path.join(cwd, "tasks.sqlite") }).getTask(task.id);
-    expect({ status: restored?.status, goal: restored?.goal?.status, connections: connections.length }).toEqual({ status: "interrupted", goal: "active", connections: count });
+    const reader = new Orchestrator({ persistPath: path.join(cwd, "tasks.sqlite") });
+    try {
+      const restored = reader.getTask(task.id);
+      expect({ status: restored?.status, goal: restored?.goal?.status, connections: connections.length }).toEqual({ status: "interrupted", goal: "active", connections: count });
+    } finally { await reader.shutdown(); }
   });
 });

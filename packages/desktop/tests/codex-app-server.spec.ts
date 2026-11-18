@@ -99,7 +99,7 @@ describe("CodexAppServerAdapter — Protocol Integration", () => {
     adapter.onEvent((e) => events.push(e));
 
     // Start the adapter — this triggers the async initialization.
-    await adapter.spawn("Write a hello world function", "/tmp/test-project");
+    const startup = adapter.spawn("Write a hello world function", "/tmp/test-project");
 
     // --- Step 1: Client sends `initialize` → server responds with success ---
     let frames = await waitForFrames(stdin);
@@ -159,6 +159,8 @@ describe("CodexAppServerAdapter — Protocol Integration", () => {
       id: turnStartRequest!.id,
       result: { turn: { id: "turn_001" } },
     });
+
+    await startup;
 
     // --- Step 4 (after handlers wired): Server sends `thread/started` notification ---
     serverWrite(stdout, {

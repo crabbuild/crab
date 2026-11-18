@@ -97,6 +97,7 @@ test("packaged media seeks large Crab and LFS files through retained byte ranges
     let previous: string | null = null;
     for (const file of ["crab.wav", "lfs.wav", "movie.webm", "git.wav"]) {
       await page.locator(`[role="treeitem"][data-item-path="${file}"]`).click();
+      await expect(page.getByRole("region", { name: file.endsWith("webm") ? "Video preview" : "Audio preview", exact: true })).toContainText(file);
       const element = page.locator(file.endsWith("webm") ? "video" : "audio");
       await expect(element).toBeVisible();
       await expect.poll(() => element.evaluate((node: HTMLMediaElement) => Number.isFinite(node.duration) && node.duration > 0)).toBe(true);

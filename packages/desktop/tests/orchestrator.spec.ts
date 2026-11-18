@@ -2015,7 +2015,7 @@ describe("Orchestrator", () => {
       try {
         const task = await orchestrator.createTask("Work", "codex", workspace, "main", { worktreeMode: mode, ...(mode === "existing" ? { worktreePath: workspace } : {}) });
         await orchestrator.startTask(task.id);
-        const peer = orchestrator.createChildTaskForAgent(task.id, "codex", "Independent work");
+        const peer = await orchestrator.createTask("Independent work", "codex", workspace, "main", { worktreeMode: "existing", worktreePath: workspace });
         await orchestrator.startTask(peer.id);
         execFileCalls = [];
         await orchestrator.archiveTask(task.id);

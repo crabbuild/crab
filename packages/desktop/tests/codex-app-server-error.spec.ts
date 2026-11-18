@@ -139,8 +139,9 @@ describe("CodexAppServerAdapter — Mid-turn error notifications (D11)", () => {
     const events: AgentEvent[] = [];
     adapter.onEvent((e) => events.push(e));
 
-    await adapter.spawn("test prompt", "/tmp/test");
+    const startup = adapter.spawn("test prompt", "/tmp/test");
     await completeHandshake(stdin, stdout);
+    await startup;
 
     // Clear events from handshake
     events.length = 0;
@@ -183,8 +184,9 @@ describe("CodexAppServerAdapter — Mid-turn error notifications (D11)", () => {
     const events: AgentEvent[] = [];
     adapter.onEvent((e) => events.push(e));
 
-    await adapter.spawn("test prompt", "/tmp/test");
+    const startup = adapter.spawn("test prompt", "/tmp/test");
     await completeHandshake(stdin, stdout);
+    await startup;
 
     // Clear events from handshake
     events.length = 0;
