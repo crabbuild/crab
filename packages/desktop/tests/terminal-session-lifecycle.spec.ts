@@ -50,7 +50,7 @@ it("keeps an interactive foreground process when the app disconnects and reconne
     router.register();
     // User startup files can consume terminal input while loading. The fixture
     // owns its shell home so foreground-process survival is deterministic.
-    const spawned = await handlers.get("crab:term-spawn")!(null, { cwd: root, env: { HOME: root, ZDOTDIR: root } }) as TermSpawnResult;
+    const spawned = await handlers.get("crab:term-spawn")!(null, { cwd: root, sessionType: "daemon", env: { HOME: root, ZDOTDIR: root } }) as TermSpawnResult;
     expect(spawned.resolvedSessionType).toBe("daemon");
     // Electron's GUI executable otherwise returns cmd's prompt immediately,
     // leaving two processes competing for this fixture's terminal input.

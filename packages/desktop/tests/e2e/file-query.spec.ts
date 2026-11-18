@@ -33,7 +33,7 @@ test("SQL uses selected SQLite, WAL, LFS and Crab sources and joins cancellation
     git(["config", "filter.crab.process", `'${crab.replaceAll("\\", "/").replaceAll("'", "'\\''")}' filter-process`]);
     git(["config", "filter.crab.required", "true"]);
     writeFileSync(path.join(source, ".gitattributes"), "chunks.pq filter=crab -text\n");
-    writeFileSync(path.join(source, ".gitignore"), "/live.sqlite-wal\n/live.sqlite-shm\n");
+    writeFileSync(path.join(source, ".gitignore"), ".crab/\n/live.sqlite-wal\n/live.sqlite-shm\n");
     application = await electron.launch({
       executablePath, args: [`--user-data-dir=${path.join(root, "profile")}`],
       env: Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === "string")),

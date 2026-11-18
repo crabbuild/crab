@@ -132,7 +132,7 @@ describe("CodexAppServerAdapter — Graceful shutdown (CA-P6, D7)", () => {
     adapter.onEvent((event) => events.push(event));
 
     // Spawn the adapter
-    await adapter.spawn("Do something", "/tmp/test-shutdown");
+    const startup = adapter.spawn("Do something", "/tmp/test-shutdown");
 
     // Complete the handshake (uses real-ish async but fake timers)
     // We need to advance timers for the setTimeout calls in completeHandshake
@@ -177,6 +177,7 @@ describe("CodexAppServerAdapter — Graceful shutdown (CA-P6, D7)", () => {
     });
 
     await vi.advanceTimersByTimeAsync(20);
+    await startup;
   });
 
   afterEach(() => {

@@ -52,12 +52,22 @@ describe("local repository file publication", () => {
     expect(await fs.promises.readFile(file, "utf8")).toBe("REPLACEMENT");
   });
 
-  it("an already-open source retains its original bytes after publication", async () => {
+  it("an open reader retains original bytes across publication or a Windows sharing refusal", async () => {
     const captured = await fs.promises.open(file, "r");
     try {
-      await provider.fsWrite("repo", file, "REPLACEMENT");
+      // Windows MoveFileEx refuses replacement while the reader is open.
+      // Refusal must preserve the target and release the prepared temporary.
+      if (process.platform === "win32") {
+        await expect(provider.fsWrite("repo", file, "REPLACEMENT")).rejects.toMatchObject({ code: "EPERM" });
+        expect(await fs.promises.readFile(file, "utf8")).toBe("ORIGINAL");
+        expect(await fs.promises.readdir(root)).toEqual(["note.txt"]);
+      } else {
+        await provider.fsWrite("repo", file, "REPLACEMENT");
+      }
       expect(await captured.readFile("utf8")).toBe("ORIGINAL");
     } finally { await captured.close(); }
+    if (process.platform === "win32") await provider.fsWrite("repo", file, "REPLACEMENT");
+    expect(await fs.promises.readFile(file, "utf8")).toBe("REPLACEMENT");
   });
 
   it("a failed rename retains the target and removes the prepared temporary", async () => {

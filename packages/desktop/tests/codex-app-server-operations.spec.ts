@@ -3,6 +3,8 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import type { AgentEvent, CodexGoal } from "../electron/orchestrator-adapters";
 
+vi.mock("shell-env", () => ({ shellEnv: async () => ({ ...process.env }) }));
+
 vi.mock("node:child_process", () => ({
   spawn: vi.fn(), execFile: vi.fn(), execFileSync: vi.fn(() => "/usr/bin"),
 }));
@@ -49,7 +51,7 @@ describe("Codex app-server operation contracts", () => {
     adapter = new CodexAppServerAdapter();
     events = [];
     adapter.onEvent(event => events.push(event));
-    adapter.spawn("Initial prompt", "/tmp/contract-test");
+    await adapter.spawn("Initial prompt", "/tmp/contract-test");
     await vi.advanceTimersByTimeAsync(0);
   });
 
@@ -190,52 +192,57 @@ describe("Codex app-server operation contracts", () => {
     expect(requests.at(-1)?.params.threadId).toBe("thread-original");
   });
 
-  it("accepts an empty standalone MCP form after turn completion and deduplicates its request identity", () => {
+  it("accepts an empty standalone MCP form after turn completion and deduplicates its request identity", async () => {
     const frame = { id: 0, method: "mcpServer/elicitation/request", params: { threadId: "thread-original", turnId: null, serverName: "Fixture MCP", mode: "form", message: "Confirm", requestedSchema: { type: "object", properties: {} } } };
     stdout.write(JSON.stringify(frame) + "\n");
     stdout.write(JSON.stringify(frame) + "\n");
     stdout.write(JSON.stringify({ method: "turn/completed", params: { threadId: "thread-original", turn: { id: "turn-1", status: "completed" } } }) + "\n");
     const delivered = adapter.respondInput("0", { kind: "elicitation", action: "accept", content: {} });
+    await vi.advanceTimersByTimeAsync(0);
     expect({ delivered, requests: events.filter(event => event.type === "input_request").length, replies }).toEqual({ delivered: true, requests: 1, replies: [{ id: 0, result: { action: "accept", content: {} } }] });
   });
 
-  it("rejects invalid MCP contents without resolving the pending form", () => {
+  it("rejects invalid MCP contents without resolving the pending form", async () => {
     stdout.write(JSON.stringify({ id: "form", method: "mcpServer/elicitation/request", params: {
       threadId: "thread-original", serverName: "Fixture MCP", mode: "form", message: "Enter a number", requestedSchema: { type: "object", properties: { count: { type: "integer", minimum: 1 } }, required: ["count"] },
     } }) + "\n");
     const id = JSON.stringify("form");
     expect(() => adapter.respondInput(id, { kind: "elicitation", action: "accept", content: { count: 1.5 } })).toThrow("integer");
     adapter.respondInput(id, { kind: "elicitation", action: "accept", content: { count: 2 } });
+    await vi.advanceTimersByTimeAsync(0);
     expect(replies).toEqual([{ id: "form", result: { action: "accept", content: { count: 2 } } }]);
   });
 
-  it.each(["decline", "cancel"] as const)("returns MCP URL %s without granting or sending contents", action => {
+  it.each(["decline", "cancel"] as const)("returns MCP URL %s without granting or sending contents", async action => {
     stdout.write(JSON.stringify({ id: "url", method: "mcpServer/elicitation/request", params: {
       threadId: "thread-original", serverName: "Fixture MCP", mode: "url", message: "Open the page", elicitationId: "url-flow", url: "https://auth.example.invalid/connect",
     } }) + "\n");
     adapter.respondInput(JSON.stringify("url"), { kind: "elicitation", action });
+    await vi.advanceTimersByTimeAsync(0);
     expect(replies).toEqual([{ id: "url", result: { action, content: null } }]);
   });
 
-  it("answers a typed question on its original server request and rejects stale answers", () => {
+  it("answers a typed question on its original server request and rejects stale answers", async () => {
     stdout.write(JSON.stringify({ id: "question-1", method: "item/tool/requestUserInput", params: {
       threadId: "thread-original", turnId: "turn-1", itemId: "question-tool", isBlocking: true,
       questions: [{ id: "mode", header: "Mode", question: "Which mode?", options: [{ label: "Thorough", description: "Run all checks" }], isOther: true }],
     } }) + "\n");
     const requestId = JSON.stringify("question-1");
     const delivered = adapter.respondInput(requestId, { kind: "questions", answers: { mode: ["Thorough"] } });
+    await vi.advanceTimersByTimeAsync(0);
     expect({ delivered, replies, repeated: adapter.respondInput(requestId, { kind: "questions", answers: {} }) }).toEqual({
       delivered: true, replies: [{ id: "question-1", result: { answers: { mode: { answers: ["Thorough"] } } } }], repeated: false,
     });
   });
 
-  it("returns only an offered approval decision, preserving policy amendments unchanged", () => {
+  it("returns only an offered approval decision, preserving policy amendments unchanged", async () => {
     const amendment = { applyNetworkPolicyAmendment: { network_policy_amendment: { action: "deny", host: "example.invalid" } } };
     stdout.write(JSON.stringify({ id: 900, method: "item/commandExecution/requestApproval", params: {
       threadId: "thread-original", turnId: "turn-1", itemId: "command-tool", command: "curl example.invalid", availableDecisions: ["accept", amendment, "decline"],
     } }) + "\n");
     const rejected = adapter.respondApproval("900", "allow");
     const delivered = adapter.respondApproval("900", "network:1");
+    await vi.advanceTimersByTimeAsync(0);
     expect({ rejected, delivered, replies }).toEqual({ rejected: false, delivered: true, replies: [{ id: 900, result: { decision: amendment } }] });
   });
 
