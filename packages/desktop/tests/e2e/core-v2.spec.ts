@@ -340,7 +340,9 @@ test("packaged desktop opens and reads a real repository through its v2 agent", 
   git(["-c", "user.name=Desktop test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "Desktop fixture"]);
   git(["branch", "topic"]);
   const application = await electron.launch({
-    executablePath, args: [`--user-data-dir=${path.join(root, "profile")}`],
+    // Playwright uses this flag for Chromium cookie encryption. This fixture
+    // never stores credentials and must not wait for macOS keychain prompts.
+    executablePath, args: [`--user-data-dir=${path.join(root, "profile")}`, ...(process.platform === "darwin" ? ["--use-mock-keychain"] : [])],
     env: { ...process.env, HOME: home, USERPROFILE: home, CRAB_PTY_MODE: "auto", CRAB_CACHE_DIR: cache },
   });
   try {
