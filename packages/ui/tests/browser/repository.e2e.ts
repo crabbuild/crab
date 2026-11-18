@@ -1443,17 +1443,6 @@ test("supported source files expose browser-parsed current-file symbols", async 
     })
     .toBeLessThanOrEqual(1);
   await expect(symbols).toBeVisible();
-  await expect
-    .poll(async () => {
-      const [handle, pane] = await Promise.all([
-        grip.boundingBox(),
-        symbols.boundingBox(),
-      ]);
-      return Math.abs(
-        handle!.y + handle!.height / 2 - pane!.y - pane!.height / 2,
-      );
-    })
-    .toBeLessThanOrEqual(1);
   await page.evaluate(() => window.scrollTo(0, 0));
 
   await symbols.getByPlaceholder("Filter symbols").fill("serve");
@@ -1657,10 +1646,31 @@ test("source stays beside the file tree across tablet widths and remains reachab
   await expectNoAccessibilityViolations(page);
 });
 
-test("Symbols and explorer controls remain reachable beside the end of a file", async ({
+test("Symbols divider stays centered and controls remain reachable beside the end of a file", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1440, height: 1000 });
+  const divider = page.getByRole("separator", { name: "Resize symbols pane" });
+  const expectAlignedDivider = async () => {
+    await expect
+      .poll(() =>
+        divider.evaluate((node) => {
+          const line = node.getBoundingClientRect();
+          const grip = node.firstElementChild!.getBoundingClientRect();
+          const source = node
+            .parentElement!.querySelector(".file-panel")!
+            .getBoundingClientRect();
+          const center =
+            (Math.max(0, line.top) + Math.min(innerHeight, line.bottom)) / 2;
+          return Math.max(
+            Math.abs(grip.y + grip.height / 2 - center),
+            Math.abs(grip.x + grip.width / 2 - line.x - line.width / 2),
+            Math.abs(line.right - source.right),
+          );
+        }),
+      )
+      .toBeLessThanOrEqual(0.5);
+  };
   for (const count of [1, 120]) {
     const text = [
       ...Array.from(
@@ -1680,12 +1690,16 @@ test("Symbols and explorer controls remain reachable beside the end of a file", 
     await expect(
       symbols.getByRole("button", { name: "symbol_0 function 1", exact: true }),
     ).toBeVisible();
+    await expectAlignedDivider();
+    await page.evaluate(() => window.scrollTo(0, 900));
+    await expectAlignedDivider();
     await page.evaluate(() =>
       window.scrollTo({
         top: document.documentElement.scrollHeight,
         behavior: "instant",
       }),
     );
+    await expectAlignedDivider();
     await expect(page.locator(".site-footer")).toBeInViewport();
     await expect(symbols.locator(".code-symbols-header")).toBeInViewport({
       ratio: 1,

@@ -6,14 +6,7 @@ import {
   InputGroupAddon,
   InputGroupInput,
 } from "@/components/ui/input-group";
-import {
-  useDeferredValue,
-  useLayoutEffect,
-  useId,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useDeferredValue, useId, useMemo, useState } from "react";
 
 import { ArrowLeftIcon, SearchIcon, XIcon } from "@primer/octicons-react";
 import type { DiffsThemeNames, FileContents } from "@pierre/diffs";
@@ -60,7 +53,6 @@ export function CodeSymbolsPanel({
   onClearActive,
   onClose,
 }: Props) {
-  const panel = useRef<HTMLElement>(null);
   const searchId = useId();
   const [filter, setFilter] = useState("");
   const deferredFilter = useDeferredValue(filter.trim().toLowerCase());
@@ -92,28 +84,8 @@ export function CodeSymbolsPanel({
     return [...grouped];
   }, [definitions]);
 
-  useLayoutEffect(() => {
-    const node = panel.current;
-    const workspace = node?.closest<HTMLElement>(".file-source-workspace");
-    if (!node || !workspace) return;
-    // Sparse outlines stay compact; keep the resize grip centered on the
-    // actual panel as filtering and symbol details change its height.
-    const measure = () =>
-      workspace.style.setProperty(
-        "--code-symbols-panel-height",
-        `${node.offsetHeight}px`,
-      );
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(node);
-    return () => {
-      observer.disconnect();
-      workspace.style.removeProperty("--code-symbols-panel-height");
-    };
-  }, []);
-
   return (
-    <aside ref={panel} className="code-symbols-panel" aria-label="Code symbols">
+    <aside className="code-symbols-panel" aria-label="Code symbols">
       <header className="code-symbols-header">
         {active === null ? (
           <div>

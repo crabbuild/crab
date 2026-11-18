@@ -4968,11 +4968,15 @@ main {
 }
 .code-symbols-resizer {
   align-items: flex-start;
+  /* Share the viewer's right border instead of drawing an adjacent stroke. */
+  inset-inline-start: -1px;
 }
 .code-symbols-resizer > div {
   position: sticky;
-  top: calc(var(--code-symbols-panel-height, 100dvh) / 2 - 12px);
-  margin-top: calc(var(--code-symbols-panel-height, 100dvh) / 2 - --spacing(3));
+  top: calc(var(--workspace-available-height, 100dvh) / 2 - --spacing(3));
+  margin-top: calc(
+    var(--workspace-available-height, 100dvh) / 2 - --spacing(3)
+  );
 }
 .code-symbols-header {
   display: flex;
@@ -5010,7 +5014,6 @@ main {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  overscroll-behavior: contain;
   overscroll-behavior: contain;
   padding-bottom: --spacing(3);
 }
