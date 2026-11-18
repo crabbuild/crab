@@ -392,6 +392,9 @@ location; existing Unix addresses that fit the OS limit remain unchanged.
   until the native terminal response confirms cleanup. The UI reports Stopping
   while this work drains; it does not treat signal acknowledgement as completion.
 - Renderer RPC waits for the native startup ping and surfaces startup errors.
+- Language-server discovery probes versions asynchronously, so a slow system
+  executable cannot freeze editor controls. Shutdown cancels and joins version
+  probes; stopping a language prevents a pending discovery from starting it later.
 - Dashboard and dataset metadata refresh after native repository recovery while
   retaining view controls and selection. The Datasets tab under Large Files
   supports read-only inspection before Crab storage setup; tracking and storage
