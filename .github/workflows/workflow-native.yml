@@ -6,7 +6,7 @@ permissions:
   actions: read
 jobs:
   broad:
-    name: Windows native ownership diagnosis (${{ matrix.os }})
+    name: Approved desktop candidate (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
@@ -15,6 +15,8 @@ jobs:
         include:
           - os: windows-2022
             target: win-x64
+          - os: macos-15-intel
+            target: mac-x64
     defaults:
       run:
         shell: bash
@@ -54,66 +56,1053 @@ jobs:
       - run: npm ci
       - name: Build Electron modules
         run: npm run build:electron
-      - name: Observe file publication and SQLite handle ownership
+      - name: Apply exact local candidate
         run: |
-          cat > "$RUNNER_TEMP/crab-native-state.cjs" <<'JS'
-          const fs=require('node:fs'), Module=require('node:module'), load=Module._load;
-          const records=[];
-          const log=(kind,data)=>fs.appendFileSync(require('node:path').join(process.env.CARGO_TARGET_DIR,'ownership-events.jsonl'),JSON.stringify({pid:process.pid,kind,...data})+'\n');
-          const tracked = file => /crab-(orch-ui-state-test|goal-contract)-/.test(String(file));
-          const record = (db,args,kind) => {
-            const file=String(args[0]); if(!tracked(file))return db;
-            const entry={file,kind,db,closes:0,stack:new Error().stack};records.push(entry);log('opened',{file,kind,stack:entry.stack});
-            const close=db.close;
-            db.close=function(){entry.closes++;const result=close.apply(this,arguments);log('closed',{file,open:db.open,closes:entry.closes});return result};
-            return db;
-          };
-          const wrappers=new Map();
-          Module._load=function(name,...args){
-            const value=load.call(this,name,...args);
-            if(name==='better-sqlite3'){
-              if(!wrappers.has(value))wrappers.set(value,new Proxy(value,{construct(target,args,newTarget){try{return record(Reflect.construct(target,args,newTarget),args,'better-sqlite3')}catch(error){log('constructor-error',{message:error.message});throw error}}}));
-              return wrappers.get(value);
-            }
-            return value;
-          };
-          function snapshot(file,error){
-           if(!tracked(file))return;
-           const remaining=[];
-           function walk(file,depth){if(remaining.length>=40)return;try{const st=fs.lstatSync(file);remaining.push({file,mode:st.mode,directory:st.isDirectory()});if(depth&&st.isDirectory()&&!st.isSymbolicLink())for(const child of fs.readdirSync(file))walk(require('node:path').join(file,child),depth-1)}catch(cause){remaining.push({file,error:cause.code})}}
-           walk(String(file),5);
-           log('cleanup',{file,error:error.code,databases:records.filter(r=>r.file.startsWith(String(file))).map(r=>({file:r.file,kind:r.kind,open:r.db.open,closes:r.closes,stack:r.stack})),remaining,handles:process._getActiveHandles().map(x=>x.constructor.name)});
-          }
-          const rmSync=fs.rmSync;fs.rmSync=function(file,...args){try{return rmSync.call(this,file,...args)}catch(error){snapshot(file,error);throw error}};
-          const rm=fs.promises.rm;fs.promises.rm=async function(file,...args){try{return await rm.call(this,file,...args)}catch(error){snapshot(file,error);throw error}};
-          JS
-          cat > "$RUNNER_TEMP/crab-rename-contract.cjs" <<'JS'
-          const fs=require('node:fs'), path=require('node:path');
-          (async()=>{
-           const root=fs.mkdtempSync(path.join(process.env.CARGO_TARGET_DIR,'node-publication-'));
-           const target=path.join(root,'old.txt'),temporary=path.join(root,'new.txt');
-           let reader;
-           try{
-            fs.writeFileSync(target,'ORIGINAL',{mode:0o751});fs.writeFileSync(temporary,'REPLACEMENT');
-            reader=await fs.promises.open(target,'r');
-            let error;
-            try{await fs.promises.rename(temporary,target)}catch(cause){error=cause.code}
-            console.log('[DEBUG-rename-contract]',JSON.stringify({version:process.version,uv:process.versions.uv,electron:process.versions.electron,error,captured:await reader.readFile('utf8'),target:fs.readFileSync(target,'utf8')}));
-            await reader.close();reader=undefined;
-            if(error){await fs.promises.rename(temporary,target);console.log('[DEBUG-rename-retry]',fs.readFileSync(target,'utf8'));}
-           }finally{await reader?.close();fs.rmSync(root,{recursive:true,force:true})}
-          })().catch(error=>{console.error(error);process.exitCode=1});
-          JS
-          node "$RUNNER_TEMP/crab-rename-contract.cjs"
-          ELECTRON_RUN_AS_NODE=1 node -e 'const child=require("node:child_process").spawnSync(require("electron"),[process.argv[1]],{env:process.env,stdio:"inherit"});if(child.error)throw child.error;process.exitCode=child.status??1' "$RUNNER_TEMP/crab-rename-contract.cjs"
-      - name: Run unchanged Windows ownership tests
-        continue-on-error: true
-        run: NODE_OPTIONS="--require=$RUNNER_TEMP/crab-native-state.cjs" npm test -- tests/orchestrator-ui-state.spec.ts --maxWorkers 1 --reporter=default --reporter=json --outputFile=windows-contract-report.json
+          cat > "$RUNNER_TEMP/candidate.patch" <<'PATCH'
+          diff --git a/.github/workflows/desktop.yml b/.github/workflows/desktop.yml
+          index f0f7239dbb5..a1d8bf499e8 100644
+          --- a/.github/workflows/desktop.yml
+          +++ b/.github/workflows/desktop.yml
+          @@ -392,7 +392,7 @@ jobs:
+                       packages/desktop/release/rc*.yml
+                     if-no-files-found: error
+                 - name: Broad desktop regression suite
+          -        run: CRAB_TEST_JUPYTER_PYTHON="$(python -c 'import sys; print(sys.executable)')" npm test -- --maxWorkers 2 --minWorkers 1
+          +        run: CRAB_TEST_JUPYTER_PYTHON="$(python -c 'import sys; print(sys.executable)')" npm test -- --maxWorkers 2
+                 - name: Retain packaged app failure context
+                   if: failure()
+                   uses: actions/upload-artifact@v4
+          diff --git a/CHANGELOG.md b/CHANGELOG.md
+          index dfc3ca4fd83..ac96fe363e3 100644
+          --- a/CHANGELOG.md
+          +++ b/CHANGELOG.md
+          @@ -22,6 +22,8 @@ macOS automatic update installation requires a future signed release.
+             durable child transcripts and full-text output access.
+           - Added complex workflow editing and execution, resizable Workflow Studio
+             panels, local runs, and restored workflow output.
+          +- Kept editor controls responsive during language-server version discovery and
+          +  cancelled pending probes during shutdown.
+           - Simplified workspace, repository, Explorer, Search, and Git navigation;
+             standardized controls, themes, and terminal font rendering.
+           - Unified normal, durable daemon, and SSH terminal controls, preserving sessions
+          @@ -48,6 +50,8 @@ macOS automatic update installation requires a future signed release.
+           - Upgraded the embedded Cellar runtime to 0.1.1.
+           - Added first-run Docker setup for the repository HTTP server and S3 gateway,
+             including generated configuration and client identity.
+          +- Patched Caddy's network dependency across server, Compose, and Cloudflare
+          +  runtime images.
+           
+           ### Rust SDK
+           
+          diff --git a/packages/desktop/README.md b/packages/desktop/README.md
+          index 4b7f8a9064f..9abd4644e72 100644
+          --- a/packages/desktop/README.md
+          +++ b/packages/desktop/README.md
+          @@ -367,6 +367,9 @@ location; existing Unix addresses that fit the OS limit remain unchanged.
+             until the native terminal response confirms cleanup. The UI reports Stopping
+             while this work drains; it does not treat signal acknowledgement as completion.
+           - Renderer RPC waits for the native startup ping and surfaces startup errors.
+          +- Language-server discovery probes versions asynchronously, so a slow system
+          +  executable cannot freeze editor controls. Shutdown cancels and joins version
+          +  probes; stopping a language prevents a pending discovery from starting it later.
+           - Dashboard and dataset metadata refresh after native repository recovery while
+             retaining view controls and selection. The Datasets tab under Large Files
+             supports read-only inspection before Crab storage setup; tracking and storage
+          diff --git a/packages/desktop/docs/architecture/lsp-integration.md b/packages/desktop/docs/architecture/lsp-integration.md
+          index fe90afe0e1f..37e8eb353b6 100644
+          --- a/packages/desktop/docs/architecture/lsp-integration.md
+          +++ b/packages/desktop/docs/architecture/lsp-integration.md
+          @@ -39,8 +39,13 @@ lightweight IDE experience within the desktop client.
+           The LSP manager discovers available language servers through:
+           
+           1. **Bundled servers** — `typescript-language-server` ships with the app
+          -2. **PATH scanning** — looks for known server binaries in the user's PATH
+          -3. **Configuration** — user-specified servers in settings
+          +2. **Downloaded servers** — binaries installed under `~/.crab/lsp/`
+          +3. **PATH scanning** — looks for known server binaries in the user's PATH
+          +
+          +Discovery shares an asynchronous scan across callers. Version probes retain
+          +their five-second timeout without blocking Electron's main process or editor
+          +controls. App shutdown aborts and joins active probes; a language stopped during
+          +discovery cannot start when that pending scan completes.
+           
+           ### Discovered Server Interface
+           
+          @@ -48,8 +53,9 @@ The LSP manager discovers available language servers through:
+           interface DiscoveredServer {
+             language: string;       // e.g., "typescript", "rust", "python"
+             command: string;        // e.g., "typescript-language-server"
+          -  args: string[];         // e.g., ["--stdio"]
+          -  available: boolean;     // Whether the binary was found
+          +  path: string;           // Resolved binary or bundled entrypoint
+          +  version?: string;      // First output line of a successful version probe
+          +  source?: "bundled" | "installed" | "system";
+           }
+           ```
+           
+          diff --git a/packages/desktop/electron/lsp-discovery.ts b/packages/desktop/electron/lsp-discovery.ts
+          index 1086080f2d4..bf73c794d8a 100644
+          --- a/packages/desktop/electron/lsp-discovery.ts
+          +++ b/packages/desktop/electron/lsp-discovery.ts
+          @@ -1,5 +1,5 @@
+           import { app } from "electron";
+          -import { execSync } from "node:child_process";
+          +import { execFile } from "node:child_process";
+           import * as fs from "node:fs";
+           import * as path from "node:path";
+           import * as os from "node:os";
+          @@ -143,24 +143,32 @@ function resolveCommand(command: string, searchDirs: string[]): string | null {
+           /**
+            * Try to get the version string from a server binary.
+            */
+          -function getVersion(binaryPath: string, versionFlag?: string): string | undefined {
+          -  if (!versionFlag) return undefined;
+          -  try {
+          -    const output = execSync(`"${binaryPath}" ${versionFlag}`, {
+          -      encoding: "utf8",
+          -      timeout: 5000,
+          -      stdio: ["pipe", "pipe", "pipe"],
+          -    }).trim();
+          -    const firstLine = output.split("\n")[0].trim();
+          -    return firstLine || undefined;
+          -  } catch {
+          -    return undefined;
+          -  }
+          +function getVersion(binaryPath: string, versionFlag: string | undefined, signal: AbortSignal): Promise<string | undefined> {
+          +  if (!versionFlag) return Promise.resolve(undefined);
+          +  return new Promise((resolve, reject) => {
+          +    let version: string | undefined;
+          +    const child = execFile(binaryPath, [versionFlag], { encoding: "utf8", timeout: 5000, windowsHide: true, signal }, (error, stdout) => {
+          +      if (!error) version = stdout.trim().split("\n")[0].trim() || undefined;
+          +    });
+          +    child.stdin?.end();
+          +    // The abort callback can precede process exit. Own the pipes and child
+          +    // until close so application shutdown cannot leave a version probe behind.
+          +    child.once("close", () => signal.aborted ? reject(signal.reason) : resolve(version));
+          +  });
+           }
+           
+           // ── Cache ───────────────────────────────────────────────────────────
+           
+          -let cachedResults: DiscoveredServer[] | null = null;
+          +interface Discovery {
+          +  controller: AbortController;
+          +  result: Promise<DiscoveredServer[]>;
+          +}
+          +
+          +let cached: Discovery | null = null;
+          +let stopping = false;
+          +// Refresh can replace the cache while older callers still await their scan.
+          +// Shutdown must retain ownership of those probes too.
+          +const active = new Set<Discovery>();
+           
+           /**
+            * Discover available language servers.
+          @@ -172,14 +180,24 @@ let cachedResults: DiscoveredServer[] | null = null;
+            *
+            * Results are cached in memory; call `refresh()` to re-scan.
+            */
+          -export function discoverServers(): DiscoveredServer[] {
+          -  if (cachedResults !== null) return cachedResults;
+          +export function discoverServers(): Promise<DiscoveredServer[]> {
+          +  if (stopping) return Promise.reject(new Error("Language server discovery is stopping"));
+          +  if (cached) return cached.result;
+          +  const controller = new AbortController();
+          +  const discovery = { controller, result: scanServers(controller.signal) };
+          +  cached = discovery;
+          +  active.add(discovery);
+          +  void discovery.result.then(() => active.delete(discovery), () => active.delete(discovery));
+          +  return discovery.result;
+          +}
+           
+          +async function scanServers(signal: AbortSignal): Promise<DiscoveredServer[]> {
+             const searchDirs = buildSearchPath();
+             const results: DiscoveredServer[] = [];
+             const seenLanguages = new Set<string>();
+           
+             for (const server of KNOWN_SERVERS) {
+          +    signal.throwIfAborted();
+               if (seenLanguages.has(server.language)) continue;
+           
+               // 1. Bundled (typescript only for now)
+          @@ -205,7 +223,7 @@ export function discoverServers(): DiscoveredServer[] {
+                   language: server.language,
+                   command: server.commands[0],
+                   path: installedPath,
+          -        version: getVersion(installedPath, server.versionFlag),
+          +        version: await getVersion(installedPath, server.versionFlag, signal),
+                   source: "installed",
+                 });
+                 seenLanguages.add(server.language);
+          @@ -220,7 +238,7 @@ export function discoverServers(): DiscoveredServer[] {
+                     language: server.language,
+                     command,
+                     path: resolved,
+          -          version: getVersion(resolved, server.versionFlag),
+          +          version: await getVersion(resolved, server.versionFlag, signal),
+                     source: "system",
+                   });
+                   seenLanguages.add(server.language);
+          @@ -229,10 +247,19 @@ export function discoverServers(): DiscoveredServer[] {
+               }
+             }
+           
+          -  cachedResults = results;
+          +  signal.throwIfAborted();
+             return results;
+           }
+           
+          +/** Cancel and join discovery children before the application exits. */
+          +export async function stopDiscovery(): Promise<void> {
+          +  stopping = true;
+          +  const scans = [...active];
+          +  for (const scan of scans) scan.controller.abort(new Error("Language server discovery stopped"));
+          +  await Promise.allSettled(scans.map(scan => scan.result));
+          +  cached = null;
+          +}
+          +
+           /**
+            * Check whether a language server has been downloaded to ~/.crab/lsp/.
+            * Synchronous sibling of `lsp-installer.findInstalledBinary`.
+          @@ -259,8 +286,8 @@ function findInstalledBinary(language: string): string | null {
+           /**
+            * Clear the discovery cache and re-scan.
+            */
+          -export function refresh(): DiscoveredServer[] {
+          -  cachedResults = null;
+          +export function refresh(): Promise<DiscoveredServer[]> {
+          +  cached = null;
+             return discoverServers();
+           }
+           
+          diff --git a/packages/desktop/electron/lsp-manager.ts b/packages/desktop/electron/lsp-manager.ts
+          index c39929ef6a4..4de53b84fcb 100644
+          --- a/packages/desktop/electron/lsp-manager.ts
+          +++ b/packages/desktop/electron/lsp-manager.ts
+          @@ -1,6 +1,6 @@
+           import { EventEmitter } from "node:events";
+           import { LspServer, LspServerConfig, ServerCapabilities } from "./lsp-server";
+          -import { discoverServers, refresh as refreshDiscovery, resolveSpawnSpec, DiscoveredServer } from "./lsp-discovery";
+          +import { discoverServers, refresh as refreshDiscovery, resolveSpawnSpec, stopDiscovery, DiscoveredServer } from "./lsp-discovery";
+           import { lspInstaller } from "./lsp-installer";
+           
+           /**
+          @@ -25,6 +25,8 @@ export class LspManager extends EventEmitter {
+             private servers = new Map<string, LspServer>();
+             private serverConfigs = new Map<string, LspServerConfig>();
+             private crashTimestamps = new Map<string, number[]>();
+          +  private stopped = false;
+          +  private revisions = new Map<string, number>();
+             private static readonly CRASH_WINDOW_MS = 30_000;
+             private static readonly MAX_AUTO_RESTARTS = 1;
+           
+          @@ -37,6 +39,8 @@ export class LspManager extends EventEmitter {
+              * Checks discovery cache, reads config overrides, spawns LspServer.
+              */
+             async start(language: string, rootPath: string): Promise<ServerCapabilities> {
+          +    if (this.stopped) throw new Error("Language server manager is stopping");
+          +    const revision = this.revisions.get(language);
+               // If already running, return existing capabilities
+               const existing = this.servers.get(language);
+               if (existing && existing.isRunning()) {
+          @@ -45,7 +49,10 @@ export class LspManager extends EventEmitter {
+               }
+           
+               // Find the server config
+          -    const config = this.resolveConfig(language);
+          +    const config = await this.resolveConfig(language);
+          +    // Stop may arrive while a version probe is running. Discovery completing
+          +    // must never turn that cancelled request into a newly spawned server.
+          +    if (this.stopped || this.revisions.get(language) !== revision) throw new Error("Language server startup was stopped");
+               if (!config) {
+                 throw new Error(`No language server found for "${language}"`);
+               }
+          @@ -72,6 +79,10 @@ export class LspManager extends EventEmitter {
+           
+               // Start the server
+               const capabilities = await server.start();
+          +    if (this.stopped || this.revisions.get(language) !== revision) {
+          +      await server.shutdown();
+          +      throw new Error("Language server startup was stopped");
+          +    }
+               this.servers.set(language, server);
+               this.serverConfigs.set(language, config);
+               this.emitStatus(language, "running", config.command);
+          @@ -95,6 +106,8 @@ export class LspManager extends EventEmitter {
+              * Graceful shutdown of all running servers.
+              */
+             async stopAll(): Promise<void> {
+          +    this.stopped = true;
+          +    await stopDiscovery();
+               const shutdowns: Promise<void>[] = [];
+               for (const [language, server] of this.servers) {
+                 shutdowns.push(
+          @@ -113,6 +126,7 @@ export class LspManager extends EventEmitter {
+              * Stop a specific language server.
+              */
+             async stop(language: string): Promise<void> {
+          +    this.revisions.set(language, (this.revisions.get(language) ?? 0) + 1);
+               const server = this.servers.get(language);
+               if (!server) return;
+               await server.shutdown();
+          @@ -123,8 +137,8 @@ export class LspManager extends EventEmitter {
+             /**
+              * Return status of all configured servers.
+              */
+          -  status(): LspServerStatus[] {
+          -    const discovered = discoverServers();
+          +  async status(): Promise<LspServerStatus[]> {
+          +    const discovered = await discoverServers();
+               const statuses: LspServerStatus[] = [];
+           
+               // Include running servers
+          @@ -154,7 +168,7 @@ export class LspManager extends EventEmitter {
+             /**
+              * Refresh the discovery cache.
+              */
+          -  refreshDiscovery(): DiscoveredServer[] {
+          +  refreshDiscovery(): Promise<DiscoveredServer[]> {
+               return refreshDiscovery();
+             }
+           
+          @@ -164,8 +178,8 @@ export class LspManager extends EventEmitter {
+              * Resolve the config for a language: check user overrides, then
+              * fall back to discovery.
+              */
+          -  private resolveConfig(language: string): LspServerConfig | null {
+          -    const discovered = discoverServers();
+          +  private async resolveConfig(language: string): Promise<LspServerConfig | null> {
+          +    const discovered = await discoverServers();
+               const match = discovered.find((s) => s.language === language);
+               if (!match) return null;
+           
+          @@ -190,8 +204,7 @@ export class LspManager extends EventEmitter {
+             /** Install a language server on demand and refresh discovery. */
+             async installLanguage(language: string): Promise<DiscoveredServer> {
+               await lspInstaller.install(language);
+          -    refreshDiscovery();
+          -    const discovered = discoverServers();
+          +    const discovered = await refreshDiscovery();
+               const match = discovered.find((s) => s.language === language);
+               if (!match) {
+                 throw new Error(`Installation succeeded but discovery couldn't find "${language}"`);
+          diff --git a/packages/desktop/tests/agent-model-discovery.spec.ts b/packages/desktop/tests/agent-model-discovery.spec.ts
+          index 8827e149794..c1014f7cc8d 100644
+          --- a/packages/desktop/tests/agent-model-discovery.spec.ts
+          +++ b/packages/desktop/tests/agent-model-discovery.spec.ts
+          @@ -65,7 +65,7 @@ describe("installed provider model discovery", () => {
+                 models: [
+                   { value: "provider-alias", label: "Provider Alias", description: "Configured model", intelligenceLevels: ["high", "max"] },
+                   { value: "no-effort-model", label: "No effort", description: "Provider default effort", intelligenceLevels: [] },
+          -      ], requests: [{ subtype: "initialize", supportedDialogKinds: [] }], binary: "/configured/claude",
+          +      ], requests: [{ subtype: "initialize", supportedDialogKinds: [], forwardSubagentText: true }], binary: "/configured/claude",
+               });
+             });
+           
+          diff --git a/packages/desktop/tests/codex-app-server-approval.spec.ts b/packages/desktop/tests/codex-app-server-approval.spec.ts
+          index 901ed3e0bf0..c9c17b8fd79 100644
+          --- a/packages/desktop/tests/codex-app-server-approval.spec.ts
+          +++ b/packages/desktop/tests/codex-app-server-approval.spec.ts
+          @@ -141,10 +141,11 @@ describe("CodexAppServerAdapter — Approval round-trip (CA9.3, CA5.2)", () => {
+               adapter.onEvent((event) => events.push(event));
+           
+               // Spawn the adapter (triggers initialization)
+          -    await adapter.spawn("Hello, write a test", "/tmp/test-cwd");
+          +    const startup = adapter.spawn("Hello, write a test", "/tmp/test-cwd");
+           
+               // Complete the handshake
+               await completeHandshake(fakeProc.stdin, fakeProc.stdout);
+          +    await startup;
+             });
+           
+             afterEach(() => {
+          @@ -159,7 +160,7 @@ describe("CodexAppServerAdapter — Approval round-trip (CA9.3, CA5.2)", () => {
+               await new Promise(resolve => setTimeout(resolve, 10));
+               drainFrames(fakeProc.stdin);
+               adapter.respondApproval(JSON.stringify("permissions"), decision);
+          -    expect(drainFrames(fakeProc.stdin).map(frame => JSON.parse(frame))).toEqual([{ id: "permissions", result: { permissions: decision === "deny" ? {} : permissions, scope } }]);
+          +    await vi.waitFor(() => expect(drainFrames(fakeProc.stdin).map(frame => JSON.parse(frame))).toEqual([{ id: "permissions", result: { permissions: decision === "deny" ? {} : permissions, scope } }]));
+             });
+           
+             it("allow → acceptForSession", async () => {
+          @@ -303,10 +304,14 @@ describe("CodexAppServerAdapter — Approval round-trip (CA9.3, CA5.2)", () => {
+               await new Promise(resolve => setTimeout(resolve, 20));
+               adapter.respondApproval("301", "allow_once");
+               adapter.respondApproval(JSON.stringify("301"), "deny");
+          -    expect(drainFrames(fakeProc.stdin).map(frame => JSON.parse(frame))).toEqual([
+          -      { id: 301, result: { decision: "accept" } },
+          -      { id: "301", result: { decision: "decline" } },
+          -    ]);
+          +    const responses: unknown[] = [];
+          +    await vi.waitFor(() => {
+          +      responses.push(...drainFrames(fakeProc.stdin).map(frame => JSON.parse(frame)));
+          +      expect(responses).toEqual([
+          +        { id: 301, result: { decision: "accept" } },
+          +        { id: "301", result: { decision: "decline" } },
+          +      ]);
+          +    });
+             });
+           
+             it("file change approval also works correctly", async () => {
+          diff --git a/packages/desktop/tests/codex-app-server-backpressure.spec.ts b/packages/desktop/tests/codex-app-server-backpressure.spec.ts
+          index 3fa6f3103df..1d8a867d983 100644
+          --- a/packages/desktop/tests/codex-app-server-backpressure.spec.ts
+          +++ b/packages/desktop/tests/codex-app-server-backpressure.spec.ts
+          @@ -125,7 +125,7 @@ describe("CodexAppServerAdapter — Backpressure", () => {
+                 const events: AgentEvent[] = [];
+                 adapter.onEvent((e) => events.push(e));
+           
+          -      await adapter.spawn("Hello backpressure test", "/tmp/bp-test");
+          +      const startup = adapter.spawn("Hello backpressure test", "/tmp/bp-test");
+           
+                 // Complete the handshake (uses real-ish timing via advanceTimersByTimeAsync)
+                 // Step 1: initialize
+          @@ -208,6 +208,8 @@ describe("CodexAppServerAdapter — Backpressure", () => {
+           
+                 await vi.advanceTimersByTimeAsync(50);
+           
+          +      await startup;
+          +
+                 // Verify no error events were emitted (the turn started successfully
+                 // after two -32001 retries)
+                 const errorEvents = events.filter((e) => e.type === "error");
+          @@ -227,7 +229,7 @@ describe("CodexAppServerAdapter — Backpressure", () => {
+                 const events: AgentEvent[] = [];
+                 adapter.onEvent((e) => events.push(e));
+           
+          -      await adapter.spawn("Hello exhaustion test", "/tmp/bp-exhaust");
+          +      const startup = adapter.spawn("Hello exhaustion test", "/tmp/bp-exhaust").catch(error => error);
+           
+                 // Complete handshake
+                 // Step 1: initialize
+          @@ -311,6 +313,8 @@ describe("CodexAppServerAdapter — Backpressure", () => {
+                 // Allow the rejection to propagate
+                 await vi.advanceTimersByTimeAsync(100);
+           
+          +      await startup;
+          +
+                 // Verify the adapter emitted an error AgentEvent
+                 const errorEvents = events.filter((e) => e.type === "error");
+                 expect(errorEvents.length).toBeGreaterThanOrEqual(1);
+          diff --git a/packages/desktop/tests/codex-app-server-death.spec.ts b/packages/desktop/tests/codex-app-server-death.spec.ts
+          index 43e1966d5a9..33d7a412e84 100644
+          --- a/packages/desktop/tests/codex-app-server-death.spec.ts
+          +++ b/packages/desktop/tests/codex-app-server-death.spec.ts
+          @@ -87,7 +87,7 @@ describe("CodexAppServerAdapter — Process Death Mid-Turn", () => {
+               adapter.onExit((code) => { exitCode = code; });
+           
+               // Spawn the adapter
+          -    await adapter.spawn("Fix the bug in main.ts", "/tmp/test-project");
+          +    const startup = adapter.spawn("Fix the bug in main.ts", "/tmp/test-project");
+           
+               // --- Complete the initialization handshake ---
+           
+          @@ -129,6 +129,7 @@ describe("CodexAppServerAdapter — Process Death Mid-Turn", () => {
+                 id: turnStartRequest!.id,
+                 result: { turn: { id: "turn_death" } },
+               });
+          +    await startup;
+           
+               // 4. Server sends turn/started notification (sets activeTurnId)
+               serverWrite(stdout, {
+          @@ -186,7 +187,7 @@ describe("CodexAppServerAdapter — Process Death Mid-Turn", () => {
+               adapter.onExit((code) => { exitCode = code; });
+           
+               // Spawn the adapter
+          -    await adapter.spawn("Hello", "/tmp/test-project");
+          +    const startup = adapter.spawn("Hello", "/tmp/test-project");
+           
+               // Complete initialization handshake
+               let frames = await waitForFrames(stdin);
+          @@ -215,6 +216,7 @@ describe("CodexAppServerAdapter — Process Death Mid-Turn", () => {
+                 id: turnStartRequest!.id,
+                 result: { turn: { id: "turn_idle" } },
+               });
+          +    await startup;
+           
+               // Send turn/started then turn/completed (turn finishes normally)
+               serverWrite(stdout, {
+          diff --git a/packages/desktop/tests/codex-app-server-error.spec.ts b/packages/desktop/tests/codex-app-server-error.spec.ts
+          index 6f515e1bddc..e72ea10f7d7 100644
+          --- a/packages/desktop/tests/codex-app-server-error.spec.ts
+          +++ b/packages/desktop/tests/codex-app-server-error.spec.ts
+          @@ -139,8 +139,9 @@ describe("CodexAppServerAdapter — Mid-turn error notifications (D11)", () => {
+               const events: AgentEvent[] = [];
+               adapter.onEvent((e) => events.push(e));
+           
+          -    await adapter.spawn("test prompt", "/tmp/test");
+          +    const startup = adapter.spawn("test prompt", "/tmp/test");
+               await completeHandshake(stdin, stdout);
+          +    await startup;
+           
+               // Clear events from handshake
+               events.length = 0;
+          @@ -183,8 +184,9 @@ describe("CodexAppServerAdapter — Mid-turn error notifications (D11)", () => {
+               const events: AgentEvent[] = [];
+               adapter.onEvent((e) => events.push(e));
+           
+          -    await adapter.spawn("test prompt", "/tmp/test");
+          +    const startup = adapter.spawn("test prompt", "/tmp/test");
+               await completeHandshake(stdin, stdout);
+          +    await startup;
+           
+               // Clear events from handshake
+               events.length = 0;
+          diff --git a/packages/desktop/tests/codex-app-server-operations.spec.ts b/packages/desktop/tests/codex-app-server-operations.spec.ts
+          index a8d68d672cd..54ed34b740b 100644
+          --- a/packages/desktop/tests/codex-app-server-operations.spec.ts
+          +++ b/packages/desktop/tests/codex-app-server-operations.spec.ts
+          @@ -3,6 +3,8 @@ import { EventEmitter } from "node:events";
+           import { PassThrough } from "node:stream";
+           import type { AgentEvent, CodexGoal } from "../electron/orchestrator-adapters";
+           
+          +vi.mock("shell-env", () => ({ shellEnv: async () => ({ ...process.env }) }));
+          +
+           vi.mock("node:child_process", () => ({
+             spawn: vi.fn(), execFile: vi.fn(), execFileSync: vi.fn(() => "/usr/bin"),
+           }));
+          @@ -49,7 +51,7 @@ describe("Codex app-server operation contracts", () => {
+               adapter = new CodexAppServerAdapter();
+               events = [];
+               adapter.onEvent(event => events.push(event));
+          -    adapter.spawn("Initial prompt", "/tmp/contract-test");
+          +    await adapter.spawn("Initial prompt", "/tmp/contract-test");
+               await vi.advanceTimersByTimeAsync(0);
+             });
+           
+          @@ -190,52 +192,57 @@ describe("Codex app-server operation contracts", () => {
+               expect(requests.at(-1)?.params.threadId).toBe("thread-original");
+             });
+           
+          -  it("accepts an empty standalone MCP form after turn completion and deduplicates its request identity", () => {
+          +  it("accepts an empty standalone MCP form after turn completion and deduplicates its request identity", async () => {
+               const frame = { id: 0, method: "mcpServer/elicitation/request", params: { threadId: "thread-original", turnId: null, serverName: "Fixture MCP", mode: "form", message: "Confirm", requestedSchema: { type: "object", properties: {} } } };
+               stdout.write(JSON.stringify(frame) + "\n");
+               stdout.write(JSON.stringify(frame) + "\n");
+               stdout.write(JSON.stringify({ method: "turn/completed", params: { threadId: "thread-original", turn: { id: "turn-1", status: "completed" } } }) + "\n");
+               const delivered = adapter.respondInput("0", { kind: "elicitation", action: "accept", content: {} });
+          +    await vi.advanceTimersByTimeAsync(0);
+               expect({ delivered, requests: events.filter(event => event.type === "input_request").length, replies }).toEqual({ delivered: true, requests: 1, replies: [{ id: 0, result: { action: "accept", content: {} } }] });
+             });
+           
+          -  it("rejects invalid MCP contents without resolving the pending form", () => {
+          +  it("rejects invalid MCP contents without resolving the pending form", async () => {
+               stdout.write(JSON.stringify({ id: "form", method: "mcpServer/elicitation/request", params: {
+                 threadId: "thread-original", serverName: "Fixture MCP", mode: "form", message: "Enter a number", requestedSchema: { type: "object", properties: { count: { type: "integer", minimum: 1 } }, required: ["count"] },
+               } }) + "\n");
+               const id = JSON.stringify("form");
+               expect(() => adapter.respondInput(id, { kind: "elicitation", action: "accept", content: { count: 1.5 } })).toThrow("integer");
+               adapter.respondInput(id, { kind: "elicitation", action: "accept", content: { count: 2 } });
+          +    await vi.advanceTimersByTimeAsync(0);
+               expect(replies).toEqual([{ id: "form", result: { action: "accept", content: { count: 2 } } }]);
+             });
+           
+          -  it.each(["decline", "cancel"] as const)("returns MCP URL %s without granting or sending contents", action => {
+          +  it.each(["decline", "cancel"] as const)("returns MCP URL %s without granting or sending contents", async action => {
+               stdout.write(JSON.stringify({ id: "url", method: "mcpServer/elicitation/request", params: {
+                 threadId: "thread-original", serverName: "Fixture MCP", mode: "url", message: "Open the page", elicitationId: "url-flow", url: "https://auth.example.invalid/connect",
+               } }) + "\n");
+               adapter.respondInput(JSON.stringify("url"), { kind: "elicitation", action });
+          +    await vi.advanceTimersByTimeAsync(0);
+               expect(replies).toEqual([{ id: "url", result: { action, content: null } }]);
+             });
+           
+          -  it("answers a typed question on its original server request and rejects stale answers", () => {
+          +  it("answers a typed question on its original server request and rejects stale answers", async () => {
+               stdout.write(JSON.stringify({ id: "question-1", method: "item/tool/requestUserInput", params: {
+                 threadId: "thread-original", turnId: "turn-1", itemId: "question-tool", isBlocking: true,
+                 questions: [{ id: "mode", header: "Mode", question: "Which mode?", options: [{ label: "Thorough", description: "Run all checks" }], isOther: true }],
+               } }) + "\n");
+               const requestId = JSON.stringify("question-1");
+               const delivered = adapter.respondInput(requestId, { kind: "questions", answers: { mode: ["Thorough"] } });
+          +    await vi.advanceTimersByTimeAsync(0);
+               expect({ delivered, replies, repeated: adapter.respondInput(requestId, { kind: "questions", answers: {} }) }).toEqual({
+                 delivered: true, replies: [{ id: "question-1", result: { answers: { mode: { answers: ["Thorough"] } } } }], repeated: false,
+               });
+             });
+           
+          -  it("returns only an offered approval decision, preserving policy amendments unchanged", () => {
+          +  it("returns only an offered approval decision, preserving policy amendments unchanged", async () => {
+               const amendment = { applyNetworkPolicyAmendment: { network_policy_amendment: { action: "deny", host: "example.invalid" } } };
+               stdout.write(JSON.stringify({ id: 900, method: "item/commandExecution/requestApproval", params: {
+                 threadId: "thread-original", turnId: "turn-1", itemId: "command-tool", command: "curl example.invalid", availableDecisions: ["accept", amendment, "decline"],
+               } }) + "\n");
+               const rejected = adapter.respondApproval("900", "allow");
+               const delivered = adapter.respondApproval("900", "network:1");
+          +    await vi.advanceTimersByTimeAsync(0);
+               expect({ rejected, delivered, replies }).toEqual({ rejected: false, delivered: true, replies: [{ id: 900, result: { decision: amendment } }] });
+             });
+           
+          diff --git a/packages/desktop/tests/codex-app-server-shutdown.spec.ts b/packages/desktop/tests/codex-app-server-shutdown.spec.ts
+          index bac939bbc04..2e8bed00965 100644
+          --- a/packages/desktop/tests/codex-app-server-shutdown.spec.ts
+          +++ b/packages/desktop/tests/codex-app-server-shutdown.spec.ts
+          @@ -132,7 +132,7 @@ describe("CodexAppServerAdapter — Graceful shutdown (CA-P6, D7)", () => {
+               adapter.onEvent((event) => events.push(event));
+           
+               // Spawn the adapter
+          -    await adapter.spawn("Do something", "/tmp/test-shutdown");
+          +    const startup = adapter.spawn("Do something", "/tmp/test-shutdown");
+           
+               // Complete the handshake (uses real-ish async but fake timers)
+               // We need to advance timers for the setTimeout calls in completeHandshake
+          @@ -177,6 +177,7 @@ describe("CodexAppServerAdapter — Graceful shutdown (CA-P6, D7)", () => {
+               });
+           
+               await vi.advanceTimersByTimeAsync(20);
+          +    await startup;
+             });
+           
+             afterEach(() => {
+          diff --git a/packages/desktop/tests/codex-app-server.spec.ts b/packages/desktop/tests/codex-app-server.spec.ts
+          index 96f0917d066..de14cf7dbc9 100644
+          --- a/packages/desktop/tests/codex-app-server.spec.ts
+          +++ b/packages/desktop/tests/codex-app-server.spec.ts
+          @@ -99,7 +99,7 @@ describe("CodexAppServerAdapter — Protocol Integration", () => {
+               adapter.onEvent((e) => events.push(e));
+           
+               // Start the adapter — this triggers the async initialization.
+          -    await adapter.spawn("Write a hello world function", "/tmp/test-project");
+          +    const startup = adapter.spawn("Write a hello world function", "/tmp/test-project");
+           
+               // --- Step 1: Client sends `initialize` → server responds with success ---
+               let frames = await waitForFrames(stdin);
+          @@ -160,6 +160,8 @@ describe("CodexAppServerAdapter — Protocol Integration", () => {
+                 result: { turn: { id: "turn_001" } },
+               });
+           
+          +    await startup;
+          +
+               // --- Step 4 (after handlers wired): Server sends `thread/started` notification ---
+               serverWrite(stdout, {
+                 method: "thread/started",
+          diff --git a/packages/desktop/tests/daemon-sessions.spec.ts b/packages/desktop/tests/daemon-sessions.spec.ts
+          index acb157ab4cb..6911790af81 100644
+          --- a/packages/desktop/tests/daemon-sessions.spec.ts
+          +++ b/packages/desktop/tests/daemon-sessions.spec.ts
+          @@ -6,7 +6,7 @@ import { DaemonSessions, daemonDirectory, prepareDaemonHistory } from "../electr
+           import { DaemonClient } from "../electron/daemon/daemon-client";
+           import { DaemonServer } from "../electron/daemon/daemon-server";
+           import { createNodePtySpawner } from "../electron/daemon/subprocess-handle";
+          -import type { CreateOrAttachResult } from "../electron/daemon/protocol";
+          +import type { CreateOrAttachResult, SessionInfo } from "../electron/daemon/protocol";
+           
+           it.each(["root", "runtime"])("preserves a %s owner's real terminal and routes new sessions after its runtime disappears", async location => {
+             const root = fs.mkdtempSync(path.join(os.tmpdir(), "crab-daemon-owners-"));
+          @@ -51,6 +51,7 @@ it.each(["root", "runtime"])("preserves a %s owner's real terminal and routes ne
+               await client.request("createOrAttach", { ...payload, sessionId: "ending" });
+               await client.request("write", { sessionId: "ending", data: "exit\r" });
+               await vi.waitFor(() => expect(() => process.kill(ending.pid!, 0)).toThrowError(expect.objectContaining({ code: "ESRCH" })));
+          +    await vi.waitFor(async () => expect((await client.request<SessionInfo[]>("listSessions")).some(session => session.sessionId === "ending" && session.isAlive)).toBe(false));
+               expect(await client.request("createOrAttach", { ...payload, sessionId: "ending" })).toMatchObject({ isNew: true });
+               expect(client.ownsCurrentSession("ending")).toBe(true);
+               const command = process.platform === "win32" ? "echo owner-%COMPUTERNAME%\r" : "printf 'owner-%s\\n' ready\r";
+          diff --git a/packages/desktop/tests/e2e/file-query.spec.ts b/packages/desktop/tests/e2e/file-query.spec.ts
+          index 10d5e5c1aad..a4ea0b3fd1a 100644
+          --- a/packages/desktop/tests/e2e/file-query.spec.ts
+          +++ b/packages/desktop/tests/e2e/file-query.spec.ts
+          @@ -33,7 +33,7 @@ test("SQL uses selected SQLite, WAL, LFS and Crab sources and joins cancellation
+               git(["config", "filter.crab.process", `'${crab.replaceAll("\\", "/").replaceAll("'", "'\\''")}' filter-process`]);
+               git(["config", "filter.crab.required", "true"]);
+               writeFileSync(path.join(source, ".gitattributes"), "chunks.pq filter=crab -text\n");
+          -    writeFileSync(path.join(source, ".gitignore"), "/live.sqlite-wal\n/live.sqlite-shm\n");
+          +    writeFileSync(path.join(source, ".gitignore"), ".crab/\n/live.sqlite-wal\n/live.sqlite-shm\n");
+               application = await electron.launch({
+                 executablePath, args: [`--user-data-dir=${path.join(root, "profile")}`],
+                 env: Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === "string")),
+          diff --git a/packages/desktop/tests/e2e/media.spec.ts b/packages/desktop/tests/e2e/media.spec.ts
+          index 56ba87f6155..95b184fd0f5 100644
+          --- a/packages/desktop/tests/e2e/media.spec.ts
+          +++ b/packages/desktop/tests/e2e/media.spec.ts
+          @@ -97,6 +97,7 @@ test("packaged media seeks large Crab and LFS files through retained byte ranges
+               let previous: string | null = null;
+               for (const file of ["crab.wav", "lfs.wav", "movie.webm", "git.wav"]) {
+                 await page.locator(`[role="treeitem"][data-item-path="${file}"]`).click();
+          +      await expect(page.getByRole("region", { name: file.endsWith("webm") ? "Video preview" : "Audio preview", exact: true })).toContainText(file);
+                 const element = page.locator(file.endsWith("webm") ? "video" : "audio");
+                 await expect(element).toBeVisible();
+                 await expect.poll(() => element.evaluate((node: HTMLMediaElement) => Number.isFinite(node.duration) && node.duration > 0)).toBe(true);
+          diff --git a/packages/desktop/tests/local-file-write.spec.ts b/packages/desktop/tests/local-file-write.spec.ts
+          index e0672d713eb..0d5e5c26e34 100644
+          --- a/packages/desktop/tests/local-file-write.spec.ts
+          +++ b/packages/desktop/tests/local-file-write.spec.ts
+          @@ -52,12 +52,22 @@ describe("local repository file publication", () => {
+               expect(await fs.promises.readFile(file, "utf8")).toBe("REPLACEMENT");
+             });
+           
+          -  it("an already-open source retains its original bytes after publication", async () => {
+          +  it("an open reader retains original bytes across publication or a Windows sharing refusal", async () => {
+               const captured = await fs.promises.open(file, "r");
+               try {
+          -      await provider.fsWrite("repo", file, "REPLACEMENT");
+          +      // Windows MoveFileEx refuses replacement while the reader is open.
+          +      // Refusal must preserve the target and release the prepared temporary.
+          +      if (process.platform === "win32") {
+          +        await expect(provider.fsWrite("repo", file, "REPLACEMENT")).rejects.toMatchObject({ code: "EPERM" });
+          +        expect(await fs.promises.readFile(file, "utf8")).toBe("ORIGINAL");
+          +        expect(await fs.promises.readdir(root)).toEqual(["note.txt"]);
+          +      } else {
+          +        await provider.fsWrite("repo", file, "REPLACEMENT");
+          +      }
+                 expect(await captured.readFile("utf8")).toBe("ORIGINAL");
+               } finally { await captured.close(); }
+          +    if (process.platform === "win32") await provider.fsWrite("repo", file, "REPLACEMENT");
+          +    expect(await fs.promises.readFile(file, "utf8")).toBe("REPLACEMENT");
+             });
+           
+             it("a failed rename retains the target and removes the prepared temporary", async () => {
+          diff --git a/packages/desktop/tests/lsp-discovery.spec.ts b/packages/desktop/tests/lsp-discovery.spec.ts
+          new file mode 100644
+          index 00000000000..d550e315507
+          --- /dev/null
+          +++ b/packages/desktop/tests/lsp-discovery.spec.ts
+          @@ -0,0 +1,106 @@
+          +import { expect, it, vi } from "vitest";
+          +import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+          +import { tmpdir } from "node:os";
+          +import path from "node:path";
+          +
+          +vi.mock("electron", () => ({ app: { getAppPath: () => process.cwd() } }));
+          +
+          +function fixture() {
+          +  const root = mkdtempSync(path.join(tmpdir(), "crab-lsp-discovery-"));
+          +  const bin = path.join(root, "bin with spaces");
+          +  const release = path.join(root, "release");
+          +  const entry = path.join(root, "version.cjs");
+          +  mkdirSync(bin);
+          +  const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
+          +  writeFileSync(entry, `
+          +    const fs = require('node:fs');
+          +    if (!process.argv.includes('--version')) {
+          +      fs.writeFileSync(${JSON.stringify(path.join(root, "server-started"))}, 'started');
+          +      process.exit();
+          +    }
+          +    const pidFile = ${JSON.stringify(path.join(root, "probe.pid"))};
+          +    fs.writeFileSync(pidFile + '.tmp', String(process.pid));
+          +    fs.renameSync(pidFile + '.tmp', pidFile);
+          +    process.stdin.resume();
+          +    process.stdin.once('end', () => {
+          +      const timer = setInterval(() => {
+          +        if (!fs.existsSync(${JSON.stringify(release)})) return;
+          +        clearInterval(timer);
+          +        process.stdout.write('fixture 1.0\\n');
+          +      }, 10);
+          +    });
+          +    setTimeout(() => process.exit(), 6_000).unref();
+          +  `);
+          +  writeFileSync(path.join(bin, "rust-analyzer"), `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec ${quote(process.execPath)} ${quote(entry)} "$@"\n`, { mode: 0o700 });
+          +  vi.stubEnv("PATH", bin + path.delimiter + (process.env.PATH ?? ""));
+          +  vi.stubEnv("HOME", root);
+          +  vi.resetModules();
+          +  return { root, release, cleanup: () => { vi.unstubAllEnvs(); rmSync(root, { recursive: true, force: true }); } };
+          +}
+          +
+          +it.skipIf(process.platform === "win32")("keeps the event loop available while a server reports its version", async () => {
+          +  const { release, cleanup } = fixture();
+          +  let heartbeat: ReturnType<typeof setTimeout> | undefined;
+          +  const { discoverServers, stopDiscovery } = await import("../electron/lsp-discovery");
+          +  try {
+          +    heartbeat = setTimeout(() => writeFileSync(release, "ready"), 50);
+          +    const servers = await discoverServers();
+          +    expect(servers.find(server => server.language === "rust")?.version).toBe("fixture 1.0");
+          +  } finally {
+          +    clearTimeout(heartbeat);
+          +    if (!existsSync(release)) writeFileSync(release, "ready");
+          +    await stopDiscovery();
+          +    cleanup();
+          +  }
+          +}, 20_000);
+          +
+          +it.skipIf(process.platform === "win32")("shutdown drains version children from a scan replaced by refresh", async () => {
+          +  const { root, cleanup } = fixture();
+          +  const { discoverServers, refresh, stopDiscovery } = await import("../electron/lsp-discovery");
+          +  const pidFile = path.join(root, "probe.pid");
+          +  const first = discoverServers().catch(() => null);
+          +  try {
+          +    await expect.poll(() => existsSync(pidFile)).toBe(true);
+          +    const firstPid = Number(readFileSync(pidFile, "utf8"));
+          +    const second = refresh().catch(() => null);
+          +    await expect.poll(() => Number(readFileSync(pidFile, "utf8"))).not.toBe(firstPid);
+          +    const secondPid = Number(readFileSync(pidFile, "utf8"));
+          +    await stopDiscovery();
+          +    const alive = [firstPid, secondPid].filter(pid => {
+          +      try { process.kill(pid, 0); return true; } catch (error) {
+          +        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+          +        return false;
+          +      }
+          +    });
+          +    expect({ results: await Promise.all([first, second]), alive }).toEqual({ results: [null, null], alive: [] });
+          +  } finally {
+          +    await stopDiscovery();
+          +    await first;
+          +    cleanup();
+          +  }
+          +}, 20_000);
+          +
+          +it.skipIf(process.platform === "win32").each(["language", "all"])("stopping %s during discovery prevents a late server and drains the version child", async scope => {
+          +  const { root, release, cleanup } = fixture();
+          +  const { LspManager } = await import("../electron/lsp-manager");
+          +  const manager = new LspManager();
+          +  const started = manager.start("rust", root).then(() => false, () => true);
+          +  try {
+          +    await expect.poll(() => existsSync(path.join(root, "probe.pid"))).toBe(true);
+          +    const pid = Number(readFileSync(path.join(root, "probe.pid"), "utf8"));
+          +    if (scope === "all") await manager.stopAll();
+          +    else await manager.stop("rust");
+          +    writeFileSync(release, "ready");
+          +    const cancelled = await started;
+          +    let alive = true;
+          +    try { process.kill(pid, 0); } catch (error) {
+          +      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+          +      alive = false;
+          +    }
+          +    expect({ cancelled, alive, spawned: existsSync(path.join(root, "server-started")) }).toEqual({ cancelled: true, alive: false, spawned: false });
+          +  } finally {
+          +    await manager.stopAll();
+          +    await started;
+          +    cleanup();
+          +  }
+          +}, 20_000);
+          diff --git a/packages/desktop/tests/orchestrator-diff.spec.ts b/packages/desktop/tests/orchestrator-diff.spec.ts
+          index e52f1df6852..74c283b7e06 100644
+          --- a/packages/desktop/tests/orchestrator-diff.spec.ts
+          +++ b/packages/desktop/tests/orchestrator-diff.spec.ts
+          @@ -36,6 +36,7 @@ const execFile = promisify(execFileCb);
+           async function createTempRepo(): Promise<string> {
+             const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), "crab-diff-test-"));
+             await execFile("git", ["init", "--initial-branch=main"], { cwd: repoDir });
+          +  await execFile("git", ["config", "core.autocrlf", "false"], { cwd: repoDir });
+             await execFile("git", ["config", "user.email", "test@crab.dev"], { cwd: repoDir });
+             await execFile("git", ["config", "user.name", "Test"], { cwd: repoDir });
+           
+          diff --git a/packages/desktop/tests/orchestrator-goals.spec.ts b/packages/desktop/tests/orchestrator-goals.spec.ts
+          index e745b09c4f0..728a0eca926 100644
+          --- a/packages/desktop/tests/orchestrator-goals.spec.ts
+          +++ b/packages/desktop/tests/orchestrator-goals.spec.ts
+          @@ -268,7 +268,10 @@ describe("native goal task ownership", () => {
+               notify(connection, "turn/started", { threadId: task.codexThreadId, turn: { id: "goal-cycle" } });
+               notify(connection, "turn/completed", { threadId: task.codexThreadId, turn: { id: "goal-cycle", status: "completed" } });
+               const count = connections.length;
+          -    const restored = new Orchestrator({ persistPath: path.join(cwd, "tasks.sqlite") }).getTask(task.id);
+          -    expect({ status: restored?.status, goal: restored?.goal?.status, connections: connections.length }).toEqual({ status: "interrupted", goal: "active", connections: count });
+          +    const reader = new Orchestrator({ persistPath: path.join(cwd, "tasks.sqlite") });
+          +    try {
+          +      const restored = reader.getTask(task.id);
+          +      expect({ status: restored?.status, goal: restored?.goal?.status, connections: connections.length }).toEqual({ status: "interrupted", goal: "active", connections: count });
+          +    } finally { await reader.shutdown(); }
+             });
+           });
+          diff --git a/packages/desktop/tests/orchestrator.spec.ts b/packages/desktop/tests/orchestrator.spec.ts
+          index 690d34ad851..0292d076064 100644
+          --- a/packages/desktop/tests/orchestrator.spec.ts
+          +++ b/packages/desktop/tests/orchestrator.spec.ts
+          @@ -2015,7 +2015,7 @@ describe("Orchestrator", () => {
+                 try {
+                   const task = await orchestrator.createTask("Work", "codex", workspace, "main", { worktreeMode: mode, ...(mode === "existing" ? { worktreePath: workspace } : {}) });
+                   await orchestrator.startTask(task.id);
+          -        const peer = orchestrator.createChildTaskForAgent(task.id, "codex", "Independent work");
+          +        const peer = await orchestrator.createTask("Independent work", "codex", workspace, "main", { worktreeMode: "existing", worktreePath: workspace });
+                   await orchestrator.startTask(peer.id);
+                   execFileCalls = [];
+                   await orchestrator.archiveTask(task.id);
+          diff --git a/packages/desktop/tests/remote-status-polling-integration.spec.ts b/packages/desktop/tests/remote-status-polling-integration.spec.ts
+          index ab53a1deaa4..1dc27c8d57e 100644
+          --- a/packages/desktop/tests/remote-status-polling-integration.spec.ts
+          +++ b/packages/desktop/tests/remote-status-polling-integration.spec.ts
+          @@ -54,6 +54,15 @@ describe("Remote status polling integration", () => {
+               "/home/dev/projects/shared",
+             ];
+           
+          +  async function openForPolling(profileId: string, paths: string[]) {
+          +    const repos = paths.map(absolute_path => {
+          +      const name = absolute_path.slice(absolute_path.lastIndexOf("/") + 1);
+          +      return { absolute_path, relative_path: name, name };
+          +    });
+          +    vi.spyOn(orchestrator, "discoverRepos").mockResolvedValueOnce(repos);
+          +    await orchestrator.openWorkspace(profileId, "/home/dev/projects");
+          +  }
+          +
+             beforeEach(() => {
+               vi.useFakeTimers();
+               mockRouter = makeMockRpcRouter();
+          @@ -178,18 +187,18 @@ describe("Remote status polling integration", () => {
+                 expect(mockRouter.sendToRemoteAgent).toHaveBeenCalledTimes(3);
+               });
+           
+          -    it("emits error event when batch_git_status RPC fails", async () => {
+          +    it("publishes repository errors when batch_git_status RPC fails", async () => {
+                 mockRouter.sendToRemoteAgent.mockRejectedValue(new Error("SSH channel closed"));
+           
+                 const errors: any[] = [];
+          -      orchestrator.on("error", (e) => errors.push(e));
+          +      orchestrator.on("status-update", e => { if (e.statuses.some((status: RemoteRepoStatus) => status.error)) errors.push(e); });
+           
+          -      orchestrator.startPolling(PROFILE_ID, REPO_PATHS);
+          +      await openForPolling(PROFILE_ID, REPO_PATHS);
+                 await vi.advanceTimersByTimeAsync(0);
+           
+                 expect(errors).toHaveLength(1);
+                 expect(errors[0].profileId).toBe(PROFILE_ID);
+          -      expect(errors[0].message).toBe("SSH channel closed");
+          +      expect(errors[0].statuses.map((status: RemoteRepoStatus) => status.error)).toEqual(REPO_PATHS.map(() => "SSH channel closed"));
+               });
+           
+               it("continues polling after a transient RPC failure", async () => {
+          @@ -203,10 +212,10 @@ describe("Remote status polling integration", () => {
+           
+                 const events: any[] = [];
+                 const errors: any[] = [];
+          -      orchestrator.on("status-update", (e) => events.push(e));
+          -      orchestrator.on("error", (e) => errors.push(e));
+          +      orchestrator.on("status-update", e => { if (e.statuses.every((status: RemoteRepoStatus) => !status.error)) events.push(e); });
+          +      orchestrator.on("status-update", e => { if (e.statuses.some((status: RemoteRepoStatus) => status.error)) errors.push(e); });
+           
+          -      orchestrator.startPolling(PROFILE_ID, ["/home/dev/projects/api"]);
+          +      await openForPolling(PROFILE_ID, ["/home/dev/projects/api"]);
+           
+                 // First poll (fails)
+                 await vi.advanceTimersByTimeAsync(0);
+          @@ -362,7 +371,7 @@ describe("Remote status polling integration", () => {
+                 // Attach error listener to prevent unhandled error throw
+                 orchestrator.on("error", () => {});
+           
+          -      orchestrator.startPolling(PROFILE_ID, REPO_PATHS);
+          +      await openForPolling(PROFILE_ID, REPO_PATHS);
+           
+                 // Initial poll
+                 await vi.advanceTimersByTimeAsync(0);
+          @@ -382,16 +391,16 @@ describe("Remote status polling integration", () => {
+                 expect(mockRouter.sendToRemoteAgent).not.toHaveBeenCalled();
+               });
+           
+          -    it("emits error event on disconnect", async () => {
+          +    it("publishes repository errors on disconnect", async () => {
+                 mockRouter.sendToRemoteAgent.mockResolvedValue({
+                   statuses: [],
+                   poll_timestamp: Date.now() / 1000,
+                 });
+           
+                 const errors: any[] = [];
+          -      orchestrator.on("error", (e) => errors.push(e));
+          +      orchestrator.on("status-update", e => { if (e.statuses.some((status: RemoteRepoStatus) => status.error)) errors.push(e); });
+           
+          -      orchestrator.startPolling(PROFILE_ID, REPO_PATHS);
+          +      await openForPolling(PROFILE_ID, REPO_PATHS);
+                 await vi.advanceTimersByTimeAsync(0);
+           
+                 // Simulate disconnection
+          @@ -402,7 +411,7 @@ describe("Remote status polling integration", () => {
+           
+                 expect(errors).toHaveLength(1);
+                 expect(errors[0].profileId).toBe(PROFILE_ID);
+          -      expect(errors[0].message).toBe("SSH connection lost");
+          +      expect(errors[0].statuses.map((status: RemoteRepoStatus) => status.error)).toEqual(REPO_PATHS.map(() => "SSH connection unavailable"));
+               });
+           
+               it("resumes polling when SSH connection is re-established", async () => {
+          @@ -478,8 +487,8 @@ describe("Remote status polling integration", () => {
+                 // Attach error listener to prevent unhandled error throw
+                 orchestrator.on("error", () => {});
+           
+          -      // Start polling without opening a workspace (direct startPolling call)
+          -      orchestrator.startPolling(PROFILE_ID, REPO_PATHS);
+          +      await openForPolling(PROFILE_ID, REPO_PATHS);
+          +      orchestrator.closeWorkspace(PROFILE_ID);
+                 await vi.advanceTimersByTimeAsync(0);
+           
+                 // Disconnect
+          @@ -490,8 +499,7 @@ describe("Remote status polling integration", () => {
+           
+                 mockRouter.sendToRemoteAgent.mockClear();
+           
+          -      // Reconnect — but since no workspace was opened via openWorkspace(),
+          -      // the orchestrator has no record of repos to resume polling for
+          +      // A closed workspace must not resume polling on reconnect.
+                 mockSessionManager.emit("ssh:status-changed", {
+                   profileId: PROFILE_ID,
+                   status: "connected",
+          @@ -514,8 +522,8 @@ describe("Remote status polling integration", () => {
+                 // Attach error listener to prevent unhandled error throw
+                 orchestrator.on("error", () => {});
+           
+          -      orchestrator.startPolling(PROFILE_A, ["/home/dev/repo-a"]);
+          -      orchestrator.startPolling(PROFILE_B, ["/home/dev/repo-b"]);
+          +      await openForPolling(PROFILE_A, ["/home/dev/repo-a"]);
+          +      await openForPolling(PROFILE_B, ["/home/dev/repo-b"]);
+           
+                 // Both poll immediately
+                 await vi.advanceTimersByTimeAsync(0);
+          diff --git a/packages/desktop/tests/ssh-host-verification.spec.ts b/packages/desktop/tests/ssh-host-verification.spec.ts
+          index 4b7dc9c1804..b1b0414ec47 100644
+          --- a/packages/desktop/tests/ssh-host-verification.spec.ts
+          +++ b/packages/desktop/tests/ssh-host-verification.spec.ts
+          @@ -38,28 +38,28 @@ afterEach(async () => {
+           
+           describe("SSH host identity before authentication", () => {
+             it("withholds credentials while trust is pending, pauses the deadline, then connects", async () => {
+          -    let accept: ((accepted: boolean) => void) | undefined;
+          -    const verify = vi.fn(async () => new Promise<boolean>(resolve => { accept = resolve; }));
+          +    let accept: (() => void) | undefined;
+          +    const verify = vi.fn(async () => new Promise<void>(resolve => { accept = resolve; }));
+               manager = new SshSessionManager(verify);
+               const connected = manager.connect(profile);
+               const outcome = connected.catch(error => error);
+               await vi.waitFor(() => expect(verify).toHaveBeenCalledOnce(), { timeout: profile.connectionTimeoutMs });
+               await new Promise(resolve => setTimeout(resolve, profile.connectionTimeoutMs! + 100));
+               expect(passwordAttempts).toBe(0);
+          -    accept!(true);
+          +    accept!();
+               await connected;
+               expect(await outcome).toBeUndefined();
+               expect(passwordAttempts).toBe(1);
+             });
+           
+             it("rejects an untrusted host before sending credentials", async () => {
+          -    const verify = vi.fn(async () => false);
+          +    const verify = vi.fn(async () => { throw new Error("Rejected fixture host key"); });
+               manager = new SshSessionManager(verify);
+               await expect(manager.connect(profile)).rejects.toThrow(/verification failed/i);
+               expect(passwordAttempts).toBe(0);
+             });
+             it("verifies host identity again when the authenticated connection rekeys", async () => {
+          -    const verify = vi.fn(async () => true);
+          +    const verify = vi.fn(async () => {});
+               manager = new SshSessionManager(verify);
+               await manager.connect(profile);
+               let finished = false;
+          @@ -70,7 +70,7 @@ describe("SSH host identity before authentication", () => {
+             });
+           
+             it("re-verifies a reconnect before sending credentials to its replacement connection", async () => {
+          -    const verify = vi.fn().mockResolvedValueOnce(true).mockResolvedValue(false);
+          +    const verify = vi.fn().mockResolvedValueOnce(undefined).mockRejectedValue(new Error("Rejected fixture host key"));
+               manager = new SshSessionManager(verify);
+               profile.autoReconnect = true;
+               await manager.connect(profile);
+          diff --git a/packages/desktop/tests/terminal-session-lifecycle.spec.ts b/packages/desktop/tests/terminal-session-lifecycle.spec.ts
+          index bbf4dc486c9..5c087f8ec81 100644
+          --- a/packages/desktop/tests/terminal-session-lifecycle.spec.ts
+          +++ b/packages/desktop/tests/terminal-session-lifecycle.spec.ts
+          @@ -50,7 +50,7 @@ it("keeps an interactive foreground process when the app disconnects and reconne
+               router.register();
+               // User startup files can consume terminal input while loading. The fixture
+               // owns its shell home so foreground-process survival is deterministic.
+          -    const spawned = await handlers.get("crab:term-spawn")!(null, { cwd: root, env: { HOME: root, ZDOTDIR: root } }) as TermSpawnResult;
+          +    const spawned = await handlers.get("crab:term-spawn")!(null, { cwd: root, sessionType: "daemon", env: { HOME: root, ZDOTDIR: root } }) as TermSpawnResult;
+               expect(spawned.resolvedSessionType).toBe("daemon");
+               // Electron's GUI executable otherwise returns cmd's prompt immediately,
+               // leaving two processes competing for this fixture's terminal input.
+          
+          PATCH
+          git apply --check "$RUNNER_TEMP/candidate.patch"
+          git apply "$RUNNER_TEMP/candidate.patch"
+      - name: Install kernel qualification runtime
+        run: python -m pip install jupyter_client==8.6.3 ipykernel==6.29.5 jupyter_server==2.17.0
+      - name: Run complete desktop regression suite
+        run: CRAB_TEST_JUPYTER_PYTHON="$(python -c 'import sys; print(sys.executable)')" npm test -- --maxWorkers 2 --reporter=default --reporter=json --outputFile=candidate-report.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: alpha2-windows-ownership-diagnosis
-          path: |
-            packages/desktop/windows-contract-report.json
-            ${{ runner.temp }}/crab-broad-suite/ownership-events.jsonl
+          name: alpha2-approved-candidate-${{ matrix.target }}
+          path: packages/desktop/candidate-report.json
           retention-days: 7
