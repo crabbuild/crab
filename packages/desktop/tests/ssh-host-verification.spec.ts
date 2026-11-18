@@ -38,28 +38,28 @@ afterEach(async () => {
 
 describe("SSH host identity before authentication", () => {
   it("withholds credentials while trust is pending, pauses the deadline, then connects", async () => {
-    let accept: ((accepted: boolean) => void) | undefined;
-    const verify = vi.fn(async () => new Promise<boolean>(resolve => { accept = resolve; }));
+    let accept: (() => void) | undefined;
+    const verify = vi.fn(async () => new Promise<void>(resolve => { accept = resolve; }));
     manager = new SshSessionManager(verify);
     const connected = manager.connect(profile);
     const outcome = connected.catch(error => error);
     await vi.waitFor(() => expect(verify).toHaveBeenCalledOnce(), { timeout: profile.connectionTimeoutMs });
     await new Promise(resolve => setTimeout(resolve, profile.connectionTimeoutMs! + 100));
     expect(passwordAttempts).toBe(0);
-    accept!(true);
+    accept!();
     await connected;
     expect(await outcome).toBeUndefined();
     expect(passwordAttempts).toBe(1);
   });
 
   it("rejects an untrusted host before sending credentials", async () => {
-    const verify = vi.fn(async () => false);
+    const verify = vi.fn(async () => { throw new Error("Rejected fixture host key"); });
     manager = new SshSessionManager(verify);
     await expect(manager.connect(profile)).rejects.toThrow(/verification failed/i);
     expect(passwordAttempts).toBe(0);
   });
   it("verifies host identity again when the authenticated connection rekeys", async () => {
-    const verify = vi.fn(async () => true);
+    const verify = vi.fn(async () => {});
     manager = new SshSessionManager(verify);
     await manager.connect(profile);
     let finished = false;
@@ -70,7 +70,7 @@ describe("SSH host identity before authentication", () => {
   });
 
   it("re-verifies a reconnect before sending credentials to its replacement connection", async () => {
-    const verify = vi.fn().mockResolvedValueOnce(true).mockResolvedValue(false);
+    const verify = vi.fn().mockResolvedValueOnce(undefined).mockRejectedValue(new Error("Rejected fixture host key"));
     manager = new SshSessionManager(verify);
     profile.autoReconnect = true;
     await manager.connect(profile);
