@@ -40,7 +40,7 @@ jobs:
         run: npm ci
       - name: Build the same renderer and packaged application
         run: |
-          npm run build:renderer
+          npm run build:renderer -- --sourcemap
           npm run build:electron
           node scripts/package.mjs --dir --arm64
       - name: Instrument request and view boundaries
@@ -63,6 +63,13 @@ jobs:
             };
            },file);
            const page=await application.firstWindow();
+           const profileClient=await page.context().newCDPSession(page);
+           await profileClient.send('Profiler.enable');
+           await profileClient.send('Profiler.setSamplingInterval',{interval:1000});
+           await profileClient.send('Profiler.start');
+           const close=application.close.bind(application);
+           application.close=async()=>{try{const result=await profileClient.send('Profiler.stop');fs.writeFileSync(process.env.CARGO_TARGET_DIR+'/renderer-'+Date.now()+'.cpuprofile',JSON.stringify(result.profile));}finally{return close();}};
+           if(process.env.WF_CPU_RATE){const cdp=await page.context().newCDPSession(page);await cdp.send("Emulation.setCPUThrottlingRate",{rate:Number(process.env.WF_CPU_RATE)});}
            page.on('console',msg=>{if(msg.text().startsWith('[DEBUG-wf-nav]'))fs.appendFileSync(file,JSON.stringify({time:Date.now(),event:msg.text()})+'\n');});
            page.on('pageerror',error=>fs.appendFileSync(file,JSON.stringify({time:Date.now(),event:'[DEBUG-wf-nav] pageerror',error:error.message})+'\n'));
            await page.evaluate(()=>{
@@ -77,9 +84,11 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: alpha2-workflow-navigation-diagnosis
+          name: alpha2-workflow-cpu-diagnosis
           path: |
             ${{ env.CARGO_TARGET_DIR }}/workflow-navigation-events.jsonl
+            ${{ env.CARGO_TARGET_DIR }}/*.cpuprofile
+            packages/desktop/dist/assets/*.map
             packages/desktop/workflow-report.json
             packages/desktop/test-results/**/trace.zip
             packages/desktop/test-results/**/error-context.md
