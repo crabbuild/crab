@@ -59,19 +59,20 @@ jobs:
           cat > "$RUNNER_TEMP/crab-native-state.cjs" <<'JS'
           const fs=require('node:fs'), Module=require('node:module'), load=Module._load;
           const records=[];
+          const log=(kind,data)=>fs.appendFileSync(require('node:path').join(process.env.CARGO_TARGET_DIR,'ownership-events.jsonl'),JSON.stringify({pid:process.pid,kind,...data})+'\n');
           const tracked = file => /crab-(orch-ui-state-test|goal-contract)-/.test(String(file));
           const record = (db,args,kind) => {
             const file=String(args[0]); if(!tracked(file))return db;
-            const entry={file,kind,db,closes:0,stack:new Error().stack};records.push(entry);
+            const entry={file,kind,db,closes:0,stack:new Error().stack};records.push(entry);log('opened',{file,kind,stack:entry.stack});
             const close=db.close;
-            db.close=function(){entry.closes++;return close.apply(this,arguments)};
+            db.close=function(){entry.closes++;const result=close.apply(this,arguments);log('closed',{file,open:db.open,closes:entry.closes});return result};
             return db;
           };
           const wrappers=new Map();
           Module._load=function(name,...args){
             const value=load.call(this,name,...args);
             if(name==='better-sqlite3'){
-              if(!wrappers.has(value))wrappers.set(value,new Proxy(value,{construct(target,args,newTarget){try{return record(Reflect.construct(target,args,newTarget),args,'better-sqlite3')}catch(error){console.error('[DEBUG-db-constructor]',error.message);throw error}}}));
+              if(!wrappers.has(value))wrappers.set(value,new Proxy(value,{construct(target,args,newTarget){try{return record(Reflect.construct(target,args,newTarget),args,'better-sqlite3')}catch(error){log('constructor-error',{message:error.message});throw error}}}));
               return wrappers.get(value);
             }
             return value;
@@ -81,7 +82,7 @@ jobs:
            const remaining=[];
            function walk(file,depth){if(remaining.length>=40)return;try{const st=fs.lstatSync(file);remaining.push({file,mode:st.mode,directory:st.isDirectory()});if(depth&&st.isDirectory()&&!st.isSymbolicLink())for(const child of fs.readdirSync(file))walk(require('node:path').join(file,child),depth-1)}catch(cause){remaining.push({file,error:cause.code})}}
            walk(String(file),5);
-           console.error('[DEBUG-db-cleanup]',JSON.stringify({file,error:error.code,databases:records.filter(r=>r.file.startsWith(String(file))).map(r=>({file:r.file,kind:r.kind,open:r.db.open,closes:r.closes,stack:r.stack})),remaining,handles:process._getActiveHandles().map(x=>x.constructor.name)}));
+           log('cleanup',{file,error:error.code,databases:records.filter(r=>r.file.startsWith(String(file))).map(r=>({file:r.file,kind:r.kind,open:r.db.open,closes:r.closes,stack:r.stack})),remaining,handles:process._getActiveHandles().map(x=>x.constructor.name)});
           }
           const rmSync=fs.rmSync;fs.rmSync=function(file,...args){try{return rmSync.call(this,file,...args)}catch(error){snapshot(file,error);throw error}};
           const rm=fs.promises.rm;fs.promises.rm=async function(file,...args){try{return await rm.call(this,file,...args)}catch(error){snapshot(file,error);throw error}};
@@ -107,10 +108,12 @@ jobs:
           ELECTRON_RUN_AS_NODE=1 node -e 'const child=require("node:child_process").spawnSync(require("electron"),[process.argv[1]],{env:process.env,stdio:"inherit"});if(child.error)throw child.error;process.exitCode=child.status??1' "$RUNNER_TEMP/crab-rename-contract.cjs"
       - name: Run unchanged Windows ownership tests
         continue-on-error: true
-        run: NODE_OPTIONS="--require=$RUNNER_TEMP/crab-native-state.cjs" npm test -- tests/local-file-write.spec.ts tests/orchestrator-goals.spec.ts tests/orchestrator-ui-state.spec.ts tests/orchestrator-diff.spec.ts --maxWorkers 1 --reporter=json --outputFile=windows-contract-report.json
+        run: NODE_OPTIONS="--require=$RUNNER_TEMP/crab-native-state.cjs" npm test -- tests/orchestrator-ui-state.spec.ts --maxWorkers 1 --reporter=default --reporter=json --outputFile=windows-contract-report.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: alpha2-windows-ownership-diagnosis
-          path: packages/desktop/windows-contract-report.json
+          path: |
+            packages/desktop/windows-contract-report.json
+            ${{ runner.temp }}/crab-broad-suite/ownership-events.jsonl
           retention-days: 7
