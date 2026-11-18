@@ -111,10 +111,14 @@ impl GitRestoration {
             Workspace::create(&index.root, working.temporary_parent()?, scope).await?;
         let (workspace, private_index) = workspace.additional_temporary().await?;
         let result = async {
-            let mut input = tokio::fs::File::open(source_index).await?;
-            let mut output = tokio::fs::File::from_std(private_index.as_file().try_clone()?);
-            tokio::io::copy(&mut input, &mut output).await?;
-            output.flush().await?;
+            {
+                // Release the snapshot reader before conversion and publication
+                // so Windows index replacement never overlaps our private copy.
+                let mut input = tokio::fs::File::open(source_index).await?;
+                let mut output = tokio::fs::File::from_std(private_index.as_file().try_clone()?);
+                tokio::io::copy(&mut input, &mut output).await?;
+                output.flush().await?;
+            }
             command::conversion::copy(
                 index,
                 private_index.path(),

@@ -121,15 +121,17 @@ jobs:
   rust:
     name: Rust quality and tests
     runs-on: ubuntu-latest
-    # Full test compilation exhausted the 45-minute job budget. Keep the
-    # complete workspace suite and leave time for execution and cache upload.
-    timeout-minutes: 75
+    # Cold workspace compilation and the serialized reconstruction corpus need
+    # time for the complete suite and cache upload; retain every test.
+    timeout-minutes: 150
     needs: [changes, actionlint]
     if: needs.changes.outputs.rust == 'true'
     env:
       # Workspace test linking exhausted runner disk. Retain file/line
       # backtraces without type/variable debug data; runtime checks stay on.
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      # Publication fixtures use the same explicit root as the build cache.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -193,7 +195,10 @@ jobs:
           # Desktop worktree integration tests invoke the real CLI. Cargo's
           # binary test harness is not the executable required by that contract.
           cargo build -p crab --locked
-          cargo test --workspace --locked --no-fail-fast
+          # Bound independent VFS fixtures to hosted memory; each test retains
+          # its concurrent workers. Stream assertions before runner termination
+          # and report resources for the complete workspace suite.
+          /usr/bin/time -v cargo test --workspace --locked --no-fail-fast -- --nocapture --test-threads=2
 
       - name: Check managed OpenAPI contract
         run: cargo run -p crab-auth --example generate_managed_openapi --locked -- --check

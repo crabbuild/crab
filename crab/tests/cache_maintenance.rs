@@ -491,7 +491,8 @@ async fn stats_commands_do_not_inspect_ranges_through_an_aliased_cache_root() {
             assert_eq!(data["root_state"], "unavailable");
             assert_eq!(data["observed"]["logical_bytes"], 0);
             assert_eq!(data["scan_complete"], false);
-            assert_eq!(data["over_budget"], false);
+            assert_eq!(data["budget_available"], false);
+            assert_eq!(data.get("over_budget"), Some(&serde_json::Value::Null));
         } else {
             let stdout = String::from_utf8(output.stdout).unwrap();
             assert!(stdout.contains("(Unavailable)"), "{stdout}");
@@ -658,6 +659,8 @@ async fn object_maintenance_commands_preserve_unknown_state_and_remote_proofs() 
 
 #[tokio::test]
 async fn verify_and_prune_commands_preserve_non_range_owners() {
+    use std::os::unix::fs::PermissionsExt as _;
+
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("cache");
     let config = temp.path().join(crab::core::config::REPO_CONFIG_REL);
@@ -692,6 +695,7 @@ async fn verify_and_prune_commands_preserve_non_range_owners() {
     let retained = [entry_dir.join("notes.txt"), entry_dir.join(".tmp-sentinel")];
     for path in &retained {
         std::fs::write(path, b"sentinel").unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
     let report = command(temp.path(), &root, &["cache", "verify"]);
     assert_eq!(

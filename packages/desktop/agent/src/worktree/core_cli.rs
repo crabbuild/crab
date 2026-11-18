@@ -1,6 +1,8 @@
 //! Adapter for the core `crab worktree` JSON contract.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(all(test, unix))]
+use std::path::PathBuf;
 
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -8,15 +10,15 @@ use tokio::process::Command;
 
 use crate::{AgentError, Result};
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[derive(Clone)]
-struct TestCrabBin {
+struct TestCrabScript {
     scope: PathBuf,
-    bin: PathBuf,
+    script: PathBuf,
 }
 
-#[cfg(test)]
-static TEST_CRAB_BIN: std::sync::Mutex<Option<TestCrabBin>> = std::sync::Mutex::new(None);
+#[cfg(all(test, unix))]
+static TEST_CRAB_SCRIPT: std::sync::Mutex<Option<TestCrabScript>> = std::sync::Mutex::new(None);
 
 #[derive(Debug, Deserialize)]
 struct CrabEnvelope<T> {
@@ -167,8 +169,7 @@ async fn run_worktree_mutation_json<T: DeserializeOwned>(
 }
 
 async fn run_crab_json<T: DeserializeOwned>(work_dir: &Path, args: &[String]) -> Result<T> {
-    let bin = resolved_crab_bin(work_dir);
-    let mut command = Command::new(&bin);
+    let mut command = crab_command(work_dir);
     command
         .args(args)
         .current_dir(work_dir)
@@ -209,66 +210,66 @@ async fn run_crab_json<T: DeserializeOwned>(work_dir: &Path, args: &[String]) ->
     )))
 }
 
-fn resolved_crab_bin(_work_dir: &Path) -> PathBuf {
-    #[cfg(test)]
+fn crab_command(_work_dir: &Path) -> Command {
+    #[cfg(all(test, unix))]
     {
-        if let Ok(guard) = TEST_CRAB_BIN.lock()
-            && let Some(test_bin) = guard.clone()
-            && _work_dir.starts_with(&test_bin.scope)
+        if let Ok(guard) = TEST_CRAB_SCRIPT.lock()
+            && let Some(fixture) = guard.as_ref()
+            && _work_dir.starts_with(&fixture.scope)
         {
-            return test_bin.bin;
+            // Parallel forks can temporarily retain a fixture's writer. Read
+            // the script through its interpreter instead of exec'ing that inode.
+            let mut command = Command::new("/bin/sh");
+            command.arg(&fixture.script);
+            return command;
         }
     }
-    crate::shellout::resolve_crab_bin()
+    Command::new(crate::shellout::resolve_crab_bin())
 }
 
 #[cfg(test)]
 #[cfg(unix)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
-    use std::sync::Mutex;
+    use tokio::sync::Mutex;
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static SCRIPT_LOCK: Mutex<()> = Mutex::const_new(());
 
     fn install_fake_crab(response: &str) -> (tempfile::TempDir, std::path::PathBuf) {
         let tmp = tempfile::tempdir().expect("tempdir");
         let log = tmp.path().join("argv.log");
-        let bin = tmp.path().join("crab");
+        let bin = tmp.path().join("crab.sh");
         let script = format!(
             "#!/bin/sh\nfor arg in \"$@\"; do printf '%s\\n' \"$arg\"; done > '{}'\nprintf '%s\\n' '{}'\n",
             log.display(),
             response.replace('\'', "'\\''")
         );
         std::fs::write(&bin, script).expect("write fake crab");
-        let mut perms = std::fs::metadata(&bin).expect("metadata").permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&bin, perms).expect("chmod fake crab");
         (tmp, log)
     }
 
-    struct CrabBinGuard;
+    struct CrabScriptGuard;
 
-    impl Drop for CrabBinGuard {
+    impl Drop for CrabScriptGuard {
         fn drop(&mut self) {
-            *TEST_CRAB_BIN.lock().expect("test crab bin lock") = None;
+            *TEST_CRAB_SCRIPT.lock().expect("test crab script lock") = None;
         }
     }
 
-    fn set_crab_bin(scope: &Path, path: &Path) -> CrabBinGuard {
-        *TEST_CRAB_BIN.lock().expect("test crab bin lock") = Some(TestCrabBin {
+    fn set_crab_script(scope: &Path, path: &Path) -> CrabScriptGuard {
+        *TEST_CRAB_SCRIPT.lock().expect("test crab script lock") = Some(TestCrabScript {
             scope: scope.to_path_buf(),
-            bin: path.to_path_buf(),
+            script: path.to_path_buf(),
         });
-        CrabBinGuard
+        CrabScriptGuard
     }
 
     #[tokio::test]
     async fn add_worktree_invokes_core_json_contract() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _guard = SCRIPT_LOCK.lock().await;
         let response = r#"{"schema":"worktree.add","version":"1.0","timestamp":"t","data":{"created":true,"path":"/tmp/wt","worktree":{"path":"/tmp/wt","head":"abc","detached":true,"locked":false,"prunable":false,"crab":{"identity":"wt"}}}}"#;
         let (tmp, log) = install_fake_crab(response);
-        let _env = set_crab_bin(tmp.path(), &tmp.path().join("crab"));
+        let _env = set_crab_script(tmp.path(), &tmp.path().join("crab.sh"));
 
         let args = vec![
             "--hydrate=full".to_owned(),
@@ -295,10 +296,15 @@ mod tests {
 
     #[tokio::test]
     async fn repair_worktrees_parses_core_json_contract() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _guard = SCRIPT_LOCK.lock().await;
         let response = r#"{"schema":"worktree.repair","version":"1.0","timestamp":"t","data":{"repaired":true,"paths":["/tmp/wt"]}}"#;
         let (tmp, log) = install_fake_crab(response);
-        let _env = set_crab_bin(tmp.path(), &tmp.path().join("crab"));
+        let _env = set_crab_script(tmp.path(), &tmp.path().join("crab.sh"));
+        #[cfg(target_os = "linux")]
+        let _writer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(tmp.path().join("crab.sh"))
+            .expect("retain the writer that would block direct execution");
 
         let payload = repair_worktrees(tmp.path(), &["/tmp/wt".to_owned()])
             .await

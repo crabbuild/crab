@@ -574,8 +574,8 @@ async fn lagging_checkpoint_preserves_concurrent_ref_suffix() {
     )
     .await
     .unwrap();
-    for sequence in 32..34 {
-        let result = publish_next(&repo, base, old, history.oids[sequence].clone(), None).await;
+    for oid in &history.oids[32..34] {
+        let result = publish_next(&repo, base, old, oid.clone(), None).await;
         base = result.0;
         old = Some(result.1);
     }

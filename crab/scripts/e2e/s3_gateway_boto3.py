@@ -313,6 +313,126 @@ def _qualify_xet_content(
     return {"bytes": size, "sha256": digest, "full_and_ranges_exact": True, "copies_exact": True}
 
 
+def _qualify_bucket_apis(client, bucket: str) -> None:
+    buckets = client.list_buckets()["Buckets"]
+    if bucket not in {entry["Name"] for entry in buckets}:
+        raise RuntimeError("ListBuckets omitted the authorized repository")
+    head = client.head_bucket(Bucket=bucket)
+    region = client.meta.region_name
+    if head["ResponseMetadata"]["HTTPHeaders"].get("x-amz-bucket-region") != region:
+        raise RuntimeError("HeadBucket returned the wrong region")
+    location = client.get_bucket_location(Bucket=bucket).get("LocationConstraint")
+    if location != (None if region == "us-east-1" else region):
+        raise RuntimeError("GetBucketLocation returned the wrong region")
+    versioning = client.get_bucket_versioning(Bucket=bucket)
+    if "Status" in versioning or "MFADelete" in versioning:
+        raise RuntimeError("GetBucketVersioning did not report an unversioned bucket")
+
+
+def _qualify_object_attributes(client, bucket: str, key: str, body: bytes, etag: str) -> None:
+    attributes = client.get_object_attributes(
+        Bucket=bucket,
+        Key=key,
+        ObjectAttributes=["ETag", "ObjectSize", "StorageClass", "Checksum"],
+    )
+    if attributes.get("ETag", "").strip('"') != etag:
+        raise RuntimeError("GetObjectAttributes returned the wrong ETag")
+    if attributes.get("ObjectSize") != len(body) or attributes.get("StorageClass") != "STANDARD":
+        raise RuntimeError("GetObjectAttributes returned the wrong size or storage class")
+    if not attributes.get("Checksum"):
+        raise RuntimeError("GetObjectAttributes omitted the persisted checksum")
+    size_only = client.get_object_attributes(
+        Bucket=bucket, Key=key, ObjectAttributes=["ObjectSize"]
+    )
+    if any(name in size_only for name in ["ETag", "StorageClass", "Checksum", "ObjectParts"]):
+        raise RuntimeError("GetObjectAttributes returned attributes that were not requested")
+    response = client.get_object(
+        Bucket=bucket, Key=key, ResponseContentType="application/x-qualification"
+    )
+    with response["Body"] as stream:
+        if stream.read() != body or response.get("ContentType") != "application/x-qualification":
+            raise RuntimeError("GetObject response override changed content or was ignored")
+
+
+def _qualify_list_pages(client, bucket: str, prefix: str, expected: set[str]) -> None:
+    for operation, marker, next_marker in [
+        (client.list_objects, "Marker", "NextMarker"),
+        (client.list_objects_v2, "ContinuationToken", "NextContinuationToken"),
+    ]:
+        request = {"Bucket": bucket, "Prefix": prefix, "MaxKeys": 1}
+        keys = []
+        while True:
+            response = operation(**request)
+            keys.extend(entry["Key"] for entry in response.get("Contents", []))
+            if not response.get("IsTruncated"):
+                break
+            token = response.get(next_marker)
+            if not token or request.get(marker) == token:
+                raise RuntimeError("Object listing did not advance its pagination marker")
+            request[marker] = token
+        if keys != sorted(expected):
+            raise RuntimeError("Object listing pages omitted, duplicated, or reordered keys")
+    parent, _, _ = prefix.rstrip("/").rpartition("/")
+    grouped = client.list_objects_v2(Bucket=bucket, Prefix=parent + "/", Delimiter="/")
+    if prefix.rstrip("/") + "/" not in {
+        group["Prefix"] for group in grouped.get("CommonPrefixes", [])
+    }:
+        raise RuntimeError("Delimited object listing omitted the fixture prefix")
+
+
+def _qualify_multipart_copy_and_abort(client, bucket: str, source: str, key: str, body: bytes) -> None:
+    uploads = []
+    try:
+        for _ in range(2):
+            uploads.append(client.create_multipart_upload(Bucket=bucket, Key=key)["UploadId"])
+        request = {"Bucket": bucket, "Prefix": key, "MaxUploads": 1}
+        listed = []
+        while True:
+            page = client.list_multipart_uploads(**request)
+            listed.extend(upload["UploadId"] for upload in page.get("Uploads", []))
+            if not page.get("IsTruncated"):
+                break
+            request["KeyMarker"] = page["NextKeyMarker"]
+            request["UploadIdMarker"] = page["NextUploadIdMarker"]
+        if sorted(listed) != sorted(uploads):
+            raise RuntimeError("ListMultipartUploads pages did not preserve both sessions")
+        aborted = uploads.pop()
+        client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=aborted)
+        _expect_error(
+            "ListParts after abort",
+            lambda: client.list_parts(Bucket=bucket, Key=key, UploadId=aborted),
+            "NoSuchUpload",
+        )
+        upload_id = uploads[0]
+        client.upload_part(Bucket=bucket, Key=key, UploadId=upload_id, PartNumber=1, Body=b"old")
+        start, end = 17, 4097
+        part = client.upload_part_copy(
+            Bucket=bucket,
+            Key=key,
+            UploadId=upload_id,
+            PartNumber=1,
+            CopySource={"Bucket": bucket, "Key": source},
+            CopySourceRange=f"bytes={start}-{end - 1}",
+        )["CopyPartResult"]
+        parts = client.list_parts(Bucket=bucket, Key=key, UploadId=upload_id)["Parts"]
+        if len(parts) != 1 or parts[0]["Size"] != end - start:
+            raise RuntimeError("UploadPartCopy did not replace the existing part")
+        client.complete_multipart_upload(
+            Bucket=bucket,
+            Key=key,
+            UploadId=upload_id,
+            MultipartUpload={"Parts": [{"PartNumber": 1, "ETag": part["ETag"]}]},
+        )
+        uploads.clear()
+        response = client.get_object(Bucket=bucket, Key=key)
+        with response["Body"] as stream:
+            if stream.read() != body[start:end]:
+                raise RuntimeError("Multipart range copy did not publish exact selected bytes")
+    finally:
+        for upload_id in uploads:
+            client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
+
+
 def run(
     client,
     bucket: str,
@@ -346,6 +466,8 @@ def run(
     checks: dict[str, bool] = {}
 
     try:
+        _qualify_bucket_apis(client, bucket)
+        checks["bucket_apis"] = True
         _qualify_literal_bytes(client, bucket, conditional_key, copy_key)
         xet = None
         if xet_fixture is not None:
@@ -380,6 +502,8 @@ def run(
         if ranged["Body"].read() != body[17 : 4097]:
             raise RuntimeError("Boto3 ranged GetObject returned different bytes")
         checks["get_and_range"] = True
+        _qualify_object_attributes(client, bucket, object_key, body, expected_etag)
+        checks["object_attributes_and_overrides"] = True
 
         tagged = client.get_object_tagging(Bucket=bucket, Key=object_key)
         tag_set = {(tag["Key"], tag["Value"]) for tag in tagged["TagSet"]}
@@ -479,6 +603,10 @@ def run(
         if not {object_key, copy_key}.issubset(listed):
             raise RuntimeError("Boto3 ListObjectsV2 omitted gateway objects")
         checks["list"] = True
+        _qualify_list_pages(client, bucket, root + "/", listed)
+        checks["list_v1_v2_pagination_and_delimiter"] = True
+        _qualify_multipart_copy_and_abort(client, bucket, object_key, conditional_key, body)
+        checks["multipart_listing_copy_replacement_and_abort"] = True
 
         upload = client.create_multipart_upload(Bucket=bucket, Key=multipart_key)
         upload_id = upload["UploadId"]

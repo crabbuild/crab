@@ -2381,9 +2381,10 @@ struct DirectoryState {
     append_only_since_anchor: bool,
 }
 
+#[derive(Clone)]
 struct TreeEncoding {
     bytes: Bytes,
-    offsets: Vec<usize>,
+    offsets: Arc<Vec<usize>>,
     allocated_bytes: usize,
 }
 
@@ -2401,10 +2402,12 @@ impl TreeEncoding {
     }
 
     fn estimated_bytes(&self) -> usize {
+        // Charge shared offsets in full, including their Arc and Vec headers.
         self.allocated_bytes.saturating_add(
             self.offsets
                 .capacity()
-                .saturating_mul(std::mem::size_of::<usize>()),
+                .saturating_mul(std::mem::size_of::<usize>())
+                .saturating_add(std::mem::size_of::<(usize, usize, Vec<usize>)>()),
         )
     }
 }
@@ -2436,7 +2439,7 @@ impl TreeEncodingBuilder {
         let allocated_bytes = self.bytes.capacity();
         TreeEncoding {
             bytes: Bytes::from(self.bytes),
-            offsets: self.offsets,
+            offsets: Arc::new(self.offsets),
             allocated_bytes,
         }
     }
@@ -3406,28 +3409,33 @@ fn encode_appended_tree(
         .sum::<usize>();
     let mut suffix = Vec::with_capacity(inherited_suffix.len().saturating_add(appended_bytes));
     suffix.extend_from_slice(inherited_suffix);
-    let mut next_offset = old.encoding.bytes.len();
-    let mut offsets = Vec::with_capacity(old.entries.len() + appended.len() + 1);
-    offsets.extend_from_slice(&old.encoding.offsets[..old.entries.len()]);
     for entry in appended {
-        offsets.push(next_offset);
         append_tree_entry(&mut suffix, entry);
-        next_offset = next_offset.saturating_add(encoded_tree_entry_bytes(entry));
     }
-    offsets.push(next_offset);
     let suffix = Bytes::from(suffix);
-    let object = match prepared.tree(base.oid(), &suffix) {
-        Some(object) => object,
-        None => GeneratedObject::append(base, &suffix)?,
+    let (encoding, object) = match prepared.tree(base.oid(), &suffix) {
+        Some(prepared) => prepared,
+        None => {
+            let object = GeneratedObject::append(base, &suffix)?;
+            let mut next_offset = old.encoding.bytes.len();
+            let mut offsets = Vec::with_capacity(old.entries.len() + appended.len() + 1);
+            offsets.extend_from_slice(&old.encoding.offsets[..old.entries.len()]);
+            for entry in appended {
+                offsets.push(next_offset);
+                next_offset = next_offset.saturating_add(encoded_tree_entry_bytes(entry));
+            }
+            offsets.push(next_offset);
+            let encoding = TreeEncoding {
+                bytes: object.shared_data(),
+                offsets: Arc::new(offsets),
+                allocated_bytes: object.data().len(),
+            };
+            (encoding, object)
+        }
     };
-    if object.data().len() != next_offset {
+    if object.data().len() != old.encoding.bytes.len().saturating_add(appended_bytes) {
         return Err(std::io::Error::other("appended tree encoding length diverged").into());
     }
-    let encoding = TreeEncoding {
-        bytes: object.shared_data(),
-        offsets,
-        allocated_bytes: object.data().len(),
-    };
     Ok((encoding, object))
 }
 

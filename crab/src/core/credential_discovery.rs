@@ -274,9 +274,7 @@ fn check_azure_sdk() -> Option<DiscoveryResult> {
 
 /// Check EC2 instance metadata service for credentials.
 ///
-/// Sends a PUT request to the IMDSv2 token endpoint with a 200ms timeout.
-/// If the endpoint responds with 200 OK, the instance has IAM role
-/// credentials available.
+/// Verify an IMDSv2 session and attached IAM role within one 200ms budget.
 pub async fn check_instance_metadata(url: &str) -> Option<DiscoveryResult> {
     let provider = detect_provider(url)?;
 
@@ -285,31 +283,58 @@ pub async fn check_instance_metadata(url: &str) -> Option<DiscoveryResult> {
         return Option::None;
     }
 
-    check_aws_imds().await
+    check_aws_imds("http://169.254.169.254").await
 }
 
-async fn check_aws_imds() -> Option<DiscoveryResult> {
+async fn check_aws_imds(endpoint: &str) -> Option<DiscoveryResult> {
+    // Metadata must stay on its selected host. A proxy or redirect response
+    // cannot establish that this instance has an attached IAM role.
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_millis(200))
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .ok()?;
 
-    // IMDSv2 requires a PUT to get a session token
-    let result = client
-        .put("http://169.254.169.254/latest/api/token")
-        .header("X-aws-ec2-metadata-token-ttl-seconds", "21600")
-        .send()
-        .await;
-
-    match result {
-        Ok(resp) if resp.status().is_success() => Some(DiscoveryResult {
+    let probe = async {
+        let response = client
+            .put(format!("{endpoint}/latest/api/token"))
+            .header("X-aws-ec2-metadata-token-ttl-seconds", "21600")
+            .send()
+            .await
+            .ok()?;
+        if response.status() != reqwest::StatusCode::OK {
+            return None;
+        }
+        let token = response.text().await.ok()?;
+        if token.is_empty() {
+            return None;
+        }
+        let mut token = reqwest::header::HeaderValue::from_str(&token).ok()?;
+        token.set_sensitive(true);
+        let response = client
+            .get(format!(
+                "{endpoint}/latest/meta-data/iam/security-credentials/"
+            ))
+            .header("X-aws-ec2-metadata-token", token)
+            .send()
+            .await
+            .ok()?;
+        if response.status() != reqwest::StatusCode::OK
+            || response.text().await.ok()?.trim().is_empty()
+        {
+            return None;
+        }
+        Some(DiscoveryResult {
             source: CredentialSource::InstanceMetadata,
             description: "EC2 instance metadata (IMDSv2): IAM role credentials available"
                 .to_string(),
             valid: true,
-        }),
-        _ => Option::None,
-    }
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_millis(200), probe)
+        .await
+        .ok()
+        .flatten()
 }
 
 // ---------------------------------------------------------------------------
@@ -326,6 +351,14 @@ async fn check_aws_imds() -> Option<DiscoveryResult> {
 ///
 /// Returns `CredentialSource::None` with a helpful message if nothing found.
 pub async fn discover_credentials(url: &str, aws_profile: Option<&str>) -> DiscoveryResult {
+    discover_with_metadata(url, aws_profile, check_instance_metadata(url)).await
+}
+
+async fn discover_with_metadata(
+    url: &str,
+    aws_profile: Option<&str>,
+    metadata: impl std::future::Future<Output = Option<DiscoveryResult>>,
+) -> DiscoveryResult {
     // 1. Local profile selection
     if let Some(result) = check_local_profile(aws_profile) {
         tracing::debug!(source = "local_config", "credential discovered");
@@ -349,7 +382,7 @@ pub async fn discover_credentials(url: &str, aws_profile: Option<&str>) -> Disco
     }
 
     // 4. Instance metadata
-    if let Some(result) = check_instance_metadata(url).await {
+    if let Some(result) = metadata.await {
         tracing::debug!(source = "instance_metadata", "credential discovered");
         return result;
     }
@@ -723,7 +756,8 @@ mod tests {
             ],
         );
 
-        let result = discover_credentials("crab://bucket/repo", None).await;
+        let result =
+            discover_with_metadata("crab://bucket/repo", None, std::future::ready(None)).await;
         assert_eq!(result.source, CredentialSource::None);
         assert!(!result.valid);
         assert!(
@@ -749,12 +783,74 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn imds_check_returns_none_when_not_on_ec2() {
-        // This test verifies that the IMDS check times out quickly
-        // when not running on an EC2 instance (which is the normal dev case).
-        let result = check_instance_metadata("crab://bucket/repo").await;
-        // On a dev machine, IMDS is unreachable so this should be None
-        assert!(result.is_none());
+    async fn imds_requires_an_attached_role() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        for (token_status, role_status, role, delay_ms, available) in [
+            (404, 404, "", 0, false),
+            (200, 404, "", 0, false),
+            (200, 200, "", 0, false),
+            (200, 200, "fixture-role", 0, true),
+            (200, 200, "fixture-role", 120, false),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let responses = [
+                    (
+                        "PUT /latest/api/token HTTP/1.1",
+                        token_status,
+                        "fixture-token",
+                    ),
+                    (
+                        "GET /latest/meta-data/iam/security-credentials/ HTTP/1.1",
+                        role_status,
+                        role,
+                    ),
+                ];
+                for (index, (request_line, status, body)) in responses.into_iter().enumerate() {
+                    if index == 1 && token_status != 200 {
+                        break;
+                    }
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let mut stream = BufReader::new(stream);
+                    let mut request = String::new();
+                    loop {
+                        let mut line = String::new();
+                        assert_ne!(stream.read_line(&mut line).await.unwrap(), 0);
+                        request.push_str(&line);
+                        if line == "\r\n" {
+                            break;
+                        }
+                    }
+                    assert!(request.starts_with(request_line));
+                    let headers = request.to_ascii_lowercase();
+                    if index == 0 {
+                        assert!(
+                            headers.contains("x-aws-ec2-metadata-token-ttl-seconds: 21600\r\n")
+                        );
+                    } else {
+                        assert!(headers.contains("x-aws-ec2-metadata-token: fixture-token\r\n"));
+                    }
+                    let response = format!(
+                        "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len(),
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    stream
+                        .get_mut()
+                        .write_all(response.as_bytes())
+                        .await
+                        .unwrap();
+                }
+            });
+            let result = check_aws_imds(&endpoint).await;
+            server.abort();
+            if let Err(error) = server.await {
+                assert!(error.is_cancelled(), "{error}");
+            }
+            assert_eq!(result.is_some(), available, "{token_status}/{role_status}");
+        }
     }
 
     #[tokio::test]

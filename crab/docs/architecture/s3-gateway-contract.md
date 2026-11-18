@@ -198,7 +198,7 @@ Supported operations:
 | Operation | Supported contract |
 | --- | --- |
 | `ListBuckets`, `HeadBucket`, `GetBucketLocation`, `GetBucketVersioning` | Authorized logical repositories only; deterministic order; configured region; honest unversioned response |
-| `GetObject`, `HeadObject`, `GetObjectAttributes` | metadata, response overrides, RFC dates, ETag/date conditions, checksum mode, object size, ETag, part-number reads, and paginated multipart-part attributes; one byte range including open and suffix forms |
+| `GetObject`, `HeadObject`, `GetObjectAttributes` | metadata, response overrides, RFC dates, ETag/date conditions, checksum mode, object size, ETag, requested `STANDARD` storage-class attributes, part-number reads, and paginated multipart-part attributes; one byte range including open and suffix forms |
 | `ListObjects`, `ListObjectsV2` | prefix, delimiter `/`, marker/start-after, max keys, reusable keys, common prefixes, and the `RestoreStatus` optional-object hint |
 | `PutObject` | body up to 5 GiB, atomic `If-Match` and `If-None-Match: *`, `Content-MD5`, SigV4 payload and chained streaming signatures, CRC32/CRC32C/CRC64NVME/SHA1/SHA256 checksums, tags, metadata, standard content headers with the `aws-chunked` transport token removed, explicit `STANDARD` storage class, and virtual empty directory-marker hints |
 | `GetObjectTagging`, `PutObjectTagging`, `DeleteObjectTagging` | Up to ten current-object tags; tag changes publish metadata-only commits without changing object bytes or ETag |
@@ -430,7 +430,9 @@ both to succeed, and both drain before writer fences are released on failure.
 Shutdown stops mutation admission and drains workers, follow-up catalog and
 readability maintenance, and attribute checkpoints before closing the read runtime.
 Warm directory edits reuse canonical encoded ranges with entry offsets charged
-to the warm-state budget. Full tree hashing and pack verification still apply.
+to the warm-state budget. Independent append preparation shares both verified
+tree bytes and their offset indexes with the serial builder, avoiding another
+directory-sized index copy. Full tree hashing and pack verification still apply.
 Cold reconstruction uses independent read-operation budgets for each mutation
 against the same pinned view. Batching does not combine unrelated requests'
 allowances; an over-budget mutation returns `SlowDown` without consuming a
