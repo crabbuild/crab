@@ -5,14 +5,14 @@ permissions:
   contents: read
   actions: read
 jobs:
-  source-readiness:
-    name: macOS LSP control and candidate diagnosis
-    runs-on: macos-15
+  media-readiness:
+    name: Linux retained media readiness diagnosis
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: false
       E2E_SMOKE: 1
-      PLAYWRIGHT_JSON_OUTPUT_NAME: workflow-report.json
+      PLAYWRIGHT_JSON_OUTPUT_NAME: media-report.json
     defaults:
       run:
         shell: bash
@@ -24,327 +24,60 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version-file: packages/desktop/.nvmrc
-      - name: Prepare isolated fixture target
+      - name: Prepare Linux and isolated target
         run: |
-          mkdir -p "$RUNNER_TEMP/crab-source-readiness"
-          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crab-source-readiness" >> "$GITHUB_ENV"
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-0 libnss3 libasound2t64 libgbm1 xvfb
+          mkdir -p "$RUNNER_TEMP/crab-media-readiness"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crab-media-readiness" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@v4
         with:
-          name: Crab-native-mac-arm64
+          name: Crab-native-linux-x64
           run-id: 44249218814
           github-token: ${{ github.token }}
-          path: packages/desktop/resources/native/mac-arm64
+          path: packages/desktop/resources/native/linux-x64
       - name: Restore producer permissions
-        run: chmod +x resources/native/mac-arm64/{crab,crab-nfs-mount,crab-desktop-agent,git-remote-crab}
-      - name: Install renderer and Electron dependencies
-        run: npm ci
-      - name: Build the same renderer and packaged application
+        run: chmod +x resources/native/linux-x64/{crab,crab-nfs-mount,crab-desktop-agent,git-remote-crab}
+      - run: npm ci
+      - name: Build and package exact source
         run: |
           npm run build:renderer
           npm run build:electron
-          node scripts/package.mjs --dir --arm64
-      - name: Trace main-process version probes
+          node scripts/package.mjs --dir --linux --x64
+      - name: Observe media selection and browser state
         run: |
-          cat > "$RUNNER_TEMP/workflow-lsp.cjs" <<'JS'
+          cat > "$RUNNER_TEMP/media-state.cjs" <<'JS'
           const fs=require('node:fs');
           const req=require('node:module').createRequire(process.cwd()+'/package.json');
           const electron=req('playwright-core')._electron, launch=electron.launch.bind(electron);
-          const file=process.env.CARGO_TARGET_DIR+'/lsp-'+process.env.PROBE_MODE+'.jsonl';
+          const file=process.env.CARGO_TARGET_DIR+'/media-events.jsonl';
           electron.launch=async function(options){
             const application=await launch(options);
-            await application.evaluate(({app},file)=>{
-              const fs=process.getBuiltinModule('node:fs'), cp=process.getBuiltinModule('node:child_process');
-              const log=(entry)=>fs.appendFileSync(file,JSON.stringify({time:Date.now(),...entry})+'\n');
-              const sync=cp.execSync;
-              cp.execSync=function(command,options){
-                if(options?.timeout!==5000)return sync.apply(this,arguments);
-                const started=Date.now();log({event:'sync-start',command});
-                try{return sync.apply(this,arguments)}finally{log({event:'sync-close',command,elapsed:Date.now()-started})}
-              };
-              const async=cp.execFile;
-              cp.execFile=function(command,args,options){
-                const child=async.apply(this,arguments);
-                if(options?.timeout===5000){const started=Date.now();log({event:'async-start',command,args});child.once('close',()=>log({event:'async-close',command,elapsed:Date.now()-started}));}
-                return child;
-              };
-              setInterval(()=>log({event:'main-heartbeat'}),200).unref();
-            },file);
+            const page=await application.firstWindow();
+            page.on('console',msg=>{if(msg.text().startsWith('[DEBUG-media]'))fs.appendFileSync(file,msg.text().slice(13)+'\n')});
+            await page.evaluate(()=>{
+              const report=(type,node)=>console.log('[DEBUG-media]'+JSON.stringify({time:Date.now(),type,tag:node.tagName,source:node.getAttribute('src'),current:node.currentSrc,connected:node.isConnected,duration:node.duration,ready:node.readyState,title:document.querySelector('section[aria-label$="preview"] p')?.textContent}));
+              for(const type of ['loadedmetadata','durationchange','emptied','loadstart','error','seeked','pause','volumechange']){
+                document.addEventListener(type,event=>{if(event.target instanceof HTMLMediaElement)report(type,event.target)},true);
+              }
+              const time=Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype,'currentTime');
+              Object.defineProperty(HTMLMediaElement.prototype,'currentTime',{...time,set(value){report('seek '+String(value),this);return time.set.call(this,value)}});
+              document.addEventListener('click',event=>{const row=event.composedPath().find(node=>node instanceof HTMLElement&&node.dataset.itemPath);if(row)console.log('[DEBUG-media]'+JSON.stringify({time:Date.now(),type:'click',file:row.dataset.itemPath}));},true);
+              const descriptor=Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype,'duration');
+              Object.defineProperty(HTMLMediaElement.prototype,'duration',{...descriptor,get(){const value=descriptor.get.call(this); console.log('[DEBUG-media]'+JSON.stringify({time:Date.now(),type:'duration-read',duration:String(value),source:this.getAttribute('src'),connected:this.isConnected,title:document.querySelector('section[aria-label$="preview"] p')?.textContent}));return value}});
+            });
             return application;
           };
           JS
-      - name: Run unchanged workflow control three times
-        continue-on-error: true
-        env:
-          PROBE_MODE: control
-          PLAYWRIGHT_JSON_OUTPUT_NAME: workflow-control.json
-        run: NODE_OPTIONS="--require=$RUNNER_TEMP/workflow-lsp.cjs" npx playwright test tests/e2e/workflow-complex.spec.ts --project=e2e-smoke --workers=1 --grep "complex workflows preserve templates" --repeat-each=3 --trace retain-on-failure --output=control-results --reporter=line,json
-      - name: Apply only the production discovery correction
-        working-directory: .
-        run: |
-          git apply <<'PATCH'
-          diff --git a/packages/desktop/electron/lsp-discovery.ts b/packages/desktop/electron/lsp-discovery.ts
-          index 1086080f2d4..7cc98a8264b 100644
-          --- a/packages/desktop/electron/lsp-discovery.ts
-          +++ b/packages/desktop/electron/lsp-discovery.ts
-          @@ -1,5 +1,5 @@
-           import { app } from "electron";
-          -import { execSync } from "node:child_process";
-          +import { execFile } from "node:child_process";
-           import * as fs from "node:fs";
-           import * as path from "node:path";
-           import * as os from "node:os";
-          @@ -143,24 +143,29 @@ function resolveCommand(command: string, searchDirs: string[]): string | null {
-           /**
-            * Try to get the version string from a server binary.
-            */
-          -function getVersion(binaryPath: string, versionFlag?: string): string | undefined {
-          -  if (!versionFlag) return undefined;
-          -  try {
-          -    const output = execSync(`"${binaryPath}" ${versionFlag}`, {
-          -      encoding: "utf8",
-          -      timeout: 5000,
-          -      stdio: ["pipe", "pipe", "pipe"],
-          -    }).trim();
-          -    const firstLine = output.split("\n")[0].trim();
-          -    return firstLine || undefined;
-          -  } catch {
-          -    return undefined;
-          -  }
-          +function getVersion(binaryPath: string, versionFlag: string | undefined, signal: AbortSignal): Promise<string | undefined> {
-          +  if (!versionFlag) return Promise.resolve(undefined);
-          +  return new Promise((resolve, reject) => {
-          +    let version: string | undefined;
-          +    const child = execFile(binaryPath, [versionFlag], { encoding: "utf8", timeout: 5000, windowsHide: true, signal }, (error, stdout) => {
-          +      if (!error) version = stdout.trim().split("\n")[0].trim() || undefined;
-          +    });
-          +    // The abort callback can precede process exit. Own the pipes and child
-          +    // until close so application shutdown cannot leave a version probe behind.
-          +    child.once("close", () => signal.aborted ? reject(signal.reason) : resolve(version));
-          +  });
-           }
-           
-           // ── Cache ───────────────────────────────────────────────────────────
-           
-          -let cachedResults: DiscoveredServer[] | null = null;
-          +interface Discovery {
-          +  controller: AbortController;
-          +  result: Promise<DiscoveredServer[]>;
-          +}
-          +
-          +let cached: Discovery | null = null;
-          +let stopping = false;
-          +const active = new Set<Discovery>();
-           
-           /**
-            * Discover available language servers.
-          @@ -172,14 +177,24 @@ let cachedResults: DiscoveredServer[] | null = null;
-            *
-            * Results are cached in memory; call `refresh()` to re-scan.
-            */
-          -export function discoverServers(): DiscoveredServer[] {
-          -  if (cachedResults !== null) return cachedResults;
-          +export function discoverServers(): Promise<DiscoveredServer[]> {
-          +  if (stopping) return Promise.reject(new Error("Language server discovery is stopping"));
-          +  if (cached) return cached.result;
-          +  const controller = new AbortController();
-          +  const discovery = { controller, result: scanServers(controller.signal) };
-          +  cached = discovery;
-          +  active.add(discovery);
-          +  void discovery.result.then(() => active.delete(discovery), () => active.delete(discovery));
-          +  return discovery.result;
-          +}
-           
-          +async function scanServers(signal: AbortSignal): Promise<DiscoveredServer[]> {
-             const searchDirs = buildSearchPath();
-             const results: DiscoveredServer[] = [];
-             const seenLanguages = new Set<string>();
-           
-             for (const server of KNOWN_SERVERS) {
-          +    signal.throwIfAborted();
-               if (seenLanguages.has(server.language)) continue;
-           
-               // 1. Bundled (typescript only for now)
-          @@ -205,7 +220,7 @@ export function discoverServers(): DiscoveredServer[] {
-                   language: server.language,
-                   command: server.commands[0],
-                   path: installedPath,
-          -        version: getVersion(installedPath, server.versionFlag),
-          +        version: await getVersion(installedPath, server.versionFlag, signal),
-                   source: "installed",
-                 });
-                 seenLanguages.add(server.language);
-          @@ -220,7 +235,7 @@ export function discoverServers(): DiscoveredServer[] {
-                     language: server.language,
-                     command,
-                     path: resolved,
-          -          version: getVersion(resolved, server.versionFlag),
-          +          version: await getVersion(resolved, server.versionFlag, signal),
-                     source: "system",
-                   });
-                   seenLanguages.add(server.language);
-          @@ -229,10 +244,19 @@ export function discoverServers(): DiscoveredServer[] {
-               }
-             }
-           
-          -  cachedResults = results;
-          +  signal.throwIfAborted();
-             return results;
-           }
-           
-          +/** Cancel and join discovery children before the application exits. */
-          +export async function stopDiscovery(): Promise<void> {
-          +  stopping = true;
-          +  const scans = [...active];
-          +  for (const scan of scans) scan.controller.abort(new Error("Language server discovery stopped"));
-          +  await Promise.allSettled(scans.map(scan => scan.result));
-          +  cached = null;
-          +}
-          +
-           /**
-            * Check whether a language server has been downloaded to ~/.crab/lsp/.
-            * Synchronous sibling of `lsp-installer.findInstalledBinary`.
-          @@ -259,8 +283,8 @@ function findInstalledBinary(language: string): string | null {
-           /**
-            * Clear the discovery cache and re-scan.
-            */
-          -export function refresh(): DiscoveredServer[] {
-          -  cachedResults = null;
-          +export function refresh(): Promise<DiscoveredServer[]> {
-          +  cached = null;
-             return discoverServers();
-           }
-           
-          diff --git a/packages/desktop/electron/lsp-manager.ts b/packages/desktop/electron/lsp-manager.ts
-          index c39929ef6a4..4de53b84fcb 100644
-          --- a/packages/desktop/electron/lsp-manager.ts
-          +++ b/packages/desktop/electron/lsp-manager.ts
-          @@ -1,6 +1,6 @@
-           import { EventEmitter } from "node:events";
-           import { LspServer, LspServerConfig, ServerCapabilities } from "./lsp-server";
-          -import { discoverServers, refresh as refreshDiscovery, resolveSpawnSpec, DiscoveredServer } from "./lsp-discovery";
-          +import { discoverServers, refresh as refreshDiscovery, resolveSpawnSpec, stopDiscovery, DiscoveredServer } from "./lsp-discovery";
-           import { lspInstaller } from "./lsp-installer";
-           
-           /**
-          @@ -25,6 +25,8 @@ export class LspManager extends EventEmitter {
-             private servers = new Map<string, LspServer>();
-             private serverConfigs = new Map<string, LspServerConfig>();
-             private crashTimestamps = new Map<string, number[]>();
-          +  private stopped = false;
-          +  private revisions = new Map<string, number>();
-             private static readonly CRASH_WINDOW_MS = 30_000;
-             private static readonly MAX_AUTO_RESTARTS = 1;
-           
-          @@ -37,6 +39,8 @@ export class LspManager extends EventEmitter {
-              * Checks discovery cache, reads config overrides, spawns LspServer.
-              */
-             async start(language: string, rootPath: string): Promise<ServerCapabilities> {
-          +    if (this.stopped) throw new Error("Language server manager is stopping");
-          +    const revision = this.revisions.get(language);
-               // If already running, return existing capabilities
-               const existing = this.servers.get(language);
-               if (existing && existing.isRunning()) {
-          @@ -45,7 +49,10 @@ export class LspManager extends EventEmitter {
-               }
-           
-               // Find the server config
-          -    const config = this.resolveConfig(language);
-          +    const config = await this.resolveConfig(language);
-          +    // Stop may arrive while a version probe is running. Discovery completing
-          +    // must never turn that cancelled request into a newly spawned server.
-          +    if (this.stopped || this.revisions.get(language) !== revision) throw new Error("Language server startup was stopped");
-               if (!config) {
-                 throw new Error(`No language server found for "${language}"`);
-               }
-          @@ -72,6 +79,10 @@ export class LspManager extends EventEmitter {
-           
-               // Start the server
-               const capabilities = await server.start();
-          +    if (this.stopped || this.revisions.get(language) !== revision) {
-          +      await server.shutdown();
-          +      throw new Error("Language server startup was stopped");
-          +    }
-               this.servers.set(language, server);
-               this.serverConfigs.set(language, config);
-               this.emitStatus(language, "running", config.command);
-          @@ -95,6 +106,8 @@ export class LspManager extends EventEmitter {
-              * Graceful shutdown of all running servers.
-              */
-             async stopAll(): Promise<void> {
-          +    this.stopped = true;
-          +    await stopDiscovery();
-               const shutdowns: Promise<void>[] = [];
-               for (const [language, server] of this.servers) {
-                 shutdowns.push(
-          @@ -113,6 +126,7 @@ export class LspManager extends EventEmitter {
-              * Stop a specific language server.
-              */
-             async stop(language: string): Promise<void> {
-          +    this.revisions.set(language, (this.revisions.get(language) ?? 0) + 1);
-               const server = this.servers.get(language);
-               if (!server) return;
-               await server.shutdown();
-          @@ -123,8 +137,8 @@ export class LspManager extends EventEmitter {
-             /**
-              * Return status of all configured servers.
-              */
-          -  status(): LspServerStatus[] {
-          -    const discovered = discoverServers();
-          +  async status(): Promise<LspServerStatus[]> {
-          +    const discovered = await discoverServers();
-               const statuses: LspServerStatus[] = [];
-           
-               // Include running servers
-          @@ -154,7 +168,7 @@ export class LspManager extends EventEmitter {
-             /**
-              * Refresh the discovery cache.
-              */
-          -  refreshDiscovery(): DiscoveredServer[] {
-          +  refreshDiscovery(): Promise<DiscoveredServer[]> {
-               return refreshDiscovery();
-             }
-           
-          @@ -164,8 +178,8 @@ export class LspManager extends EventEmitter {
-              * Resolve the config for a language: check user overrides, then
-              * fall back to discovery.
-              */
-          -  private resolveConfig(language: string): LspServerConfig | null {
-          -    const discovered = discoverServers();
-          +  private async resolveConfig(language: string): Promise<LspServerConfig | null> {
-          +    const discovered = await discoverServers();
-               const match = discovered.find((s) => s.language === language);
-               if (!match) return null;
-           
-          @@ -190,8 +204,7 @@ export class LspManager extends EventEmitter {
-             /** Install a language server on demand and refresh discovery. */
-             async installLanguage(language: string): Promise<DiscoveredServer> {
-               await lspInstaller.install(language);
-          -    refreshDiscovery();
-          -    const discovered = discoverServers();
-          +    const discovered = await refreshDiscovery();
-               const match = discovered.find((s) => s.language === language);
-               if (!match) {
-                 throw new Error(`Installation succeeded but discovery couldn't find "${language}"`);
-          PATCH
-      - name: Rebuild and package candidate
-        run: |
-          npm run build:electron
-          node scripts/package.mjs --dir --arm64
-      - name: Run unchanged workflow candidate three times
-        env:
-          PROBE_MODE: candidate
-          PLAYWRIGHT_JSON_OUTPUT_NAME: workflow-candidate.json
-        run: NODE_OPTIONS="--require=$RUNNER_TEMP/workflow-lsp.cjs" npx playwright test tests/e2e/workflow-complex.spec.ts --project=e2e-smoke --workers=1 --grep "complex workflows preserve templates" --repeat-each=3 --trace retain-on-failure --output=candidate-results --reporter=line,json
+      - name: Repeat unchanged retained range and integrity scenario
+        run: xvfb-run -a env NODE_OPTIONS="--require=$RUNNER_TEMP/media-state.cjs" npx playwright test tests/e2e/media.spec.ts --project=e2e-smoke --workers=1 --repeat-each=3 --trace retain-on-failure --reporter=line,json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: alpha2-workflow-lsp-diagnosis
+          name: alpha2-linux-media-diagnosis
           path: |
-            ${{ env.CARGO_TARGET_DIR }}/lsp-*.jsonl
-            packages/desktop/workflow-control.json
-            packages/desktop/workflow-candidate.json
-            packages/desktop/control-results/**/trace.zip
-            packages/desktop/control-results/**/error-context.md
-            packages/desktop/candidate-results/**/trace.zip
-            packages/desktop/candidate-results/**/error-context.md
+            ${{ env.CARGO_TARGET_DIR }}/media-events.jsonl
+            packages/desktop/media-report.json
+            packages/desktop/test-results/**/trace.zip
+            packages/desktop/test-results/**/error-context.md
           retention-days: 7
