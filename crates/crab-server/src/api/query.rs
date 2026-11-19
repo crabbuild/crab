@@ -30,6 +30,7 @@ pub(super) async fn execute(
     search_query: Option<&str>,
     cancellation: &CancellationToken,
     projection_source: Option<&str>,
+    headers: &axum::http::HeaderMap,
 ) -> crab_remote_git::Result<Payload> {
     if matches!(action, Action::Refs) {
         let refs = repository.refs();
@@ -69,7 +70,7 @@ pub(super) async fn execute(
         Action::Commits => OperationKind::History,
         Action::Tree | Action::Search => OperationKind::Tree,
         Action::TreeAttribution => OperationKind::DirectoryAttribution,
-        Action::Blob | Action::Asset | Action::File => OperationKind::Content,
+        Action::Blob | Action::Asset | Action::File | Action::FilePreview => OperationKind::Content,
         Action::Changes => OperationKind::Compare,
         Action::Diff => OperationKind::Diff,
         Action::Blame => OperationKind::Blame,
@@ -128,7 +129,7 @@ pub(super) async fn execute(
                         result.next,
                     )
                 };
-                json!({"items":items,"next":next.map(|cursor|encode_cursor(&server.cursor_key,cursor))})
+                json!({"items":items,"next":next.map(|cursor|encode_cursor(&server.cursor_key,repository_id,cursor))})
             }
             Action::Tree => {
                 let result = snapshot.list_directory(&path, &page, &operation).await?;
@@ -139,7 +140,7 @@ pub(super) async fn execute(
                 json!({
                     "directory_oid": directory.oid.to_string(),
                     "items": result.items.iter().map(entry_json).collect::<Vec<_>>(),
-                    "next": result.next.map(|cursor|encode_cursor(&server.cursor_key,cursor)),
+                    "next": result.next.map(|cursor|encode_cursor(&server.cursor_key,repository_id,cursor)),
                 })
             }
             Action::TreeAttribution => {
@@ -231,7 +232,7 @@ pub(super) async fn execute(
                     "state": "ready",
                     "directory_oid": directory.oid.to_string(),
                     "items": items,
-                    "next": result.next.map(|cursor|encode_cursor(&server.cursor_key,cursor)),
+                    "next": result.next.map(|cursor|encode_cursor(&server.cursor_key,repository_id,cursor)),
                 })
             }
             Action::Search => {
@@ -264,7 +265,9 @@ pub(super) async fn execute(
                 matches.truncate(page.limit());
                 json!({"items":matches.iter().map(|(_,entry)|entry_json(entry)).collect::<Vec<_>>(),"truncated":truncated})
             }
-            Action::Blob => return Ok(Payload::Blob(snapshot.read_blob(&path, &operation).await?)),
+            Action::Blob | Action::FilePreview => {
+                return super::revalidation::read(server, &snapshot, &path, &operation, action, headers).await.map(|(response, elapsed)| Payload::Response(response, elapsed));
+            }
             Action::Asset => {
                 return Ok(Payload::Asset(snapshot.read_blob(&path, &operation).await?));
             }
@@ -325,8 +328,8 @@ pub(super) async fn execute(
                 }
             }
             Action::Blame => {
-                let blame = snapshot.blame(&path, &operation).await?;
-                json!({"ranges":blame.ranges.iter().map(|range|json!({"start":range.start,"lines":range.lines,"commit":commit_json(&range.commit)})).collect::<Vec<_>>()})
+                let blame = snapshot.shared_blame(&path, &operation).await?;
+                return Ok(Payload::Blame(blame, repository.generation()));
             }
         };
         value["commit"] = json!(snapshot.commit_oid().to_string());

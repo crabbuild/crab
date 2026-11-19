@@ -70,6 +70,34 @@ impl CellRuntimeBudget {
 }
 
 impl CellCapacityReport {
+    pub(super) fn read_runtime(&self) -> crab_remote_git::RuntimeOptions {
+        let mut options = crab_remote_git::RuntimeOptions {
+            max_decode_concurrency: self.resources.job_credits.clamp(1, 16),
+            ..crab_remote_git::RuntimeOptions::default()
+        };
+        let cached = options.max_object_cache_bytes
+            + options.max_pack_index_cache_bytes
+            + options.max_parsed_cache_bytes
+            + options.max_blame_cache_bytes
+            + options.max_negative_cache_bytes;
+        let available = usize::try_from(self.resources.memory_bytes / 8)
+            .unwrap_or(usize::MAX)
+            .min(cached);
+        // The shared reader adds fixed transient headroom to these cache caps.
+        // Scale disposable retention from the same measured process authority
+        // as Cells instead of letting a small container inherit host-sized caches.
+        for capacity in [
+            &mut options.max_object_cache_bytes,
+            &mut options.max_pack_index_cache_bytes,
+            &mut options.max_parsed_cache_bytes,
+            &mut options.max_blame_cache_bytes,
+            &mut options.max_negative_cache_bytes,
+        ] {
+            *capacity = capacity.saturating_mul(available) / cached;
+        }
+        options
+    }
+
     pub(super) fn measure(directory: &std::path::Path, limit: u64) -> Result<Self> {
         Self::from_resources(crate::resources::local_resources(directory, limit)?)
     }
@@ -118,6 +146,23 @@ mod tests {
             available_file_descriptors,
             job_credits: 16,
         }
+    }
+
+    #[tokio::test]
+    async fn minimum_profile_bounds_read_retention_and_cpu_from_process_resources() {
+        let mut resources = local_resources(GIB, 32 * GIB, 1024);
+        resources.job_credits = 1;
+        let report = CellCapacityReport::from_resources(resources).unwrap();
+        let options = report.read_runtime();
+        let runtime = crab_remote_git::RemoteGitRuntime::new(
+            options,
+            std::sync::Arc::new(crab_remote_git::NoopMetrics),
+        )
+        .unwrap();
+        let snapshot = runtime.snapshot().await;
+        assert_eq!(options.max_decode_concurrency, 1);
+        assert!(snapshot.resident_capacity_bytes <= 256 * MIB as usize);
+        runtime.shutdown().await;
     }
 
     #[test]

@@ -17,7 +17,7 @@ use crate::objects::{
 use crate::reader::{GitObject, RemoteGitObjectMetadata, RemoteGitPackedEntry};
 use crate::state::RepositoryState;
 use crate::{
-    AnnotatedTag, Blame, BudgetDimension, Commit, CorruptionStage, Error, GitPath, MetricKind,
+    AnnotatedTag, BudgetDimension, Commit, CorruptionStage, Error, GitPath, MetricKind,
     MetricObservation, MetricOutcome, OperationLimits, Result, TreeEntry,
 };
 
@@ -159,7 +159,7 @@ pub struct OperationContext {
     state: Arc<RepositoryState>,
     limits: OperationLimits,
     cancellation: CancellationToken,
-    deadline: tokio::time::Instant,
+    deadline: Option<tokio::time::Instant>,
     deadline_stop: CancellationToken,
     budget: OperationBudget,
     session: Option<TrackedLocatorSession>,
@@ -189,6 +189,26 @@ impl OperationContext {
         budget: OperationBudget,
     ) -> Result<Self> {
         Self::open_inner(state, kind, cancellation, limits, true, Some(budget)).await
+    }
+
+    pub(crate) async fn open_shared(
+        state: Arc<RepositoryState>,
+        cancellation: &CancellationToken,
+        shared: Arc<crate::budget::SharedBudget>,
+    ) -> Result<Self> {
+        // Repository limits supply batching hints, not a producer ceiling.
+        // Every charge and remaining allowance comes from the live waiters.
+        let hints = state.options.operation_limits();
+        let budget = OperationBudget::shared(shared, state.runtime.clone());
+        Self::open_inner(
+            state,
+            OperationKind::Blame,
+            cancellation,
+            hints,
+            true,
+            Some(budget),
+        )
+        .await
     }
 
     pub(crate) fn budget(&self) -> &OperationBudget {
@@ -247,11 +267,18 @@ impl OperationContext {
         let runtime_cancellation = state.runtime.background_cancellation();
         let started = Instant::now();
         let max_duration = limits.max_duration;
-        let deadline = tokio::time::Instant::now()
-            .checked_add(max_duration)
-            .ok_or(Error::InvalidLimit {
-                name: "operation duration",
-            })?;
+        let shared = budget.as_ref().is_some_and(OperationBudget::is_shared);
+        let deadline = if shared {
+            None
+        } else {
+            Some(
+                tokio::time::Instant::now()
+                    .checked_add(max_duration)
+                    .ok_or(Error::InvalidLimit {
+                        name: "operation duration",
+                    })?,
+            )
+        };
         let budget =
             budget.unwrap_or_else(|| OperationBudget::new(limits, Arc::clone(&state.runtime)));
         let operation_cancellation = cancellation.child_token();
@@ -267,21 +294,23 @@ impl OperationContext {
                 .store
                 .clone()
                 .with_read_admission(budget.read_admission(operation_cancellation.clone()));
+            let opening = GitObjectLocatorSession::open_for_catalog(
+                Arc::clone(store.inner()),
+                state.layout.repo_prefix(),
+                catalog,
+                max_duration,
+            );
             let session = tokio::select! {
                 biased;
                 () = cancellation.cancelled() => return Err(Error::Cancelled),
                 () = runtime_cancellation.cancelled() => return Err(Error::Cancelled),
-                session = tokio::time::timeout_at(
-                    deadline,
-                    GitObjectLocatorSession::open_for_catalog(
-                        Arc::clone(store.inner()),
-                        state.layout.repo_prefix(),
-                        catalog,
-                        max_duration,
-                    ),
-                ) => session.map_err(|_| Error::Timeout {
-                    operation: "open locator",
-                })?,
+                session = async {
+                    match deadline {
+                        Some(deadline) => tokio::time::timeout_at(deadline, opening).await
+                            .map_err(|_| Error::Timeout { operation: "open locator" }),
+                        None => Ok(opening.await),
+                    }
+                } => session?,
             };
             let session = match session {
                 Ok(session) => session,
@@ -309,7 +338,7 @@ impl OperationContext {
             }
             return Err(Error::Cancelled);
         }
-        if tokio::time::Instant::now() >= deadline {
+        if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
             if let Some(session) = session {
                 session.close().await?;
             }
@@ -327,7 +356,12 @@ impl OperationContext {
                 biased;
                 () = deadline_finished.cancelled() => {}
                 () = shutdown_cancellation.cancelled() => deadline_cancellation.cancel(),
-                () = tokio::time::sleep_until(deadline) => deadline_cancellation.cancel(),
+                () = async {
+                    match deadline {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => deadline_cancellation.cancel(),
             }
         });
         Ok(Self {
@@ -397,7 +431,9 @@ impl OperationContext {
     /// # }
     /// ```
     pub async fn finish<T>(mut self, operation: Result<T>) -> Result<T> {
-        let timed_out = tokio::time::Instant::now() >= self.deadline;
+        let timed_out = self
+            .deadline
+            .is_some_and(|deadline| tokio::time::Instant::now() >= deadline);
         let interrupted = timed_out || self.cancellation.is_cancelled();
         self.deadline_stop.cancel();
         let operation = match operation {
@@ -763,6 +799,26 @@ impl OperationContext {
     }
 
     pub(crate) async fn read_commit(&self, oid: gix_hash::ObjectId) -> Result<Commit> {
+        Ok(self.read_commit_shared(oid).await?.value.clone())
+    }
+
+    pub(crate) async fn read_commits(&self, oids: &[gix_hash::ObjectId]) -> Result<Vec<Commit>> {
+        let shared = self.read_commits_shared(oids).await?;
+        let mut commits = Vec::new();
+        commits
+            .try_reserve_exact(shared.len())
+            .map_err(|source| Error::Allocation {
+                requested: shared.len().saturating_mul(std::mem::size_of::<Commit>()),
+                source,
+            })?;
+        commits.extend(shared.iter().map(|commit| commit.value.clone()));
+        Ok(commits)
+    }
+
+    pub(crate) async fn read_commit_shared(
+        &self,
+        oid: gix_hash::ObjectId,
+    ) -> Result<crate::objects::SharedCommit> {
         self.budget
             .charge(BudgetDimension::LogicalObjects, 1)
             .await?;
@@ -770,34 +826,71 @@ impl OperationContext {
             crate::runtime::ObjectCacheKey::new(&self.state.identity, self.state.generation, oid);
         let maximum = self.state.options.object_limits().max_object_bytes;
         if let Some(commit) = self.state.runtime.cached_commit(&key, maximum).await {
-            return Ok(commit.as_ref().clone());
+            return Ok(commit);
         }
         let object = self.read_object_uncharged(oid).await?;
         let source_bytes = object.data.len() as u64;
-        let commit = Arc::new(parse_commit(&object)?);
+        let commit = self.parse_shared_commit(&object).await?;
         self.state
             .runtime
             .insert_commit(key, Arc::clone(&commit), source_bytes)
             .await;
-        Ok(commit.as_ref().clone())
+        Ok(commit)
     }
 
-    pub(crate) async fn read_commits(&self, oids: &[gix_hash::ObjectId]) -> Result<Vec<Commit>> {
+    pub(crate) async fn read_commits_shared(
+        &self,
+        oids: &[gix_hash::ObjectId],
+    ) -> Result<Vec<crate::objects::SharedCommit>> {
         check_cancelled(&self.cancellation)?;
         self.budget
             .charge(BudgetDimension::LogicalObjects, oids.len() as u64)
             .await?;
-        let objects = self.read_objects_uncharged(oids).await?;
-        let mut commits = Vec::new();
-        commits
-            .try_reserve_exact(objects.len())
+        let mut retained = Vec::new();
+        retained
+            .try_reserve_exact(oids.len())
             .map_err(|source| Error::Allocation {
-                requested: objects.len().saturating_mul(std::mem::size_of::<Commit>()),
+                requested: oids
+                    .len()
+                    .saturating_mul(std::mem::size_of::<Option<crate::objects::SharedCommit>>()),
                 source,
             })?;
-        for object in objects {
+        let maximum = self.state.options.object_limits().max_object_bytes;
+        let mut missing = Vec::new();
+        missing
+            .try_reserve_exact(oids.len())
+            .map_err(|source| Error::Allocation {
+                requested: oids
+                    .len()
+                    .saturating_mul(std::mem::size_of::<gix_hash::ObjectId>()),
+                source,
+            })?;
+        // History already uses this verified parsed cache for point reads.
+        // Batching must keep those size checks and avoid reparsing warm commits.
+        for oid in oids {
+            let key = crate::runtime::ObjectCacheKey::new(
+                &self.state.identity,
+                self.state.generation,
+                *oid,
+            );
+            let cached = self.state.runtime.cached_commit(&key, maximum).await;
+            if cached.is_none() {
+                missing.push(*oid);
+            }
+            retained.push(cached);
+        }
+        let objects = if missing.is_empty() {
+            Vec::new()
+        } else {
+            self.read_objects_uncharged(&missing).await?
+        };
+        let mut objects = objects.into_iter();
+        for slot in retained.iter_mut().filter(|slot| slot.is_none()) {
+            let object = objects.next().ok_or(Error::InternalInvariant {
+                invariant: "commit batch retains every requested missing object",
+            })?;
             let source_bytes = object.data.len() as u64;
-            let commit = Arc::new(parse_commit(&object)?);
+            let commit = self.parse_shared_commit(&object).await?;
             let key = crate::runtime::ObjectCacheKey::new(
                 &self.state.identity,
                 self.state.generation,
@@ -807,9 +900,56 @@ impl OperationContext {
                 .runtime
                 .insert_commit(key, Arc::clone(&commit), source_bytes)
                 .await;
-            commits.push(commit.as_ref().clone());
+            *slot = Some(commit);
+        }
+        let mut commits = Vec::new();
+        commits
+            .try_reserve_exact(retained.len())
+            .map_err(|source| Error::Allocation {
+                requested: retained.len().saturating_mul(std::mem::size_of::<Commit>()),
+                source,
+            })?;
+        for slot in retained {
+            let commit = slot.ok_or(Error::InternalInvariant {
+                invariant: "commit batch fills every requested position",
+            })?;
+            commits.push(commit);
         }
         Ok(commits)
+    }
+
+    async fn parse_shared_commit(
+        &self,
+        object: &GitObject,
+    ) -> Result<crate::objects::SharedCommit> {
+        let headers = object
+            .data
+            .split(|byte| *byte == b'\n')
+            .take_while(|line| !line.is_empty())
+            .filter(|line| !line.starts_with(b" "))
+            .count();
+        let overhead = headers.saturating_mul(std::mem::size_of::<crate::SignatureHeader>() * 2);
+        let capacity = object
+            .data
+            .len()
+            .saturating_add(overhead)
+            .saturating_add(std::mem::size_of::<Commit>());
+        let temporary = self.state.runtime.reserve_bytes(capacity).await?;
+        let retained = self.state.runtime.reserve_bytes(capacity).await?;
+        let large = object.data.len() >= 64 * 1024;
+        let object = object.clone();
+        let parse = move || {
+            let _temporary = temporary;
+            Ok(Arc::new(crate::resident::Retained::new(
+                parse_commit(&object)?,
+                retained,
+            )))
+        };
+        if large {
+            self.state.runtime.run_cpu(&self.cancellation, parse).await
+        } else {
+            parse()
+        }
     }
 
     pub(crate) async fn parse_tag_object(&self, object: &GitObject) -> Result<AnnotatedTag> {
@@ -903,7 +1043,7 @@ impl OperationContext {
         let mut comparisons = 0u64;
         for object in objects {
             let source_bytes = object.data.len() as u64;
-            let tree = Arc::new(parse_tree_raw(&object)?);
+            let tree = self.parse_shared_tree(&object).await?;
             let key = crate::runtime::ObjectCacheKey::new(
                 &self.state.identity,
                 self.state.generation,
@@ -947,7 +1087,7 @@ impl OperationContext {
     pub(crate) async fn read_raw_tree(
         &self,
         oid: gix_hash::ObjectId,
-    ) -> Result<Arc<Vec<RawTreeEntry>>> {
+    ) -> Result<crate::objects::SharedTree> {
         let key =
             crate::runtime::ObjectCacheKey::new(&self.state.identity, self.state.generation, oid);
         let maximum = self.state.options.object_limits().max_object_bytes;
@@ -956,7 +1096,7 @@ impl OperationContext {
             None => {
                 let object = self.read_object_uncharged(oid).await?;
                 let source_bytes = object.data.len() as u64;
-                let tree = Arc::new(parse_tree_raw(&object)?);
+                let tree = self.parse_shared_tree(&object).await?;
                 self.state
                     .runtime
                     .insert_tree(key, Arc::clone(&tree), source_bytes)
@@ -965,6 +1105,34 @@ impl OperationContext {
             }
         };
         Ok(tree)
+    }
+
+    async fn parse_shared_tree(&self, object: &GitObject) -> Result<crate::objects::SharedTree> {
+        // Even the shortest encoded entry includes a mode, separator, NUL and
+        // SHA-1. Bound both parsed arrays before the dependency allocates them.
+        let entries = object.data.len() / 23;
+        let retained = object
+            .data
+            .len()
+            .saturating_add(entries.saturating_mul(std::mem::size_of::<RawTreeEntry>()))
+            .saturating_add(std::mem::size_of::<Vec<RawTreeEntry>>());
+        let temporary = entries.saturating_mul(128);
+        let memory = self.state.runtime.reserve_bytes(retained).await?;
+        let working = self.state.runtime.reserve_bytes(temporary).await?;
+        let large = object.data.len() >= 64 * 1024;
+        let object = object.clone();
+        let parse = move || {
+            let _working = working;
+            Ok(Arc::new(crate::resident::Retained::new(
+                parse_tree_raw(&object)?,
+                memory,
+            )))
+        };
+        if large {
+            self.state.runtime.run_cpu(&self.cancellation, parse).await
+        } else {
+            parse()
+        }
     }
 
     /// Read a bounded batch of verified Git objects in request order.
@@ -1197,8 +1365,27 @@ impl OperationContext {
         self.budget.usage().await
     }
 
+    pub(crate) async fn remaining_response_bytes(&self) -> u64 {
+        self.budget.remaining(BudgetDimension::ResponseBytes).await
+    }
+
     pub(crate) async fn charge_cached(&self, usage: BudgetUsage) -> Result<()> {
         self.budget.charge_cached(usage).await
+    }
+
+    pub(crate) fn blame_key(
+        &self,
+        commit: gix_hash::ObjectId,
+        path: &GitPath,
+    ) -> crate::runtime::BlameCacheKey {
+        crate::runtime::BlameCacheKey::Attribution {
+            identity: self.state.identity.clone(),
+            generation: self.state.generation,
+            commit,
+            path: path.clone(),
+            semantics: crate::runtime::BLAME_SEMANTICS,
+            object_limits: self.object_limits(),
+        }
     }
 
     pub(crate) async fn cached_blame(
@@ -1208,7 +1395,7 @@ impl OperationContext {
     ) -> Option<crate::runtime::CachedBlame> {
         self.state
             .runtime
-            .cached_blame(&self.state.identity, self.state.generation, commit, path)
+            .cached_blame(&self.blame_key(commit, path))
             .await
     }
 
@@ -1216,19 +1403,12 @@ impl OperationContext {
         &self,
         commit: gix_hash::ObjectId,
         path: GitPath,
-        value: Arc<Blame>,
+        value: crate::SharedBlame,
         usage: BudgetUsage,
     ) {
         self.state
             .runtime
-            .insert_blame(
-                self.state.identity.clone(),
-                self.state.generation,
-                commit,
-                path,
-                value,
-                usage,
-            )
+            .insert_blame(self.blame_key(commit, &path), value, usage)
             .await;
     }
 
@@ -1236,7 +1416,7 @@ impl OperationContext {
         &self,
         parent: gix_hash::ObjectId,
         current: gix_hash::ObjectId,
-    ) -> Option<Arc<Vec<(usize, usize)>>> {
+    ) -> Option<crate::runtime::LineMatches> {
         self.state
             .runtime
             .cached_blame_comparison(&self.state.identity, parent, current)
@@ -1247,7 +1427,7 @@ impl OperationContext {
         &self,
         parent: gix_hash::ObjectId,
         current: gix_hash::ObjectId,
-        matches: Arc<Vec<(usize, usize)>>,
+        matches: crate::runtime::LineMatches,
     ) {
         self.state
             .runtime
@@ -1260,7 +1440,10 @@ impl OperationContext {
     }
 
     pub(crate) fn ensure_active(&self) -> Result<()> {
-        if tokio::time::Instant::now() >= self.deadline {
+        if self
+            .deadline
+            .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
+        {
             return Err(Error::Timeout {
                 operation: "repository operation",
             });

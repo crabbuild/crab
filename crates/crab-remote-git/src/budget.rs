@@ -30,6 +30,23 @@ pub enum BudgetDimension {
 }
 
 impl BudgetDimension {
+    const ALL: [Self; 14] = [
+        Self::LogicalObjects,
+        Self::StorageRequests,
+        Self::FetchedBytes,
+        Self::InflatedBytes,
+        Self::Depth,
+        Self::Entries,
+        Self::HistoryCommits,
+        Self::DiffInputBytes,
+        Self::DiffOutputBytes,
+        Self::BlameLines,
+        Self::BlameComparisons,
+        Self::ArchiveEntries,
+        Self::ArchiveBytes,
+        Self::ResponseBytes,
+    ];
+
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::LogicalObjects => "logical objects",
@@ -61,9 +78,15 @@ pub(crate) struct WorkBudget {
 pub(crate) struct OperationBudget {
     parent_read_admission: Option<Arc<dyn crab_storage::ReadAdmission>>,
     read_progress: Option<crab_storage::ReadProgress>,
-    work: Arc<Mutex<WorkBudget>>,
+    owner: BudgetOwner,
     runtime: Arc<RemoteGitRuntime>,
     id: u64,
+}
+
+#[derive(Clone)]
+enum BudgetOwner {
+    Operation(Arc<Mutex<WorkBudget>>),
+    Shared(Arc<SharedBudget>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,10 +111,24 @@ impl OperationBudget {
         Self {
             parent_read_admission: None,
             read_progress: None,
-            work: Arc::new(Mutex::new(WorkBudget::new(limits))),
+            owner: BudgetOwner::Operation(Arc::new(Mutex::new(WorkBudget::new(limits)))),
             runtime,
             id: NEXT_BUDGET_ID.fetch_add(1, Ordering::Relaxed),
         }
+    }
+
+    pub(crate) fn shared(shared: Arc<SharedBudget>, runtime: Arc<RemoteGitRuntime>) -> Self {
+        Self {
+            parent_read_admission: None,
+            read_progress: None,
+            owner: BudgetOwner::Shared(shared),
+            runtime,
+            id: NEXT_BUDGET_ID.fetch_add(1, Ordering::Relaxed),
+        }
+    }
+
+    pub(crate) fn is_shared(&self) -> bool {
+        matches!(self.owner, BudgetOwner::Shared(_))
     }
 
     pub(crate) fn with_parent_read_admission(
@@ -108,6 +145,10 @@ impl OperationBudget {
     }
 
     pub(crate) async fn received(&self, bytes: u64) {
+        if let BudgetOwner::Shared(shared) = &self.owner {
+            crab_storage::ReadAdmission::received(shared.as_ref(), bytes).await;
+            return;
+        }
         if let Some(progress) = &self.read_progress {
             progress.record_received(bytes);
         }
@@ -133,7 +174,10 @@ impl OperationBudget {
     }
 
     pub(crate) async fn charge(&self, dimension: BudgetDimension, amount: u64) -> Result<()> {
-        let result = self.work.lock().await.charge(dimension, amount);
+        let result = match &self.owner {
+            BudgetOwner::Operation(work) => work.lock().await.charge(dimension, amount),
+            BudgetOwner::Shared(shared) => return Box::pin(shared.charge(dimension, amount)).await,
+        };
         if result.is_err() {
             self.runtime.metrics().record(MetricObservation {
                 kind: MetricKind::Budget,
@@ -147,13 +191,19 @@ impl OperationBudget {
     }
 
     pub(crate) async fn usage(&self) -> BudgetUsage {
-        BudgetUsage {
-            used: self.work.lock().await.used,
+        match &self.owner {
+            BudgetOwner::Operation(work) => BudgetUsage {
+                used: work.lock().await.used,
+            },
+            BudgetOwner::Shared(shared) => shared.usage().await,
         }
     }
 
     pub(crate) async fn remaining(&self, dimension: BudgetDimension) -> u64 {
-        self.work.lock().await.remaining(dimension)
+        match &self.owner {
+            BudgetOwner::Operation(work) => work.lock().await.remaining(dimension),
+            BudgetOwner::Shared(shared) => Box::pin(shared.remaining(dimension)).await,
+        }
     }
 
     pub(crate) async fn charge_cached(&self, usage: BudgetUsage) -> Result<()> {

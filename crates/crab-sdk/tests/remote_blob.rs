@@ -645,24 +645,31 @@ async fn verify_native_reads(bucket: Option<String>) {
         )
         .await;
 
-    let history = current
-        .history(
-            crab_sdk::remote::HistoryTraversal::AllParents,
-            crab_sdk::remote::PageRequest::new(1, None).unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(history.items[0].id.to_string(), second);
-    let cursor = history.next.unwrap();
-    let parent = current
-        .history(
-            crab_sdk::remote::HistoryTraversal::AllParents,
-            crab_sdk::remote::PageRequest::new(1, Some(cursor.clone())).unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(parent.items[0].id.to_string(), first);
-    assert!(parent.next.is_none());
+    let mut history_cursors = Vec::new();
+    for traversal in [
+        crab_sdk::remote::HistoryTraversal::AllParents,
+        crab_sdk::remote::HistoryTraversal::FirstParent,
+    ] {
+        let history = current
+            .history(
+                traversal,
+                crab_sdk::remote::PageRequest::new(1, None).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(history.items[0].id.to_string(), second);
+        let cursor = history.next.unwrap();
+        let parent = current
+            .history(
+                traversal,
+                crab_sdk::remote::PageRequest::new(7, Some(cursor.clone())).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(parent.items[0].id.to_string(), first);
+        assert!(parent.next.is_none());
+        history_cursors.push((traversal, cursor));
+    }
 
     native.replace_without_catalog().await;
     copy_published_objects(&store, &storage, cloud.as_ref(), &mut published).await;
@@ -682,14 +689,16 @@ async fn verify_native_reads(bucket: Option<String>) {
         crab::verify_pinned_lookup(&current, second_bytes).await;
         crab::verify_lookup_missing(&same_commit).await;
     }
-    let invalid = same_commit
-        .history(
-            crab_sdk::remote::HistoryTraversal::AllParents,
-            crab_sdk::remote::PageRequest::new(1, Some(cursor)).unwrap(),
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(invalid.kind(), crab_sdk::ErrorKind::InvalidInput);
+    for (traversal, cursor) in history_cursors {
+        let invalid = same_commit
+            .history(
+                traversal,
+                crab_sdk::remote::PageRequest::new(1, Some(cursor)).unwrap(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(invalid.kind(), crab_sdk::ErrorKind::InvalidInput);
+    }
     let archive = current
         .archive(crab_sdk::remote::ContentMode::Git)
         .await

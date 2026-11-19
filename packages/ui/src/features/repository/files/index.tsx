@@ -21,9 +21,9 @@ import {
   parentHex,
   useRequest,
   type Blame,
-  type Content,
   type Repository,
 } from "@/lib/api";
+import type { FilePreview as FilePreviewContent } from "@/lib/contracts";
 import { enableCodeKeyboardScroll, type CodeThemes } from "@/lib/code-theme";
 import { short } from "@/lib/format";
 import { repoHref } from "@/lib/repository-route";
@@ -71,6 +71,24 @@ const MIN_BLAME_PANE_WIDTH = 25;
 
 const MAX_BLAME_PANE_WIDTH = 75;
 
+const unavailablePreview = {
+  omitted_size: {
+    title: "Preview omitted because of file size",
+    description:
+      "Inline source is limited to 1 MB. Download the exact stored bytes to inspect the complete file.",
+  },
+  binary: {
+    title: "Binary file",
+    description:
+      "Download the exact stored bytes or open Preview to inspect this file.",
+  },
+  unsupported_encoding: {
+    title: "Unsupported text encoding",
+    description:
+      "This file is not valid UTF-8 text. Download the exact stored bytes to inspect it locally.",
+  },
+};
+
 function formatSize(bytes: number) {
   if (bytes < 1024) return `${bytes.toLocaleString()} bytes`;
   return `${(bytes / 1024).toFixed(2)} KB`;
@@ -91,9 +109,12 @@ export function FileView({
 }: Props) {
   const preview = previewDescriptor(name);
   const previewFirst = preview !== null && preview.kind !== "markdown";
-  const state = useRequest<Content>(
-    endpoint(repo, "file", { rev, path_hex: path }),
+  const state = useRequest<FilePreviewContent>(
+    endpoint(repo, "file-preview", { rev, path_hex: path }),
   );
+  const previewState = state.data?.preview.state;
+  const text =
+    state.data?.preview.state === "inline" ? state.data.preview.text : null;
   const [presentation, setView] = useState<"code" | "preview">(
     previewFirst ? "preview" : "code",
   );
@@ -111,8 +132,16 @@ export function FileView({
     setActiveSymbol(null);
   }, [path, previewFirst]);
   useEffect(() => {
-    if (preview === null && state.data?.text === null) setView("preview");
-  }, [preview, state.data?.oid, state.data?.text]);
+    // An unknown large format starts with metadata. Opening its inspector is
+    // explicit, so omission never triggers a full download just to label it.
+    if (
+      preview === null &&
+      previewState &&
+      previewState !== "inline" &&
+      previewState !== "omitted_size"
+    )
+      setView("preview");
+  }, [preview, state.data?.oid, previewState]);
   useEffect(() => {
     const permalink = (event: KeyboardEvent) => {
       const target = event.target;
@@ -140,19 +169,23 @@ export function FileView({
     return () => window.removeEventListener("keydown", permalink);
   }, [repo.owner, repo.name, rev, path, blameView]);
   const blame = useRequest<Blame>(
-    view === "blame" ? endpoint(repo, "blame", { rev, path_hex: path }) : null,
+    view === "blame" &&
+      text !== null &&
+      state.data?.classification === "OrdinaryGit"
+      ? endpoint(repo, "blame", { rev, path_hex: path })
+      : null,
   );
   const file = useMemo(
     () => ({
       name,
-      contents: state.data?.text ?? "",
+      contents: text ?? "",
       cacheKey: state.data?.oid,
     }),
-    [name, state.data],
+    [name, text, state.data?.oid],
   );
   const symbolLanguage = codeSymbolLanguage(name);
   const symbolSource =
-    state.data?.classification === "OrdinaryGit" ? state.data.text : null;
+    state.data?.classification === "OrdinaryGit" ? text : null;
   const symbolState = useCodeSymbols(name, symbolSource);
   symbolsRef.current = symbolState.symbols;
 
@@ -247,14 +280,11 @@ export function FileView({
   );
   const activePreview: PreviewDescriptor | null =
     preview ??
-    (state.data?.text === null
+    (state.data && state.data.preview.state !== "inline"
       ? { kind: "generic", label: "File inspector" }
       : null);
   const symbols =
-    view === "code" &&
-    symbolsOpen &&
-    symbolLanguage &&
-    state.data?.text != null ? (
+    view === "code" && symbolsOpen && symbolLanguage && text !== null ? (
       <CodeSymbolsPanel
         state={symbolState}
         active={activeSymbol}
@@ -305,7 +335,7 @@ export function FileView({
                     aria-pressed={view === "code"}
                     aria-checked={undefined}
                   >
-                    {content.text === null ? "Info" : "Code"}
+                    {text === null ? "Info" : "Code"}
                   </ToggleGroupItem>
                   {activePreview && (
                     <ToggleGroupItem
@@ -317,7 +347,7 @@ export function FileView({
                       Preview
                     </ToggleGroupItem>
                   )}
-                  {content.text !== null &&
+                  {text !== null &&
                     content.classification === "OrdinaryGit" && (
                       <ToggleGroupItem
                         value="blame"
@@ -330,31 +360,32 @@ export function FileView({
                     )}
                 </ToggleGroup>
                 <span className="file-metadata muted">
-                  {content.text === null
-                    ? content.text_truncated
-                      ? (activePreview?.label ?? "Large text file")
-                      : (activePreview?.label ?? "Binary file")
-                    : `${content.text === "" ? 0 : content.text.split("\n").length - Number(content.text.endsWith("\n"))} lines`}{" "}
+                  {content.preview.state !== "inline"
+                    ? unavailablePreview[content.preview.state].title
+                    : `${content.preview.text === "" ? 0 : content.preview.text.split("\n").length - Number(content.preview.text.endsWith("\n"))} lines`}{" "}
                   <span aria-hidden="true">·</span> {formatSize(content.size)}
                 </span>
               </div>
               <div className="file-actions">
-                {view === "code" && symbolLanguage && !symbolsOpen && (
-                  <Button
-                    aria-label="Open code symbols"
-                    size="icon-sm"
-                    onClick={() => setSymbolsOpen(true)}
-                    variant="outline"
-                  >
-                    <CodeIcon data-icon="inline-start" />
-                  </Button>
-                )}
+                {view === "code" &&
+                  text !== null &&
+                  symbolLanguage &&
+                  !symbolsOpen && (
+                    <Button
+                      aria-label="Open code symbols"
+                      size="icon-sm"
+                      onClick={() => setSymbolsOpen(true)}
+                      variant="outline"
+                    >
+                      <CodeIcon data-icon="inline-start" />
+                    </Button>
+                  )}
                 <Button asChild variant="outline" size="sm">
                   <a href={endpoint(repo, "blob", { rev, path_hex: path })}>
                     Raw
                   </a>
                 </Button>
-                {content.text !== null && (
+                {text !== null && (
                   <Button
                     aria-label={
                       copied ? "File contents copied" : "Copy file contents"
@@ -362,7 +393,7 @@ export function FileView({
                     size="icon-sm"
                     onClick={async () => {
                       try {
-                        await navigator.clipboard.writeText(content.text ?? "");
+                        await navigator.clipboard.writeText(text);
                         setCopied(true);
                       } catch {
                         setCopied(false);
@@ -384,7 +415,7 @@ export function FileView({
                   </a>
                 </Button>
                 {write &&
-                  content.text !== null &&
+                  text !== null &&
                   content.classification === "OrdinaryGit" && (
                     <Button
                       aria-label="Edit this file"
@@ -451,23 +482,19 @@ export function FileView({
                   revision={revision}
                   directory={parentHex(path)}
                   name={name}
-                  text={content.text}
+                  text={text}
                   size={content.size}
                   blobUrl={endpoint(repo, "blob", { rev, path_hex: path })}
                   theme={theme}
                   codeThemes={codeThemes}
                 />
               </Suspense>
-            ) : content.text === null ? (
+            ) : content.preview.state !== "inline" ? (
               <div className="notice">
                 <strong>
-                  {content.text_truncated ? "Large text file" : "Binary file"}
+                  {unavailablePreview[content.preview.state].title}
                 </strong>
-                <p>
-                  {content.text_truncated
-                    ? "Inline source is limited to 1 MB. Download the exact stored bytes to inspect the complete file."
-                    : "Crab does not recognize a safe interactive preview for this format. Download the exact stored bytes to inspect it locally."}
-                </p>
+                <p>{unavailablePreview[content.preview.state].description}</p>
               </div>
             ) : view === "blame" ? (
               blame.data ? (

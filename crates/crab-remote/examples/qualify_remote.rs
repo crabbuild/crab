@@ -3,6 +3,8 @@
 mod captured_browse;
 #[path = "support/captured_catalog.rs"]
 mod captured_catalog;
+#[path = "support/history_pages.rs"]
+mod history_pages;
 mod support;
 
 use std::io;
@@ -40,7 +42,7 @@ async fn main() -> Result<()> {
             [bucket, prefix, path] => (bucket, prefix, path, "all"),
             [bucket, prefix, path, selection] => (bucket, prefix, path, selection.as_str()),
             _ => return Err(io::Error::other(
-                "usage: qualify_remote <bucket> <prefix> <text-path> [operation|all|build-indexes|checkpoint|catalog|catalog-current|capture-browse|capture-catalog|ref-point|resolve-oid|blame-history|blame-history-uncached]",
+                "usage: qualify_remote <bucket> <prefix> <text-path> [operation|all|history-pages|build-indexes|checkpoint|catalog|catalog-current|capture-browse|capture-catalog|ref-point|resolve-oid|blame-history|blame-history-uncached]",
             )
             .into()),
         };
@@ -57,6 +59,7 @@ async fn main() -> Result<()> {
         && selection != "resolve-oid"
         && selection != "blame-history"
         && selection != "blame-history-uncached"
+        && selection != "history-pages"
         && !WORKLOADS.contains(&selection)
     {
         return Err(io::Error::other("unknown qualification operation").into());
@@ -80,10 +83,12 @@ async fn main() -> Result<()> {
         .with_storage_observer(counters.clone());
     let layout = StoreLayout::new(store, prefix.to_owned());
     let identity = RepositoryIdentity::new(format!("s3:{bucket}"), prefix.as_str(), 1)?;
-    if selection == "capture-catalog" {
+    if selection == "history-pages" {
+        history_pages::qualify(&layout, &identity, options, &path, &counters).await?;
+    } else if selection == "capture-catalog" {
         captured_catalog::qualify(&layout, &path, &counters).await?;
     } else if selection == "capture-browse" {
-        let runtime = Arc::new(RemoteGitRuntime::default());
+        let runtime = Arc::new(RemoteGitRuntime::new(Default::default(), counters.clone())?);
         let result = captured_browse::qualify(
             &layout,
             &identity,
@@ -251,7 +256,7 @@ async fn main() -> Result<()> {
             })
             .await?;
     } else if selection == "build-indexes" {
-        let runtime = Arc::new(RemoteGitRuntime::default());
+        let runtime = Arc::new(RemoteGitRuntime::new(Default::default(), counters.clone())?);
         let cancel = CancellationToken::new();
         let result = counters
             .measure("build-indexes", "maintenance", async {
@@ -313,10 +318,10 @@ async fn main() -> Result<()> {
                         max_blame_cache_entries: 0,
                         ..crab_remote_git::RuntimeOptions::default()
                     },
-                    Arc::new(crab_remote_git::NoopMetrics),
+                    counters.clone(),
                 )?
             } else {
-                RemoteGitRuntime::default()
+                RemoteGitRuntime::new(Default::default(), counters.clone())?
             };
             let runtime = Arc::new(runtime);
             let result = qualify(

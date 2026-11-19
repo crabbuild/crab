@@ -46,8 +46,12 @@ def verify_queries(source: Path, records: list[dict], revision: str) -> dict:
     selection = records[-1]["selection"]
     if selection == "blame-history-uncached":
         selection = "blame-history"
+    if selection == "history-pages":
+        count = int(git("rev-list", "--first-parent", "--count", head))
+        expected_names = {f"history-page-{depth}" for depth in (1, 10, 100)
+                          if (depth - 1) * 100 < count}
     require(len(names) == len(set(names)), "duplicate query evidence")
-    require(set(names) == (expected_names if selection == "all" else {selection}), "missing query evidence")
+    require(set(names) == (expected_names if selection in {"all", "history-pages"} else {selection}), "missing query evidence")
     measurements = [record for record in records if record["kind"] == "measurement"]
     for name in names:
         pair = [record for record in measurements if record["operation"] == name]
@@ -94,6 +98,14 @@ def verify_queries(source: Path, records: list[dict], revision: str) -> dict:
             expected = git(*args).decode().splitlines()
             require(value["commits"] == expected[:1000], "history differs")
             require(value["has_more"] == (len(expected) > 1000), "history continuation differs")
+        elif selection == "history-pages" and name in expected_names:
+            depth = int(name.removeprefix("history-page-"))
+            require(value["page"] == depth and value["page_size"] == 100,
+                    "history page coordinates differ")
+            expected = git("rev-list", "--first-parent", "--max-count=101",
+                           f"--skip={(depth - 1) * 100}", head).decode().splitlines()
+            require(value["commits"] == expected[:100], "resumed history differs")
+            require(value["has_more"] == (len(expected) > 100), "resumed continuation differs")
         elif name == "attribution":
             require([(item["path"], item["oid"]) for item in value["entries"]] ==
                     [(item["path"], item["oid"]) for item in root[:100]], "attribution page differs")

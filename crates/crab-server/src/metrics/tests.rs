@@ -7,9 +7,45 @@ fn snapshot() -> RuntimeSnapshot {
         catalog_healthy: true,
         draining: false,
         receive_workers: 1,
-        admission_available: [16, 3, 8, 1],
-        admission_capacity: [16, 4, 8, 2],
+        admission_available: [16, 3, 8, 1, 12],
+        admission_capacity: [16, 4, 8, 2, 12],
     }
+}
+
+#[test]
+fn git_metrics_keep_checksum_bytes_and_active_producer_lifetimes_separate() {
+    use crab_remote_git::{MetricKind, MetricObservation, RemoteGitMetrics};
+
+    let metrics = Metrics::new().unwrap();
+    for (kind, value, duration) in [
+        (
+            MetricKind::CacheVerification,
+            4096,
+            Some(Duration::from_millis(2)),
+        ),
+        (MetricKind::BlameProducer, 1, None),
+    ] {
+        metrics.record(MetricObservation {
+            kind,
+            value,
+            duration,
+            outcome: None,
+            cache: None,
+        });
+    }
+    let started = metrics.render(snapshot());
+    assert!(started.contains("crab_git_active_blame_producers 1"));
+    metrics.record(MetricObservation {
+        kind: MetricKind::BlameProducer,
+        value: 1,
+        duration: Some(Duration::from_millis(3)),
+        outcome: None,
+        cache: None,
+    });
+    let finished = metrics.render(snapshot());
+    assert!(finished.contains("crab_git_active_blame_producers 0"));
+    assert!(finished.contains("crab_git_blame_producers_total 1"));
+    assert!(finished.contains("crab_git_cache_verification_bytes_total 4096"));
 }
 
 #[tokio::test]
@@ -17,6 +53,11 @@ async fn completed_request_exports_bounded_full_body_metrics() {
     let metrics = Metrics::new().unwrap();
     let observation = metrics.start_request(&Method::GET).response(StatusCode::OK);
     let body = Body::new(ObservedBody::new(Body::from("response"), observation));
+    assert!(
+        metrics
+            .render(snapshot())
+            .contains("crab_server_active_sized_response_bytes{method=\"get\"} 8")
+    );
     assert_eq!(
         body.collect().await.unwrap().to_bytes(),
         Bytes::from_static(b"response")
@@ -24,6 +65,7 @@ async fn completed_request_exports_bounded_full_body_metrics() {
     let rendered = metrics.render(snapshot());
     assert!(rendered.contains("crab_server_requests_total{method=\"get\",outcome=\"2xx\"} 1"));
     assert!(rendered.contains("crab_server_in_flight_requests{method=\"get\"} 0"));
+    assert!(rendered.contains("crab_server_active_sized_response_bytes{method=\"get\"} 0"));
     assert!(rendered.contains("crab_server_request_duration_seconds_count{method=\"get\"} 1"));
 }
 
@@ -35,6 +77,7 @@ fn dropped_response_body_records_abort_and_releases_in_flight_gauge() {
 
     let rendered = metrics.render(snapshot());
     assert!(rendered.contains("crab_server_response_body_aborts_total{method=\"get\"} 1"));
+    assert!(rendered.contains("crab_server_active_sized_response_bytes{method=\"get\"} 0"));
     assert!(rendered.contains("crab_server_in_flight_requests{method=\"get\"} 0"));
 }
 

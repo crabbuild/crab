@@ -42,6 +42,8 @@ use sha1::{Digest as _, Sha1};
 use tokio::sync::{Mutex, Notify, OwnedMutexGuard, Semaphore};
 use tokio_util::sync::CancellationToken;
 
+mod shared_blame;
+
 #[derive(Clone, Copy)]
 enum DeltaKind {
     Ref,
@@ -755,6 +757,23 @@ async fn publish_with_runtime(
     options: RepositoryOptions,
     runtime_options: RuntimeOptions,
 ) -> PublishedFixture {
+    publish_with_metrics(
+        delta_kind,
+        corrupt_target_crc,
+        options,
+        runtime_options,
+        Arc::new(crab_remote_git::NoopMetrics),
+    )
+    .await
+}
+
+async fn publish_with_metrics(
+    delta_kind: DeltaKind,
+    corrupt_target_crc: bool,
+    options: RepositoryOptions,
+    runtime_options: RuntimeOptions,
+    metrics: Arc<dyn crab_remote_git::RemoteGitMetrics>,
+) -> PublishedFixture {
     let fixture = PackFixture::new(delta_kind);
     let pack_bytes = Bytes::from(fs::read(&fixture.pack).expect("read fixture pack"));
     let mut index_bytes = fs::read(&fixture.index).expect("read fixture index");
@@ -903,10 +922,7 @@ async fn publish_with_runtime(
     writer.close().await.expect("close locator writer");
 
     let cancellation = CancellationToken::new();
-    let runtime = Arc::new(
-        RemoteGitRuntime::new(runtime_options, Arc::new(crab_remote_git::NoopMetrics))
-            .expect("runtime"),
-    );
+    let runtime = Arc::new(RemoteGitRuntime::new(runtime_options, metrics).expect("runtime"));
     let repository = capture_fixture_repository(
         layout.clone(),
         crab_remote_git::RepositoryIdentity::new("memory", "org/repo", 1).expect("identity"),
@@ -4020,6 +4036,189 @@ async fn history_pages_are_deterministic_and_bound_to_start_and_mode() {
     }
     .await;
     operation.finish(result).await.expect("finish operation");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resumed_first_parent_pages_do_not_read_the_skipped_prefix() {
+    for indexed in [false, true] {
+        let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+        let graph = if indexed {
+            Some(publish_complete_graph(&fixture, true).await)
+        } else {
+            None
+        };
+        let cancel = CancellationToken::new();
+        let setup = fixture
+            .repository
+            .operation(OperationKind::History, &cancel)
+            .await
+            .unwrap();
+        let result = async {
+            let snapshot = fixture
+                .repository
+                .snapshot(&Revision::Reference("main".into()), &setup)
+                .await?;
+            snapshot
+                .history(
+                    HistoryTraversal::FirstParent,
+                    &PageRequest::new(1, None)?,
+                    &setup,
+                )
+                .await
+        }
+        .await;
+        let cursor = setup.finish(result).await.unwrap().next.unwrap();
+
+        // The continuation is exercised with a fresh runtime, not a warm
+        // parsed-commit cache that could hide a prefix walk's physical reads.
+        let (repository, runtime) = reopen_fixture(&fixture).await;
+        let repository = if let Some(hash) = graph {
+            repository.with_commit_graph(&hash, &cancel).await.unwrap()
+        } else {
+            repository
+        };
+        let operation = repository
+            .operation_with_limits(
+                OperationKind::History,
+                &cancel,
+                OperationLimits {
+                    max_history_commits: 1,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let result = async {
+            let snapshot = repository
+                .snapshot(&Revision::Reference("main".into()), &operation)
+                .await?;
+            snapshot
+                .history(
+                    HistoryTraversal::FirstParent,
+                    &PageRequest::new(17, Some(cursor))?,
+                    &operation,
+                )
+                .await
+        }
+        .await;
+        let page = operation.finish(result).await.unwrap();
+        assert_eq!(
+            (
+                page.items
+                    .iter()
+                    .map(|commit| commit.oid)
+                    .collect::<Vec<_>>(),
+                page.next
+            ),
+            (vec![fixture.root_commit], None)
+        );
+        runtime.shutdown().await;
+        fixture.runtime.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn history_seek_cursors_preserve_context_and_tagged_offset_cursors() {
+    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+    let cancel = CancellationToken::new();
+    let operation = fixture
+        .repository
+        .operation(OperationKind::History, &cancel)
+        .await
+        .unwrap();
+    let result = async {
+        let snapshot = fixture
+            .repository
+            .snapshot(&Revision::Reference("main".into()), &operation)
+            .await?;
+        let first = snapshot
+            .history(
+                HistoryTraversal::FirstParent,
+                &PageRequest::new(1, None)?,
+                &operation,
+            )
+            .await?;
+        let cursor = first.next.unwrap();
+        assert_eq!(
+            PageCursor::from_bytes(Bytes::copy_from_slice(cursor.as_bytes()))?,
+            cursor
+        );
+        let root = fixture
+            .repository
+            .snapshot(&Revision::Commit(fixture.root_commit), &operation)
+            .await?;
+        for (snapshot, mode) in [
+            (&root, HistoryTraversal::FirstParent),
+            (&snapshot, HistoryTraversal::AllParents),
+        ] {
+            assert!(matches!(
+                snapshot
+                    .history(
+                        mode,
+                        &PageRequest::new(2, Some(cursor.clone()))?,
+                        &operation
+                    )
+                    .await,
+                Err(Error::InvalidCursor {
+                    reason: CursorError::ContextMismatch
+                })
+            ));
+        }
+        let mut malformed = cursor.as_bytes().to_vec();
+        malformed[22] = HistoryTraversal::AllParents as u8;
+        assert!(PageCursor::from_bytes(malformed).is_err());
+        assert!(PageCursor::from_bytes(Bytes::copy_from_slice(&cursor.as_bytes()[..42])).is_err());
+
+        // These exact alpha.1 bytes mean offset 1, never a resume OID.
+        let mut released = vec![1, 2];
+        released.extend_from_slice(snapshot.commit_oid().as_bytes());
+        released.push(HistoryTraversal::FirstParent as u8);
+        released.extend_from_slice(&1u64.to_be_bytes());
+        let released = PageCursor::from_bytes(released)?;
+        let second = snapshot
+            .history(
+                HistoryTraversal::FirstParent,
+                &PageRequest::new(7, Some(released.clone()))?,
+                &operation,
+            )
+            .await?;
+        assert_eq!(
+            (
+                second
+                    .items
+                    .iter()
+                    .map(|commit| commit.oid)
+                    .collect::<Vec<_>>(),
+                second.next
+            ),
+            (vec![fixture.root_commit], None)
+        );
+        Ok((snapshot, released))
+    }
+    .await;
+    let (snapshot, released) = operation.finish(result).await.unwrap();
+    let strict = fixture
+        .repository
+        .operation_with_limits(
+            OperationKind::History,
+            &cancel,
+            OperationLimits {
+                max_history_commits: 1,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let result = snapshot
+        .history(
+            HistoryTraversal::FirstParent,
+            &PageRequest::new(1, Some(released)).unwrap(),
+            &strict,
+        )
+        .await;
+    let error = strict.finish(result).await.unwrap_err();
+    assert!(contains_limit_exceeded(&error, "history commits"));
+    fixture.runtime.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
