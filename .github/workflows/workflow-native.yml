@@ -68,7 +68,7 @@ jobs:
             const backend = safeStorage.getSelectedStorageBackend();
             const encrypted = available ? await safeStorage.encryptStringAsync('ephemeral qualification value') : null;
             const result = encrypted ? await safeStorage.decryptStringAsync(encrypted) : null;
-            fs.writeFileSync(process.argv[2], JSON.stringify({ available, backend, roundTrip: result?.result === 'ephemeral qualification value', protected: encrypted ? !encrypted.includes(Buffer.from('ephemeral qualification value')) : false }));
+            fs.writeFileSync(process.argv.at(-1), JSON.stringify({ available, backend, roundTrip: result?.result === 'ephemeral qualification value', plaintextAbsent: encrypted ? !encrypted.includes(Buffer.from('ephemeral qualification value')) : false }), { flag: 'wx' });
             app.quit();
           }).catch(error => { console.error(error.message); app.exit(1); });
           JS
@@ -77,7 +77,7 @@ jobs:
           const { createRequire } = require('node:module');
           const path = require('node:path');
           const requireDesktop = createRequire(path.join(process.cwd(), 'package.json'));
-          const child = spawnSync(requireDesktop('electron'), ['--no-sandbox', path.join(process.env.RUNNER_TEMP, 'keyring-app.cjs'), path.join(process.env.RUNNER_TEMP, process.argv[2] + '.json')], { env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined }, stdio: 'inherit', timeout: 30000 });
+          const child = spawnSync(requireDesktop('electron'), ['--no-sandbox', path.join(process.env.RUNNER_TEMP, 'keyring-app.cjs'), path.join(process.env.RUNNER_TEMP, process.argv.at(-1) + '.json')], { env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined }, stdio: 'inherit', timeout: 30000 });
           if (child.error) throw child.error;
           process.exitCode = child.status ?? 1;
           JS
@@ -95,7 +95,7 @@ jobs:
             node - <<'JS'
           const fs = require('node:fs'), path = require('node:path'), assert = require('node:assert/strict');
           const result = JSON.parse(fs.readFileSync(path.join(process.env.RUNNER_TEMP, 'keyring-candidate.json')));
-          assert.deepEqual(result, { available: true, backend: 'gnome_libsecret', roundTrip: true, protected: true });
+          assert.deepEqual(result, { available: true, backend: 'gnome_libsecret', roundTrip: true, plaintextAbsent: true });
           console.log(JSON.stringify(result));
           JS
             xvfb-run -a python scripts/qualify-v2.py > keyring-storage.log 2>&1
