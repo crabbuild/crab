@@ -7,20 +7,25 @@ permissions:
 jobs:
   notebook:
     runs-on: windows-2022
-    timeout-minutes: 90
+    timeout-minutes: 120
     defaults:
       run:
         shell: bash
         working-directory: packages/desktop
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: false
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: cd249ad5e42141269aa18041333cb703d7a32672
+          ref: e77cd860de6ab3bf934ba04f3100d9e959ea6f2a
       - uses: actions/setup-node@v4
         with:
           node-version-file: packages/desktop/.nvmrc
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.0
       - name: Set private qualification paths
         run: |
           echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crab-notebook-target" >> "$GITHUB_ENV"
@@ -40,6 +45,19 @@ jobs:
         run: |
           python -m pip install awscli jupyter_client==8.6.3 ipykernel==6.29.5 jupyter_server==2.17.0
           echo "CRAB_TEST_JUPYTER_PYTHON=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
+      - name: Build and bundle the corrected native CLI
+        run: |
+          cargo build --locked --no-default-features -p crab --bin crab
+          node --input-type=module - <<'JS'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          const source = path.join(process.env.CARGO_TARGET_DIR, 'debug', 'crab.exe');
+          for (const name of ['crab.exe', 'git-remote-crab.exe']) {
+            const destination = path.join('resources', 'native', 'win-x64', name);
+            fs.unlinkSync(destination);
+            fs.linkSync(source, destination);
+          }
+          JS
       - name: Build exact current application
         run: |
           npm run build:renderer
@@ -69,7 +87,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: alpha2-windows-storage-commands-proof
+          name: alpha2-windows-quoted-cli-proof
           path: |
             packages/desktop/windows-storage.log
             packages/desktop/storage-fixture-command-logs/*.log
