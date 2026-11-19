@@ -207,7 +207,7 @@ jobs:
           components: rustfmt
       - name: Install Linux build and Electron dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-0 libnss3 libasound2t64 libgbm1 xvfb tmux
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-0 libnss3 libasound2t64 libgbm1 xvfb tmux dbus-x11 gnome-keyring libsecret-1-0
       - name: Install macOS SSH terminal test dependency
         if: runner.os == 'macOS'
         run: command -v tmux || brew install tmux
@@ -408,7 +408,15 @@ jobs:
         if: matrix.os == 'macos-15' || runner.os == 'Windows' || runner.os == 'Linux'
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
-            xvfb-run -a python scripts/qualify-v2.py
+            # Saved connections and cold restarts require a real Secret Service;
+            # a private bus and keyring keep qualification independent of the host.
+            dbus-run-session -- bash -euo pipefail <<'KEYRING'
+              export XDG_CURRENT_DESKTOP=GNOME
+              export XDG_DATA_HOME="$RUNNER_TEMP/crab-desktop-keyring"
+              mkdir -m 700 -p "$XDG_DATA_HOME"
+              python -c "import secrets; print(secrets.token_hex(32), end=\"\")" | gnome-keyring-daemon --unlock --components=secrets
+              xvfb-run -a python scripts/qualify-v2.py
+          KEYRING
           else
             python scripts/qualify-v2.py
           fi

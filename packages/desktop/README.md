@@ -37,6 +37,8 @@ Terminal layouts, scrollback, and logs stay inside the app profile. Layouts
 are isolated by repository or task, including when using a separate test profile.
 Markdown uses the editor's single Edit/Preview switch; the rendered preview has
 no nested Rendered/Source toolbar.
+Activity docks below the workspace so file actions remain reachable while jobs
+are visible. File context menus stay within the viewport and scroll when needed.
 
 Before opening a terminal, Crab checks the durable daemon's recorded runtime.
 If that runtime has been removed, a daemon advertising guarded idle shutdown is
@@ -87,6 +89,8 @@ discovery and optional installation use that Python environment asynchronously.
 Background outputs remain attached to the current cell after it becomes idle;
 rerunning that cell retires the old route. Cancel stops pending environment
 preparation or kernel readiness/restart and joins process cleanup before retry.
+Local launch errors identify the kernel, executable and working directory,
+including Windows errors that omit the failing filename.
 Fresh-environment installation has packaged macOS proof. To run a notebook on
 Jupyter Server, check the local Python runtime, enter the server base URL with
 its token, and select **Connect to server**. Enter a kernel name or use the
@@ -282,6 +286,8 @@ The OS keyring must be available; Linux's plaintext `basic_text` backend is
 refused. Listing connection metadata initializes the keyring only when an
 encrypted vault must be read. Repositories using environment credentials can
 retry transfers without initializing an unused keyring.
+Linux CI qualifies saved connections with an unlocked GNOME keyring in a private
+D-Bus session, retaining the same encryption requirement as the application.
 Unsaved form values clear on save, cancel, or provider change. Credentials
 never belong in repository URLs. Connections and local checkout selections
 survive restart; cloning records the selection for the destination checkout.

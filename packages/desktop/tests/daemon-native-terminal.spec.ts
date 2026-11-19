@@ -20,7 +20,8 @@ it.each(["win32", "darwin", "linux"])("terminates a %s PTY using its supported k
   try {
     Object.defineProperty(process, "platform", { value: platform });
     new NodePtySubprocessHandle(pty).kill("SIGTERM");
-    expect(kill).toHaveBeenCalledWith(platform === "win32" ? undefined : "SIGTERM");
+    expect(kill).toHaveBeenCalledOnce();
+    expect(kill.mock.calls[0][0]).toBe(platform === "win32" ? undefined : "SIGTERM");
   } finally { Object.defineProperty(process, "platform", descriptor); }
 });
 
