@@ -1185,5 +1185,2805 @@
     "minimum-profile sustained-load and native-architecture performance qualification",
     "independent ref/source/frontier growth and remaining lifecycle qualification",
     "hosted-provider latency excluded from this local RustFS verification"
-  ]
+  ],
+  "followups_2026_11_19": {
+    "revision": "8ba88f5a45288979f9d4afb262e0f3faee6555a4",
+    "acceptance": "open",
+    "builds": {
+      "debug": {
+        "receipt_sha256": "f6ff59c9c4e16c1aa8c8b22f47ea7f0bffaf76ccf168aa0a67dd21456b02e8be",
+        "binary_sha256": "e6175ed2ac873177c55d1a286fcba04ab7f8558ad99d412d6af353b45e56f4e3",
+        "base_revision": "03ecadc5e33a2f09da8a3c596bb1915debc9eca2",
+        "patch_sha256": "d293f8387ec24ffabdff0c4c79f32b8edf737a68c1969d66da12e3bd5efb876d",
+        "all_source_inputs_match_current_tree": true
+      },
+      "release": {
+        "receipt_sha256": "63e7ec758479b040993a7080d7afa5e75634acdd984a6567631cdf76fac27626",
+        "binary_sha256": "4730ae6176eaf337c47d563a1000c7e56d89240c806afad2e40653941dd01818",
+        "base_revision": "03ecadc5e33a2f09da8a3c596bb1915debc9eca2",
+        "patch_sha256": "d293f8387ec24ffabdff0c4c79f32b8edf737a68c1969d66da12e3bd5efb876d",
+        "all_source_inputs_match_current_tree": true
+      }
+    },
+    "focused_tests": {
+      "auth_passed": 36,
+      "auth_ignored": 1,
+      "api_passed": 15,
+      "directory_passed": 2,
+      "peer_passed": 2,
+      "peer_ignored": 1,
+      "shutdown_passed": 2,
+      "proxy_passed": 36,
+      "read_service_tool_passed": 20,
+      "strict_clippy": "passed",
+      "format": "passed"
+    },
+    "git_read_smoke": {
+      "kind": "combined_source_git_read_surface_smoke_with_separate_failed_directory_gate",
+      "status": "passed",
+      "checks": [
+        {
+          "name": "replica-a-public-ready",
+          "passed": true
+        },
+        {
+          "name": "replica-b-public-ready",
+          "passed": true
+        },
+        {
+          "name": "real-github-fixture-login",
+          "passed": true
+        },
+        {
+          "name": "session-cookie-present",
+          "passed": true
+        },
+        {
+          "name": "first-http-history-equals-git",
+          "passed": true
+        },
+        {
+          "name": "configured-signer-crosses-real-replicas",
+          "passed": true
+        },
+        {
+          "name": "file-http-equals-native-git",
+          "passed": true
+        },
+        {
+          "name": "file-preview-http-equals-native-git",
+          "passed": true
+        },
+        {
+          "name": "blob-http-equals-native-git",
+          "passed": true
+        },
+        {
+          "name": "blame-http-equals-native-git",
+          "passed": true
+        },
+        {
+          "name": "preview-large.rs-equals-native-git",
+          "passed": true
+        },
+        {
+          "name": "preview-large.rs-bounded-json",
+          "passed": true
+        },
+        {
+          "name": "preview-large-binary.dat-equals-native-git",
+          "passed": true
+        },
+        {
+          "name": "preview-large-binary.dat-bounded-json",
+          "passed": true
+        },
+        {
+          "name": "preview-large-nonutf8.dat-equals-native-git",
+          "passed": true
+        },
+        {
+          "name": "preview-large-nonutf8.dat-bounded-json",
+          "passed": true
+        },
+        {
+          "name": "preview-boundary.txt-equals-native-git",
+          "passed": true
+        },
+        {
+          "name": "preview-over-boundary.txt-equals-native-git",
+          "passed": true
+        },
+        {
+          "name": "preview-over-boundary.txt-bounded-json",
+          "passed": true
+        },
+        {
+          "name": "preview-empty.txt-equals-native-git",
+          "passed": true
+        },
+        {
+          "name": "preview-binary.dat-equals-native-git",
+          "passed": true
+        },
+        {
+          "name": "preview-nonutf8.dat-equals-native-git",
+          "passed": true
+        },
+        {
+          "name": "preview-small.rs-equals-native-git",
+          "passed": true
+        },
+        {
+          "name": "legacy-raw-response-budget-still-rejects",
+          "passed": true
+        },
+        {
+          "name": "chunked-json-keeps-exact-wire-content-length",
+          "passed": true
+        },
+        {
+          "name": "preview-private-revalidation-policy",
+          "passed": true
+        },
+        {
+          "name": "preview-weak-list-wire-304",
+          "passed": true
+        },
+        {
+          "name": "matching-star-does-not-authorize-missing-path",
+          "passed": true
+        },
+        {
+          "name": "raw-and-preview-validators-are-distinct",
+          "passed": true
+        },
+        {
+          "name": "raw-strong-if-range-is-exact",
+          "passed": true
+        },
+        {
+          "name": "weak-if-range-sends-complete-verified-body",
+          "passed": true
+        },
+        {
+          "name": "sixteen-real-cold-blame-readers-equal-native-git",
+          "passed": true
+        },
+        {
+          "name": "one-cold-blame-producer-per-process",
+          "passed": true
+        },
+        {
+          "name": "http-abort-observes-an-admitted-cold-producer",
+          "passed": true
+        },
+        {
+          "name": "http-abort-closes-the-real-client",
+          "passed": true
+        },
+        {
+          "name": "http-abort-drains-one-producer-and-admitted-work",
+          "passed": true
+        },
+        {
+          "name": "real-chromium-http-cache-revalidation",
+          "passed": true
+        },
+        {
+          "name": "durable-server-logout-completes",
+          "passed": true
+        },
+        {
+          "name": "revoked-original-cookie-cannot-return-304-on-57793",
+          "passed": true
+        },
+        {
+          "name": "revoked-original-cookie-cannot-return-304-on-57794",
+          "passed": true
+        },
+        {
+          "name": "functional-resource-samples-and-admitted-work-drained",
+          "passed": true
+        },
+        {
+          "name": "a-sized-body-metric-present",
+          "passed": true
+        },
+        {
+          "name": "a-checksum-metric-present",
+          "passed": true
+        },
+        {
+          "name": "b-sized-body-metric-present",
+          "passed": true
+        },
+        {
+          "name": "b-checksum-metric-present",
+          "passed": true
+        },
+        {
+          "name": "provider-proxy-has-no-errors",
+          "passed": true
+        }
+      ],
+      "directory_recovery": {
+        "status": "failed",
+        "receipt": "directory-gap-r0-reproducer-complete/report.json",
+        "scope": "separate lifecycle gate; not claimed passed by this read-surface smoke"
+      },
+      "exit_codes": [0, 0],
+      "cold_blame_producer_deltas": {
+        "a": 1.0,
+        "b": 1.0
+      },
+      "http_abort": {
+        "error_type": "RemoteDisconnected",
+        "drain_seconds": 0.004029584000818431,
+        "producer_delta": 1.0,
+        "remaining": {
+          "crab_git_active_cpu_jobs": 0.0,
+          "crab_git_active_blame_producers": 0.0,
+          "crab_git_active_blame_waiters": 0.0,
+          "crab_git_active_origin_operations": 0.0
+        }
+      },
+      "receipt_sha256": "c07bebbcd5e2adaa98cc66c3c336fe749f047bf36b33d4efafd2cdf18e1e215c"
+    },
+    "directory_restore": {
+      "status": "failed",
+      "creation_mechanism": "not proven",
+      "frozen_r0_copy_receipt_sha256": "772f990ad17f0b85db88231f721d87af880ca54d5a0b151907e867d31913f026",
+      "healthy_r0_six_restart_receipt_sha256": "08169f64affff5b48bf2db809378188ca7d11ae470a8b9f224bedb1928919748",
+      "preserved_objects_manifest_sha256": "3a7cc21d1bcd8f8308f33a942f601ceb5aec9d61cac4f75769f52e77daef0559",
+      "missing_epoch": 4,
+      "present_txids": [1, 3],
+      "missing_txid": 2,
+      "dependency_patch": false,
+      "data_repair": false
+    },
+    "provider_migration": {
+      "status": "migrated",
+      "image": "rustfs/rustfs@sha256:040304b66e029a5cde4bed140b41513e925909839a9b912a40a98340610d1f66",
+      "memory_bytes": 3221225472,
+      "nano_cpus": 1000000000,
+      "files_verified": 19711,
+      "manifest_sha256": "4b287067d7496b1d28401c3171fad0f239133df92530c51fee6dad3eee99d5d7",
+      "destination_df": "Filesystem      Size  Used Avail Use% Mounted on\n/dev/vdb1        47G  3.6G   41G   8% /data\n",
+      "reason": "actual CopyObject Disk full on shared data volume; same copy succeeds after migration",
+      "original_directory_retained": true
+    },
+    "preceding_chunked_json_http": {
+      "baseline": {
+        "receipt_sha256": "99c50e5522f3a12aa96eff3d6c88c17a32cb680db5d27e558a0d9297ae5f75a0",
+        "status": "failed",
+        "failures": ["mixed-1:interactive_latency", "mixed-8:interactive_latency"],
+        "exit_codes": [0, 0],
+        "resources": {
+          "status": "observed",
+          "failures": [],
+          "peak_rss_bytes": [248594432, 250740736],
+          "admitted_work_drained": null,
+          "rss_plateau": "passed",
+          "provider": {
+            "response_body_bytes": 1383709983,
+            "requests": 2346683,
+            "request_body_bytes": 815487,
+            "categories": {
+              ".crab": 2337435,
+              "r0-debug-baseline-20-20261118": 9248
+            },
+            "operations": {
+              "get": 2340231,
+              "list": 5674,
+              "put": 778
+            },
+            "classes": {
+              ".crab:get": 2334679,
+              ".crab:list": 1978,
+              ".crab:put": 778,
+              "r0-debug-baseline-20-20261118:get": 5552,
+              "r0-debug-baseline-20-20261118:list": 3696
+            },
+            "class_request_body_bytes": {
+              ".crab:put": 815487
+            },
+            "proxy_errors": {},
+            "class_response_body_bytes": {
+              ".crab:get": 1377639861,
+              ".crab:list": 835890,
+              ".crab:put": 2132,
+              "r0-debug-baseline-20-20261118:get": 2961732,
+              "r0-debug-baseline-20-20261118:list": 2270368
+            },
+            "methods": {
+              "GET": 2345905,
+              "PUT": 778
+            },
+            "statuses": {
+              "2xx": 2346670,
+              "4xx": 13
+            }
+          },
+          "quota_enforcement": "native processes on shared 32-GiB host; no process CPU/RAM quota; observed ceiling 1 GiB each",
+          "limits": {
+            "maximum_late_rss_ratio": 1.1,
+            "sample_interval_seconds": 1
+          }
+        },
+        "columns": ["case", "workload", "attempts", "successes", "rejected", "errors", "oracle_mismatches", "elapsed_seconds", "offered_requests_per_second", "successful_requests_per_second", "p50_us", "p95_us", "ttfb_p95_us", "server_total_p95_ms"],
+        "cells": [
+          ["small-1", "preview", 2640, 2640, 0, 0, 0, 10.000994333007839, 263.9737522184966, 263.9737522184966, 3731.125, 4575.5, 4563.792, 0.068],
+          ["expensive-1", "blame", 815, 815, 0, 0, 0, 10.00167974998476, 81.4863123368094, 81.4863123368094, 3805.667, 4859.375, 4843.25, 0.129],
+          ["expensive-1", "late-history", 815, 815, 0, 0, 0, 10.00167974998476, 81.4863123368094, 81.4863123368094, 4224.541, 5439.291, 5427.416, 0.596],
+          ["expensive-1", "raw", 815, 815, 0, 0, 0, 10.00167974998476, 81.4863123368094, 81.4863123368094, 3771.125, 4865.542, 4857.625, 0.068],
+          ["mixed-1", "preview", 160, 160, 0, 0, 0, 10.00749662501039, 15.988014385149382, 15.988014385149382, 9859.334, 26083.458, 26051.625, 0.182],
+          ["mixed-1", "history", 160, 160, 0, 0, 0, 10.00749662501039, 15.988014385149382, 15.988014385149382, 10390.334, 24275.083, 24197.208, 0.318],
+          ["mixed-1", "raw", 160, 160, 0, 0, 0, 10.00749662501039, 15.988014385149382, 15.988014385149382, 9479.625, 26852.708, 26825.0, 0.169],
+          ["mixed-1", "blame", 161, 161, 0, 0, 0, 10.00749662501039, 16.087939475056565, 16.087939475056565, 9298.0, 27943.542, 27904.417, 0.317],
+          ["mixed-1", "late-history", 161, 161, 0, 0, 0, 10.00749662501039, 16.087939475056565, 16.087939475056565, 10324.916, 24136.875, 24102.875, 1.306],
+          ["distinct-1", "preview-distinct", 108, 108, 0, 0, 0, 10.021352792042308, 10.776988121380175, 10.776988121380175, 17091.0, 28861.666, 28836.416, 0.205],
+          ["distinct-1", "history", 107, 107, 0, 0, 0, 10.021352792042308, 10.677201194330358, 10.677201194330358, 16511.666, 32416.958, 32380.5, 0.322],
+          ["distinct-1", "raw-distinct", 107, 107, 0, 0, 0, 10.021352792042308, 10.677201194330358, 10.677201194330358, 18311.833, 29991.833, 29965.0, 0.197],
+          ["distinct-1", "blame-distinct", 107, 107, 0, 0, 0, 10.021352792042308, 10.677201194330358, 10.677201194330358, 17225.709, 28502.875, 28469.542, 0.228],
+          ["distinct-1", "late-history", 107, 107, 0, 0, 0, 10.021352792042308, 10.677201194330358, 10.677201194330358, 18282.458, 26657.625, 26635.792, 1.424],
+          ["small-8", "preview", 9033, 9033, 0, 0, 0, 10.006181334028952, 902.7419850248602, 902.7419850248602, 7834.125, 14452.209, 14421.334, 0.137],
+          ["expensive-8", "blame", 897, 897, 0, 0, 0, 10.028534833050799, 89.44477083968228, 89.44477083968228, 27195.917, 47761.916, 47555.208, 0.422],
+          ["expensive-8", "late-history", 898, 898, 0, 0, 0, 10.028534833050799, 89.54448630327167, 89.54448630327167, 29097.417, 53036.375, 53023.958, 4.992],
+          ["expensive-8", "raw", 896, 896, 0, 0, 0, 10.028534833050799, 89.34505537609289, 89.34505537609289, 27157.667, 44636.625, 44603.75, 0.187],
+          ["mixed-8", "preview", 406, 406, 0, 0, 0, 10.01515641604783, 40.53855807478394, 40.53855807478394, 34151.791, 82608.959, 82580.417, 0.231],
+          ["mixed-8", "history", 404, 404, 0, 0, 0, 10.01515641604783, 40.33886074436629, 40.33886074436629, 35170.084, 75368.625, 75359.25, 0.368],
+          ["mixed-8", "raw", 402, 402, 0, 0, 0, 10.01515641604783, 40.13916341394864, 40.13916341394864, 33958.167, 69232.167, 69224.042, 0.197],
+          ["mixed-8", "blame", 403, 403, 0, 0, 0, 10.01515641604783, 40.23901207915746, 40.23901207915746, 35119.416, 76017.417, 75985.375, 0.46],
+          ["mixed-8", "late-history", 406, 406, 0, 0, 0, 10.01515641604783, 40.53855807478394, 40.53855807478394, 35587.209, 78581.625, 78560.583, 14.035],
+          ["distinct-8", "preview-distinct", 842, 842, 0, 0, 0, 10.00719587499043, 84.13945430050906, 84.13945430050906, 15482.25, 38439.75, 38426.167, 0.158],
+          ["distinct-8", "history", 841, 841, 0, 0, 0, 10.00719587499043, 84.03952620751558, 84.03952620751558, 15550.417, 38075.041, 38041.25, 0.294],
+          ["distinct-8", "raw-distinct", 841, 841, 0, 0, 0, 10.00719587499043, 84.03952620751558, 84.03952620751558, 15915.416, 38699.0, 38679.875, 0.146],
+          ["distinct-8", "blame-distinct", 838, 838, 0, 0, 0, 10.00719587499043, 83.73974192853514, 83.73974192853514, 15371.416, 38819.5, 38797.166, 0.166],
+          ["distinct-8", "late-history", 837, 837, 0, 0, 0, 10.00719587499043, 83.63981383554166, 83.63981383554166, 16423.084, 39024.959, 39012.875, 2.38],
+          ["small-16", "preview", 11676, 11676, 0, 0, 0, 10.011952750035562, 1166.206063043848, 1166.206063043848, 12935.375, 18719.625, 18713.833, 0.116],
+          ["expensive-16", "blame", 4248, 4248, 0, 0, 0, 10.013134499953594, 424.24277832477804, 424.24277832477804, 11814.875, 16116.75, 16098.042, 0.177],
+          ["expensive-16", "late-history", 4252, 4252, 0, 0, 0, 10.013134499953594, 424.6422536339351, 424.6422536339351, 12665.625, 17730.958, 17720.0, 3.37],
+          ["expensive-16", "raw", 4251, 4251, 0, 0, 0, 10.013134499953594, 424.5423848066458, 424.5423848066458, 11734.667, 16138.917, 16132.959, 0.088],
+          ["mixed-16", "preview", 2025, 2025, 0, 0, 0, 10.028591458976734, 201.92267361608333, 201.92267361608333, 13458.25, 28431.875, 28329.083, 0.141],
+          ["mixed-16", "history", 2029, 2029, 0, 0, 0, 10.028591458976734, 202.32153321828793, 202.32153321828793, 13444.833, 27924.125, 27904.542, 0.244],
+          ["mixed-16", "raw", 2032, 2032, 0, 0, 0, 10.028591458976734, 202.6206779199414, 202.6206779199414, 13423.75, 28408.875, 28398.5, 0.126],
+          ["mixed-16", "blame", 2031, 2031, 0, 0, 0, 10.028591458976734, 202.52096301939022, 202.52096301939022, 13590.417, 28796.083, 28782.083, 0.268],
+          ["mixed-16", "late-history", 2027, 2027, 0, 0, 0, 10.028591458976734, 202.12210341718563, 202.12210341718563, 14265.541, 29872.625, 29757.458, 2.206],
+          ["distinct-16", "preview-distinct", 660, 660, 0, 0, 0, 10.071463375003077, 65.53168843746089, 65.53168843746089, 46070.583, 85858.625, 85829.292, 0.294],
+          ["distinct-16", "history", 662, 662, 0, 0, 0, 10.071463375003077, 65.73026931151381, 65.73026931151381, 44251.083, 79862.334, 79847.084, 0.344],
+          ["distinct-16", "raw-distinct", 660, 660, 0, 0, 0, 10.071463375003077, 65.53168843746089, 65.53168843746089, 44560.875, 81901.792, 81895.25, 0.287],
+          ["distinct-16", "blame-distinct", 660, 660, 0, 0, 0, 10.071463375003077, 65.53168843746089, 65.53168843746089, 44121.958, 79457.791, 79449.541, 0.322],
+          ["distinct-16", "late-history", 659, 659, 0, 0, 0, 10.071463375003077, 65.43239800043443, 65.43239800043443, 46202.667, 78690.25, 78674.917, 3.822],
+          ["small-32", "preview", 6394, 6240, 154, 0, 0, 10.024177165993024, 637.8578405110014, 622.4949835453001, 45431.209, 86451.542, 86426.292, 0.164],
+          ["expensive-32", "blame", 3690, 3630, 60, 0, 0, 10.016897750028875, 368.37752486685446, 362.38764641373484, 28083.708, 39136.708, 39127.25, 0.27],
+          ["expensive-32", "late-history", 3683, 3628, 55, 0, 0, 10.016897750028875, 367.6787057139905, 362.18798379863085, 28799.958, 40499.167, 40486.042, 2.829],
+          ["expensive-32", "raw", 3687, 3644, 43, 0, 0, 10.016897750028875, 368.0780309441985, 363.78528471946277, 27958.833, 38411.458, 38404.583, 0.131],
+          ["mixed-32", "preview", 1391, 1357, 34, 0, 0, 10.057883834000677, 138.29946964566486, 134.91903688653287, 27437.5, 108004.292, 107980.667, 0.169],
+          ["mixed-32", "history", 1390, 1367, 23, 0, 0, 10.057883834000677, 138.20004515274923, 135.91328181568934, 27616.209, 103670.167, 103635.208, 0.328],
+          ["mixed-32", "raw", 1391, 1364, 27, 0, 0, 10.057883834000677, 138.29946964566486, 135.6150083369424, 27829.458, 102070.833, 102043.292, 0.164],
+          ["mixed-32", "blame", 1388, 1346, 42, 0, 0, 10.057883834000677, 138.00119616691794, 133.82536746446075, 27271.958, 103598.209, 103578.959, 0.316],
+          ["mixed-32", "late-history", 1392, 1364, 28, 0, 0, 10.057883834000677, 138.39889413858052, 135.6150083369424, 28245.875, 105719.083, 105683.333, 3.21],
+          ["distinct-32", "preview-distinct", 877, 844, 33, 0, 0, 10.044284250005148, 87.31333942481272, 84.02788879651304, 71280.958, 104263.166, 104249.541, 0.285],
+          ["distinct-32", "history", 879, 853, 26, 0, 0, 10.044284250005148, 87.51245764470967, 84.92392078604932, 71710.208, 106802.084, 106775.334, 0.576],
+          ["distinct-32", "raw-distinct", 881, 852, 29, 0, 0, 10.044284250005148, 87.71157586460662, 84.82436167610085, 71568.167, 106412.0, 106402.75, 0.218],
+          ["distinct-32", "blame-distinct", 879, 846, 33, 0, 0, 10.044284250005148, 87.51245764470967, 84.22700701640998, 71363.125, 103285.5, 103264.25, 0.447],
+          ["distinct-32", "late-history", 880, 845, 35, 0, 0, 10.044284250005148, 87.61201675465814, 84.12744790646151, 72004.125, 105109.792, 105085.292, 6.49],
+          ["small-64", "preview", 10346, 9994, 352, 0, 0, 10.038635000004433, 1030.6182065585044, 995.5536783632024, 56897.5, 106720.709, 106706.75, 0.135],
+          ["expensive-64", "blame", 4216, 4110, 106, 0, 0, 10.032960250042379, 420.2149609814503, 409.6497840687288, 49894.958, 66282.125, 66229.083, 0.209],
+          ["expensive-64", "late-history", 4216, 4105, 111, 0, 0, 10.032960250042379, 420.2149609814503, 409.1514266671854, 50383.459, 65996.0, 65981.208, 2.261],
+          ["expensive-64", "raw", 4211, 4115, 96, 0, 0, 10.032960250042379, 419.7166035799068, 410.14814147027226, 49508.125, 65671.625, 65666.042, 0.109],
+          ["mixed-64", "preview", 2553, 2479, 74, 0, 0, 10.034662334015593, 254.41812738888248, 247.0436889138424, 48669.417, 68661.375, 68652.958, 0.132],
+          ["mixed-64", "history", 2561, 2486, 75, 0, 0, 10.034662334015593, 255.2153639807787, 247.74127093175161, 48894.75, 68626.083, 68611.125, 0.219],
+          ["mixed-64", "raw", 2564, 2495, 69, 0, 0, 10.034662334015593, 255.5143277027398, 248.63816209763488, 48681.875, 68214.041, 68206.916, 0.124],
+          ["mixed-64", "blame", 2562, 2507, 55, 0, 0, 10.034662334015593, 255.31501855476574, 249.8340169854792, 48819.875, 68975.417, 68965.167, 0.233],
+          ["mixed-64", "late-history", 2558, 2501, 57, 0, 0, 10.034662334015593, 254.91640025881762, 249.23608954155702, 49211.75, 69824.708, 69809.958, 1.975],
+          ["distinct-64", "preview-distinct", 1960, 1895, 65, 0, 0, 10.041527333960403, 195.18943033409752, 188.71631147097693, 59961.917, 98150.875, 98144.084, 0.143],
+          ["distinct-64", "history", 1959, 1895, 64, 0, 0, 10.041527333960403, 195.0898438900495, 188.71631147097693, 59752.25, 99521.375, 99502.75, 0.26],
+          ["distinct-64", "raw-distinct", 1964, 1896, 68, 0, 0, 10.041527333960403, 195.58777611028955, 188.81589791502495, 60029.625, 99796.875, 99790.292, 0.135],
+          ["distinct-64", "blame-distinct", 1959, 1884, 75, 0, 0, 10.041527333960403, 195.0898438900495, 187.62086058644883, 60390.166, 97791.084, 97775.625, 0.145],
+          ["distinct-64", "late-history", 1959, 1886, 73, 0, 0, 10.041527333960403, 195.0898438900495, 187.82003347454486, 60561.708, 96494.125, 96481.375, 2.105],
+          ["small-distinct-16", "preview-distinct", 7895, 7895, 0, 0, 0, 10.013021791004576, 788.4732665909758, 788.4732665909758, 15137.125, 44272.625, 44258.666, 0.143],
+          ["soak-16", "preview", 120383, 120383, 0, 0, 0, 600.0375391249545, 200.6257811395545, 200.6257811395545, 12942.458, 35655.583, 35636.833, 0.134],
+          ["soak-16", "history", 120387, 120387, 0, 0, 0, 600.0375391249545, 200.63244738914588, 200.63244738914588, 13007.5, 35839.125, 35817.25, 0.244],
+          ["soak-16", "raw", 120390, 120390, 0, 0, 0, 600.0375391249545, 200.6374470763394, 200.6374470763394, 12926.584, 35725.375, 35707.0, 0.124],
+          ["soak-16", "blame", 120393, 120393, 0, 0, 0, 600.0375391249545, 200.64244676353294, 200.64244676353294, 12999.334, 35620.208, 35595.666, 0.258],
+          ["soak-16", "late-history", 120391, 120391, 0, 0, 0, 600.0375391249545, 200.63911363873726, 200.63911363873726, 13671.333, 36847.625, 36831.0, 2.029]
+        ],
+        "provider_by_case": {
+          "small-1": {
+            "response_body_bytes": 5742082,
+            "requests": 9604,
+            "request_body_bytes": 12462,
+            "operations": {
+              "get": 9521,
+              "list": 72,
+              "put": 11
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 9604
+            }
+          },
+          "expensive-1": {
+            "response_body_bytes": 5389983,
+            "requests": 9050,
+            "request_body_bytes": 9868,
+            "operations": {
+              "get": 8958,
+              "list": 82,
+              "put": 10
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 9050
+            }
+          },
+          "mixed-1": {
+            "response_body_bytes": 2352229,
+            "requests": 3996,
+            "request_body_bytes": 12444,
+            "operations": {
+              "get": 3907,
+              "list": 78,
+              "put": 11
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 3996
+            }
+          },
+          "distinct-1": {
+            "response_body_bytes": 1285089,
+            "requests": 2179,
+            "request_body_bytes": 9271,
+            "operations": {
+              "get": 2085,
+              "list": 83,
+              "put": 11
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 2178,
+              "4xx": 1
+            }
+          },
+          "small-8": {
+            "response_body_bytes": 17186444,
+            "requests": 29154,
+            "request_body_bytes": 13254,
+            "operations": {
+              "get": 29058,
+              "list": 84,
+              "put": 12
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 29154
+            }
+          },
+          "expensive-8": {
+            "response_body_bytes": 7204246,
+            "requests": 12219,
+            "request_body_bytes": 12444,
+            "operations": {
+              "get": 12136,
+              "list": 72,
+              "put": 11
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 12219
+            }
+          },
+          "mixed-8": {
+            "response_body_bytes": 4525223,
+            "requests": 7680,
+            "request_body_bytes": 9057,
+            "operations": {
+              "get": 7589,
+              "list": 82,
+              "put": 9
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 7680
+            }
+          },
+          "distinct-8": {
+            "response_body_bytes": 8356460,
+            "requests": 14178,
+            "request_body_bytes": 12444,
+            "operations": {
+              "get": 14093,
+              "list": 74,
+              "put": 11
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 14178
+            }
+          },
+          "small-16": {
+            "response_body_bytes": 23944290,
+            "requests": 40606,
+            "request_body_bytes": 9271,
+            "operations": {
+              "get": 40516,
+              "list": 79,
+              "put": 11
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 40605,
+              "4xx": 1
+            }
+          },
+          "expensive-16": {
+            "response_body_bytes": 26665919,
+            "requests": 45229,
+            "request_body_bytes": 13254,
+            "operations": {
+              "get": 45135,
+              "list": 82,
+              "put": 12
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 45229
+            }
+          },
+          "mixed-16": {
+            "response_body_bytes": 22467188,
+            "requests": 38105,
+            "request_body_bytes": 12444,
+            "operations": {
+              "get": 38014,
+              "list": 80,
+              "put": 11
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 38105
+            }
+          },
+          "distinct-16": {
+            "response_body_bytes": 7317384,
+            "requests": 12414,
+            "request_body_bytes": 9057,
+            "operations": {
+              "get": 12332,
+              "list": 73,
+              "put": 9
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 12414
+            }
+          },
+          "small-32": {
+            "response_body_bytes": 12796693,
+            "requests": 21707,
+            "request_body_bytes": 12444,
+            "operations": {
+              "get": 21625,
+              "list": 71,
+              "put": 11
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 21707
+            }
+          },
+          "expensive-32": {
+            "response_body_bytes": 23198288,
+            "requests": 39342,
+            "request_body_bytes": 9271,
+            "operations": {
+              "get": 39246,
+              "list": 85,
+              "put": 11
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 39341,
+              "4xx": 1
+            }
+          },
+          "mixed-32": {
+            "response_body_bytes": 17007775,
+            "requests": 28851,
+            "request_body_bytes": 13254,
+            "operations": {
+              "get": 28755,
+              "list": 84,
+              "put": 12
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 28851
+            }
+          },
+          "distinct-32": {
+            "response_body_bytes": 9482718,
+            "requests": 16083,
+            "request_body_bytes": 12444,
+            "operations": {
+              "get": 16000,
+              "list": 72,
+              "put": 11
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 16083
+            }
+          },
+          "small-64": {
+            "response_body_bytes": 20273242,
+            "requests": 34385,
+            "request_body_bytes": 9057,
+            "operations": {
+              "get": 34304,
+              "list": 72,
+              "put": 9
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 34385
+            }
+          },
+          "expensive-64": {
+            "response_body_bytes": 26970131,
+            "requests": 45745,
+            "request_body_bytes": 13254,
+            "operations": {
+              "get": 45653,
+              "list": 80,
+              "put": 12
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 45745
+            }
+          },
+          "mixed-64": {
+            "response_body_bytes": 27427150,
+            "requests": 46515,
+            "request_body_bytes": 12658,
+            "operations": {
+              "get": 46414,
+              "list": 88,
+              "put": 13
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 46514,
+              "4xx": 1
+            }
+          },
+          "distinct-64": {
+            "response_body_bytes": 20854188,
+            "requests": 35371,
+            "request_body_bytes": 9057,
+            "operations": {
+              "get": 35290,
+              "list": 72,
+              "put": 9
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 35371
+            }
+          },
+          "small-distinct-16": {
+            "response_body_bytes": 18004289,
+            "requests": 30535,
+            "request_body_bytes": 12444,
+            "operations": {
+              "get": 30451,
+              "list": 73,
+              "put": 11
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 30535
+            }
+          },
+          "soak-16": {
+            "response_body_bytes": 1075215656,
+            "requests": 1823658,
+            "request_body_bytes": 570517,
+            "operations": {
+              "get": 1819113,
+              "list": 4000,
+              "put": 545
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 1823649,
+              "4xx": 9
+            }
+          }
+        }
+      },
+      "candidate": {
+        "receipt_sha256": "d7468c68d7286bca2faeca0599a03231bb6684399d2847dee5adc0d462dca3b9",
+        "status": "failed",
+        "failures": ["mixed-16:interactive_latency", "expensive-1:late-history:p95_regression", "small-16:preview:p95_regression", "small-16:preview:throughput_regression", "expensive-16:blame:p95_regression", "expensive-16:blame:throughput_regression", "expensive-16:late-history:p95_regression", "expensive-16:late-history:throughput_regression", "expensive-16:raw:p95_regression", "expensive-16:raw:throughput_regression", "mixed-16:preview:p95_regression", "mixed-16:preview:throughput_regression", "mixed-16:history:p95_regression", "mixed-16:history:throughput_regression", "mixed-16:raw:p95_regression", "mixed-16:raw:throughput_regression", "mixed-16:blame:p95_regression", "mixed-16:blame:throughput_regression", "mixed-16:late-history:p95_regression", "mixed-16:late-history:throughput_regression", "small-32:preview:p95_regression", "small-32:preview:throughput_regression", "expensive-32:blame:p95_regression", "expensive-32:blame:throughput_regression", "expensive-32:late-history:p95_regression", "expensive-32:late-history:throughput_regression", "expensive-32:raw:p95_regression", "expensive-32:raw:throughput_regression", "mixed-32:preview:p95_regression", "mixed-32:preview:throughput_regression", "mixed-32:history:p95_regression", "mixed-32:history:throughput_regression", "mixed-32:raw:p95_regression", "mixed-32:raw:throughput_regression", "mixed-32:blame:p95_regression", "mixed-32:blame:throughput_regression", "mixed-32:late-history:p95_regression", "mixed-32:late-history:throughput_regression", "expensive-64:late-history:p95_regression", "expensive-64:raw:p95_regression", "distinct-64:preview-distinct:p95_regression", "distinct-64:history:p95_regression", "distinct-64:blame-distinct:p95_regression", "distinct-64:late-history:p95_regression", "soak-16:preview:p95_regression", "soak-16:history:p95_regression", "soak-16:raw:p95_regression", "soak-16:blame:p95_regression", "soak-16:late-history:p95_regression"],
+        "exit_codes": [0, 0],
+        "resources": {
+          "status": "failed",
+          "failures": ["provider_proxy_errors"],
+          "peak_rss_bytes": [267288576, 258359296],
+          "admitted_work_drained": true,
+          "rss_plateau": "passed",
+          "provider": {
+            "response_body_bytes": 1401354922,
+            "requests": 2325306,
+            "request_body_bytes": 825874,
+            "categories": {
+              ".crab": 2315915,
+              "r0-debug-baseline-20-20261118": 9391
+            },
+            "operations": {
+              "get": 2318776,
+              "head": 12,
+              "list": 5708,
+              "put": 810
+            },
+            "classes": {
+              ".crab:get": 2313119,
+              ".crab:head": 6,
+              ".crab:list": 1996,
+              ".crab:put": 794,
+              "r0-debug-baseline-20-20261118:get": 5657,
+              "r0-debug-baseline-20-20261118:head": 6,
+              "r0-debug-baseline-20-20261118:list": 3712,
+              "r0-debug-baseline-20-20261118:put": 16
+            },
+            "class_request_body_bytes": {
+              ".crab:put": 824706,
+              "r0-debug-baseline-20-20261118:put": 1168
+            },
+            "proxy_errors": {
+              "RemoteDisconnected": 1
+            },
+            "class_response_body_bytes": {
+              ".crab:get": 1362612690,
+              ".crab:list": 844389,
+              ".crab:put": 1804,
+              "r0-debug-baseline-20-20261118:get": 35615523,
+              "r0-debug-baseline-20-20261118:list": 2280188,
+              "r0-debug-baseline-20-20261118:put": 328
+            },
+            "methods": {
+              "GET": 2324484,
+              "HEAD": 12,
+              "PUT": 810
+            },
+            "statuses": {
+              "2xx": 2325284,
+              "4xx": 21,
+              "5xx": 1
+            }
+          },
+          "quota_enforcement": "native processes on shared 32-GiB host; no process CPU/RAM quota; observed ceiling 1 GiB each",
+          "limits": {
+            "maximum_late_rss_ratio": 1.1,
+            "sample_interval_seconds": 1
+          }
+        },
+        "columns": ["case", "workload", "attempts", "successes", "rejected", "errors", "oracle_mismatches", "elapsed_seconds", "offered_requests_per_second", "successful_requests_per_second", "p50_us", "p95_us", "ttfb_p95_us", "server_total_p95_ms"],
+        "cells": [
+          ["small-1", "preview", 2695, 2695, 0, 0, 0, 10.003317708033137, 269.41061742303634, 269.41061742303634, 3634.0, 4211.25, 4199.25, 0.089],
+          ["expensive-1", "blame", 831, 831, 0, 0, 0, 10.003798082994763, 83.0684499132983, 83.0684499132983, 3858.917, 4655.0, 4642.417, 0.13],
+          ["expensive-1", "late-history", 832, 832, 0, 0, 0, 10.003798082994763, 83.16841194688831, 83.16841194688831, 3837.625, 4591.208, 4580.042, 0.085],
+          ["expensive-1", "raw", 831, 831, 0, 0, 0, 10.003798082994763, 83.0684499132983, 83.0684499132983, 3810.625, 4524.625, 4515.416, 0.061],
+          ["mixed-1", "preview", 490, 490, 0, 0, 0, 10.00312212499557, 48.98470636238653, 48.98470636238653, 3898.583, 4746.833, 4732.0, 0.103],
+          ["mixed-1", "history", 490, 490, 0, 0, 0, 10.00312212499557, 48.98470636238653, 48.98470636238653, 3941.541, 4817.667, 4802.708, 0.119],
+          ["mixed-1", "raw", 490, 490, 0, 0, 0, 10.00312212499557, 48.98470636238653, 48.98470636238653, 3882.375, 4723.75, 4714.625, 0.067],
+          ["mixed-1", "blame", 489, 489, 0, 0, 0, 10.00312212499557, 48.88473757389186, 48.88473757389186, 3934.5, 4735.666, 4724.5, 0.136],
+          ["mixed-1", "late-history", 490, 490, 0, 0, 0, 10.00312212499557, 48.98470636238653, 48.98470636238653, 3897.625, 4668.459, 4652.959, 0.091],
+          ["distinct-1", "preview-distinct", 521, 521, 0, 0, 0, 10.000903625041246, 52.09529253891308, 52.09529253891308, 3814.166, 4363.666, 4354.875, 0.085],
+          ["distinct-1", "history", 521, 521, 0, 0, 0, 10.000903625041246, 52.09529253891308, 52.09529253891308, 3840.041, 4435.334, 4422.5, 0.106],
+          ["distinct-1", "raw-distinct", 521, 521, 0, 0, 0, 10.000903625041246, 52.09529253891308, 52.09529253891308, 3803.875, 4285.375, 4277.542, 0.058],
+          ["distinct-1", "blame-distinct", 520, 520, 0, 0, 0, 10.000903625041246, 51.995301574347025, 51.995301574347025, 3807.625, 4342.291, 4332.583, 0.09],
+          ["distinct-1", "late-history", 520, 520, 0, 0, 0, 10.000903625041246, 51.995301574347025, 51.995301574347025, 3821.75, 4393.166, 4382.416, 0.083],
+          ["small-8", "preview", 12065, 12065, 0, 0, 0, 10.005078125046566, 1205.887635179645, 1205.887635179645, 6240.458, 8254.834, 8242.792, 0.125],
+          ["expensive-8", "blame", 4001, 4001, 0, 0, 0, 10.006731499976013, 399.8308538616821, 399.8308538616821, 6450.542, 8515.292, 8492.5, 0.187],
+          ["expensive-8", "late-history", 4002, 4002, 0, 0, 0, 10.006731499976013, 399.93078659196493, 399.93078659196493, 6381.208, 8335.584, 8318.375, 0.105],
+          ["expensive-8", "raw", 4002, 4002, 0, 0, 0, 10.006731499976013, 399.93078659196493, 399.93078659196493, 6385.167, 8552.875, 8543.5, 0.076],
+          ["mixed-8", "preview", 2358, 2358, 0, 0, 0, 10.004783042008057, 235.6872697887836, 235.6872697887836, 6543.083, 8514.792, 8506.042, 0.137],
+          ["mixed-8", "history", 2359, 2359, 0, 0, 0, 10.004783042008057, 235.78722198123006, 235.78722198123006, 6533.375, 8458.0, 8441.167, 0.138],
+          ["mixed-8", "raw", 2360, 2360, 0, 0, 0, 10.004783042008057, 235.88717417367653, 235.88717417367653, 6507.209, 8386.666, 8379.333, 0.077],
+          ["mixed-8", "blame", 2357, 2357, 0, 0, 0, 10.004783042008057, 235.58731759633713, 235.58731759633713, 6603.916, 8548.042, 8537.084, 0.181],
+          ["mixed-8", "late-history", 2357, 2357, 0, 0, 0, 10.004783042008057, 235.58731759633713, 235.58731759633713, 6504.792, 8455.75, 8434.875, 0.107],
+          ["distinct-8", "preview-distinct", 2396, 2396, 0, 0, 0, 10.005257541954052, 239.47409548960547, 239.47409548960547, 6460.291, 8354.458, 8346.166, 0.131],
+          ["distinct-8", "history", 2397, 2397, 0, 0, 0, 10.005257541954052, 239.57404294181316, 239.57404294181316, 6476.084, 8346.125, 8335.875, 0.136],
+          ["distinct-8", "raw-distinct", 2396, 2396, 0, 0, 0, 10.005257541954052, 239.47409548960547, 239.47409548960547, 6431.833, 8426.542, 8406.5, 0.077],
+          ["distinct-8", "blame-distinct", 2395, 2395, 0, 0, 0, 10.005257541954052, 239.3741480373978, 239.3741480373978, 6451.458, 8339.042, 8331.542, 0.129],
+          ["distinct-8", "late-history", 2394, 2394, 0, 0, 0, 10.005257541954052, 239.27420058519013, 239.27420058519013, 6480.084, 8319.584, 8301.334, 0.109],
+          ["small-16", "preview", 9636, 9636, 0, 0, 0, 10.015142625023145, 962.1430628380823, 962.1430628380823, 15106.625, 26543.666, 26533.584, 0.275],
+          ["expensive-16", "blame", 1330, 1323, 7, 0, 0, 10.036030665971339, 132.52251256162097, 131.82502565340192, 39459.667, 56095.917, 56074.917, 0.916],
+          ["expensive-16", "late-history", 1329, 1317, 12, 0, 0, 10.036030665971339, 132.42287157473254, 131.22717973207128, 39782.208, 56322.834, 56314.75, 0.268],
+          ["expensive-16", "raw", 1330, 1317, 13, 0, 0, 10.036030665971339, 132.52251256162097, 131.22717973207128, 38760.0, 55203.083, 55183.333, 0.19],
+          ["mixed-16", "preview", 841, 841, 0, 0, 0, 10.019314375007525, 83.93787923231707, 83.93787923231707, 37643.041, 62445.75, 62430.917, 10.066],
+          ["mixed-16", "history", 843, 843, 0, 0, 0, 10.019314375007525, 84.13749368946883, 84.13749368946883, 38465.292, 61209.583, 61183.458, 0.375],
+          ["mixed-16", "raw", 840, 837, 3, 0, 0, 10.019314375007525, 83.83807200374119, 83.53865031801354, 37335.583, 59485.917, 59467.583, 0.185],
+          ["mixed-16", "blame", 840, 839, 1, 0, 0, 10.019314375007525, 83.83807200374119, 83.7382647751653, 37830.375, 61200.583, 61180.583, 1.409],
+          ["mixed-16", "late-history", 840, 838, 2, 0, 0, 10.019314375007525, 83.83807200374119, 83.63845754658942, 37287.375, 61457.459, 61429.667, 0.379],
+          ["distinct-16", "preview-distinct", 1706, 1706, 0, 0, 0, 10.13814595801523, 168.27534413737993, 168.27534413737993, 17027.625, 30120.292, 30113.792, 0.381],
+          ["distinct-16", "history", 1703, 1698, 5, 0, 0, 10.13814595801523, 167.9794320433517, 167.48624521997135, 16708.041, 29551.625, 29537.084, 0.269],
+          ["distinct-16", "raw-distinct", 1705, 1704, 1, 0, 0, 10.13814595801523, 168.17670677270385, 168.07806940802777, 16593.041, 29630.417, 29625.125, 0.154],
+          ["distinct-16", "blame-distinct", 1709, 1706, 3, 0, 0, 10.13814595801523, 168.57125623140814, 168.27534413737993, 16588.375, 31075.209, 31069.959, 0.349],
+          ["distinct-16", "late-history", 1705, 1704, 1, 0, 0, 10.13814595801523, 168.17670677270385, 168.07806940802777, 16807.833, 30564.917, 30553.958, 0.219],
+          ["small-32", "preview", 4109, 3955, 154, 0, 0, 10.08300916699227, 407.51723339211264, 392.2440151048444, 74223.208, 119427.209, 119415.625, 10.185],
+          ["expensive-32", "blame", 1092, 1066, 26, 0, 0, 10.092295999987982, 108.20134486754058, 105.62512237069437, 81928.542, 205452.041, 205426.208, 2.729],
+          ["expensive-32", "late-history", 1098, 1074, 24, 0, 0, 10.092295999987982, 108.79585775142817, 106.41780621587783, 81607.084, 243893.959, 243862.625, 0.28],
+          ["expensive-32", "raw", 1090, 1062, 28, 0, 0, 10.092295999987982, 108.00317390624473, 105.22878044810265, 82290.584, 220784.541, 220767.958, 0.177],
+          ["mixed-32", "preview", 768, 767, 1, 0, 0, 10.080831333005335, 76.1841930124865, 76.0849948445015, 79160.25, 128000.917, 127992.084, 1.064],
+          ["mixed-32", "history", 761, 757, 4, 0, 0, 10.080831333005335, 75.48980583659144, 75.09301316465141, 78539.125, 147654.5, 147636.292, 46.496],
+          ["mixed-32", "raw", 756, 746, 10, 0, 0, 10.080831333005335, 74.9938149966664, 74.00183331681632, 77789.166, 142752.583, 142744.083, 0.288],
+          ["mixed-32", "blame", 762, 751, 11, 0, 0, 10.080831333005335, 75.58900400457645, 74.49782415674136, 77805.166, 129854.833, 129820.708, 0.725],
+          ["mixed-32", "late-history", 772, 766, 6, 0, 0, 10.080831333005335, 76.58098568442654, 75.98579667651649, 78072.375, 128093.875, 128079.291, 0.315],
+          ["distinct-32", "preview-distinct", 1638, 1637, 1, 0, 0, 10.022304583981168, 163.43546399677828, 163.3356865462308, 37515.292, 57454.417, 57446.167, 0.366],
+          ["distinct-32", "history", 1641, 1635, 6, 0, 0, 10.022304583981168, 163.73479634842073, 163.13613164513583, 37608.959, 57433.209, 57423.459, 0.269],
+          ["distinct-32", "raw-distinct", 1637, 1630, 7, 0, 0, 10.022304583981168, 163.3356865462308, 162.6372443923984, 37110.125, 57408.042, 57402.459, 0.149],
+          ["distinct-32", "blame-distinct", 1637, 1631, 6, 0, 0, 10.022304583981168, 163.3356865462308, 162.7370218429459, 37095.334, 59263.292, 59255.708, 0.44],
+          ["distinct-32", "late-history", 1633, 1622, 11, 0, 0, 10.022304583981168, 162.93657674404085, 161.83902478801855, 37639.083, 56507.833, 56499.25, 0.213],
+          ["small-64", "preview", 12374, 12047, 327, 0, 0, 10.03440458397381, 1233.1573733595328, 1200.5694906143763, 50044.792, 72342.709, 72335.75, 0.198],
+          ["expensive-64", "blame", 3889, 3736, 153, 0, 0, 10.030481250025332, 387.7181865017871, 372.46468109299985, 53439.25, 72865.875, 72856.542, 0.246],
+          ["expensive-64", "late-history", 3883, 3759, 124, 0, 0, 10.030481250025332, 387.12000981908955, 374.7576917100071, 53471.541, 74425.5, 74417.833, 0.175],
+          ["expensive-64", "raw", 3890, 3759, 131, 0, 0, 10.030481250025332, 387.81788261557, 374.7576917100071, 53443.583, 74155.333, 74150.042, 0.115],
+          ["mixed-64", "preview", 2575, 2522, 53, 0, 0, 10.040102709026542, 256.4714798868491, 251.1926494270421, 47626.459, 67785.375, 67779.792, 0.182],
+          ["mixed-64", "history", 2574, 2505, 69, 0, 0, 10.040102709026542, 256.3718793121358, 249.49943965691534, 47857.375, 66759.333, 66725.791, 0.187],
+          ["mixed-64", "raw", 2573, 2502, 71, 0, 0, 10.040102709026542, 256.2722787374224, 249.20063793277535, 47820.042, 67966.75, 67960.292, 0.099],
+          ["mixed-64", "blame", 2578, 2510, 68, 0, 0, 10.040102709026542, 256.7702816109891, 249.99744253048206, 47924.959, 68125.5, 68110.083, 0.241],
+          ["mixed-64", "late-history", 2580, 2511, 69, 0, 0, 10.040102709026542, 256.9694827604158, 250.09704310519538, 47724.292, 68386.0, 68376.875, 0.15],
+          ["distinct-64", "preview-distinct", 2114, 2070, 44, 0, 0, 10.084474999981467, 209.62915769079552, 205.26601533583099, 51227.0, 111581.708, 111577.083, 0.247],
+          ["distinct-64", "history", 2115, 2053, 62, 0, 0, 10.084474999981467, 209.72832001704472, 203.5802557895947, 51885.375, 110427.583, 110406.708, 0.252],
+          ["distinct-64", "raw-distinct", 2113, 2019, 94, 0, 0, 10.084474999981467, 209.52999536454632, 200.2087366971221, 51711.208, 108950.917, 108946.917, 0.128],
+          ["distinct-64", "blame-distinct", 2115, 2044, 71, 0, 0, 10.084474999981467, 209.72832001704472, 202.68779485335196, 51044.25, 108630.667, 108622.334, 0.22],
+          ["distinct-64", "late-history", 2111, 2053, 58, 0, 0, 10.084474999981467, 209.33167071204792, 203.5802557895947, 51266.875, 108283.875, 108266.375, 0.191],
+          ["small-distinct-16", "preview-distinct", 12762, 12762, 0, 0, 0, 10.012458832992706, 1274.6119822183039, 1274.6119822183039, 11847.75, 16090.125, 16079.208, 0.143],
+          ["soak-16", "preview", 113751, 113751, 0, 0, 0, 600.0673085000017, 189.56373458228424, 189.56373458228424, 12869.0, 42923.708, 42899.708, 0.226],
+          ["soak-16", "history", 113749, 113712, 37, 0, 0, 600.0673085000017, 189.5604016228451, 189.49874187322052, 12863.917, 42597.416, 42575.0, 0.25],
+          ["soak-16", "raw", 113748, 113712, 36, 0, 0, 600.0673085000017, 189.55873514312552, 189.49874187322052, 12817.292, 42833.375, 42794.75, 0.133],
+          ["soak-16", "blame", 113746, 113718, 28, 0, 0, 600.0673085000017, 189.55540218368634, 189.508740751538, 12904.75, 43369.667, 43335.375, 0.294],
+          ["soak-16", "late-history", 113749, 113719, 30, 0, 0, 600.0673085000017, 189.5604016228451, 189.5104072312576, 12852.875, 42934.458, 42913.458, 0.193]
+        ],
+        "provider_by_case": {
+          "small-1": {
+            "response_body_bytes": 38368394,
+            "requests": 9734,
+            "request_body_bytes": 15040,
+            "operations": {
+              "get": 9589,
+              "head": 12,
+              "list": 95,
+              "put": 38
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 9724,
+              "4xx": 10
+            }
+          },
+          "expensive-1": {
+            "response_body_bytes": 5447958,
+            "requests": 9162,
+            "request_body_bytes": 9079,
+            "operations": {
+              "get": 9072,
+              "list": 81,
+              "put": 9
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 9162
+            }
+          },
+          "mixed-1": {
+            "response_body_bytes": 5334422,
+            "requests": 9065,
+            "request_body_bytes": 12474,
+            "operations": {
+              "get": 8974,
+              "list": 80,
+              "put": 11
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 9065
+            }
+          },
+          "distinct-1": {
+            "response_body_bytes": 5556002,
+            "requests": 9445,
+            "request_body_bytes": 9079,
+            "operations": {
+              "get": 9365,
+              "list": 71,
+              "put": 9
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 9445
+            }
+          },
+          "small-8": {
+            "response_body_bytes": 25524854,
+            "requests": 43362,
+            "request_body_bytes": 12688,
+            "operations": {
+              "get": 43260,
+              "list": 89,
+              "put": 13
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 43362
+            }
+          },
+          "expensive-8": {
+            "response_body_bytes": 25099494,
+            "requests": 42642,
+            "request_body_bytes": 13286,
+            "operations": {
+              "get": 42550,
+              "list": 80,
+              "put": 12
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 42642
+            }
+          },
+          "mixed-8": {
+            "response_body_bytes": 24897396,
+            "requests": 42300,
+            "request_body_bytes": 9079,
+            "operations": {
+              "get": 42209,
+              "list": 82,
+              "put": 9
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 42300
+            }
+          },
+          "distinct-8": {
+            "response_body_bytes": 25764081,
+            "requests": 43769,
+            "request_body_bytes": 12474,
+            "operations": {
+              "get": 43684,
+              "list": 74,
+              "put": 11
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 43769
+            }
+          },
+          "small-16": {
+            "response_body_bytes": 21836857,
+            "requests": 37102,
+            "request_body_bytes": 13286,
+            "operations": {
+              "get": 37012,
+              "list": 78,
+              "put": 12
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 37102
+            }
+          },
+          "expensive-16": {
+            "response_body_bytes": 8733322,
+            "requests": 14837,
+            "request_body_bytes": 8467,
+            "operations": {
+              "get": 14744,
+              "list": 83,
+              "put": 10
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 14836,
+              "4xx": 1
+            }
+          },
+          "mixed-16": {
+            "response_body_bytes": 8947777,
+            "requests": 15204,
+            "request_body_bytes": 12444,
+            "operations": {
+              "get": 15120,
+              "list": 73,
+              "put": 11
+            },
+            "proxy_errors": {
+              "RemoteDisconnected": 1
+            },
+            "statuses": {
+              "2xx": 15203,
+              "5xx": 1
+            }
+          },
+          "distinct-16": {
+            "response_body_bytes": 18008504,
+            "requests": 30598,
+            "request_body_bytes": 9057,
+            "operations": {
+              "get": 30506,
+              "list": 83,
+              "put": 9
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 30598
+            }
+          },
+          "small-32": {
+            "response_body_bytes": 8614129,
+            "requests": 14635,
+            "request_body_bytes": 12444,
+            "operations": {
+              "get": 14551,
+              "list": 73,
+              "put": 11
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 14635
+            }
+          },
+          "expensive-32": {
+            "response_body_bytes": 7167437,
+            "requests": 12174,
+            "request_body_bytes": 13468,
+            "operations": {
+              "get": 12085,
+              "list": 75,
+              "put": 14
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 12173,
+              "4xx": 1
+            }
+          },
+          "mixed-32": {
+            "response_body_bytes": 8183899,
+            "requests": 13912,
+            "request_body_bytes": 9057,
+            "operations": {
+              "get": 13824,
+              "list": 79,
+              "put": 9
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 13912
+            }
+          },
+          "distinct-32": {
+            "response_body_bytes": 16603335,
+            "requests": 28210,
+            "request_body_bytes": 12444,
+            "operations": {
+              "get": 28119,
+              "list": 80,
+              "put": 11
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 28210
+            }
+          },
+          "small-64": {
+            "response_body_bytes": 25767113,
+            "requests": 43778,
+            "request_body_bytes": 9867,
+            "operations": {
+              "get": 43691,
+              "list": 77,
+              "put": 10
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 43778
+            }
+          },
+          "expensive-64": {
+            "response_body_bytes": 25297829,
+            "requests": 42977,
+            "request_body_bytes": 12444,
+            "operations": {
+              "get": 42892,
+              "list": 74,
+              "put": 11
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 42977
+            }
+          },
+          "mixed-64": {
+            "response_body_bytes": 27674373,
+            "requests": 47010,
+            "request_body_bytes": 12658,
+            "operations": {
+              "get": 46916,
+              "list": 81,
+              "put": 13
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 47009,
+              "4xx": 1
+            }
+          },
+          "distinct-64": {
+            "response_body_bytes": 23021078,
+            "requests": 39117,
+            "request_body_bytes": 9057,
+            "operations": {
+              "get": 39026,
+              "list": 82,
+              "put": 9
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 39117
+            }
+          },
+          "small-distinct-16": {
+            "response_body_bytes": 24377445,
+            "requests": 41413,
+            "request_body_bytes": 12444,
+            "operations": {
+              "get": 41329,
+              "list": 73,
+              "put": 11
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 41413
+            }
+          },
+          "soak-16": {
+            "response_body_bytes": 1021063716,
+            "requests": 1734747,
+            "request_body_bytes": 578101,
+            "operations": {
+              "get": 1730202,
+              "list": 3995,
+              "put": 550
+            },
+            "proxy_errors": {},
+            "statuses": {
+              "2xx": 1734739,
+              "4xx": 8
+            }
+          }
+        }
+      }
+    },
+    "current_matched_http": {
+      "status": "failed_engineering_gates",
+      "thresholds_unchanged": true,
+      "profile": "v7; dedicated VM data disk; identical original Git prefixes; Directory separately failed",
+      "fixture_binding_sha256": "1f3a819a98ce7f258e094c290d74bb917d250567df0cdc271b1e6b2c4f79aca2",
+      "variants": {
+        "baseline": {
+          "status": "measured",
+          "receipt_sha256": "bc802ceb14ab635571215c3df6146066184539b34aac56c0560f74726cf92914",
+          "failures": [],
+          "exit_codes": [0, 0],
+          "columns": ["case", "workload", "attempts", "successes", "rejected", "errors", "oracle_mismatches", "elapsed_seconds", "offered_requests_per_second", "successful_requests_per_second", "p50_us", "p95_us", "ttfb_p95_us", "server_total_p95_ms"],
+          "cells": [
+            ["small-1", "preview", 2405, 2405, 0, 0, 0, 10.002921916951891, 240.42974842423402, 240.42974842423402, 3237.708, 6632.084, 6618.834, 0.089],
+            ["expensive-1", "blame", 663, 663, 0, 0, 0, 10.003443084016908, 66.27718021001331, 66.27718021001331, 3361.75, 14039.125, 13933.375, 0.17],
+            ["expensive-1", "late-history", 663, 663, 0, 0, 0, 10.003443084016908, 66.27718021001331, 66.27718021001331, 3801.0, 14652.042, 14631.583, 0.683],
+            ["expensive-1", "raw", 663, 663, 0, 0, 0, 10.003443084016908, 66.27718021001331, 66.27718021001331, 3303.208, 12608.916, 12593.791, 0.089],
+            ["mixed-1", "preview", 409, 409, 0, 0, 0, 10.003261875011958, 40.88666328147198, 40.88666328147198, 3479.125, 11591.042, 11571.25, 0.095],
+            ["mixed-1", "history", 409, 409, 0, 0, 0, 10.003261875011958, 40.88666328147198, 40.88666328147198, 3480.041, 10394.042, 10295.042, 0.168],
+            ["mixed-1", "raw", 409, 409, 0, 0, 0, 10.003261875011958, 40.88666328147198, 40.88666328147198, 3519.375, 8407.625, 8398.875, 0.085],
+            ["mixed-1", "blame", 409, 409, 0, 0, 0, 10.003261875011958, 40.88666328147198, 40.88666328147198, 3487.291, 9590.334, 9560.959, 0.161],
+            ["mixed-1", "late-history", 409, 409, 0, 0, 0, 10.003261875011958, 40.88666328147198, 40.88666328147198, 4026.833, 10089.625, 10069.708, 0.675],
+            ["distinct-1", "preview-distinct", 549, 549, 0, 0, 0, 10.008070625015534, 54.85572799893664, 54.85572799893664, 2922.417, 4749.541, 4737.75, 0.083],
+            ["distinct-1", "history", 549, 549, 0, 0, 0, 10.008070625015534, 54.85572799893664, 54.85572799893664, 2967.625, 4765.917, 4748.625, 0.134],
+            ["distinct-1", "raw-distinct", 549, 549, 0, 0, 0, 10.008070625015534, 54.85572799893664, 54.85572799893664, 2904.0, 5309.0, 5300.334, 0.078],
+            ["distinct-1", "blame-distinct", 549, 549, 0, 0, 0, 10.008070625015534, 54.85572799893664, 54.85572799893664, 2876.0, 4715.792, 4703.959, 0.093],
+            ["distinct-1", "late-history", 549, 549, 0, 0, 0, 10.008070625015534, 54.85572799893664, 54.85572799893664, 3336.959, 5295.458, 5283.125, 0.625],
+            ["small-8", "preview", 7271, 7271, 0, 0, 0, 10.006255291984417, 726.6454620465747, 726.6454620465747, 7554.833, 27742.75, 27724.041, 0.153],
+            ["expensive-8", "blame", 4137, 4137, 0, 0, 0, 10.00829262501793, 413.3572183589695, 413.3572183589695, 5719.708, 8667.875, 8655.541, 0.228],
+            ["expensive-8", "late-history", 4136, 4136, 0, 0, 0, 10.00829262501793, 413.257301216509, 413.257301216509, 6466.458, 9879.5, 9858.875, 2.379],
+            ["expensive-8", "raw", 4136, 4136, 0, 0, 0, 10.00829262501793, 413.257301216509, 413.257301216509, 5654.084, 8592.333, 8578.875, 0.113],
+            ["mixed-8", "preview", 2669, 2669, 0, 0, 0, 10.004709833010565, 266.774353734241, 266.774353734241, 5383.833, 7396.083, 7379.708, 0.089],
+            ["mixed-8", "history", 2672, 2672, 0, 0, 0, 10.004709833010565, 267.074212505767, 267.074212505767, 5456.959, 7384.209, 7363.708, 0.167],
+            ["mixed-8", "raw", 2672, 2672, 0, 0, 0, 10.004709833010565, 267.074212505767, 267.074212505767, 5388.5, 7293.917, 7287.625, 0.079],
+            ["mixed-8", "blame", 2668, 2668, 0, 0, 0, 10.004709833010565, 266.67440081039905, 266.67440081039905, 5501.416, 7454.209, 7433.292, 0.164],
+            ["mixed-8", "late-history", 2668, 2668, 0, 0, 0, 10.004709833010565, 266.67440081039905, 266.67440081039905, 6106.458, 8358.417, 8347.125, 1.917],
+            ["distinct-8", "preview-distinct", 1749, 1749, 0, 0, 0, 10.004522958013695, 174.8209292277188, 174.8209292277188, 6660.583, 23516.041, 23508.375, 0.137],
+            ["distinct-8", "history", 1748, 1748, 0, 0, 0, 10.004522958013695, 174.72097443685104, 174.72097443685104, 6810.291, 23693.708, 23677.625, 0.259],
+            ["distinct-8", "raw-distinct", 1752, 1752, 0, 0, 0, 10.004522958013695, 175.1207936003221, 175.1207936003221, 6701.292, 21616.042, 21605.542, 0.135],
+            ["distinct-8", "blame-distinct", 1750, 1750, 0, 0, 0, 10.004522958013695, 174.92088401858655, 174.92088401858655, 6727.5, 22826.416, 22808.583, 0.146],
+            ["distinct-8", "late-history", 1749, 1749, 0, 0, 0, 10.004522958013695, 174.8209292277188, 174.8209292277188, 7496.292, 23899.5, 23892.125, 2.251],
+            ["small-16", "preview", 9092, 9092, 0, 0, 0, 10.063714541960508, 903.4437495311539, 903.4437495311539, 14053.042, 33880.625, 33872.75, 0.155],
+            ["expensive-16", "blame", 2627, 2627, 0, 0, 0, 10.013887375011109, 262.33568459692066, 262.33568459692066, 17968.291, 34469.125, 34449.625, 0.342],
+            ["expensive-16", "late-history", 2622, 2622, 0, 0, 0, 10.013887375011109, 261.8363780027126, 261.8363780027126, 19092.0, 37375.667, 37361.084, 4.257],
+            ["expensive-16", "raw", 2625, 2625, 0, 0, 0, 10.013887375011109, 262.1359619592374, 262.1359619592374, 17941.708, 34219.708, 34206.75, 0.165],
+            ["mixed-16", "preview", 1216, 1216, 0, 0, 0, 10.03249070799211, 121.20619249926708, 121.20619249926708, 23263.667, 47805.958, 47791.583, 0.245],
+            ["mixed-16", "history", 1219, 1219, 0, 0, 0, 10.03249070799211, 121.50522093470936, 121.50522093470936, 23456.042, 44858.083, 44727.417, 0.386],
+            ["mixed-16", "raw", 1217, 1217, 0, 0, 0, 10.03249070799211, 121.3058686444145, 121.3058686444145, 23172.042, 46602.083, 46591.041, 0.195],
+            ["mixed-16", "blame", 1213, 1213, 0, 0, 0, 10.03249070799211, 120.90716406382481, 120.90716406382481, 23142.709, 47748.292, 47735.625, 0.362],
+            ["mixed-16", "late-history", 1214, 1214, 0, 0, 0, 10.03249070799211, 121.00684020897224, 121.00684020897224, 24873.458, 46535.041, 46501.375, 5.211],
+            ["distinct-16", "preview-distinct", 1540, 1540, 0, 0, 0, 10.02031516697025, 153.68778070736428, 153.68778070736428, 18063.667, 35462.167, 35451.75, 0.182],
+            ["distinct-16", "history", 1542, 1542, 0, 0, 0, 10.02031516697025, 153.88737522776347, 153.88737522776347, 18475.041, 36377.125, 36344.083, 0.331],
+            ["distinct-16", "raw-distinct", 1544, 1544, 0, 0, 0, 10.02031516697025, 154.08696974816263, 154.08696974816263, 18515.167, 36815.333, 36803.291, 0.164],
+            ["distinct-16", "blame-distinct", 1540, 1540, 0, 0, 0, 10.02031516697025, 153.68778070736428, 153.68778070736428, 18455.334, 35545.5, 35534.417, 0.185],
+            ["distinct-16", "late-history", 1541, 1541, 0, 0, 0, 10.02031516697025, 153.78757796756386, 153.78757796756386, 19266.292, 38729.333, 38709.167, 3.381],
+            ["small-32", "preview", 8910, 8771, 139, 0, 0, 10.034129208012018, 887.9694306592717, 874.116708901512, 34032.5, 55441.667, 55433.792, 0.161],
+            ["expensive-32", "blame", 2740, 2716, 24, 0, 0, 10.037690584023949, 272.9711557717271, 270.58016754598935, 37294.875, 58590.666, 58576.0, 0.344],
+            ["expensive-32", "late-history", 2740, 2700, 40, 0, 0, 10.037690584023949, 272.9711557717271, 268.9861753954975, 38001.042, 58671.542, 58648.0, 4.64],
+            ["expensive-32", "raw", 2737, 2688, 49, 0, 0, 10.037690584023949, 272.6722822435099, 267.79068128262867, 36380.416, 58321.958, 58311.75, 0.199],
+            ["mixed-32", "preview", 2049, 2029, 20, 0, 0, 10.02233841700945, 204.44330601753896, 202.44776374308762, 29005.166, 47823.625, 47811.458, 0.158],
+            ["mixed-32", "history", 2048, 2023, 25, 0, 0, 10.02233841700945, 204.34352890381638, 201.84910106075222, 29378.75, 48681.916, 48661.791, 0.278],
+            ["mixed-32", "raw", 2055, 2036, 19, 0, 0, 10.02233841700945, 205.04196869987436, 203.14620353914557, 29059.875, 48702.958, 48696.125, 0.14],
+            ["mixed-32", "blame", 2056, 2034, 22, 0, 0, 10.02233841700945, 205.1417458135969, 202.94664931170044, 29460.542, 49199.25, 49170.625, 0.291],
+            ["mixed-32", "late-history", 2058, 2028, 30, 0, 0, 10.02233841700945, 205.34130004104205, 202.34798662936504, 30118.25, 49926.416, 49913.0, 2.669],
+            ["distinct-32", "preview-distinct", 1615, 1595, 20, 0, 0, 10.049498125037644, 160.70454264540206, 158.71439351047448, 37654.25, 62582.875, 62576.125, 0.174],
+            ["distinct-32", "history", 1619, 1590, 29, 0, 0, 10.049498125037644, 161.10257247238758, 158.21685622674258, 37330.917, 60164.583, 60148.541, 0.351],
+            ["distinct-32", "raw-distinct", 1621, 1591, 30, 0, 0, 10.049498125037644, 161.3015873858803, 158.31636368348896, 36928.208, 62197.792, 62189.167, 0.154],
+            ["distinct-32", "blame-distinct", 1621, 1592, 29, 0, 0, 10.049498125037644, 161.3015873858803, 158.41587114023534, 37369.375, 60762.583, 60751.042, 0.179],
+            ["distinct-32", "late-history", 1618, 1592, 26, 0, 0, 10.049498125037644, 161.0030650156412, 158.41587114023534, 38986.458, 62692.792, 62658.875, 4.353],
+            ["small-64", "preview", 8965, 8523, 442, 0, 0, 10.06715608300874, 890.5196190541885, 846.6144688453819, 65290.667, 119102.167, 119083.334, 0.159],
+            ["expensive-64", "blame", 2425, 2315, 110, 0, 0, 10.086899041954894, 240.41085272228742, 229.50561816581254, 79742.375, 143651.459, 143637.042, 0.467],
+            ["expensive-64", "late-history", 2429, 2303, 126, 0, 0, 10.086899041954894, 240.80740670615924, 228.3159562141971, 83016.5, 149085.583, 149074.458, 8.062],
+            ["expensive-64", "raw", 2429, 2299, 130, 0, 0, 10.086899041954894, 240.80740670615924, 227.91940223032526, 81020.5, 138227.875, 138221.5, 0.217],
+            ["mixed-64", "preview", 1679, 1624, 55, 0, 0, 10.080010167032015, 166.5672923120046, 161.11094860910987, 71527.792, 117065.0, 117058.542, 0.187],
+            ["mixed-64", "history", 1677, 1611, 66, 0, 0, 10.080010167032015, 166.36887981371754, 159.82126737024385, 72115.875, 117716.208, 117705.375, 0.447],
+            ["mixed-64", "raw", 1672, 1611, 61, 0, 0, 10.080010167032015, 165.87284856799982, 159.82126737024385, 72749.792, 114064.541, 114056.166, 0.185],
+            ["mixed-64", "blame", 1689, 1623, 66, 0, 0, 10.080010167032015, 167.55935480344002, 161.01174235996635, 71794.833, 115918.333, 115908.041, 0.374],
+            ["mixed-64", "late-history", 1686, 1640, 46, 0, 0, 10.080010167032015, 167.2617360560094, 162.69824859540654, 74351.791, 120760.25, 120733.834, 4.747],
+            ["distinct-64", "preview-distinct", 1849, 1769, 80, 0, 0, 10.054499958001543, 183.8977579912897, 175.9411216260635, 66435.75, 102249.583, 102243.459, 0.164],
+            ["distinct-64", "history", 1852, 1768, 84, 0, 0, 10.054499958001543, 184.19613185498565, 175.8416636714982, 66976.167, 97543.875, 97510.792, 0.322],
+            ["distinct-64", "raw-distinct", 1849, 1760, 89, 0, 0, 10.054499958001543, 183.8977579912897, 175.04600003497558, 66569.584, 99674.75, 99656.75, 0.154],
+            ["distinct-64", "blame-distinct", 1836, 1759, 77, 0, 0, 10.054499958001543, 182.60480458194044, 174.94654208041024, 66287.167, 102122.25, 102117.0, 0.182],
+            ["distinct-64", "late-history", 1843, 1756, 87, 0, 0, 10.054499958001543, 183.30101026389772, 174.64816821671428, 67434.875, 105684.667, 105677.958, 4.155],
+            ["small-distinct-16", "preview-distinct", 9051, 9051, 0, 0, 0, 10.016891042003408, 903.5737697501971, 903.5737697501971, 15874.25, 28029.75, 28023.958, 0.143],
+            ["soak-16", "preview", 153562, 153562, 0, 0, 0, 600.0484963749768, 255.91598167098388, 255.91598167098388, 11196.166, 18076.375, 18065.917, 0.119],
+            ["soak-16", "history", 153561, 153561, 0, 0, 0, 600.0484963749768, 255.91431513901847, 255.91431513901847, 11240.958, 18159.958, 18142.375, 0.217],
+            ["soak-16", "raw", 153562, 153562, 0, 0, 0, 600.0484963749768, 255.91598167098388, 255.91598167098388, 11186.458, 18130.291, 18119.083, 0.111],
+            ["soak-16", "blame", 153563, 153563, 0, 0, 0, 600.0484963749768, 255.91764820294927, 255.91764820294927, 11263.791, 18095.0, 18073.083, 0.221],
+            ["soak-16", "late-history", 153560, 153560, 0, 0, 0, 600.0484963749768, 255.91264860705306, 255.91264860705306, 11951.166, 19201.375, 19188.292, 2.1]
+          ],
+          "provider_by_case": {
+            "small-1": {
+              "response_body_bytes": 37803640,
+              "request_body_bytes": 14230,
+              "requests": 8782,
+              "proxy_errors": {},
+              "operations": {
+                "get": 8641,
+                "head": 12,
+                "list": 92,
+                "put": 37
+              },
+              "statuses": {
+                "2xx": 8772,
+                "4xx": 10
+              }
+            },
+            "expensive-1": {
+              "response_body_bytes": 4571363,
+              "request_body_bytes": 13286,
+              "requests": 7677,
+              "proxy_errors": {},
+              "operations": {
+                "get": 7583,
+                "list": 82,
+                "put": 12
+              },
+              "statuses": {
+                "2xx": 7677
+              }
+            },
+            "mixed-1": {
+              "response_body_bytes": 4656638,
+              "request_body_bytes": 11662,
+              "requests": 7916,
+              "proxy_errors": {},
+              "operations": {
+                "get": 7828,
+                "list": 78,
+                "put": 10
+              },
+              "statuses": {
+                "2xx": 7916
+              }
+            },
+            "distinct-1": {
+              "response_body_bytes": 5832368,
+              "request_body_bytes": 13500,
+              "requests": 9914,
+              "proxy_errors": {},
+              "operations": {
+                "get": 9822,
+                "list": 78,
+                "put": 14
+              },
+              "statuses": {
+                "2xx": 9913,
+                "4xx": 1
+              }
+            },
+            "small-8": {
+              "response_body_bytes": 14257825,
+              "request_body_bytes": 9061,
+              "requests": 24238,
+              "proxy_errors": {},
+              "operations": {
+                "get": 24150,
+                "list": 79,
+                "put": 9
+              },
+              "statuses": {
+                "2xx": 24238
+              }
+            },
+            "expensive-8": {
+              "response_body_bytes": 26900268,
+              "request_body_bytes": 12444,
+              "requests": 45728,
+              "proxy_errors": {},
+              "operations": {
+                "get": 45638,
+                "list": 79,
+                "put": 11
+              },
+              "statuses": {
+                "2xx": 45728
+              }
+            },
+            "mixed-8": {
+              "response_body_bytes": 27768906,
+              "request_body_bytes": 9867,
+              "requests": 47207,
+              "proxy_errors": {},
+              "operations": {
+                "get": 47116,
+                "list": 81,
+                "put": 10
+              },
+              "statuses": {
+                "2xx": 47207
+              }
+            },
+            "distinct-8": {
+              "response_body_bytes": 19228748,
+              "request_body_bytes": 12444,
+              "requests": 32686,
+              "proxy_errors": {},
+              "operations": {
+                "get": 32596,
+                "list": 79,
+                "put": 11
+              },
+              "statuses": {
+                "2xx": 32686
+              }
+            },
+            "small-16": {
+              "response_body_bytes": 20583670,
+              "request_body_bytes": 12658,
+              "requests": 34984,
+              "proxy_errors": {},
+              "operations": {
+                "get": 34892,
+                "list": 79,
+                "put": 13
+              },
+              "statuses": {
+                "2xx": 34983,
+                "4xx": 1
+              }
+            },
+            "expensive-16": {
+              "response_body_bytes": 15712229,
+              "request_body_bytes": 9867,
+              "requests": 26714,
+              "proxy_errors": {},
+              "operations": {
+                "get": 26623,
+                "list": 81,
+                "put": 10
+              },
+              "statuses": {
+                "2xx": 26714
+              }
+            },
+            "mixed-16": {
+              "response_body_bytes": 13675421,
+              "request_body_bytes": 11634,
+              "requests": 23249,
+              "proxy_errors": {},
+              "operations": {
+                "get": 23159,
+                "list": 80,
+                "put": 10
+              },
+              "statuses": {
+                "2xx": 23249
+              }
+            },
+            "distinct-16": {
+              "response_body_bytes": 15853929,
+              "request_body_bytes": 13254,
+              "requests": 26951,
+              "proxy_errors": {},
+              "operations": {
+                "get": 26863,
+                "list": 76,
+                "put": 12
+              },
+              "statuses": {
+                "2xx": 26951
+              }
+            },
+            "small-32": {
+              "response_body_bytes": 18909311,
+              "request_body_bytes": 9057,
+              "requests": 32146,
+              "proxy_errors": {},
+              "operations": {
+                "get": 32059,
+                "list": 78,
+                "put": 9
+              },
+              "statuses": {
+                "2xx": 32146
+              }
+            },
+            "expensive-32": {
+              "response_body_bytes": 17837334,
+              "request_body_bytes": 12658,
+              "requests": 30318,
+              "proxy_errors": {},
+              "operations": {
+                "get": 30223,
+                "list": 82,
+                "put": 13
+              },
+              "statuses": {
+                "2xx": 30317,
+                "4xx": 1
+              }
+            },
+            "mixed-32": {
+              "response_body_bytes": 21193418,
+              "request_body_bytes": 9867,
+              "requests": 36030,
+              "proxy_errors": {},
+              "operations": {
+                "get": 35944,
+                "list": 76,
+                "put": 10
+              },
+              "statuses": {
+                "2xx": 36030
+              }
+            },
+            "distinct-32": {
+              "response_body_bytes": 17757568,
+              "request_body_bytes": 12444,
+              "requests": 30188,
+              "proxy_errors": {},
+              "operations": {
+                "get": 30098,
+                "list": 79,
+                "put": 11
+              },
+              "statuses": {
+                "2xx": 30188
+              }
+            },
+            "small-64": {
+              "response_body_bytes": 19136561,
+              "request_body_bytes": 12444,
+              "requests": 32531,
+              "proxy_errors": {},
+              "operations": {
+                "get": 32437,
+                "list": 83,
+                "put": 11
+              },
+              "statuses": {
+                "2xx": 32531
+              }
+            },
+            "expensive-64": {
+              "response_body_bytes": 15670615,
+              "request_body_bytes": 13254,
+              "requests": 26640,
+              "proxy_errors": {},
+              "operations": {
+                "get": 26558,
+                "list": 70,
+                "put": 12
+              },
+              "statuses": {
+                "2xx": 26640
+              }
+            },
+            "mixed-64": {
+              "response_body_bytes": 18106221,
+              "request_body_bytes": 8461,
+              "requests": 30776,
+              "proxy_errors": {},
+              "operations": {
+                "get": 30684,
+                "list": 82,
+                "put": 10
+              },
+              "statuses": {
+                "2xx": 30775,
+                "4xx": 1
+              }
+            },
+            "distinct-64": {
+              "response_body_bytes": 19327950,
+              "request_body_bytes": 13254,
+              "requests": 32856,
+              "proxy_errors": {},
+              "operations": {
+                "get": 32772,
+                "list": 72,
+                "put": 12
+              },
+              "statuses": {
+                "2xx": 32856
+              }
+            },
+            "small-distinct-16": {
+              "response_body_bytes": 18740375,
+              "request_body_bytes": 13254,
+              "requests": 31859,
+              "proxy_errors": {},
+              "operations": {
+                "get": 31769,
+                "list": 78,
+                "put": 12
+              },
+              "statuses": {
+                "2xx": 31859
+              }
+            },
+            "soak-16": {
+              "response_body_bytes": 1369269975,
+              "request_body_bytes": 566320,
+              "requests": 2327573,
+              "proxy_errors": {},
+              "operations": {
+                "get": 2323024,
+                "list": 4007,
+                "put": 542
+              },
+              "statuses": {
+                "2xx": 2327563,
+                "4xx": 10
+              }
+            }
+          },
+          "resources": {
+            "status": "observed",
+            "failures": [],
+            "peak_rss_bytes": [260816896, 254033920],
+            "admitted_work_drained": null,
+            "rss_plateau": "passed",
+            "provider": {
+              "response_body_bytes": 1742846845,
+              "request_body_bytes": 821547,
+              "requests": 2907049,
+              "proxy_errors": {},
+              "classes": {
+                ".crab:get": 2894808,
+                ".crab:head": 6,
+                ".crab:list": 1958,
+                ".crab:put": 791,
+                "r0-debug-baseline-20-20261118:get": 5714,
+                "r0-debug-baseline-20-20261118:head": 6,
+                "r0-debug-baseline-20-20261118:list": 3750,
+                "r0-debug-baseline-20-20261118:put": 16
+              },
+              "operations": {
+                "get": 2900522,
+                "head": 12,
+                "list": 5708,
+                "put": 807
+              },
+              "statuses": {
+                "2xx": 2907025,
+                "4xx": 24
+              },
+              "methods": {
+                "GET": 2906230,
+                "HEAD": 12,
+                "PUT": 807
+              },
+              "class_response_body_bytes": {
+                ".crab:get": 1704064583,
+                ".crab:list": 831608,
+                ".crab:put": 2296,
+                "r0-debug-baseline-20-20261118:get": 35644512,
+                "r0-debug-baseline-20-20261118:list": 2303518,
+                "r0-debug-baseline-20-20261118:put": 328
+              },
+              "categories": {
+                ".crab": 2897563,
+                "r0-debug-baseline-20-20261118": 9486
+              },
+              "class_request_body_bytes": {
+                ".crab:put": 820379,
+                "r0-debug-baseline-20-20261118:put": 1168
+              }
+            },
+            "quota_enforcement": "native processes on shared 32-GiB host; no process CPU/RAM quota; observed ceiling 1 GiB each",
+            "limits": {
+              "maximum_late_rss_ratio": 1.1,
+              "sample_interval_seconds": 1
+            }
+          }
+        },
+        "candidate": {
+          "status": "failed",
+          "receipt_sha256": "b9799082e108a68f93579eaa8c632074053852191b7635ca38bf533ef8759eca",
+          "failures": ["soak-16:interactive_latency", "distinct-64:preview-distinct:p95_regression", "distinct-64:history:p95_regression", "distinct-64:history:throughput_regression", "distinct-64:raw-distinct:p95_regression", "distinct-64:raw-distinct:throughput_regression", "distinct-64:blame-distinct:p95_regression", "distinct-64:blame-distinct:throughput_regression", "distinct-64:late-history:p95_regression", "distinct-64:late-history:throughput_regression", "small-distinct-16:preview-distinct:p95_regression", "small-distinct-16:preview-distinct:throughput_regression", "soak-16:preview:p95_regression", "soak-16:preview:throughput_regression", "soak-16:history:p95_regression", "soak-16:history:throughput_regression", "soak-16:raw:p95_regression", "soak-16:raw:throughput_regression", "soak-16:blame:p95_regression", "soak-16:blame:throughput_regression", "soak-16:late-history:p95_regression", "soak-16:late-history:throughput_regression"],
+          "exit_codes": [0, 0],
+          "columns": ["case", "workload", "attempts", "successes", "rejected", "errors", "oracle_mismatches", "elapsed_seconds", "offered_requests_per_second", "successful_requests_per_second", "p50_us", "p95_us", "ttfb_p95_us", "server_total_p95_ms"],
+          "cells": [
+            ["small-1", "preview", 4038, 4038, 0, 0, 0, 10.005385875003412, 403.58263543719875, 403.58263543719875, 2213.708, 2748.667, 2738.667, 0.087],
+            ["expensive-1", "blame", 1439, 1439, 0, 0, 0, 10.000641916994937, 143.89076340735545, 143.89076340735545, 2215.084, 2738.417, 2724.25, 0.13],
+            ["expensive-1", "late-history", 1439, 1439, 0, 0, 0, 10.000641916994937, 143.89076340735545, 143.89076340735545, 2183.292, 2705.625, 2694.25, 0.084],
+            ["expensive-1", "raw", 1438, 1438, 0, 0, 0, 10.000641916994937, 143.79076982611335, 143.79076982611335, 2153.792, 2693.208, 2686.083, 0.059],
+            ["mixed-1", "preview", 882, 882, 0, 0, 0, 10.000778167042881, 88.19313710072998, 88.19313710072998, 2124.083, 2449.125, 2441.667, 0.078],
+            ["mixed-1", "history", 883, 883, 0, 0, 0, 10.000778167042881, 88.29312931966506, 88.29312931966506, 2142.083, 2522.0, 2508.417, 0.098],
+            ["mixed-1", "raw", 882, 882, 0, 0, 0, 10.000778167042881, 88.19313710072998, 88.19313710072998, 2101.167, 2421.959, 2412.917, 0.052],
+            ["mixed-1", "blame", 882, 882, 0, 0, 0, 10.000778167042881, 88.19313710072998, 88.19313710072998, 2158.958, 2542.0, 2527.958, 0.121],
+            ["mixed-1", "late-history", 882, 882, 0, 0, 0, 10.000778167042881, 88.19313710072998, 88.19313710072998, 2123.25, 2482.541, 2471.625, 0.076],
+            ["distinct-1", "preview-distinct", 897, 897, 0, 0, 0, 10.00232995802071, 89.67910514496775, 89.67910514496775, 2120.792, 2573.458, 2566.958, 0.072],
+            ["distinct-1", "history", 897, 897, 0, 0, 0, 10.00232995802071, 89.67910514496775, 89.67910514496775, 2144.25, 2567.791, 2557.25, 0.099],
+            ["distinct-1", "raw-distinct", 898, 898, 0, 0, 0, 10.00232995802071, 89.77908185081498, 89.77908185081498, 2110.5, 2512.125, 2505.917, 0.05],
+            ["distinct-1", "blame-distinct", 898, 898, 0, 0, 0, 10.00232995802071, 89.77908185081498, 89.77908185081498, 2115.458, 2573.334, 2566.875, 0.084],
+            ["distinct-1", "late-history", 897, 897, 0, 0, 0, 10.00232995802071, 89.67910514496775, 89.67910514496775, 2125.75, 2556.917, 2547.959, 0.078],
+            ["small-8", "preview", 14570, 14570, 0, 0, 0, 10.004217582987621, 1456.3857572206932, 1456.3857572206932, 5217.666, 7032.375, 7024.209, 0.131],
+            ["expensive-8", "blame", 4870, 4870, 0, 0, 0, 10.014912708022166, 486.27483254037975, 486.27483254037975, 5296.416, 7063.292, 7040.292, 0.184],
+            ["expensive-8", "late-history", 4866, 4866, 0, 0, 0, 10.014912708022166, 485.8754281604698, 485.8754281604698, 5239.375, 6972.792, 6962.75, 0.102],
+            ["expensive-8", "raw", 4868, 4868, 0, 0, 0, 10.014912708022166, 486.0751303504248, 486.0751303504248, 5179.916, 6884.083, 6876.125, 0.073],
+            ["mixed-8", "preview", 2877, 2877, 0, 0, 0, 10.003623458032962, 287.59579087213183, 287.59579087213183, 5255.958, 7155.917, 7146.958, 0.141],
+            ["mixed-8", "history", 2878, 2878, 0, 0, 0, 10.003623458032962, 287.6957546506762, 287.6957546506762, 5342.833, 7159.333, 7146.541, 0.136],
+            ["mixed-8", "raw", 2879, 2879, 0, 0, 0, 10.003623458032962, 287.7957184292206, 287.7957184292206, 5280.958, 7114.917, 7108.875, 0.076],
+            ["mixed-8", "blame", 2877, 2877, 0, 0, 0, 10.003623458032962, 287.59579087213183, 287.59579087213183, 5360.75, 7225.542, 7204.042, 0.192],
+            ["mixed-8", "late-history", 2876, 2876, 0, 0, 0, 10.003623458032962, 287.4958270935875, 287.4958270935875, 5289.917, 7161.917, 7150.583, 0.108],
+            ["distinct-8", "preview-distinct", 2859, 2859, 0, 0, 0, 10.006554165971465, 285.7127391287588, 285.7127391287588, 5380.875, 7191.583, 7182.208, 0.14],
+            ["distinct-8", "history", 2860, 2860, 0, 0, 0, 10.006554165971465, 285.81267363002803, 285.81267363002803, 5387.333, 7270.833, 7253.917, 0.146],
+            ["distinct-8", "raw-distinct", 2861, 2861, 0, 0, 0, 10.006554165971465, 285.9126081312973, 285.9126081312973, 5369.0, 7232.208, 7225.917, 0.075],
+            ["distinct-8", "blame-distinct", 2861, 2861, 0, 0, 0, 10.006554165971465, 285.9126081312973, 285.9126081312973, 5357.958, 7300.917, 7293.542, 0.139],
+            ["distinct-8", "late-history", 2860, 2860, 0, 0, 0, 10.006554165971465, 285.81267363002803, 285.81267363002803, 5375.542, 7228.208, 7217.625, 0.112],
+            ["small-16", "preview", 15091, 15091, 0, 0, 0, 10.008027040981688, 1507.8896108298009, 1507.8896108298009, 10312.791, 14390.167, 14384.166, 0.129],
+            ["expensive-16", "blame", 4749, 4738, 11, 0, 0, 10.006694125011563, 474.58230866974884, 473.48304453090543, 10975.5, 15553.125, 15528.625, 0.2],
+            ["expensive-16", "late-history", 4750, 4736, 14, 0, 0, 10.006694125011563, 474.68224177328005, 473.283178323843, 10798.834, 15677.542, 15667.834, 0.111],
+            ["expensive-16", "raw", 4748, 4734, 14, 0, 0, 10.006694125011563, 474.4823755662176, 473.0833121167806, 10876.292, 15381.5, 15375.125, 0.079],
+            ["mixed-16", "preview", 2864, 2864, 0, 0, 0, 10.008819207956549, 286.14764044526373, 286.14764044526373, 10272.875, 14210.25, 14203.083, 0.145],
+            ["mixed-16", "history", 2866, 2863, 3, 0, 0, 10.008819207956549, 286.34746421652443, 286.0477285596334, 10237.125, 14294.375, 14284.667, 0.142],
+            ["mixed-16", "raw", 2868, 2866, 2, 0, 0, 10.008819207956549, 286.54728798778507, 286.34746421652443, 10293.458, 14301.375, 14295.708, 0.076],
+            ["mixed-16", "blame", 2866, 2866, 0, 0, 0, 10.008819207956549, 286.34746421652443, 286.34746421652443, 10367.75, 14547.583, 14519.0, 0.202],
+            ["mixed-16", "late-history", 2863, 2859, 4, 0, 0, 10.008819207956549, 286.0477285596334, 285.6480810171121, 10231.917, 14335.917, 14325.625, 0.108],
+            ["distinct-16", "preview-distinct", 2986, 2986, 0, 0, 0, 10.0082533750101, 298.35375745540483, 298.35375745540483, 10453.333, 14397.0, 14392.375, 0.128],
+            ["distinct-16", "history", 2979, 2979, 0, 0, 0, 10.0082533750101, 297.65433471522135, 297.65433471522135, 10485.0, 14709.792, 14672.75, 0.139],
+            ["distinct-16", "raw-distinct", 2983, 2981, 2, 0, 0, 10.0082533750101, 298.05400485246906, 297.85416978384524, 10454.75, 14609.042, 14602.0, 0.073],
+            ["distinct-16", "blame-distinct", 2981, 2980, 1, 0, 0, 10.0082533750101, 297.85416978384524, 297.7542522495333, 10504.417, 14542.625, 14537.208, 0.134],
+            ["distinct-16", "late-history", 2982, 2979, 3, 0, 0, 10.0082533750101, 297.9540873181571, 297.65433471522135, 10385.667, 14345.5, 14332.875, 0.106],
+            ["small-32", "preview", 14449, 14295, 154, 0, 0, 10.015227583993692, 1442.7031117188342, 1427.3265265430641, 21529.916, 31451.666, 31444.875, 0.147],
+            ["expensive-32", "blame", 4773, 4711, 62, 0, 0, 10.016182208026294, 476.5288710677846, 470.3388878274321, 21345.0, 31835.958, 31820.833, 0.216],
+            ["expensive-32", "late-history", 4776, 4708, 68, 0, 0, 10.016182208026294, 476.8283863858662, 470.0393725093505, 21628.875, 32091.584, 32079.166, 0.123],
+            ["expensive-32", "raw", 4774, 4700, 74, 0, 0, 10.016182208026294, 476.6287095071452, 469.24066499446633, 21491.209, 32347.916, 32341.708, 0.084],
+            ["mixed-32", "preview", 2652, 2626, 26, 0, 0, 10.013550790958107, 264.8411193354774, 262.2446377733649, 23261.834, 34919.167, 34910.875, 0.185],
+            ["mixed-32", "history", 2657, 2625, 32, 0, 0, 10.013550790958107, 265.34044271280675, 262.144773097899, 23573.0, 35020.75, 35009.791, 0.192],
+            ["mixed-32", "raw", 2652, 2620, 32, 0, 0, 10.013550790958107, 264.8411193354774, 261.6454497205697, 23304.584, 34763.167, 34757.792, 0.113],
+            ["mixed-32", "blame", 2651, 2621, 30, 0, 0, 10.013550790958107, 264.7412546600115, 261.74531439603555, 23363.708, 34992.25, 34980.875, 0.236],
+            ["mixed-32", "late-history", 2650, 2616, 34, 0, 0, 10.013550790958107, 264.64138998454564, 261.2459910187062, 23306.625, 35092.958, 35079.125, 0.156],
+            ["distinct-32", "preview-distinct", 2703, 2683, 20, 0, 0, 10.014544916979503, 269.90742189563764, 267.9103266540865, 22475.5, 32769.75, 32761.709, 0.162],
+            ["distinct-32", "history", 2701, 2677, 24, 0, 0, 10.014544916979503, 269.7077123714825, 267.3111980816211, 22462.958, 33634.292, 33626.208, 0.186],
+            ["distinct-32", "raw-distinct", 2708, 2682, 26, 0, 0, 10.014544916979503, 270.4066957060254, 267.81047189200893, 22519.833, 32790.541, 32783.625, 0.101],
+            ["distinct-32", "blame-distinct", 2704, 2662, 42, 0, 0, 10.014544916979503, 270.0072766577152, 265.81337665045777, 22434.083, 32491.333, 32484.083, 0.159],
+            ["distinct-32", "late-history", 2705, 2673, 32, 0, 0, 10.014544916979503, 270.1071314197927, 266.9117790333109, 22299.875, 33321.25, 33309.917, 0.141],
+            ["small-64", "preview", 13232, 12757, 475, 0, 0, 10.031232833047397, 1319.080139024172, 1271.728033066155, 46359.667, 71412.583, 71403.208, 0.186],
+            ["expensive-64", "blame", 3644, 3480, 164, 0, 0, 10.070641667000018, 361.8438745507986, 345.55891422524127, 51277.625, 83037.792, 83028.042, 0.425],
+            ["expensive-64", "late-history", 3646, 3495, 151, 0, 0, 10.070641667000018, 362.04247162793956, 347.0483923037983, 51055.0, 81428.584, 81412.125, 0.188],
+            ["expensive-64", "raw", 3639, 3487, 152, 0, 0, 10.070641667000018, 361.34738185794623, 346.2540039952346, 51113.416, 82291.458, 82278.667, 0.137],
+            ["mixed-64", "preview", 1759, 1673, 86, 0, 0, 10.077197666978464, 174.55249545853323, 166.01837686306203, 67471.541, 117325.291, 117316.208, 0.772],
+            ["mixed-64", "history", 1756, 1658, 98, 0, 0, 10.077197666978464, 174.2547936470633, 164.5298678057124, 68262.208, 114349.833, 114316.416, 0.266],
+            ["mixed-64", "raw", 1754, 1668, 86, 0, 0, 10.077197666978464, 174.05632577275003, 165.52220717727883, 67120.208, 115148.667, 115127.667, 0.146],
+            ["mixed-64", "blame", 1751, 1667, 84, 0, 0, 10.077197666978464, 173.7586239612801, 165.4229732401222, 67568.834, 119587.959, 119561.625, 1.048],
+            ["mixed-64", "late-history", 1758, 1661, 97, 0, 0, 10.077197666978464, 174.4532615213766, 164.82756961718232, 67704.25, 116323.084, 116314.042, 0.215],
+            ["distinct-64", "preview-distinct", 1667, 1608, 59, 0, 0, 10.039729374984745, 166.04033213818903, 160.1636797109826, 67155.708, 122439.541, 122433.583, 1.087],
+            ["distinct-64", "history", 1666, 1553, 113, 0, 0, 10.039729374984745, 165.9407278597618, 154.68544439748504, 68497.291, 117516.917, 117483.084, 0.282],
+            ["distinct-64", "raw-distinct", 1670, 1559, 111, 0, 0, 10.039729374984745, 166.33914497347072, 155.2830700680484, 65813.083, 114938.917, 114925.667, 0.14],
+            ["distinct-64", "blame-distinct", 1668, 1575, 93, 0, 0, 10.039729374984745, 166.13993641661625, 156.87673852288407, 67356.708, 125527.333, 125481.208, 1.067],
+            ["distinct-64", "late-history", 1667, 1535, 132, 0, 0, 10.039729374984745, 166.04033213818903, 152.89256738579493, 67487.667, 123326.792, 123260.292, 0.23],
+            ["small-distinct-16", "preview-distinct", 7478, 7478, 0, 0, 0, 10.01003529195441, 747.0503132002402, 747.0503132002402, 14995.333, 38313.958, 38305.458, 0.604],
+            ["soak-16", "preview", 113739, 113739, 0, 0, 0, 600.0469591669971, 189.55016480359444, 189.55016480359444, 14445.333, 30158.875, 30141.25, 0.524],
+            ["soak-16", "history", 113744, 113580, 164, 0, 0, 600.0469591669971, 189.55849748476814, 189.28518554227006, 14446.542, 29910.667, 29887.542, 0.272],
+            ["soak-16", "raw", 113739, 113578, 161, 0, 0, 600.0469591669971, 189.55016480359444, 189.28185246980058, 14402.417, 29842.75, 29832.75, 0.146],
+            ["soak-16", "blame", 113735, 113560, 175, 0, 0, 600.0469591669971, 189.54349865865547, 189.25185481757518, 14524.125, 30274.667, 30242.708, 0.576],
+            ["soak-16", "late-history", 113737, 113582, 155, 0, 0, 600.0469591669971, 189.54683173112494, 189.28851861473956, 14404.459, 29808.041, 29789.083, 0.211]
+          ],
+          "provider_by_case": {
+            "small-1": {
+              "response_body_bytes": 74088872,
+              "request_body_bytes": 12593,
+              "requests": 15181,
+              "proxy_errors": {},
+              "operations": {
+                "get": 14992,
+                "head": 24,
+                "list": 104,
+                "put": 61
+              },
+              "statuses": {
+                "2xx": 15165,
+                "4xx": 16
+              }
+            },
+            "expensive-1": {
+              "response_body_bytes": 9423902,
+              "request_body_bytes": 12472,
+              "requests": 15865,
+              "proxy_errors": {},
+              "operations": {
+                "get": 15772,
+                "list": 82,
+                "put": 11
+              },
+              "statuses": {
+                "2xx": 15865
+              }
+            },
+            "mixed-1": {
+              "response_body_bytes": 9431669,
+              "request_body_bytes": 12474,
+              "requests": 16044,
+              "proxy_errors": {},
+              "operations": {
+                "get": 15962,
+                "list": 71,
+                "put": 11
+              },
+              "statuses": {
+                "2xx": 16044
+              }
+            },
+            "distinct-1": {
+              "response_body_bytes": 9614733,
+              "request_body_bytes": 9891,
+              "requests": 16354,
+              "proxy_errors": {},
+              "operations": {
+                "get": 16261,
+                "list": 83,
+                "put": 10
+              },
+              "statuses": {
+                "2xx": 16354
+              }
+            },
+            "small-8": {
+              "response_body_bytes": 30752799,
+              "request_body_bytes": 12688,
+              "requests": 52306,
+              "proxy_errors": {},
+              "operations": {
+                "get": 52210,
+                "list": 83,
+                "put": 13
+              },
+              "statuses": {
+                "2xx": 52305,
+                "4xx": 1
+              }
+            },
+            "expensive-8": {
+              "response_body_bytes": 30816470,
+              "request_body_bytes": 9079,
+              "requests": 52413,
+              "proxy_errors": {},
+              "operations": {
+                "get": 52325,
+                "list": 79,
+                "put": 9
+              },
+              "statuses": {
+                "2xx": 52413
+              }
+            },
+            "mixed-8": {
+              "response_body_bytes": 30563884,
+              "request_body_bytes": 12474,
+              "requests": 51984,
+              "proxy_errors": {},
+              "operations": {
+                "get": 51889,
+                "list": 84,
+                "put": 11
+              },
+              "statuses": {
+                "2xx": 51984
+              }
+            },
+            "distinct-8": {
+              "response_body_bytes": 30389917,
+              "request_body_bytes": 12474,
+              "requests": 51685,
+              "proxy_errors": {},
+              "operations": {
+                "get": 51601,
+                "list": 73,
+                "put": 11
+              },
+              "statuses": {
+                "2xx": 51685
+              }
+            },
+            "small-16": {
+              "response_body_bytes": 32111246,
+              "request_body_bytes": 9079,
+              "requests": 54615,
+              "proxy_errors": {},
+              "operations": {
+                "get": 54527,
+                "list": 79,
+                "put": 9
+              },
+              "statuses": {
+                "2xx": 54615
+              }
+            },
+            "expensive-16": {
+              "response_body_bytes": 30609354,
+              "request_body_bytes": 12688,
+              "requests": 52063,
+              "proxy_errors": {},
+              "operations": {
+                "get": 51961,
+                "list": 89,
+                "put": 13
+              },
+              "statuses": {
+                "2xx": 52062,
+                "4xx": 1
+              }
+            },
+            "mixed-16": {
+              "response_body_bytes": 30606256,
+              "request_body_bytes": 9079,
+              "requests": 52055,
+              "proxy_errors": {},
+              "operations": {
+                "get": 51968,
+                "list": 78,
+                "put": 9
+              },
+              "statuses": {
+                "2xx": 52055
+              }
+            },
+            "distinct-16": {
+              "response_body_bytes": 31482332,
+              "request_body_bytes": 13286,
+              "requests": 53546,
+              "proxy_errors": {},
+              "operations": {
+                "get": 53452,
+                "list": 82,
+                "put": 12
+              },
+              "statuses": {
+                "2xx": 53546
+              }
+            },
+            "small-32": {
+              "response_body_bytes": 30298189,
+              "request_body_bytes": 12474,
+              "requests": 51529,
+              "proxy_errors": {},
+              "operations": {
+                "get": 51445,
+                "list": 73,
+                "put": 11
+              },
+              "statuses": {
+                "2xx": 51529
+              }
+            },
+            "expensive-32": {
+              "response_body_bytes": 30615374,
+              "request_body_bytes": 9079,
+              "requests": 52071,
+              "proxy_errors": {},
+              "operations": {
+                "get": 51983,
+                "list": 79,
+                "put": 9
+              },
+              "statuses": {
+                "2xx": 52071
+              }
+            },
+            "mixed-32": {
+              "response_body_bytes": 28626347,
+              "request_body_bytes": 12688,
+              "requests": 48690,
+              "proxy_errors": {},
+              "operations": {
+                "get": 48588,
+                "list": 89,
+                "put": 13
+              },
+              "statuses": {
+                "2xx": 48690
+              }
+            },
+            "distinct-32": {
+              "response_body_bytes": 28585256,
+              "request_body_bytes": 13286,
+              "requests": 48615,
+              "proxy_errors": {},
+              "operations": {
+                "get": 48530,
+                "list": 73,
+                "put": 12
+              },
+              "statuses": {
+                "2xx": 48615
+              }
+            },
+            "small-64": {
+              "response_body_bytes": 28178675,
+              "request_body_bytes": 9079,
+              "requests": 47930,
+              "proxy_errors": {},
+              "operations": {
+                "get": 47839,
+                "list": 82,
+                "put": 9
+              },
+              "statuses": {
+                "2xx": 47930
+              }
+            },
+            "expensive-64": {
+              "response_body_bytes": 24417541,
+              "request_body_bytes": 12468,
+              "requests": 41529,
+              "proxy_errors": {},
+              "operations": {
+                "get": 41439,
+                "list": 79,
+                "put": 11
+              },
+              "statuses": {
+                "2xx": 41529
+              }
+            },
+            "mixed-64": {
+              "response_body_bytes": 18824051,
+              "request_body_bytes": 9059,
+              "requests": 32016,
+              "proxy_errors": {},
+              "operations": {
+                "get": 31937,
+                "list": 70,
+                "put": 9
+              },
+              "statuses": {
+                "2xx": 32016
+              }
+            },
+            "distinct-64": {
+              "response_body_bytes": 18168799,
+              "request_body_bytes": 13468,
+              "requests": 30903,
+              "proxy_errors": {},
+              "operations": {
+                "get": 30808,
+                "list": 81,
+                "put": 14
+              },
+              "statuses": {
+                "2xx": 30903
+              }
+            },
+            "small-distinct-16": {
+              "response_body_bytes": 15736983,
+              "request_body_bytes": 12444,
+              "requests": 26767,
+              "proxy_errors": {},
+              "operations": {
+                "get": 26671,
+                "list": 85,
+                "put": 11
+              },
+              "statuses": {
+                "2xx": 26767
+              }
+            },
+            "soak-16": {
+              "response_body_bytes": 1016893091,
+              "request_body_bytes": 570517,
+              "requests": 1729604,
+              "proxy_errors": {},
+              "operations": {
+                "get": 1725075,
+                "list": 3984,
+                "put": 545
+              },
+              "statuses": {
+                "2xx": 1729599,
+                "4xx": 5
+              }
+            }
+          },
+          "resources": {
+            "status": "observed",
+            "failures": [],
+            "peak_rss_bytes": [266207232, 257310720],
+            "admitted_work_drained": true,
+            "rss_plateau": "passed",
+            "provider": {
+              "response_body_bytes": 1590278413,
+              "request_body_bytes": 816891,
+              "requests": 2593840,
+              "proxy_errors": {},
+              "classes": {
+                ".crab:get": 2581475,
+                ".crab:head": 12,
+                ".crab:list": 1967,
+                ".crab:put": 797,
+                "r0-debug-baseline-20-20261118:get": 5795,
+                "r0-debug-baseline-20-20261118:head": 12,
+                "r0-debug-baseline-20-20261118:list": 3750,
+                "r0-debug-baseline-20-20261118:put": 32
+              },
+              "operations": {
+                "get": 2587270,
+                "head": 24,
+                "list": 5717,
+                "put": 829
+              },
+              "statuses": {
+                "2xx": 2593817,
+                "4xx": 23
+              },
+              "methods": {
+                "GET": 2592987,
+                "HEAD": 24,
+                "PUT": 829
+              },
+              "class_response_body_bytes": {
+                ".crab:get": 1518856055,
+                ".crab:list": 830934,
+                ".crab:put": 1148,
+                "r0-debug-baseline-20-20261118:get": 68286098,
+                "r0-debug-baseline-20-20261118:list": 2303522,
+                "r0-debug-baseline-20-20261118:put": 656
+              },
+              "categories": {
+                ".crab": 2584251,
+                "r0-debug-baseline-20-20261118": 9589
+              },
+              "class_request_body_bytes": {
+                ".crab:put": 814555,
+                "r0-debug-baseline-20-20261118:put": 2336
+              }
+            },
+            "quota_enforcement": "native processes on shared 32-GiB host; no process CPU/RAM quota; observed ceiling 1 GiB each",
+            "limits": {
+              "maximum_late_rss_ratio": 1.1,
+              "sample_interval_seconds": 1
+            }
+          }
+        }
+      }
+    },
+    "current_minimum_profile": {
+      "status": "failed",
+      "receipt_sha256": "daeb131bbd8818e577f08e4a8f1271c5f9921aa62bef8768e1f79ea7ee716f0c",
+      "scope": "enforced 1 CPU / 1 GiB Linux container functional proof; linux/amd64 image emulated on aarch64 VM, not native latency or soak proof",
+      "binding": {
+        "workflow_run": 44526683530,
+        "artifact": 14534051137,
+        "zip_sha256": "ff5ef915bccdd16fe883507db49109d6c9b60f94c25301dfe34cc38e49469d7f",
+        "image_archive_sha256": "da739f91abd8e40f530a16f76cd35855990e365493cd8fb76aae06f85bc5ec5f",
+        "source_revision": "f6d0ec361c4e7f6ca4f73648ecd92367b2955b96",
+        "head_revision": "8ba88f5a45288979f9d4afb262e0f3faee6555a4",
+        "source_tree": "2ebf1cdc1fcfba1260d03343b557a5d431d3a85e",
+        "pr_merge_tree_equals_head": true,
+        "image_id": "sha256:83d3b99555a949df590247397eb236d1586954e303dad46acc2b720be9aa372c",
+        "platform": "linux/amd64"
+      },
+      "checks": [
+        {
+          "name": "owned-vm-forwarding-active",
+          "passed": true
+        },
+        {
+          "name": "enforced-docker-cpu-and-memory",
+          "passed": true
+        },
+        {
+          "name": "minimum-profile-public-ready",
+          "passed": true
+        },
+        {
+          "name": "startup-authority-sees-cgroup-limits",
+          "passed": true
+        }
+      ],
+      "quota": {
+        "memory_bytes": 1073741824,
+        "nano_cpus": 1000000000,
+        "swap_bytes": 1073741824
+      },
+      "error_kind": "ConnectionResetError",
+      "cause": "cold Repository epoch 9 restore: transactions 1 and 3 present, 2 missing",
+      "final_exit_code": 1,
+      "oom_killed": false,
+      "soak": "not reached"
+    },
+    "read_only_checkpoint_race": {
+      "status": "reproduced_on_frozen_baseline",
+      "dependency": "cellar-main 0.1.1",
+      "published_source_revision": "95f860bcddb1f49dc72453f100154c4eeeb7bfbd",
+      "reproducer_sha256": "103a3833c22f077e16e9d00cad554a083392c182b4f4dd6e925ea75a6033ed2e",
+      "receipt_sha256": "733bec89437f506aad683df01f7aa2b68ff7bfd43a479be37b1e8c83ba490b15",
+      "sequence": ["foreign restore; read-only directory-status; idle 70 seconds; graceful Preserve shutdown", "same local state reload; read-only directory-status; graceful Preserve shutdown", "cold foreign restore rejects epoch 2: 1 and 3 present without 2"],
+      "historical_repository_local_staged_files": [
+        {
+          "file": "0000000000000001-0000000000000001.ltx",
+          "bytes": 52164003,
+          "sha256": "b5d27f35aee1e5584d7d481803cac2a5a25db16ddfe512a75991f7cf85ad4dd6",
+          "header_min_txid": 1,
+          "header_max_txid": 1,
+          "header_timestamp_utc": "2026-11-19T12:59:01.336000+00:00"
+        },
+        {
+          "file": "0000000000000002-0000000000000002.ltx",
+          "bytes": 197,
+          "sha256": "a9395986792a6785dfa6c6e51992c407b90d836b549038f11598affc7d5ac51c",
+          "header_min_txid": 2,
+          "header_max_txid": 2,
+          "header_timestamp_utc": "2026-11-19T12:59:01.648000+00:00"
+        },
+        {
+          "file": "0000000000000003-0000000000000003.ltx",
+          "bytes": 52164003,
+          "sha256": "788c2a0f66f5d342cb37fb6c67d1aee338c65b0862502a0fdd6be9f808c776ab",
+          "header_min_txid": 3,
+          "header_max_txid": 3,
+          "header_timestamp_utc": "2026-11-19T13:13:39.329000+00:00"
+        }
+      ],
+      "repository_remote_listing_sha256": "1edb77b37f4e4a68e3081e9efccd640ed586f7fd495b2a11458e2b5cb62a81a1",
+      "proposed_fix": "serialize per-cell maintenance checkpoint with final capture/upload/close; blocking job retains gate through completion",
+      "proposed_patch_sha256": "de4e322ab885adf0a533c32ff2e0d1466a403cb3d30ee835ad1ebf1e43082998",
+      "dependency_change": "awaiting explicit approval; none applied",
+      "state_repair": false
+    },
+    "native_on_vm_disk": {
+      "status": "failed_engineering_gates",
+      "raw_report_sha256": "a70ba7f9a461bb8422e51203d8f406cc2872d094bd9e6764192b2f7dcdfdccef",
+      "orchestrator_sha256": "83b496c07d7855d997cd02b4cfd6a011defc677d14cae1a4ae13acc0370e457f",
+      "bindings": {
+        "baseline": {
+          "qualifier_sha256": "161d95ee2701238fcce450a48840f479789bdf8ae456a5711bfb0410721b5344",
+          "source_receipt_sha256": "c913d80f6ba13146480a8ff54c485810a2b1cf086185d93e1b247a59b71a6f88",
+          "source_revision": "aafb6d256c5e8d3a8e768d31dd887a18f2afd2e4"
+        },
+        "candidate": {
+          "qualifier_sha256": "6c88ff6da6880e43e8a5cf9b5149da4d4ccd359adc3add29c8fecadf4c918dc6",
+          "source_receipt_sha256": "4536f3de6577bb0c66513e6adc7d2822a9108c25e8d49874d2155f24c3de15f2",
+          "source_revision": "c5b6d40c45935d642517aab6a45af454cc881f45"
+        }
+      },
+      "provider": "local pinned RustFS; 1 CPU / 3 GiB backend; 2 CPU / 4 GiB VM; dedicated VM data disk; unchanged original Git inputs",
+      "scope": "debug; 20 interleaved pairs per scale/selection; every query has fresh runtime and then a warm repeat; backend counters are logical Store invocations, not HTTP retry counts",
+      "rows": 240,
+      "query_cells": 72,
+      "git_queries_checked": 1440,
+      "thresholds": {
+        "maximum_control_p95_ratio": 1.1,
+        "target_p95_ratio": 0.8
+      },
+      "failures": [
+        {
+          "commits": 100,
+          "operation": "commit",
+          "cache": "cold",
+          "p95_ratio": 1.2559627059843885
+        },
+        {
+          "commits": 1000,
+          "operation": "blame",
+          "cache": "warm",
+          "p95_ratio": 1.6576576576576576
+        },
+        {
+          "commits": 10000,
+          "operation": "blame",
+          "cache": "warm",
+          "p95_ratio": 1.553935860058309
+        },
+        {
+          "commits": 10000,
+          "operation": "blob",
+          "cache": "warm",
+          "p95_ratio": 1.2654774396642183
+        },
+        {
+          "commits": 10000,
+          "operation": "history",
+          "cache": "warm",
+          "p95_ratio": 1.5643521208599651
+        },
+        {
+          "commits": 10000,
+          "operation": "history-page-1",
+          "cache": "cold",
+          "p95_ratio": 1.0276039936695258
+        },
+        {
+          "commits": 10000,
+          "operation": "history-page-1",
+          "cache": "warm",
+          "p95_ratio": 2.102206736353078
+        },
+        {
+          "commits": 10000,
+          "operation": "object-batch",
+          "cache": "warm",
+          "p95_ratio": 1.479342956694873
+        },
+        {
+          "commits": 10000,
+          "operation": "path-history",
+          "cache": "cold",
+          "p95_ratio": 1.1405603270375975
+        },
+        {
+          "commits": 10000,
+          "operation": "resolve",
+          "cache": "warm",
+          "p95_ratio": 1.4803418803418804
+        },
+        {
+          "commits": 10000,
+          "operation": "tree",
+          "cache": "cold",
+          "p95_ratio": 1.1109577954385639
+        },
+        {
+          "commits": 10000,
+          "operation": "tree",
+          "cache": "warm",
+          "p95_ratio": 1.1447241045498548
+        }
+      ],
+      "provider_migration_receipt_sha256": "f2b0a465996ea7a0ca7ab04a2c919c2d9c6c4e06857a6455afe7bf0e7b9a879c",
+      "shared_native_inputs_match_current_tree": true,
+      "historical_failures_retained": true,
+      "columns": ["commits", "operation", "cache", "target", "baseline_p50_us", "baseline_p95_us", "candidate_p50_us", "candidate_p95_us", "baseline_read_invocations_median", "candidate_read_invocations_median", "baseline_read_bytes_median", "candidate_read_bytes_median", "p95_ratio", "gate"],
+      "cells": [
+        [100, "attribution", "cold", false, 81527, 97474, 84274, 92523, 61.0, 61.0, 62597.0, 62597.0, 0.9492069680119827, "passed"],
+        [100, "attribution", "warm", false, 2073, 2234, 2097, 2377, 0.0, 0.0, 0.0, 0.0, 1.0640107430617727, "passed"],
+        [100, "blame", "cold", false, 240756, 340786, 251641, 293707, 179.0, 179.0, 133772.0, 133772.0, 0.8618517192607678, "passed"],
+        [100, "blame", "warm", false, 350, 495, 362, 419, 0.0, 0.0, 0.0, 0.0, 0.8464646464646465, "passed"],
+        [100, "blob", "cold", false, 73534, 141382, 73904, 92857, 55.0, 55.0, 43319.0, 43319.0, 0.6567809197776238, "passed"],
+        [100, "blob", "warm", false, 370, 514, 379, 465, 0.0, 0.0, 0.0, 0.0, 0.9046692607003891, "passed"],
+        [100, "commit", "cold", false, 7025, 9224, 7390, 11585, 5.0, 5.0, 37365.0, 37365.0, 1.2559627059843885, "failed"],
+        [100, "commit", "warm", false, 240, 367, 243, 356, 0.0, 0.0, 0.0, 0.0, 0.9700272479564033, "passed"],
+        [100, "history", "cold", true, 132601, 197970, 27237, 31251, 104.0, 12.0, 52029.0, 52029.0, 0.1578572510986513, "passed"],
+        [100, "history", "warm", false, 766, 820, 672, 756, 0.0, 0.0, 0.0, 0.0, 0.9219512195121952, "passed"],
+        [100, "history-page-1", "cold", true, 120880, 135574, 26405, 30795, 104.0, 12.0, 52029.0, 52029.0, 0.22714532284951391, "passed"],
+        [100, "history-page-1", "warm", false, 732, 810, 672, 729, 0.0, 0.0, 0.0, 0.0, 0.9, "passed"],
+        [100, "object-batch", "cold", false, 75227, 112633, 76997, 89630, 55.0, 55.0, 45466.0, 45466.0, 0.7957703337387799, "passed"],
+        [100, "object-batch", "warm", false, 1972, 2182, 1989, 2112, 0.0, 0.0, 0.0, 0.0, 0.9679193400549955, "passed"],
+        [100, "object-point", "cold", false, 73978, 128088, 75115, 83540, 55.0, 55.0, 43319.0, 43319.0, 0.6522078570982449, "passed"],
+        [100, "object-point", "warm", false, 384, 553, 397, 454, 0.0, 0.0, 0.0, 0.0, 0.8209764918625678, "passed"],
+        [100, "path-history", "cold", false, 247858, 341642, 251788, 273845, 176.0, 176.0, 133757.0, 133757.0, 0.8015554293675836, "passed"],
+        [100, "path-history", "warm", false, 12474, 12805, 12505, 13135, 0.0, 0.0, 0.0, 0.0, 1.0257711831315892, "passed"],
+        [100, "resolve", "cold", false, 7899, 10738, 8137, 9699, 5.0, 5.0, 37365.0, 37365.0, 0.9032408269696405, "passed"],
+        [100, "resolve", "warm", false, 293, 430, 264, 363, 0.0, 0.0, 0.0, 0.0, 0.8441860465116279, "passed"],
+        [100, "tree", "cold", false, 71494, 104790, 72808, 88881, 54.0, 54.0, 43176.0, 43176.0, 0.8481820784425995, "passed"],
+        [100, "tree", "warm", false, 704, 875, 730, 803, 0.0, 0.0, 0.0, 0.0, 0.9177142857142857, "passed"],
+        [1000, "attribution", "cold", false, 101301, 291759, 84186, 148507, 50.0, 50.0, 273687.0, 273687.0, 0.5090057204747754, "passed"],
+        [1000, "attribution", "warm", false, 2206, 4323, 2190, 3200, 0.0, 0.0, 0.0, 0.0, 0.7402266944251678, "passed"],
+        [1000, "blame", "cold", false, 1537720, 3351154, 1589437, 3092678, 951.0, 951.0, 728968.0, 728968.0, 0.922869554786202, "passed"],
+        [1000, "blame", "warm", false, 381, 444, 435, 736, 0.0, 0.0, 0.0, 0.0, 1.6576576576576576, "failed"],
+        [1000, "blob", "cold", false, 71573, 323195, 73394, 107867, 43.0, 43.0, 189707.0, 189707.0, 0.3337520691842386, "passed"],
+        [1000, "blob", "warm", false, 392, 950, 428, 536, 0.0, 0.0, 0.0, 0.0, 0.5642105263157895, "passed"],
+        [1000, "commit", "cold", false, 11193, 26556, 11303, 15025, 7.0, 7.0, 66534.0, 66534.0, 0.5657855098659437, "passed"],
+        [1000, "commit", "warm", false, 250, 593, 266, 396, 0.0, 0.0, 0.0, 0.0, 0.6677908937605397, "passed"],
+        [1000, "history", "cold", true, 1566912, 2624370, 244096, 405796, 1010.0, 76.0, 333664.0, 399064.0, 0.15462606263598502, "passed"],
+        [1000, "history", "warm", false, 5433, 13821, 4621, 4937, 0.0, 0.0, 0.0, 0.0, 0.3572100426886622, "passed"],
+        [1000, "history-page-1", "cold", true, 154388, 181603, 37859, 42247, 109.0, 18.0, 167183.0, 199885.0, 0.23263382212848907, "passed"],
+        [1000, "history-page-1", "warm", false, 817, 853, 650, 733, 0.0, 0.0, 0.0, 0.0, 0.8593200468933178, "passed"],
+        [1000, "history-page-10", "cold", true, 1441015, 1554084, 40227, 45442, 1010.0, 19.0, 333664.0, 232732.0, 0.029240375681108613, "passed"],
+        [1000, "history-page-10", "warm", false, 4359, 4594, 692, 752, 0.0, 0.0, 0.0, 0.0, 0.16369177187636047, "passed"],
+        [1000, "object-batch", "cold", false, 74557, 175111, 79955, 145302, 43.0, 43.0, 191854.0, 191854.0, 0.8297708310728623, "passed"],
+        [1000, "object-batch", "warm", false, 1980, 2272, 2064, 2295, 0.0, 0.0, 0.0, 0.0, 1.0101232394366197, "passed"],
+        [1000, "object-point", "cold", false, 69304, 254611, 71918, 124882, 43.0, 43.0, 189707.0, 189707.0, 0.4904815581416357, "passed"],
+        [1000, "object-point", "warm", false, 393, 958, 388, 664, 0.0, 0.0, 0.0, 0.0, 0.6931106471816284, "passed"],
+        [1000, "path-history", "cold", false, 1842290, 3008039, 1581248, 2384913, 930.0, 930.0, 728954.0, 728954.0, 0.7928464358341099, "passed"],
+        [1000, "path-history", "warm", false, 13744, 32406, 13529, 15270, 0.0, 0.0, 0.0, 0.0, 0.4712090353638215, "passed"],
+        [1000, "resolve", "cold", false, 12429, 53992, 12515, 21815, 7.0, 7.0, 66534.0, 66534.0, 0.40404133945769743, "passed"],
+        [1000, "resolve", "warm", false, 318, 848, 285, 398, 0.0, 0.0, 0.0, 0.0, 0.4693396226415094, "passed"],
+        [1000, "tree", "cold", false, 70016, 253721, 73968, 156563, 42.0, 42.0, 189564.0, 189564.0, 0.6170675663425573, "passed"],
+        [1000, "tree", "warm", false, 731, 1825, 749, 897, 0.0, 0.0, 0.0, 0.0, 0.4915068493150685, "passed"],
+        [10000, "attribution", "cold", false, 63872, 259109, 56254, 257799, 26.0, 26.0, 377618.0, 377618.0, 0.9949442126672559, "passed"],
+        [10000, "attribution", "warm", false, 2345, 8645, 2316, 6241, 0.0, 0.0, 0.0, 0.0, 0.7219201850780799, "passed"],
+        [10000, "blame", "cold", false, 1438409, 4993874, 1308720, 4688109, 667.0, 667.0, 4708972.0, 4708972.0, 0.9387719834341035, "passed"],
+        [10000, "blame", "warm", false, 463, 686, 437, 1066, 0.0, 0.0, 0.0, 0.0, 1.553935860058309, "failed"],
+        [10000, "blob", "cold", false, 38963, 214535, 70830, 143488, 18.0, 18.0, 271596.0, 271596.0, 0.6688325914186496, "passed"],
+        [10000, "blob", "warm", false, 415, 953, 501, 1206, 0.0, 0.0, 0.0, 0.0, 1.2654774396642183, "failed"],
+        [10000, "commit", "cold", false, 12682, 106791, 13740, 53690, 7.0, 7.0, 72285.0, 72285.0, 0.5027577230290942, "passed"],
+        [10000, "commit", "warm", false, 316, 1761, 295, 1359, 0.0, 0.0, 0.0, 0.0, 0.7717206132879046, "passed"],
+        [10000, "history", "cold", true, 1942722, 8129349, 386088, 1428387, 1041.0, 116.0, 1366389.0, 1711875.0, 0.17570742749511678, "passed"],
+        [10000, "history", "warm", false, 5431, 6884, 4634, 10769, 0.0, 0.0, 0.0, 0.0, 1.5643521208599651, "failed"],
+        [10000, "history-page-1", "cold", true, 240748, 255905, 91052, 262969, 138.0, 55.0, 1133922.0, 1414004.0, 1.0276039936695258, "failed"],
+        [10000, "history-page-1", "warm", false, 775, 861, 654, 1810, 0.0, 0.0, 0.0, 0.0, 2.102206736353078, "failed"],
+        [10000, "history-page-10", "cold", true, 1628037, 1819571, 91015, 257606, 1041.0, 56.0, 1366389.0, 1447438.0, 0.14157512952228848, "passed"],
+        [10000, "history-page-10", "warm", false, 4268, 4677, 666, 2062, 0.0, 0.0, 0.0, 0.0, 0.4408809065640368, "passed"],
+        [10000, "history-page-100", "cold", true, 15427880, 18324721, 87604, 217363, 10055.0, 54.0, 3166706.0, 1381382.0, 0.011861735848529427, "passed"],
+        [10000, "history-page-100", "warm", false, 38595, 45183, 670, 1709, 0.0, 0.0, 0.0, 0.0, 0.03782396033906558, "passed"],
+        [10000, "object-batch", "cold", false, 74280, 268998, 104205, 270568, 47.0, 47.0, 1222439.0, 1222439.0, 1.0058364746206292, "passed"],
+        [10000, "object-batch", "warm", false, 2014, 4018, 2146, 5944, 0.0, 0.0, 0.0, 0.0, 1.479342956694873, "failed"],
+        [10000, "object-point", "cold", false, 39609, 137428, 46992, 150612, 18.0, 18.0, 271596.0, 271596.0, 1.0959338708269057, "passed"],
+        [10000, "object-point", "warm", false, 417, 968, 449, 1042, 0.0, 0.0, 0.0, 0.0, 1.0764462809917354, "passed"],
+        [10000, "path-history", "cold", false, 1476700, 5088100, 1416939, 5803285, 696.0, 696.0, 4691860.0, 4691860.0, 1.1405603270375975, "failed"],
+        [10000, "path-history", "warm", false, 14736, 26219, 14571, 24685, 0.0, 0.0, 0.0, 0.0, 0.9414928105572294, "passed"],
+        [10000, "resolve", "cold", false, 14588, 187317, 19075, 67163, 7.0, 7.0, 72285.0, 72285.0, 0.3585526140179482, "passed"],
+        [10000, "resolve", "warm", false, 294, 585, 352, 866, 0.0, 0.0, 0.0, 0.0, 1.4803418803418804, "failed"],
+        [10000, "tree", "cold", false, 37548, 150742, 50768, 167468, 16.0, 16.0, 238721.0, 238721.0, 1.1109577954385639, "failed"],
+        [10000, "tree", "warm", false, 733, 2066, 758, 2365, 0.0, 0.0, 0.0, 0.0, 1.1447241045498548, "failed"]
+      ]
+    },
+    "session_read_diagnostic": {
+      "status": "measured",
+      "scope": "diagnostic only: /api/session isolates two fresh durable reads without Git, catalog authorization, or native Cells; no engineering thresholds waived",
+      "source_binaries": {
+        "sequential": "ab5df41fdfc871d673377bb3fc53f392fd047f3fa9491c6c6218b859fa91bffc",
+        "parallel": "4730ae6176eaf337c47d563a1000c7e56d89240c806afad2e40653941dd01818"
+      },
+      "driver_sha256": "af9a8c875c40bfc4b3eea372e0c3b96e35d57338d51ffdfcad67fa27cfc3a5db",
+      "cases": [
+        {
+          "variant": "sequential",
+          "clients": 1,
+          "repeat": 0,
+          "attempts": 8610,
+          "successes": 8610,
+          "errors": {},
+          "elapsed_seconds": 20.00246120803058,
+          "successful_requests_per_second": 430.4470164483206,
+          "p50_us": 2120.9580008871853,
+          "p95_us": 3177.7499825693667
+        },
+        {
+          "variant": "parallel",
+          "clients": 1,
+          "repeat": 0,
+          "attempts": 14950,
+          "successes": 14950,
+          "errors": {},
+          "elapsed_seconds": 20.003358124988154,
+          "successful_requests_per_second": 747.374487796133,
+          "p50_us": 1254.3330085463822,
+          "p95_us": 1743.8330105505884
+        },
+        {
+          "variant": "parallel",
+          "clients": 1,
+          "repeat": 1,
+          "attempts": 16733,
+          "successes": 16733,
+          "errors": {},
+          "elapsed_seconds": 20.003963458002545,
+          "successful_requests_per_second": 836.484210585813,
+          "p50_us": 1170.5419747158885,
+          "p95_us": 1424.0420423448086
+        },
+        {
+          "variant": "sequential",
+          "clients": 1,
+          "repeat": 1,
+          "attempts": 9728,
+          "successes": 9728,
+          "errors": {},
+          "elapsed_seconds": 20.00166516599711,
+          "successful_requests_per_second": 486.35949841294797,
+          "p50_us": 2010.3330025449395,
+          "p95_us": 2485.0420304574072
+        },
+        {
+          "variant": "sequential",
+          "clients": 8,
+          "repeat": 0,
+          "attempts": 43332,
+          "successes": 43332,
+          "errors": {},
+          "elapsed_seconds": 20.011928374995477,
+          "successful_requests_per_second": 2165.308334897459,
+          "p50_us": 3576.999995857477,
+          "p95_us": 4857.1660299785435
+        },
+        {
+          "variant": "parallel",
+          "clients": 8,
+          "repeat": 0,
+          "attempts": 44413,
+          "successes": 44413,
+          "errors": {},
+          "elapsed_seconds": 20.012348541989923,
+          "successful_requests_per_second": 2219.279701088771,
+          "p50_us": 3469.4159985519946,
+          "p95_us": 5002.249963581562
+        },
+        {
+          "variant": "parallel",
+          "clients": 8,
+          "repeat": 1,
+          "attempts": 43527,
+          "successes": 43527,
+          "errors": {},
+          "elapsed_seconds": 20.011039207980502,
+          "successful_requests_per_second": 2175.1491499661665,
+          "p50_us": 3539.874975103885,
+          "p95_us": 5193.916033022106
+        },
+        {
+          "variant": "sequential",
+          "clients": 8,
+          "repeat": 1,
+          "attempts": 43055,
+          "successes": 43055,
+          "errors": {},
+          "elapsed_seconds": 20.011867582972627,
+          "successful_requests_per_second": 2151.473347127037,
+          "p50_us": 3558.875003363937,
+          "p95_us": 5089.83398322016
+        },
+        {
+          "variant": "sequential",
+          "clients": 16,
+          "repeat": 0,
+          "attempts": 42372,
+          "successes": 42372,
+          "errors": {},
+          "elapsed_seconds": 20.015471250051633,
+          "successful_requests_per_second": 2116.962287064223,
+          "p50_us": 7242.333027534187,
+          "p95_us": 11071.583954617381
+        },
+        {
+          "variant": "parallel",
+          "clients": 16,
+          "repeat": 0,
+          "attempts": 41578,
+          "successes": 41578,
+          "errors": {},
+          "elapsed_seconds": 20.013215417042375,
+          "successful_requests_per_second": 2077.5271743007083,
+          "p50_us": 7335.082977078855,
+          "p95_us": 11893.042013980448
+        },
+        {
+          "variant": "parallel",
+          "clients": 16,
+          "repeat": 1,
+          "attempts": 45461,
+          "successes": 45461,
+          "errors": {},
+          "elapsed_seconds": 20.013275458011776,
+          "successful_requests_per_second": 2271.542150322512,
+          "p50_us": 6814.458000008017,
+          "p95_us": 10304.583003744483
+        },
+        {
+          "variant": "sequential",
+          "clients": 16,
+          "repeat": 1,
+          "attempts": 44829,
+          "successes": 44829,
+          "errors": {},
+          "elapsed_seconds": 20.01414795801975,
+          "successful_requests_per_second": 2239.8654212043252,
+          "p50_us": 6980.459031183273,
+          "p95_us": 9753.082995302975
+        },
+        {
+          "variant": "sequential",
+          "clients": 32,
+          "repeat": 0,
+          "attempts": 32577,
+          "successes": 32577,
+          "errors": {},
+          "elapsed_seconds": 20.03488237503916,
+          "successful_requests_per_second": 1626.013964086449,
+          "p50_us": 17947.332991752774,
+          "p95_us": 35784.834006335586
+        },
+        {
+          "variant": "parallel",
+          "clients": 32,
+          "repeat": 0,
+          "attempts": 43455,
+          "successes": 43455,
+          "errors": {},
+          "elapsed_seconds": 20.015614500036463,
+          "successful_requests_per_second": 2171.0549668509116,
+          "p50_us": 14037.957997061312,
+          "p95_us": 23040.124971885234
+        },
+        {
+          "variant": "parallel",
+          "clients": 32,
+          "repeat": 1,
+          "attempts": 46043,
+          "successes": 46043,
+          "errors": {},
+          "elapsed_seconds": 20.015903583029285,
+          "successful_requests_per_second": 2300.320775369289,
+          "p50_us": 13369.499996770173,
+          "p95_us": 21175.249945372343
+        },
+        {
+          "variant": "sequential",
+          "clients": 32,
+          "repeat": 1,
+          "attempts": 45952,
+          "successes": 45952,
+          "errors": {},
+          "elapsed_seconds": 20.018891957995947,
+          "successful_requests_per_second": 2295.4317113332313,
+          "p50_us": 13615.291973110288,
+          "p95_us": 19872.625009156764
+        },
+        {
+          "variant": "sequential",
+          "clients": 64,
+          "repeat": 0,
+          "attempts": 45485,
+          "successes": 45485,
+          "errors": {},
+          "elapsed_seconds": 20.02627966698492,
+          "successful_requests_per_second": 2271.2655428788626,
+          "p50_us": 27210.959000512958,
+          "p95_us": 41591.91600047052
+        },
+        {
+          "variant": "parallel",
+          "clients": 64,
+          "repeat": 0,
+          "attempts": 45682,
+          "successes": 45682,
+          "errors": {},
+          "elapsed_seconds": 20.03001091600163,
+          "successful_requests_per_second": 2280.6776816660604,
+          "p50_us": 26938.833005260676,
+          "p95_us": 44047.500006854534
+        },
+        {
+          "variant": "parallel",
+          "clients": 64,
+          "repeat": 1,
+          "attempts": 46176,
+          "successes": 46176,
+          "errors": {},
+          "elapsed_seconds": 20.027622834022623,
+          "successful_requests_per_second": 2305.6155702379033,
+          "p50_us": 26672.916021198034,
+          "p95_us": 43411.332997493446
+        },
+        {
+          "variant": "sequential",
+          "clients": 64,
+          "repeat": 1,
+          "attempts": 45475,
+          "successes": 45475,
+          "errors": {},
+          "elapsed_seconds": 20.027874666033313,
+          "successful_requests_per_second": 2270.585371635006,
+          "p50_us": 27398.00000563264,
+          "p95_us": 41641.49996358901
+        }
+      ],
+      "exit_codes": [0, 0],
+      "receipt_sha256": "fde960eb00ab3f549815941dc1adf71011f44ecc63e7b5c96b3bad28a42c8241"
+    },
+    "warm_stage_diagnostic": {
+      "status": "completed_equal_results",
+      "scope": "diagnostic only; stage timing adds local observer code and 200 repeated warm reads; does not replace the frozen matrix",
+      "receipt_sha256": "a770f3ba92b8f03bfefed271f60722814ad4d5a1f3caf206b413a3bafb9d6efc",
+      "builds": [
+        {
+          "variant": "baseline",
+          "source_sha256": "840b39e5242ff32f8e419a88239524a027528136ce6689098f2da88365cda748",
+          "binary_sha256": "cd56b7205103001d294fb13243ab2b3e16ecacdd3f1a42b3df24e5e7b57715ea"
+        },
+        {
+          "variant": "candidate",
+          "source_sha256": "840b39e5242ff32f8e419a88239524a027528136ce6689098f2da88365cda748",
+          "binary_sha256": "b57450ab67738038016f06b786798fd81f2585b871fc5a45bb8c2a40e5940e62"
+        }
+      ],
+      "columns": ["operation", "repeat", "variant", "samples", "open_p50_us", "open_p95_us", "snapshot_p50_us", "snapshot_p95_us", "query_p50_us", "query_p95_us", "finish_p50_us", "finish_p95_us", "total_p50_us", "total_p95_us", "receipt_sha256"],
+      "rows": [
+        ["blame", 0, "baseline", 200, 11.0, 29, 118.0, 234, 107.0, 127, 38.0, 64, 282.0, 429, "db2e6f9478e761ff65aaf857ab133bb780a258c152691fc0d3f7ece437003c07"],
+        ["blame", 0, "candidate", 200, 15.0, 47, 144.0, 265, 110.0, 136, 44.0, 74, 317.0, 494, "b632b73822d6d7de5de8d52905053281a821a3f2981ec10b51be75789a037b14"],
+        ["blame", 1, "candidate", 200, 12.0, 29, 126.0, 228, 107.0, 126, 36.0, 58, 285.0, 440, "9c8182c5f55798e7c304abb0a6450e0dcf8796a354bf276a0bc5ce989e2208c2"],
+        ["blame", 1, "baseline", 200, 10.0, 32, 123.0, 223, 108.0, 125, 33.5, 62, 281.0, 425, "0946e987c2375d80a56a45583b891454ca51777b1b470891734409cdd0869d27"],
+        ["blame", 2, "baseline", 200, 10.0, 34, 121.5, 225, 107.0, 129, 33.0, 58, 279.0, 441, "ff9c349258af88656a50d974dbe106e7f2a628ab528addcfc6e7cd5c463465a2"],
+        ["blame", 2, "candidate", 200, 13.0, 42, 131.5, 274, 112.0, 132, 40.0, 75, 296.5, 505, "05c6d444f570b14f427de93340ad77949927f3f56526d2441af923bd63922d32"],
+        ["blame", 3, "candidate", 200, 13.0, 46, 132.5, 279, 112.0, 138, 40.0, 84, 302.0, 528, "ffee633e7b5ec9dc8455e9b607c9738a4d94035fd696eb297233da2a302a193c"],
+        ["blame", 3, "baseline", 200, 10.0, 49, 123.0, 295, 107.0, 136, 35.0, 75, 276.0, 535, "0a7db05558a7869a1efdaca6d25a95694f6174ecc8d13f7823cb5fef1be80169"],
+        ["blob", 0, "baseline", 200, 12.0, 85, 136.5, 313, 83.0, 116, 40.0, 98, 272.5, 597, "f569ba4b704f6512cae8e53685ede587cc9f146e616243712caedf7303d327e6"],
+        ["blob", 0, "candidate", 200, 14.0, 47, 140.5, 281, 84.0, 110, 43.0, 82, 284.5, 534, "429e084d4e6087849568c43493c9349c7411cf2e05000c564f1b12d47efa5500"],
+        ["blob", 1, "candidate", 200, 13.0, 46, 124.5, 253, 80.0, 105, 39.0, 71, 260.0, 481, "448a32483e3b18cf39902b326bc82b00f08d10731cd135595ab8f0af5e2ff05e"],
+        ["blob", 1, "baseline", 200, 11.0, 52, 129.0, 286, 79.0, 109, 37.0, 87, 261.0, 512, "5d497ff52f4f3c37b2844fb6697103c34f2d6403457e430fe95a2054ab231084"],
+        ["blob", 2, "baseline", 200, 12.0, 52, 140.0, 296, 83.0, 113, 43.0, 79, 285.0, 515, "98467c790159e9ec0d5988dc43d3bac606f5823af2b7d3a5c315acc22932488a"],
+        ["blob", 2, "candidate", 200, 13.0, 46, 134.5, 280, 82.5, 109, 39.0, 74, 273.0, 501, "fca8cb67c7a82d3b77ab0133f9b233a7dc95d269795e42f7a0739f30102378ff"],
+        ["blob", 3, "candidate", 200, 12.0, 39, 121.0, 251, 78.0, 107, 35.5, 79, 249.5, 469, "719c9fc58a99fadf3797107db4a63f6589e4d566411c8d7243a1d371e6e65746"],
+        ["blob", 3, "baseline", 200, 16.5, 64, 167.5, 305, 89.0, 117, 48.0, 89, 331.0, 588, "b77377a8d104ecbba90a1c8c69e05eb5d3ff43c4c4f863b1f2617b2c75518ddf"],
+        ["resolve", 0, "baseline", 200, 9.0, 39, 119.0, 262, 24.0, 42, 34.0, 72, 190.5, 410, "a739fb7ae584f5e9d7516802e9b61a317a00d0cc4567ff86177e72e8b2bb6750"],
+        ["resolve", 0, "candidate", 200, 10.5, 36, 119.0, 235, 25.0, 35, 33.5, 62, 193.0, 376, "d0df88e5d271a3c4a24931e338c69a6d88ca914b83e4b2c8106e90fb4339f22e"],
+        ["resolve", 1, "candidate", 200, 14.0, 61, 132.0, 271, 27.0, 42, 40.5, 80, 219.0, 443, "1ed8de3184aafff7efcec3f98589a7c1978604a42097d9d8d633734331199b91"],
+        ["resolve", 1, "baseline", 200, 12.0, 59, 130.0, 322, 26.0, 45, 38.5, 101, 210.0, 509, "105381f3afd66b6a1b30c237386abb8dfec3c9cc6e85dcd0c105c596a5d1cd7c"],
+        ["resolve", 2, "baseline", 200, 12.0, 53, 128.0, 320, 26.0, 44, 43.5, 91, 216.5, 525, "3c3c95450266b97a77d0338f6fab01881b6f2956c8cad2e172171aa5645ef0d6"],
+        ["resolve", 2, "candidate", 200, 15.0, 109, 145.0, 355, 29.0, 56, 52.5, 134, 257.0, 631, "b2257db4c55a64e1dd398a0bef18256a1f387de1cce668b56354f2107a19790b"],
+        ["resolve", 3, "candidate", 200, 12.0, 44, 123.0, 302, 25.0, 45, 40.0, 92, 204.0, 485, "24f1464e0722d5b74dc58d15096b736833385b272115886dd15d25bf3867a534"],
+        ["resolve", 3, "baseline", 200, 9.0, 25, 114.5, 195, 23.0, 32, 36.0, 65, 188.0, 314, "41c952c0fbe2f9098a68f5db86294078bcba6895873b9dfc96fc4da65d8c3be6"],
+        ["tree", 0, "baseline", 200, 15.0, 35, 160.0, 250, 395.0, 434, 42.0, 75, 621.5, 752, "b291bd22e187083c2069b8bf2b8abdbbcff3b383361ef4f5dfb24e747c4fd85e"],
+        ["tree", 0, "candidate", 200, 16.0, 33, 145.0, 237, 393.5, 435, 46.0, 80, 609.0, 741, "3bfff58ddee2bbf0ad121392b165f6238c71768f67562d5faed9d473a27a19a4"],
+        ["tree", 1, "candidate", 200, 14.0, 37, 146.0, 254, 389.0, 435, 43.0, 69, 599.0, 764, "e7aab97c50d73cd1d629ee0a010c086e5e6e4f40bc9a33742cb0a73f7dbf787c"],
+        ["tree", 1, "baseline", 200, 13.0, 32, 143.0, 239, 394.5, 431, 39.0, 65, 598.0, 738, "24b377357900d14b3c61d160d624a76e02535bdbb6f49d539e09d742cd63392f"],
+        ["tree", 2, "baseline", 200, 16.0, 39, 167.0, 263, 399.5, 437, 46.0, 76, 642.0, 787, "3cdca62491168d3b9779e68fc5e904934cc88b6e002c91b050727d2d7cf7856e"],
+        ["tree", 2, "candidate", 200, 18.0, 44, 154.0, 266, 401.0, 432, 49.0, 96, 630.5, 811, "85260ba5f576d05309dd00075262faaa2890f6d3169a960b20f2698454c77745"],
+        ["tree", 3, "candidate", 200, 16.5, 46, 151.5, 275, 399.5, 454, 46.5, 87, 624.5, 826, "dec880e25ca797452a6865a75850e0c7d632d27fc7c8bcadf868059522fda97e"],
+        ["tree", 3, "baseline", 200, 13.0, 50, 140.5, 428, 395.5, 750, 46.0, 142, 601.5, 1776, "86013d0949a46f09d172e3482a0ca30f53e2310a2feb19fcbeb72a44e0c0b0ca"],
+        ["history", 0, "baseline", 200, 17.0, 36, 163.5, 247, 4829.0, 5555, 47.0, 78, 5067.5, 5809, "ae855e456e48fc26437713e7558b9bc71afb38fecd3bac225f14eabdedb19f6e"],
+        ["history", 0, "candidate", 200, 18.0, 36, 164.5, 267, 4249.5, 4581, 48.0, 76, 4501.5, 4861, "3386d35ab1fe1d615c9faa5f2658d02bdfc052e8f73cecb8f7c0b5487bc19cd2"],
+        ["history", 1, "candidate", 200, 14.0, 22, 139.0, 200, 4213.0, 4615, 41.5, 59, 4426.0, 4802, "1ba6b37316b086699e2b367ae6e9c207ba1eedd5cc9b0b35b899af636a89cb9d"],
+        ["history", 1, "baseline", 200, 19.0, 46, 169.5, 285, 4880.5, 5375, 53.0, 72, 5146.0, 5679, "ea9819daa21bc08e7d32723bcdd478409199e0b1d505412c132c49a472060b04"],
+        ["history", 2, "baseline", 200, 30.0, 53, 211.0, 307, 5000.0, 5296, 65.0, 98, 5322.0, 5643, "3b0a4ea00be8a1ace675a5b6ccb0f704be070df09b88e364c123d44d5e6ab1e4"],
+        ["history", 2, "candidate", 200, 15.0, 29, 149.5, 239, 4211.5, 4644, 43.0, 66, 4445.5, 4891, "1962061487f81f793dfbdd5ea759601178a673a44c6c0dc2d87bd6e760073762"],
+        ["history", 3, "candidate", 200, 17.0, 40, 160.0, 266, 4260.0, 4637, 44.0, 79, 4507.0, 4954, "b07dba256b8de32bc8c51b7ab53e9f460593bac9588e8d354add1c78a0f3e48f"],
+        ["history", 3, "baseline", 200, 10.0, 17, 120.0, 163, 4816.0, 5420, 36.5, 51, 4996.0, 5590, "f0fd997ca2de454f3bdc2eae11ebef7e1e1892b1596880d87187d08ed81d95ba"]
+      ]
+    },
+    "current_source_ci": {
+      "run_id": 44526683530,
+      "revision": "8ba88f5a45288979f9d4afb262e0f3faee6555a4",
+      "jobs": [
+        {
+          "id": 135568999222,
+          "name": "Build and inspect image",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "id": 135581864830,
+          "name": "Qualify native recovery on three Kubernetes nodes",
+          "status": "completed",
+          "conclusion": "success"
+        }
+      ],
+      "artifacts": [
+        {
+          "id": 14535810042,
+          "name": "cellar-kubernetes-qualification-44526683530",
+          "size_in_bytes": 25949,
+          "digest": "sha256:7d80ecca806c7164bd2c9061afb4825b8456c8f6fc4ba46100a86ec2b5f22b19"
+        },
+        {
+          "id": 14534051137,
+          "name": "http-server-image-44526683530",
+          "size_in_bytes": 140277777,
+          "digest": "sha256:ff5ef915bccdd16fe883507db49109d6c9b60f94c25301dfe34cc38e49469d7f"
+        },
+        {
+          "id": 14532704063,
+          "name": "cellar-process-qualification-44526683530",
+          "size_in_bytes": 1620,
+          "digest": "sha256:3ea6c582ee8bc83eed35c540ad6cc6deec81625957245f34169c3cc0e76233d5"
+        },
+        {
+          "id": 14532369277,
+          "name": "container-setup-44526683530",
+          "size_in_bytes": 6787,
+          "digest": "sha256:253671e242e5cc4f54b45fc711c6ff8c42426f7c441270a2aca8c95c759fd86e"
+        }
+      ],
+      "receipt_sha256": "1d96a349e0381fc2af5005a603e4598638e9692bc65b95cb48174e5063fc4e29"
+    },
+    "ready_locator_close": {
+      "revision": "37002f85ce2",
+      "scope": "immediate close completes inline; pending close transfers to runtime before yielding; frozen acceptance matrix not rerun",
+      "source_sha256": "2b306ad14b3f27b0597532ed7f3313937b3f23c7eb58045d1cf17e1c085554ee",
+      "tests": {
+        "operation": 10,
+        "archive_cleanup": 3,
+        "strict_all_targets_clippy": "passed",
+        "red_regression_sha256": "7b95b02e01ba62732937c5b089fa97c13f8346875dda486942954d276b7eca7c",
+        "green_regression_sha256": "8b19e9cbdac153667471cf841caba65ca1ae3f9456b8f08a9610bd5a180a608a",
+        "archive_receipt_sha256": "150f19bee937d34c125c5624b59c2c81f2c780c9a67f79b12101a7e1c783b620",
+        "clippy_receipt_sha256": "f09610df88a378bf4be93a6cbc4d346c65cc211302838dcadc7d1cfa4885acd9"
+      },
+      "diagnostic_receipt_sha256": "1cc80a49a9331999fc34d600f4b35f06443fb7a444bb89359c5b3456c70c795c",
+      "build_receipt_sha256": "ec0588d7ca511dad210318120c5aab9f8742d3ef9d112935a688e726bcf3b8cf",
+      "native_git": {
+        "status": "passed",
+        "processes": 40,
+        "receipt_sha256": "3e4394d5f4782532a5431f6b7acf3c706de5312acff0177e8ba50fb61a666f9f"
+      },
+      "columns": ["operation", "repeat", "variant", "samples", "open_p50_us", "open_p95_us", "snapshot_p50_us", "snapshot_p95_us", "query_p50_us", "query_p95_us", "finish_p50_us", "finish_p95_us", "total_p50_us", "total_p95_us", "receipt_sha256"],
+      "rows": [
+        ["blame", 0, "baseline", 200, 8.0, 15, 116.0, 149, 105.0, 121, 31.0, 45, 263.0, 319, "e41001dc8df87da863d4e1f3fa1339cd8e6fb95b8e4ba8ea79346f9f3873700e"],
+        ["blame", 0, "candidate", 200, 8.0, 13, 107.0, 121, 100.0, 111, 8.0, 12, 225.0, 248, "713001f647d506840aec47a331bb3346de67b913fffa55ece7f7e655d5193a1a"],
+        ["blame", 1, "candidate", 200, 9.0, 14, 103.0, 125, 99.0, 111, 8.0, 13, 220.0, 254, "a180306cb1b979e341c2bf72347c44d53ea8039392aac96b96998324e35f86f7"],
+        ["blame", 1, "baseline", 200, 10.0, 18, 132.0, 178, 117.0, 142, 34.0, 50, 297.0, 373, "0ac189c610ded4d3ce451bedd0b967ede4d6389f4f056f2dcf75d50ad6b57311"],
+        ["blame", 2, "baseline", 200, 10.0, 21, 146.0, 211, 129.0, 172, 38.5, 55, 330.0, 428, "7cffbec838ec7721ce136352a67c9183bd81777a609e0e975e2b190b38fd939e"],
+        ["blame", 2, "candidate", 200, 7.0, 9, 100.0, 113, 94.0, 105, 7.0, 8, 209.0, 234, "133525b183dca78dc79487b29db9daf69ebc5e32c9592f6c4c76070a6e375a22"],
+        ["blame", 3, "candidate", 200, 7.0, 10, 103.0, 118, 97.0, 105, 7.0, 9, 216.0, 233, "79d39b1bbfd2282aa5455ecd131a3aee89f8c3903040de89d4416f2fe34fec91"],
+        ["blame", 3, "baseline", 200, 7.0, 10, 107.0, 128, 98.5, 113, 27.5, 37, 239.5, 281, "f515e4c15b12cdb9cf77e9e22d000ef54fc3c1115ec1d0d98a72dcebb674d1e6"],
+        ["blob", 0, "baseline", 200, 8.0, 10, 102.0, 120, 67.0, 81, 27.0, 35, 205.0, 239, "7605dc2874eb63e4d7dc895f6ac0371f4847fb57178632e61f9f8f299d19111b"],
+        ["blob", 0, "candidate", 200, 7.0, 11, 105.0, 116, 67.0, 76, 7.0, 10, 187.0, 211, "1ceb3b69784ccf2115263c6e6b8124c2a60ae6bef9fe0f7b4a126d7417bd8e12"],
+        ["blob", 1, "candidate", 200, 7.0, 10, 105.0, 116, 67.0, 78, 7.0, 10, 187.0, 207, "84889e0fef39379034ef846cfee13445d6e002217d38deffb730e37dd8541a66"],
+        ["blob", 1, "baseline", 200, 7.0, 11, 102.0, 126, 67.0, 80, 25.5, 33, 204.5, 248, "401de101e962abd2c605ab895de97fc5fb420c20aebab4afc5aa8528f4a0a157"],
+        ["blob", 2, "baseline", 200, 7.0, 11, 104.0, 121, 69.5, 81, 25.0, 36, 206.0, 248, "9a357aa2c95a18f6ab7a5f2e0bad134a502f81b4038f8f9bf40a762b7ccf6326"],
+        ["blob", 2, "candidate", 200, 7.0, 9, 105.0, 116, 67.0, 77, 7.0, 10, 187.0, 208, "05f631f55678ee03b12528fac0ac1ba161f7f3ba2f529f38b3df88fb74a710a1"],
+        ["blob", 3, "candidate", 200, 7.0, 10, 106.0, 116, 67.0, 78, 7.0, 10, 187.0, 206, "b9d7a509d81089b1320b5de3b60193744132d02549bf94d01ee419e0a04dc265"],
+        ["blob", 3, "baseline", 200, 7.0, 11, 103.0, 126, 67.0, 80, 26.0, 36, 204.0, 239, "a60eedd2ec33ea4f4995713a571c916d5fc170540e7e913411b132733a45bbcf"],
+        ["resolve", 0, "baseline", 200, 7.0, 8, 102.0, 114, 20.0, 25, 24.0, 31, 155.0, 176, "0935aa1ec719a0e9569f4b5249d811f3ad4c5e2a063c8ccf427c4e779228e479"],
+        ["resolve", 0, "candidate", 200, 7.0, 10, 105.0, 114, 21.0, 25, 6.0, 8, 140.0, 155, "6801aaad9f4dd7ea90838b073cf2546c8de411d49712b09c0fa85300abf96c0f"],
+        ["resolve", 1, "candidate", 200, 10.0, 13, 107.0, 131, 23.0, 28, 8.0, 11, 148.0, 184, "75303ed551304b918014569136c519f2133229146a5ee4d24fd296a5199c1fa0"],
+        ["resolve", 1, "baseline", 200, 8.0, 13, 115.0, 148, 23.0, 28, 32.0, 42, 181.0, 228, "498df6556c1f9ee3ce9e04c1e42cc792b222ec7cc3e381f0979e011362780340"],
+        ["resolve", 2, "baseline", 200, 7.0, 9, 102.0, 118, 20.0, 25, 25.0, 33, 157.0, 181, "d18aa10e3f89aa8a2c07f881bd54db52057f86bc6be942ff670d66de38f778ce"],
+        ["resolve", 2, "candidate", 200, 7.0, 11, 104.0, 115, 21.0, 25, 6.0, 10, 140.0, 157, "cd2bf3a9dda14f7f1be61b71d54d612c3674764d91bab8e60962d3a0f72b5730"],
+        ["resolve", 3, "candidate", 200, 10.0, 20, 116.5, 195, 25.0, 39, 9.0, 17, 161.0, 265, "e50d2606ecc2b29bb99306336643b0a0f1978e100dfaef9cb2eda8a6e571ad17"],
+        ["resolve", 3, "baseline", 200, 13.0, 24, 156.0, 250, 33.0, 48, 43.0, 71, 246.5, 384, "888bedd69ed492e0774274607d7a6af6f147d3d3db55b0f590059cddf5dcf69d"],
+        ["tree", 0, "baseline", 200, 9.0, 15, 123.5, 167, 413.0, 465, 35.0, 49, 582.5, 681, "7843e8542265120ef01d97074e6e6def3a61fb803073778b98b6cef8a050067e"],
+        ["tree", 0, "candidate", 200, 11.0, 21, 128.5, 183, 422.0, 498, 10.0, 18, 586.0, 716, "eb30abac6a48f56d0b15e6ecd03e564068cfe3db70272d67cbd13a4654bf0ca8"],
+        ["tree", 1, "candidate", 200, 12.0, 32, 131.0, 248, 428.5, 532, 11.0, 23, 586.0, 806, "d72fe69954f65b742d925069a64186af7f709d8a0b64c8b5f0e4cf52506b8309"],
+        ["tree", 1, "baseline", 200, 7.0, 12, 112.0, 146, 383.0, 430, 30.0, 41, 541.0, 612, "2fccf04c72616b5ee35a06a7d6fe42017b43aa35c99ac7dfeb72cdf14cdd2d91"],
+        ["tree", 2, "baseline", 200, 11.0, 26, 137.0, 201, 423.0, 472, 39.0, 61, 622.5, 721, "2fdef981a4113d29727970e60d025e7bef5f275b0de63bd84efe2ac489213afd"],
+        ["tree", 2, "candidate", 200, 10.0, 18, 129.5, 178, 435.5, 487, 10.0, 15, 592.0, 675, "e788b805a95d2d4d8270cebadbcf6824b2a312c1125c77e792c6b0b4690f9f87"],
+        ["tree", 3, "candidate", 200, 10.0, 18, 117.0, 166, 396.0, 467, 9.0, 15, 544.5, 642, "892875aa057a653bf8586ea4fff52458fd5f9ae01fc188ae8aa79bfe4c501095"],
+        ["tree", 3, "baseline", 200, 8.0, 13, 113.0, 152, 380.0, 412, 30.0, 42, 533.0, 612, "aab8e4fcd03fe4a80aab42f34481152b292c2ea507614eda0f9123fbda726ef7"],
+        ["history", 0, "baseline", 200, 8.0, 13, 114.0, 147, 4635.5, 4972, 32.0, 47, 4794.5, 5146, "0d409c86769536c087535e9fb829a535c6f8039ccc204292721e13a3ce1d48c2"],
+        ["history", 0, "candidate", 200, 10.0, 18, 116.0, 169, 4001.5, 4392, 10.0, 21, 4147.5, 4554, "96fccfdd81d2c8536c53f3815a5b7b4e5b26df9318627cf2babb4feb072c9a3c"],
+        ["history", 1, "candidate", 200, 12.0, 28, 128.0, 221, 4225.0, 5217, 11.0, 19, 4385.5, 5479, "f39437c613a243188cdf3c55bba679324cba2d747079315b79a5fd0960fa8877"],
+        ["history", 1, "baseline", 200, 11.0, 16, 126.0, 186, 4835.5, 5323, 34.0, 55, 5000.0, 5528, "ea37722c1e893dd7f9a20fc9afeea5e93ce7e66cc41fc0326ae92623eb902aa0"],
+        ["history", 2, "baseline", 200, 10.0, 24, 126.0, 222, 4800.5, 5265, 36.0, 67, 4978.5, 5477, "f7de147792835b2d894e70e24ea27c482b9e0b46b3cfbe8c9cbb474ee1126b55"],
+        ["history", 2, "candidate", 200, 14.0, 23, 136.0, 213, 4207.0, 4384, 14.0, 31, 4386.5, 4607, "9f08df672eeafd084e116d2ae4583e007e30c0a7c78e35325132c29644e1ddec"],
+        ["history", 3, "candidate", 200, 16.0, 33, 148.5, 233, 4129.5, 4497, 13.0, 22, 4306.0, 4731, "d706033e346e05dcb4e570467503523ffcd9f823f622ec9b0545538801dcfe3b"],
+        ["history", 3, "baseline", 200, 16.0, 33, 158.0, 237, 4854.0, 5297, 42.5, 67, 5081.5, 5548, "bd659233440a71e0fbeaaa222eb349e0b3fe286d6359fb72ee4e59e6a05d1d2c"]
+      ]
+    }
+  }
 }
