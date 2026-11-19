@@ -22,6 +22,8 @@ macOS automatic update installation requires a future signed release.
   durable child transcripts and full-text output access.
 - Added complex workflow editing and execution, resizable Workflow Studio
   panels, local runs, and restored workflow output.
+- Added a Results workspace for comparing captured workflow runs, metrics,
+  curves, and retained evidence, with matching CLI and server access.
 - Kept editor controls responsive during language-server version discovery and
   cancelled pending probes during shutdown.
 - Simplified workspace, repository, Explorer, Search, and Git navigation;
