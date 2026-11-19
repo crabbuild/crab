@@ -43,6 +43,10 @@ async fn metadata_preview_omits_payload_without_guessing_encoding() {
     large_non_utf8[0] = 0xff;
     let boundary = vec![b'x'; MIB];
     let over_boundary = vec![b'x'; MIB + 1];
+    let mut over_binary = over_boundary.clone();
+    over_binary[0] = 0;
+    let mut over_non_utf8 = over_boundary.clone();
+    over_non_utf8[0] = 0xff;
     let crab_pointer = b"version https://crab.dev/spec/v1\nfile-hash 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\nsize 4294967296\n";
     let lfs_pointer = b"version https://git-lfs.github.com/spec/v1\noid sha256:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\nsize 8589934592\n";
     let entries = [
@@ -51,6 +55,8 @@ async fn metadata_preview_omits_payload_without_guessing_encoding() {
         ("large-non-utf8", 0o100644, large_non_utf8.as_slice()),
         ("boundary", 0o100644, boundary.as_slice()),
         ("over-boundary", 0o100644, over_boundary.as_slice()),
+        ("over-binary", 0o100644, over_binary.as_slice()),
+        ("over-non-utf8", 0o100644, over_non_utf8.as_slice()),
         ("empty", 0o100644, b"".as_slice()),
         ("text", 0o100644, "UTF-8 ✓\n".as_bytes()),
         ("binary", 0o100644, b"a\0b".as_slice()),
@@ -370,22 +376,31 @@ async fn metadata_preview_omits_payload_without_guessing_encoding() {
         Err(Error::Cancelled)
     ));
 
-    let legacy: Value = http
-        .get(format!(
-            "{origin}/api/repos/team/repo/file?rev={commit}&path=over-boundary"
-        ))
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(
-        (legacy["text"].clone(), legacy["text_truncated"].clone()),
-        (Value::Null, Value::Bool(true))
-    );
+    // The tagged endpoint promises inspected UTF-8 truncation. The new
+    // preview route owns omission without decoding; it cannot redefine this.
+    for (name, truncated) in [
+        ("over-boundary", true),
+        ("over-binary", false),
+        ("over-non-utf8", false),
+    ] {
+        let legacy: Value = http
+            .get(format!(
+                "{origin}/api/repos/team/repo/file?rev={commit}&path={name}"
+            ))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            (legacy["text"].clone(), legacy["text_truncated"].clone()),
+            (Value::Null, Value::Bool(truncated)),
+            "{name}"
+        );
+    }
     let missing = http
         .get(format!(
             "{origin}/api/repos/team/repo/file-preview?rev={commit}&path=absent"

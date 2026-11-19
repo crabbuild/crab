@@ -837,6 +837,54 @@ soaks; no new timing pass is claimed. Physical-source fixtures now independently
 verify 2/5/17 source objects, the same final Git history and refs, and zero
 pending frontier transactions. Their timing remains pending.
 
+
+
+### Latest integration and naturally aged read retention
+
+The branch integrates `crab-v2` commit `725ab53a3c0`. Its separate 256 MiB raw
+allowance remains. The new metadata size branch on `/file` conflicted with the
+`v2.0.0-alpha.1` inspected-UTF-8 truncation contract: a real binary regression
+fails before the dispatcher fix and passes after it. Metadata omission uses the
+canonical `file-preview` route. The redundant `/file` metadata adapter is removed;
+the upstream low-object-limit metadata test now exercises that canonical route.
+Fifteen API tests, seventeen browse tests, strict server all-target Clippy,
+UI typecheck/production build, 35 UI unit tests and ten browser tests pass.
+The rebuilt integrated release retains its own complete source/input binding.
+
+A real RustFS lifecycle sequence passes twelve checks and forty fresh native
+Git query oracles. A cold reader is held across a mode-only change plus an
+unrelated addition, deletion, recreation, a fifty-commit force rewind, index
+replacement and actual repository-scoped GC. Its original object-index body is
+naturally more than an hour old; no provider timestamp or metadata is fabricated.
+The old body remains byte-identical. Only after GC does the held capture open its
+Git reader and perform blob, path-history and directory-attribution queries;
+all equal the original hundred-commit Git snapshot and drain backend work.
+The first fixture's index/worktree execute-bit mismatch is retained separately;
+the successful sequence uses a different untouched aged fixture.
+
+The catalog-revalidation release completes both original 22-case HTTP phases
+and both 600-second soaks. R0/candidate soaks complete 647,299/700,995 successful
+requests, at about 1,079/1,168 requests/s, with preview p95 22.63/24.23 ms.
+Both soaks pass relative controls; every Git check passes, resource plateaus
+pass and all four processes exit zero. The candidate retains 102 timing failures
+across the short cases. An unrelated Rust compilation consuming about five
+cores was observed during that phase; its process/resource receipt is retained.
+This observation does not waive failures or establish their sole cause.
+Three alternating rounds of every original short case, with continuous compiler
+monitoring, are prepared for the integrated release. Native release growth and
+the current-image minimum profile remain pending; combined acceptance stays open.
+
+Twelve completed old request journals are losslessly archived with original and
+compressed hashes, verified by decompression. Their reports, failed gates,
+thresholds, logs and source bindings remain unchanged.
+
+The rebuilt post-`725ab53a3c0` release additionally passes all 54 two-replica
+RustFS smoke checks: 9 MiB raw content equals Git under the upstream allowance;
+the tagged `/file` JSON budget still rejects it. Preview/Git parity, fresh
+catalog denial before cached `304`, real disconnect/drain, Chromium 200/304/401,
+durable logout and native Directory checks pass. Both replicas exit zero with
+complete actual durability fields and zero pending work.
+
 ### R0 — Freeze the evidence contract and establish a baseline
 
 **Scope:** `crates/crab-remote/examples/qualify_remote.rs`, its `support/` owners;

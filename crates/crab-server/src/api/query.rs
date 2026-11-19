@@ -1,9 +1,8 @@
 use super::{
     Action, Parameters, Payload,
     representation::{
-        MAX_INLINE_TEXT_BYTES, commit_json, commit_summary_json, content_json, display_path,
-        encode_cursor, encode_hex, entry_json, file_json, json_attribution_summary,
-        path_history_json,
+        commit_json, commit_summary_json, content_json, display_path, encode_cursor, encode_hex,
+        entry_json, json_attribution_summary, path_history_json,
     },
 };
 use crate::{repository::projection, server::Server};
@@ -271,16 +270,10 @@ pub(super) async fn execute(
             Action::Asset => {
                 return Ok(Payload::Asset(snapshot.read_blob(&path, &operation).await?));
             }
-            Action::File => {
-                let metadata = snapshot.blob_metadata(&path, &operation).await?;
-                // The viewer needs identity and size before choosing a parser.
-                // Do not inflate large bodies just to discard their inline text.
-                if metadata.git_size > MAX_INLINE_TEXT_BYTES as u64 {
-                    file_json(&metadata, None, true)
-                } else {
-                    content_json(&snapshot.read_blob(&path, &operation).await?)
-                }
-            },
+            // The released truncation flag requires inspected UTF-8. Metadata
+            // omission belongs to file-preview; guessing here changes clients'
+            // binary/encoding behavior even when the JSON shape stays the same.
+            Action::File => content_json(&snapshot.read_blob(&path, &operation).await?),
             Action::Changes | Action::Diff => {
                 let base_revision = params.base.as_deref().map(Revision::parse).transpose()?
                     .or_else(|| commit.parents.first().copied().map(Revision::Commit));
