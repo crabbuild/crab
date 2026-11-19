@@ -42,15 +42,10 @@ pub fn run_lfs_update_in(root: &Path, force: bool, manual: bool) -> Result<()> {
 fn print_manual_instructions(bin: &str) {
     println!("Run the following commands to update LFS configuration:");
     println!();
-    println!("  git config --local lfs.customtransfer.crab.path \"{bin}\"");
-    println!("  git config --local lfs.customtransfer.crab.args lfs-transfer-agent");
-    println!("  git config --local lfs.customtransfer.crab.concurrent true");
-    println!("  git config --local lfs.customtransfer.crab.direction both");
-    println!("  git config --local lfs.standalonetransferagent crab");
-    println!("  git config --local filter.lfs.clean \"{bin} lfs clean -- %f\"");
-    println!("  git config --local filter.lfs.smudge \"{bin} lfs smudge -- %f\"");
-    println!("  git config --local filter.lfs.process \"{bin} lfs filter-process\"");
-    println!("  git config --local filter.lfs.required true");
+    for (key, value) in super::install::lfs_config(bin, false) {
+        let argument = gix_quote::single(value.as_bytes().into());
+        println!("  git config --local {key} {argument}");
+    }
     println!();
     println!("Replace pre-push in the directory printed by:");
     println!("  git rev-parse --git-path hooks");
@@ -62,22 +57,7 @@ fn print_manual_instructions(bin: &str) {
 
 /// Update the transfer agent config entries to the current binary path.
 fn update_config(root: &Path, bin: &str) -> Result<()> {
-    let configs = [
-        ("lfs.customtransfer.crab.path", bin.to_owned()),
-        (
-            "lfs.customtransfer.crab.args",
-            "lfs-transfer-agent".to_owned(),
-        ),
-        ("lfs.customtransfer.crab.concurrent", "true".to_owned()),
-        ("lfs.customtransfer.crab.direction", "both".to_owned()),
-        ("lfs.standalonetransferagent", "crab".to_owned()),
-        ("filter.lfs.clean", format!("{bin} lfs clean -- %f")),
-        ("filter.lfs.smudge", format!("{bin} lfs smudge -- %f")),
-        ("filter.lfs.process", format!("{bin} lfs filter-process")),
-        ("filter.lfs.required", "true".to_owned()),
-    ];
-
-    for (key, value) in configs {
+    for (key, value) in super::install::lfs_config(bin, false) {
         let output = Command::new("git")
             .args(["config", "--local", key, &value])
             .current_dir(root)

@@ -30,6 +30,8 @@ macOS automatic update installation requires a future signed release.
   across reconnects and recovering stale daemon owners.
 - Fixed forced terminal shutdown on Windows so foreground console programs are
   reaped with their shell.
+- Quoted installed Git filter commands so paths with spaces, quotes,
+  and Windows separators launch the selected Crab executable.
 - Identified the selected kernel executable and working directory in notebook
   launch failures, including opaque Windows process errors.
 - Kept file context menus within the viewport and docked Activity below the
