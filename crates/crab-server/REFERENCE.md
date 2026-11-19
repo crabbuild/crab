@@ -2443,11 +2443,13 @@ and a resident-cell limit derived from process memory and file descriptors.
 is not a throughput or production-scale qualification.
 
 Browser blob reads allow up to 256 MiB per Git object and raw/inline-asset
-response; JSON responses retain their separate 8 MiB cap. File-info requests
-read blob metadata first. Above the 1 MiB inline-text threshold they return the
-size, identity and classification without decoding the full body, with
-`text: null` and `text_truncated: true`. Raw/range requests still verify the Git object
-before returning bytes; this is not an unbounded server-side streaming reader.
+response; JSON responses retain their separate 8 MiB cap. The `file-preview`
+endpoint reads metadata first and returns `preview.state: omitted_size` above
+1 MiB without guessing text encoding. The first-party viewer uses this endpoint.
+The tagged `file` endpoint retains full inspection within its operation budget:
+`text_truncated` is true only for inspected UTF-8 omitted because of size.
+Raw/range requests still verify the Git object before returning bytes; this is
+not an unbounded server-side streaming reader.
 CSV/TSV workbenches above their 50 MiB normalization budget keep HTTP scans;
 whole-file browser parsers retain their independent 50 MiB limit.
 

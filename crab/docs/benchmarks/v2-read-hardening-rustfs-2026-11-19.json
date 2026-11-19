@@ -4895,5 +4895,280 @@
         "main_commits": 100
       }
     ]
+  },
+  "integrated_followup": {
+    "status": "functional_lifecycle_passed_performance_not_accepted",
+    "integrated_base": "725ab53a3c00e37c48e4702393080d9c09554fb4",
+    "catalog_sequential_matrix": {
+      "scope": "Source-bound catalog release from the preceding base; same original 22 cases, roots, provider limits and thresholds. Foreign compilation was observed during candidate short cases; failures remain retained and have not been cleared.",
+      "status": "failed_engineering_gates",
+      "summary_sha256": "0fd5db30ba6cbc88cdeb0208a6ec2b5e5dab9267a66f395f3d8e7a299f1aa7db",
+      "foreign_contention_receipt_sha256": "f62f519f2f0b55ef496a8293c0954083121a05b12b89be7ad6419bd40dbec229",
+      "variants": {
+        "baseline": {
+          "report_sha256": "49946b37dd035cffb8865e271fcf083ce343a5bacbcb50c7539bbc4e3c43b802",
+          "status": "measured",
+          "failures": [],
+          "exit_codes": [
+            0,
+            0
+          ],
+          "resource_failures": [],
+          "soak": {
+            "successes": 647299,
+            "errors": 0,
+            "successful_rps": 1078.7379085352736,
+            "preview_p95_us": 22630.0
+          }
+        },
+        "candidate": {
+          "report_sha256": "7aec1fa014def77c82dc9713c763d4ea66f0d5bde06e2956bec0d6a6264b2ac0",
+          "status": "failed",
+          "failures": [
+            "small-1:preview:p95_regression",
+            "mixed-1:preview:p95_regression",
+            "distinct-1:preview-distinct:p95_regression",
+            "distinct-1:preview-distinct:throughput_regression",
+            "distinct-1:history:p95_regression",
+            "distinct-1:history:throughput_regression",
+            "distinct-1:raw-distinct:p95_regression",
+            "distinct-1:raw-distinct:throughput_regression",
+            "distinct-1:blame-distinct:p95_regression",
+            "distinct-1:blame-distinct:throughput_regression",
+            "distinct-1:late-history:p95_regression",
+            "distinct-1:late-history:throughput_regression",
+            "small-8:preview:p95_regression",
+            "small-8:preview:throughput_regression",
+            "expensive-8:blame:p95_regression",
+            "expensive-8:blame:throughput_regression",
+            "expensive-8:late-history:p95_regression",
+            "expensive-8:late-history:throughput_regression",
+            "expensive-8:raw:p95_regression",
+            "expensive-8:raw:throughput_regression",
+            "mixed-8:preview:p95_regression",
+            "mixed-8:preview:throughput_regression",
+            "mixed-8:history:p95_regression",
+            "mixed-8:history:throughput_regression",
+            "mixed-8:raw:p95_regression",
+            "mixed-8:raw:throughput_regression",
+            "mixed-8:blame:p95_regression",
+            "mixed-8:blame:throughput_regression",
+            "mixed-8:late-history:p95_regression",
+            "mixed-8:late-history:throughput_regression",
+            "distinct-8:preview-distinct:p95_regression",
+            "distinct-8:preview-distinct:throughput_regression",
+            "distinct-8:history:p95_regression",
+            "distinct-8:history:throughput_regression",
+            "distinct-8:raw-distinct:p95_regression",
+            "distinct-8:raw-distinct:throughput_regression",
+            "distinct-8:blame-distinct:p95_regression",
+            "distinct-8:blame-distinct:throughput_regression",
+            "distinct-8:late-history:p95_regression",
+            "distinct-8:late-history:throughput_regression",
+            "small-16:preview:p95_regression",
+            "small-16:preview:throughput_regression",
+            "expensive-16:blame:p95_regression",
+            "expensive-16:blame:throughput_regression",
+            "expensive-16:late-history:p95_regression",
+            "expensive-16:late-history:throughput_regression",
+            "expensive-16:raw:p95_regression",
+            "expensive-16:raw:throughput_regression",
+            "mixed-16:preview:p95_regression",
+            "mixed-16:preview:throughput_regression",
+            "mixed-16:history:p95_regression",
+            "mixed-16:history:throughput_regression",
+            "mixed-16:raw:p95_regression",
+            "mixed-16:raw:throughput_regression",
+            "mixed-16:blame:p95_regression",
+            "mixed-16:blame:throughput_regression",
+            "mixed-16:late-history:p95_regression",
+            "mixed-16:late-history:throughput_regression",
+            "distinct-16:preview-distinct:p95_regression",
+            "distinct-16:preview-distinct:throughput_regression",
+            "distinct-16:history:p95_regression",
+            "distinct-16:history:throughput_regression",
+            "distinct-16:raw-distinct:p95_regression",
+            "distinct-16:raw-distinct:throughput_regression",
+            "distinct-16:blame-distinct:p95_regression",
+            "distinct-16:blame-distinct:throughput_regression",
+            "distinct-16:late-history:p95_regression",
+            "distinct-16:late-history:throughput_regression",
+            "small-32:preview:p95_regression",
+            "small-32:preview:throughput_regression",
+            "expensive-32:blame:p95_regression",
+            "expensive-32:blame:throughput_regression",
+            "expensive-32:late-history:p95_regression",
+            "expensive-32:late-history:throughput_regression",
+            "expensive-32:raw:p95_regression",
+            "expensive-32:raw:throughput_regression",
+            "mixed-32:preview:p95_regression",
+            "mixed-32:preview:throughput_regression",
+            "mixed-32:history:p95_regression",
+            "mixed-32:history:throughput_regression",
+            "mixed-32:raw:p95_regression",
+            "mixed-32:raw:throughput_regression",
+            "mixed-32:blame:p95_regression",
+            "mixed-32:blame:throughput_regression",
+            "mixed-32:late-history:p95_regression",
+            "mixed-32:late-history:throughput_regression",
+            "distinct-32:preview-distinct:p95_regression",
+            "distinct-32:preview-distinct:throughput_regression",
+            "distinct-32:history:p95_regression",
+            "distinct-32:history:throughput_regression",
+            "distinct-32:raw-distinct:p95_regression",
+            "distinct-32:raw-distinct:throughput_regression",
+            "distinct-32:blame-distinct:p95_regression",
+            "distinct-32:blame-distinct:throughput_regression",
+            "distinct-32:late-history:p95_regression",
+            "distinct-32:late-history:throughput_regression",
+            "small-64:preview:throughput_regression",
+            "expensive-64:blame:throughput_regression",
+            "expensive-64:late-history:throughput_regression",
+            "expensive-64:raw:throughput_regression",
+            "small-distinct-16:preview-distinct:p95_regression",
+            "small-distinct-16:preview-distinct:throughput_regression"
+          ],
+          "exit_codes": [
+            0,
+            0
+          ],
+          "resource_failures": [],
+          "soak": {
+            "successes": 700995,
+            "errors": 0,
+            "successful_rps": 1167.5077931908736,
+            "preview_p95_us": 24230.5
+          }
+        }
+      }
+    },
+    "naturally_aged_lifecycle": {
+      "status": "passed",
+      "checks": 12,
+      "report_sha256": "6d595d747389bf1b081abd065e6158cb05fc3539ac73179daa4d38a60c8cf905",
+      "native_binding_sha256": "5399a47a23f151fba739bd8fa43a034b312960237f7f4fda94bd7e9586de977c",
+      "native_current_input_equivalence_sha256": "08b9c5d05cfa43285c08c2e1f4901115130fa1631526ddd4e7dc2c866a442d8c",
+      "naturally_aged_index": {
+        "key": "e2e-add-commit-push/growth-retry-20261119/frontier-16/metadata/git-object-index/layers/e0e970ebf5d179e2b566cf90205d1361e3dd2532ab663417a40b583bfac5bc39.bin",
+        "last_modified": "2026-11-19T16:41:59+00:00",
+        "age_seconds": 22778.345018,
+        "size": 37528,
+        "etag": "\"eb9de06f61095eab5416dc831bdad5e9\""
+      },
+      "checks_detail": [
+        {
+          "name": "captured-index-body-older-than-one-hour",
+          "passed": true
+        },
+        {
+          "name": "cold-capture-pins-original-tip",
+          "passed": true
+        },
+        {
+          "name": "deleted-path-fails-with-path-not-found",
+          "passed": true
+        },
+        {
+          "name": "deleted-path-failure-drains-provider-work",
+          "passed": true
+        },
+        {
+          "name": "aged-captured-index-retained-through-gc",
+          "passed": true
+        },
+        {
+          "name": "captured-reader-exits-cleanly",
+          "passed": true
+        },
+        {
+          "name": "captured-reader-completes-all-three-cold-queries",
+          "passed": true
+        },
+        {
+          "name": "captured-blob-is-byte-identical-to-old-git",
+          "passed": true
+        },
+        {
+          "name": "captured-path-history-equals-old-git",
+          "passed": true
+        },
+        {
+          "name": "captured-attribution-selects-old-git-tree",
+          "passed": true
+        },
+        {
+          "name": "captured-last-change-attribution-equals-old-git",
+          "passed": true
+        },
+        {
+          "name": "captured-cold-queries-drain-provider-work",
+          "passed": true
+        }
+      ],
+      "native_git_oracles": {
+        "initial-native-git": {
+          "status": "passed",
+          "head": "f1043c37c10102a94f3c9ac2fb4fdbf029a4ef98",
+          "queries_checked": 10,
+          "blame_lines_checked": 50
+        },
+        "mode-native-git": {
+          "status": "passed",
+          "head": "2a78089c91671f65f60847d177a3e6e841c3c72d",
+          "queries_checked": 10,
+          "blame_lines_checked": 50
+        },
+        "recreate-native-git": {
+          "status": "passed",
+          "head": "07d31a46eb05b698aea7dd5b88e89d0d774f8386",
+          "queries_checked": 10,
+          "blame_lines_checked": 2
+        },
+        "force-rewind-native-git": {
+          "status": "passed",
+          "head": "6d27b39e50f80bbdd7ee651bccc03aff9c3f8222",
+          "queries_checked": 10,
+          "blame_lines_checked": 50
+        }
+      },
+      "scope": "Canonical ordinary/force push, mode/delete/recreate, cold captured derived reads across real repository GC of naturally aged RustFS objects; no bucket GC or timestamp overrides",
+      "retained_setup_failure": "First mode fixture changed the index without changing the worktree execute bit; git rm refused that local change. The corrected driver uses a separate untouched aged namespace and real file mode. No timing samples used this setup."
+    },
+    "upstream_integration": {
+      "released_contract": "v2.0.0-alpha.1 /file truncation means inspected UTF-8. The upstream uninspected size branch reproduces a binary-classification regression. Keep the canonical metadata-only file-preview route and upstream separate raw allowance.",
+      "red_receipt_sha256": "cc70a15c210106fee6b40869c3666d5b3229e35e0be5443938593dd4dc637caf",
+      "green_checks": {"api_tests":15,"browse_tests":17,"strict_server_all_target_clippy":"passed","ui_unit_tests":35,"ui_browser_tests":10,"ui_typecheck_and_build":"passed","source_bound_release_build":"passed"}
+    },
+    "lossless_completed_journal_archives": {
+      "manifest_sha256": "487bcbcebc86024d4b25166b23d6d26149abbba38bf381df9ed2cff67cc08d2d",
+      "scope": "Twelve completed old request journals retained as verified gzip archives with original hashes; 3,265,426,992 bytes reclaimed. Reports, failures, thresholds, logs, source bindings and current journals unchanged."
+    },
+    "remaining": "Green integrated build/functional proof, quiet matched controls, native release matrix/growth and current integrated minimum-image proof remain open."
+  },
+  "post_725ab_live_smoke": {
+    "status": "passed",
+    "checks": 54,
+    "report_sha256": "fa3b9251aa0b90ad0af6de88cef95a1fc5d2761466572dd92bf1da920d5b4d4e",
+    "build_receipt_sha256": "e82bfc4953e784c8eddec88ee4813287b1581d59018ecb3af065da59092dfc61",
+    "source_revision": "5e0c164024860f6d1fcbabce6744ee7e4a155b20",
+    "source_patch_sha256": "ae0743529a8fa27415bec01d9cf782d2cbf4e5909d183c84b9a02f275e6b8771",
+    "server_binary_sha256": "f228f67e134476462acfdbabe4c8533a490a70c488c598c85c7f7600d37e86d1",
+    "exit_codes": [
+      0,
+      0
+    ],
+    "shutdown_proofs": [
+      {
+        "replica": "a",
+        "valid": true,
+        "actual_line": "2026-11-19T23:13:42.562257Z  INFO Cellar shutdown proof complete=true log_quiesced=true local_durability_closed=true clean_reload_prepared=true pending_application_events=0 pending_dispatches=0 deadline_elapsed=false"
+      },
+      {
+        "replica": "b",
+        "valid": true,
+        "actual_line": "2026-11-19T23:13:41.428086Z  INFO Cellar shutdown proof complete=true log_quiesced=true local_durability_closed=true clean_reload_prepared=true pending_application_events=0 pending_dispatches=0 deadline_elapsed=false"
+      }
+    ],
+    "scope": "Both actual replicas; 9 MiB raw byte identity under upstream allowance, tagged /file budget, preview/CRC/Git parity, fresh catalog denial before 304, real disconnect/drain, Chromium wire 200/304/401, durable logout and Directory ready"
   }
 }
