@@ -757,6 +757,19 @@ impl RemoteGitReader {
         budget: &OperationBudget,
         cancellation: &CancellationToken,
     ) -> Result<RemoteGitObjectMetadata> {
+        let key = crate::runtime::ObjectCacheKey::new(&self.identity, self.generation, requested);
+        // Metadata does not reconstruct a body or apply its decoded-size limit.
+        // Recheck a retained object's hash instead of rereading its packed CRC.
+        if let Some(object) = self
+            .verified_cached_object(&key, u64::MAX, cancellation)
+            .await?
+        {
+            return Ok(RemoteGitObjectMetadata {
+                oid: object.oid,
+                kind: object.kind,
+                size: object.data.len() as u64,
+            });
+        }
         let locator = self
             .locate(session, requested, budget, cancellation)
             .await?;
@@ -811,13 +824,20 @@ impl RemoteGitReader {
         budget: &OperationBudget,
         cancellation: &CancellationToken,
     ) -> Result<GitObject> {
-        let locator = self
-            .locate(session, requested, budget, cancellation)
-            .await?;
         let maximum = self
             .limits
             .max_object_bytes
             .max(crab_git::MAX_LFS_POINTER_SIZE as u64);
+        let key = crate::runtime::ObjectCacheKey::new(&self.identity, self.generation, requested);
+        if let Some(object) = self
+            .verified_cached_object(&key, maximum, cancellation)
+            .await?
+        {
+            return Ok(object.as_ref().clone());
+        }
+        let locator = self
+            .locate(session, requested, budget, cancellation)
+            .await?;
         self.read_resolved_locator(session, requested, locator, maximum, budget, cancellation)
             .await
     }
@@ -4897,43 +4917,143 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cached_metadata_avoids_origin_reads_and_keeps_pointer_body_limits() {
+        for size in [4, crab_git::MAX_LFS_POINTER_SIZE + 1] {
+            let runtime = Arc::new(RemoteGitRuntime::default());
+            let identity = RepositoryIdentity::new("provider", "repository", 1).unwrap();
+            let data = Bytes::from(vec![b'x'; size]);
+            let oid = gix_object::compute_hash(gix_hash::Kind::Sha1, gix_object::Kind::Blob, &data)
+                .unwrap();
+            let key = crate::runtime::ObjectCacheKey::new(&identity, 1, oid);
+            runtime
+                .insert_object(
+                    key,
+                    Arc::new(GitObject {
+                        oid,
+                        kind: gix_object::Kind::Blob,
+                        data: data.clone(),
+                    }),
+                )
+                .await;
+            let reader = Arc::new(
+                RemoteGitReader::from_pinned(
+                    Store::new(Arc::new(InMemory::new())),
+                    "repository",
+                    [],
+                    ReaderLimits {
+                        max_object_bytes: 1,
+                        ..Default::default()
+                    },
+                    runtime.clone(),
+                    identity,
+                    1,
+                )
+                .unwrap(),
+            );
+            let budget = OperationBudget::new(
+                crate::OperationLimits {
+                    max_storage_requests: 1,
+                    max_fetched_bytes: 1,
+                    max_inflated_bytes: 1,
+                    ..Default::default()
+                },
+                runtime.clone(),
+            );
+            let session = GitObjectLocatorSession::without_catalog();
+            let cancel = CancellationToken::new();
+            let metadata = reader
+                .read_metadata_with_session(&session, oid, &budget, &cancel)
+                .await
+                .unwrap();
+            assert_eq!(
+                (metadata.oid, metadata.kind, metadata.size),
+                (oid, gix_object::Kind::Blob, size as u64)
+            );
+            let pointer = reader
+                .read_small_metadata_object_with_session(&session, oid, &budget, &cancel)
+                .await;
+            if size <= crab_git::MAX_LFS_POINTER_SIZE {
+                assert_eq!(pointer.unwrap().data, data);
+            } else {
+                assert!(matches!(
+                    pointer,
+                    Err(Error::LimitExceeded {
+                        limit: "decoded object bytes",
+                        ..
+                    })
+                ));
+            }
+            let usage = budget.usage().await;
+            assert_eq!(
+                (
+                    usage.amount(BudgetDimension::StorageRequests),
+                    usage.amount(BudgetDimension::FetchedBytes),
+                    usage.amount(BudgetDimension::InflatedBytes)
+                ),
+                (0, 0, 0)
+            );
+            runtime.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
     async fn corrupt_cached_object_is_discarded_and_reported() {
         for data in [
             Bytes::from_static(b"not empty"),
             Bytes::from(vec![b'x'; 128 * 1024]),
         ] {
-            let runtime = Arc::new(RemoteGitRuntime::default());
-            let identity = RepositoryIdentity::new("provider", "repository", 1).expect("identity");
-            let oid = gix_hash::ObjectId::empty_blob(gix_hash::Kind::Sha1);
-            let key = crate::runtime::ObjectCacheKey::new(&identity, 1, oid);
-            runtime
-                .insert_object(
-                    key.clone(),
-                    Arc::new(GitObject {
-                        oid,
-                        kind: gix_object::Kind::Blob,
-                        data,
-                    }),
+            for metadata in [false, true] {
+                let runtime = Arc::new(RemoteGitRuntime::default());
+                let identity =
+                    RepositoryIdentity::new("provider", "repository", 1).expect("identity");
+                let oid = gix_hash::ObjectId::empty_blob(gix_hash::Kind::Sha1);
+                let key = crate::runtime::ObjectCacheKey::new(&identity, 1, oid);
+                runtime
+                    .insert_object(
+                        key.clone(),
+                        Arc::new(GitObject {
+                            oid,
+                            kind: gix_object::Kind::Blob,
+                            data: data.clone(),
+                        }),
+                    )
+                    .await;
+                let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+                let reader = RemoteGitReader::from_pinned(
+                    Store::new(object_store),
+                    "repository",
+                    [],
+                    ReaderLimits::default(),
+                    Arc::clone(&runtime),
+                    identity,
+                    1,
                 )
-                .await;
-            let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-            let reader = RemoteGitReader::from_pinned(
-                Store::new(object_store),
-                "repository",
-                [],
-                ReaderLimits::default(),
-                Arc::clone(&runtime),
-                identity,
-                1,
-            )
-            .expect("reader");
+                .expect("reader");
 
-            let error = reader
-                .verified_cached_object(&key, u64::MAX, &CancellationToken::new())
-                .await
-                .expect_err("corrupt cache entry must fail");
-            assert!(matches!(error, Error::CacheCorrupt { .. }));
-            assert!(runtime.cached_object(&key).await.is_none());
+                let cancel = CancellationToken::new();
+                let result = if metadata {
+                    reader
+                        .read_metadata_with_session(
+                            &GitObjectLocatorSession::without_catalog(),
+                            oid,
+                            &OperationBudget::new(
+                                crate::OperationLimits::default(),
+                                runtime.clone(),
+                            ),
+                            &cancel,
+                        )
+                        .await
+                        .map(|_| ())
+                } else {
+                    reader
+                        .verified_cached_object(&key, u64::MAX, &cancel)
+                        .await
+                        .map(|_| ())
+                };
+                let error = result.expect_err("corrupt cache entry must fail");
+                assert!(matches!(error, Error::CacheCorrupt { .. }));
+                assert!(runtime.cached_object(&key).await.is_none());
+            }
         }
     }
 

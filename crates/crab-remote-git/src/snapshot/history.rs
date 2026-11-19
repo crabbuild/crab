@@ -68,7 +68,14 @@ impl RemoteGitSnapshot {
             && let Some(oid) = next
         {
             operation.ensure_active()?;
-            let commits = if let Some(graph) = &self.commit_graph {
+            let commits = if let Some(commit) = operation.cached_commit(oid).await {
+                // Verified raw parents already determine the next commit. The
+                // graph only accelerates cold batching; consulting it again
+                // would add metadata work to every parsed-cache hit.
+                operation.charge(BudgetDimension::HistoryCommits, 1).await?;
+                operation.charge(BudgetDimension::LogicalObjects, 1).await?;
+                vec![commit.value.clone()]
+            } else if let Some(graph) = &self.commit_graph {
                 // Unknown commit messages can exhaust the response budget. Bound
                 // speculation by the existing object/response limits first.
                 let maximum_commit_bytes = operation

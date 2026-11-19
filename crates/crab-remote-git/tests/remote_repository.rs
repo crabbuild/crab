@@ -4118,6 +4118,80 @@ async fn resumed_first_parent_pages_do_not_read_the_skipped_prefix() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn warm_history_reuses_verified_parents_and_preserves_semantic_limits() {
+    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+    let graph = publish_complete_graph(&fixture, true).await;
+    let cancel = CancellationToken::new();
+    let repository = fixture
+        .repository
+        .clone()
+        .with_commit_graph(&graph, &cancel)
+        .await
+        .unwrap();
+    let operation = repository
+        .operation(OperationKind::History, &cancel)
+        .await
+        .unwrap();
+    let snapshot = repository
+        .snapshot(&Revision::Reference("main".into()), &operation)
+        .await
+        .unwrap();
+    let request = PageRequest::new(10, None).unwrap();
+    let result = snapshot
+        .history(HistoryTraversal::FirstParent, &request, &operation)
+        .await;
+    let expected = operation.finish(result).await.unwrap();
+    for (limits, failure) in [
+        (
+            OperationLimits {
+                max_entries: 1,
+                ..Default::default()
+            },
+            None,
+        ),
+        (
+            OperationLimits {
+                max_logical_objects: 1,
+                ..Default::default()
+            },
+            Some("logical objects"),
+        ),
+        (
+            OperationLimits {
+                max_history_commits: 1,
+                ..Default::default()
+            },
+            Some("history commits"),
+        ),
+        (
+            OperationLimits {
+                max_response_bytes: 1,
+                ..Default::default()
+            },
+            Some("response bytes"),
+        ),
+    ] {
+        let operation = repository
+            .operation_with_limits(OperationKind::History, &cancel, limits)
+            .await
+            .unwrap();
+        let result = snapshot
+            .history(HistoryTraversal::FirstParent, &request, &operation)
+            .await;
+        match (operation.finish(result).await, failure) {
+            (Ok(page), None) => assert_eq!(page, expected),
+            (Err(error), Some(limit)) => {
+                assert!(contains_limit_exceeded(&error, limit), "{error:?}")
+            }
+            (result, failure) => {
+                panic!("unexpected history result: {result:?}, expected {failure:?}")
+            }
+        }
+    }
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn history_seek_cursors_preserve_context_and_tagged_offset_cursors() {
     let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
     let cancel = CancellationToken::new();

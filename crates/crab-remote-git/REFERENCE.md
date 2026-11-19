@@ -278,11 +278,14 @@ old signatures. Unconfigured loopback instances retain process-local keys.
 
 When a matching graph is available, first-parent history groups bounded raw
 commit reads and verifies every positional parent list and adjacent first parent.
-Missing or inconsistent advertised graph records fail explicitly. Without the
+Missing or inconsistent selected graph records fail explicitly. Without the
 optional graph, raw first-parent reads still resume directly. Speculation obeys
 page, object, and remaining response limits. Parsed commit batching retains the
 same source-size checks as point reads; raw object cache hits still verify their
-checksums. First-parent path cursors also carry the next verified raw parent.
+checksums. Verified parsed commits continue through their raw parents without
+selecting graph records again; those hits still charge logical objects, history
+commits and response bytes. First-parent path cursors also carry the next
+verified raw parent.
 The existing path/all-parent graph paths retain their raw-parent fallback when
 acceleration is absent or inconsistent; this continuation change does not alter
 their ordering or fallback policy.
@@ -425,6 +428,12 @@ Git blobs, Crab pointers, and Git LFS pointers but never materializes pointer
 targets. Logical Crab content belongs to `crab-read`; verified LFS content
 belongs to `crab-lfs`. Service composition decides whether those representations
 are enabled.
+
+Metadata and small pointer reads reuse the same identity/generation-scoped
+object cache and verify its complete Git hash before returning. Metadata can
+report a cached object's size above the caller's decoded-body limit without
+reconstruction; pointer-body reads retain their existing size ceiling. A cold
+metadata miss still verifies the selected encoded entries and delta sizes.
 
 An unborn default branch does not imply an empty repository: `RepositoryRefs.head`
 is `None` and `unborn_head` carries the symbolic branch name even when tags or other
