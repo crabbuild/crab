@@ -28,6 +28,8 @@ packages/*
 !packages/ui/vite.config.ts
 !packages/ui/src/
 !packages/ui/src/**
+!packages/workflow-results/
+!packages/workflow-results/**
 !packages/web/
 packages/web/*
 !packages/web/crab.optimized.svg
