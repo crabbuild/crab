@@ -57,7 +57,7 @@ real HTTP/provider measurements.
 | R3     | Coalesce blame with independent waiter budgets and fair HTTP admission   | L      | HIGH | R0                     | IN PROGRESS  |
 | R4     | Bound and offload cache verification and diff CPU work                   | M      | HIGH | R0; coordinate with R3 | IN PROGRESS  |
 | R5     | Add authorized conditional reads for selected representations            | M      | HIGH | R2                     | IN PROGRESS  |
-| R6     | Decide whether persistent attribution or a new range representation pays | L      | HIGH | R1–R5 measurements     | GATED DESIGN |
+| R6     | Decide whether persistent attribution or a new range representation pays | L      | HIGH | R1–R5 measurements     | DEFERRED     |
 | R7     | Qualify the combined source and publish the supported envelope           | L      | HIGH | R1–R5                  | IN PROGRESS  |
 
 Recommended order: R0; R1 and R2; R4; R3; R5; R7. R1 and R2 can use independent
@@ -503,7 +503,7 @@ entries; the three Myers cancellation/repeated-line checks pass. The retained
 macOS crash report identifies recursive delta polling as the debug stack failure;
 an iterative traversal and exact 64-delta regression now pass on default worker
 stacks, including the point and batch paths. The integrated remote-Git library
-suite passes all 188 tests. R6 remains gated.
+suite passes all 188 tests. R6 defers persistent formats; its decision is below.
 
 R3 owns complete semantic flights with dynamic live-waiter budgets rather than
 the first caller's/default ceiling. All fourteen dimensions replay, depth is a
@@ -542,6 +542,34 @@ hash is archived. The observer now requires the plan's 600-second soak before
 claiming a plateau; the 1.10 growth threshold and failed receipt remain intact.
 This corrects the measurement definition rather than waiving a measured soak
 failure. Functional runs label plateau proof unavailable.
+
+The first matched release load attempt loses its local RustFS container at
+32 clients: Docker records an OOM kill at the task-selected 1 GiB backend limit.
+Its partial request journal and backend exit state are retained. The matched
+retry declares 3 GiB for RustFS on both sides, retaining the one-CPU backend and
+2-CPU/4-GiB VM. This is a backend fixture change, not minimum-server or hosted
+qualification. No latency, throughput, failure or RSS threshold is loosened.
+
+Both retry variants complete all 22 HTTP cells, including their ten-minute
+soaks, with zero Git-oracle mismatches, zero non-rejection request errors and
+clean replica exits. Both RSS plateau checks pass. The old control fails the
+soak's interactive-latency target; the pre-fix candidate fails mixed-load
+latency/rejection gates. Its retained comparison contains 91 p95/throughput
+regression entries. These are failed engineering receipts, not accepted results.
+The observer now preserves its report when a replica disappears, and the
+comparator distinguishes baseline starvation from invalid measurements without
+waiving candidate targets. Fixture commit and compiler must match as well.
+
+The measured preview regression identifies repeated encoded-entry metadata reads
+despite a verified cached blob. Metadata and pointer-body readers now reuse that
+cache with full checksum verification, existing identity/generation keys and
+pointer size limits. Metadata still reports oversized cached objects without
+reconstruction. Warm history likewise continues through verified parsed parents
+without reselecting graph records; cold batching and selected-index validation
+remain. These changes pass 189 library tests, 19 focused native Git regressions,
+three qualifier-counter tests, strict affected-crate Clippy and 20 qualification
+tool tests. Source-bound rebuilds and the final matched qualification follow;
+the earlier failures remain in the evidence set.
 
 The mounted volume's root is not writable by this user; its existing
 `crabbuild-target/` and `CrabData/` directories are writable. The preflight above
@@ -836,6 +864,34 @@ cost must be measured against eliminated read work.
 **Exit:** a source-bound decision document accepts or rejects each option with
 actual cold measurements and a lifecycle proof plan. No new persistent reader
 or format lands under a “performance experiment” without that contract.
+
+**Decision record, 2026-11-19:** defer all three persistent representations.
+The retained 20-repeat native RustFS comparison binds R0 qualifier
+`2ff8649df3b8c740d6d12aac580a8bfa336199bf7f73addcdce9d56f53c19ae3`
+and R1 qualifier
+`5a7944c05a158586de13bfe4ae9d0a1ba31123a0d4ffe085b7f73f0bee28b7c7`.
+These are debug diagnostic inputs, not the combined release acceptance result.
+The exact candidate hash is recorded in `native-comparison.json`; no persistent
+format is accepted from these measurements.
+
+| Option | Measured cold evidence | Decision and next proof |
+| ------ | ---------------------- | ----------------------- |
+| Persist comparison maps | On 10,000 commits, R0/R1 blame query p95 is 1.953/3.523 seconds with the same median 667 backend reads. An interleaved repeat improves cold timing but retains a warm p95 failure. This does not isolate Myers as the dominant cost. | Defer. First isolate comparison CPU from ancestry, verified object reads and output. Measure map bytes and preparation CPU per eliminated comparison. |
+| Persist complete line origins | The same blame baseline is expensive, but repository page 100 already falls from 45.55 seconds/10,055 reads to 0.147 seconds/54 reads without a new format. Shared producers and retained results must be qualified before adding another persistent cache. | Defer. Measure remaining cold blame after the combined changes, varying unrelated history independently from file changes. Compare origin-index publication/storage cost with the existing change-point path. |
+| Independently verified Git/LFS ranges | The real 9 MiB plain/delta preview corpus proves bounded metadata output and preserved full-response rejection. It does not establish a cold random-range latency or provider-byte baseline. Alpha.1 CRC validation can still fetch a large encoded base. | Defer; missing range baseline. Measure authenticated cold range amplification separately for Git and LFS. Existing Xet chunk integrity does not prove either representation. |
+
+Before revisiting any option, its separate design must bind a repository UUID,
+immutable snapshot/input IDs and semantics version; publish only complete
+authenticated descriptors through the existing publication owner. Reader pins
+and GC roots must retain every referenced page through cancellation and cleanup.
+Qualification must interrupt preparation/publication, race readers with GC and
+force push, recreate paths, corrupt/miss an advertised page, enforce quota, and
+restore/replicate the index before accepting it. Missing optional preparation
+uses the existing canonical computation; an advertised corrupt index fails.
+Measure write acknowledgement, maintenance CPU/bytes and retained storage, and
+name the release-tag refusal/upgrade contract before changing stored formats.
+No preparation command, background writer, GC root or compatibility reader is
+introduced by this decision.
 
 ### R7 — Qualify the combined source and supported resource envelope
 

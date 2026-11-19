@@ -220,14 +220,44 @@ class ReadServiceTests(unittest.TestCase):
                    "successful_latency_us":{"p50":10, "p95":100}, "ttfb_us":{"p50":1, "p95":2},
                    "offered_requests_per_second":10, "successful_requests_per_second":10}
         baseline = {"schema":1, "phase":"baseline", "binding":self.binding, "workload_sha256":workload_identity(self.profile),
+                    "fixture_commit":self.head,
                     "cases":[{"name":"mixed", "cache":"warm_objects", "workloads":{"source":summary}}]}
         candidate = copy.deepcopy(baseline)
         candidate["phase"] = "candidate"
         self.assertIn("mixed:source:p95_regression", compare_baseline(candidate, baseline, self.profile))
         candidate["cases"][0]["workloads"]["source"]["successful_latency_us"]["p95"] = 80
         self.assertEqual(compare_baseline(candidate, baseline, self.profile), [])
+        for mutate in (lambda value:value.update(fixture_commit="0" * 40),
+                       lambda value:value["binding"].update(compiler="different compiler")):
+            different = copy.deepcopy(candidate)
+            mutate(different)
+            with self.assertRaisesRegex(ValueError, "differs"):
+                compare_baseline(different, baseline, self.profile)
         candidate["workload_sha256"] = "changed"
         with self.assertRaisesRegex(ValueError, "profile differs"):
+            compare_baseline(candidate, baseline, self.profile)
+
+    def test_baseline_starvation_does_not_hide_candidate_improvement_or_relax_its_target(self):
+        small = {**self.profile["cases"][0], "name":"small"}
+        self.profile["cases"] = [small, {**self.profile["cases"][0], "reference_case":"small"}]
+        summary = {"attempts":20, "successes":20, "rejected":0, "errors":0, "oracle_mismatches":0,
+                   "successful_latency_us":{"p50":10, "p95":100}, "ttfb_us":{"p50":1, "p95":2},
+                   "offered_requests_per_second":10, "successful_requests_per_second":10}
+        baseline = {"schema":1, "phase":"baseline", "binding":self.binding, "fixture_commit":self.head,
+                    "workload_sha256":workload_identity(self.profile), "cases":[
+                        {"name":name, "cache":"warm_objects", "workloads":{"source":copy.deepcopy(summary)}}
+                        for name in ("small", "mixed")]}
+        baseline["cases"][1]["workloads"]["source"]["successful_latency_us"]["p95"] = 300
+        self.assertEqual(validate_report(baseline, self.profile), ["mixed:interactive_latency"])
+        candidate = copy.deepcopy(baseline)
+        candidate["phase"] = "candidate"
+        candidate["cases"][1]["workloads"]["source"]["successful_latency_us"]["p95"] = 50
+        self.assertEqual(compare_baseline(candidate, baseline, self.profile), [])
+        self.assertEqual(validate_report(baseline, self.profile), ["mixed:interactive_latency"])
+        candidate["cases"][1]["workloads"]["source"]["successful_latency_us"]["p95"] = 250
+        self.assertIn("mixed:interactive_latency", validate_report(candidate, self.profile))
+        baseline["cases"][0]["workloads"]["source"].update(successes=19, errors=1)
+        with self.assertRaisesRegex(ValueError, "measurement gates"):
             compare_baseline(candidate, baseline, self.profile)
 
     def test_preview_migration_selects_a_frozen_wire_variant_without_changing_the_profile(self):

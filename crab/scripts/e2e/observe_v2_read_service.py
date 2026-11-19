@@ -154,22 +154,34 @@ class Observation:
         self.stopped.set()
         self.thread.join()
         deadline = time.monotonic() + 30
+        last, present, drained = None, False, False
         while True:
-            last = self.sample()
+            try:
+                last = self.sample()
+            except Exception as error:
+                self.errors.append("final_sample:" + type(error).__name__)
+                break
             present = all(all(name in replica["metrics"] for name in DRAIN) for replica in last["replicas"])
             drained = present and all(replica["metrics"][name] == 0 for replica in last["replicas"] for name in DRAIN)
             if drained or not present or time.monotonic() >= deadline:
                 break
             time.sleep(.1)
-        after = json.loads(self.fetch(self.profile["provider_url"]))
-        failures = resource_gates(self.samples, self.profile)
+        delta = None
+        try:
+            after = json.loads(self.fetch(self.profile["provider_url"]))
+            delta = RequestCountingProxy.delta(self.before, after)
+        except Exception as error:
+            self.errors.append("final_provider:" + type(error).__name__)
+        failures = resource_gates(self.samples, self.profile) if len(self.samples) >= 2 else ["insufficient_resource_samples"]
         failures += ["sample:" + error for error in self.errors]
         for index, replica in enumerate(self.profile["replicas"]):
-            require(process_identity(replica["pid"], self.binary) == self.identities[index], "observed replica restarted")
+            try:
+                require(process_identity(replica["pid"], self.binary) == self.identities[index], "observed replica restarted")
+            except Exception as error:
+                failures.append(f"replica-{index}:identity:" + type(error).__name__)
         if present and not drained:
             failures.append("admitted_work_did_not_drain")
-        delta = RequestCountingProxy.delta(self.before, after)
-        if delta["proxy_errors"]:
+        if delta is not None and delta["proxy_errors"]:
             failures.append("provider_proxy_errors")
         report = {"schema":1, "status":"failed" if failures else "observed", "failures":failures,
                   "profile_sha256":canonical_hash(self.profile),
@@ -177,10 +189,10 @@ class Observation:
                   "observer_sha256":sha256(Path(__file__)), "process_start_identities":self.identities,
                   "provider_counter_sha256":sha256(Path(__file__).with_name("run_concurrent_push_smoke.py")),
                   "samples":len(self.samples), "duration_seconds":time.monotonic() - self.started,
-                  "peak_rss_bytes":[max(sample["replicas"][i]["rss_bytes"] for sample in self.samples)
+                  "peak_rss_bytes":[max((sample["replicas"][i]["rss_bytes"] for sample in self.samples), default=None)
                                     for i in range(len(self.identities))],
                   "last":last, "admitted_work_drained":drained if present else None,
-                  "rss_plateau":"insufficient_duration" if self.samples[-1]["elapsed_seconds"] - self.samples[0]["elapsed_seconds"] < MINIMUM_SOAK_SECONDS
+                  "rss_plateau":"insufficient_duration" if len(self.samples) < 2 or self.samples[-1]["elapsed_seconds"] - self.samples[0]["elapsed_seconds"] < MINIMUM_SOAK_SECONDS
                                 else "failed" if any(name.endswith(":rss_growth") for name in failures) else "passed",
                   "provider":delta, "quota_enforcement":self.profile["quota_enforcement"],
                   "limits":{key:self.profile[key] for key in ("maximum_late_rss_ratio", "sample_interval_seconds")}}
