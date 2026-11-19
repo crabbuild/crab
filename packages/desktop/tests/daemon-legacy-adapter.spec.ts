@@ -156,6 +156,11 @@ async function createFakeLegacyDaemon(version: number): Promise<FakeLegacyDaemon
       safeRmdir(socketDir);
     },
     sendStreamEvent: (event: DaemonEvent, payload?: Buffer) => {
+      // Poll replies must reflect stream exits, or they resurrect fixture sessions.
+      if (event.event === "exit") {
+        const session = sessions.find(session => session.sessionId === event.sessionId);
+        if (session) { session.isAlive = false; session.state = "exited"; }
+      }
       for (const sock of streamSockets) {
         if (!sock.destroyed) {
           sock.write(encodeFrame(event, payload));

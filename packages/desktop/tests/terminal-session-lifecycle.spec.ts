@@ -52,12 +52,15 @@ it("keeps an interactive foreground process when the app disconnects and reconne
     // owns its shell home so foreground-process survival is deterministic.
     const spawned = await handlers.get("crab:term-spawn")!(null, { cwd: root, sessionType: "daemon", env: { HOME: root, ZDOTDIR: root } }) as TermSpawnResult;
     expect(spawned.resolvedSessionType).toBe("daemon");
-    // Electron's GUI executable otherwise returns cmd's prompt immediately,
-    // leaving two processes competing for this fixture's terminal input.
-    const command = process.platform === "win32" ? `start "" /b /wait "${process.execPath}" agent.cjs` : `${JSON.stringify(process.execPath)} agent.cjs`;
+    // Electron's Windows GUI binary can exit after readiness without owning
+    // console input. npm supplies the console Node executable for this fixture.
+    const executable = process.platform === "win32" ? process.env.NODE : process.execPath;
+    if (!executable) throw new Error("npm test must provide its Node executable");
+    const command = process.platform === "win32" ? `"${executable}" agent.cjs` : `${JSON.stringify(executable)} agent.cjs`;
     await bridge.handleWrite(spawned.id, `${command}\r`);
     await vi.waitFor(() => expect(output).toMatch(/agent-ready:(\d+)/), { timeout: 5000 });
     const agentPid = Number(/agent-ready:(\d+)/.exec(output)![1]);
+    expect(() => process.kill(agentPid, 0)).not.toThrow();
     await expect(client.request("prepare-upgrade", { successorPath: path.resolve(__dirname, "../dist-electron/daemon/daemon-main.cjs") }))
       .rejects.toThrow("deferred while terminals are running");
     const sessionId = bridge.getDaemonSessionIds()[0];
