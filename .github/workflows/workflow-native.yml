@@ -53,6 +53,7 @@ jobs:
           const assert = require('node:assert/strict');
           const fs = require('node:fs');
           const path = require('node:path');
+          const { execFileSync } = require('node:child_process');
           const { _electron: electron } = require('@playwright/test');
           (async () => {
             const root = fs.mkdtempSync(path.join(process.env.CARGO_TARGET_DIR, 'platform-contract-'));
@@ -82,6 +83,33 @@ jobs:
               const retry = await write('retry saved');
               assert.equal(retry.bytes, 11);
               assert.equal(fs.readFileSync(target, 'utf8'), 'retry saved');
+              const git = args => execFileSync('git', args, { cwd: source });
+              git(['init', '--initial-branch=main']);
+              fs.writeFileSync(target, 'INDEX');
+              git(['add', '--', 'note.md']);
+              const indexBefore = git(['ls-files', '--stage', '-z']);
+              fs.writeFileSync(target, 'DIRTY');
+              const page = await app.firstWindow();
+              await page.waitForFunction(() => Boolean(window.crab?.rpc));
+              const rpc = (method, params) => page.evaluate(async ({ method, params }) => {
+                try { return { result: await window.crab.rpc(method, params) }; }
+                catch (error) { return { error: { code: error.code, message: error.message } }; }
+              }, { method, params });
+              const opened = await rpc('open_local', { repo_id: 'publication-contract', path: source });
+              assert.ok(opened.result, JSON.stringify(opened));
+              const retained = await rpc('file_open', { repo_id: 'publication-contract', path: 'note.md' });
+              assert.ok(retained.result, JSON.stringify(retained));
+              const publication = await rpc('files_restore', { repo_id: 'publication-contract', paths: ['note.md'], op_id: 'retained-publication' });
+              const snapshot = await rpc('read_range', { repo_id: 'publication-contract', file_id: retained.result.file_id, offset: 0, length: 5 });
+              assert.equal(Buffer.from(snapshot.result.bytes_b64, 'base64').toString(), 'DIRTY');
+              const afterPublication = fs.readFileSync(target, 'utf8');
+              await rpc('file_close', { repo_id: 'publication-contract', file_id: retained.result.file_id });
+              const withoutReader = await rpc('files_restore', { repo_id: 'publication-contract', paths: ['note.md'], op_id: 'publication-without-reader' });
+              assert.ok(withoutReader.result, JSON.stringify(withoutReader));
+              assert.equal(fs.readFileSync(target, 'utf8'), 'INDEX');
+              assert.deepEqual(git(['ls-files', '--stage', '-z']), indexBefore);
+              await rpc('close', { repo_id: 'publication-contract' });
+              fs.writeFileSync('windows-publication-contract.json', JSON.stringify({ publication, afterPublication, snapshot: 'DIRTY', withoutReader, final: 'INDEX', indexUnchanged: true }, null, 2));
               assert.notEqual(mainPid, launcherPid);
               const closed = app.waitForEvent('close');
               process.kill(mainPid, 'SIGKILL');
@@ -101,6 +129,7 @@ jobs:
         with:
           name: alpha2-windows-platform-contracts-proof
           path: |
+            packages/desktop/windows-publication-contract.json
             packages/desktop/windows-platform-contracts.json
             packages/desktop/windows-observation.log
             packages/desktop/test-results/**
