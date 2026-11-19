@@ -5,6 +5,7 @@ use crab_metadata::git_object_locator::{
     GitObjectKind, GitObjectLocator, GitObjectLocatorSession, GitObjectLookup, GitObjectMetadata,
     GitObjectOrdinal,
 };
+use futures_util::{FutureExt, future::Either};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::task_tracker::TaskTrackerToken;
@@ -307,17 +308,19 @@ impl OperationContext {
                 catalog,
                 max_duration,
             );
+            // Selecting before awaiting avoids a second slot for the large
+            // opening future in the enclosing async state.
+            let opening = match deadline {
+                Some(deadline) => Either::Left(tokio::time::timeout_at(deadline, opening)),
+                None => Either::Right(opening.map(Ok)),
+            };
             let session = tokio::select! {
                 biased;
                 () = cancellation.cancelled() => return Err(Error::Cancelled),
                 () = runtime_cancellation.cancelled() => return Err(Error::Cancelled),
-                session = async {
-                    match deadline {
-                        Some(deadline) => tokio::time::timeout_at(deadline, opening).await
-                            .map_err(|_| Error::Timeout { operation: "open locator" }),
-                        None => Ok(opening.await),
-                    }
-                } => session?,
+                session = opening => session.map_err(|_| Error::Timeout {
+                    operation: "open locator",
+                })?,
             };
             let session = match session {
                 Ok(session) => session,
