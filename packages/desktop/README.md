@@ -39,6 +39,8 @@ Markdown uses the editor's single Edit/Preview switch; the rendered preview has
 no nested Rendered/Source toolbar.
 Activity docks below the workspace so file actions remain reachable while jobs
 are visible. File context menus stay within the viewport and scroll when needed.
+Hydration warnings remain above scrollable selection controls, with separate
+space for progress output when Activity reduces the available height.
 
 Before opening a terminal, Crab checks the durable daemon's recorded runtime.
 If that runtime has been removed, a daemon advertising guarded idle shutdown is
