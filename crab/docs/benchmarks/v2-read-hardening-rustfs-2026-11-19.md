@@ -1,7 +1,8 @@
 # V2 read hardening: combined local RustFS qualification
 
 **Status: implementation delivered; combined acceptance remains open.**
-The preserved-catalog HTTP restart fails before serving; current targeted native
+The approved Cellar checkpoint fix passes fresh cold/aged/local recovery on two
+replicas; the preserved invalid catalog remains refused. Targeted native
 controls retain one cold-attribution timing failure. Earlier passing smoke and
 minimum-profile results below retain their own historical source bindings.
 The frozen engineering gates did not all pass. This report is not a release or
@@ -308,3 +309,26 @@ JSON companion. Setup errors and the first correlated frontier fixtures remain
 retained and were excluded before timing began. Distinct physical-source object
 growth and wider history sizes remain unqualified. This native proof does not
 clear HTTP recovery, the minimum-profile soak or the combined acceptance gate.
+
+## Approved Cellar checkpoint fix
+
+The user approved the scoped dependency fix. The workspace pins Cellar commit
+`590640c7ce49ef3fd391bdae9540ba23081cd74b`;
+[PR #176](https://github.com/crabbuild/cellar/pull/176) contains the 15-line
+checkpoint guard and a public regression based on the exact published 0.1.1
+source. Five unpatched runs reproduce the missing LTX transaction; five fixed
+runs pass. Unrelated lockfile dependency records and edges remain unchanged.
+The maintenance PR has two changed files. Broader SDK CI remains pending.
+
+The combined release passes 49 local RustFS checks: Git/preview parity, real
+replica cursor continuation, sixteen same-key cold blame callers, socket abort
+and drain, Chromium revalidation, durable logout and native Directory state.
+A separate three-cycle sequence verifies cold read-only Directory restore after
+70 seconds idle, local reload and another cold restore. All six replica stops
+report complete drain and closed local durability with zero pending work.
+
+These checks use new post-fix storage roots with the exact original Git tips,
+republished by the canonical writer. Old damaged catalogs, their staged evidence
+and failed receipts are untouched. R0 receives the same approved SDK pin for
+matched valid-state measurements. Original baseline inputs/results remain
+retained. No timing, throughput, resource-soak or other lifecycle gate is waived.

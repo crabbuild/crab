@@ -24,8 +24,8 @@
 - **Target:** `crab-v2`; revalidate the target before execution.
 - **Delivery status:** IMPLEMENTED; ACCEPTANCE OPEN. R0–R5 are implemented.
   Source-bound Git-read/session smoke and historical enforced minimum-profile
-  functional proof pass; frozen performance and cold Cellar recovery gates remain
-  failed. R7's measured failures and remaining lifecycle cells are recorded,
+  functional proof pass. The approved Cellar fix now passes a fresh two-replica
+  cold/aged/local-reload sequence; frozen performance gates remain failed. R7's measured failures and remaining lifecycle cells are recorded,
   not waived. See the
   [combined qualification report](../crab/docs/benchmarks/v2-read-hardening-rustfs-2026-11-19.md).
 - **Depends on:** existing read/authority contracts and the applicable resource
@@ -738,6 +738,40 @@ JSON companion. Setup errors and the first correlated frontier fixtures remain
 retained and were excluded before timing began. Distinct physical-source object
 growth and wider history sizes remain unqualified. This native proof does not
 clear HTTP recovery, the minimum-profile soak or the combined acceptance gate.
+
+### Approved checkpoint dependency fix and fresh recovery proof
+
+The user approved the scoped Cellar dependency fix. The workspace pins immutable
+commit `590640c7ce49ef3fd391bdae9540ba23081cd74b`, based on the exact published
+0.1.1 source. [Cellar PR #176](https://github.com/crabbuild/cellar/pull/176)
+contains a 15-line checkpoint gate plus its public integration regression. The
+maintenance base isolates this change from unrelated main-branch release work.
+All eight Cellar packages use that revision; unrelated lockfile records and
+edges are unchanged. This is the explicit exception to the original dependency
+freeze, with no public API or data-format change.
+
+The public regression reproduces the non-contiguous 1→3 LTX chain on the
+published source five times and passes five times with the fix. Final checkpoint
+capture/upload/close excludes age maintenance; the owned gate remains with the
+actual blocking maintenance worker if its async waiter is cancelled. Existing
+invalid chains remain refused and are retained unchanged.
+
+A source-bound release server passes 49 checks against local RustFS, including
+native Git parity, sixteen cold blame callers, actual socket cancellation,
+Chromium 200/304/401, durable logout on both replicas and native Directory state.
+A separate three-cycle recovery sequence passes cold read-only restore with
+70 seconds idle, same-local-path reload, and independent cold restore. Both
+replicas retain the original ready Directory format/revision; all six stops
+prove complete drain, quiesced log, closed local durability, zero pending work
+and no elapsed shutdown deadline.
+
+The old missing-transaction catalogs and failed receipts remain intact. New
+post-fix roots republish the exact original Git commits through the canonical
+writer; root, UUID and pack identities are recorded. The frozen R0 server is
+also rebuilt with only the common approved SDK pin for valid-state comparisons.
+Original R0 binaries and measurements remain unchanged. Timing, throughput,
+minimum-profile soak and remaining lifecycle acceptance are still open; these
+functional results do not clear their failed or pending gates.
 
 ### R0 — Freeze the evidence contract and establish a baseline
 
