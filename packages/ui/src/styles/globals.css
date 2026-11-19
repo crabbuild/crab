@@ -4823,6 +4823,8 @@ main {
 }
 .file-panel {
   margin-top: --spacing(4);
+  /* The sticky toolbar owns the top edge so it remains visible on scroll. */
+  border-top: 0;
   overflow: clip;
 }
 .file-view-controls {
@@ -4846,6 +4848,14 @@ main {
 }
 .file-actions > [data-slot="button"] {
   height: 32px;
+}
+/* Joined buttons overlap edges; keep hover steady and keyboard focus on top. */
+.file-actions > [data-slot="button"]:hover:not(:focus-visible) {
+  border-color: var(--border);
+}
+.file-actions > [data-slot="button"]:focus-visible {
+  position: relative;
+  z-index: 1;
 }
 .file-actions > [data-size="icon-sm"] {
   width: 34px;
@@ -4917,6 +4927,7 @@ main {
 .file-panel > .panel-header {
   min-height: 46px;
   padding: --spacing(2) --spacing(2.5);
+  border-top: 1px solid var(--border);
 }
 .code-main-file .file-navigation {
   position: sticky;

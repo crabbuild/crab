@@ -140,6 +140,8 @@ grant, and this consolidation does not establish full GitHub Enterprise parity.
   and Code/Blame form one continuous sticky header with the explorer open or
   closed; the controls follow the navigation row's measured height. Scrolled
   navigation keeps the branch and path available and exposes **Top**.
+  The toolbar keeps its top border while sticky; joined actions use a stable
+  outline on hover and show keyboard focus above adjacent buttons.
   The Symbols column starts at 320px and retains its width when the viewer grows.
   Its outlined panel fits short outlines and scrolls longer lists internally.
   The divider shares the viewer border; its grip stays centered within the
