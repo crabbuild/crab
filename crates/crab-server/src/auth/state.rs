@@ -130,23 +130,38 @@ impl Authentication {
 
     pub(super) async fn load_session(&self, session_key: Key) -> Option<Arc<Session>> {
         let state = &self.state;
-        let body = state
-            .store
-            .get_with_etag_bounded(&state.path("sessions", &session_key), 64 * 1024)
-            .await
-            .ok()?
-            .0;
-        let record: StoredSession = serde_json::from_slice(&body).ok()?;
+        let cached_marker_path = self.sessions.lock().await.get(&session_key).map(|session| {
+            state.identity_session_path(
+                &session.identity.issuer,
+                &session.identity.subject,
+                &session_key,
+            )
+        });
+        let session_path = state.path("sessions", &session_key);
+        let record = state.store.get_with_etag_bounded(&session_path, 64 * 1024);
+        let marker = async {
+            let path = cached_marker_path.as_ref()?;
+            state.store.get_with_etag_bounded(path, 8 * 1024).await.ok()
+        };
+        // The cache supplies only an address: both durable records stay fresh.
+        // A changed identity must select its current marker before any grant,
+        // rather than turning a stale cached locator into authority.
+        let (record, marker) = tokio::join!(record, marker);
+        let record: StoredSession = serde_json::from_slice(&record.ok()?.0).ok()?;
         let marker_path = state.identity_session_path(
             &record.identity.issuer,
             &record.identity.subject,
             &session_key,
         );
-        let (body, _) = state
-            .store
-            .get_with_etag_bounded(&marker_path, 8 * 1024)
-            .await
-            .ok()?;
+        let (body, _) = if cached_marker_path.as_ref() == Some(&marker_path) {
+            marker?
+        } else {
+            state
+                .store
+                .get_with_etag_bounded(&marker_path, 8 * 1024)
+                .await
+                .ok()?
+        };
         let marker: IdentitySessionMarker = serde_json::from_slice(&body).ok()?;
         if marker.schema_version != 1
             || marker.session_key != session_key
