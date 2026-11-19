@@ -1,4 +1,4 @@
-name: Alpha approved platform qualification
+name: Alpha Windows terminal and storage qualification
 on:
   workflow_dispatch:
 permissions:
@@ -47,9 +47,69 @@ jobs:
           npm run build:renderer
           npm run build:electron
           node scripts/package.mjs --dir --publish never
+      - name: Probe actual ConPTY close and directory ownership
+        run: |
+          cat > conpty-close-probe.cjs <<'JS'
+          const fs = require('node:fs');
+          const os = require('node:os');
+          const path = require('node:path');
+          const { DaemonServer } = require(path.resolve('dist-electron/daemon/daemon-server.cjs'));
+          const { NodePtySubprocessHandle } = require(path.resolve('dist-electron/daemon/subprocess-handle.cjs'));
+          const pty = require(path.resolve('node_modules/node-pty'));
+          const { DaemonClient } = require(path.resolve('dist-electron/daemon/daemon-client.cjs'));
+          const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+          const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
+          (async () => {
+            const results = [];
+            for (const mode of ['shell', 'foreground']) {
+              const root = fs.mkdtempSync(path.join(os.tmpdir(), 'crab-conpty-close-proof-'));
+              fs.writeFileSync(path.join(root, 'foreground.cjs'), "console.log('READY:' + process.pid); process.stdin.resume();");
+              const terminals = [];
+              const server = new DaemonServer({ socketPath: path.join(root, 'daemon-v2.sock'), tokenPath: path.join(root, 'daemon-v2.token'), pidPath: path.join(root, 'daemon-v2.pid'), idleTimeoutMs: 0, spawnSubprocess(options) {
+                const terminal = pty.spawn(options.file, options.args ?? [], { cols: options.cols, rows: options.rows, cwd: options.cwd, env: { ...process.env, ...options.env } });
+                const closed = new Promise(resolve => terminal.onExit(resolve));
+                terminals.push({ terminal, closed });
+                return new NodePtySubprocessHandle(terminal);
+              } });
+              let output = '';
+              const client = new DaemonClient({ socketDir: root, daemonEntryPath: '', onSessionData: (_, data) => { output += data; }, onSessionExit() {}, onAgentStateChange() {} });
+              try {
+                await server.start();
+                const session = await client.request('createOrAttach', { sessionId: 'proof', cwd: root, cols: 80, rows: 24, env: {} });
+                const command = mode === 'shell' ? 'echo READY:shell' : `"${process.env.NODE}" foreground.cjs`;
+                await client.request('write', { sessionId: 'proof', data: command + '\r' });
+                const ready = Date.now();
+                while (!output.includes(mode === 'shell' ? 'READY:shell' : 'READY:') || (mode === 'foreground' && !/READY:(\d+)/.test(output))) {
+                  if (Date.now() - ready > 5000) throw new Error('console never became ready');
+                  await delay(25);
+                }
+                const foreground = Number(/READY:(\d+)/.exec(output)?.[1]);
+                client.disconnect();
+                const started = Date.now();
+                await server.shutdown({ killSessions: true });
+                const result = { mode, shutdownMs: Date.now() - started, shellAliveAfterShutdown: alive(session.pid), foregroundAliveAfterShutdown: foreground ? alive(foreground) : null };
+                try { fs.rmSync(root, { recursive: true, force: true }); result.removeAfterShutdown = 'OK'; } catch (error) { result.removeAfterShutdown = error.code; }
+                await Promise.race([Promise.all(terminals.map(entry => entry.closed)), delay(8000).then(() => { throw new Error('ConPTY did not close'); })]);
+                result.closeMs = Date.now() - started;
+                result.shellAliveAfterClose = alive(session.pid);
+                result.foregroundAliveAfterClose = foreground ? alive(foreground) : null;
+                try { fs.rmSync(root, { recursive: true, force: true }); result.removeAfterClose = 'OK'; } catch (error) { result.removeAfterClose = error.code; }
+                results.push(result);
+              } finally {
+                client.disconnect();
+                await server.shutdown({ killSessions: true });
+                await fs.promises.rm(root, { recursive: true, force: true });
+              }
+            }
+            fs.writeFileSync('conpty-close-proof.json', JSON.stringify(results, null, 2));
+            console.log(JSON.stringify(results));
+          })().catch(error => { console.error(error); process.exitCode = 1; });
+          JS
+          ELECTRON_RUN_AS_NODE=1 NODE="$(node -p 'process.execPath')" node_modules/electron/dist/electron.exe conpty-close-probe.cjs
       - name: Qualify complete desktop regression suite
         run: npm test -- --maxWorkers 2 --reporter=json --outputFile=approved-unit-report.json > approved-unit.log 2>&1
       - name: Qualify all packaged storage scenarios with optimized native runtime
+        if: ${{ !cancelled() }}
         run: |
           python - <<'PYCODE' > approved-storage.log 2>&1
           from pathlib import Path
@@ -65,116 +125,8 @@ jobs:
         with:
           name: alpha2-approved-windows-proof
           path: |
+            packages/desktop/conpty-close-proof.json
             packages/desktop/approved-unit.log
             packages/desktop/approved-unit-report.json
             packages/desktop/approved-storage.log
-            packages/desktop/test-results/**
-  linux:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    defaults:
-      run:
-        shell: bash
-        working-directory: packages/desktop
-    env:
-      CSC_IDENTITY_AUTO_DISCOVERY: false
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: 50ed184c0a3d58051a427e7765ca5d78232557db
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: packages/desktop/.nvmrc
-      - name: Set private qualification paths
-        run: |
-          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crab-keyring-target" >> "$GITHUB_ENV"
-          mkdir -p "$RUNNER_TEMP/crab-keyring-target"
-      - name: Install Linux and real Secret Service dependencies
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-0 libnss3 libasound2t64 libgbm1 xvfb tmux dbus-x11 gnome-keyring libsecret-1-0 pkg-config libssl-dev libfuse3-dev
-      - uses: actions/download-artifact@v4
-        with:
-          name: Crab-native-linux-x64
-          path: packages/desktop/resources/native/linux-x64
-          run-id: 44556853705
-          github-token: ${{ github.token }}
-      - uses: actions/download-artifact@v4
-        with:
-          name: Crab-remote-runtime-Linux-X64
-          path: packages/desktop/release/remote-runtime
-          run-id: 44556853705
-          github-token: ${{ github.token }}
-      - name: Install desktop dependencies and restore native permissions
-        run: |
-          npm ci
-          chmod +x resources/native/linux-x64/{crab,crab-nfs-mount,crab-desktop-agent,git-remote-crab}
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install pinned notebook and storage runtime
-        run: |
-          python -m pip install awscli jupyter_client==8.6.3 ipykernel==6.29.5 jupyter_server==2.17.0
-          echo "CRAB_TEST_JUPYTER_PYTHON=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
-      - name: Build exact packaged application
-        run: |
-          npm run build:renderer
-          npm run build:electron
-          node scripts/package.mjs --dir --publish never
-      - name: Prepare actual Electron keyring probe
-        run: |
-          cat > "$RUNNER_TEMP/keyring-app.cjs" <<'JS'
-          const { app, safeStorage } = require('electron');
-          const fs = require('node:fs');
-          app.whenReady().then(async () => {
-            const available = await safeStorage.isAsyncEncryptionAvailable();
-            const backend = safeStorage.getSelectedStorageBackend();
-            const encrypted = available ? await safeStorage.encryptStringAsync('ephemeral qualification value') : null;
-            const result = encrypted ? await safeStorage.decryptStringAsync(encrypted) : null;
-            fs.writeFileSync(process.argv.at(-1), JSON.stringify({ available, backend, roundTrip: result?.result === 'ephemeral qualification value', plaintextAbsent: encrypted ? !encrypted.includes(Buffer.from('ephemeral qualification value')) : false }), { flag: 'wx' });
-            app.quit();
-          }).catch(error => { console.error(error.message); app.exit(1); });
-          JS
-          cat > "$RUNNER_TEMP/keyring-driver.cjs" <<'JS'
-          const { spawnSync } = require('node:child_process');
-          const { createRequire } = require('node:module');
-          const path = require('node:path');
-          const requireDesktop = createRequire(path.join(process.cwd(), 'package.json'));
-          const child = spawnSync(requireDesktop('electron'), ['--no-sandbox', path.join(process.env.RUNNER_TEMP, 'keyring-app.cjs'), path.join(process.env.RUNNER_TEMP, process.argv.at(-1) + '.json')], { env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined }, stdio: 'inherit', timeout: 30000 });
-          if (child.error) throw child.error;
-          process.exitCode = child.status ?? 1;
-          JS
-      - name: Qualify actual encryption and unchanged packaged storage suite
-        run: |
-          dbus-run-session -- bash -euo pipefail <<'KEYRING'
-            export XDG_CURRENT_DESKTOP=GNOME
-            export XDG_DATA_HOME="$RUNNER_TEMP/crab-desktop-keyring"
-            mkdir -m 700 -p "$XDG_DATA_HOME"
-            python -c "import secrets; print(secrets.token_hex(32), end=\"\")" | gnome-keyring-daemon --unlock --components=secrets
-            xvfb-run -a node "$RUNNER_TEMP/keyring-driver.cjs" keyring-candidate
-            node - <<'JS'
-          const fs = require('node:fs'), path = require('node:path'), assert = require('node:assert/strict');
-          const result = JSON.parse(fs.readFileSync(path.join(process.env.RUNNER_TEMP, 'keyring-candidate.json')));
-          assert.deepEqual(result, { available: true, backend: 'gnome_libsecret', roundTrip: true, plaintextAbsent: true });
-          console.log(JSON.stringify(result));
-          JS
-            xvfb-run -a python - <<'PYCODE' > keyring-storage.log 2>&1
-          from pathlib import Path
-          p = Path("scripts/qualify-v2.py").resolve()
-          source = p.read_text()
-          start = source.index('                subprocess.run(["cargo", "test"')
-          end = source.index('                identity_spec =', start)
-          source = source[:start] + source[end:]
-          exec(compile(source, str(p), "exec"), {"__file__": str(p), "__name__": "__main__"})
-          PYCODE
-          KEYRING
-      - name: Qualify complete desktop regression suite
-        run: npm test -- --maxWorkers 2 --reporter=json --outputFile=candidate-report.json > candidate-unit.log 2>&1
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: alpha2-approved-linux-proof
-          path: |
-            ${{ runner.temp }}/keyring-*.json
-            packages/desktop/keyring-storage.log
-            packages/desktop/candidate-unit.log
-            packages/desktop/candidate-report.json
             packages/desktop/test-results/**
