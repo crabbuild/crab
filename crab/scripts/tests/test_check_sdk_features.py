@@ -24,7 +24,8 @@ class FeatureBoundaryTests(unittest.TestCase):
         for profile, extra in [("default", "tokio"), ("default", "crab-storage"),
                                ("remote", "crab-cache"), ("remote-files", "crab-vfs"),
                                ("remote-files", "crab-server"), ("remote", "crab"),
-                               ("publish", "crab"), ("publish", "crab-auth-server")]:
+                               ("publish", "crab"), ("publish", "crab-auth-server"),
+                               ("results", "crab-cache"), ("remote", "crab-workflow")]:
             with self.subTest(profile=profile, extra=extra):
                 forbidden, _ = module.violations(
                     profile, set(module.PROFILES[profile]), {"crab-sdk", extra}
@@ -43,6 +44,17 @@ class FeatureBoundaryTests(unittest.TestCase):
                 {"crab-sdk", "crab-storage", "crab-remote-git", "crab-read", "crab-lfs"},
             ),
             ([], ["crab-coordination", "crab-remote", "crab-write"]),
+        )
+
+    def test_results_requires_its_workflow_owner_without_enabling_hydration(self):
+        packages = {"crab-sdk", "crab-read", "crab-storage", "crab-remote-git"}
+        self.assertEqual(
+            module.violations("results", {"results"}, packages),
+            ([], ["crab-workflow"]),
+        )
+        self.assertEqual(
+            module.violations("results", {"results"}, packages | {"crab-workflow"}),
+            ([], []),
         )
 
 

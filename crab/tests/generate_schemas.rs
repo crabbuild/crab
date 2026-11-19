@@ -101,6 +101,15 @@ fn write_schema(name: &str, schema: &schemars::schema::RootSchema) {
 
 #[test]
 #[ignore]
+fn regenerate_results_schema() {
+    write_schema(
+        "workflow.results",
+        &schema_for!(crab::cmd::results::ResultsPayload),
+    );
+}
+
+#[test]
+#[ignore]
 fn regenerate_schemas() {
     // -- Envelope types (generic instantiated with serde_json::Value) --
     write_schema("envelope", &schema_for!(Envelope<serde_json::Value>));
@@ -123,6 +132,11 @@ fn regenerate_schemas() {
     write_schema("workflow.stage_result", &schema_for!(WorkflowStageResult));
     write_schema("workflow.stage.failed", &schema_for!(WorkflowStageFailed));
     write_schema("workflow.run", &schema_for!(WorkflowRunSummary));
+
+    write_schema(
+        "workflow.results",
+        &schema_for!(crab::cmd::results::ResultsPayload),
+    );
 
     // -- Command result payloads --
     write_schema("add", &schema_for!(AddSummary));

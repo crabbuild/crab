@@ -974,6 +974,8 @@ enum Cmd {
     /// persisted under `.crab/workflow/exp/<uuid>.meta.json`.
     #[command(subcommand)]
     Exp(ExpCmd),
+    /// Captured experiment results and immutable comparison reports.
+    Results(crab::cmd::results::ResultsArgs),
     /// DVC-style experiment task queue management.
     #[command(subcommand)]
     Queue(QueueCmd),
@@ -1553,6 +1555,8 @@ enum ExpCmd {
     /// Run an experiment: materialize HEAD into a tmpdir, apply
     /// `--set` overrides, execute the DAG, persist metadata.
     Run(crab::cmd::exp::RunArgs),
+    /// Reproduce a captured run using its retained effective inputs.
+    Reproduce(crab::cmd::exp::ReproduceArgs),
     /// Print an experiment's metadata.
     Show(crab::cmd::exp::ShowArgs),
     /// Diff two experiments (params, stage hashes, metrics).
@@ -2171,6 +2175,8 @@ impl Cmd {
             Self::Stage(StageCmd::List(args)) => OutputMode::from_flags(args.json, false),
             Self::Freeze(args) => OutputMode::from_flags(args.json, false),
             Self::Unfreeze(args) => OutputMode::from_flags(args.json, false),
+            Self::Results(args) => OutputMode::from_flags(args.json, false),
+            Self::Exp(ExpCmd::Reproduce(args)) => OutputMode::from_flags(args.json, false),
             Self::Exp(ExpCmd::Run(args)) => OutputMode::from_flags(args.json, false),
             Self::Exp(ExpCmd::Show(args)) => OutputMode::from_flags(args.json, false),
             Self::Exp(ExpCmd::Diff(args)) => OutputMode::from_flags(args.json, false),
@@ -2436,6 +2442,8 @@ impl Cmd {
             Self::Stage(StageCmd::List(_)) => crab::cmd::stage::STAGE_LIST_SCHEMA,
             Self::Freeze(_) => crab::cmd::freeze::FREEZE_SCHEMA,
             Self::Unfreeze(_) => crab::cmd::freeze::UNFREEZE_SCHEMA,
+            Self::Results(_) => "workflow.results",
+            Self::Exp(ExpCmd::Reproduce(_)) => crab::cmd::exp::EXP_RUN_SCHEMA,
             Self::Exp(ExpCmd::Run(_)) => crab::cmd::exp::EXP_RUN_SCHEMA,
             Self::Exp(ExpCmd::Show(_)) => crab::cmd::exp::EXP_SHOW_SCHEMA,
             Self::Exp(ExpCmd::Diff(_)) => crab::cmd::exp::EXP_DIFF_SCHEMA,
@@ -4825,9 +4833,14 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             crab::cmd::freeze::exec_unfreeze(args)?;
             Ok(ExitCode::SUCCESS)
         }
+        Some(Cmd::Results(args)) => {
+            crab::cmd::results::exec(args).await?;
+            Ok(ExitCode::SUCCESS)
+        }
         Some(Cmd::Exp(sub)) => {
             let _span = tracing::info_span!("exp").entered();
             match sub {
+                ExpCmd::Reproduce(args) => crab::cmd::exp::exec_reproduce(args).await?,
                 ExpCmd::Run(args) => crab::cmd::exp::exec_run(args).await?,
                 ExpCmd::Show(args) => crab::cmd::exp::exec_show(args)?,
                 ExpCmd::Diff(args) => crab::cmd::exp::exec_diff(args)?,

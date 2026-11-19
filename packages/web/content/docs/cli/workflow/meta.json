@@ -8,6 +8,7 @@
     "running-pipelines",
     "params-metrics-plots",
     "experiments",
+    "results",
     "hydra",
     "queues",
     "remote-cache-ci",

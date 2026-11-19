@@ -491,3 +491,63 @@ The public API is qualified only when all of the following are true:
   consistently;
 - external consumer, MSRV, rustdoc warning, API snapshot, semver, and packaging
   checks pass.
+
+### Native Results (opt-in `results` feature)
+
+`repository.remote()?.results()` reads workflow-owned schema-v1 `RunPage`,
+`SealedResult`, immutable `Report` and verified attachment bytes. This capability
+uses the repository's captured resolved store, operation lifetime, cancellation,
+deadline and storage admission; it does not require YAML or a local worktree.
+It does not grant workflow execution or expose a raw object store. Re-exported
+workflow Results values carry the SDK's semver obligations. Results roots are
+live discovery; use a digest-bearing `RunSelection` in `ResultsRead::Run` to pin a snapshot. Reports always pin their
+values and evidence independently of mutable experiment roots.
+
+`ResultOrigin` distinguishes `Captured` observations from an explicit
+`ExperimentMetadata` migration. Imported snapshots preserve recorded metrics and
+reported status, with no inferred parameters, stages, attachments or reproduction
+specification. `RunSummary.origin` supports truthful catalog labels; consumers
+must not treat reported success as captured execution. This required provenance
+field belongs to the unshipped Results contract; experiment metadata v1 is
+unchanged. SDK and generated client declarations evolve with that owner, without
+a runtime reader for retired Results shapes.
+
+`Chart.reduction` identifies sampled curves or exact-counted matrices through the
+re-exported `ChartReduction` type. Counted matrices include all observations
+from retained sources; `displayed_points` is the number of observed class pairs,
+with zero-count combinations added during rendering. Counts do not replace the
+captured summary metrics. The Results grid budget is checked before imputation.
+
+A chart may carry missing, denied or corrupt availability alongside a usable
+specification containing the verified series. Render that specification with
+its recovery notice; scalar comparison rows remain captured values. An entirely
+unavailable chart has no specification. This applies to primary and cross-file
+coordinate sources; only revisions with their required plot inputs verified
+contribute observations. Provider diagnostics are not renderer
+data. Cancellation and read-admission rejection still terminate the operation;
+a plot read cannot turn an exhausted caller budget into a successful comparison.
+
+Direct-storage Results has dedicated qualification. Managed handles retain the
+compiled read mechanism and their existing grant/target binding; this is not a
+claim of managed-service Results qualification. A managed grant must expose the
+workflow Results objects and control roots. CLI Results transfers currently
+require direct repository storage and refuse installed managed authorities before
+direct credential resolution.
+
+`crab/scripts/check-sdk-features.py` checks cross-target dependency graphs for
+Results alone, with files, with service, and with the desktop's local/service
+combination. The workflow owner is required only when Results is enabled;
+Results alone cannot pull hydration or product/server dependencies. Native
+workflow CI also builds the minimal and Results SDK slices and executes the bare
+Results read/admission test. These gates do not establish live managed-service
+or provider support.
+
+The existing credentialed SDK jobs also select Results publication and cold
+retrieval cases for S3, GCS and Azure. Each uses the workflow publication owner,
+retries immutable publication, discards source/local evidence, verifies a cold
+pull and recovers a report after removing run discovery. SDK report and blob
+reads enter through a fresh `Client::open`; the test checks that the repository
+object inventory stays unchanged. Cleanup targets only the unique fixture
+repository. These transport cases use a sealed scalar/CSV observation; they do
+not replace packaged two-run acceptance or establish live provider support
+until their credentialed jobs actually pass.

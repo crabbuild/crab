@@ -16,6 +16,7 @@ use crate::{AgentError, Result};
 mod content;
 mod files;
 mod native;
+mod results;
 pub(crate) use content::command::output as git_output;
 pub(crate) use content::diff;
 pub(crate) use content::{

@@ -13,7 +13,7 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 #[cfg(unix)]
@@ -45,38 +45,49 @@ pub fn sidecar_path(final_path: &Path, run_id: Uuid) -> PathBuf {
 /// rename so the final file appears with correct permissions from
 /// the first moment it is visible.
 pub fn write_atomic(path: &Path, bytes: &[u8], run_id: Uuid, mode: u32) -> Result<()> {
+    write_atomic_from_reader(path, bytes, run_id, mode)
+}
+
+/// Atomically materializes a file from a finite streaming source.
+///
+/// Publishes after reading, syncing and setting permissions; source-read failures
+/// leave the existing target untouched and discard the incomplete sidecar.
+pub fn write_atomic_from_reader(
+    path: &Path,
+    mut source: impl Read,
+    run_id: Uuid,
+    mode: u32,
+) -> Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
         fs::create_dir_all(parent).map_err(CrabError::Io)?;
     }
-
     let tmp = sidecar_path(path, run_id);
-
-    // Fresh write — truncate any stale sidecar from a previous run
-    // (orphan sweep should have handled this, but defend in depth).
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&tmp)
-        .map_err(CrabError::Io)?;
-    file.write_all(bytes).map_err(CrabError::Io)?;
-    file.sync_all().map_err(CrabError::Io)?;
-
-    #[cfg(unix)]
-    {
-        let permissions = fs::Permissions::from_mode(mode);
-        fs::set_permissions(&tmp, permissions).map_err(CrabError::Io)?;
+    let result = (|| {
+        // A retried write can reuse its interrupted run's sidecar; the target
+        // remains unchanged until all new bytes have reached the sidecar.
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp)
+            .map_err(CrabError::Io)?;
+        std::io::copy(&mut source, &mut file).map_err(CrabError::Io)?;
+        file.sync_all().map_err(CrabError::Io)?;
+        #[cfg(unix)]
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(mode)).map_err(CrabError::Io)?;
+        #[cfg(not(unix))]
+        let _ = mode;
+        drop(file);
+        crate::atomic::replace_file(&tmp, path)
+    })();
+    if result.is_err() {
+        // Preserve the original read/write failure; cleanup cannot publish a
+        // partial replacement and an unremovable sidecar remains sweepable.
+        let _ = fs::remove_file(&tmp);
     }
-    #[cfg(not(unix))]
-    let _ = mode;
-
-    // Rename is atomic within a filesystem. Cross-fs renames surface
-    // `ErrorKind::CrossesDevices` on recent Rust — callers route
-    // through `write_atomic_crossfs` in that case.
-    fs::rename(&tmp, path).map_err(CrabError::Io)?;
-    Ok(())
+    result
 }
 
 /// Atomically materialize a directory output from a manifest of
@@ -307,6 +318,42 @@ mod tests {
         let run_id = Uuid::now_v7();
         write_atomic(&path, b"fresh", run_id, 0o644).unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"fresh");
+    }
+
+    #[test]
+    fn streaming_read_failure_preserves_target_and_discards_partial_sidecar() {
+        struct Interrupted {
+            delivered: bool,
+        }
+        impl Read for Interrupted {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if self.delivered {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "source stopped",
+                    ));
+                }
+                self.delivered = true;
+                buffer[0] = b'x';
+                Ok(1)
+            }
+        }
+        let directory = TempDir::new().unwrap();
+        let target = directory.path().join("model.bin");
+        fs::write(&target, b"keep model").unwrap();
+        let id = Uuid::now_v7();
+        let error = write_atomic_from_reader(&target, Interrupted { delivered: false }, id, 0o644)
+            .unwrap_err();
+        assert!(
+            matches!(error, CrabError::Io(source) if source.kind() == std::io::ErrorKind::UnexpectedEof)
+        );
+        assert_eq!(
+            (
+                fs::read(target).unwrap(),
+                sidecar_path(&directory.path().join("model.bin"), id).exists()
+            ),
+            (b"keep model".to_vec(), false)
+        );
     }
 
     #[test]

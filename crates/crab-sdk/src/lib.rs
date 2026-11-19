@@ -56,6 +56,9 @@ pub mod operation;
 #[cfg(feature = "remote")]
 #[path = "api/remote.rs"]
 pub mod remote;
+#[cfg(feature = "results")]
+#[path = "api/results.rs"]
+pub mod results;
 #[path = "api/storage.rs"]
 pub mod storage;
 

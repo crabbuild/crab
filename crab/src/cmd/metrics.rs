@@ -18,6 +18,10 @@ use clap::{Parser, ValueEnum};
 use serde::Serialize;
 
 use crate::cmd::params::{ChangedEntry, Format, ScalarJson};
+use crab_workflow::results::plot_specs::*;
+use crab_workflow::results::plot_templates::*;
+use crab_workflow::results::plots::{PlotData, declared_plot_configs, parse_plot_data_bytes};
+
 use crate::core::error::{CrabError, Result};
 use crate::core::output::{OutputMode, emit_json};
 use crate::workflow::params::{self, Scalar, ScalarMap};
@@ -726,37 +730,6 @@ fn plot_config_matches_target(config: &PlotConfig, target: &Path) -> bool {
             .is_some_and(|id| Path::new(id) == target)
 }
 
-fn declared_plot_configs(workflow: &Workflow) -> Vec<PlotConfig> {
-    let mut configs = workflow.plot_configs.clone();
-    for path in &workflow.plots {
-        push_simple_plot_config(&mut configs, path);
-    }
-    for stage in workflow.stages.values() {
-        for path in &stage.plots {
-            push_simple_plot_config(&mut configs, path);
-        }
-    }
-    configs
-}
-
-fn push_simple_plot_config(configs: &mut Vec<PlotConfig>, path: &Path) {
-    if configs.iter().any(|config| config.path == path) {
-        return;
-    }
-    configs.push(PlotConfig {
-        id: None,
-        path: path.to_path_buf(),
-        x: None,
-        x_path: None,
-        y: Vec::new(),
-        no_header: false,
-        title: None,
-        x_label: None,
-        y_label: None,
-        template: None,
-    });
-}
-
 fn apply_plot_arg_overrides(mut config: PlotConfig, args: &PlotArgs) -> PlotConfig {
     if let Some(x) = &args.x {
         config.x = Some(x.clone());
@@ -979,11 +952,6 @@ struct PlotImageItem {
     data_url: String,
 }
 
-struct PlotRevisionData {
-    revision: String,
-    data: PlotData,
-}
-
 fn render_vega_output(configs: &[PlotConfig], repo_root: &Path) -> Result<String> {
     let specs = build_plot_specs(configs, repo_root)?;
     if specs.len() == 1 {
@@ -1126,9 +1094,7 @@ fn default_plot_html_template(title: &str) -> String {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{title}</title>
-  <script src="https://cdn.jsdelivr.net/npm/vega@5"></script>
-  <script src="https://cdn.jsdelivr.net/npm/vega-lite@5"></script>
-  <script src="https://cdn.jsdelivr.net/npm/vega-embed@6"></script>
+  <script>{runtime}</script>
   <style>
     body {{ font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; color: #111827; }}
     main {{ max-width: 960px; margin: 0 auto; }}
@@ -1146,11 +1112,14 @@ fn default_plot_html_template(title: &str) -> String {
   <main>
     <h1>{title}</h1>
     {{plot_divs}}
+    <details><summary>Open source notices</summary><pre>{licenses}</pre></details>
   </main>
 </body>
 </html>
 "#,
-        title = escape_html_text(title)
+        title = escape_html_text(title),
+        runtime = crab_workflow::results::CHART_RUNTIME,
+        licenses = escape_html_text(crab_workflow::results::CHART_LICENSES),
     )
 }
 
@@ -1178,7 +1147,14 @@ fn render_plot_divs(documents: &[PlotDocument]) -> Result<String> {
       section.append(title, path, body);
       root.appendChild(section);
       if (plot.kind === "vega") {{
-        vegaEmbed(body, plot.spec, {{ actions: true }});
+        const showError = (error) => {{
+          const message = document.createElement("p");
+          message.setAttribute("role", "alert");
+          message.style.overflowWrap = "anywhere";
+          message.textContent = String(error);
+          body.replaceChildren(message);
+        }};
+        vegaEmbed(body, plot.spec, {{ actions: true, onError: showError }}).catch(showError);
         return;
       }}
       const grid = document.createElement("div");
@@ -1778,243 +1754,6 @@ fn reject_image_sources_for_vega(config: &PlotConfig, sources: &[PlotSource]) ->
     Ok(())
 }
 
-fn build_vega_spec(
-    config: &PlotConfig,
-    title: &str,
-    data: &PlotData,
-    repo_root: &Path,
-) -> Result<serde_json::Value> {
-    let x_field = config.x.as_deref().unwrap_or("step");
-    if let Some(spec) = build_template_vega_spec(
-        config,
-        title,
-        data,
-        repo_root,
-        TemplateSeries::Single,
-        x_field,
-    )? {
-        return Ok(spec);
-    }
-
-    let values = plot_data_values(x_field, data, None);
-    let mark = match config.template.as_deref() {
-        Some("scatter" | "point") => "point",
-        Some("bar" | "confusion") => "bar",
-        _ => "line",
-    };
-    let x_type = infer_vega_type(&values, x_field);
-    let y_type = infer_vega_type(&values, "value");
-    let y_field_title = if data.y_fields.len() == 1 {
-        data.y_fields[0].as_str()
-    } else {
-        "value"
-    };
-    let x_title = plot_x_label(config, x_field);
-    let y_title = plot_y_label(config, y_field_title);
-
-    Ok(serde_json::json!({
-        "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
-        "title": title,
-        "data": { "values": values },
-        "mark": { "type": mark, "tooltip": true },
-        "encoding": {
-            "x": { "field": x_field, "type": x_type, "title": x_title },
-            "y": { "field": "value", "type": y_type, "title": y_title },
-            "color": { "field": "metric", "type": "nominal" }
-        }
-    }))
-}
-
-fn build_vega_diff_spec(
-    config: &PlotConfig,
-    title: &str,
-    baseline: &str,
-    target: &str,
-    baseline_data: &PlotData,
-    target_data: &PlotData,
-    repo_root: &Path,
-) -> Result<serde_json::Value> {
-    let x_field = config.x.as_deref().unwrap_or("step");
-    if let Some(spec) = build_template_vega_spec(
-        config,
-        &format!("{title}: {baseline} vs {target}"),
-        baseline_data,
-        repo_root,
-        TemplateSeries::Diff {
-            baseline,
-            target,
-            target_data,
-        },
-        x_field,
-    )? {
-        return Ok(spec);
-    }
-
-    let mut values = plot_data_values(x_field, baseline_data, Some(baseline));
-    values.extend(plot_data_values(x_field, target_data, Some(target)));
-    let mark = match config.template.as_deref() {
-        Some("scatter" | "point") => "point",
-        Some("bar" | "confusion") => "bar",
-        _ => "line",
-    };
-    let x_type = infer_vega_type(&values, x_field);
-    let y_type = infer_vega_type(&values, "value");
-    let x_title = plot_x_label(config, x_field);
-    let y_title = plot_y_label(config, "value");
-
-    Ok(serde_json::json!({
-        "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
-        "title": format!("{title}: {baseline} vs {target}"),
-        "data": { "values": values },
-        "mark": { "type": mark, "tooltip": true },
-        "encoding": {
-            "x": { "field": x_field, "type": x_type, "title": x_title },
-            "y": { "field": "value", "type": y_type, "title": y_title },
-            "color": { "field": "series", "type": "nominal", "title": "series" }
-        }
-    }))
-}
-
-fn build_vega_revision_spec(
-    config: &PlotConfig,
-    title: &str,
-    revision_data: &[PlotRevisionData],
-    repo_root: &Path,
-) -> Result<serde_json::Value> {
-    let Some(first) = revision_data.first() else {
-        return Err(CrabError::Configuration {
-            key: config.path.display().to_string(),
-            origin: "plots diff requires at least one revision".to_owned(),
-        });
-    };
-
-    let summary = revision_data_summary(revision_data);
-    let x_field = config.x.as_deref().unwrap_or("step");
-    if let Some(spec) = build_template_vega_spec(
-        config,
-        &format!("{title}: {summary}"),
-        &first.data,
-        repo_root,
-        TemplateSeries::Revisions(revision_data),
-        x_field,
-    )? {
-        return Ok(spec);
-    }
-
-    let mut values = Vec::new();
-    for item in revision_data {
-        values.extend(plot_data_values(x_field, &item.data, Some(&item.revision)));
-    }
-    let mark = match config.template.as_deref() {
-        Some("scatter" | "point") => "point",
-        Some("bar" | "confusion") => "bar",
-        _ => "line",
-    };
-    let x_type = infer_vega_type(&values, x_field);
-    let y_type = infer_vega_type(&values, "value");
-    let x_title = plot_x_label(config, x_field);
-    let y_title = plot_y_label(config, "value");
-
-    Ok(serde_json::json!({
-        "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
-        "title": format!("{title}: {summary}"),
-        "data": { "values": values },
-        "mark": { "type": mark, "tooltip": true },
-        "encoding": {
-            "x": { "field": x_field, "type": x_type, "title": x_title },
-            "y": { "field": "value", "type": y_type, "title": y_title },
-            "color": { "field": "series", "type": "nominal", "title": "series" }
-        }
-    }))
-}
-
-fn plot_x_label(config: &PlotConfig, fallback: &str) -> String {
-    config
-        .x_label
-        .clone()
-        .unwrap_or_else(|| fallback.to_owned())
-}
-
-fn plot_y_label(config: &PlotConfig, fallback: &str) -> String {
-    config
-        .y_label
-        .clone()
-        .unwrap_or_else(|| fallback.to_owned())
-}
-
-enum TemplateSeries<'a> {
-    Single,
-    Diff {
-        baseline: &'a str,
-        target: &'a str,
-        target_data: &'a PlotData,
-    },
-    Revisions(&'a [PlotRevisionData]),
-}
-
-fn build_template_vega_spec(
-    config: &PlotConfig,
-    title: &str,
-    data: &PlotData,
-    repo_root: &Path,
-    series: TemplateSeries<'_>,
-    x_field: &str,
-) -> Result<Option<serde_json::Value>> {
-    let Some(template) = config.template.as_deref() else {
-        return Ok(None);
-    };
-    let Some(spec) = resolve_plot_template_spec(repo_root, template)? else {
-        return Ok(None);
-    };
-    let y_field = data.y_fields.first().map_or("value", String::as_str);
-    let x_label = plot_x_label(config, x_field);
-    let y_label = plot_y_label(config, y_field);
-    let values = match series {
-        TemplateSeries::Single => plot_template_data_values(x_field, data, None),
-        TemplateSeries::Diff {
-            baseline,
-            target,
-            target_data,
-        } => {
-            let mut values = plot_template_data_values(x_field, data, Some(baseline));
-            values.extend(plot_template_data_values(
-                x_field,
-                target_data,
-                Some(target),
-            ));
-            values
-        }
-        TemplateSeries::Revisions(revision_data) => {
-            let mut values = Vec::new();
-            for item in revision_data {
-                values.extend(plot_template_data_values(
-                    x_field,
-                    &item.data,
-                    Some(&item.revision),
-                ));
-            }
-            values
-        }
-    };
-    let color_field = if values.iter().any(|value| value.get("rev").is_some()) {
-        "rev"
-    } else {
-        "metric"
-    };
-    Ok(Some(apply_plot_template_anchors(
-        spec,
-        &PlotTemplateValues {
-            data: serde_json::Value::Array(values),
-            title,
-            x_field,
-            y_field,
-            x_label: &x_label,
-            y_label: &y_label,
-            color_field,
-        },
-    )))
-}
-
 #[derive(Debug, Serialize)]
 pub struct PlotTemplatesPayload {
     pub templates: Vec<PlotTemplateInfo>,
@@ -2044,46 +1783,6 @@ pub struct PlotTemplateSpecPayload {
     pub path: Option<PathBuf>,
     pub spec: serde_json::Value,
 }
-
-struct BuiltinPlotTemplate {
-    name: &'static str,
-    description: &'static str,
-}
-
-const BUILTIN_PLOT_TEMPLATES: &[BuiltinPlotTemplate] = &[
-    BuiltinPlotTemplate {
-        name: "linear",
-        description: "basic linear plot including cursor interactivity",
-    },
-    BuiltinPlotTemplate {
-        name: "simple",
-        description: "minimal linear template, useful as a custom template base",
-    },
-    BuiltinPlotTemplate {
-        name: "scatter",
-        description: "scatter plot",
-    },
-    BuiltinPlotTemplate {
-        name: "smooth",
-        description: "linear plot with LOESS smoothing",
-    },
-    BuiltinPlotTemplate {
-        name: "confusion",
-        description: "confusion matrix heatmap",
-    },
-    BuiltinPlotTemplate {
-        name: "confusion_normalized",
-        description: "confusion matrix heatmap for normalized values",
-    },
-    BuiltinPlotTemplate {
-        name: "bar_horizontal",
-        description: "horizontal bar plot",
-    },
-    BuiltinPlotTemplate {
-        name: "bar_horizontal_sorted",
-        description: "horizontal bar plot sorted by value",
-    },
-];
 
 fn list_plot_templates(repo_root: &Path) -> Result<PlotTemplatesPayload> {
     let mut templates = BUILTIN_PLOT_TEMPLATES
@@ -2202,312 +1901,6 @@ fn template_name_from_path(template: &str, path: &Path) -> String {
         .or_else(|| path.file_stem().and_then(|stem| stem.to_str()))
         .unwrap_or(template)
         .to_owned()
-}
-
-fn resolve_plot_template_spec(
-    repo_root: &Path,
-    template: &str,
-) -> Result<Option<serde_json::Value>> {
-    if let Some(path) = resolve_custom_plot_template_path(repo_root, template) {
-        return read_plot_template_path(&path).map(Some);
-    }
-    Ok(builtin_plot_template_spec(template))
-}
-
-fn read_plot_template_path(path: &Path) -> Result<serde_json::Value> {
-    let text = std::fs::read_to_string(path).map_err(CrabError::Io)?;
-    serde_json::from_str(&text).map_err(|e| CrabError::Configuration {
-        key: path.display().to_string(),
-        origin: format!("plot template JSON parse error: {e}"),
-    })
-}
-
-fn resolve_custom_plot_template_path(repo_root: &Path, template: &str) -> Option<PathBuf> {
-    let template_path = Path::new(template);
-    let mut candidates = Vec::new();
-    if template_path.is_absolute() {
-        candidates.push(template_path.to_path_buf());
-    } else {
-        candidates.push(repo_root.join(template_path));
-        candidates.push(repo_root.join(".crab").join("plots").join(template_path));
-        candidates.push(repo_root.join(".dvc").join("plots").join(template_path));
-        if template_path.extension().is_none() {
-            let json_name = format!("{template}.json");
-            candidates.push(repo_root.join(".crab").join("plots").join(&json_name));
-            candidates.push(repo_root.join(".dvc").join("plots").join(json_name));
-        }
-    }
-    candidates.into_iter().find(|path| path.is_file())
-}
-
-fn builtin_plot_template_spec(template: &str) -> Option<serde_json::Value> {
-    let spec = match template {
-        "linear" => serde_json::json!({
-            "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
-            "title": "<DVC_METRIC_TITLE>",
-            "data": {"values": "<DVC_METRIC_DATA>"},
-            "mark": {"type": "line", "point": true, "tooltip": true},
-            "encoding": {
-                "x": {"field": "<DVC_METRIC_X>", "type": "quantitative", "title": "<DVC_METRIC_X_LABEL>"},
-                "y": {"field": "<DVC_METRIC_Y>", "type": "quantitative", "title": "<DVC_METRIC_Y_LABEL>"},
-                "color": {"field": "<DVC_METRIC_COLOR>", "type": "nominal"}
-            }
-        }),
-        "simple" => serde_json::json!({
-            "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
-            "title": "<DVC_METRIC_TITLE>",
-            "data": {"values": "<DVC_METRIC_DATA>"},
-            "mark": "line",
-            "encoding": {
-                "x": {"field": "<DVC_METRIC_X>", "type": "quantitative"},
-                "y": {"field": "<DVC_METRIC_Y>", "type": "quantitative"}
-            }
-        }),
-        "scatter" => serde_json::json!({
-            "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
-            "title": "<DVC_METRIC_TITLE>",
-            "data": {"values": "<DVC_METRIC_DATA>"},
-            "mark": {"type": "point", "tooltip": true},
-            "encoding": {
-                "x": {"field": "<DVC_METRIC_X>", "type": "quantitative", "title": "<DVC_METRIC_X_LABEL>"},
-                "y": {"field": "<DVC_METRIC_Y>", "type": "quantitative", "title": "<DVC_METRIC_Y_LABEL>"},
-                "color": {"field": "<DVC_METRIC_COLOR>", "type": "nominal"}
-            }
-        }),
-        "smooth" => serde_json::json!({
-            "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
-            "title": "<DVC_METRIC_TITLE>",
-            "data": {"values": "<DVC_METRIC_DATA>"},
-            "transform": [{"loess": "<DVC_METRIC_Y>", "on": "<DVC_METRIC_X>"}],
-            "mark": {"type": "line", "tooltip": true},
-            "encoding": {
-                "x": {"field": "<DVC_METRIC_X>", "type": "quantitative", "title": "<DVC_METRIC_X_LABEL>"},
-                "y": {"field": "<DVC_METRIC_Y>", "type": "quantitative", "title": "<DVC_METRIC_Y_LABEL>"},
-                "color": {"field": "<DVC_METRIC_COLOR>", "type": "nominal"}
-            }
-        }),
-        "confusion" => confusion_template_spec(false),
-        "confusion_normalized" => confusion_template_spec(true),
-        "bar_horizontal" => bar_template_spec(false),
-        "bar_horizontal_sorted" => bar_template_spec(true),
-        _ => return None,
-    };
-    Some(spec)
-}
-
-fn confusion_template_spec(normalized: bool) -> serde_json::Value {
-    if normalized {
-        return serde_json::json!({
-            "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
-            "title": "<DVC_METRIC_TITLE> (normalized)",
-            "data": {"values": "<DVC_METRIC_DATA>"},
-            "transform": [
-                {
-                    "aggregate": [{"op": "count", "as": "count"}],
-                    "groupby": ["<DVC_METRIC_X>", "<DVC_METRIC_Y>"]
-                },
-                {
-                    "joinaggregate": [{"op": "sum", "field": "count", "as": "total"}]
-                },
-                {
-                    "calculate": "datum.count / datum.total",
-                    "as": "normalized"
-                }
-            ],
-            "mark": {"type": "rect", "tooltip": true},
-            "encoding": {
-                "x": {"field": "<DVC_METRIC_X>", "type": "nominal", "title": "<DVC_METRIC_X_LABEL>"},
-                "y": {"field": "<DVC_METRIC_Y>", "type": "nominal", "title": "<DVC_METRIC_Y_LABEL>"},
-                "color": {"field": "normalized", "type": "quantitative", "title": "normalized"}
-            }
-        });
-    }
-    serde_json::json!({
-        "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
-        "title": "<DVC_METRIC_TITLE>",
-        "data": {"values": "<DVC_METRIC_DATA>"},
-        "mark": {"type": "rect", "tooltip": true},
-        "encoding": {
-            "x": {"field": "<DVC_METRIC_X>", "type": "nominal", "title": "<DVC_METRIC_X_LABEL>"},
-            "y": {"field": "<DVC_METRIC_Y>", "type": "nominal", "title": "<DVC_METRIC_Y_LABEL>"},
-            "color": {"aggregate": "count", "type": "quantitative", "title": "count"}
-        }
-    })
-}
-
-fn bar_template_spec(sorted: bool) -> serde_json::Value {
-    let sort = if sorted {
-        serde_json::json!("-x")
-    } else {
-        serde_json::Value::Null
-    };
-    serde_json::json!({
-        "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
-        "title": "<DVC_METRIC_TITLE>",
-        "data": {"values": "<DVC_METRIC_DATA>"},
-        "mark": {"type": "bar", "tooltip": true},
-        "encoding": {
-            "x": {"field": "<DVC_METRIC_Y>", "type": "quantitative", "title": "<DVC_METRIC_Y_LABEL>"},
-            "y": {
-                "field": "<DVC_METRIC_X>",
-                "type": "nominal",
-                "title": "<DVC_METRIC_X_LABEL>",
-                "sort": sort
-            },
-            "color": {"field": "<DVC_METRIC_COLOR>", "type": "nominal"}
-        }
-    })
-}
-
-struct PlotTemplateValues<'a> {
-    data: serde_json::Value,
-    title: &'a str,
-    x_field: &'a str,
-    y_field: &'a str,
-    x_label: &'a str,
-    y_label: &'a str,
-    color_field: &'a str,
-}
-
-fn apply_plot_template_anchors(
-    value: serde_json::Value,
-    replacements: &PlotTemplateValues<'_>,
-) -> serde_json::Value {
-    match value {
-        serde_json::Value::String(text) => replace_plot_template_string(&text, replacements),
-        serde_json::Value::Array(items) => serde_json::Value::Array(
-            items
-                .into_iter()
-                .map(|item| apply_plot_template_anchors(item, replacements))
-                .collect(),
-        ),
-        serde_json::Value::Object(map) => serde_json::Value::Object(
-            map.into_iter()
-                .map(|(key, value)| (key, apply_plot_template_anchors(value, replacements)))
-                .collect(),
-        ),
-        other => other,
-    }
-}
-
-fn replace_plot_template_string(
-    text: &str,
-    replacements: &PlotTemplateValues<'_>,
-) -> serde_json::Value {
-    if text == "<DVC_METRIC_DATA>" {
-        return replacements.data.clone();
-    }
-    let replaced = text
-        .replace("<DVC_METRIC_TITLE>", replacements.title)
-        .replace("<DVC_METRIC_X>", replacements.x_field)
-        .replace("<DVC_METRIC_Y>", replacements.y_field)
-        .replace("<DVC_METRIC_X_LABEL>", replacements.x_label)
-        .replace("<DVC_METRIC_Y_LABEL>", replacements.y_label)
-        .replace("<DVC_METRIC_COLOR>", replacements.color_field)
-        .replace("<DVC_METRIC_PLOT_HEIGHT>", "300")
-        .replace("<DVC_METRIC_PLOT_WIDTH>", "700");
-    serde_json::Value::String(replaced)
-}
-
-fn plot_data_values(
-    x_field: &str,
-    data: &PlotData,
-    revision: Option<&str>,
-) -> Vec<serde_json::Value> {
-    let mut values = Vec::new();
-    for (step, row) in data.rows.iter().enumerate() {
-        for (idx, field) in data.y_fields.iter().enumerate() {
-            let Some(value) = row.y_values.get(idx) else {
-                continue;
-            };
-            let mut object = serde_json::Map::new();
-            if x_field == "step" {
-                object.insert("step".to_owned(), plot_scalar(&row.x));
-            } else {
-                object.insert("step".to_owned(), serde_json::Value::Number(step.into()));
-                object.insert(x_field.to_owned(), plot_scalar(&row.x));
-            }
-            object.insert(
-                "metric".to_owned(),
-                serde_json::Value::String(field.clone()),
-            );
-            object.insert("value".to_owned(), plot_scalar(value));
-            if let Some(revision) = revision {
-                object.insert(
-                    "revision".to_owned(),
-                    serde_json::Value::String(revision.to_owned()),
-                );
-                object.insert(
-                    "series".to_owned(),
-                    serde_json::Value::String(format!("{revision}: {field}")),
-                );
-            } else {
-                object.insert(
-                    "series".to_owned(),
-                    serde_json::Value::String(field.clone()),
-                );
-            }
-            values.push(serde_json::Value::Object(object));
-        }
-    }
-    values
-}
-
-fn plot_template_data_values(
-    x_field: &str,
-    data: &PlotData,
-    revision: Option<&str>,
-) -> Vec<serde_json::Value> {
-    let mut values = Vec::new();
-    for (step, row) in data.rows.iter().enumerate() {
-        let mut object = serde_json::Map::new();
-        object.insert("step".to_owned(), serde_json::Value::Number(step.into()));
-        object.insert(x_field.to_owned(), plot_scalar(&row.x));
-        for (idx, field) in data.y_fields.iter().enumerate() {
-            let Some(value) = row.y_values.get(idx) else {
-                continue;
-            };
-            object.insert(field.clone(), plot_scalar(value));
-        }
-        if data.y_fields.len() > 1 {
-            object.insert(
-                "metric".to_owned(),
-                serde_json::Value::String(data.y_fields.join(",")),
-            );
-        }
-        if let Some(revision) = revision {
-            object.insert(
-                "rev".to_owned(),
-                serde_json::Value::String(revision.to_owned()),
-            );
-        }
-        values.push(serde_json::Value::Object(object));
-    }
-    values
-}
-
-fn plot_scalar(raw: &str) -> serde_json::Value {
-    if let Ok(i) = raw.parse::<i64>() {
-        return serde_json::Value::Number(i.into());
-    }
-    if let Ok(f) = raw.parse::<f64>()
-        && f.is_finite()
-        && let Some(n) = serde_json::Number::from_f64(f)
-    {
-        return serde_json::Value::Number(n);
-    }
-    serde_json::Value::String(raw.to_owned())
-}
-
-fn infer_vega_type(values: &[serde_json::Value], field: &str) -> &'static str {
-    if values
-        .iter()
-        .all(|value| value.get(field).is_some_and(serde_json::Value::is_number))
-    {
-        "quantitative"
-    } else {
-        "nominal"
-    }
 }
 
 fn render_plot_tables_for_config(config: &PlotConfig, repo_root: &Path) -> Result<String> {
@@ -2795,14 +2188,6 @@ fn revision_summary(revisions: &[String]) -> String {
         .join(" vs ")
 }
 
-fn revision_data_summary(revision_data: &[PlotRevisionData]) -> String {
-    revision_data
-        .iter()
-        .map(|item| item.revision.as_str())
-        .collect::<Vec<_>>()
-        .join(" vs ")
-}
-
 fn append_plot_data_table(out: &mut String, x_col: &str, data: &PlotData) {
     if data.rows.is_empty() {
         out.push_str("  (no data)\n");
@@ -2828,18 +2213,6 @@ fn append_plot_data_table(out: &mut String, x_col: &str, data: &PlotData) {
     }
 }
 
-#[derive(Debug, Default, Clone, Serialize)]
-struct PlotData {
-    y_fields: Vec<String>,
-    rows: Vec<PlotRow>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct PlotRow {
-    x: String,
-    y_values: Vec<String>,
-}
-
 fn read_plot_data(path: &Path, config: &PlotConfig) -> Result<PlotData> {
     if !path.exists() {
         return Err(CrabError::Configuration {
@@ -2848,7 +2221,7 @@ fn read_plot_data(path: &Path, config: &PlotConfig) -> Result<PlotData> {
         });
     }
     let bytes = std::fs::read(path).map_err(CrabError::Io)?;
-    parse_plot_data_bytes(path, &bytes, config)
+    parse_plot_data_bytes(path, &bytes, config).map_err(Into::into)
 }
 
 fn read_working_plot_data(repo_root: &Path, config: &PlotConfig) -> Result<PlotData> {
@@ -2960,192 +2333,9 @@ fn overlay_x_rows(config: &PlotConfig, mut data: PlotData, x_data: PlotData) -> 
         });
     }
     for (row, x_row) in data.rows.iter_mut().zip(x_data.rows) {
-        row.x = x_row.x;
+        row.replace_x(x_row);
     }
     Ok(data)
-}
-
-fn parse_plot_data_bytes(path: &Path, bytes: &[u8], config: &PlotConfig) -> Result<PlotData> {
-    let text = std::str::from_utf8(bytes).map_err(|e| CrabError::Configuration {
-        key: path.display().to_string(),
-        origin: format!("plot data file is not valid UTF-8: {e}"),
-    })?;
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-
-    match ext {
-        "csv" => Ok(read_delimited_plot_data(text, config, ',')),
-        "tsv" => Ok(read_delimited_plot_data(text, config, '\t')),
-        "json" => read_json_plot_data(path, text, config),
-        "yaml" | "yml" => read_yaml_plot_data(path, text, config),
-        other => Err(CrabError::Configuration {
-            key: path.display().to_string(),
-            origin: format!(
-                "unsupported plot data extension {:?} (expected .csv, .tsv, .json, .yaml, or .yml)",
-                if other.is_empty() { "<none>" } else { other }
-            ),
-        }),
-    }
-}
-
-fn read_delimited_plot_data(text: &str, config: &PlotConfig, delimiter: char) -> PlotData {
-    let raw_lines = text.lines().collect::<Vec<_>>();
-    let Some(first_line) = raw_lines.first() else {
-        return PlotData::default();
-    };
-    let first_cols = split_delimited_row(first_line, delimiter);
-    let headers: Vec<String> = if config.no_header {
-        (0..first_cols.len()).map(|idx| idx.to_string()).collect()
-    } else {
-        first_cols.iter().map(|col| (*col).to_owned()).collect()
-    };
-
-    let y_fields = effective_y_fields(&headers, config);
-
-    let x_col = config.x.as_deref().unwrap_or("");
-    let x_idx = headers.iter().position(|h| h == x_col);
-    let y_indices: Vec<Option<usize>> = config
-        .y
-        .iter()
-        .map(|y| headers.iter().position(|h| h == y))
-        .collect();
-    let y_indices = if y_indices.is_empty() {
-        y_fields
-            .iter()
-            .map(|y| headers.iter().position(|h| h == y))
-            .collect()
-    } else {
-        y_indices
-    };
-
-    let mut rows = Vec::new();
-    let data_lines: &[&str] = if config.no_header {
-        &raw_lines
-    } else {
-        &raw_lines[1..]
-    };
-    for (i, line) in data_lines.iter().enumerate() {
-        let cols = split_delimited_row(line, delimiter);
-        let x_val = x_idx.and_then(|idx| cols.get(idx).copied()).unwrap_or("");
-        let x_display = if x_val.is_empty() {
-            i.to_string()
-        } else {
-            x_val.to_owned()
-        };
-        let y_vals: Vec<String> = y_indices
-            .iter()
-            .map(|opt_idx| {
-                opt_idx
-                    .and_then(|idx| cols.get(idx).copied())
-                    .unwrap_or("-")
-                    .to_owned()
-            })
-            .collect();
-        rows.push(PlotRow {
-            x: x_display,
-            y_values: y_vals,
-        });
-    }
-    PlotData { y_fields, rows }
-}
-
-fn split_delimited_row(line: &str, delimiter: char) -> Vec<&str> {
-    line.split(delimiter).map(str::trim).collect()
-}
-
-fn plot_json_value_to_string(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::String(s) => s.clone(),
-        other => other.to_string(),
-    }
-}
-
-fn read_json_plot_data(path: &Path, text: &str, config: &PlotConfig) -> Result<PlotData> {
-    let parsed: serde_json::Value =
-        serde_json::from_str(text).map_err(|e| CrabError::Configuration {
-            key: path.display().to_string(),
-            origin: format!("json plot parse error: {e}"),
-        })?;
-    read_object_array_plot_data(path, config, &parsed)
-}
-
-fn read_yaml_plot_data(path: &Path, text: &str, config: &PlotConfig) -> Result<PlotData> {
-    let parsed: serde_yaml::Value =
-        serde_yaml::from_str(text).map_err(|e| CrabError::Configuration {
-            key: path.display().to_string(),
-            origin: format!("yaml plot parse error: {e}"),
-        })?;
-    let json = serde_json::to_value(parsed).map_err(|e| CrabError::Configuration {
-        key: path.display().to_string(),
-        origin: format!("yaml plot normalization error: {e}"),
-    })?;
-    read_object_array_plot_data(path, config, &json)
-}
-
-fn read_object_array_plot_data(
-    path: &Path,
-    config: &PlotConfig,
-    parsed: &serde_json::Value,
-) -> Result<PlotData> {
-    let arr = find_first_object_array(parsed).ok_or_else(|| CrabError::Configuration {
-        key: path.display().to_string(),
-        origin: "plot JSON/YAML data must contain an array of objects".to_owned(),
-    })?;
-
-    let headers = arr
-        .iter()
-        .find_map(|obj| obj.as_object())
-        .map(|obj| obj.keys().cloned().collect::<Vec<_>>())
-        .unwrap_or_default();
-    let y_fields = effective_y_fields(&headers, config);
-    let x_col = config.x.as_deref().unwrap_or("");
-    let mut rows = Vec::new();
-    for (i, obj) in arr.iter().enumerate() {
-        let x_val = if x_col.is_empty() {
-            i.to_string()
-        } else {
-            obj.get(x_col)
-                .map_or_else(|| i.to_string(), plot_json_value_to_string)
-        };
-        let y_vals: Vec<String> = y_fields
-            .iter()
-            .map(|y_key| {
-                obj.get(y_key.as_str())
-                    .map_or_else(|| "-".to_owned(), plot_json_value_to_string)
-            })
-            .collect();
-        rows.push(PlotRow {
-            x: x_val,
-            y_values: y_vals,
-        });
-    }
-    Ok(PlotData { y_fields, rows })
-}
-
-fn find_first_object_array(value: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
-    match value {
-        serde_json::Value::Array(items) => {
-            if items.iter().any(serde_json::Value::is_object) {
-                return Some(items);
-            }
-            items.iter().find_map(find_first_object_array)
-        }
-        serde_json::Value::Object(map) => map.values().find_map(find_first_object_array),
-        _ => None,
-    }
-}
-
-fn effective_y_fields(headers: &[String], config: &PlotConfig) -> Vec<String> {
-    if !config.y.is_empty() {
-        return config.y.clone();
-    }
-    let x = config.x.as_deref();
-    headers
-        .iter()
-        .rev()
-        .find(|field| Some(field.as_str()) != x)
-        .cloned()
-        .into_iter()
-        .collect()
 }
 
 /// Pick default metrics paths when the caller didn't pass any.
@@ -4887,8 +4077,9 @@ mod tests {
 
     #[test]
     fn plot_data_accepts_headerless_delimited_columns() {
-        let data = read_delimited_plot_data(
-            "1,0.2,0.8\n2,0.1,0.9\n",
+        let data = parse_plot_data_bytes(
+            Path::new("metrics.csv"),
+            b"1,0.2,0.8\n2,0.1,0.9\n",
             &PlotConfig {
                 id: None,
                 path: PathBuf::from("metrics.csv"),
@@ -4901,8 +4092,8 @@ mod tests {
                 y_label: Some("accuracy".to_owned()),
                 template: None,
             },
-            ',',
-        );
+        )
+        .unwrap();
 
         assert_eq!(data.y_fields, vec!["2"]);
         assert_eq!(data.rows.len(), 2);

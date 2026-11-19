@@ -168,14 +168,13 @@ export class SessionManager implements ISessionManager {
 
   /**
    * Incremental update for scroll/view changes on the active repo.
-   * Merges the partial into the cached session and schedules flush.
+   * Loads existing state or creates the first session, then schedules flush.
    */
   update(repoPath: string, partial: Partial<RepoSession>): void {
-    const existing = this.cache.get(repoPath);
-    if (!existing) return;
-    this.cache.set(repoPath, { ...existing, ...partial, savedAt: Date.now() });
-    this.dirty.add(repoPath);
-    this.scheduleFlush();
+    // A first-open repository may never have been deactivated. Preserve cold
+    // stored fields and use the same snapshot writer for every view update.
+    this.activate(repoPath);
+    this.deactivate(repoPath, partial);
   }
 
   /** Get a saved scroll position for a specific view within a repo. */

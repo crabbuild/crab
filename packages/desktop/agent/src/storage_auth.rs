@@ -294,7 +294,18 @@ pub async fn validate_target(
             | "git_push_branch"
             | "git_push_remote"
     );
+    let results_transport = method == "workflow_results_action"
+        && params
+            .get("action")
+            .and_then(Value::as_str)
+            .is_some_and(|action| {
+                matches!(
+                    action,
+                    "publish" | "publish_report" | "retrieve_report" | "promote"
+                )
+            });
     if !git
+        && !results_transport
         && !matches!(
             method,
             "crab_add"

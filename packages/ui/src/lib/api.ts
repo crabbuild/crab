@@ -355,7 +355,7 @@ export function useRequest<T>(
 }
 
 export function endpoint(
-  repo: Repository,
+  repo: Pick<Repository, "owner" | "name">,
   action: string,
   params: Record<string, string | undefined> = {},
 ) {

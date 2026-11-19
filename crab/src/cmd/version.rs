@@ -59,6 +59,7 @@ fn schema_registry() -> BTreeMap<String, String> {
         ("tier.plan", "1.0"),
         ("track", "1.0"),
         ("version", "1.0"),
+        ("workflow.results", "1.0"),
         // Enterprise replication schemas — v1.0
         ("replica.certification", "1.0"),
         ("replica.evidence.verify", "1.0"),
@@ -204,6 +205,7 @@ mod tests {
             "tier.plan",
             "track",
             "version",
+            "workflow.results",
             "replica.certification",
             "replica.evidence.verify",
             "replica.live-control-plane.evidence",
@@ -271,8 +273,8 @@ mod tests {
             "missing error schema"
         );
 
-        // Total count: 8 migrated + 26 new json + 12 streaming + 16 events + 1 error = 63
-        assert_eq!(schemas.len(), 63, "unexpected schema count");
+        // Total count: 8 migrated + 27 new json + 12 streaming + 16 events + 1 error = 64
+        assert_eq!(schemas.len(), 64, "unexpected schema count");
     }
 
     #[test]

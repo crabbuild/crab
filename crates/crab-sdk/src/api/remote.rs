@@ -33,6 +33,12 @@ pub struct Remote<'a> {
 }
 
 impl<'a> Remote<'a> {
+    /// Read captured workflow results without requiring a local worktree.
+    #[cfg(feature = "results")]
+    #[must_use]
+    pub fn results(&self) -> crate::results::Results<'a> {
+        crate::results::Results { owner: self.owner }
+    }
     /// Inspect implemented operation families without I/O or refreshing state.
     #[must_use]
     pub fn capabilities(&self) -> &[Capability] {

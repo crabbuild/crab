@@ -52,6 +52,8 @@ import {
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { ImperativePanelHandle } from "react-resizable-panels";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "../components/ui/resizable";
+import { repositoryKey } from "../state";
+import { ResultsWorkspace } from "../components/results/ResultsWorkspace";
 import { ExperimentPanel } from "../components/workflow/ExperimentPanel";
 import { MigrateWizard } from "../components/workflow/MigrateWizard";
 import { NewStageDialog } from "../components/workflow/NewStageDialog";
@@ -547,12 +549,14 @@ function WorkflowEditorInner({ repo, onOpenSource }: Props) {
   return (
     <div className="flex h-full w-full bg-background">
       <ResizablePanelGroup direction="horizontal" autoSaveId="crab.workflowStudio.sidebar">
+        {activeTab !== "results" && <>
         <ResizablePanel id="workflow-list" order={1} defaultSize={22} minSize={15} maxSize={40}>
           <WorkflowSidebar files={state.availableFiles} workflows={workflows} fileErrors={fileErrors} activeFile={state.activeFile}
         links={links} disabled={locked} dirty={state.dirty} canRename={!!repo.path}
         onSelect={actions.switchFile} onRefresh={() => actions.load()} onCreate={actions.createWorkflow} onRename={actions.renameWorkflow} onDelete={actions.deleteWorkflow} onMigrate={() => setShowMigrateWizard(true)} />
         </ResizablePanel>
         <ResizableHandle aria-label="Resize workflow list" />
+        </>}
         <ResizablePanel id="workflow-studio" order={2} minSize={60}>
           <div className="flex h-full min-w-0 flex-col">
             {(operationError || editorError) && (
@@ -560,7 +564,40 @@ function WorkflowEditorInner({ repo, onOpenSource }: Props) {
                 {operationError || editorError}
               </div>
             )}
-            {state.phase === "loading" ? (
+              <Tabs value={activeTab} onValueChange={(value) => actions.setActiveTab(value as WorkflowTab)} className="flex min-h-0 flex-1 flex-col">
+                <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border bg-card pr-3">
+                  <WorkflowTabs outdatedCount={outdatedCount} />
+                  <div className="flex shrink-0 items-center gap-2 py-1">
+                    {activeTab !== "results" && (
+                    <Button disabled={!state.workflow} variant="outline" ref={outputToggle} type="button" className={clsx(" flex items-center gap-1 text-xs", outputOpen && "text-primary")} aria-label="Toggle workflow output" aria-expanded={outputOpen} aria-controls={outputId}
+          onClick={() => outputOpen ? outputPanel.current?.collapse() : outputPanel.current?.expand()}>
+                      <PanelBottom size={14} />
+                      Output
+                    </Button>)}
+                    {/* Run controls */}
+                    {state.phase === "running" ? (
+                      <Button variant="destructive" type="button" className="flex items-center gap-1 text-xs" onClick={actions.cancel} disabled={cancelling}>
+                        <Square size={14} />{" "}
+                        {cancelling ? "Stopping…" : "Cancel"}
+                      </Button>
+                    ) : activeTab !== "results" && (
+                      <Button variant="default" type="button" className="flex items-center gap-1 text-xs" onClick={() => actions.run()} disabled={busy || (state.phase !== "editing" && state.phase !== "done")}>
+                        <Play size={14} /> Run All
+                      </Button>
+                    )}
+                    {activeTab !== "results" && state.phase === "done" && (
+                      <Button variant="outline" type="button" className="text-xs" onClick={actions.resetRun}>
+                        Reset
+                      </Button>
+                    )}
+                  </div>
+                </div>
+
+            {activeTab === "results" ? (
+              <TabsContent value="results" className="mt-0 min-h-0 flex-1 overflow-hidden">
+                <ResultsWorkspace key={repositoryKey(repo)} repo={repo} />
+              </TabsContent>
+            ) : state.phase === "loading" ? (
               <div role="status" className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground">
                 <Loader2 size={18} className="animate-spin" />
                 Loading workflows…
@@ -595,34 +632,7 @@ function WorkflowEditorInner({ repo, onOpenSource }: Props) {
                 </Button>
               </div>
             ) : (
-              <Tabs value={activeTab} onValueChange={(value) => actions.setActiveTab(value as WorkflowTab)} className="flex min-h-0 flex-1 flex-col">
-                <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border bg-card pr-3">
-                  <WorkflowTabs outdatedCount={outdatedCount} />
-                  <div className="flex shrink-0 items-center gap-2 py-1">
-                    <Button variant="outline" ref={outputToggle} type="button" className={clsx(" flex items-center gap-1 text-xs", outputOpen && "text-primary")} aria-label="Toggle workflow output" aria-expanded={outputOpen} aria-controls={outputId}
-          onClick={() => outputOpen ? outputPanel.current?.collapse() : outputPanel.current?.expand()}>
-                      <PanelBottom size={14} />
-                      Output
-                    </Button>
-                    {/* Run controls */}
-                    {state.phase === "running" ? (
-                      <Button variant="destructive" type="button" className="flex items-center gap-1 text-xs" onClick={actions.cancel} disabled={cancelling}>
-                        <Square size={14} />{" "}
-                        {cancelling ? "Stopping…" : "Cancel"}
-                      </Button>
-                    ) : (
-                      <Button variant="default" type="button" className="flex items-center gap-1 text-xs" onClick={() => actions.run()} disabled={busy || (state.phase !== "editing" && state.phase !== "done")}>
-                        <Play size={14} /> Run All
-                      </Button>
-                    )}
-                    {state.phase === "done" && (
-                      <Button variant="outline" type="button" className="text-xs" onClick={actions.resetRun}>
-                        Reset
-                      </Button>
-                    )}
-                  </div>
-                </div>
-
+              <>
                 <ResizablePanelGroup direction="vertical" autoSaveId="crab.workflowStudio.output" className="min-h-0 flex-1">
                   <ResizablePanel id="workflow-content" order={1} defaultSize={100} minSize={35}>
                     <div className="flex h-full min-h-0 flex-col">
@@ -809,9 +819,7 @@ function WorkflowEditorInner({ repo, onOpenSource }: Props) {
                       </TabsContent>
 
                       {/* Context menu */}
-                      <TabsContent value="experiments" className="mt-0 min-h-0 flex-1">
-                        <ExperimentPanel repoId={repo.repo_id} />
-                      </TabsContent>
+                      <TabsContent value="queue" className="mt-0 min-h-0 flex-1"><ExperimentPanel repoId={repo.repo_id} /></TabsContent>
                     </div>
                   </ResizablePanel>
                   <ResizableHandle aria-label="Resize workflow output" aria-orientation="horizontal" className={clsx(!outputOpen && "hidden")} />
@@ -822,8 +830,9 @@ function WorkflowEditorInner({ repo, onOpenSource }: Props) {
                     )}
                   </ResizablePanel>
                 </ResizablePanelGroup>
-              </Tabs>
+              </>
             )}
+            </Tabs>
           </div>
         </ResizablePanel>
       </ResizablePanelGroup>

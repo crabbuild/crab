@@ -636,6 +636,7 @@ async fn run_inline_single_stage(
         outs: outs.clone(),
     };
     let stage_hash = compute_stage_hash(&resolved);
+    let admitted_deps = admitted_file_deps(&resolved, repo_root);
 
     // Pre-execution planning / cache probe.
     let workflow_root = repo_root.join(".crab").join("workflow");
@@ -921,7 +922,13 @@ async fn run_inline_single_stage(
             // runs of other stages; we upsert this one and save.
             let lockfile_path = repo_root.join("crab.lock");
             let mut lockfile = Lockfile::load(&lockfile_path)?;
-            upsert_lockfile(&mut lockfile, &stage, &entry, repo_root, BTreeMap::new())?;
+            upsert_lockfile(
+                &mut lockfile,
+                &stage,
+                &entry,
+                admitted_deps,
+                BTreeMap::new(),
+            )?;
             lockfile.save(&lockfile_path)?;
 
             stage_result
@@ -1437,7 +1444,13 @@ async fn run_yaml_single_stage(
     .await;
 
     match outcome {
-        Ok((entry, used_cache, duration_ms, params)) => {
+        Ok(StageExecution {
+            entry,
+            used_cache,
+            duration_ms,
+            params,
+            deps,
+        }) => {
             journal.mark_run_outcome(run_id, RunOutcome::Success)?;
             let mut result =
                 build_stage_result(stage_name.as_str(), &entry, used_cache, duration_ms);
@@ -1449,7 +1462,7 @@ async fn run_yaml_single_stage(
             // consumers rely on the lockfile to pick up the new
             // hashes.
             let mut lockfile = lockfile;
-            upsert_lockfile(&mut lockfile, stage, &entry, repo_root, params)?;
+            upsert_lockfile(&mut lockfile, stage, &entry, deps, params)?;
             let yaml_stages: BTreeSet<StageName> = workflow.stages.keys().cloned().collect();
             prune_and_save_lockfile_via_ctx(&mut lockfile, &yaml_stages, lock_ctx, repo_root)?;
             emit_result(jsonl.as_mut(), &result, mode)?;
@@ -1872,10 +1885,16 @@ async fn run_dag(
 
                 // Record source and duration on the span.
                 match &outcome {
-                    Ok((_, used_cache, duration_ms, _)) => {
-                        stage_span
-                            .record("source", if *used_cache { "Cache" } else { "Execution" });
-                        stage_span.record("duration_ms", *duration_ms);
+                    Ok(execution) => {
+                        stage_span.record(
+                            "source",
+                            if execution.used_cache {
+                                "Cache"
+                            } else {
+                                "Execution"
+                            },
+                        );
+                        stage_span.record("duration_ms", execution.duration_ms);
                     }
                     Err(_) => {
                         stage_span.record("source", "Failed");
@@ -1909,12 +1928,18 @@ async fn run_dag(
         let stage_hash_preview = result.stage_hash_preview;
 
         match result.outcome {
-            Ok((entry, used_cache, duration_ms, params)) => {
+            Ok(StageExecution {
+                entry,
+                used_cache,
+                duration_ms,
+                params,
+                deps,
+            }) => {
                 let stage = workflow.stages.get(&stage_name);
 
                 // Update lockfile in memory.
                 if let Some(s) = stage {
-                    let _ = upsert_lockfile(&mut lockfile, s, &entry, repo_root, params);
+                    let _ = upsert_lockfile(&mut lockfile, s, &entry, deps, params);
                 }
 
                 let mut stage_result =
@@ -2016,10 +2041,16 @@ async fn run_dag(
     while let Some(result) = result_rx.recv().await {
         let stage_name = result.stage_name;
         match result.outcome {
-            Ok((entry, used_cache, duration_ms, params)) => {
+            Ok(StageExecution {
+                entry,
+                used_cache,
+                duration_ms,
+                params,
+                deps,
+            }) => {
                 let stage = workflow.stages.get(&stage_name);
                 if let Some(s) = stage {
-                    let _ = upsert_lockfile(&mut lockfile, s, &entry, repo_root, params);
+                    let _ = upsert_lockfile(&mut lockfile, s, &entry, deps, params);
                 }
                 let mut stage_result =
                     build_stage_result(stage_name.as_str(), &entry, used_cache, duration_ms);
@@ -2126,11 +2157,19 @@ async fn run_dag(
 
 // --- Parallel scheduler helpers ---
 
+struct StageExecution {
+    entry: StageCacheEntry,
+    used_cache: bool,
+    duration_ms: u64,
+    params: BTreeMap<String, String>,
+    deps: Vec<LockedDep>,
+}
+
 /// Result sent from a spawned stage task back to the scheduler loop.
 struct ParallelStageResult {
     stage_name: StageName,
     stage_hash_preview: Option<StageHash>,
-    outcome: Result<(StageCacheEntry, bool, u64, BTreeMap<String, String>)>,
+    outcome: Result<StageExecution>,
 }
 
 /// Execute a single stage in a spawned task context. This is the
@@ -2158,7 +2197,7 @@ async fn execute_stage_parallel(
     allow_missing: bool,
     jsonl: Option<Arc<tokio::sync::Mutex<JsonlStream<std::io::Stdout>>>>,
     run_started_at: Instant,
-) -> Result<(StageCacheEntry, bool, u64, BTreeMap<String, String>)> {
+) -> Result<StageExecution> {
     // Each parallel task opens its own journal connection. SQLite WAL
     // mode with busy_timeout handles concurrent writers.
     let journal = Journal::open(&journal_path)?;
@@ -2203,6 +2242,7 @@ async fn execute_stage_parallel(
         outs: stage.outs.clone(),
     };
     let stage_hash = compute_stage_hash(&resolved);
+    let admitted_deps = admitted_file_deps(&resolved, &repo_root);
 
     let cache_lookup_enabled = stage.run_cache_lookup_enabled() && !executor_cfg.no_run_cache;
     let cached = if cache_lookup_enabled {
@@ -2317,7 +2357,13 @@ async fn execute_stage_parallel(
                 )?;
             }
             let duration_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-            Ok((entry, cache_hit, duration_ms, params))
+            Ok(StageExecution {
+                entry,
+                used_cache: cache_hit,
+                duration_ms,
+                params,
+                deps: admitted_deps,
+            })
         }
         Err(err) => {
             if attempt > 1 && policy.max_attempts > 1 {
@@ -2746,7 +2792,7 @@ async fn try_build_workflow_remote(
 /// tree) and walking the same executor path inline single-stage
 /// uses.
 ///
-/// Returns `(cache_entry, used_cache, duration_ms, params)` on success.
+/// Returns execution observations and the admitted file input witnesses on success.
 #[allow(dead_code)]
 #[expect(
     clippy::too_many_arguments,
@@ -2766,7 +2812,7 @@ async fn execute_one_stage_from_yaml(
     journal: &Journal,
     run_id: Uuid,
     args: &RunArgs,
-) -> Result<(StageCacheEntry, bool, u64, BTreeMap<String, String>)> {
+) -> Result<StageExecution> {
     execute_one_stage_from_yaml_with_jsonl(
         stage,
         stage_name,
@@ -2806,7 +2852,7 @@ async fn execute_one_stage_from_yaml_with_jsonl(
     run_id: Uuid,
     args: &RunArgs,
     jsonl: Option<&mut JsonlStream<std::io::Stdout>>,
-) -> Result<(StageCacheEntry, bool, u64, BTreeMap<String, String>)> {
+) -> Result<StageExecution> {
     // Validate declared outs before any journal work.
     for out in &stage.outs {
         out.validate(stage_name)?;
@@ -2855,6 +2901,7 @@ async fn execute_one_stage_from_yaml_with_jsonl(
         outs: stage.outs.clone(),
     };
     let stage_hash = compute_stage_hash(&resolved);
+    let admitted_deps = admitted_file_deps(&resolved, repo_root);
 
     let cached = if stage.run_cache_lookup_enabled() && !executor_cfg.no_run_cache {
         read_local(&executor_cfg.cache_root, &stage_hash)
@@ -2970,7 +3017,13 @@ async fn execute_one_stage_from_yaml_with_jsonl(
                 )?;
             }
             let duration_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-            Ok((entry, cache_hit, duration_ms, params))
+            Ok(StageExecution {
+                entry,
+                used_cache: cache_hit,
+                duration_ms,
+                params,
+                deps: admitted_deps,
+            })
         }
         Err(err) => {
             // If retries were exhausted, wrap the error to surface
@@ -2987,56 +3040,34 @@ async fn execute_one_stage_from_yaml_with_jsonl(
     }
 }
 
-/// Translate a stage's cache entry into lockfile records and
-/// upsert. Deps recorded here come from the resolver — we hash the
-/// live working-tree + run-state view, same data the stage_hash
-/// was computed over.
+// Commands and cache hooks can overwrite inputs. Carry the admitted hashes
+// into the lockfile so output provenance never hashes the changed bytes.
+fn admitted_file_deps(resolved: &ResolvedStage, repo_root: &Path) -> Vec<LockedDep> {
+    resolved
+        .stage
+        .deps
+        .iter()
+        .filter_map(|dep| {
+            let Dep::Path(path) = dep else { return None };
+            let key = local_repo_relative_dep_key(path, resolved.stage.wdir.as_deref());
+            let hash = *resolved.dep_hashes.get(&key)?;
+            let metadata = std::fs::metadata(repo_root.join(&key)).ok()?;
+            metadata.is_file().then(|| LockedDep {
+                path: PathBuf::from(key),
+                hash,
+                size: metadata.len(),
+            })
+        })
+        .collect()
+}
+
 fn upsert_lockfile(
     lockfile: &mut Lockfile,
     stage: &Stage,
     entry: &StageCacheEntry,
-    repo_root: &Path,
+    deps: Vec<LockedDep>,
     params: BTreeMap<String, String>,
 ) -> Result<()> {
-    let mut deps: Vec<LockedDep> = Vec::new();
-    for dep in &stage.deps {
-        if let Dep::Path(p) = dep {
-            // When the stage has a wdir, resolve relative dep paths
-            // against repo_root/wdir/ and store them as wdir/dep in
-            // the lockfile (repo-relative).
-            let (abs, lockfile_path) = if p.is_absolute() {
-                (p.clone(), p.clone())
-            } else if let Some(ref wdir) = stage.wdir {
-                (repo_root.join(wdir).join(p), wdir.join(p))
-            } else {
-                (repo_root.join(p), p.clone())
-            };
-            // Best-effort: if the file vanished between exec and
-            // lockfile-write we drop it. A fully correct answer
-            // would carry the resolver's computed hashes through —
-            // that lives in task 3.14 once structured DAG output
-            // ships. For this wiring step we re-read rather than
-            // thread the hash-map back out.
-            let Ok(meta) = std::fs::metadata(&abs) else {
-                continue;
-            };
-            if !meta.is_file() {
-                continue;
-            }
-            let Ok(bytes) = std::fs::read(&abs) else {
-                continue;
-            };
-            let h = blake3::hash(&bytes);
-            let mut hash_bytes = [0u8; 32];
-            hash_bytes.copy_from_slice(h.as_bytes());
-            deps.push(LockedDep {
-                path: lockfile_path,
-                hash: hash_bytes,
-                size: meta.len(),
-            });
-        }
-    }
-
     // Resolve env values for the lockfile so explain-miss can diff
     // against them later.
     let env: BTreeMap<String, String> = match &stage.env {
@@ -3662,7 +3693,7 @@ fn preview_stage_cache_hit(
 /// discover` setting dictates the mode (default `Root`). Mapping
 /// the config enum to the workflow enum here keeps `run_in` free
 /// of the cross-module import.
-fn resolve_discover_mode(
+pub(crate) fn resolve_discover_mode(
     args: &RunArgs,
     config: &Config,
 ) -> crate::workflow::discover::DiscoverMode {

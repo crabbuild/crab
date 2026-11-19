@@ -21,6 +21,8 @@ use crate::StageState;
 
 use crate::{Result, WorkflowError as CrabError};
 
+mod admission;
+
 /// Current on-disk schema version. Bumped when the SQL layout
 /// changes in a way earlier readers cannot tolerate. Journals
 /// with a higher value refuse to open with
@@ -195,6 +197,19 @@ impl Journal {
 
                  CREATE INDEX IF NOT EXISTS idx_stage_runs_state
                      ON stage_runs(state);
+
+                 CREATE TABLE IF NOT EXISTS stage_inputs (
+                    run_id       TEXT NOT NULL,
+                    stage_name   TEXT NOT NULL,
+                    attempt      INTEGER NOT NULL,
+                    input_index  INTEGER NOT NULL,
+                    input_path   TEXT,
+                    hash         BLOB NOT NULL CHECK(length(hash) = 32),
+                    PRIMARY KEY (run_id, stage_name, attempt, input_index),
+                    FOREIGN KEY (run_id, stage_name, attempt)
+                        REFERENCES stage_runs(run_id, stage_name, attempt)
+                        ON DELETE CASCADE
+                 );
 
                  CREATE TABLE IF NOT EXISTS journal_meta (
                     key   TEXT PRIMARY KEY,

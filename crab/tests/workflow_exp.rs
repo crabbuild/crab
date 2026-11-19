@@ -111,9 +111,9 @@ fn init_scratch_repo() -> TempDir {
     tmp
 }
 
-#[cfg(unix)]
 fn init_checkpoint_repo() -> TempDir {
-    let tmp = TempDir::new().unwrap();
+    let target = std::env::var_os("CARGO_TARGET_DIR").expect("external target is required");
+    let tmp = tempfile::tempdir_in(target).unwrap();
     let repo = tmp.path();
 
     git(repo, &["init", "--initial-branch=main"]);
@@ -127,22 +127,42 @@ fn init_checkpoint_repo() -> TempDir {
         "[workflow]\nenabled = true\n",
     )
     .unwrap();
+    let interpreter = if cfg!(windows) { "python" } else { "python3" };
+    let python = Command::new(interpreter)
+        .args(["-c", "import sys; print(sys.executable)"])
+        .output()
+        .unwrap();
+    assert!(python.status.success(), "Python interpreter must resolve");
+    let python = String::from_utf8(python.stdout).unwrap();
+    let python = python.trim();
+    assert!(Path::new(python).is_absolute());
     fs::write(
         repo.join("crab.yaml"),
-        concat!(
-            "stages:\n",
-            "  train:\n",
-            "    cmd: >-\n",
-            "      set -eu; printf one > model.bin;\n",
-            "      \"$CRAB_WORKFLOW_EXECUTABLE\" workflow checkpoint >> \"$CRAB_TEST_LOG\" 2>&1;\n",
-            "      printf two > model.bin;\n",
-            "      \"$CRAB_WORKFLOW_EXECUTABLE\" workflow checkpoint >> \"$CRAB_TEST_LOG\" 2>&1;\n",
-            "      if [ \"x$CRAB_TEST_CHECKPOINT_CRASH\" = x1 ]; then exit 91; fi;\n",
-            "      printf three > model.bin\n",
-            "    outs:\n",
-            "      - path: model.bin\n",
-            "        checkpoint: true\n",
-        ),
+        serde_json::to_vec(&serde_json::json!({
+            "stages": {"train": {
+                "cmd": {"argv": [python, "train.py"]},
+                "outs": [{"path": "model.bin", "checkpoint": true}]
+            }}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        repo.join("train.py"),
+        r#"import os
+from pathlib import Path
+import subprocess
+import sys
+
+with open(os.environ["CRAB_TEST_LOG"], "ab") as log:
+    for value in (b"one", b"two"):
+        Path("model.bin").write_bytes(value)
+        subprocess.run([os.environ["CRAB_WORKFLOW_EXECUTABLE"], "workflow", "checkpoint"],
+                       stdout=log, stderr=subprocess.STDOUT, check=True)
+if os.environ.get("CRAB_TEST_CHECKPOINT_CRASH") == "1":
+    sys.exit(91)
+Path("model.bin").write_bytes(b"three")
+"#,
     )
     .unwrap();
     git(repo, &["add", "-A"]);
@@ -150,7 +170,6 @@ fn init_checkpoint_repo() -> TempDir {
     tmp
 }
 
-#[cfg(unix)]
 fn local_experiment_ids(repo: &Path) -> Vec<String> {
     let mut ids = fs::read_dir(repo.join(".crab/workflow/exp"))
         .unwrap()
@@ -321,7 +340,6 @@ fn run_exp_raw(
     )
 }
 
-#[cfg(unix)]
 #[test]
 fn checkpoint_lineage_apply_reset_and_resume_preserve_source() {
     let tmp = init_checkpoint_repo();
@@ -374,6 +392,30 @@ fn checkpoint_lineage_apply_reset_and_resume_preserve_source() {
     );
 
     let shown = run_exp_json(repo, "show", &[&source_id]);
+    let result = crab_workflow::results::LocalResults::new(repo)
+        .unwrap()
+        .run(&source_id)
+        .unwrap();
+    let preview = run_crab_json(
+        repo,
+        &[
+            "results",
+            "preview",
+            &source_id,
+            "--digest",
+            &result.digest,
+            "--resume",
+            "--json",
+        ],
+    );
+    assert_eq!(
+        preview["base_commit"],
+        git_output(repo, &["rev-parse", "HEAD"])
+    );
+    assert_eq!(
+        preview["checkpoint"],
+        source_before_reset["records"][1]["id"]
+    );
     assert_eq!(
         shown["metadata"]["checkpoints"].as_array().unwrap().len(),
         2
@@ -431,6 +473,9 @@ fn checkpoint_lineage_apply_reset_and_resume_preserve_source() {
     let resumed_ids = local_experiment_ids(repo);
     assert_eq!(resumed_ids.len(), 2);
     let resumed_id = resumed_ids.iter().find(|id| *id != &source_id).unwrap();
+    let resumed_payload: Value = serde_json::from_slice(&resumed.stdout)
+        .expect("resume stdout must contain only its structured result");
+    assert_eq!(resumed_payload["data"]["exp_id"], resumed_id.as_str());
     let resumed_state: Value = serde_json::from_slice(
         &fs::read(
             repo.join(".crab/workflow/checkpoints")
@@ -1349,7 +1394,34 @@ fn exp_apply_removes_files_deleted_by_experiment() {
     let exp_id = run["exp_id"].as_str().unwrap();
     fs::write(repo.join("tracked.txt"), "local conflicting edit\n").unwrap();
 
+    let result = crab_workflow::results::LocalResults::new(repo)
+        .unwrap()
+        .run(exp_id)
+        .unwrap();
+    let preview = run_crab_json(
+        repo,
+        &[
+            "results",
+            "preview",
+            exp_id,
+            "--digest",
+            &result.digest,
+            "--json",
+        ],
+    );
+    assert_eq!(
+        fs::read_to_string(repo.join("tracked.txt")).unwrap(),
+        "local conflicting edit\n"
+    );
+    assert!(
+        preview["deleted"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|path| path == "tracked.txt")
+    );
     let apply = run_exp_json(repo, "apply", &[exp_id]);
+    assert_eq!(preview["applied"], apply["applied"]);
     assert!(
         apply["deleted"]
             .as_array()

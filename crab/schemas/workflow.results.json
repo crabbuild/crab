@@ -1,0 +1,1215 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "anyOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "runs": {
+          "items": {
+            "$ref": "#/definitions/RunSelection"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "runs"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/definitions/RunPage"
+    },
+    {
+      "$ref": "#/definitions/SealedResult"
+    },
+    {
+      "$ref": "#/definitions/ActionPreview"
+    },
+    {
+      "$ref": "#/definitions/ArtifactPromotionPayload"
+    },
+    {
+      "$ref": "#/definitions/Comparison"
+    },
+    {
+      "items": {
+        "$ref": "#/definitions/Chart"
+      },
+      "type": "array"
+    },
+    {
+      "$ref": "#/definitions/Report"
+    },
+    {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "report": {
+          "$ref": "#/definitions/Report"
+        }
+      },
+      "required": [
+        "id",
+        "report"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "output": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "output"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "ids"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "bytes": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "hash": {
+          "type": "string"
+        },
+        "output": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "bytes",
+        "hash",
+        "output",
+        "path"
+      ],
+      "type": "object"
+    }
+  ],
+  "definitions": {
+    "ActionPreview": {
+      "additionalProperties": false,
+      "description": "Local execution facts shown before applying or resuming a run.",
+      "properties": {
+        "applied": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "base_commit": {
+          "type": "string"
+        },
+        "checkpoint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "deleted": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "applied",
+        "base_commit",
+        "deleted"
+      ],
+      "type": "object"
+    },
+    "ArtifactPromotionPayload": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        },
+        "stage_ref": {
+          "type": "string"
+        },
+        "version_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "stage",
+        "stage_ref",
+        "version_id"
+      ],
+      "type": "object"
+    },
+    "Attachment": {
+      "additionalProperties": false,
+      "properties": {
+        "hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/definitions/AttachmentKind"
+        },
+        "path": {
+          "type": "string"
+        },
+        "push": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "remote": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "size": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "stage": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/definitions/Availability"
+        }
+      },
+      "required": [
+        "kind",
+        "path",
+        "push",
+        "size",
+        "state"
+      ],
+      "type": "object"
+    },
+    "AttachmentKind": {
+      "enum": [
+        "metric",
+        "plot",
+        "image",
+        "log",
+        "workflow",
+        "input",
+        "output",
+        "checkpoint",
+        "template"
+      ],
+      "type": "string"
+    },
+    "Availability": {
+      "enum": [
+        "present",
+        "missing",
+        "invalid",
+        "not_captured",
+        "corrupt",
+        "denied",
+        "unsupported"
+      ],
+      "type": "string"
+    },
+    "AxisRange": {
+      "additionalProperties": false,
+      "properties": {
+        "lower": {
+          "format": "double",
+          "type": "number"
+        },
+        "upper": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "lower",
+        "upper"
+      ],
+      "type": "object"
+    },
+    "Chart": {
+      "additionalProperties": false,
+      "properties": {
+        "displayed_points": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "images": {
+          "items": {
+            "$ref": "#/definitions/ChartImage"
+          },
+          "type": "array"
+        },
+        "interaction": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ChartInteraction"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "key": {
+          "type": "string"
+        },
+        "points": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reduction": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ChartReduction"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "spec": true,
+        "state": {
+          "$ref": "#/definitions/Availability"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "displayed_points",
+        "images",
+        "key",
+        "points",
+        "state",
+        "title"
+      ],
+      "type": "object"
+    },
+    "ChartImage": {
+      "additionalProperties": false,
+      "properties": {
+        "digest": {
+          "type": "string"
+        },
+        "experiment_id": {
+          "type": "string"
+        },
+        "hash": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "digest",
+        "experiment_id",
+        "hash",
+        "label",
+        "path"
+      ],
+      "type": "object"
+    },
+    "ChartInteraction": {
+      "additionalProperties": false,
+      "properties": {
+        "domain": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AxisRange"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "field": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "field",
+        "key",
+        "label"
+      ],
+      "type": "object"
+    },
+    "ChartReduction": {
+      "description": "Describes how retained observations were reduced for display.",
+      "enum": [
+        "sampled",
+        "counted"
+      ],
+      "type": "string"
+    },
+    "Column": {
+      "additionalProperties": false,
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "pointer": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "file",
+        "key",
+        "kind",
+        "pointer"
+      ],
+      "type": "object"
+    },
+    "Comparison": {
+      "additionalProperties": false,
+      "properties": {
+        "rows": {
+          "items": {
+            "$ref": "#/definitions/ComparisonRow"
+          },
+          "type": "array"
+        },
+        "spec": {
+          "$ref": "#/definitions/ComparisonSpec"
+        }
+      },
+      "required": [
+        "rows",
+        "spec"
+      ],
+      "type": "object"
+    },
+    "ComparisonCell": {
+      "additionalProperties": false,
+      "properties": {
+        "absolute_delta": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "baseline": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Datum"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "candidate": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Datum"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "improvement": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "key": {
+          "type": "string"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "relative_delta": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "type": "object"
+    },
+    "ComparisonRow": {
+      "additionalProperties": false,
+      "properties": {
+        "cells": {
+          "items": {
+            "$ref": "#/definitions/ComparisonCell"
+          },
+          "type": "array"
+        },
+        "comparable": {
+          "type": "boolean"
+        },
+        "run": {
+          "$ref": "#/definitions/SealedResult"
+        }
+      },
+      "required": [
+        "cells",
+        "comparable",
+        "run"
+      ],
+      "type": "object"
+    },
+    "ComparisonSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "axes": {
+          "additionalProperties": {
+            "$ref": "#/definitions/AxisRange"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "baseline": {
+          "default": "",
+          "type": "string"
+        },
+        "columns": {
+          "default": null,
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "datasets": {
+          "additionalProperties": {
+            "$ref": "#/definitions/DatasetIdentity"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "include_logs": {
+          "default": false,
+          "type": "boolean"
+        },
+        "objectives": {
+          "additionalProperties": {
+            "$ref": "#/definitions/Direction"
+          },
+          "default": {},
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "DatasetIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "evaluator": {
+          "type": "string"
+        },
+        "hash": {
+          "type": "string"
+        },
+        "split": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "evaluator",
+        "hash",
+        "split"
+      ],
+      "type": "object"
+    },
+    "Datum": {
+      "additionalProperties": false,
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "pointer": {
+          "type": "string"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/definitions/Availability"
+        },
+        "value": true
+      },
+      "required": [
+        "file",
+        "pointer",
+        "state",
+        "value"
+      ],
+      "type": "object"
+    },
+    "Direction": {
+      "enum": [
+        "minimize",
+        "maximize"
+      ],
+      "type": "string"
+    },
+    "InputWitness": {
+      "additionalProperties": false,
+      "properties": {
+        "hash": {
+          "type": "string"
+        },
+        "path": {
+          "description": "Repository dependency key, absent for external or absolute locations.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "hash"
+      ],
+      "type": "object"
+    },
+    "OutputWitness": {
+      "additionalProperties": false,
+      "properties": {
+        "hash": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "size": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "hash",
+        "path",
+        "size"
+      ],
+      "type": "object"
+    },
+    "PlotConfig": {
+      "description": "Structured plot configuration for workflow metrics consumers.",
+      "properties": {
+        "id": {
+          "default": null,
+          "description": "Optional DVC plot ID used to target a named plot whose data lives in `path`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "no_header": {
+          "default": false,
+          "description": "CSV/TSV inputs do not contain a header row; columns are addressed by zero-based index.",
+          "type": "boolean"
+        },
+        "path": {
+          "description": "Path to the metrics data file.",
+          "type": "string"
+        },
+        "template": {
+          "default": null,
+          "description": "Plot template.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "default": null,
+          "description": "Human-readable plot title.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "x": {
+          "default": null,
+          "description": "Column or field name for the x-axis.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "x_label": {
+          "default": null,
+          "description": "Human-readable x-axis label.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "x_path": {
+          "default": null,
+          "description": "Optional source file for x-axis values when DVC maps x and y to different files.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "y": {
+          "default": [],
+          "description": "Column or field names for the y-axis.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "y_label": {
+          "default": null,
+          "description": "Human-readable y-axis label.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "Report": {
+      "additionalProperties": false,
+      "properties": {
+        "charts": {
+          "items": {
+            "$ref": "#/definitions/Chart"
+          },
+          "type": "array"
+        },
+        "comparison": {
+          "$ref": "#/definitions/Comparison"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "renderer": {
+          "type": "string"
+        },
+        "schema_version": {
+          "format": "uint16",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "charts",
+        "comparison",
+        "created_at",
+        "renderer",
+        "schema_version",
+        "title"
+      ],
+      "type": "object"
+    },
+    "ReproductionSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "all_pipelines": {
+          "type": "boolean"
+        },
+        "directories": {
+          "description": "Closed input trees, including empty directories, restored before files.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "downstream": {
+          "type": "boolean"
+        },
+        "files": {
+          "items": {
+            "$ref": "#/definitions/Attachment"
+          },
+          "type": "array"
+        },
+        "glob": {
+          "type": "boolean"
+        },
+        "pipeline": {
+          "type": "boolean"
+        },
+        "recursive": {
+          "type": "boolean"
+        },
+        "runtimes": {
+          "items": {
+            "$ref": "#/definitions/RuntimeWitness"
+          },
+          "type": "array"
+        },
+        "single_item": {
+          "type": "boolean"
+        },
+        "source_commit": {
+          "type": "string"
+        },
+        "source_result": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RunSelection"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Exact source result when this run was reproduced."
+        },
+        "targets": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "unavailable_reasons": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "all_pipelines",
+        "directories",
+        "downstream",
+        "files",
+        "glob",
+        "pipeline",
+        "recursive",
+        "runtimes",
+        "single_item",
+        "source_commit",
+        "targets",
+        "unavailable_reasons"
+      ],
+      "type": "object"
+    },
+    "ResultOrigin": {
+      "description": "Distinguishes retained observations from an explicit metadata-only migration.",
+      "enum": [
+        "captured",
+        "experiment_metadata"
+      ],
+      "type": "string"
+    },
+    "ResultSnapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "attachments": {
+          "items": {
+            "$ref": "#/definitions/Attachment"
+          },
+          "type": "array"
+        },
+        "base_commit": {
+          "type": "string"
+        },
+        "capture_issues": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "ended_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "experiment_id": {
+          "type": "string"
+        },
+        "metrics": {
+          "items": {
+            "$ref": "#/definitions/Datum"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "origin": {
+          "$ref": "#/definitions/ResultOrigin"
+        },
+        "parameters": {
+          "items": {
+            "$ref": "#/definitions/Datum"
+          },
+          "type": "array"
+        },
+        "plots": {
+          "items": {
+            "$ref": "#/definitions/PlotConfig"
+          },
+          "type": "array"
+        },
+        "reproduction": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ReproductionSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_version": {
+          "format": "uint16",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "source_metadata_hash": {
+          "type": "string"
+        },
+        "stages": {
+          "items": {
+            "$ref": "#/definitions/StageResult"
+          },
+          "type": "array"
+        },
+        "started_at": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "attachments",
+        "base_commit",
+        "capture_issues",
+        "experiment_id",
+        "metrics",
+        "origin",
+        "parameters",
+        "plots",
+        "schema_version",
+        "source_metadata_hash",
+        "stages",
+        "started_at",
+        "status"
+      ],
+      "type": "object"
+    },
+    "RunPage": {
+      "additionalProperties": false,
+      "properties": {
+        "columns": {
+          "items": {
+            "$ref": "#/definitions/Column"
+          },
+          "type": "array"
+        },
+        "display_columns": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "generation": {
+          "type": "string"
+        },
+        "next_cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rows": {
+          "items": {
+            "$ref": "#/definitions/RunSummary"
+          },
+          "type": "array"
+        },
+        "total": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "columns",
+        "display_columns",
+        "generation",
+        "rows",
+        "total"
+      ],
+      "type": "object"
+    },
+    "RunSelection": {
+      "additionalProperties": false,
+      "properties": {
+        "digest": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "digest",
+        "id"
+      ],
+      "type": "object"
+    },
+    "RunSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "base_commit": {
+          "type": "string"
+        },
+        "capture_issues": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "digest": {
+          "type": "string"
+        },
+        "ended_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "metrics": {
+          "items": {
+            "$ref": "#/definitions/Datum"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "origin": {
+          "$ref": "#/definitions/ResultOrigin"
+        },
+        "parameters": {
+          "items": {
+            "$ref": "#/definitions/Datum"
+          },
+          "type": "array"
+        },
+        "started_at": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "base_commit",
+        "capture_issues",
+        "digest",
+        "id",
+        "metrics",
+        "origin",
+        "parameters",
+        "started_at",
+        "status"
+      ],
+      "type": "object"
+    },
+    "RuntimeWitness": {
+      "additionalProperties": false,
+      "properties": {
+        "hash": {
+          "type": "string"
+        },
+        "program": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "hash",
+        "program"
+      ],
+      "type": "object"
+    },
+    "SealedResult": {
+      "additionalProperties": false,
+      "properties": {
+        "digest": {
+          "type": "string"
+        },
+        "snapshot": {
+          "$ref": "#/definitions/ResultSnapshot"
+        }
+      },
+      "required": [
+        "digest",
+        "snapshot"
+      ],
+      "type": "object"
+    },
+    "StageResult": {
+      "additionalProperties": false,
+      "properties": {
+        "attempts": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "duration_ms": {
+          "description": "Observed execution duration, absent when this attempt did not record one.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inputs": {
+          "items": {
+            "$ref": "#/definitions/InputWitness"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "outputs": {
+          "items": {
+            "$ref": "#/definitions/OutputWitness"
+          },
+          "type": "array"
+        },
+        "source": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "attempts",
+        "inputs",
+        "name",
+        "outputs",
+        "source",
+        "state"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "Structured command payloads emitted by `crab results --json`.",
+  "title": "ResultsPayload"
+}

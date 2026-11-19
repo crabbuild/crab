@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Read-side verbs go through the SDK.
-crab-sdk = { workspace = true, features = ["files", "service", "local"] }
+crab-sdk = { workspace = true, features = ["files", "service", "local", "results"] }
 crab-git = { workspace = true, features = ["process", "facade"] }
 crab-types = { workspace = true }
 crab-storage = { workspace = true }

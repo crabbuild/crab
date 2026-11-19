@@ -1,0 +1,260 @@
+---
+title: "Results workspace"
+description: "Compare captured experiment metrics, curves, and evidence; retain immutable reports."
+meta:
+  contentType: How-to
+  goal: "Compare real runs and recover a published immutable comparison."
+  audience: "Experiment authors and reviewers."
+---
+
+# Results workspace
+
+Crab captures effective parameters before execution and retains declared metrics,
+plots, outputs, stage witnesses, checkpoint records, and logs before an experiment
+worktree is removed. Results have a separate versioned contract; existing
+experiment metadata keeps its original format.
+
+Input witnesses retain the content hashes admitted before execution, including
+directory and generated inputs. External input locations are omitted; their
+hashes remain available for dataset comparisons. Failed attempts do not inherit
+earlier successful outputs. A missing observed duration is shown as unavailable.
+
+Reproduction restores source inputs, including copied directories. When a selected
+upstream stage rebuilds an input, Crab runs that stage instead of requiring its
+future output before the pipeline starts.
+Copied outputs and checkpoint state restored before a run are retained as its
+initial inputs. Reproducing that run, or a later reproduction of it, restores
+those bytes even when its base commit contains a different model.
+Directory inputs also preserve deleted children and empty folders. Reproduction
+replaces their captured trees before restoring files, so older files from the
+base commit cannot reappear.
+
+Each reproduced run records its immediate source run ID and result digest. Expand
+**Captured run identities** to inspect this relation, including in a saved report.
+Empty local settings created by `crab init` permit reproduction. Private settings
+with values are not retained; those runs explain why exact reproduction is unavailable.
+
+In Crab Desktop, open **Data Workflows → Results**. **Data Workflows → Queue**
+remains the scheduling view. Select up to 20 captured runs, choose a baseline,
+configure metric and parameter columns, and inspect captured evidence. Search and
+sorting apply before pagination. A missing metric stays missing; it never becomes
+zero. A zero baseline has an absolute delta without a percentage delta.
+
+`crab exp save` also creates a Results entry, labeled **saved**. Its declared
+metrics, parameters, curves and outputs come from the saved workspace. Parameter
+values describe that workspace at save time; they do not prove how a model was
+trained. You can apply the saved workspace or create a branch. Reproduce, Resume
+and artifact promotion require their execution evidence. Manual saves do not
+borrow earlier logs, stages or checkpoints. Earlier experiments enter this catalog
+through the explicit metadata migration below.
+
+Declared custom templates, including those under `.crab/plots`, are retained with
+the saved observation. Removing the source file later does not change the captured
+chart or exported report. Only declared render assets are read; private Crab state
+stays excluded. If a resolved custom template cannot be retained, Results shows
+that unavailable chart and keeps its captured metrics. A built-in with the same
+name does not replace it.
+
+Before Apply, Preview or branch creation, Crab checks captured output bytes in
+an owned copy of the selected workspace. Changed observations or unsafe directory
+symlinks stop the action before files are changed. Restore or retrieve the
+original experiment snapshot before trying again.
+
+Curve overlays fit the available panel width with legends below the plot. On
+narrow screens, focus the metric comparison and use arrow keys or scroll
+horizontally; the run column stays visible. Expand **Captured run identities**
+to inspect full run, commit, and snapshot IDs.
+
+Objective directions are explicit. Set a dataset input hash, split, and evaluator
+identity for each selected run before interpreting an improvement label. The hash
+must match a retained input witness. Unknown or different identities show a
+comparability reason alongside the numerical delta.
+
+## Inspect results from the CLI
+
+```bash
+crab results list --search train --limit 50 --json
+crab results show <experiment-id> --json
+crab results compare <baseline-id> <candidate-id> --json
+crab results charts <baseline-id> <candidate-id> --json
+crab results attachment <experiment-id> model.bin --output retained-model.bin
+```
+
+`list` returns the column catalog, displayed columns, a generation, and a cursor.
+Automation can run `crab version --json` first and check
+`data.schemas["workflow.results"]` for the supported Results envelope version.
+Pass the cursor with the same query to request the next page. If the catalog
+changes, restart from the first page. Metric and parameter keys include the
+original file and an escaped JSON pointer, preserving literal dotted keys.
+Integers outside exact browser precision are marked unsupported; inspect the
+retained source bytes for the original value.
+
+Use `compare --spec comparison.json` to declare the baseline, selected metric
+keys, objective directions, and dataset identities. Save that specification with
+the report when the comparison needs review.
+Set `columns` to `null` for automatic metric discovery or to `[]` for no metric
+columns. Explicit selections use an array of metric keys. Structured Results
+payloads follow the generated `workflow.results` JSON schema.
+
+## Migrate earlier experiment metadata
+
+```bash
+crab results migrate <experiment-id> <another-experiment-id> --json
+crab results migrate --all --json
+crab results list --search imported --json
+```
+
+Migration reads supported v1 experiment metadata from the local experiment cache
+using its original decoder. Retrieve remote experiments with `crab exp pull` first.
+It installs canonical Results snapshots with `origin: "experiment_metadata"`;
+normal Results reads do not scan old metadata or inspect today's workspace.
+
+Recorded metric values, timestamps, labels and reported terminal status are
+preserved. The table labels that status **imported**, and comparison explains the
+evidence gap. Parameter overrides and saved CLI arguments cannot establish resolved
+inputs. Original plot, model, checkpoint and log bytes are not inferred. Execution
+actions stay unavailable for these metadata-only results; run or save a new
+experiment to capture the evidence they require. Dataset identities still require
+retained input witnesses. You can compare recorded scalar values and publish
+immutable reports without claiming comparable execution.
+
+Migration is idempotent and never replaces an existing canonical capture. Invalid
+sources fail before root installation. Metadata files are bounded to 8 MiB and a
+batch to 256 MiB, including retained snapshots; select fewer IDs for a larger
+catalog. Installation is durable per run: retry after an I/O interruption. A corrupt
+existing Results root fails visibly and is not overwritten. Original experiment
+metadata and owned workspaces stay intact.
+
+## Save and retrieve an immutable report
+
+Publication and retrieval use the repository remote in `crab.toml`. Run
+`crab configure` first if the repository has not been configured.
+
+```bash
+crab results report create <baseline-id> <candidate-id> --title "Validation comparison" --json
+crab results report push <report-id> --json
+crab results report pull <report-id> --json
+crab results report show <report-id> --json
+crab results report export <report-id> --output comparison.html
+```
+
+A report ID is a BLAKE3 digest of its frozen comparison. Reports retain their own
+observations and evidence independently of experiment rename, reset, force push,
+or removal. Metric/plot sources, templates and workflow documents are retained;
+model, input and checkpoint payloads remain immutable links. Retrieve their run
+or artifact version to download those bytes. Logs are excluded from shared report evidence unless `include_logs`
+is enabled in the comparison specification. Input/runtime witnesses remain
+provenance; a report does not promise an executable checkpoint or cache entry.
+
+Exported HTML bundles its chart runtime and notices. Retained charts use inline
+data with external loading disabled, so reviewing a report does not need a CDN.
+Overlays share a 2,000-point display budget across their series. Large series
+disclose sampling and retain their original source bytes. Sampling preserves
+endpoints, extrema and missing intervals; null or missing observations remain
+gaps. Built-in confusion matrices count every retained observation before
+rendering. Large inputs with a bounded class grid keep exact counts; their views
+say **Counted**, rather than **sampled**. The display limit applies to the full
+class grid, including zero-count combinations. Missing class labels remain
+distinct from literal text, and numeric classes retain numeric order.
+
+Authored transformations that need more rows than the display budget show an
+explicit unsupported state rather than statistics computed from a sample.
+Their original source bytes remain available.
+
+If a run's retained plot or cross-file coordinate bytes are missing or fail verification, the comparison
+keeps captured metric values and the other verified curves. A notice identifies
+the affected run and explains recovery. Restore damaged evidence from a verified
+copy, or retrieve missing published evidence again, then refresh Results. Opening a missing or corrupt attachment in a
+saved report shows an error while the frozen comparison remains available.
+Saving or publishing still requires the report's complete rendering evidence.
+If every selected curve is unavailable, the view removes the old curves and
+shows the recovery notice. Refresh after restoring evidence to render them again.
+
+Compatible line charts share the cursor and numeric x range. Use **Zoom in**,
+**Zoom out**, or **From / To → Apply range**; **Reset range** restores the saved
+view. Working ranges persist with the comparison, and saving a report freezes
+them. Range changes while inspecting a report are temporary. Charts with
+different coordinate definitions or domains remain independent; transformed and
+compound custom charts retain their authored behavior.
+
+Built-in smoothed and minimal curves keep runs separate. Confusion matrices show
+one panel per series; normalized matrices normalize within each y class of each
+run. Class combinations with no observations have explicit zero-count cells.
+Matrix expansion is limited to 2,000 displayed cells. Offline chart viewports
+support keyboard scrolling while headings and export controls stay visible.
+
+Templates plot every selected y field separately for each run and preserve source
+columns for custom calculations. DVC object and array anchors, including color,
+grouping, tooltips, facets and zoom parameters, keep their JSON types. Files
+sharing a DVC plot ID remain separate charts. Horizontal bars use numeric x and
+categorical y, with runs grouped alongside each category. Literal punctuation
+and backslashes in column names work without renaming the retained source data.
+
+
+The optional repository browser exposes **Results** for published runs and
+reports. A link ending in `/results?report=<report-id>` identifies a frozen report;
+repository access is still required. Browser report publication requires write
+access. Execution actions require a worktree in Crab Desktop or the CLI.
+
+## Publish captured runs
+
+```bash
+crab results push <experiment-id> --json
+crab results pull <experiment-id> --json
+```
+
+Results CLI transfers currently require a direct object-storage remote. Managed
+authorities, including installed custom service profiles, are rejected before
+direct credentials are requested. An invalid service profile is an error and is
+never interpreted as a bucket. Managed-service Results qualification remains
+open.
+
+`crab exp push` and `crab exp pull` also transfer Results when a run has a Results
+snapshot. Results-only transfer includes captured evidence; it does not create an
+apply workspace or import all workflow cache entries. Output push policy still
+applies. Publication rejects evidence excluded from the chosen remote rather than
+silently uploading it.
+
+Published objects live in repository object storage. Unpublished objects under
+`.crab/workflow/results/` are durable work, not disposable cache. Preserve them
+until publication. Repository GC currently retains the Results object family
+conservatively.
+
+## Act on an experiment
+
+**Apply** previews every file to write or delete before restoring the completed
+experiment workspace. Confirming replaces local edits at those paths.
+**Promote artifact** moves
+an immutable artifact version to a stage; its bytes must match the selected run's
+recorded output. Set the expected current version to detect concurrent changes.
+**Create branch** creates a Git branch from the experiment. **Resume** continues
+an acknowledged checkpoint with the current workflow configuration. Its preview
+shows the checkpoint ID and current HEAD used as the new experiment's base.
+
+Preview the same execution facts without changing files from the CLI:
+
+```bash
+crab results preview <experiment-id> --digest <result-digest> --json
+crab results preview <experiment-id> --digest <result-digest> --resume --json
+```
+
+**Reproduce** uses the original source commit and retained effective inputs:
+
+```bash
+crab exp reproduce <experiment-id> --digest <result-digest> --json
+```
+
+Reproduction does not replay recorded shell text or current parameter overrides.
+Crab verifies the captured executable witness before running. Inherited
+unretained environment values, external inputs, shell commands, missing inputs,
+and local execution configuration can make exact reproduction unavailable; the
+Results view explains the reason. Ordinary checkpoint resume remains available
+when its separate prerequisites are present.
+
+Promote a matching immutable version from the CLI:
+
+```bash
+crab results promote <experiment-id> --digest <result-digest> \
+  --name model --version <immutable-version> --stage staging \
+  --expected <current-version> --json
+```

@@ -48,6 +48,50 @@ mod tests {
     use uuid::Uuid;
 
     #[tokio::test]
+    async fn read_timeout_recovery_does_not_claim_an_unconfirmed_write() {
+        let server = crate::test_support::server::fixture_without_cells().await;
+        async fn stalled() -> StatusCode {
+            std::future::pending().await
+        }
+        let app = Router::new().route("/", get(stalled).post(stalled)).layer(
+            middleware::from_fn_with_state(server.clone(), crate::app::admit),
+        );
+        let read = app
+            .clone()
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap());
+        let write = app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/")
+                .body(Body::empty())
+                .unwrap(),
+        );
+        let (read, write) = tokio::join!(read, write);
+        let read = read.unwrap();
+        let write = write.unwrap();
+        let statuses = (read.status(), write.status());
+        let read: serde_json::Value =
+            serde_json::from_slice(&read.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        let write: serde_json::Value =
+            serde_json::from_slice(&write.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        crate::test_support::server::close(&server).await;
+        assert_eq!(
+            (
+                statuses,
+                read["error"]["message"].as_str(),
+                write["error"]["message"].as_str()
+            ),
+            (
+                (StatusCode::GATEWAY_TIMEOUT, StatusCode::GATEWAY_TIMEOUT),
+                Some("The read request timed out. Retry the read."),
+                Some(
+                    "Collaboration request timed out; retry the same submission to recover a possible completed write"
+                )
+            )
+        );
+    }
+
+    #[tokio::test]
     async fn admitted_browser_write_cannot_follow_a_route_refresh_while_its_body_is_pending() {
         let server = crate::test_support::server::fixture().await;
         let repository = server.repositories.values().pop().unwrap();

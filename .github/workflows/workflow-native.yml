@@ -31,7 +31,21 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Set isolated Cargo target directory
+        shell: bash
+        # Evidence fixtures run before Cargo creates the target directory.
+        run: |
+          mkdir -p "$RUNNER_TEMP/crab-workflow-native-target"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crab-workflow-native-target" >> "$GITHUB_ENV"
+
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Test Results qualification evidence
+        run: python -m unittest discover -s crab/scripts/tests -p "test_*results*.py"
 
       - name: Install macOS FUSE dependencies
         if: runner.os == 'macOS'
@@ -54,6 +68,37 @@ jobs:
       - name: Run CLI v1 contract tests
         run: cargo test -p crab --test workflow_v1_contracts --no-default-features --features simd-accel,tier,watch --locked
 
+      - name: Run experiment CLI regressions
+        # Existing experiment fixtures still execute POSIX commands.
+        if: runner.os != 'Windows'
+        run: cargo test -p crab --locked --no-default-features --features simd-accel,tier,watch --test workflow_exp
+
+      - name: Run native Windows checkpoint and resume regression
+        if: runner.os == 'Windows'
+        run: cargo test -p crab --locked --no-default-features --features simd-accel,tier,watch --test workflow_exp checkpoint_lineage_apply_reset_and_resume_preserve_source -- --exact
+
+      - name: Run Results CLI regressions
+        run: cargo test -p crab --locked --no-default-features --features simd-accel,tier,watch --test workflow_results
+
+      - name: Run metrics and plot regressions
+        if: runner.os != 'Windows'
+        run: cargo test -p crab --locked --no-default-features --features simd-accel,tier,watch --lib cmd::metrics::tests
+
+      - name: Check schema drift
+        run: cargo test -p crab --locked --no-default-features --features simd-accel,tier,watch --test schema_drift
+
+      - name: Check Results payload schema
+        run: cargo test -p crab --locked --no-default-features --features simd-accel,tier,watch --test schema_validate results_payloads_use_owner_shapes_and_reject_malformed_reports -- --exact
+
+      - name: Check minimal SDK features
+        run: cargo check -p crab-sdk --locked --no-default-features --lib
+
+      - name: Check Results SDK features
+        run: cargo check -p crab-sdk --locked --no-default-features --features results --lib
+
+      - name: Test Results SDK reads and admission
+        run: cargo test -p crab-sdk --locked --no-default-features --features results --test results
+
       - name: Build release CLI on Windows feature contract
         if: runner.os == 'Windows'
         run: cargo build -p crab --release --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch
@@ -65,11 +110,11 @@ jobs:
       - name: Smoke the native Windows release binary
         if: runner.os == 'Windows'
         shell: pwsh
-        run: .\target\release\crab.exe --version
+        run: '& "$env:CARGO_TARGET_DIR/release/crab.exe" --version'
 
       - name: Smoke the native Unix release binary
         if: runner.os != 'Windows'
-        run: ./target/release/crab --version
+        run: '"$CARGO_TARGET_DIR/release/crab" --version'
 
       - name: Execute a native workflow stage on Unix
         if: runner.os != 'Windows'
@@ -88,7 +133,7 @@ jobs:
           from pathlib import Path
           Path("output.txt").write_text("native-workflow", encoding="utf-8")
           PY
-          (cd "${smoke_root}" && "${GITHUB_WORKSPACE}/target/release/crab" run)
+          (cd "${smoke_root}" && "${CARGO_TARGET_DIR}/release/crab" run)
           test "$(cat "${smoke_root}/output.txt")" = native-workflow
 
       - name: Execute a native workflow stage on Windows
@@ -110,7 +155,7 @@ jobs:
           '@ | Set-Content -Path (Join-Path $smokeRoot "write.py") -Encoding utf8
           Push-Location $smokeRoot
           try {
-            & "$env:GITHUB_WORKSPACE\target\release\crab.exe" run
+            & "$env:CARGO_TARGET_DIR/release/crab.exe" run
             if ($LASTEXITCODE -ne 0) { throw "native workflow failed with exit code $LASTEXITCODE" }
           } finally {
             Pop-Location

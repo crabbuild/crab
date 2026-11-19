@@ -46,11 +46,15 @@
 //! during `exp pull` remains separate; `workflow push-cache` / `run
 //! --pull-cache` are the cache transport.
 
+mod workspace_action;
+
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
+
+pub(crate) mod results_migration;
 use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -175,6 +179,7 @@ pub(crate) struct ExpRunExecutionOptions {
     glob: bool,
     copy_paths: Vec<PathBuf>,
     resume: Option<String>,
+    reproduction: Option<crab_workflow::results::ReproductionSpec>,
 }
 
 impl Default for ExpRunExecutionOptions {
@@ -199,6 +204,7 @@ impl Default for ExpRunExecutionOptions {
             glob: false,
             copy_paths: Vec::new(),
             resume: None,
+            reproduction: None,
         }
     }
 }
@@ -225,6 +231,7 @@ impl ExpRunExecutionOptions {
             glob: args.glob,
             copy_paths: args.copy_paths.clone(),
             resume: args.resume.clone(),
+            reproduction: None,
         }
     }
 
@@ -377,6 +384,10 @@ pub struct RunArgs {
     /// this experiment id or unambiguous prefix.
     #[arg(long, value_name = "EXPERIMENT")]
     pub resume: Option<String>,
+
+    /// Pin checkpoint resume to the experiment state shown in Results.
+    #[arg(long, requires = "resume")]
+    pub result_digest: Option<String>,
 
     /// Max parallel stages. Reserved for future parallel DAG
     /// execution; ignored for now.
@@ -625,6 +636,10 @@ pub struct PromoteArgs {
     /// Experiment id to promote.
     pub id: String,
 
+    /// Require the action's mutable experiment state to match this captured result.
+    #[arg(long)]
+    pub result_digest: Option<String>,
+
     /// Branch name to create from the experiment snapshot.
     /// Optional for DVC-style `crab exp branch <id> [branch]`; if
     /// omitted, Crab derives one from the experiment name or id.
@@ -656,6 +671,10 @@ impl PromoteArgs {
 pub struct ApplyArgs {
     /// Experiment id or unambiguous prefix to apply to the workspace.
     pub id: String,
+
+    /// Require the action's mutable experiment state to match this captured result.
+    #[arg(long)]
+    pub result_digest: Option<String>,
 
     /// Optional checkpoint id or sequence to apply instead of the terminal
     /// workspace snapshot.
@@ -1264,6 +1283,18 @@ pub fn exec_gc(args: GcArgs) -> Result<()> {
 /// `HEAD@repo_root`; the user's main worktree is never mutated.
 pub async fn run_exp_run(args: &RunArgs, repo_root: &Path) -> Result<()> {
     let mode = args.output_mode();
+    if args.result_digest.is_some() {
+        let source = args
+            .resume
+            .as_deref()
+            .ok_or_else(|| CrabError::Configuration {
+                key: "exp run --result-digest".into(),
+                origin: "a pinned result requires --resume".into(),
+            })?;
+        let id = resolve_experiment_id(repo_root, source)?;
+        let metadata = read_local_metadata(repo_root, &id)?;
+        validate_result_source(repo_root, &metadata, args.result_digest.as_deref())?;
+    }
 
     if args.run_all {
         let start_args = crate::cmd::exp_queue::StartArgs {
@@ -1344,11 +1375,20 @@ pub(crate) async fn run_exp_run_with_id(
 
     // Materialize the tmpdir and overlay overrides onto declared
     // params files so they participate in stage hashing.
-    let worktree = match base_commit.as_deref() {
-        Some(commit) => {
-            ExperimentWorktree::create_at_commit(repo_root, exp_id, commit, &overrides)?
+    let worktree = if let Some(spec) = &options.reproduction {
+        ExperimentWorktree::reproduce(
+            repo_root,
+            exp_id,
+            spec,
+            &crab_workflow::results::LocalResults::new(repo_root)?,
+        )?
+    } else {
+        match base_commit.as_deref() {
+            Some(commit) => {
+                ExperimentWorktree::create_at_commit(repo_root, exp_id, commit, &overrides)?
+            }
+            None => ExperimentWorktree::create(repo_root, exp_id, &overrides)?,
         }
-        None => ExperimentWorktree::create(repo_root, exp_id, &overrides)?,
     };
     let base_commit = worktree.base_commit.clone();
     let tmpdir_path = worktree.path.clone();
@@ -1357,22 +1397,23 @@ pub(crate) async fn run_exp_run_with_id(
         &exp_id.to_string(),
     )?;
     let checkpoint_token = crate::cmd::workflow_checkpoint::control_token(&exp_id.to_string());
-    copy_paths_into_experiment(repo_root, &tmpdir_path, &options.copy_paths)?;
+    let mut materialized_inputs =
+        copy_paths_into_experiment(repo_root, &tmpdir_path, &options.copy_paths)?;
+    if let Some(spec) = &options.reproduction {
+        materialized_inputs.extend(spec.files.iter().map(|file| PathBuf::from(&file.path)));
+        materialized_inputs.extend(spec.directories.iter().map(PathBuf::from));
+    }
     if let Some(source) = options.resume.as_deref() {
         let source_id = resolve_experiment_id(repo_root, source)?;
-        let records = checkpoint_records(repo_root, &source_id)?;
-        let record = records
-            .iter()
-            .rev()
-            .find(|record| record.resumable)
-            .ok_or_else(|| CrabError::Configuration {
-                key: "exp run --resume".to_owned(),
-                origin: format!("experiment {source_id} has no acknowledged checkpoint"),
-            })?;
+        let record = latest_resumable_checkpoint(repo_root, &source_id)?;
         let source_state = checkpoint_state_dir(repo_root, &source_id);
         let target_state = checkpoint_state_dir(repo_root, &exp_id);
         copy_checkpoint_state(&source_state, &target_state, repo_root)?;
-        apply_checkpoint_record_to(&target_state, &tmpdir_path, record)?;
+        materialized_inputs.extend(apply_checkpoint_record_to(
+            &target_state,
+            &tmpdir_path,
+            &record,
+        )?);
     }
     let _active_queue_run = if is_queued_run {
         Some(crate::cmd::exp_queue::mark_queue_run_active(
@@ -1454,6 +1495,35 @@ pub(crate) async fn run_exp_run_with_id(
         stages: None,
         glob: options.glob,
         cmd: options.targets.clone(),
+    };
+
+    let result_capture = if options.dry_run {
+        None
+    } else {
+        let repo = repo_root.to_path_buf();
+        let directory = tmpdir_path.clone();
+        let capture_args = run_args.clone();
+        let commit = base_commit.clone();
+        let source_result = options
+            .reproduction
+            .as_ref()
+            .and_then(|spec| spec.source_result.clone());
+        Some(
+            tokio::task::spawn_blocking(move || {
+                crate::cmd::results::begin_capture(
+                    &repo,
+                    &directory,
+                    &capture_args,
+                    &commit,
+                    source_result,
+                    &materialized_inputs,
+                )
+            })
+            .await
+            .map_err(|error| {
+                CrabError::Internal(format!("result input capture failed: {error}"))
+            })??,
+        )
     };
 
     let (checkpoint_stop_tx, checkpoint_stop_rx) = tokio::sync::oneshot::channel();
@@ -1601,6 +1671,28 @@ pub(crate) async fn run_exp_run_with_id(
 
     write_local_metadata(repo_root, &metadata)?;
 
+    if let Some(capture) = result_capture {
+        let directory = tmpdir_path.clone();
+        let observed = metadata.clone();
+        let source_root = repo_root.to_path_buf();
+        let captured = tokio::task::spawn_blocking(move || -> Result<()> {
+            let checkpoints = checkpoint_records(&source_root, &exp_id)?;
+            let lockfile = Lockfile::load(&directory.join("crab.lock"))?;
+            capture.finish(&observed, &lockfile, &checkpoints)?;
+            Ok(())
+        })
+        .await
+        .map_err(|source| CrabError::Io(std::io::Error::other(source)))
+        .and_then(std::convert::identity);
+        if let Err(error) = captured {
+            if dag_result.is_ok() {
+                dag_result = Err(error);
+            } else {
+                warn!(exp_id = %exp_id, %error, "result evidence capture failed after experiment failure");
+            }
+        }
+    }
+
     if is_queued_run {
         crate::cmd::exp_queue::persist_queue_logs(
             repo_root,
@@ -1720,9 +1812,11 @@ pub fn run_exp_ls(args: &LsArgs, repo_root: &Path) -> Result<()> {
 pub fn run_exp_promote(args: &PromoteArgs, repo_root: &Path) -> Result<()> {
     let exp_id = resolve_experiment_id(repo_root, &args.id)?;
     let metadata = read_local_metadata(repo_root, &exp_id)?;
+    validate_result_source(repo_root, &metadata, args.result_digest.as_deref())?;
     let branch = promote_branch_name(args, &metadata);
 
-    let commit = create_experiment_branch(repo_root, &branch, &metadata)?;
+    let commit =
+        create_experiment_branch(repo_root, &branch, &metadata, args.result_digest.as_deref())?;
 
     let payload = ExpPromotePayload {
         exp_id: exp_id.to_string(),
@@ -1733,11 +1827,53 @@ pub fn run_exp_promote(args: &PromoteArgs, repo_root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Read the execution owner's paths and checkpoint without changing the workspace.
+pub fn preview_result_action(
+    repo_root: &Path,
+    id: &str,
+    digest: &str,
+    resume: bool,
+) -> Result<crab_workflow::results::ActionPreview> {
+    let exp_id = resolve_experiment_id(repo_root, id)?;
+    let metadata = read_local_metadata(repo_root, &exp_id)?;
+    validate_result_source(repo_root, &metadata, Some(digest))?;
+    if resume {
+        let checkpoint = latest_resumable_checkpoint(repo_root, &exp_id)?;
+        return Ok(crab_workflow::results::ActionPreview {
+            base_commit: resolve_current_head(repo_root)?,
+            checkpoint: Some(checkpoint.id),
+            applied: checkpoint.outputs.into_keys().collect(),
+            deleted: Vec::new(),
+        });
+    }
+    let prepared = workspace_action::prepare(repo_root, &exp_id, Some(digest), "results preview")?;
+    workspace_action::validate_target(&prepared, repo_root)?;
+    let snapshot_dir = prepared.directory.path();
+    let mut applied = Vec::new();
+    apply_workspace_tree(snapshot_dir, snapshot_dir, repo_root, &mut applied, true)?;
+    applied.sort();
+    Ok(crab_workflow::results::ActionPreview {
+        base_commit: metadata.base_commit,
+        checkpoint: None,
+        applied: applied
+            .into_iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect(),
+        deleted: prepared
+            .manifest
+            .deleted
+            .into_iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect(),
+    })
+}
+
 /// Testable `exp apply` entry point. Returns the payload so tests
 /// can assert on the workspace changes without parsing stdout.
 pub fn run_exp_apply(args: &ApplyArgs, repo_root: &Path) -> Result<ExpApplyPayload> {
     let exp_id = resolve_experiment_id(repo_root, &args.id)?;
-    read_local_metadata(repo_root, &exp_id)?;
+    let metadata = read_local_metadata(repo_root, &exp_id)?;
+    validate_result_source(repo_root, &metadata, args.result_digest.as_deref())?;
     let (applied, deleted) = if let Some(selector) = args.checkpoint.as_deref() {
         let record = select_checkpoint_record(repo_root, &exp_id, selector)?;
         (
@@ -1749,7 +1885,13 @@ pub fn run_exp_apply(args: &ApplyArgs, repo_root: &Path) -> Result<ExpApplyPaylo
             Vec::new(),
         )
     } else {
-        apply_experiment_snapshot_to(repo_root, &exp_id, repo_root, "exp apply")?
+        apply_experiment_snapshot_to(
+            repo_root,
+            &exp_id,
+            repo_root,
+            "exp apply",
+            args.result_digest.as_deref(),
+        )?
     };
 
     let payload = ExpApplyPayload {
@@ -1776,7 +1918,7 @@ pub fn run_exp_reset(args: &ResetArgs, repo_root: &Path) -> Result<ExpResetPaylo
                 state_root.display()
             ),
         })?;
-    ensure_checkpoint_parent_not_symlink(state_parent, repo_root)?;
+    ensure_parent_not_symlink(state_parent, repo_root, "workflow checkpoint state")?;
     fs::create_dir_all(state_parent).map_err(CrabError::Io)?;
     let paths = checkpoint_lineage_paths(&state_root)?;
     let selected = args
@@ -1877,7 +2019,7 @@ fn commit_checkpoint_state_reset(
                 state_root.display()
             ),
         })?;
-    ensure_checkpoint_parent_not_symlink(parent, repo_root)?;
+    ensure_parent_not_symlink(parent, repo_root, "workflow checkpoint state")?;
     let backup = parent.join(format!(
         ".{}.reset-backup-{}",
         state_root
@@ -1947,7 +2089,7 @@ fn copy_checkpoint_state(source: &Path, destination: &Path, repo_root: &Path) ->
             key: "workflow checkpoint state path invalid".to_owned(),
             origin: destination.display().to_string(),
         })?;
-    ensure_checkpoint_parent_not_symlink(parent, repo_root)?;
+    ensure_parent_not_symlink(parent, repo_root, "workflow checkpoint state")?;
     fs::create_dir_all(parent).map_err(CrabError::Io)?;
     let temporary = parent.join(format!(
         ".{}.resume-{}",
@@ -1967,18 +2109,18 @@ fn copy_checkpoint_state(source: &Path, destination: &Path, repo_root: &Path) ->
     Ok(())
 }
 
-fn ensure_checkpoint_parent_not_symlink(parent: &Path, trusted_root: &Path) -> Result<()> {
+fn ensure_parent_not_symlink(parent: &Path, trusted_root: &Path, context: &str) -> Result<()> {
     let root_metadata = fs::symlink_metadata(trusted_root).map_err(CrabError::Io)?;
     if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
         return Err(CrabError::Configuration {
-            key: "workflow checkpoint state root invalid".to_owned(),
+            key: format!("{context} root invalid"),
             origin: trusted_root.display().to_string(),
         });
     }
     let relative = parent
         .strip_prefix(trusted_root)
         .map_err(|_| CrabError::Configuration {
-            key: "workflow checkpoint state parent outside repository".to_owned(),
+            key: format!("{context} parent outside repository"),
             origin: parent.display().to_string(),
         })?;
     let mut current = trusted_root.to_owned();
@@ -1988,18 +2130,22 @@ fn ensure_checkpoint_parent_not_symlink(parent: &Path, trusted_root: &Path) -> R
         }
         if !matches!(component, Component::Normal(_)) {
             return Err(CrabError::Configuration {
-                key: "workflow checkpoint state parent invalid".to_owned(),
+                key: format!("{context} parent invalid"),
                 origin: parent.display().to_string(),
             });
         }
         current.push(component.as_os_str());
-        if let Ok(metadata) = fs::symlink_metadata(&current)
-            && metadata.file_type().is_symlink()
-        {
-            return Err(CrabError::Configuration {
-                key: "workflow checkpoint state parent symlink".to_owned(),
-                origin: current.display().to_string(),
-            });
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(CrabError::Configuration {
+                    key: format!("{context} parent symlink"),
+                    origin: current.display().to_string(),
+                });
+            }
+            Ok(metadata) if !metadata.is_dir() => break,
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(CrabError::Io(error)),
         }
     }
     Ok(())
@@ -2089,6 +2235,20 @@ fn checkpoint_records(repo_root: &Path, exp_id: &ExperimentId) -> Result<Vec<Che
             .then_with(|| left.sequence.cmp(&right.sequence))
     });
     Ok(records)
+}
+
+fn latest_resumable_checkpoint(
+    repo_root: &Path,
+    exp_id: &ExperimentId,
+) -> Result<CheckpointRecord> {
+    checkpoint_records(repo_root, exp_id)?
+        .into_iter()
+        .rev()
+        .find(|record| record.resumable)
+        .ok_or_else(|| CrabError::Configuration {
+            key: "exp run --resume".to_owned(),
+            origin: format!("experiment {exp_id} has no acknowledged checkpoint"),
+        })
 }
 
 fn select_checkpoint_record(
@@ -2374,7 +2534,7 @@ fn write_checkpoint_reset_decision(
     decision: &serde_json::Value,
     repo_root: &Path,
 ) -> Result<()> {
-    ensure_checkpoint_parent_not_symlink(state_root, repo_root)?;
+    ensure_parent_not_symlink(state_root, repo_root, "workflow checkpoint state")?;
     fs::create_dir_all(state_root).map_err(CrabError::Io)?;
     let path = state_root.join("reset.json");
     let temporary = state_root.join(format!(
@@ -2445,20 +2605,13 @@ fn apply_experiment_snapshot_to(
     exp_id: &ExperimentId,
     target_root: &Path,
     command: &str,
+    result_digest: Option<&str>,
 ) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
-    let snapshot_dir = workspace_dir_path(repo_root, exp_id);
-    if !snapshot_dir.is_dir() {
-        return Err(CrabError::Configuration {
-            key: command.to_owned(),
-            origin: format!(
-                "experiment {exp_id} has no workspace snapshot; rerun it with a Crab version that records apply snapshots"
-            ),
-        });
-    }
-
-    let manifest = read_workspace_manifest_for_command(repo_root, exp_id, command)?;
+    let prepared = workspace_action::prepare(repo_root, exp_id, result_digest, command)?;
+    workspace_action::validate_target(&prepared, target_root)?;
+    let snapshot_dir = prepared.directory.path();
     let mut deleted = Vec::new();
-    for rel in &manifest.deleted {
+    for rel in &prepared.manifest.deleted {
         ensure_safe_workspace_relpath(rel)?;
         let target = target_root.join(rel);
         if remove_existing_path(&target)? {
@@ -2467,7 +2620,7 @@ fn apply_experiment_snapshot_to(
     }
 
     let mut applied = Vec::new();
-    apply_workspace_tree(&snapshot_dir, &snapshot_dir, target_root, &mut applied)?;
+    apply_workspace_tree(snapshot_dir, snapshot_dir, target_root, &mut applied, false)?;
     applied.sort();
     deleted.sort();
     Ok((applied, deleted))
@@ -2494,9 +2647,36 @@ pub fn run_exp_save(args: &SaveArgs, repo_root: &Path) -> Result<ExpSavePayload>
     let base_commit = resolve_current_head(repo_root)?;
     capture_workspace_snapshot(repo_root, repo_root, &base_commit, &exp_id)?;
 
+    let snapshot_root = workspace_dir_path(repo_root, &exp_id);
+    let workflow_files = save_selection
+        .workflow_files
+        .iter()
+        .map(|path| snapshot_root.join(path))
+        .collect::<Vec<_>>();
+    let (mut workflow, provenance) = load_save_workflow(&snapshot_root, &workflow_files)?;
+    let workflow_files = match save_selection.stages.as_ref() {
+        Some(selected) => {
+            workflow.stages.retain(|name, _| selected.contains(name));
+            provenance
+                .into_iter()
+                .filter(|(name, _)| selected.contains(name))
+                .map(|(_, path)| path)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+        }
+        None => workflow_files,
+    };
+    let declarations = discover::parse_all(&snapshot_root, &workflow_files)?;
+    workflow.params = declarations.params;
+    workflow.metrics = declarations.metrics;
+    workflow.plots = declarations.plots;
+    workflow.plot_configs = declarations.plot_configs;
     let declared_metrics = save_selection.declared_metrics;
-    let metrics = collect_metric_values(repo_root, &declared_metrics);
-    let stages = read_current_lockfile_stage_hashes(repo_root, save_selection.stages.as_ref());
+    // Metadata and Results read the same owned copy. Reading the live workspace
+    // again could attach newer values to an older saved Apply snapshot.
+    let metrics = collect_metric_values(&snapshot_root, &declared_metrics);
+    let stages = read_current_lockfile_stage_hashes(&snapshot_root, save_selection.stages.as_ref());
     let metadata = ExperimentMetadata {
         schema_version: EXPERIMENT_METADATA_SCHEMA_VERSION,
         exp_id,
@@ -2514,6 +2694,16 @@ pub fn run_exp_save(args: &SaveArgs, repo_root: &Path) -> Result<ExpSavePayload>
         ended_at: Some(crab_types::time::now_rfc3339_millis()?),
     };
     write_local_metadata(repo_root, &metadata)?;
+    // The Apply copy excludes private Crab state. Render assets are admitted
+    // separately, only through declared template references in the authoring repo.
+    crab_workflow::results::ResultCapture::saved(
+        crab_workflow::results::LocalResults::new(repo_root)?,
+        &snapshot_root,
+        repo_root,
+        workflow,
+        &workflow_files,
+        &metadata,
+    )?;
 
     let payload = ExpSavePayload {
         exp_id: exp_id.to_string(),
@@ -2542,6 +2732,17 @@ pub fn run_exp_rename(args: &RenameArgs, repo_root: &Path) -> Result<ExpRenamePa
     let old_name = metadata.name.clone();
     metadata.name = Some(new_name.clone());
     write_local_metadata(repo_root, &metadata)?;
+    let local = crab_workflow::results::LocalResults::new(repo_root)?;
+    match local.run(&exp_id.to_string()) {
+        Ok(mut result) => {
+            result.snapshot.name = metadata.name.clone();
+            result.snapshot.source_metadata_hash = metadata.content_hash()?;
+            local.install(&result.snapshot.seal()?)?;
+        }
+        Err(crab_workflow::WorkflowError::Io(error))
+            if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
 
     let payload = ExpRenamePayload {
         exp_id: exp_id.to_string(),
@@ -3229,6 +3430,20 @@ async fn push_experiments_to_remote(
     for id in ids {
         check_cancelled(cancel)?;
         let ref_path = remote_exp_meta_ref_path(prefix, id);
+        let local_results = crab_workflow::results::LocalResults::new(repo_root)?;
+        match local_results.run(&id.to_string()) {
+            Ok(run) => {
+                let results = crab_workflow::results::RemoteResults::new(
+                    crab_workflow::WorkflowStore::from_storage(store.as_storage().clone()),
+                    prefix,
+                    cancel.clone(),
+                );
+                results.push(&local_results, &run).await?;
+            }
+            Err(crab_workflow::WorkflowError::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
         if !force && remote_object_exists(store, &ref_path).await? {
             let metadata = read_remote_metadata(store, prefix, id).await?;
             check_cancelled(cancel)?;
@@ -3239,7 +3454,7 @@ async fn push_experiments_to_remote(
 
         let metadata = read_local_metadata(repo_root, id)?;
         let snapshot_dir = workspace_dir_path(repo_root, id);
-        if !snapshot_dir.is_dir() {
+        if metadata.status == "success" && !snapshot_dir.is_dir() {
             return Err(CrabError::Configuration {
                 key: "exp push".to_owned(),
                 origin: format!(
@@ -3252,7 +3467,9 @@ async fn push_experiments_to_remote(
             delete_remote_experiment(store, prefix, id).await?;
         }
 
-        push_workspace_snapshot(store, prefix, repo_root, id).await?;
+        if snapshot_dir.is_dir() {
+            push_workspace_snapshot(store, prefix, repo_root, id).await?;
+        }
         check_cancelled(cancel)?;
         push_checkpoint_state(store, prefix, repo_root, id).await?;
 
@@ -3352,7 +3569,28 @@ async fn pull_experiment_from_store(
 ) -> Result<()> {
     let metadata = read_remote_metadata(store, prefix, id).await?;
     pull_checkpoint_state(store, prefix, repo_root, id).await?;
-    restore_workspace_snapshot(store, prefix, repo_root, id).await?;
+    if metadata.status == "success" {
+        restore_workspace_snapshot(store, prefix, repo_root, id).await?;
+    }
+    let results = crab_workflow::results::RemoteResults::new(
+        crab_workflow::WorkflowStore::from_storage(store.as_storage().clone()),
+        prefix,
+        CancellationToken::new(),
+    );
+    match results.run(&id.to_string()).await {
+        Ok(_) => {
+            results
+                .pull(
+                    &crab_workflow::results::LocalResults::new(repo_root)?,
+                    &id.to_string(),
+                )
+                .await?;
+        }
+        // Schema-v1 experiment metadata predates Results. An absent Results
+        // root is the only accepted absence; corruption and denial propagate.
+        Err(crab_workflow::WorkflowError::NotFound { .. }) => {}
+        Err(error) => return Err(error.into()),
+    }
     write_local_metadata(repo_root, &metadata)?;
     Ok(())
 }
@@ -3442,6 +3680,15 @@ async fn remove_remote_experiments(
             check_cancelled(cancel)?;
             let exp_id = parse_experiment_id(id)?;
             delete_remote_experiment(store, prefix, &exp_id).await?;
+            // Discovery is mutable; frozen reports own their retained bodies.
+            // Force publication uses a different path and must retain the new root.
+            crab_workflow::results::RemoteResults::new(
+                crab_workflow::WorkflowStore::from_storage(store.as_storage().clone()),
+                prefix,
+                cancel.clone(),
+            )
+            .remove_run(id)
+            .await?;
         }
     }
 
@@ -3785,6 +4032,7 @@ fn read_declared_metrics(tmpdir: &Path) -> Result<Vec<PathBuf>> {
 struct ExpSaveSelection {
     stages: Option<BTreeSet<StageName>>,
     declared_metrics: Vec<PathBuf>,
+    workflow_files: Vec<PathBuf>,
 }
 
 fn resolve_exp_save_selection(args: &SaveArgs, repo_root: &Path) -> Result<ExpSaveSelection> {
@@ -3799,6 +4047,7 @@ fn resolve_exp_save_selection(args: &SaveArgs, repo_root: &Path) -> Result<ExpSa
             return Ok(ExpSaveSelection {
                 stages: None,
                 declared_metrics: Vec::new(),
+                workflow_files: Vec::new(),
             });
         }
         return Err(CrabError::Configuration {
@@ -3815,6 +4064,14 @@ fn resolve_exp_save_selection(args: &SaveArgs, repo_root: &Path) -> Result<ExpSa
     Ok(ExpSaveSelection {
         stages,
         declared_metrics,
+        workflow_files: yaml_paths
+            .into_iter()
+            .map(|path| {
+                path.strip_prefix(repo_root)
+                    .map(Path::to_path_buf)
+                    .map_err(|_| CrabError::Internal("save workflow escaped repository".into()))
+            })
+            .collect::<Result<_>>()?,
     })
 }
 
@@ -4183,7 +4440,12 @@ fn capture_workspace_snapshot(
     result
 }
 
-fn copy_paths_into_experiment(repo_root: &Path, tmpdir: &Path, paths: &[PathBuf]) -> Result<()> {
+fn copy_paths_into_experiment(
+    repo_root: &Path,
+    tmpdir: &Path,
+    paths: &[PathBuf],
+) -> Result<Vec<PathBuf>> {
+    let mut copied = Vec::with_capacity(paths.len());
     for raw in paths {
         let rel = normalize_copy_path(raw)?;
         let src = repo_root.join(&rel);
@@ -4192,8 +4454,9 @@ fn copy_paths_into_experiment(repo_root: &Path, tmpdir: &Path, paths: &[PathBuf]
             path = %rel.display(),
             "exp run: copied path into experiment worktree"
         );
+        copied.push(rel);
     }
-    Ok(())
+    Ok(copied)
 }
 
 fn normalize_copy_path(path: &Path) -> Result<PathBuf> {
@@ -4284,6 +4547,7 @@ fn copy_workspace_tree(root: &Path, src: &Path, dst_root: &Path) -> Result<()> {
         if file_type.is_dir() {
             fs::create_dir_all(&target).map_err(CrabError::Io)?;
             copy_workspace_tree(root, &path, dst_root)?;
+            preserve_mode(&path, &target)?;
         } else if file_type.is_symlink() {
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent).map_err(CrabError::Io)?;
@@ -4855,6 +5119,7 @@ fn apply_workspace_tree(
     src: &Path,
     repo_root: &Path,
     applied: &mut Vec<PathBuf>,
+    preview: bool,
 ) -> Result<()> {
     for entry in fs::read_dir(src).map_err(CrabError::Io)? {
         let entry = entry.map_err(CrabError::Io)?;
@@ -4871,13 +5136,23 @@ fn apply_workspace_tree(
         let target = repo_root.join(rel);
         let metadata = fs::symlink_metadata(&path).map_err(CrabError::Io)?;
         let file_type = metadata.file_type();
+        // Preview traverses the same validated tree as Apply, without touching
+        // the target. Separate path inference can omit symlinks or deletions.
+        if preview {
+            if file_type.is_dir() {
+                apply_workspace_tree(root, &path, repo_root, applied, true)?;
+            } else if file_type.is_file() || file_type.is_symlink() {
+                applied.push(rel.to_path_buf());
+            }
+            continue;
+        }
         if file_type.is_dir() {
             if target.exists() && !target.is_dir() {
                 remove_existing_path(&target)?;
             }
             fs::create_dir_all(&target).map_err(CrabError::Io)?;
+            apply_workspace_tree(root, &path, repo_root, applied, false)?;
             preserve_mode(&path, &target)?;
-            apply_workspace_tree(root, &path, repo_root, applied)?;
         } else if file_type.is_symlink() {
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent).map_err(CrabError::Io)?;
@@ -4890,11 +5165,11 @@ fn apply_workspace_tree(
             if target.is_dir() {
                 remove_existing_path(&target)?;
             }
-            let bytes = fs::read(&path).map_err(CrabError::Io)?;
+            let source = fs::File::open(&path).map_err(CrabError::Io)?;
             let mode = file_mode(&path)?;
-            crate::workflow::materialize::write_atomic(
+            crate::workflow::materialize::write_atomic_from_reader(
                 &target,
-                &bytes,
+                source,
                 uuid::Uuid::now_v7(),
                 mode,
             )?;
@@ -4993,6 +5268,7 @@ fn remove_existing_path(path: &Path) -> Result<bool> {
 }
 
 fn remove_experiment_files(repo_root: &Path, exp_id: &ExperimentId) -> Result<()> {
+    crab_workflow::results::LocalResults::new(repo_root)?.remove_run(&exp_id.to_string())?;
     for path in [
         meta_file_path(repo_root, exp_id),
         workspace_manifest_path(repo_root, exp_id),
@@ -5712,6 +5988,7 @@ fn create_experiment_branch(
     repo_root: &Path,
     branch: &str,
     metadata: &ExperimentMetadata,
+    result_digest: Option<&str>,
 ) -> Result<String> {
     let tmp_parent = tempfile::Builder::new()
         .prefix("crab-exp-branch-")
@@ -5733,7 +6010,13 @@ fn create_experiment_branch(
     )?;
 
     let result = (|| {
-        apply_experiment_snapshot_to(repo_root, &metadata.exp_id, &tmp_path, "exp branch")?;
+        apply_experiment_snapshot_to(
+            repo_root,
+            &metadata.exp_id,
+            &tmp_path,
+            "exp branch",
+            result_digest,
+        )?;
         run_git(
             &tmp_path,
             &["add", "-A"],
@@ -8017,6 +8300,7 @@ mod tests {
             ended_at: None,
         };
         let args = PromoteArgs {
+            result_digest: None,
             id: id.to_string(),
             branch_name: None,
             branch: None,
@@ -8467,6 +8751,7 @@ mod tests {
 
         let apply = run_exp_apply(
             &ApplyArgs {
+                result_digest: None,
                 id: id.to_string(),
                 checkpoint: None,
                 json: false,
@@ -8845,4 +9130,84 @@ mod tests {
         assert_eq!(summaries[0].started_at, "2020-01-01T00:00:00.000Z");
         assert_eq!(summaries[1].started_at, "2099-12-31T23:59:59.000Z");
     }
+}
+
+#[derive(Debug, Clone, Parser)]
+pub struct ReproduceArgs {
+    pub id: String,
+    #[arg(long)]
+    pub digest: Option<String>,
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Executes pinned effective inputs; current overrides and checkpoint resume are excluded.
+pub async fn exec_reproduce(args: ReproduceArgs) -> Result<()> {
+    let root = std::env::current_dir()?;
+    let local = crab_workflow::results::LocalResults::new(&root)?;
+    let result = match &args.digest {
+        Some(hash) => local.run_at(&args.id, hash)?,
+        None => local.run(&args.id)?,
+    };
+    let mut spec = result
+        .snapshot
+        .reproduction
+        .ok_or_else(|| CrabError::Configuration {
+            key: "exp reproduce".into(),
+            origin: "This run has no retained execution inputs".into(),
+        })?;
+    spec.source_result = Some(crab_workflow::results::RunSelection {
+        id: result.snapshot.experiment_id,
+        digest: result.digest,
+    });
+    let options = ExpRunExecutionOptions {
+        force: true,
+        targets: spec.targets.clone(),
+        recursive: spec.recursive,
+        single_item: spec.single_item,
+        downstream: spec.downstream,
+        pipeline: spec.pipeline,
+        all_pipelines: spec.all_pipelines,
+        glob: spec.glob,
+        mirror_child_output: !args.json,
+        reproduction: Some(spec),
+        ..ExpRunExecutionOptions::default()
+    };
+    let payload = run_exp_run_with_id(
+        root,
+        ExperimentId::new_v7(),
+        BTreeMap::new(),
+        options,
+        None,
+        Some(result.snapshot.base_commit),
+        None,
+        Vec::new(),
+    )
+    .await?;
+    emit_run(&payload, OutputMode::from_flags(args.json, false))
+}
+
+fn validate_result_source(
+    repo_root: &Path,
+    metadata: &ExperimentMetadata,
+    digest: Option<&str>,
+) -> Result<()> {
+    let Some(digest) = digest else {
+        // Tagged experiment commands can apply their owned workspace without a
+        // Results selection. Digest-based actions additionally require capture evidence.
+        return Ok(());
+    };
+    let local = crab_workflow::results::LocalResults::new(repo_root)?;
+    let result = local.run_at(&metadata.exp_id.to_string(), digest)?;
+    if result.snapshot.origin == crab_workflow::results::ResultOrigin::ExperimentMetadata {
+        return Err(CrabError::Configuration {
+            key: "results action".into(),
+            origin: "Imported experiment metadata has no verified execution or workspace capture. Run or save a new experiment to enable actions".into(),
+        });
+    }
+    if result.snapshot.source_metadata_hash != metadata.content_hash()? {
+        return Err(CrabError::Configuration {key: "results action".into(), origin:
+            "Experiment state changed after this result was captured. This snapshot is historical; reproduce its retained inputs or select a newly captured result".into()});
+    }
+    Ok(())
 }

@@ -7,6 +7,7 @@ description = "Self-hosted repository web application backed by Crab object stor
 publish = false
 
 [dependencies]
+crab-workflow = { workspace = true }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 bytes = { workspace = true }
 blake3 = { workspace = true }

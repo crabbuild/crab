@@ -166,7 +166,10 @@ function Fixture() {
           <TabsContent value="status" className="m-0 p-4">
             Workflow status
           </TabsContent>
-          <TabsContent value="experiments" className="m-0 p-4">
+          <TabsContent value="results" className="m-0 p-4">
+            Workflow results
+          </TabsContent>
+          <TabsContent value="queue" className="m-0 p-4">
             Workflow experiments
           </TabsContent>
         </Tabs>

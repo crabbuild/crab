@@ -17,6 +17,7 @@ use std::{
 use url::Url;
 
 mod provider;
+pub(crate) mod storage_proxy;
 pub(crate) use provider::{KEY_ONE, KEY_TWO, Provider, start_provider};
 
 pub(crate) struct Harness {
@@ -28,6 +29,72 @@ pub(crate) struct Harness {
 }
 
 impl Harness {
+    pub(crate) async fn add_repository(&self, name: &str) {
+        let primary = self
+            .server
+            .repositories
+            .get(&("team".into(), "private".into()))
+            .unwrap();
+        let mut config = primary.config.clone();
+        config.name = name.into();
+        config.prefix = format!("test-{name}");
+        let layout = StoreLayout::new(primary.store.clone(), config.prefix.clone());
+        crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        let catalog = self.server.catalog.as_ref().unwrap();
+        let record = catalog
+            .adopt_repository(
+                config.owner.clone(),
+                config.name.clone(),
+                config.prefix.clone(),
+                config.description.clone(),
+                config.members.clone(),
+            )
+            .await
+            .unwrap();
+        self.server
+            .cells()
+            .unwrap()
+            .repository(record.id)
+            .unwrap()
+            .client
+            .initialize(record.id)
+            .await
+            .unwrap();
+        catalog.mark_cell_ready(primary.id).await.unwrap();
+        catalog.mark_cell_ready(record.id).await.unwrap();
+        let repository = Repository::new(
+            record.id,
+            config.clone(),
+            layout,
+            RepositoryIdentity::new("test", config.prefix.as_str(), 1).unwrap(),
+        );
+        let mut repositories: BTreeMap<_, _> = self
+            .server
+            .repositories
+            .values()
+            .into_iter()
+            .map(|repository| {
+                (
+                    (
+                        repository.config.owner.clone(),
+                        repository.config.name.clone(),
+                    ),
+                    repository,
+                )
+            })
+            .collect();
+        repositories.insert((config.owner, config.name), Arc::new(repository));
+        let (document, _) = catalog.load().await.unwrap();
+        self.server
+            .repositories
+            .replace(crate::repository::catalog::RepositoryIndex::new(
+                document.version,
+                repositories,
+            ));
+    }
+
     pub(crate) async fn initialize_directory(&self) {
         self.server
             .cells()

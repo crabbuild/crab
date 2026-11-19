@@ -17,6 +17,10 @@ PROFILES = {
     "service-files": ("service", "remote", "files"),
     "service-publish": ("service", "publish"),
     "local-service": ("local", "service"),
+    "results": ("results",),
+    "results-files": ("results", "files"),
+    "service-results": ("service", "results"),
+    "local-service-results": ("local", "service", "results"),
 }
 HYDRATION = { "crab-lfs", "crab-cache", "crab-cache-store", "xet-data", "xet-client"}
 
@@ -25,6 +29,10 @@ def violations(profile, features, packages):
     forbidden = {name for name in packages if name in {"crab", "crab-vfs"}
                  or name.startswith("crab-") and name.endswith("-server")}
     required = {"crab-sdk"}
+    if "results" in features:
+        required.add("crab-workflow")
+    else:
+        forbidden |= packages & {"crab-workflow"}
     if profile == "default":
         forbidden |= packages & {"tokio", "tokio-util", "object_store"}
         forbidden |= {name for name in packages if name.startswith("crab-") and name != "crab-sdk"}

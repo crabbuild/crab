@@ -1,3 +1,5 @@
+#[cfg(feature = "results")]
+mod results;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -179,7 +181,7 @@ impl ClientState {
         })
     }
 
-    #[cfg(feature = "local")]
+    #[cfg(any(feature = "local", feature = "results"))]
     pub(crate) fn admitted_store(
         &self,
         store: &Store,
@@ -362,6 +364,10 @@ impl Client {
             locator,
             owner: Arc::new(owner),
             managed: resolved.managed,
+            #[cfg(feature = "results")]
+            results_store: resolved.store,
+            #[cfg(feature = "results")]
+            results_prefix: resolved.prefix,
             #[cfg(feature = "files")]
             content,
         })
@@ -463,6 +469,10 @@ pub struct RemoteRepository {
     locator: RepositoryLocator,
     owner: Arc<RemoteGitRepository>,
     managed: bool,
+    #[cfg(feature = "results")]
+    results_store: Store,
+    #[cfg(feature = "results")]
+    results_prefix: String,
 }
 
 /// An operation family implemented for this repository handle.
@@ -475,6 +485,8 @@ pub struct RemoteRepository {
 pub enum RepositoryCapability {
     /// Read pinned Git objects, trees, history, diffs, blame and raw archives.
     ReadGit,
+    /// Read captured workflow results, comparisons and immutable reports.
+    ReadResults,
     /// Reconstruct Crab and LFS content, including ranges and hydrated archives.
     ReadContent,
     /// Prepare and execute atomic ref batches with durable direct reconciliation.
@@ -544,6 +556,8 @@ impl RemoteRepository {
         if self.managed {
             return &[
                 RepositoryCapability::ReadGit,
+                #[cfg(feature = "results")]
+                RepositoryCapability::ReadResults,
                 #[cfg(feature = "files")]
                 RepositoryCapability::ReadContent,
                 #[cfg(feature = "publish")]
@@ -556,6 +570,8 @@ impl RemoteRepository {
         if self.client.0.store.bucket_identity().cloud != crab_storage::StorageProviderKind::Local {
             return &[
                 RepositoryCapability::ReadGit,
+                #[cfg(feature = "results")]
+                RepositoryCapability::ReadResults,
                 #[cfg(feature = "files")]
                 RepositoryCapability::ReadContent,
                 RepositoryCapability::UpdateRefs,
@@ -564,6 +580,8 @@ impl RemoteRepository {
         }
         &[
             RepositoryCapability::ReadGit,
+            #[cfg(feature = "results")]
+            RepositoryCapability::ReadResults,
             #[cfg(feature = "files")]
             RepositoryCapability::ReadContent,
         ]

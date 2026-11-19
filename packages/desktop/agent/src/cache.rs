@@ -90,16 +90,9 @@ fn reply(output: Output, operation: Operation) -> Result<Value> {
         };
     }
     if let Some(error) = envelope.error {
-        if let (Some(code), Some(message)) = (error["code"].as_str(), error["message"].as_str()) {
-            return Err(AgentError::Command {
-                status: output.status.code().unwrap_or(-1),
-                code: code.into(),
-                message: message.into(),
-                details: error,
-            });
-        }
-        return Err(AgentError::Other(
-            "Crab returned an invalid cache error".into(),
+        return Err(shellout::command_error(
+            output.status.code().unwrap_or(-1),
+            error,
         ));
     }
     let data = envelope

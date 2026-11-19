@@ -1246,9 +1246,11 @@ impl From<crab_workflow::WorkflowError> for CrabError {
         match error {
             crab_workflow::WorkflowError::Timestamp(source) => Self::from(source),
             crab_workflow::WorkflowError::Cancelled => Self::Cancelled,
-            error @ crab_workflow::WorkflowError::ExperimentMetadataMalformed { .. } => {
-                Self::WorkflowMetadataCorrupt(error)
-            }
+            error @ (crab_workflow::WorkflowError::ExperimentMetadataMalformed { .. }
+            | crab_workflow::WorkflowError::ResultsStored { .. }
+            | crab_workflow::WorkflowError::ResultsJson(_)
+            | crab_workflow::WorkflowError::ResultsToml(_)
+            | crab_workflow::WorkflowError::ResultsUtf8(_)) => Self::WorkflowMetadataCorrupt(error),
             crab_workflow::WorkflowError::CorruptObject { path, reason } => {
                 Self::CorruptObject { path, reason }
             }
