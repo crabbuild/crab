@@ -14,7 +14,11 @@ import {
   type QuerySession,
   type QuerySource,
 } from "./query";
-import type { TableData } from "../model";
+import {
+  decodeDelimitedText,
+  MAX_PREVIEW_BYTES,
+  type TableData,
+} from "../model";
 
 // Worker responses carry CSP and are cached immutably. Change this revision
 // whenever the worker's allowed network policy changes to avoid stale policy.
@@ -65,19 +69,21 @@ function valueAt(table: ArrowResult, row: number, column: number) {
   return table.getChildAt(column)?.get(row);
 }
 
+async function sourceBytes(source: QuerySource) {
+  if (source.bytes) return source.bytes;
+  const response = await fetch(source.url, {
+    headers: { Accept: "application/octet-stream" },
+  });
+  if (!response.ok)
+    throw new Error(`Dataset bytes could not be loaded (${response.status})`);
+  return new Uint8Array(await response.arrayBuffer());
+}
+
 async function loadArrowSource(
   connection: duckdb.AsyncDuckDBConnection,
   source: QuerySource,
 ) {
-  let bytes = source.bytes;
-  if (!bytes) {
-    const response = await fetch(source.url, {
-      headers: { Accept: "application/octet-stream" },
-    });
-    if (!response.ok)
-      throw new Error(`Arrow bytes could not be loaded (${response.status})`);
-    bytes = new Uint8Array(await response.arrayBuffer());
-  }
+  const bytes = await sourceBytes(source);
   const { tableFromIPC, tableToIPC } = await import("apache-arrow");
   const stream = tableToIPC(tableFromIPC(bytes), "stream");
   await connection.insertArrowFromIPCStream(stream, {
@@ -95,6 +101,7 @@ export async function createDuckDbQuerySession(
   const worker = new Worker(workerUrl);
   const database = new duckdb.AsyncDuckDB(new duckdb.VoidLogger(), worker);
   let connection: duckdb.AsyncDuckDBConnection | undefined;
+  let sourceEncoding: string | undefined;
   try {
     await database.instantiate(duckdbWasm, null, (progress) =>
       onProgress?.(progress.bytesLoaded, progress.bytesTotal),
@@ -112,12 +119,22 @@ export async function createDuckDbQuerySession(
       await loadArrowSource(connection, source);
     } else {
       const fileName = `source.${source.format === "jsonl" ? "json" : source.format}`;
-      await database.registerFileURL(
-        fileName,
-        new URL(source.url, window.location.href).toString(),
-        duckdb.DuckDBDataProtocol.HTTP,
-        false,
-      );
+      if (
+        (source.format === "csv" || source.format === "tsv") &&
+        source.size <= MAX_PREVIEW_BYTES
+      ) {
+        // This DuckDB version reads UTF-8. Normalize bounded text inputs only;
+        // large datasets retain HTTP scans and the stored blob stays untouched.
+        const decoded = decodeDelimitedText(await sourceBytes(source));
+        sourceEncoding = decoded.encoding;
+        await database.registerFileText(fileName, decoded.text);
+      } else
+        await database.registerFileURL(
+          fileName,
+          new URL(source.url, window.location.href).toString(),
+          duckdb.DuckDBDataProtocol.HTTP,
+          false,
+        );
       await connection.query(
         `CREATE VIEW data AS SELECT * FROM ${sourceExpression(source.format, fileName)}`,
       );
@@ -165,6 +182,7 @@ export async function createDuckDbQuerySession(
     return {
       defaultQuery: defaultDataQuery(),
       relations: [{ name: "data", type: "view", fields }],
+      sourceEncoding,
       sourceRows,
       cancel: () => liveConnection.cancelSent(),
       explain: (sql) => result(sql, true),

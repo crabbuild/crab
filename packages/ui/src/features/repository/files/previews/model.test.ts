@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { parseNumpyHeader, parseSafetensors, previewDescriptor } from "./model";
+import {
+  decodeDelimitedText,
+  parseNumpyHeader,
+  parseSafetensors,
+  previewDescriptor,
+} from "./model";
 import {
   boundedReadQuery,
   defaultDataQuery,
@@ -29,6 +34,38 @@ describe("file preview classification", () => {
 
   it("leaves unknown executable formats on the exact-byte fallback", () => {
     expect(previewDescriptor("release.exe")).toBeNull();
+  });
+});
+
+describe("delimited text encodings", () => {
+  it.each([
+    [
+      "Unicode UTF-8",
+      new TextEncoder().encode("£,café,東京,🦀"),
+      "£,café,東京,🦀",
+      "utf-8",
+    ],
+    ["UTF-8 BOM", new Uint8Array([0xef, 0xbb, 0xbf, 0x41]), "A", "utf-8"],
+    [
+      "Windows-1252",
+      new Uint8Array([0xa3, 0xe9, 0x80, 0x93, 0x94]),
+      "£é€“”",
+      "windows-1252",
+    ],
+    ["UTF-16LE", new Uint8Array([0xff, 0xfe, 0xa3, 0]), "£", "utf-16le"],
+    ["UTF-16BE", new Uint8Array([0xfe, 0xff, 0, 0xa3]), "£", "utf-16be"],
+  ])("preserves characters in %s", (_name, bytes, text, encoding) => {
+    expect(decodeDelimitedText(bytes as Uint8Array)).toEqual({
+      text,
+      encoding,
+    });
+  });
+
+  it.each([
+    ["UTF-8", new Uint8Array([0xef, 0xbb, 0xbf, 0xff])],
+    ["UTF-16", new Uint8Array([0xff, 0xfe, 0x41])],
+  ])("rejects malformed text with an explicit %s BOM", (_name, bytes) => {
+    expect(() => decodeDelimitedText(bytes as Uint8Array)).toThrow();
   });
 });
 

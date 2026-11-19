@@ -11,14 +11,18 @@ import {
 import type { Repository } from "@/lib/api";
 import { DataTable } from "./data/explorer";
 import { RepositoryMarkdown } from "../markdown";
-import { extension, parseSafetensors, type PreviewDescriptor } from "./model";
+import {
+  extension,
+  MAX_PREVIEW_BYTES,
+  parseSafetensors,
+  type PreviewDescriptor,
+} from "./model";
 import { archiveInventory, parseOffice, type OfficePreview } from "./office";
 import { loadGguf, loadNumpy } from "./loaders";
 import { PdfPreview } from "./pdf";
 import { GenericFilePreview } from "./generic";
 import type { CodeThemes } from "@/lib/code-theme";
 
-const MAX_PREVIEW_BYTES = 50 * 1024 * 1024;
 const DataWorkbench = lazy(() =>
   import("./data/workbench").then((module) => ({
     default: module.DataWorkbench,
