@@ -2925,6 +2925,36 @@ invoke this evidence test entry. No sibling ordering change is needed. Native
 Windows execution still requires the hosted follow-up; this local filesystem
 reproduction does not establish cross-platform execution proof.
 
+### Native Results visual refinement
+
+The user requests a quieter, more comfortable Results layout. Keep the desktop
+design system and Data Workflows navigation. Results uses the full workflow
+canvas; Editor/Status/Queue restore the workflow-file list. Scalar comparisons
+lead into paired synchronized curves, followed by run evidence. Compact status,
+objective and delta treatments replace repeated prose; complete comparison notes
+remain available by hover, keyboard focus and assistive text. Identity, action
+eligibility and range explanations use inline disclosures. Imported provenance
+remains visible, and running workflows retain their Cancel action.
+
+Focused Darwin-arm64/RustFS proof uses source tree `08421c4a…` and packaged app
+SHA-256 `138274d0e6a77a3837f942c60c9880bac95222f38519dfa847f48bb54143d551`.
+The real comparison/restart/cold-retrieval journey passes in 75.067 seconds
+including capture overhead; the existing restore/reproduce/resume/promote
+journey also passes. Fifteen empty/working/report layouts cover 1280px and 900px
+in light/dark, plus wide high contrast: zero outer overflow and zero automated
+WCAG A/AA violations. Keyboard note inspection and workflow-list restoration
+pass. Product/Electron typechecks, renderer/Electron builds and directory
+packaging pass; Rust CLI/agent and bundled chart-runtime hashes are unchanged.
+
+Retain the packets in the external target's `results-beautify-review/`,
+`results-beautify-final/` and `results-beautify-verified/`. The first capture
+attempt fails on its changing disclosure selector. The second cannot create
+axe's blank aggregation target in Electron; the native action case passes.
+The final capture uses axe's documented same-origin API and explicitly asserts
+that Results has no frames. No product fallback, disabled accessibility rules,
+acceptance assertion changes or timeout increases. This focused UI proof does
+not replace full qualification or close the earlier 360-second native timeout.
+
 ## STOP conditions
 
 Stop the affected slice and report the concrete issue if:

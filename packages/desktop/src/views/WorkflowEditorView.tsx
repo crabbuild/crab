@@ -549,12 +549,14 @@ function WorkflowEditorInner({ repo, onOpenSource }: Props) {
   return (
     <div className="flex h-full w-full bg-background">
       <ResizablePanelGroup direction="horizontal" autoSaveId="crab.workflowStudio.sidebar">
+        {activeTab !== "results" && <>
         <ResizablePanel id="workflow-list" order={1} defaultSize={22} minSize={15} maxSize={40}>
           <WorkflowSidebar files={state.availableFiles} workflows={workflows} fileErrors={fileErrors} activeFile={state.activeFile}
         links={links} disabled={locked} dirty={state.dirty} canRename={!!repo.path}
         onSelect={actions.switchFile} onRefresh={() => actions.load()} onCreate={actions.createWorkflow} onRename={actions.renameWorkflow} onDelete={actions.deleteWorkflow} onMigrate={() => setShowMigrateWizard(true)} />
         </ResizablePanel>
         <ResizableHandle aria-label="Resize workflow list" />
+        </>}
         <ResizablePanel id="workflow-studio" order={2} minSize={60}>
           <div className="flex h-full min-w-0 flex-col">
             {(operationError || editorError) && (
@@ -566,23 +568,24 @@ function WorkflowEditorInner({ repo, onOpenSource }: Props) {
                 <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border bg-card pr-3">
                   <WorkflowTabs outdatedCount={outdatedCount} />
                   <div className="flex shrink-0 items-center gap-2 py-1">
-                    <Button disabled={activeTab === "results" || !state.workflow} variant="outline" ref={outputToggle} type="button" className={clsx(" flex items-center gap-1 text-xs", outputOpen && "text-primary")} aria-label="Toggle workflow output" aria-expanded={outputOpen} aria-controls={outputId}
+                    {activeTab !== "results" && (
+                    <Button disabled={!state.workflow} variant="outline" ref={outputToggle} type="button" className={clsx(" flex items-center gap-1 text-xs", outputOpen && "text-primary")} aria-label="Toggle workflow output" aria-expanded={outputOpen} aria-controls={outputId}
           onClick={() => outputOpen ? outputPanel.current?.collapse() : outputPanel.current?.expand()}>
                       <PanelBottom size={14} />
                       Output
-                    </Button>
+                    </Button>)}
                     {/* Run controls */}
                     {state.phase === "running" ? (
                       <Button variant="destructive" type="button" className="flex items-center gap-1 text-xs" onClick={actions.cancel} disabled={cancelling}>
                         <Square size={14} />{" "}
                         {cancelling ? "Stopping…" : "Cancel"}
                       </Button>
-                    ) : (
+                    ) : activeTab !== "results" && (
                       <Button variant="default" type="button" className="flex items-center gap-1 text-xs" onClick={() => actions.run()} disabled={busy || (state.phase !== "editing" && state.phase !== "done")}>
                         <Play size={14} /> Run All
                       </Button>
                     )}
-                    {state.phase === "done" && (
+                    {activeTab !== "results" && state.phase === "done" && (
                       <Button variant="outline" type="button" className="text-xs" onClick={actions.resetRun}>
                         Reset
                       </Button>

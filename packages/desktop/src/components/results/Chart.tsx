@@ -16,6 +16,7 @@ import {
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { ChevronDown, Link2, RotateCcw, ZoomIn, ZoomOut } from "lucide-react";
 
 export function ResultChart({
   chart,
@@ -125,11 +126,11 @@ export function ResultChart({
   }, [range, axis]);
   return (
     <section
-      className="min-w-0 py-4"
+      className="min-w-0 border-t border-border py-5"
       aria-label={chart.title}
       data-axis-key={axis?.key}
     >
-      <h3 className="text-sm font-medium">{chart.title}</h3>
+      <h3 className="mb-3 truncate text-sm font-medium" title={chart.title}>{chart.title}</h3>
       {axis?.domain && !error && (
         <AxisControls
           key={axis.key}
@@ -182,7 +183,7 @@ export function ResultChart({
       <div
         ref={container}
         tabIndex={0}
-        className="overflow-auto focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring"
+        className="mt-3 overflow-auto rounded-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring"
       />
     </section>
   );
@@ -229,28 +230,32 @@ function AxisControls({
   };
   return (
     <form
-      className="my-2 flex flex-wrap items-end gap-2 text-xs"
+      className="mb-3 flex flex-wrap items-end gap-2 text-xs"
       aria-label={`X range ${title}`}
       onSubmit={(event) => {
         event.preventDefault();
         if (validRange(domain, bounds)) onChange(bounds);
       }}
     >
-      <p className="basis-full text-muted-foreground">
-        Linked x axis · {axis.label} · data {domain.lower}–{domain.upper}
-        <span className="block">
+      <details className="group basis-full text-[11px] text-muted-foreground">
+        <summary className="flex w-fit cursor-pointer items-center gap-1.5 rounded-sm focus-visible:outline focus-visible:outline-ring">
+          <Link2 size={12} aria-hidden="true" /> Linked x axis · {axis.label}
+          <span className="font-mono">{domain.lower}–{domain.upper}</span>
+          <ChevronDown size={12} className="transition-transform group-open:rotate-180" aria-hidden="true" />
+        </summary>
+        <p className="mt-1 max-w-prose">
           {immutable
             ? "Report inspection is temporary. Reset restores the saved range."
             : "Ranges are saved with your working comparison."}
-        </span>
-      </p>
+        </p>
+      </details>
       <label className="min-w-0 text-muted-foreground">
         From
         <Input
           aria-label={`X minimum ${title}`}
           type="number"
           step="any"
-          className="mt-1 h-8 w-28 text-xs"
+          className="mt-1 h-8 w-20 font-mono text-xs"
           placeholder="Auto"
           value={text.lower}
           onChange={(event) => setDraft({ ...text, lower: event.target.value })}
@@ -262,7 +267,7 @@ function AxisControls({
           aria-label={`X maximum ${title}`}
           type="number"
           step="any"
-          className="mt-1 h-8 w-28 text-xs"
+          className="mt-1 h-8 w-20 font-mono text-xs"
           placeholder="Auto"
           value={text.upper}
           onChange={(event) => setDraft({ ...text, upper: event.target.value })}
@@ -278,32 +283,38 @@ function AxisControls({
       </Button>
       <Button
         type="button"
-        size="sm"
-        variant="outline"
+        size="icon-sm"
+        variant="ghost"
+        aria-label="Zoom in"
+        title="Zoom in"
         onClick={() => onChange(zoomRange(domain, range, 0.5))}
       >
-        Zoom in
+        <ZoomIn size={14} />
       </Button>
       <Button
         type="button"
-        size="sm"
-        variant="outline"
+        size="icon-sm"
+        variant="ghost"
+        aria-label="Zoom out"
+        title="Zoom out"
         disabled={!range}
         onClick={() => onChange(zoomRange(domain, range, 2))}
       >
-        Zoom out
+        <ZoomOut size={14} />
       </Button>
       <Button
         type="button"
-        size="sm"
+        size="icon-sm"
         variant="ghost"
+        aria-label="Reset range"
+        title="Reset range"
         disabled={
           range?.lower === resetRange?.lower &&
           range?.upper === resetRange?.upper
         }
         onClick={onReset}
       >
-        Reset range
+        <RotateCcw size={14} />
       </Button>
     </form>
   );

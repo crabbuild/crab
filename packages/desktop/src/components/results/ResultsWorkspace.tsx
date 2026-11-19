@@ -9,9 +9,24 @@ import {
 import { ComparisonTable } from "./ComparisonTable";
 import { RunDetails, ActionPreviewDialog } from "./RunDetails";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { BarChart3, RefreshCw, Save } from "lucide-react";
+import {
+  ArrowDown,
+  ArrowUp,
+  BarChart3,
+  CheckCircle2,
+  Circle,
+  Download,
+  LockKeyhole,
+  RefreshCw,
+  Save,
+  Search,
+  SlidersHorizontal,
+  XCircle,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { cn } from "@/lib/utils";
 import { requestPrompt } from "../../lib/application-dialogs";
 import { useSession } from "../../lib/session-context";
 import { repositoryKey, type OpenRepo } from "../../state";
@@ -321,7 +336,10 @@ export function ResultsWorkspace({ repo }: { repo: OpenRepo }) {
     ),
   );
   const shown = report?.report.comparison ?? comparison?.comparison;
-  const charts = report?.charts ?? comparison?.charts ?? [];
+  // Lead from scalar comparisons directly into their synchronized curves.
+  const charts = [...(report?.charts ?? comparison?.charts ?? [])].sort(
+    (left, right) => Number(Boolean(right.interaction)) - Number(Boolean(left.interaction)),
+  );
   const columns = useMemo(
     () =>
       page?.columns.filter((column) =>
@@ -471,20 +489,24 @@ export function ResultsWorkspace({ repo }: { repo: OpenRepo }) {
       role="region"
       aria-label="Results workspace"
     >
-      <div className="flex min-h-11 flex-wrap items-center gap-2 border-b border-border px-4 py-2">
-        <BarChart3 size={16} />
-        <h2 className="mr-2 text-sm font-medium">Results</h2>
+      <div className="flex min-h-14 flex-wrap items-center gap-2 border-b border-border px-5 py-3">
+        <BarChart3 size={16} className="text-muted-foreground" aria-hidden="true" />
+        <h2 className="mr-3 text-sm font-semibold">Results</h2>
+        <div className="relative min-w-48 flex-1">
+        <Search size={14} className="pointer-events-none absolute left-2.5 top-2.5 text-muted-foreground" aria-hidden="true" />
         <Input
-          className="h-8 min-w-40 flex-1"
+          className="h-9 w-full pl-8 text-xs"
           aria-label="Search experiments"
           placeholder="Search runs, parameters, metrics…"
           value={query.search}
           onChange={(e) => updateQuery({ search: e.target.value })}
         />
+        </div>
         <Button
           variant="ghost"
-          size="sm"
+          size="icon-sm"
           aria-label="Refresh Results"
+          title="Refresh Results"
           onClick={() => {
             updateQuery({ cursor: null });
             refresh((v) => v + 1);
@@ -492,13 +514,17 @@ export function ResultsWorkspace({ repo }: { repo: OpenRepo }) {
         >
           <RefreshCw size={16} />
         </Button>
-        <details className="relative">
-          <summary className="cursor-pointer text-xs">Columns</summary>
-          <div className="fixed left-4 right-4 z-20 mt-2 max-h-72 overflow-auto rounded-md border border-border bg-popover p-3 shadow-md sm:absolute sm:left-auto sm:right-0 sm:w-80">
+        <Popover>
+          <PopoverTrigger asChild>
+            <Button variant="ghost" size="sm"><SlidersHorizontal size={14} /> Columns</Button>
+          </PopoverTrigger>
+          <PopoverContent align="end" className="max-h-80 w-80 max-w-[calc(100vw-2rem)] overflow-y-auto p-3">
+            <p className="mb-2 text-xs font-medium">Visible columns</p>
             {page?.columns.map((column) => (
-              <label key={column.key} className="flex gap-2 py-1 text-xs">
+              <label key={column.key} className="flex cursor-pointer items-center gap-2 rounded px-2 py-2 text-xs hover:bg-accent">
                 <input
                   type="checkbox"
+                  className="size-3.5 shrink-0 accent-primary"
                   checked={(query.columns ?? page.display_columns).includes(
                     column.key,
                   )}
@@ -527,8 +553,8 @@ export function ResultsWorkspace({ repo }: { repo: OpenRepo }) {
                 {column.pointer}
               </label>
             ))}
-          </div>
-        </details>
+          </PopoverContent>
+        </Popover>
         <Button
           variant="outline"
           size="sm"
@@ -556,11 +582,12 @@ export function ResultsWorkspace({ repo }: { repo: OpenRepo }) {
             }
           }}
         >
+          <Download size={14} aria-hidden="true" />
           Retrieve report
         </Button>
         <select
           aria-label="Open immutable report"
-          className="h-8 max-w-48 rounded-md border border-input bg-background text-xs"
+          className="h-8 min-w-0 max-w-48 rounded-md border border-input bg-background px-2 text-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           value={preferences.report}
           onChange={(e) =>
             setPreferences((p) => ({ ...p, report: e.target.value }))
@@ -643,16 +670,11 @@ export function ResultsWorkspace({ repo }: { repo: OpenRepo }) {
         </div>
       )}
       <div className="min-h-0 flex-1 overflow-auto">
-        {report && !page?.rows.length ? (
-          <p className="border-b border-border px-4 py-2 text-xs text-muted-foreground">
-            Showing a retrieved report. Choose Working comparison above to
-            browse captured runs.
-          </p>
-        ) : (
+        {!(report && !page?.rows.length) && (
           <>
             <div className="overflow-x-auto" aria-busy={loading}>
               <table className="w-full border-collapse text-left text-xs tabular-nums">
-                <thead className="bg-muted">
+                <thead className="bg-muted/50 text-muted-foreground">
                   <tr>
                     <th className="p-3">
                       <span className="sr-only">Compare</span>
@@ -666,7 +688,7 @@ export function ResultsWorkspace({ repo }: { repo: OpenRepo }) {
                       <th
                         key={key}
                         scope="col"
-                        className="whitespace-nowrap px-3 py-2"
+                        className="whitespace-nowrap px-3 py-2 font-medium"
                         aria-sort={
                           query.sort === key
                             ? query.descending
@@ -678,6 +700,7 @@ export function ResultsWorkspace({ repo }: { repo: OpenRepo }) {
                         <Button
                           variant="ghost"
                           size="sm"
+                          className="-ml-3 gap-1.5 text-xs"
                           onClick={() =>
                             updateQuery({
                               sort: key,
@@ -693,6 +716,9 @@ export function ResultsWorkspace({ repo }: { repo: OpenRepo }) {
                               : key === "status"
                                 ? "Status"
                                 : label(key)}
+                          {query.sort === key && (query.descending
+                            ? <ArrowDown size={12} aria-hidden="true" />
+                            : <ArrowUp size={12} aria-hidden="true" />)}
                         </Button>
                       </th>
                     ))}
@@ -702,12 +728,13 @@ export function ResultsWorkspace({ repo }: { repo: OpenRepo }) {
                   {page?.rows.map((row) => (
                     <tr
                       key={row.id}
-                      className="border-b border-border hover:bg-muted/50"
+                      className={cn("border-b border-border/60 transition-colors hover:bg-muted/50", selected.some((run) => run.id === row.id) && "bg-accent/50")}
                     >
                       <td className="p-3">
                         <input
                           aria-label={`Compare ${row.name ?? row.id}`}
                           type="checkbox"
+                          className="size-3.5 accent-primary"
                           checked={selected.some((run) => run.id === row.id)}
                           disabled={
                             !selected.some((run) => run.id === row.id) &&
@@ -728,11 +755,16 @@ export function ResultsWorkspace({ repo }: { repo: OpenRepo }) {
                           </span>
                         )}
                       </td>
-                      <td className="px-3">
+                      <td className="whitespace-nowrap px-3">
+                        <span className={cn("inline-flex items-center gap-1.5", row.status === "success" ? "text-success" : row.status === "failed" ? "text-destructive" : "text-muted-foreground")}>
+                        {row.status === "success" ? <CheckCircle2 size={13} aria-hidden="true" /> : row.status === "failed" ? <XCircle size={13} aria-hidden="true" /> : <Circle size={13} aria-hidden="true" />}
                         {row.status}{row.origin === "experiment_metadata" && " (imported)"}
+                        </span>
                       </td>
                       <td className="whitespace-nowrap px-3">
-                        {row.started_at}
+                        <time dateTime={row.started_at} title={row.started_at} className="text-muted-foreground">
+                          {new Date(row.started_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                        </time>
                       </td>
                       {columns.map((column) => (
                         <td
@@ -763,7 +795,9 @@ export function ResultsWorkspace({ repo }: { repo: OpenRepo }) {
                 </tbody>
               </table>
               {!page?.rows.length && (
-                <div className="px-6 py-10 text-sm text-muted-foreground">
+                <div className="flex min-h-48 flex-col items-center justify-center gap-3 px-6 py-10 text-xs text-muted-foreground">
+                  <BarChart3 size={24} strokeWidth={1.5} aria-hidden="true" />
+                  <p className="max-w-72 text-center leading-relaxed">
                   {loading
                     ? "Loading captured results…"
                     : error
@@ -772,12 +806,13 @@ export function ResultsWorkspace({ repo }: { repo: OpenRepo }) {
                         ? "No local run catalog. The retrieved immutable report is available below."
                         : query.search
                           ? "No results match this search."
-                          : "No captured results yet. Queue and start experiments, or retrieve published results."}
+                          : "No results yet. Run experiments from Queue, or retrieve a published report."}
+                  </p>
                 </div>
               )}
             </div>
             <div className="flex items-center justify-between border-b border-border px-4 py-2 text-xs text-muted-foreground">
-              <span>
+                  <span className="tabular-nums">
                 {page?.total ?? 0} results · {selected.length}/20 selected
               </span>
               <div className="flex gap-2">
@@ -812,13 +847,14 @@ export function ResultsWorkspace({ repo }: { repo: OpenRepo }) {
           </p>
         )}
         {(selected.length > 0 || report) && (
-          <div className="px-4 py-4">
-            <div className="flex flex-wrap items-center gap-3">
-              <h3 className="text-sm font-medium">
+          <div className="px-5 py-5">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-3">
+              <h3 className="mr-auto text-sm font-semibold">
                 {report ? report.report.title : "Comparison"}
               </h3>
               {report && (
-                <span className="text-xs text-muted-foreground">
+                <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <LockKeyhole size={12} aria-hidden="true" />
                   {report.report.comparison.rows.length} runs · Immutable report
                 </span>
               )}
@@ -828,7 +864,7 @@ export function ResultsWorkspace({ repo }: { repo: OpenRepo }) {
                     Baseline{" "}
                     <select
                       aria-label="Baseline run"
-                      className="ml-2 rounded border border-input bg-background p-1"
+                      className="ml-2 h-8 rounded-md border border-input bg-background px-2 font-mono"
                       value={spec.baseline}
                       onChange={(e) => updateSpec({ baseline: e.target.value })}
                     >
@@ -842,6 +878,7 @@ export function ResultsWorkspace({ repo }: { repo: OpenRepo }) {
                   <label className="text-xs">
                     <input
                       type="checkbox"
+                      className="accent-primary"
                       checked={spec.include_logs}
                       onChange={(e) =>
                         updateSpec({ include_logs: e.target.checked })
@@ -851,7 +888,7 @@ export function ResultsWorkspace({ repo }: { repo: OpenRepo }) {
                   </label>
                   <Button
                     size="sm"
-                    variant="outline"
+                    variant="default"
                     disabled={!canAct || !comparison || busy}
                     onClick={save}
                   >
@@ -888,7 +925,7 @@ export function ResultsWorkspace({ repo }: { repo: OpenRepo }) {
               )}
             </div>
             {report && (
-              <p className="mt-2 break-all font-mono text-xs text-muted-foreground">
+              <p title={report.id} className="mt-2 max-w-64 truncate font-mono text-[11px] text-muted-foreground">
                 {report.id}
               </p>
             )}
@@ -905,21 +942,7 @@ export function ResultsWorkspace({ repo }: { repo: OpenRepo }) {
                 }}
               />
             )}
-            {run && (
-              <RunDetails
-                key={`${run.digest}:${report?.id ?? "working"}`}
-                run={run}
-                report={report}
-                spec={spec}
-                evidence={evidence}
-                canAct={canAct}
-                busy={busy}
-                onAction={action}
-                onEvidence={openEvidence}
-                onChange={updateSpec}
-              />
-            )}
-            <div className="mt-4 divide-y divide-border">
+            <div className="mt-5 grid min-w-0 gap-x-6 lg:grid-cols-2">
               {charts.map((chart) => (
                 <ResultChart
                   key={chart.key}
@@ -943,6 +966,20 @@ export function ResultsWorkspace({ repo }: { repo: OpenRepo }) {
                 />
               ))}
             </div>
+            {run && (
+              <RunDetails
+                key={`${run.digest}:${report?.id ?? "working"}`}
+                run={run}
+                report={report}
+                spec={spec}
+                evidence={evidence}
+                canAct={canAct}
+                busy={busy}
+                onAction={action}
+                onEvidence={openEvidence}
+                onChange={updateSpec}
+              />
+            )}
           </div>
         )}
       </div>

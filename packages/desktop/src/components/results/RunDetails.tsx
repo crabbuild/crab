@@ -7,6 +7,16 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
+  ClipboardPaste,
+  FileText,
+  GitBranch,
+  Layers3,
+  Package,
+  Play,
+  RotateCcw,
+  Upload,
+} from "lucide-react";
+import {
   Dialog,
   DialogContent,
   DialogTitle,
@@ -118,18 +128,27 @@ export function RunDetails({
   onEvidence: (path: string) => void;
   onChange: (change: Partial<ComparisonSpec>) => void;
 }) {
+  const reasons = actionReasons(run, Boolean(report), canAct);
   return (
-    <div className="mt-4 border-t border-border pt-4">
+    <div className="mt-6 border-t border-border pt-5">
       <div className="flex flex-wrap items-center gap-2">
-        <h3 className="mr-auto text-sm font-medium">
-          Run evidence · {shortId(run.snapshot.experiment_id)}
+        <h3 className="mr-auto inline-flex items-center gap-2 text-sm font-medium">
+          <Layers3 size={15} className="text-muted-foreground" aria-hidden="true" />
+          Run evidence <span className="rounded bg-muted px-2 py-1 font-mono text-xs font-normal">{shortId(run.snapshot.experiment_id)}</span>
         </h3>
-        {["apply", "reproduce", "resume", "promote", "branch", "publish"].map(
-          (name) => (
+        {[
+          { name: "apply", Icon: ClipboardPaste },
+          { name: "reproduce", Icon: RotateCcw },
+          { name: "resume", Icon: Play },
+          { name: "promote", Icon: Package },
+          { name: "branch", Icon: GitBranch },
+          { name: "publish", Icon: Upload },
+        ].map(
+          ({ name, Icon }) => (
             <Button
               key={name}
               size="sm"
-              variant="outline"
+              variant={name === "apply" || name === "reproduce" || name === "resume" ? "outline" : "ghost"}
               disabled={
                 !canAct ||
                 busy ||
@@ -146,6 +165,7 @@ export function RunDetails({
               }
               onClick={() => void onAction(name)}
             >
+              <Icon size={14} aria-hidden="true" />
               {name === "branch"
                 ? "Create branch"
                 : name === "promote"
@@ -155,17 +175,22 @@ export function RunDetails({
           ),
         )}
       </div>
-      <ul className="mt-2 space-y-1 text-xs text-muted-foreground">
-        {actionReasons(run, Boolean(report), canAct).map((reason) => (
+      {reasons.length > 0 && <details open={run.snapshot.origin === "experiment_metadata"} className="mt-3 text-xs text-muted-foreground">
+        <summary className="w-fit cursor-pointer">Action availability</summary>
+        <ul className="mt-2 max-w-prose space-y-1.5 leading-relaxed">
+        {reasons.map((reason) => (
           <li key={reason}>{reason}</li>
         ))}
-      </ul>
-      <details className="mt-2 text-xs text-muted-foreground">
+        </ul>
+      </details>}
+      <div className="mt-4 grid min-w-0 gap-x-8 gap-y-3 lg:grid-cols-2">
+      <details className="min-w-0 text-xs text-muted-foreground">
         <summary className="cursor-pointer">Captured run identities</summary>
-        <p className="mt-2 break-all font-mono text-xs text-muted-foreground">
-          Run {run.snapshot.experiment_id} · Source commit{" "}
-          {run.snapshot.base_commit} · Snapshot {run.digest}
-        </p>
+        <dl className="mt-3 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-2 text-[11px]">
+          <dt>Run</dt><dd className="break-all font-mono text-foreground">{run.snapshot.experiment_id}</dd>
+          <dt>Source commit</dt><dd className="break-all font-mono text-foreground">{run.snapshot.base_commit}</dd>
+          <dt>Snapshot</dt><dd className="break-all font-mono text-foreground">{run.digest}</dd>
+        </dl>
         {run.snapshot.reproduction?.source_result && (
           <p className="mt-2 break-all font-mono text-xs text-muted-foreground">
             Reproduced from {run.snapshot.reproduction.source_result.id} ·
@@ -179,21 +204,27 @@ export function RunDetails({
         onChange={onChange}
         immutable={Boolean(report)}
       />
-      <div className="mt-3 grid gap-4 lg:grid-cols-2">
-        <div>
-          <h4 className="text-xs font-medium">Stages and checkpoints</h4>
+      </div>
+      <div className="mt-5 grid min-w-0 gap-6 lg:grid-cols-2">
+        <div className="min-w-0">
+          <h4 className="mb-1 text-xs font-medium">Stages and checkpoints</h4>
           {run.snapshot.stages.map((stage) => (
             <div
               key={stage.name}
-              className="border-b border-border py-2 text-xs"
+              className="border-b border-border/60 py-3 text-xs"
             >
-              <strong>{stage.name}</strong> · {stage.state} ·{" "}
+              <div className="flex items-center justify-between gap-3">
+                <strong className="truncate font-medium">{stage.name}</strong>
+                <span className="text-[11px] text-muted-foreground">{stage.state}</span>
+              </div>
+              <p className="mt-1 text-[11px] text-muted-foreground">
               {stage.duration_ms === null
                 ? "Duration unavailable"
                 : String(stage.duration_ms) + " ms"}{" "}
               · {stage.attempts} attempts
-              <details>
-                <summary className="cursor-pointer text-muted-foreground">
+              </p>
+              <details className="mt-2">
+                <summary className="cursor-pointer text-[11px] text-muted-foreground">
                   Dataset/output witnesses
                 </summary>
                 {stage.hash && (
@@ -204,7 +235,8 @@ export function RunDetails({
                 {stage.inputs.map((input) => (
                   <p
                     key={JSON.stringify([input.path, input.hash])}
-                    className="break-all py-1 font-mono"
+                    className="truncate py-1 font-mono"
+                    title={`Input ${input.path ?? "(external source)"} · ${input.hash}`}
                   >
                     Input {input.path ?? "(external source)"} · {input.hash}
                   </p>
@@ -212,7 +244,8 @@ export function RunDetails({
                 {stage.outputs.map((output) => (
                   <p
                     key={JSON.stringify([output.path, output.hash])}
-                    className="break-all py-1 font-mono"
+                    className="truncate py-1 font-mono"
+                    title={`Output ${output.path} · ${output.hash}`}
                   >
                     Output {output.path} · {output.hash}
                   </p>
@@ -220,7 +253,7 @@ export function RunDetails({
               </details>
             </div>
           ))}
-          <h4 className="mt-4 text-xs font-medium">
+          <h4 className="mb-2 mt-5 text-xs font-medium">
             Retained artifacts and logs
           </h4>
           {run.snapshot.attachments
@@ -234,10 +267,13 @@ export function RunDetails({
               <Button
                 key={`${a.path}:${a.stage}`}
                 variant="ghost"
-                className="h-auto w-full justify-start whitespace-normal break-all px-0 py-1 text-left text-xs"
+                className="h-auto min-h-9 w-full justify-start gap-2 px-2 py-2 text-left text-xs"
+                aria-label={`${a.kind} · ${a.path} · ${a.state}`}
                 onClick={() => void onEvidence(a.path)}
               >
-                {a.kind} · {a.path} · {a.state}
+                {a.kind === "log" ? <FileText size={14} className="text-muted-foreground" /> : <Package size={14} className="text-muted-foreground" />}
+                <span className="min-w-0 flex-1 truncate font-mono" title={a.path}>{a.path}</span>
+                <span className="text-[11px] text-muted-foreground">{a.kind} · {a.state}</span>
               </Button>
             ))}
           {run.snapshot.capture_issues.map((issue) => (
@@ -246,7 +282,7 @@ export function RunDetails({
             </p>
           ))}
         </div>
-        <div>
+        <div className="min-w-0 rounded-md bg-muted/30 p-4">
           {evidence ? (
             <>
               <h4 className="break-all text-xs font-medium">
@@ -271,9 +307,10 @@ export function RunDetails({
               )}
             </>
           ) : (
-            <p className="text-xs text-muted-foreground">
-              Choose a retained artifact or log to inspect its captured bytes.
-            </p>
+            <div className="flex min-h-32 flex-col items-center justify-center gap-2 text-xs text-muted-foreground">
+              <FileText size={22} strokeWidth={1.5} aria-hidden="true" />
+              <p>Select an artifact or log to preview</p>
+            </div>
           )}
         </div>
       </div>
@@ -297,14 +334,14 @@ function DatasetControls({
   // cannot erase fields the user is still editing.
   const [draft, setDraft] = useState(current);
   return (
-    <details className="mt-3 text-xs">
+    <details className="min-w-0 text-xs">
       <summary className="cursor-pointer text-muted-foreground">
         Dataset and split identity · {current.hash ? current.split : "Unknown"}
       </summary>
-      <p className="my-2 text-muted-foreground">
+      <p className="my-3 max-w-prose text-[11px] leading-relaxed text-muted-foreground">
         {immutable
           ? "Dataset, split and evaluator identity retained in this report."
-          : "Use a retained input hash and name the split and evaluator. Improvement labels require matching identities."}
+          : "Match the retained dataset hash, split and evaluator to compare improvement."}
       </p>
       <div className="grid grid-cols-2 gap-2">
         <label className="col-span-2 min-w-0 text-muted-foreground">

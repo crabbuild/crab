@@ -190,6 +190,15 @@ scalars independently of the source metadata and entire prior local Results cach
 
 ## Comparisons and clients
 
+The native Results tab uses the full Data Workflows canvas; the workflow-file
+list returns in Editor, Status and Queue. Metrics and plots precede the selected
+run's evidence inspector, with synchronized curves first. Wide layouts pair
+charts; narrower layouts stack them. Comparison notes open from metric info controls.
+Action eligibility, complete identities and range guidance use inline disclosures;
+imported provenance remains visible. Status icons supplement text, and compact
+zoom controls retain explicit accessible names. Column selection uses the shared
+portalled popover, so it remains usable inside the scrolling workspace.
+
 Read lifetimes use native repository/session IDs or the browser repository
 address within its issuer/subject lifecycle. Display metadata and capability
 refreshes preserve the comparison's controls and keyboard focus; an actual scope
