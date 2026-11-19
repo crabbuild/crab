@@ -34,6 +34,8 @@ macOS automatic update installation requires a future signed release.
   and Windows separators launch the selected Crab executable.
 - Kept Windows file transfers compatible with open previews, preserving captured
   preview bytes while atomically publishing hydrated or restored content.
+- Kept repository sessions available when worktree detail panels inherit the
+  current storage connection.
 - Identified the selected kernel executable and working directory in notebook
   launch failures, including opaque Windows process errors.
 - Kept file context menus within the viewport and docked Activity below the

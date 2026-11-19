@@ -279,6 +279,15 @@ describe("native agent process ownership", () => {
     expect(children[1].frames.find(frame => frame.method === "open_local")?.params.__storage_auth).toMatchObject({ id: second.id });
   });
 
+  it.each(["unbound", "saved"])("opening an alias preserves a current %s repository owner", async kind => {
+    const { first } = await storageAgent();
+    const storage_connection_id = kind === "saved" ? first.id : null;
+    await agent.request("open_local", { repo_id: "one", path: "/one", storage_connection_id });
+    const session = agent.repositorySession("one");
+    await agent.request("open_local", { repo_id: "alias", path: "/one", storage_connection_id });
+    expect(agent.repositorySession("one")).toBe(session);
+  });
+
   it("opening a worktree with an explicit identity also replaces its other open contexts", async () => {
     const { first, second } = await storageAgent();
     await agent.request("open_local", { repo_id: "one", path: "/one", storage_connection_id: first.id });
