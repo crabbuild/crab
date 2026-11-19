@@ -73,6 +73,8 @@ failure cleanup before exiting.
 SSH document reads and saves retain the caller's native session. A replacement
 blocks stale saves, preserves pending input, and lets the observed new runtime
 retry the editor buffer.
+Worktree detail panels inherit the selected storage connection. Opening another
+context with that same identity preserves existing repository readers.
 
 Notebook previews recapture after repository services recover and offer
 **Retry notebook** after a read failure. HTML/SVG outputs render in isolated
