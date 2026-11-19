@@ -77,6 +77,12 @@ shutdown deadline. Its 25-second no-progress limit remains unchanged. The SDK's
 40-second total default cut a progressing ten-repository drain while its last
 large snapshot was still being published.
 
+A successful process exit requires completed ingress, application, Cell, log,
+and local-durability phases with no pending work or elapsed deadline. Repository
+initialization uses the same proof before publishing readiness or deleting its
+temporary local evidence. A clean-reload certificate remains optional: a complete
+stop without it uses normal recovery, and explicit handoff never prepares one.
+
 Paged replicas use foreground faulting with background prefetch disabled through
 the SDK's supported `hydrate_bytes_per_second = 0` policy. A native shutdown
 capture proved `Hydrator::step` dereferenced a null `sqlite3_vfs_find` result after
