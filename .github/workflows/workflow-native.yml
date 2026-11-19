@@ -1,59 +1,131 @@
-name: Alpha Windows publication contract
+name: Alpha Windows storage qualification
 on:
   workflow_dispatch:
 permissions:
   contents: read
+  actions: read
 jobs:
-  publication:
+  notebook:
+    name: Hydration and media controls
     runs-on: windows-2025
-    timeout-minutes: 15
-    steps:
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.97.0
-      - name: Compare dependency and standard replacement semantics
+    timeout-minutes: 120
+    defaults:
+      run:
         shell: bash
+        working-directory: packages/desktop
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: false
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: e77cd860de6ab3bf934ba04f3100d9e959ea6f2a
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: packages/desktop/.nvmrc
+      - name: Set private qualification paths
         run: |
-          mkdir -p "$RUNNER_TEMP/alpha2-rename-contract"
-          cd "$RUNNER_TEMP/alpha2-rename-contract"
-          cat > contract.rs <<'RS'
-          use std::{fs::{self, File}, io::{Read, Write}, os::windows::ffi::OsStrExt, path::Path};
-          #[link(name = "kernel32")]
-          unsafe extern "system" { fn MoveFileExW(old: *const u16, new: *const u16, flags: u32) -> i32; }
-          fn wide(path: &Path) -> Vec<u16> { path.as_os_str().encode_wide().chain(Some(0)).collect() }
-          fn main() -> std::io::Result<()> {
-              let root = std::env::current_dir()?.join("owned");
-              fs::create_dir(&root)?;
-              let destination = root.join("content.bin");
-              let temporary = root.join("temporary.bin");
-              fs::write(&destination, b"captured preview")?;
-              let mut preview = File::open(&destination)?;
-              let mut file = File::create(&temporary)?;
-              file.write_all(b"published content")?;
-              file.flush()?;
-              let old = wide(&temporary);
-              let new = wide(&destination);
-              // SAFETY: both paths are live nul-terminated UTF-16 allocations.
-              let moved = unsafe { MoveFileExW(old.as_ptr(), new.as_ptr(), 1) };
-              let dependency_error = std::io::Error::last_os_error();
-              assert_eq!(moved, 0, "control unexpectedly replaced an open destination");
-              assert_eq!(dependency_error.raw_os_error(), Some(5));
-              assert_eq!(fs::read(&destination)?, b"captured preview");
-              fs::rename(&temporary, &destination)?;
-              let mut retained = Vec::new();
-              preview.read_to_end(&mut retained)?;
-              assert_eq!(retained, b"captured preview");
-              assert_eq!(fs::read(&destination)?, b"published content");
-              drop(file); drop(preview);
-              fs::remove_dir_all(&root)?;
-              println!("{{\"moveFileExError\":5,\"standardRename\":true,\"retainedPreview\":true,\"exactPublishedBytes\":true,\"cleanup\":true}}");
-              Ok(())
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crab-notebook-target" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/crab-notebook-target"
+      - uses: actions/download-artifact@v4
+        with:
+          name: alpha2-windows-quoted-native
+          path: packages/desktop/resources/native/win-x64
+          run-id: 44543250890
+          github-token: ${{ github.token }}
+      - name: Install desktop dependencies
+        run: npm ci
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pinned notebook runtime
+        run: |
+          python -m pip install awscli jupyter_client==8.6.3 ipykernel==6.29.5 jupyter_server==2.17.0
+          echo "CRAB_TEST_JUPYTER_PYTHON=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
+      - name: Build exact current application
+        run: |
+          npm run build:renderer
+          npm run build:electron
+          node scripts/package.mjs --dir --publish never
+      - name: Observe Windows failure boundaries
+        run: |
+          python -X utf8 - <<'PYCODE'
+          from pathlib import Path
+          p = Path('tests/e2e/media.spec.ts')
+          s = p.read_text()
+          marker = '      await expect.poll(() => element.evaluate((node: HTMLMediaElement) => Number.isFinite(node.duration) && node.duration > 0)).toBe(true);'
+          observation = r'''
+          try {
+          OBSERVED_ASSERTION
+          } catch (error) {
+            const state = await element.evaluate(async (node: HTMLMediaElement) => {
+              const response = await fetch(node.src, { headers: { Range: "bytes=0-63" } });
+              return { source: node.src, duration: String(node.duration), error: node.error && { code: node.error.code, message: node.error.message }, ready: node.readyState, network: node.networkState, status: response.status, bytes: Array.from(new Uint8Array(await response.arrayBuffer())) };
+            });
+            const evidence = await application!.evaluate(() => (globalThis as typeof globalThis & { mediaEvidence: unknown[] }).mediaEvidence);
+            writeFileSync(test.info().outputPath('media-failure.json'), JSON.stringify({ file, state, evidence }, null, 2));
+            await page.screenshot({ path: test.info().outputPath('media-failure.png') });
+            throw error;
           }
-          RS
-          rustc --edition=2024 contract.rs -o contract.exe
-          ./contract.exe | tee publication-contract.json
+          '''
+          assert s.count(marker) == 1
+          p.write_text(s.replace(marker, observation.replace('OBSERVED_ASSERTION', marker)))
+          p = Path('tests/e2e/large-files.spec.ts')
+          s = p.read_text()
+          marker = '      writeFileSync(test.info().outputPath("hydrate-failure.txt"), await page.getByRole("main").innerText());'
+          observation = r'''
+          const files = ['data[1].lfs', 'staged.safetensors', 'lfs.safetensors'].map(file => {
+            const destination = path.join(source, file);
+            try { const bytes = readFileSync(destination); return { file, size: bytes.length, prefix: bytes.subarray(0, 160).toString('hex') }; } catch (error) { return { file, error: String(error) }; }
+          });
+          writeFileSync(test.info().outputPath('hydrate-files.json'), JSON.stringify(files, null, 2));
+          const ids = await call(page, 'file_open', { repo_id: 'large-files', path: 'data[1].lfs' });
+          try {
+            const result = await call(page, 'file_materialize', { repo_id: 'large-files', file_id: ids.file_id, op_id: 'diagnostic-only-retry' });
+            writeFileSync(test.info().outputPath('hydrate-retry.json'), JSON.stringify({ result }, null, 2));
+          } catch (retryError) { writeFileSync(test.info().outputPath('hydrate-retry.json'), JSON.stringify({ error: String(retryError) })); }
+          finally { await call(page, 'file_close', { repo_id: 'large-files', file_id: ids.file_id }); }
+          '''
+          assert s.count(marker) == 1
+          p.write_text(s.replace(marker, marker + observation))
+          PYCODE
+          E2E_SMOKE=1 node node_modules/@playwright/test/cli.js test --project=e2e-smoke --workers=1 large-files.spec.ts media.spec.ts > windows-observation.log 2>&1
+      - name: Retain debug observations
+        if: always()
+        run: |
+          python - <<'PYCODE'
+          from pathlib import Path
+          import shutil
+          source=Path('test-results')
+          if source.exists():
+              shutil.move(str(source), 'debug-test-results')
+          PYCODE
+      - uses: actions/download-artifact@v4
+        if: always()
+        with:
+          name: Crab-native-win-x64
+          path: packages/desktop/release-native-control
+          run-id: 44455996465
+          github-token: ${{ github.token }}
+      - name: Package unchanged optimized media read path
+        if: always()
+        run: |
+          node <<'JS'
+          const fs = require('node:fs');
+          fs.rmSync('resources/native/win-x64', { recursive: true, force: true });
+          fs.cpSync('release-native-control', 'resources/native/win-x64', { recursive: true });
+          JS
+          node scripts/package.mjs --dir --publish never
+      - name: Observe optimized media with unchanged assertions
+        if: always()
+        run: E2E_SMOKE=1 node node_modules/@playwright/test/cli.js test --project=e2e-smoke --workers=1 media.spec.ts > windows-optimized-media.log 2>&1
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: alpha2-windows-rename-contract
-          path: ${{ runner.temp }}/alpha2-rename-contract/publication-contract.json
+          name: alpha2-windows-performance-proof
+          path: |
+            packages/desktop/windows-optimized-media.log
+            packages/desktop/debug-test-results/**
+            packages/desktop/windows-observation.log
+            packages/desktop/test-results/**
