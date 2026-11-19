@@ -332,3 +332,66 @@ republished by the canonical writer. Old damaged catalogs, their staged evidence
 and failed receipts are untouched. R0 receives the same approved SDK pin for
 matched valid-state measurements. Original baseline inputs/results remain
 retained. No timing, throughput, resource-soak or other lifecycle gate is waived.
+
+
+### Current SDK-pinned HTTP and native minimum-profile proof
+
+The common-SDK release comparison completes all 22 cases per variant and both
+600-second mixed soaks. Both variants have zero Git mismatches, non-rejection
+request errors or proxy errors, pass RSS plateaus and exit `[0, 0]`. The soaks
+pass their relative performance controls: aggregate throughput is about
+1,153/1,203 requests/s for R0/candidate; preview p95 is 24.82/21.22 ms. Twenty-six
+short-run engineering failures remain. A fixed three-round alternating,
+two-replica diagnostic retains eight failed controls. UUID-correlated existing
+boundary logs place most elapsed time outside Git query/encoding; the direct
+RustFS diagnostic also retains six failed controls. Thresholds and
+all original failed receipts remain unchanged.
+
+The exact-source ARM64 CI image passes the native RustFS process and three-node
+Kubernetes recovery jobs. On local RustFS, an additional native ARM64 container
+enforces 1 CPU and 1 GiB, without extra swap. Its 600-second eight-client mix
+completes 631,332 successful Git-checked requests with zero errors or rejections.
+RSS late/middle ratio is 1.054; cgroup memory peaks at 338,657,280 bytes with no
+OOM. Cold coalescing, previews, native Directory, revalidation and admitted-work
+drain pass; the process exits zero with all actual durability fields complete.
+
+The first final-log assertion incorrectly matched ANSI-styled `field=value`
+text as plain text. Its failed report and raw log remain unchanged. A separate
+verifier strips only terminal SGR bytes and checks every actual shutdown field;
+it does not change measurements or thresholds. The overridden qualification
+entrypoint uses a private config path; the inherited default-config Docker
+health command reports unhealthy, while explicit HTTP/mTLS/native checks pass.
+Normal container setup/recovery has separate CI proof. The OCI artifact also
+retains its initial config-ID/manifest-ID import assertion and the subsequent
+verification of both identities and every layer.
+
+The latest `crab-v2` adds CSV preview changes at `641965f58e4`; affected UI
+typecheck, production build, unit and browser checks pass. Performance and remaining lifecycle acceptance
+remain open. These local measurements do not establish hosted S3 latency.
+
+
+### Fresh catalog metadata revalidation
+
+The rebuilt release reuses a validated catalog document only after a fresh
+provider ETag/version and size check. A changed identity requires the bounded
+body read and full validation. Provider errors fail the request; missing data
+removes the previous grant. Conditional mutations retain the exact CAS token.
+This removes unchanged catalog body transfer and decoding from warm membership
+reads without introducing a freshness interval.
+
+The regression fails against the previous source and passes after the change.
+Twenty-four catalog, fifteen membership and ten auth tests pass, together with
+strict server all-target Clippy. The source-bound release passes 53 live RustFS
+checks. Both replicas return `503 membership_unavailable` when only catalog
+metadata reads are denied, including a matching cached validator; restoring the
+provider permits `304` again. Both replicas drain with complete durability proof.
+The CSV rebase passes UI typecheck, production build, 35 unit tests and eight
+browser tests. Eighteen HTTP qualification tests pass.
+
+A direct RustFS diagnostic of the preceding candidate still has six failed
+controls; bypassing the Python meter does not clear its regression. Measured
+public response body transfer takes microseconds. Current catalog-revalidation
+performance qualification is running with the same 22 cases and two 600-second
+soaks; no new timing pass is claimed. Physical-source fixtures now independently
+verify 2/5/17 source objects, the same final Git history and refs, and zero
+pending frontier transactions. Their timing remains pending.

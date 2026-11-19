@@ -52,7 +52,7 @@ class ReadServiceTests(unittest.TestCase):
     def git(self, *args):
         return subprocess.check_output(["git", "-C", str(self.source), *args], stderr=subprocess.PIPE)
 
-    def serve(self, status=200, corrupt=False, delay=0):
+    def serve(self, status=200, corrupt=False, delay=0, request_id=None):
         owner = self
         self.seen_hosts = []
 
@@ -76,6 +76,8 @@ class ReadServiceTests(unittest.TestCase):
                                        "text_truncated":False, "mode":"100644", "classification":"OrdinaryGit",
                                        "commit":params["rev"][0], "generation":1}).encode()
                 self.send_response(status)
+                if request_id is not None:
+                    self.send_header("X-Request-Id", request_id)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 try:
@@ -126,6 +128,15 @@ class ReadServiceTests(unittest.TestCase):
         record, body = transport.get(0, "/api/repos/owner/repository/blob", "blob")
         oracle.check(workload, "target.rs", body, record["sha256"], record["bytes"])
         self.assertEqual(body, b"")
+
+    def test_transport_correlates_server_request_ids_without_recording_arbitrary_headers(self):
+        identifier = "019aab12-3456-7000-8000-123456789abc"
+        for value, expected in ((identifier, identifier), ("arbitrary-header-text", None)):
+            with self.subTest(value=value):
+                transport = Transport([self.serve(request_id=value)], {}, 1)
+                self.addCleanup(transport.close)
+                record, _ = transport.get(0, "/api/repos/owner/repository/blob", "blob")
+                self.assertEqual(record.get("request_id"), expected)
 
     def test_client_cancellation_closes_the_pending_socket_and_remains_a_failed_request(self):
         transport = Transport([self.serve(delay=.2)], {}, 1)

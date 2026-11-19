@@ -2284,7 +2284,6 @@ test("delimited workbenches preserve encoded text and align their headers", asyn
     "encoded.tsv": { text: null, bytes: utf16 },
     "large.csv": {
       text: null,
-      textTruncated: true,
       bytes: strToU8("name,value\nlarge,1\n"),
       size: 5 * 1024 * 1024 * 1024,
     },

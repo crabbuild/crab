@@ -305,6 +305,11 @@ class Transport:
             record["status"] = response.status
             record["headers_us"] = (time.perf_counter_ns() - started) / 1000
             record["server_timing_ms"] = server_timings(response.getheader("server-timing", ""))
+            # Correlate boundary traces without retaining arbitrary reflected
+            # header text, which could contain credentials.
+            request_id = response.getheader("x-request-id", "")
+            if re.fullmatch(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}", request_id):
+                record["request_id"] = request_id
             chunk = response.read(1)
             record["ttfb_us"] = (time.perf_counter_ns() - started) / 1000
             while chunk:
@@ -317,7 +322,7 @@ class Transport:
             record["sha256"] = digest.hexdigest()
         except (OSError, http.client.HTTPException, ValueError) as error:
             # Response/error strings may contain reflected credentials. Persist
-            # a bounded category only; never log headers, URLs or response bodies.
+            # a bounded category only; never log arbitrary headers, URLs or bodies.
             record["error"] = "ClientCancelled" if cancelled.is_set() else type(error).__name__
             connection.close()
             self.connections.pop(replica, None)
