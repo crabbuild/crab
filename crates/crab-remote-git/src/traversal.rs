@@ -7,12 +7,14 @@ use crate::{Commit, CursorError, EntryKind, EntryMode, Error, GitPath, Result, T
 
 const CURSOR_VERSION: u8 = 1;
 const PATH_HISTORY_CURSOR_VERSION: u8 = 2;
+const HISTORY_SEEK_CURSOR_VERSION: u8 = 2;
 const DIRECTORY_CURSOR_KIND: u8 = 1;
 const HISTORY_CURSOR_KIND: u8 = 2;
 const PATH_HISTORY_CURSOR_KIND: u8 = 3;
 const AHEAD_HISTORY_CURSOR_KIND: u8 = 4;
 const DIRECTORY_CURSOR_FIXED_BYTES: usize = 2 + 20 + 20 + 8 + 4 + 4;
 const HISTORY_CURSOR_BYTES: usize = 2 + 20 + 1 + 8;
+const HISTORY_SEEK_CURSOR_BYTES: usize = 2 + 20 + 1 + 20;
 const PATH_HISTORY_CURSOR_FIXED_BYTES: usize = HISTORY_CURSOR_BYTES + 20 + 4;
 const AHEAD_HISTORY_CURSOR_BYTES: usize = 2 + 20 + 20 + 8;
 const MAX_CURSOR_BYTES: usize = 64 * 1024;
@@ -23,6 +25,9 @@ pub struct PageCursor(Bytes);
 
 impl PageCursor {
     /// Validate and own an opaque cursor payload returned by this crate.
+    ///
+    /// This checks syntax, not authenticity. Authenticate imported bytes at the
+    /// caller boundary before using a continuation that selects a resume OID.
     ///
     /// # Errors
     ///
@@ -159,15 +164,38 @@ impl PageCursor {
     }
 
     pub(crate) fn decode_history(&self) -> Result<HistoryCursor> {
-        if self.0.len() != HISTORY_CURSOR_BYTES
-            || self.0[..2] != [CURSOR_VERSION, HISTORY_CURSOR_KIND]
-        {
+        let expected = match self.0.first() {
+            Some(&CURSOR_VERSION) => HISTORY_CURSOR_BYTES,
+            Some(&HISTORY_SEEK_CURSOR_VERSION) => HISTORY_SEEK_CURSOR_BYTES,
+            _ => return Err(malformed_cursor()),
+        };
+        if self.0.len() != expected || self.0.get(1) != Some(&HISTORY_CURSOR_KIND) {
             return Err(malformed_cursor());
         }
         let start = object_id(&self.0[2..22])?;
         let mode = HistoryTraversal::try_from(self.0[22])?;
-        let skip = u64::from_be_bytes(array(&self.0[23..31])?);
-        Ok(HistoryCursor { start, mode, skip })
+        let position = if self.0[0] == CURSOR_VERSION {
+            HistoryPosition::Offset(u64::from_be_bytes(array(&self.0[23..31])?))
+        } else {
+            if mode != HistoryTraversal::FirstParent {
+                return Err(malformed_cursor());
+            }
+            HistoryPosition::FirstParent(object_id(&self.0[23..43])?)
+        };
+        Ok(HistoryCursor {
+            start,
+            mode,
+            position,
+        })
+    }
+
+    pub(crate) fn history_seek(start: ObjectId, next: ObjectId) -> Self {
+        let mut bytes = Vec::with_capacity(HISTORY_SEEK_CURSOR_BYTES);
+        bytes.extend_from_slice(&[HISTORY_SEEK_CURSOR_VERSION, HISTORY_CURSOR_KIND]);
+        bytes.extend_from_slice(start.as_bytes());
+        bytes.push(HistoryTraversal::FirstParent as u8);
+        bytes.extend_from_slice(next.as_bytes());
+        Self(Bytes::from(bytes))
     }
 
     pub(crate) fn ahead_history(start: ObjectId, base: ObjectId, skip: u64) -> Self {
@@ -270,7 +298,12 @@ pub(crate) struct DirectoryCursor<'a> {
 pub(crate) struct HistoryCursor {
     pub(crate) start: ObjectId,
     pub(crate) mode: HistoryTraversal,
-    pub(crate) skip: u64,
+    pub(crate) position: HistoryPosition,
+}
+
+pub(crate) enum HistoryPosition {
+    Offset(u64),
+    FirstParent(ObjectId),
 }
 
 pub(crate) struct AheadHistoryCursor {

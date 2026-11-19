@@ -1,5 +1,4 @@
 use std::cmp::Ordering;
-use std::sync::Arc;
 
 use bytes::Bytes;
 use gix_hash::ObjectId;
@@ -71,7 +70,7 @@ impl TreeListingRequest {
 }
 
 struct TreeFrame {
-    entries: Arc<Vec<RawTreeEntry>>,
+    entries: crate::objects::SharedTree,
     parent: GitPath,
     next: usize,
     depth: u64,

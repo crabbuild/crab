@@ -10,6 +10,9 @@ use super::RemoteGitRuntime;
 use crate::budget::{OperationBudget, SharedBudget};
 use crate::{Error, Result};
 
+// Followers and departed ledgers need a bound independent of producer slots.
+const MAX_SHARED_PARTICIPANTS: usize = 256;
+
 #[derive(Clone)]
 struct Flight<T: Clone> {
     receiver: watch::Receiver<Option<std::result::Result<T, Arc<Error>>>>,
@@ -33,6 +36,15 @@ where
 
     pub(super) async fn len(&self) -> usize {
         self.flights.lock().await.len()
+    }
+
+    pub(super) async fn waiters(&self) -> usize {
+        self.flights
+            .lock()
+            .await
+            .values()
+            .map(|flight| flight.budget.waiters())
+            .sum()
     }
 
     pub(super) async fn run<F, Fut>(
@@ -65,8 +77,11 @@ where
                     (flight.clone(), None)
                 } else {
                     let (sender, receiver) = watch::channel(None);
-                    let shared_budget = SharedBudget::new(runtime.background_cancellation());
-                    let registered = shared_budget.register(budget, cancellation).await;
+                    let shared_budget = SharedBudget::new(
+                        runtime.background_cancellation(),
+                        MAX_SHARED_PARTICIPANTS,
+                    );
+                    let registered = shared_budget.register(budget, cancellation).await?;
                     let flight = Flight {
                         receiver,
                         budget: shared_budget.clone(),
@@ -93,7 +108,7 @@ where
             };
             let registered = match registered {
                 Some(registered) => Some(registered),
-                None => flight.budget.register(budget, cancellation).await,
+                None => flight.budget.register(budget, cancellation).await?,
             };
             if let Some((rejection, lease)) = registered {
                 break (flight, rejection, lease);
@@ -105,7 +120,7 @@ where
         let mut receiver = flight.receiver;
         let mut result = loop {
             if let Some(source) = rejection.borrow().clone() {
-                break Err(Error::SharedRead { source });
+                break Err(Error::from_shared(source));
             }
             let completed = receiver.borrow().clone();
             if let Some(result) = completed {
@@ -143,10 +158,7 @@ where
             }
         }
         drop(receiver);
-        result?.map_err(|source| match Arc::try_unwrap(source) {
-            Ok(error) => error,
-            Err(source) => Error::SharedRead { source },
-        })
+        result?.map_err(Error::from_shared)
     }
 
     async fn retire(&self, key: &K, budget: &Arc<SharedBudget>) {

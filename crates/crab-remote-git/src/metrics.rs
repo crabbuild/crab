@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Bounded metric category emitted by remote repository operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -15,6 +15,14 @@ pub enum MetricKind {
     Locator,
     /// Pack inflation or Git parsing.
     Decode,
+    /// Full checksum verification, with examined bytes and elapsed duration.
+    CacheVerification,
+    /// Admitted blocking-job lifetime: no duration starts, a duration finishes.
+    CpuJob,
+    /// Reserved buffer/result bytes: no duration reserves, a duration releases.
+    ResidentBytes,
+    /// Uncached attribution lifetime: no duration starts, a duration finishes.
+    BlameProducer,
     /// Tree or commit traversal.
     Traversal,
     /// Resource-budget rejection.
@@ -70,10 +78,110 @@ pub trait RemoteGitMetrics: Send + Sync + 'static {
     fn record(&self, observation: MetricObservation);
 }
 
+pub(crate) struct WorkObservation {
+    metrics: std::sync::Arc<dyn RemoteGitMetrics>,
+    kind: MetricKind,
+    value: u64,
+    started: Instant,
+}
+
+impl WorkObservation {
+    pub(crate) fn new(
+        metrics: std::sync::Arc<dyn RemoteGitMetrics>,
+        kind: MetricKind,
+        value: u64,
+    ) -> Self {
+        metrics.record(MetricObservation {
+            kind,
+            value,
+            duration: None,
+            outcome: None,
+            cache: None,
+        });
+        Self {
+            metrics,
+            kind,
+            value,
+            started: Instant::now(),
+        }
+    }
+}
+
+impl Drop for WorkObservation {
+    fn drop(&mut self) {
+        self.metrics.record(MetricObservation {
+            kind: self.kind,
+            value: self.value,
+            duration: Some(self.started.elapsed()),
+            outcome: None,
+            cache: None,
+        });
+    }
+}
+
 /// Metrics sink used when callers do not install instrumentation.
 #[derive(Debug, Default)]
 pub struct NoopMetrics;
 
 impl RemoteGitMetrics for NoopMetrics {
     fn record(&self, _observation: MetricObservation) {}
+}
+
+pub(crate) struct BlameProducerObservation<'a> {
+    metrics: &'a dyn RemoteGitMetrics,
+    started: Instant,
+}
+
+impl<'a> BlameProducerObservation<'a> {
+    pub(crate) fn new(metrics: &'a dyn RemoteGitMetrics) -> Self {
+        metrics.record(MetricObservation {
+            kind: MetricKind::BlameProducer,
+            value: 1,
+            duration: None,
+            outcome: None,
+            cache: None,
+        });
+        Self {
+            metrics,
+            started: Instant::now(),
+        }
+    }
+}
+
+impl Drop for BlameProducerObservation<'_> {
+    fn drop(&mut self) {
+        // A dropped attribution future still ends its measured lifetime; this
+        // does not claim its backend/session cleanup has already drained.
+        self.metrics.record(MetricObservation {
+            kind: MetricKind::BlameProducer,
+            value: 1,
+            duration: Some(self.started.elapsed()),
+            outcome: None,
+            cache: None,
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct Observations(Mutex<Vec<MetricObservation>>);
+
+    impl RemoteGitMetrics for Observations {
+        fn record(&self, observation: MetricObservation) {
+            self.0.lock().unwrap().push(observation);
+        }
+    }
+
+    #[test]
+    fn abandoned_blame_future_ends_its_observed_lifetime() {
+        let observations = Observations::default();
+        drop(BlameProducerObservation::new(&observations));
+        let events = observations.0.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(events[0].duration.is_none() && events[1].duration.is_some());
+    }
 }

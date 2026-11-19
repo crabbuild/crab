@@ -89,6 +89,7 @@ export interface SearchResults {
   commit: string;
   truncated: boolean;
 }
+// Diff retains the tagged embedded-content representation.
 export interface Content {
   oid: string;
   size: number;

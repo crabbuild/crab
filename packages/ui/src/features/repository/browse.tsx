@@ -11,13 +11,13 @@ import {
   displayHex,
   endpoint,
   useRequest,
-  type Content,
   type Entry,
   type Page,
   type Commit,
   type Repository,
   type TreeAttribution,
 } from "@/lib/api";
+import type { FilePreview } from "@/lib/contracts";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { date, relativeDate, short } from "@/lib/format";
@@ -57,8 +57,8 @@ function ReadmePreview({
   theme: "light" | "dark";
   codeThemes: CodeThemes;
 }) {
-  const state = useRequest<Content>(
-    endpoint(repo, "file", { rev, path_hex: entry.path_hex }),
+  const state = useRequest<FilePreview>(
+    endpoint(repo, "file-preview", { rev, path_hex: entry.path_hex }),
   );
   const name = entry.path.split("/").pop() ?? "README";
   return (
@@ -81,8 +81,12 @@ function ReadmePreview({
       </header>
       <Result state={state}>
         {(content) =>
-          content.text === null ? (
-            <div className="notice">This README is not a text file.</div>
+          content.preview.state !== "inline" ? (
+            <div className="notice">
+              {content.preview.state === "omitted_size"
+                ? "Preview omitted because of file size."
+                : "This README is not supported UTF-8 text."}
+            </div>
           ) : (
             <RepositoryMarkdown
               repo={repo}
@@ -93,7 +97,7 @@ function ReadmePreview({
               theme={theme}
               codeThemes={codeThemes}
             >
-              {content.text}
+              {content.preview.text}
             </RepositoryMarkdown>
           )
         }

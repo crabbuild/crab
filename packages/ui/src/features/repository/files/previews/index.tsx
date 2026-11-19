@@ -517,6 +517,16 @@ function BinaryPreview({ descriptor, blobUrl, name, size, ...props }: Props) {
 }
 
 export function FilePreview(props: Props) {
+  if (
+    props.text === null &&
+    ["markdown", "notebook"].includes(props.descriptor.kind)
+  )
+    return (
+      <PreviewNotice>
+        Inline text is unavailable for this preview. Download the exact stored
+        bytes to inspect this file.
+      </PreviewNotice>
+    );
   if (props.descriptor.kind === "markdown")
     return (
       <RepositoryMarkdown

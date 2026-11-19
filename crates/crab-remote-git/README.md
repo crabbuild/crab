@@ -306,3 +306,27 @@ share the existing blame cache's entry and byte limits; no additional cache
 configuration is introduced. Blob verification, comparison-budget charging and
 cancellation checks happen before consuming a retained line map. A cached map
 never authorizes a commit or substitutes for fetching an unverified blob.
+
+Identical complete attribution reads share a runtime-owned producer and locator
+session. `shared_blame` returns `SharedBlame`, retaining one immutable result;
+the existing `blame` returns a caller-owned copy. Flights include the complete
+immutable `ObjectLimits` profile. Each waiter independently pays prior and new
+work across all budget dimensions; depth remains a maximum. Expiration or
+cancellation removes only that waiter. The last departure cancels production,
+and runtime shutdown drains its admitted work. Each flight bounds both live
+waiters and retained participant ledgers to 256.
+
+Runtime byte admission covers encoded/inflated buffers, parsed indexes and
+commits/trees, comparison working sets, managed attribution results, and explicit
+response reservations. `reserve_bytes` admits before allocation and `bind`
+retains its charge through the last `Bytes` clone or slice. Cache eviction
+releases only map ownership. Active owners remain charged, and pressure rejects
+immediately after disposable-cache eviction rather than waiting for an output
+the caller might still hold. The default envelope is the sum of existing cache
+byte caps plus 128 MiB transient capacity (417 MiB at defaults).
+
+This is an allocation-capacity envelope, not a process RSS limit. Database and
+transport internals, supplied capture metadata, and explicit caller-owned DTO
+copies have separate owners. `RuntimeSnapshot` reports admitted bytes, capacity,
+CPU/origin occupancy and attribution waiters separately from cache-map estimates.
+`run_cpu` retains worker admission and tracked lifetime even if its waiter drops.
