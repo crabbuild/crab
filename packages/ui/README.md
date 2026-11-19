@@ -140,9 +140,13 @@ grant, and this consolidation does not establish full GitHub Enterprise parity.
   and Code/Blame form one continuous sticky header with the explorer open or
   closed; the controls follow the navigation row's measured height. Scrolled
   navigation keeps the branch and path available and exposes **Top**.
-  The toolbar keeps its rounded top border while sticky; joined actions use a stable
-  outline on hover and show keyboard focus above adjacent buttons.
-  The Symbols column starts at 320px and retains its width when the viewer grows.
+  The file workspace and its portaled menus share Primer's light/dark palette,
+  6px corners, thin borders, neutral hover fills, and blue keyboard focus.
+  Explorer and Symbols panes start at 320px, with 16px viewer gutters. Search
+  fields and tree/symbol rows use 32px sizing; file actions use 28px controls.
+  The toolbar keeps its rounded top border while sticky; joined actions keep a
+  stable outline on hover. Explorer search shares the Symbols input component.
+  The Symbols column retains its width when the viewer grows.
   Its outlined panel fits short outlines and scrolls longer lists internally.
   The divider shares the viewer border; its grip stays centered within the
   visible workspace as the document scrolls.

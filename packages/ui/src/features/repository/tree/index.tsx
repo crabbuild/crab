@@ -1,6 +1,11 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { FileTree, useFileTree } from "@pierre/trees/react";
 import { Button } from "@/components/ui/button";
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupInput,
+} from "@/components/ui/input-group";
 import { FileIcon, SearchIcon } from "@primer/octicons-react";
 import {
   displayHex,
@@ -66,7 +71,7 @@ export function RepositoryTree({
     search: true,
     density: "default",
     itemHeight: 32,
-    icons: "complete",
+    icons: { set: "minimal", colored: false },
     renaming: false,
     dragAndDrop: false,
     sort: (left, right) =>
@@ -87,12 +92,12 @@ export function RepositoryTree({
       }
       [data-type="item"][data-item-selected="true"]::after {
         background: var(--info);
-        border-radius: 0 6px 6px 0;
+        border-radius: 2px;
         content: "";
-        inset-block: 0;
-        inset-inline-start: calc(-1 * var(--trees-padding-inline));
+        inset-block: 4px;
+        inset-inline-start: calc(-0.5 * var(--trees-padding-inline));
         position: absolute;
-        width: 3px;
+        width: 4px;
       }
       [data-type="item"][data-item-selected="true"] > [data-item-section="icon"] {
         color: var(--trees-fg-muted);
@@ -297,13 +302,16 @@ export function RepositoryTree({
   }, [repo.owner, repo.name, rev, model, attempt, activePath, ancestors]);
   return (
     <>
-      <label className="tree-search" htmlFor="repository-tree-search">
-        <SearchIcon aria-hidden="true" />
-        <input
+      <InputGroup className="tree-search">
+        <InputGroupAddon>
+          <SearchIcon aria-hidden="true" />
+        </InputGroupAddon>
+        <InputGroupInput
           ref={searchInput}
           id="repository-tree-search"
           type="search"
           role="combobox"
+          aria-label="Go to file"
           aria-autocomplete="list"
           aria-expanded={searchResults.length > 0}
           aria-controls={
@@ -337,8 +345,10 @@ export function RepositoryTree({
             }
           }}
         />
-        <kbd aria-hidden="true">T</kbd>
-      </label>
+        <InputGroupAddon align="inline-end">
+          <kbd aria-hidden="true">T</kbd>
+        </InputGroupAddon>
+      </InputGroup>
       {normalizedQuery ? (
         <div
           className="tree-search-results"

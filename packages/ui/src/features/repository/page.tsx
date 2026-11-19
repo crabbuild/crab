@@ -93,7 +93,7 @@ const Settings = lazy(() =>
     default: module.Settings,
   })),
 );
-const DEFAULT_TREE_PANE_WIDTH = 356;
+const DEFAULT_TREE_PANE_WIDTH = 320;
 const MIN_TREE_PANE_WIDTH = 240;
 const MAX_TREE_PANE_WIDTH = 640;
 const TREE_PANE_KEYBOARD_STEP = 24;

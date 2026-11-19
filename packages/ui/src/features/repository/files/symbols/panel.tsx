@@ -8,7 +8,7 @@ import {
 } from "@/components/ui/input-group";
 import { useDeferredValue, useId, useMemo, useState } from "react";
 
-import { ArrowLeftIcon, SearchIcon, XIcon } from "@primer/octicons-react";
+import { ArrowLeftIcon, FilterIcon, XIcon } from "@primer/octicons-react";
 import type { DiffsThemeNames, FileContents } from "@pierre/diffs";
 import type { CodeSymbol, CodeSymbolsState } from ".";
 import { CodeSymbolDetails } from "./detail";
@@ -120,7 +120,7 @@ export function CodeSymbolsPanel({
             </FieldLabel>
             <InputGroup>
               <InputGroupAddon>
-                <SearchIcon aria-hidden="true" />
+                <FilterIcon aria-hidden="true" />
               </InputGroupAddon>
               <InputGroupInput
                 id={searchId}

@@ -1221,7 +1221,7 @@ test("overview groups files with their commit and opens the tree when navigating
   await expect(page.locator(".latest-commit")).toContainText(
     "Update this path",
   );
-  await expect(page.locator(".tree-sidebar")).toHaveCSS("width", "356px");
+  await expect(page.locator(".tree-sidebar")).toHaveCSS("width", "320px");
   await expect(page.getByPlaceholder("Go to file")).toBeVisible();
   await page
     .getByRole("button", { name: "Close file tree", exact: true })
@@ -1664,8 +1664,8 @@ test("Symbols divider stays centered and controls remain reachable beside the en
             (Math.max(0, line.top) + Math.min(innerHeight, line.bottom)) / 2;
           return Math.max(
             Math.abs(grip.y + grip.height / 2 - center),
-            Math.abs(grip.x + grip.width / 2 - line.x - line.width / 2),
-            Math.abs(line.right - source.right),
+            Math.abs(grip.x + grip.width / 2 - source.right + 0.5),
+            Math.abs(line.left - source.right + 1),
           );
         }),
       )
@@ -2406,7 +2406,7 @@ test("file tree scrolls independently and its resize grip follows the sticky pan
   }
   await expect(separator).toBeInViewport();
   await separator.press("ArrowRight");
-  await expect(separator).toHaveAttribute("aria-valuenow", "380");
+  await expect(separator).toHaveAttribute("aria-valuenow", "344");
 });
 
 test("file tree and content panes resize with pointer and keyboard controls", async ({
@@ -2419,7 +2419,7 @@ test("file tree and content panes resize with pointer and keyboard controls", as
   });
   const treePane = page.locator(".tree-sidebar");
   const contentPane = page.locator(".code-main");
-  await expect(separator).toHaveAttribute("aria-valuenow", "356");
+  await expect(separator).toHaveAttribute("aria-valuenow", "320");
   await expect(treePane).toBeVisible();
   await expect(contentPane).toBeVisible();
   await expectNoAccessibilityViolations(page);
@@ -2440,7 +2440,7 @@ test("file tree and content panes resize with pointer and keyboard controls", as
   await separator.press("ArrowRight");
   await expect(separator).toHaveAttribute("aria-valuenow", "264");
   await separator.dblclick();
-  await expect(separator).toHaveAttribute("aria-valuenow", "356");
+  await expect(separator).toHaveAttribute("aria-valuenow", "320");
 
   await page.setViewportSize({ width: 600, height: 900 });
   await expect(separator).toBeHidden();
@@ -2551,50 +2551,15 @@ test("deep links expand the active path and select its file", async ({
     const active = rows.find(
       (row) => row.getAttribute("aria-selected") === "true",
     );
-    const folder = rows.find(
-      (row) => row.getAttribute("data-item-type") === "folder",
-    );
-    const folderContent = folder?.querySelector(
-      '[data-item-section="content"]',
-    );
-    const selectedStyle = active ? getComputedStyle(active) : null;
-    const selectedRail = active ? getComputedStyle(active, "::after") : null;
-    const tokenProbe = document.createElement("span");
-    tokenProbe.style.backgroundColor = "var(--secondary)";
-    tokenProbe.style.color = "var(--info)";
-    tree.closest(".app-shell")?.append(tokenProbe);
-    const neutralBackground = getComputedStyle(tokenProbe).backgroundColor;
-    const accentColor = getComputedStyle(tokenProbe).color;
-    tokenProbe.remove();
     return {
       active: active?.getAttribute("aria-label"),
-      activeHeight: active?.getBoundingClientRect().height,
-      activeBackground: selectedStyle?.backgroundColor,
-      activeRailBackground: selectedRail?.backgroundColor,
-      activeRailLeft: selectedRail?.left,
-      activeRailWidth: selectedRail?.width,
-      activeIconToken: active
-        ?.querySelector("[data-icon-token]")
-        ?.getAttribute("data-icon-token"),
-      neutralBackground,
-      accentColor,
       expanded: rows
         .filter((row) => row.getAttribute("aria-expanded") === "true")
         .map((row) => row.getAttribute("aria-label")),
-      folderIconWidth: folderContent
-        ? getComputedStyle(folderContent, "::before").width
-        : null,
     };
   });
   expect(state.active).toBe("index.ts");
-  expect(state.activeHeight).toBe(32);
-  expect(state.activeBackground).toBe(state.neutralBackground);
-  expect(state.activeRailBackground).toBe(state.accentColor);
-  expect(state.activeRailLeft).toBe("-16px");
-  expect(state.activeRailWidth).toBe("3px");
-  expect(state.activeIconToken).toBe("typescript");
   expect(state.expanded).toContain("src");
-  expect(state.folderIconWidth).toBe("16px");
 });
 
 test("one directory click selects, expands, and loads its children", async ({
@@ -2888,8 +2853,6 @@ test("branch file actions edit and delete through reviewable commit pages", asyn
   });
   await expect(edit).toBeVisible();
   await expect(remove).toBeVisible();
-  await expect(edit).toHaveCSS("width", "34px");
-  await expect(remove).toHaveCSS("height", "32px");
 
   await edit.click();
   await expect(

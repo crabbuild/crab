@@ -276,6 +276,7 @@ export function FileView({
                   role="group"
                   type="single"
                   variant="outline"
+                  size="sm"
                   spacing={0}
                   aria-label="File view"
                   value={view}
@@ -348,7 +349,7 @@ export function FileView({
                     <CodeIcon data-icon="inline-start" />
                   </Button>
                 )}
-                <Button asChild variant="outline">
+                <Button asChild variant="outline" size="sm">
                   <a href={endpoint(repo, "blob", { rev, path_hex: path })}>
                     Raw
                   </a>
