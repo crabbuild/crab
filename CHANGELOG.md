@@ -28,6 +28,8 @@ macOS automatic update installation requires a future signed release.
   standardized controls, themes, and terminal font rendering.
 - Unified normal, durable daemon, and SSH terminal controls, preserving sessions
   across reconnects and recovering stale daemon owners.
+- Joined terminal cleanup before daemon shutdown completes, including retired
+  sessions and Windows ConPTY output closure.
 - Fixed forced terminal shutdown on Windows so foreground console programs are
   reaped with their shell.
 - Quoted installed Git filter commands so paths with spaces, quotes,

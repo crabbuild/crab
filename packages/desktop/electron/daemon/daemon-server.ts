@@ -147,6 +147,7 @@ export class DaemonServer {
   private idleTimeoutMs: number;
   private startedAt: number = Date.now();
   private disposed = false;
+  private shutdownPromise?: Promise<void>;
   private shutdownPending = false;
   private metrics: DaemonMetrics;
   private hooks: DaemonServerHooks;
@@ -270,8 +271,12 @@ export class DaemonServer {
   /**
    * Graceful shutdown: close server, disconnect clients, dispose host.
    */
-  async shutdown(opts: { killSessions: boolean } = { killSessions: false }): Promise<void> {
-    if (this.disposed) return;
+  shutdown(opts: { killSessions: boolean } = { killSessions: false }): Promise<void> {
+    this.shutdownPromise ??= this.closeResources(opts.killSessions);
+    return this.shutdownPromise;
+  }
+
+  private async closeResources(killSessions: boolean): Promise<void> {
     this.disposed = true;
 
     this.clearIdleTimer();
@@ -288,8 +293,8 @@ export class DaemonServer {
     this.clients.clear();
 
     // Dispose host (kills all sessions if requested, otherwise just releases)
-    if (opts.killSessions) {
-      this.host.dispose();
+    if (killSessions) {
+      await this.host.dispose();
     }
 
     // Close server
