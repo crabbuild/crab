@@ -133,9 +133,31 @@ grant, and this consolidation does not establish full GitHub Enterprise parity.
   stay mounted until their discussion unmounts.
 - `src/features/repository/`: browsing, refs, tree, file rendering, commit details,
   and diffs. Preview engines, workers, and their tests stay under `files/`.
-  `files/symbols/` owns parsing and the Symbols workspace. Its shadcn Resizable
-  divider supports pointer and keyboard resizing; narrow layouts stack the pane
-  below source. Tablet layouts retain separate tree, divider, and source columns;
+  `files/symbols/` owns parsing and the Symbols panel. `files/workspace.tsx`
+  places that panel beside the source, aligned with the Code/Blame toolbar
+  below the shared navigation and commit row. Its header stays aligned while
+  scrolling. The shadcn Resizable divider supports pointer and
+  keyboard resizing; narrow layouts stack the pane below source. File navigation
+  and Code/Blame form one continuous sticky header with the explorer open or
+  closed; the controls follow the navigation row's measured height. Scrolled
+  navigation keeps the branch and path available and exposes **Top**.
+  The file workspace and its portaled menus share Primer's light/dark palette,
+  6px corners, thin borders, neutral hover fills, and blue keyboard focus.
+  Explorer and Symbols panes start at 320px, with 16px viewer gutters. Search
+  fields and tree/symbol rows use 32px sizing; file actions use 28px controls.
+  The toolbar and content body own separate borders so scrolled side edges
+  cannot bleed through the rounded toolbar corners. Joined actions keep a
+  stable outline on hover. Explorer search shares the Symbols input component.
+  The Symbols column retains its width when the viewer grows.
+  Its outlined panel fits short outlines and scrolls longer lists internally.
+  The viewer owns its right border; the transparent resize gutter avoids a
+  stray stroke beside the commit row. Its resize target ends with the content,
+  and its grip stays centered on the visible content edge below the toolbar,
+  including short files and outlines taller than the source.
+  Both sticky sidebars stay inside the visible file workspace when the footer
+  appears, keeping their headers and search controls reachable. Columns too
+  narrow for the split place Symbols below the viewer.
+  Tablet layouts retain separate tree, divider, and source columns;
   mobile layouts stack the tree above the file. Symbol and line-hash navigation
   scroll the document vertically without changing horizontal source scrolling.
   The symbol outline uses compact kind/name/line rows. Symbol details put

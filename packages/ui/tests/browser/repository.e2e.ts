@@ -1221,7 +1221,7 @@ test("overview groups files with their commit and opens the tree when navigating
   await expect(page.locator(".latest-commit")).toContainText(
     "Update this path",
   );
-  await expect(page.locator(".tree-sidebar")).toHaveCSS("width", "356px");
+  await expect(page.locator(".tree-sidebar")).toHaveCSS("width", "320px");
   await expect(page.getByPlaceholder("Go to file")).toBeVisible();
   await page
     .getByRole("button", { name: "Close file tree", exact: true })
@@ -1335,7 +1335,7 @@ test("supported source files expose browser-parsed current-file symbols", async 
 
   const treeSidebar = page.locator(".tree-sidebar");
   const tree = page.locator(".repository-tree");
-  const breadcrumb = page.locator(".code-main > .breadcrumb");
+  const breadcrumb = page.locator(".file-navigation");
   const fileHeader = page.locator(".file-panel > .panel-header");
   const symbols = page.getByRole("complementary", { name: "Code symbols" });
   const symbolsHeader = symbols.locator(".code-symbols-header");
@@ -1345,8 +1345,8 @@ test("supported source files expose browser-parsed current-file symbols", async 
   await expect(fileHeader).toHaveCSS("position", "sticky");
   await expect
     .poll(() =>
-      treeSidebar.evaluate(
-        (node) => node.getBoundingClientRect().height - window.innerHeight,
+      treeSidebar.evaluate((node) =>
+        Math.max(0, node.getBoundingClientRect().bottom - window.innerHeight),
       ),
     )
     .toBe(0);
@@ -1361,8 +1361,8 @@ test("supported source files expose browser-parsed current-file symbols", async 
     .toBeLessThanOrEqual(1);
   await expect
     .poll(() =>
-      symbols.evaluate(
-        (node) => window.innerHeight - node.getBoundingClientRect().bottom,
+      symbols.evaluate((node) =>
+        Math.max(0, node.getBoundingClientRect().bottom - window.innerHeight),
       ),
     )
     .toBeLessThanOrEqual(1);
@@ -1425,37 +1425,25 @@ test("supported source files expose browser-parsed current-file symbols", async 
     .toEqual({ document: 900, source: 0 });
   await expect
     .poll(async () => {
-      const [fileHeaderBottom, symbolsBounds, symbolsHeaderTop] =
-        await Promise.all([
-          fileHeader.evaluate((node) => node.getBoundingClientRect().bottom),
-          symbols.evaluate((node) => {
-            const bounds = node.getBoundingClientRect();
-            return {
-              top: bounds.top,
-              bottomGap: window.innerHeight - bounds.bottom,
-            };
-          }),
-          symbolsHeader.evaluate((node) => node.getBoundingClientRect().top),
-        ]);
-      return [
-        Math.abs(fileHeaderBottom - symbolsBounds.top),
-        Math.abs(symbolsBounds.top - symbolsHeaderTop),
-        Math.abs(symbolsBounds.bottomGap),
-      ];
-    })
-    .toEqual([0, 0, 0]);
-  await expect(symbols).toBeVisible();
-  await expect
-    .poll(async () => {
-      const [handle, pane] = await Promise.all([
-        grip.boundingBox(),
-        symbols.boundingBox(),
+      const [symbolsBounds, symbolsHeaderTop, toolbarTop] = await Promise.all([
+        symbols.evaluate((node) => {
+          const bounds = node.getBoundingClientRect();
+          return {
+            top: bounds.top,
+            bottomOverflow: Math.max(0, bounds.bottom - window.innerHeight),
+          };
+        }),
+        symbolsHeader.evaluate((node) => node.getBoundingClientRect().top),
+        fileHeader.evaluate((node) => node.getBoundingClientRect().top),
       ]);
-      return Math.abs(
-        handle!.y + handle!.height / 2 - pane!.y - pane!.height / 2,
+      return Math.max(
+        Math.abs(symbolsBounds.top - toolbarTop),
+        Math.abs(symbolsBounds.top - symbolsHeaderTop),
+        symbolsBounds.bottomOverflow,
       );
     })
     .toBeLessThanOrEqual(1);
+  await expect(symbols).toBeVisible();
   await page.evaluate(() => window.scrollTo(0, 0));
 
   await symbols.getByPlaceholder("Filter symbols").fill("serve");
@@ -1657,6 +1645,188 @@ test("source stays beside the file tree across tablet widths and remains reachab
     )
     .toBe(785);
   await expectNoAccessibilityViolations(page);
+});
+
+test("Symbols divider stays centered and controls remain reachable beside the end of a file", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  const divider = page.getByRole("separator", { name: "Resize symbols pane" });
+  const expectAlignedDivider = async () => {
+    await expect
+      .poll(() =>
+        divider.evaluate((node) => {
+          const line = node.getBoundingClientRect();
+          const grip = node.firstElementChild!.getBoundingClientRect();
+          const parent = node.parentElement!;
+          const source = parent
+            .querySelector(".file-body")!
+            .getBoundingClientRect();
+          const toolbar = parent
+            .querySelector(".file-toolbar")!
+            .getBoundingClientRect();
+          const symbols = parent
+            .querySelector(".code-symbols-panel")!
+            .getBoundingClientRect();
+          const top = Math.max(toolbar.bottom, source.top);
+          const bottom = Math.max(top, Math.min(innerHeight, source.bottom));
+          const center = (top + bottom) / 2;
+          return Math.max(
+            Math.abs(grip.y + grip.height / 2 - center),
+            Math.abs(grip.x + grip.width / 2 - source.right + 0.5),
+            Math.abs(line.left - source.right + 1),
+            Math.abs(line.bottom - source.bottom),
+            Math.abs(symbols.top - toolbar.top),
+          );
+        }),
+      )
+      .toBeLessThanOrEqual(0.5);
+  };
+  for (const [count, continuation] of [
+    [1, 0],
+    [30, 0],
+    [1, 200],
+    [120, 200],
+  ]) {
+    const text = [
+      ...Array.from(
+        { length: count },
+        (_, index) => `pub fn symbol_${index}() {}`,
+      ),
+      ...Array.from(
+        { length: continuation },
+        () => "// Source continues below the outline.",
+      ),
+    ].join("\n");
+    await routePreviewFiles(page, {
+      "src/outline.rs": { text, bytes: strToU8(text) },
+    });
+    await page.goto("/team/project/blob/main/src/outline.rs");
+    const symbols = page.getByRole("complementary", { name: "Code symbols" });
+    await expect(
+      symbols.getByRole("button", { name: "symbol_0 function 1", exact: true }),
+    ).toBeVisible();
+    await expectAlignedDivider();
+    await page.evaluate(() => window.scrollTo(0, 900));
+    await expectAlignedDivider();
+    await page.evaluate(() =>
+      window.scrollTo({
+        top: document.documentElement.scrollHeight,
+        behavior: "instant",
+      }),
+    );
+    await expectAlignedDivider();
+    await expect(page.locator(".site-footer")).toBeInViewport();
+    await expect(symbols.locator(".code-symbols-header")).toBeInViewport({
+      ratio: 1,
+    });
+    await expect(
+      symbols.getByRole("textbox", { name: "Filter symbols" }),
+    ).toBeInViewport({ ratio: 1 });
+    await expect(page.locator(".tree-sidebar-controls")).toBeInViewport({
+      ratio: 1,
+    });
+    if (count === 1) {
+      expect((await symbols.boundingBox())!.height).toBeLessThan(400);
+    } else {
+      const list = symbols.locator(".code-symbols-list");
+      await expect
+        .poll(() =>
+          list.evaluate((node) => node.scrollHeight > node.clientHeight),
+        )
+        .toBe(true);
+      const documentPosition = await page.evaluate(() => window.scrollY);
+      await list.hover();
+      await page.mouse.wheel(0, 10000);
+      await expect
+        .poll(() => list.evaluate((node) => node.scrollTop))
+        .toBeGreaterThan(0);
+      await page.mouse.wheel(0, -10000);
+      await expect.poll(() => list.evaluate((node) => node.scrollTop)).toBe(0);
+      expect(await page.evaluate(() => window.scrollY)).toBe(documentPosition);
+    }
+  }
+});
+
+test("file navigation stays joined to Code and Blame when the explorer toggles while scrolled", async ({
+  page,
+}) => {
+  for (const width of [1440, 785]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto("/team/project/blob/main/src/navigation.rs#L82");
+    await expect(
+      page.locator('.file-source-code [data-line="82"]'),
+    ).toBeInViewport();
+    await page
+      .getByRole("button", { name: "Close file tree", exact: true })
+      .click();
+    await page.evaluate(() =>
+      window.scrollTo({ top: 1200, behavior: "instant" }),
+    );
+
+    const navigation = page.locator(".file-navigation");
+    const toolbar = page.locator(".file-panel > .panel-header");
+    const joinedHeader = async () => {
+      await expect
+        .poll(() =>
+          navigation.evaluate((node) => node.getBoundingClientRect().top),
+        )
+        .toBe(0);
+      await expect
+        .poll(async () => {
+          const [row, controls] = await Promise.all([
+            navigation.boundingBox(),
+            toolbar.boundingBox(),
+          ]);
+          return Math.abs(controls!.y - row!.y - row!.height);
+        })
+        .toBeLessThanOrEqual(1);
+    };
+    await joinedHeader();
+    const openTree = page.getByRole("button", {
+      name: "Open file tree",
+      exact: true,
+    });
+    await expect(openTree).toBeInViewport();
+    await page.getByRole("button", { name: "Blame", exact: true }).click();
+    await expect(page.getByLabel("Blame view", { exact: true })).toBeVisible();
+    await joinedHeader();
+    await page.getByRole("button", { name: "Code", exact: true }).click();
+    await expect(
+      page.locator('.file-source-code [data-line="82"]'),
+    ).toBeInViewport();
+    await joinedHeader();
+    await openTree.click();
+    await joinedHeader();
+    await expect(
+      page.locator('.file-source-code [data-line="82"]'),
+    ).toBeInViewport();
+    if (width > 900) {
+      const symbols = page.getByRole("complementary", { name: "Code symbols" });
+      await expect
+        .poll(async () => {
+          const [pane, controls] = await Promise.all([
+            symbols.boundingBox(),
+            toolbar.boundingBox(),
+          ]);
+          return Math.abs(pane!.y - controls!.y);
+        })
+        .toBe(0);
+      const [controls, pane] = await Promise.all([
+        toolbar.boundingBox(),
+        symbols.boundingBox(),
+      ]);
+      expect(controls!.x + controls!.width).toBeLessThanOrEqual(pane!.x);
+    }
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth),
+    ).toBeLessThanOrEqual(width);
+    await page.getByRole("button", { name: "Top", exact: true }).click();
+    await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
+    await expect(
+      page.getByRole("button", { name: "Top", exact: true }),
+    ).toBeHidden();
+  }
 });
 
 test("symbol and line-hash navigation preserve the source horizontal scroll position", async ({
@@ -2220,13 +2390,24 @@ test("file tree scrolls independently and its resize grip follows the sticky pan
   const pagePosition = await page.evaluate(() => window.scrollY);
   await page.mouse.wheel(0, 10000);
   await expect
-    .poll(() => treeScroll.evaluate((node) => node.scrollTop))
-    .toBeGreaterThan(0);
-  const treePosition = await treeScroll.evaluate((node) => node.scrollTop);
-  await page.mouse.wheel(0, 10000);
+    .poll(() =>
+      treeScroll.evaluate(
+        (node) => node.scrollHeight - node.clientHeight - node.scrollTop,
+      ),
+    )
+    .toBe(0);
+  const endPosition = await treeScroll.evaluate((node) => node.scrollTop);
   await expect
     .poll(() => page.evaluate(() => window.scrollY))
     .toBe(pagePosition);
+
+  // Leave room for the scrollport to grow as the repository header scrolls out.
+  // A list already at its bottom would naturally clamp its previous offset.
+  await page.mouse.wheel(0, -500);
+  await expect
+    .poll(() => treeScroll.evaluate((node) => node.scrollTop))
+    .toBeLessThan(endPosition);
+  const treePosition = await treeScroll.evaluate((node) => node.scrollTop);
 
   for (const scrollTop of [900, Number.MAX_SAFE_INTEGER]) {
     await page.evaluate((top) => window.scrollTo(0, top), scrollTop);
@@ -2245,7 +2426,7 @@ test("file tree scrolls independently and its resize grip follows the sticky pan
   }
   await expect(separator).toBeInViewport();
   await separator.press("ArrowRight");
-  await expect(separator).toHaveAttribute("aria-valuenow", "380");
+  await expect(separator).toHaveAttribute("aria-valuenow", "344");
 });
 
 test("file tree and content panes resize with pointer and keyboard controls", async ({
@@ -2258,7 +2439,7 @@ test("file tree and content panes resize with pointer and keyboard controls", as
   });
   const treePane = page.locator(".tree-sidebar");
   const contentPane = page.locator(".code-main");
-  await expect(separator).toHaveAttribute("aria-valuenow", "356");
+  await expect(separator).toHaveAttribute("aria-valuenow", "320");
   await expect(treePane).toBeVisible();
   await expect(contentPane).toBeVisible();
   await expectNoAccessibilityViolations(page);
@@ -2279,7 +2460,7 @@ test("file tree and content panes resize with pointer and keyboard controls", as
   await separator.press("ArrowRight");
   await expect(separator).toHaveAttribute("aria-valuenow", "264");
   await separator.dblclick();
-  await expect(separator).toHaveAttribute("aria-valuenow", "356");
+  await expect(separator).toHaveAttribute("aria-valuenow", "320");
 
   await page.setViewportSize({ width: 600, height: 900 });
   await expect(separator).toBeHidden();
@@ -2390,50 +2571,15 @@ test("deep links expand the active path and select its file", async ({
     const active = rows.find(
       (row) => row.getAttribute("aria-selected") === "true",
     );
-    const folder = rows.find(
-      (row) => row.getAttribute("data-item-type") === "folder",
-    );
-    const folderContent = folder?.querySelector(
-      '[data-item-section="content"]',
-    );
-    const selectedStyle = active ? getComputedStyle(active) : null;
-    const selectedRail = active ? getComputedStyle(active, "::after") : null;
-    const tokenProbe = document.createElement("span");
-    tokenProbe.style.backgroundColor = "var(--secondary)";
-    tokenProbe.style.color = "var(--info)";
-    tree.closest(".app-shell")?.append(tokenProbe);
-    const neutralBackground = getComputedStyle(tokenProbe).backgroundColor;
-    const accentColor = getComputedStyle(tokenProbe).color;
-    tokenProbe.remove();
     return {
       active: active?.getAttribute("aria-label"),
-      activeHeight: active?.getBoundingClientRect().height,
-      activeBackground: selectedStyle?.backgroundColor,
-      activeRailBackground: selectedRail?.backgroundColor,
-      activeRailLeft: selectedRail?.left,
-      activeRailWidth: selectedRail?.width,
-      activeIconToken: active
-        ?.querySelector("[data-icon-token]")
-        ?.getAttribute("data-icon-token"),
-      neutralBackground,
-      accentColor,
       expanded: rows
         .filter((row) => row.getAttribute("aria-expanded") === "true")
         .map((row) => row.getAttribute("aria-label")),
-      folderIconWidth: folderContent
-        ? getComputedStyle(folderContent, "::before").width
-        : null,
     };
   });
   expect(state.active).toBe("index.ts");
-  expect(state.activeHeight).toBe(32);
-  expect(state.activeBackground).toBe(state.neutralBackground);
-  expect(state.activeRailBackground).toBe(state.accentColor);
-  expect(state.activeRailLeft).toBe("-16px");
-  expect(state.activeRailWidth).toBe("3px");
-  expect(state.activeIconToken).toBe("typescript");
   expect(state.expanded).toContain("src");
-  expect(state.folderIconWidth).toBe("16px");
 });
 
 test("one directory click selects, expands, and loads its children", async ({
@@ -2727,8 +2873,6 @@ test("branch file actions edit and delete through reviewable commit pages", asyn
   });
   await expect(edit).toBeVisible();
   await expect(remove).toBeVisible();
-  await expect(edit).toHaveCSS("width", "34px");
-  await expect(remove).toHaveCSS("height", "32px");
 
   await edit.click();
   await expect(

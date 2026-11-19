@@ -192,7 +192,7 @@ function AddFileMenu({
         )}
       </DropdownMenuTrigger>
       <DropdownMenuContent
-        className="w-44"
+        className="repository-file-menu w-44"
         onCloseAutoFocus={(event) => {
           const action = selectedAction.current;
           selectedAction.current = undefined;

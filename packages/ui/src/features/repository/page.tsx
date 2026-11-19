@@ -1,4 +1,5 @@
 import { PaneResizer } from "@/components/layout/pane-resizer";
+import { useWorkspaceHeight } from "@/components/layout/use-workspace-height";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
@@ -40,12 +41,11 @@ import {
   lazy,
   useEffect,
   useLayoutEffect,
-  useRef,
   useState,
   type CSSProperties,
 } from "react";
 import { CreateFile, DeleteFile, EditFile, UploadFiles } from "./files/editor";
-import { FileBreadcrumb, FileNavigation } from "./files/navigation";
+import { FileNavigation } from "./files/navigation";
 import { LatestCommit } from "./latest-commit";
 import { RepositoryRefControls, RepositoryToolbar } from "./toolbar";
 
@@ -93,7 +93,7 @@ const Settings = lazy(() =>
     default: module.Settings,
   })),
 );
-const DEFAULT_TREE_PANE_WIDTH = 356;
+const DEFAULT_TREE_PANE_WIDTH = 320;
 const MIN_TREE_PANE_WIDTH = 240;
 const MAX_TREE_PANE_WIDTH = 640;
 const TREE_PANE_KEYBOARD_STEP = 24;
@@ -171,32 +171,35 @@ export function RepositoryPage({
       : revision;
   const path = resolvedRoute?.path ?? "";
   const kind = resolvedRoute?.kind ?? "Tree";
+  const creatingFile = view === "create";
   const [showTree, setShowTree] = useState(
-    view === "create"
-      ? matchMedia("(min-width: 641px)").matches
-      : Boolean(path),
+    creatingFile ? matchMedia("(min-width: 641px)").matches : Boolean(path),
   );
   const [searchFocusRequest, setSearchFocusRequest] = useState(0);
   const [treePaneWidth, setTreePaneWidth] = useState(DEFAULT_TREE_PANE_WIDTH);
   const [treePaneMax, setTreePaneMax] = useState(MAX_TREE_PANE_WIDTH);
-  const fileLayout = useRef<HTMLDivElement>(null);
+  const [fileLayout, setFileLayout] = useState<HTMLDivElement | null>(null);
+  // Code and Blame share one file workspace. Changing presentation must not
+  // reopen an explorer the reader just closed.
   useEffect(
     () =>
       setShowTree(
-        view === "create"
-          ? matchMedia("(min-width: 641px)").matches
-          : Boolean(path),
+        creatingFile ? matchMedia("(min-width: 641px)").matches : Boolean(path),
       ),
-    [path, view],
+    [path, creatingFile],
   );
   useLayoutEffect(() => {
-    const layout = fileLayout.current;
+    const layout = fileLayout;
     if (!layout || !showTree) return;
     const updateLimit = () => {
       if (matchMedia("(max-width: 640px)").matches) return;
+      // Suspense can keep this workspace hidden while file tools load.
+      // Its zero width must not overwrite the reader's explorer size.
+      const width = layout.clientWidth;
+      if (width === 0) return;
       const max = Math.max(
         MIN_TREE_PANE_WIDTH,
-        Math.min(MAX_TREE_PANE_WIDTH, Math.floor(layout.clientWidth / 2)),
+        Math.min(MAX_TREE_PANE_WIDTH, Math.floor(width / 2)),
       );
       setTreePaneMax(max);
       setTreePaneWidth((width) => clampTreePaneWidth(width, max));
@@ -205,10 +208,11 @@ export function RepositoryPage({
     const observer = new ResizeObserver(updateLimit);
     observer.observe(layout);
     return () => observer.disconnect();
-  }, [showTree]);
+  }, [fileLayout, showTree]);
   const overview = view === "code" && !path && !showTree;
   const fileWorkspace =
     (view === "code" || view === "blame" || view === "create") && !overview;
+  useWorkspaceHeight(fileWorkspace ? fileLayout : null);
   const issuesView =
     view === "issues" || view === "labels" || view === "milestones";
   const discussionNavigation =
@@ -333,6 +337,30 @@ export function RepositoryPage({
     window.addEventListener("keydown", focusSearch);
     return () => window.removeEventListener("keydown", focusSearch);
   });
+  const fileNavigation = visibleRefs && rev && !overview && (
+    <FileNavigation
+      repo={repo}
+      refs={visibleRefs}
+      revision={selected?.name ?? revision ?? rev}
+      archiveRevision={rev}
+      rev={navigationRevision ?? rev}
+      path={path}
+      kind={kind}
+      view={view}
+      treeOpen={showTree}
+      onOpenTree={() => setShowTree(true)}
+      onSearch={focusFileSearch}
+    />
+  );
+  const latestCommit = rev && (
+    <LatestCommit
+      revision={navigationRevision ?? rev}
+      repo={repo}
+      rev={rev}
+      path={path}
+      kind={kind}
+    />
+  );
   return (
     <>
       <div className="repo-header">
@@ -680,7 +708,7 @@ export function RepositoryPage({
                           />
                         )}
                         <div
-                          ref={fileLayout}
+                          ref={setFileLayout}
                           className={
                             overview
                               ? "code-layout overview-layout"
@@ -801,36 +829,8 @@ export function RepositoryPage({
                               )
                             ) : (
                               <>
-                                {!showTree && !overview && (
-                                  <FileNavigation
-                                    repo={repo}
-                                    refs={data}
-                                    revision={selected?.name ?? revision ?? rev}
-                                    archiveRevision={rev}
-                                    rev={navigationRevision ?? rev}
-                                    path={path}
-                                    kind={kind}
-                                    view={view}
-                                    onOpenTree={() => setShowTree(true)}
-                                    onSearch={focusFileSearch}
-                                  />
-                                )}
-                                {!overview && showTree && (
-                                  <FileBreadcrumb
-                                    repo={repo}
-                                    rev={navigationRevision ?? rev}
-                                    path={path}
-                                  />
-                                )}
-                                {kind !== "Tree" && (
-                                  <LatestCommit
-                                    revision={navigationRevision ?? rev}
-                                    repo={repo}
-                                    rev={rev}
-                                    path={path}
-                                    kind={kind}
-                                  />
-                                )}
+                                {kind !== "Blob" && fileNavigation}
+                                {kind === "Submodule" && latestCommit}
                                 <Suspense
                                   fallback={
                                     <div className="notice" role="status">
@@ -848,15 +848,7 @@ export function RepositoryPage({
                                       theme={theme}
                                       codeThemes={codeThemes}
                                       onEntry={selectEntry}
-                                      header={
-                                        <LatestCommit
-                                          revision={navigationRevision ?? rev}
-                                          repo={repo}
-                                          rev={rev}
-                                          path={path}
-                                          kind="Tree"
-                                        />
-                                      }
+                                      header={latestCommit}
                                     />
                                   ) : kind === "Submodule" ? (
                                     <div className="notice">
@@ -872,6 +864,8 @@ export function RepositoryPage({
                                       blameView={view === "blame"}
                                       path={path}
                                       name={displayHex(path)}
+                                      navigation={fileNavigation}
+                                      header={latestCommit}
                                       theme={theme}
                                       codeThemes={codeThemes}
                                       write={

@@ -3,6 +3,7 @@ import { repoHref, revisionAddress } from "@/lib/repository-route";
 import { Fragment, useLayoutEffect, useRef, useState } from "react";
 
 import {
+  ArrowUpIcon,
   CheckIcon,
   CopyIcon,
   KebabHorizontalIcon,
@@ -115,6 +116,7 @@ export function FileNavigation({
   path,
   kind,
   view,
+  treeOpen,
   onOpenTree,
   onSearch,
 }: {
@@ -126,52 +128,107 @@ export function FileNavigation({
   path: string;
   kind: string;
   view: string;
+  treeOpen: boolean;
   onOpenTree: () => void;
   onSearch: () => void;
 }) {
+  const navigation = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const node = navigation.current;
+    const viewer = node?.closest<HTMLElement>(".file-viewer");
+    if (!node || !viewer) return;
+    // Both explorer states own the same sticky row. Measure it so font and
+    // viewport changes cannot leave a gap above the file controls.
+    const measure = () =>
+      viewer.style.setProperty(
+        "--file-navigation-height",
+        `${node.offsetHeight}px`,
+      );
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    const updateStuck = () =>
+      node.toggleAttribute(
+        "data-stuck",
+        node.getBoundingClientRect().top <= 0 && window.scrollY > 0,
+      );
+    updateStuck();
+    window.addEventListener("scroll", updateStuck, { passive: true });
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("scroll", updateStuck);
+    };
+  }, []);
+
   return (
-    <div className="file-navigation">
-      <Button
-        onClick={onOpenTree}
-        aria-label="Open file tree"
-        aria-expanded={false}
-        size="icon"
-        variant="outline"
-      >
-        <SidebarExpandIcon data-icon="inline-start" />
-      </Button>
-      <RevisionPicker
-        refs={refs}
-        revision={revision}
-        onSelect={(name) =>
-          navigate(
-            repoHref(repo, {
-              rev: revisionAddress(refs, name),
-              view,
-              path,
-              kind,
-            }),
-          )
-        }
-      />
+    <div
+      ref={navigation}
+      className={`file-navigation${treeOpen ? " tree-open" : ""}`}
+    >
+      {!treeOpen && (
+        <>
+          <Button
+            onClick={onOpenTree}
+            aria-label="Open file tree"
+            aria-expanded={false}
+            size="icon"
+            variant="outline"
+          >
+            <SidebarExpandIcon data-icon="inline-start" />
+          </Button>
+          <RevisionPicker
+            refs={refs}
+            revision={revision}
+            onSelect={(name) =>
+              navigate(
+                repoHref(repo, {
+                  rev: revisionAddress(refs, name),
+                  view,
+                  path,
+                  kind,
+                }),
+              )
+            }
+          />
+        </>
+      )}
       <FileBreadcrumb repo={repo} rev={rev} path={path} />
-      <button
-        className="file-search-opener"
-        type="button"
-        aria-label="Go to file"
-        onClick={onSearch}
+      {!treeOpen && (
+        <div className="file-navigation-actions">
+          <button
+            className="file-search-opener"
+            type="button"
+            aria-label="Go to file"
+            onClick={onSearch}
+          >
+            <SearchIcon />
+            <span>Go to file</span>
+            <kbd>T</kbd>
+          </button>
+          <CloneMenu
+            repo={repo}
+            revision={archiveRevision}
+            compact
+            icon={KebabHorizontalIcon}
+            label="Repository actions"
+          />
+        </div>
+      )}
+      <Button
+        className="file-scroll-top"
+        variant="ghost"
+        size="sm"
+        onClick={() =>
+          window.scrollTo({
+            top: 0,
+            behavior: matchMedia("(prefers-reduced-motion: reduce)").matches
+              ? "instant"
+              : "smooth",
+          })
+        }
       >
-        <SearchIcon />
-        <span>Go to file</span>
-        <kbd>T</kbd>
-      </button>
-      <CloneMenu
-        repo={repo}
-        revision={archiveRevision}
-        compact
-        icon={KebabHorizontalIcon}
-        label="Repository actions"
-      />
+        <ArrowUpIcon data-icon="inline-start" /> Top
+      </Button>
     </div>
   );
 }

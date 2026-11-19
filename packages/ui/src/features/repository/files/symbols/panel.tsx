@@ -6,16 +6,9 @@ import {
   InputGroupAddon,
   InputGroupInput,
 } from "@/components/ui/input-group";
-import {
-  useDeferredValue,
-  useEffect,
-  useId,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useDeferredValue, useId, useMemo, useState } from "react";
 
-import { ArrowLeftIcon, SearchIcon, XIcon } from "@primer/octicons-react";
+import { ArrowLeftIcon, FilterIcon, XIcon } from "@primer/octicons-react";
 import type { DiffsThemeNames, FileContents } from "@pierre/diffs";
 import type { CodeSymbol, CodeSymbolsState } from ".";
 import { CodeSymbolDetails } from "./detail";
@@ -60,7 +53,6 @@ export function CodeSymbolsPanel({
   onClearActive,
   onClose,
 }: Props) {
-  const panel = useRef<HTMLElement>(null);
   const searchId = useId();
   const [filter, setFilter] = useState("");
   const deferredFilter = useDeferredValue(filter.trim().toLowerCase());
@@ -92,49 +84,8 @@ export function CodeSymbolsPanel({
     return [...grouped];
   }, [definitions]);
 
-  useEffect(() => {
-    let frame = 0;
-    const fitToViewport = () => {
-      cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(() => {
-        const node = panel.current;
-        if (!node) return;
-        const workspace = node.closest<HTMLElement>(".file-source-workspace");
-        if (!workspace) return;
-        const fileHeader = node
-          .closest(".file-panel")
-          ?.querySelector<HTMLElement>(":scope > .panel-header");
-        // The file navigation stays above this pane while the document scrolls.
-        // Reserve its measured edge so the Symbols header remains reachable.
-        const stickyTop = Math.max(
-          0,
-          fileHeader?.getBoundingClientRect().bottom ?? 0,
-        );
-        workspace.style.setProperty(
-          "--code-symbols-sticky-top",
-          `${stickyTop}px`,
-        );
-        // The pane grows as it becomes sticky; a fixed viewport fraction either
-        // truncates tall screens or overflows below the fold before it sticks.
-        const top = Math.max(0, node.getBoundingClientRect().top);
-        workspace.style.setProperty(
-          "--code-symbols-available-height",
-          `${window.innerHeight - top}px`,
-        );
-      });
-    };
-    fitToViewport();
-    window.addEventListener("resize", fitToViewport);
-    window.addEventListener("scroll", fitToViewport, { passive: true });
-    return () => {
-      cancelAnimationFrame(frame);
-      window.removeEventListener("resize", fitToViewport);
-      window.removeEventListener("scroll", fitToViewport);
-    };
-  }, []);
-
   return (
-    <aside ref={panel} className="code-symbols-panel" aria-label="Code symbols">
+    <aside className="code-symbols-panel" aria-label="Code symbols">
       <header className="code-symbols-header">
         {active === null ? (
           <div>
@@ -169,7 +120,7 @@ export function CodeSymbolsPanel({
             </FieldLabel>
             <InputGroup>
               <InputGroupAddon>
-                <SearchIcon aria-hidden="true" />
+                <FilterIcon aria-hidden="true" />
               </InputGroupAddon>
               <InputGroupInput
                 id={searchId}

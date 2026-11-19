@@ -14,7 +14,7 @@ import {
   type CodeSymbol,
 } from "@/features/repository/files/symbols";
 import { CodeSymbolsPanel } from "@/features/repository/files/symbols/panel";
-import { SourceWorkspace } from "./symbols/workspace";
+import { FileWorkspace } from "./workspace";
 import {
   endpoint,
   navigate,
@@ -44,6 +44,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type ReactNode,
 } from "react";
 
 const FilePreview = lazy(() =>
@@ -57,6 +58,8 @@ type Props = {
   blameView?: boolean;
   path: string;
   name: string;
+  navigation: ReactNode;
+  header: ReactNode;
   theme: "light" | "dark";
   codeThemes: CodeThemes;
   write?: { branch: string };
@@ -80,6 +83,8 @@ export function FileView({
   blameView = false,
   path,
   name,
+  navigation,
+  header,
   theme,
   codeThemes,
   write,
@@ -98,6 +103,7 @@ export function FileView({
   );
   const [copied, setCopied] = useState(false);
   const [symbolsOpen, setSymbolsOpen] = useState(true);
+  const [body, setBody] = useState<HTMLDivElement | null>(null);
   const [activeSymbol, setActiveSymbol] = useState<CodeSymbol | null>(null);
   const sourceHost = useRef<HTMLElement | null>(null);
   const symbolsRef = useRef<CodeSymbol[]>([]);
@@ -245,321 +251,330 @@ export function FileView({
     (state.data?.text === null
       ? { kind: "generic", label: "File inspector" }
       : null);
-  return (
+  const symbols =
+    view === "code" &&
+    symbolsOpen &&
+    symbolLanguage &&
+    state.data?.text != null ? (
+      <CodeSymbolsPanel
+        state={symbolState}
+        active={activeSymbol}
+        file={file}
+        theme={codeThemes[theme]}
+        onActivate={navigateToSymbol}
+        onClearActive={() => setActiveSymbol(null)}
+        onClose={() => setSymbolsOpen(false)}
+      />
+    ) : null;
+  const contents = (
     <Result state={state}>
       {(content) => (
         <section className="panel file-panel" aria-label={`File ${name}`}>
           <div className="panel-header">
-            <div className="file-view-controls">
-              <ToggleGroup
-                role="group"
-                type="single"
-                variant="outline"
-                spacing={0}
-                aria-label="File view"
-                value={view}
-                onValueChange={(next) => {
-                  if (next !== "code" && next !== "preview" && next !== "blame")
-                    return;
-                  setView(next === "blame" ? "code" : next);
-                  if (blameView || next === "blame")
-                    navigate(
-                      repoHref(repo, {
-                        rev: revision,
-                        path,
-                        kind: "Blob",
-                        view: next === "blame" ? "blame" : "code",
-                      }) + window.location.hash,
-                    );
-                }}
-              >
-                <ToggleGroupItem
-                  value="code"
-                  role="button"
-                  aria-pressed={view === "code"}
-                  aria-checked={undefined}
+            <div className="file-toolbar">
+              <div className="file-view-controls">
+                <ToggleGroup
+                  role="group"
+                  type="single"
+                  variant="outline"
+                  size="sm"
+                  spacing={0}
+                  aria-label="File view"
+                  value={view}
+                  onValueChange={(next) => {
+                    if (
+                      next !== "code" &&
+                      next !== "preview" &&
+                      next !== "blame"
+                    )
+                      return;
+                    setView(next === "blame" ? "code" : next);
+                    if (blameView || next === "blame")
+                      navigate(
+                        repoHref(repo, {
+                          rev: revision,
+                          path,
+                          kind: "Blob",
+                          view: next === "blame" ? "blame" : "code",
+                        }) + window.location.hash,
+                      );
+                  }}
                 >
-                  {content.text === null ? "Info" : "Code"}
-                </ToggleGroupItem>
-                {activePreview && (
                   <ToggleGroupItem
-                    value="preview"
+                    value="code"
                     role="button"
-                    aria-pressed={view === "preview"}
+                    aria-pressed={view === "code"}
                     aria-checked={undefined}
                   >
-                    Preview
+                    {content.text === null ? "Info" : "Code"}
                   </ToggleGroupItem>
-                )}
-                {content.text !== null &&
-                  content.classification === "OrdinaryGit" && (
+                  {activePreview && (
                     <ToggleGroupItem
-                      value="blame"
+                      value="preview"
                       role="button"
-                      aria-pressed={view === "blame"}
+                      aria-pressed={view === "preview"}
                       aria-checked={undefined}
                     >
-                      Blame
+                      Preview
                     </ToggleGroupItem>
                   )}
-              </ToggleGroup>
-              <span className="file-metadata muted">
-                {content.text === null
-                  ? content.text_truncated
-                    ? (activePreview?.label ?? "Large text file")
-                    : (activePreview?.label ?? "Binary file")
-                  : `${content.text === "" ? 0 : content.text.split("\n").length - Number(content.text.endsWith("\n"))} lines`}{" "}
-                <span aria-hidden="true">·</span> {formatSize(content.size)}
-              </span>
-            </div>
-            <div className="file-actions">
-              {view === "code" && symbolLanguage && !symbolsOpen && (
-                <Button
-                  aria-label="Open code symbols"
-                  size="icon-sm"
-                  onClick={() => setSymbolsOpen(true)}
-                  variant="outline"
-                >
-                  <CodeIcon data-icon="inline-start" />
-                </Button>
-              )}
-              <Button asChild variant="outline">
-                <a href={endpoint(repo, "blob", { rev, path_hex: path })}>
-                  Raw
-                </a>
-              </Button>
-              {content.text !== null && (
-                <Button
-                  aria-label={
-                    copied ? "File contents copied" : "Copy file contents"
-                  }
-                  size="icon-sm"
-                  onClick={async () => {
-                    try {
-                      await navigator.clipboard.writeText(content.text ?? "");
-                      setCopied(true);
-                    } catch {
-                      setCopied(false);
-                    }
-                  }}
-                  variant="outline"
-                >
-                  <CopyIcon data-icon="inline-start" />
-                </Button>
-              )}
-              <Button asChild variant="outline" size="icon-sm">
-                <a
-                  href={endpoint(repo, "blob", { rev, path_hex: path })}
-                  download={name.split("/").pop()}
-                  aria-label="Download raw file"
-                  title="Download raw file"
-                >
-                  <DownloadIcon data-icon="inline-start" />
-                </a>
-              </Button>
-              {write &&
-                content.text !== null &&
-                content.classification === "OrdinaryGit" && (
+                  {content.text !== null &&
+                    content.classification === "OrdinaryGit" && (
+                      <ToggleGroupItem
+                        value="blame"
+                        role="button"
+                        aria-pressed={view === "blame"}
+                        aria-checked={undefined}
+                      >
+                        Blame
+                      </ToggleGroupItem>
+                    )}
+                </ToggleGroup>
+                <span className="file-metadata muted">
+                  {content.text === null
+                    ? content.text_truncated
+                      ? (activePreview?.label ?? "Large text file")
+                      : (activePreview?.label ?? "Binary file")
+                    : `${content.text === "" ? 0 : content.text.split("\n").length - Number(content.text.endsWith("\n"))} lines`}{" "}
+                  <span aria-hidden="true">·</span> {formatSize(content.size)}
+                </span>
+              </div>
+              <div className="file-actions">
+                {view === "code" && symbolLanguage && !symbolsOpen && (
                   <Button
-                    aria-label="Edit this file"
+                    aria-label="Open code symbols"
                     size="icon-sm"
+                    onClick={() => setSymbolsOpen(true)}
+                    variant="outline"
+                  >
+                    <CodeIcon data-icon="inline-start" />
+                  </Button>
+                )}
+                <Button asChild variant="outline" size="sm">
+                  <a href={endpoint(repo, "blob", { rev, path_hex: path })}>
+                    Raw
+                  </a>
+                </Button>
+                {content.text !== null && (
+                  <Button
+                    aria-label={
+                      copied ? "File contents copied" : "Copy file contents"
+                    }
+                    size="icon-sm"
+                    onClick={async () => {
+                      try {
+                        await navigator.clipboard.writeText(content.text ?? "");
+                        setCopied(true);
+                      } catch {
+                        setCopied(false);
+                      }
+                    }}
+                    variant="outline"
+                  >
+                    <CopyIcon data-icon="inline-start" />
+                  </Button>
+                )}
+                <Button asChild variant="outline" size="icon-sm">
+                  <a
+                    href={endpoint(repo, "blob", { rev, path_hex: path })}
+                    download={name.split("/").pop()}
+                    aria-label="Download raw file"
+                    title="Download raw file"
+                  >
+                    <DownloadIcon data-icon="inline-start" />
+                  </a>
+                </Button>
+                {write &&
+                  content.text !== null &&
+                  content.classification === "OrdinaryGit" && (
+                    <Button
+                      aria-label="Edit this file"
+                      size="icon-sm"
+                      onClick={() =>
+                        navigate(
+                          repoHref(repo, {
+                            rev: write.branch,
+                            view: "edit",
+                            path,
+                            kind: "Blob",
+                          }),
+                        )
+                      }
+                      variant="outline"
+                    >
+                      <PencilIcon data-icon="inline-start" />
+                    </Button>
+                  )}
+                {write && (
+                  <Button
+                    aria-label="Delete this file"
+                    size="icon-sm"
+                    variant="outline"
                     onClick={() =>
                       navigate(
                         repoHref(repo, {
                           rev: write.branch,
-                          view: "edit",
+                          view: "delete",
                           path,
                           kind: "Blob",
                         }),
                       )
                     }
-                    variant="outline"
                   >
-                    <PencilIcon data-icon="inline-start" />
+                    <TrashIcon data-icon="inline-start" />
                   </Button>
                 )}
-              {write && (
-                <Button
-                  aria-label="Delete this file"
-                  size="icon-sm"
-                  variant="outline"
-                  onClick={() =>
-                    navigate(
-                      repoHref(repo, {
-                        rev: write.branch,
-                        view: "delete",
-                        path,
-                        kind: "Blob",
-                      }),
-                    )
-                  }
-                >
-                  <TrashIcon data-icon="inline-start" />
-                </Button>
-              )}
+              </div>
             </div>
           </div>
-          {content.classification !== "OrdinaryGit" && (
-            <div className="file-note">
-              Git object classification: {content.classification}. Downloads
-              contain the exact stored Git blob.
-            </div>
-          )}
-          {view === "blame" && (blame.loading || blame.error) && (
-            <Result state={blame}>{() => null}</Result>
-          )}
-          {view === "preview" && activePreview ? (
-            <Suspense
-              fallback={
-                <div className="file-preview-notice" role="status">
-                  Loading preview tools…
-                </div>
-              }
-            >
-              <FilePreview
-                descriptor={activePreview}
-                repo={repo}
-                rev={rev}
-                revision={revision}
-                directory={parentHex(path)}
-                name={name}
-                text={content.text}
-                size={content.size}
-                blobUrl={endpoint(repo, "blob", { rev, path_hex: path })}
-                theme={theme}
-                codeThemes={codeThemes}
-              />
-            </Suspense>
-          ) : content.text === null ? (
-            <div className="notice">
-              <strong>
-                {content.text_truncated ? "Large text file" : "Binary file"}
-              </strong>
-              <p>
-                {content.text_truncated
-                  ? "Inline source is limited to 1 MB. Download the exact stored bytes to inspect the complete file."
-                  : "Crab does not recognize a safe interactive preview for this format. Download the exact stored bytes to inspect it locally."}
-              </p>
-            </div>
-          ) : view === "blame" ? (
-            blame.data ? (
-              <div className="blame-view" aria-label="Blame view">
-                <div className="blame-view-toolbar">
-                  <div className="blame-age-legend" aria-label="Commit age">
-                    <span>Older</span>
-                    <span className="blame-age-scale" aria-hidden="true" />
-                    <span>Newer</span>
-                  </div>
-                  <span className="blame-contributors">
-                    Contributors{" "}
-                    <strong>
-                      {
-                        new Set(
-                          blame.data.ranges.map((range) => range.commit.author),
-                        ).size
-                      }
-                    </strong>
-                  </span>
-                </div>
-                <div
-                  className="blame-view-grid"
-                  style={
-                    {
-                      "--blame-pane-width": `${blamePaneWidth}%`,
-                    } as CSSProperties
-                  }
-                >
-                  <div
-                    id="blame-commit-pane"
-                    className="blame-rows"
-                    aria-label="Blame commits"
-                  >
-                    {blame.data.ranges.map((range) => (
-                      <div
-                        className="blame-row"
-                        key={`${range.start}:${range.commit.oid}`}
-                        style={
-                          { "--blame-lines": range.lines } as CSSProperties
-                        }
-                      >
-                        <code>
-                          {range.start}–{range.start + range.lines - 1}
-                        </code>
-                        <Link
-                          className="blame-oid"
-                          href={repoHref(repo, {
-                            view: "commit",
-                            rev: range.commit.oid,
-                          })}
-                        >
-                          {short(range.commit.oid)}
-                        </Link>
-                        <span className="blame-author">
-                          {range.commit.author}
-                        </span>
-                        <Link
-                          className="blame-message"
-                          href={repoHref(repo, {
-                            view: "commit",
-                            rev: range.commit.oid,
-                          })}
-                        >
-                          {range.commit.message.split("\n")[0]}
-                        </Link>
-                      </div>
-                    ))}
-                  </div>
-                  <PaneResizer
-                    className="blame-resizer"
-                    label="Resize blame pane"
-                    controls="blame-commit-pane blame-source-pane"
-                    value={blamePaneWidth}
-                    min={MIN_BLAME_PANE_WIDTH}
-                    max={MAX_BLAME_PANE_WIDTH}
-                    defaultValue={DEFAULT_BLAME_PANE_WIDTH}
-                    step={5}
-                    unit="percent"
-                    valueText={`${blamePaneWidth}% blame, ${100 - blamePaneWidth}% source`}
-                    onChange={setBlamePaneWidth}
-                  />
-                  <div
-                    id="blame-source-pane"
-                    className="blame-source"
-                    aria-label="File source"
-                    tabIndex={0}
-                  >
-                    <File
-                      key={`${theme}:${codeThemes.light}:${codeThemes.dark}`}
-                      file={file}
-                      options={options}
-                      style={
-                        {
-                          "--diffs-line-height": "20px",
-                          "--diffs-overflow-override": "visible",
-                        } as CSSProperties
-                      }
-                    />
-                  </div>
-                </div>
+          <div className="file-body" ref={setBody}>
+            {content.classification !== "OrdinaryGit" && (
+              <div className="file-note">
+                Git object classification: {content.classification}. Downloads
+                contain the exact stored Git blob.
               </div>
-            ) : null
-          ) : (
-            <SourceWorkspace
-              symbols={
-                symbolsOpen &&
-                symbolLanguage && (
-                  <CodeSymbolsPanel
-                    state={symbolState}
-                    active={activeSymbol}
-                    file={file}
-                    theme={codeThemes[theme]}
-                    onActivate={navigateToSymbol}
-                    onClearActive={() => setActiveSymbol(null)}
-                    onClose={() => setSymbolsOpen(false)}
-                  />
-                )
-              }
-            >
+            )}
+            {view === "blame" && (blame.loading || blame.error) && (
+              <Result state={blame}>{() => null}</Result>
+            )}
+            {view === "preview" && activePreview ? (
+              <Suspense
+                fallback={
+                  <div className="file-preview-notice" role="status">
+                    Loading preview tools…
+                  </div>
+                }
+              >
+                <FilePreview
+                  descriptor={activePreview}
+                  repo={repo}
+                  rev={rev}
+                  revision={revision}
+                  directory={parentHex(path)}
+                  name={name}
+                  text={content.text}
+                  size={content.size}
+                  blobUrl={endpoint(repo, "blob", { rev, path_hex: path })}
+                  theme={theme}
+                  codeThemes={codeThemes}
+                />
+              </Suspense>
+            ) : content.text === null ? (
+              <div className="notice">
+                <strong>
+                  {content.text_truncated ? "Large text file" : "Binary file"}
+                </strong>
+                <p>
+                  {content.text_truncated
+                    ? "Inline source is limited to 1 MB. Download the exact stored bytes to inspect the complete file."
+                    : "Crab does not recognize a safe interactive preview for this format. Download the exact stored bytes to inspect it locally."}
+                </p>
+              </div>
+            ) : view === "blame" ? (
+              blame.data ? (
+                <div className="blame-view" aria-label="Blame view">
+                  <div className="blame-view-toolbar">
+                    <div className="blame-age-legend" aria-label="Commit age">
+                      <span>Older</span>
+                      <span className="blame-age-scale" aria-hidden="true" />
+                      <span>Newer</span>
+                    </div>
+                    <span className="blame-contributors">
+                      Contributors{" "}
+                      <strong>
+                        {
+                          new Set(
+                            blame.data.ranges.map(
+                              (range) => range.commit.author,
+                            ),
+                          ).size
+                        }
+                      </strong>
+                    </span>
+                  </div>
+                  <div
+                    className="blame-view-grid"
+                    style={
+                      {
+                        "--blame-pane-width": `${blamePaneWidth}%`,
+                      } as CSSProperties
+                    }
+                  >
+                    <div
+                      id="blame-commit-pane"
+                      className="blame-rows"
+                      aria-label="Blame commits"
+                    >
+                      {blame.data.ranges.map((range) => (
+                        <div
+                          className="blame-row"
+                          key={`${range.start}:${range.commit.oid}`}
+                          style={
+                            { "--blame-lines": range.lines } as CSSProperties
+                          }
+                        >
+                          <code>
+                            {range.start}–{range.start + range.lines - 1}
+                          </code>
+                          <Link
+                            className="blame-oid"
+                            href={repoHref(repo, {
+                              view: "commit",
+                              rev: range.commit.oid,
+                            })}
+                          >
+                            {short(range.commit.oid)}
+                          </Link>
+                          <span className="blame-author">
+                            {range.commit.author}
+                          </span>
+                          <Link
+                            className="blame-message"
+                            href={repoHref(repo, {
+                              view: "commit",
+                              rev: range.commit.oid,
+                            })}
+                          >
+                            {range.commit.message.split("\n")[0]}
+                          </Link>
+                        </div>
+                      ))}
+                    </div>
+                    <PaneResizer
+                      className="blame-resizer"
+                      label="Resize blame pane"
+                      controls="blame-commit-pane blame-source-pane"
+                      value={blamePaneWidth}
+                      min={MIN_BLAME_PANE_WIDTH}
+                      max={MAX_BLAME_PANE_WIDTH}
+                      defaultValue={DEFAULT_BLAME_PANE_WIDTH}
+                      step={5}
+                      unit="percent"
+                      valueText={`${blamePaneWidth}% blame, ${100 - blamePaneWidth}% source`}
+                      onChange={setBlamePaneWidth}
+                    />
+                    <div
+                      id="blame-source-pane"
+                      className="blame-source"
+                      aria-label="File source"
+                      tabIndex={0}
+                    >
+                      <File
+                        key={`${theme}:${codeThemes.light}:${codeThemes.dark}`}
+                        file={file}
+                        options={options}
+                        style={
+                          {
+                            "--diffs-line-height": "20px",
+                            "--diffs-overflow-override": "visible",
+                          } as CSSProperties
+                        }
+                      />
+                    </div>
+                  </div>
+                </div>
+              ) : null
+            ) : (
               <div className="file-source-code">
                 <File
                   key={`${theme}:${codeThemes.light}:${codeThemes.dark}:${symbolLanguage ?? "plain"}`}
@@ -567,10 +582,19 @@ export function FileView({
                   options={options}
                 />
               </div>
-            </SourceWorkspace>
-          )}
+            )}
+          </div>
         </section>
       )}
     </Result>
+  );
+  return (
+    <div className="file-viewer">
+      {navigation}
+      {header}
+      <FileWorkspace content={body} symbols={symbols}>
+        {contents}
+      </FileWorkspace>
+    </div>
   );
 }

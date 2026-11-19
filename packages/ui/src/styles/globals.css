@@ -293,14 +293,19 @@ main {
   height: min(62vh, 720px);
   min-height: 280px;
   color: var(--foreground);
-  --trees-accent-override: var(--ring);
+  --trees-accent-override: var(--info);
   --trees-bg-override: var(--background);
-  --trees-bg-muted-override: var(--secondary);
+  --trees-bg-muted-override: var(--list-hover);
   --trees-border-color-override: var(--border);
   --trees-fg-override: var(--foreground);
   --trees-fg-muted-override: var(--muted-foreground);
   --trees-font-family-override: var(--font-sans);
   --trees-font-size-override: var(--text-sm);
+  --trees-selected-bg-override: var(--list-hover);
+  --trees-selected-fg-override: var(--foreground);
+  --trees-search-bg-override: var(--background);
+  --trees-focus-ring-color-override: var(--ring);
+  --trees-border-radius-override: var(--radius-md);
   --trees-item-margin-x-override: 0px;
   --trees-item-padding-x-override: 6px;
 }
@@ -2152,20 +2157,6 @@ main {
     margin-left: 26px;
   }
 }
-.repository-tree {
-  --trees-bg-override: var(--background);
-  --trees-fg-override: var(--foreground);
-  --trees-fg-muted-override: var(--muted-foreground);
-  --trees-bg-muted-override: var(--muted);
-  --trees-border-color-override: var(--border);
-  --trees-accent-override: var(--info);
-  --trees-selected-bg-override: var(--secondary);
-  --trees-selected-fg-override: var(--foreground);
-  --trees-search-bg-override: var(--background);
-  --trees-font-family-override: var(--font-sans);
-  --trees-focus-ring-color-override: var(--ring);
-}
-
 .app-shell {
   display: flex;
   flex-direction: column;
@@ -4446,27 +4437,8 @@ main {
   max-width: none;
 }
 .tree-search {
-  display: flex;
-  align-items: center;
-  gap: --spacing(2);
-  height: 34px;
+  width: auto;
   margin: 0 --spacing(4) --spacing(3);
-  padding: 0 --spacing(2.5);
-  color: var(--muted-foreground);
-  background: var(--background);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-}
-
-.tree-search input {
-  min-width: 0;
-  flex: 1;
-  padding: 0;
-  color: var(--foreground);
-  background: transparent;
-  border: 0;
-  outline: 0;
-  font: inherit;
 }
 .tree-search input::-webkit-search-cancel-button {
   display: none;
@@ -4478,7 +4450,7 @@ main {
   color: var(--muted-foreground);
   background: var(--background);
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border-radius: calc(var(--radius-md) / 2);
   font: 11px/18px var(--font-mono);
   text-align: center;
 }
@@ -4504,14 +4476,10 @@ main {
   overflow: hidden;
   color: var(--foreground);
   background: transparent;
-  border-radius: var(--radius);
+  border-radius: var(--radius-md);
   font: inherit;
   text-align: left;
   cursor: pointer;
-}
-.tree-search-results [role="option"]:hover,
-.tree-search-results [role="option"].active {
-  background: var(--secondary);
 }
 .tree-search-results [role="option"] svg {
   flex: 0 0 auto;
@@ -4526,13 +4494,128 @@ main {
   margin: --spacing(3) --spacing(2);
   color: var(--muted-foreground);
 }
+/* Portaled repository menus share the pane palette outside its DOM subtree. */
+.repo-file-workspace,
+.revision-picker-panel,
+.repository-file-menu {
+  --background: #fff;
+  --foreground: #1f2328;
+  --border: #d1d9e0;
+  --muted: #f6f8fa;
+  --muted-foreground: #59636e;
+  --secondary: #f6f8fa;
+  --secondary-foreground: var(--foreground);
+  --accent: #eff2f5;
+  --accent-foreground: var(--foreground);
+  --primary: var(--foreground);
+  --primary-foreground: var(--background);
+  --popover: var(--background);
+  --popover-foreground: var(--foreground);
+  --input: var(--border);
+  --input-hover: var(--border);
+  --ring: #0969da;
+  --info: #0969da;
+  --radius: 0.375rem;
+  --radius-md: var(--radius);
+  --radius-sm: 0.1875rem;
+  --list-hover: #818b981f;
+  --segmented-track: #e6eaef;
+  --segmented-selected: #fff;
+  --shadow-overlay: 0 8px 24px rgb(140 149 159 / 20%);
+}
+.dark .repo-file-workspace,
+.dark .revision-picker-panel,
+.dark .repository-file-menu {
+  --background: #0d1117;
+  --foreground: #f0f6fc;
+  --border: #3d444d;
+  --muted: #151b23;
+  --muted-foreground: #9198a1;
+  --secondary: #212830;
+  --accent: #262c36;
+  --ring: #1f6feb;
+  --info: #4493f8;
+  --list-hover: #656c7633;
+  --segmented-track: #010409;
+  --segmented-selected: #212830;
+  --shadow-overlay: 0 8px 24px rgb(1 4 9 / 40%);
+}
+.revision-picker-panel,
+.repository-file-menu {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-overlay);
+}
+/* Keep pane controls on Primer's radius rather than the app's compact scale. */
+:is(.repo-file-workspace, .revision-picker-panel, .repository-file-menu)
+  :is(
+    [data-slot="button"],
+    [data-slot="input"],
+    [data-slot="textarea"],
+    [data-slot="input-group"],
+    [data-slot="toggle-group"]
+  ) {
+  border-radius: var(--radius-md);
+}
+:is(.repo-file-workspace, .revision-picker-panel, .repository-file-menu)
+  [data-slot="button"] {
+  translate: none;
+}
+:is(.repo-file-workspace, .revision-picker-panel, .repository-file-menu)
+  [data-slot="button"][data-variant="outline"] {
+  border-color: var(--border);
+  background: var(--secondary);
+}
+:is(.repo-file-workspace, .revision-picker-panel, .repository-file-menu)
+  [data-slot="button"][data-variant="outline"]:is(
+    :hover,
+    [aria-expanded="true"]
+  ):not(:disabled, [aria-disabled="true"]) {
+  background: var(--accent);
+}
+:is(.repo-file-workspace, .revision-picker-panel, .repository-file-menu)
+  [data-slot="button"][data-variant="ghost"]:hover:not(:disabled) {
+  background: var(--list-hover);
+}
+:is(.repo-file-workspace, .revision-picker-panel, .repository-file-menu)
+  :is(
+    [role="option"],
+    [role="menuitemradio"],
+    [data-slot="dropdown-menu-item"]
+  ):is(
+    :hover,
+    [aria-selected="true"],
+    [aria-checked="true"],
+    [data-highlighted]
+  ) {
+  background: var(--list-hover);
+}
+:is(.repo-file-workspace, .revision-picker-panel, .repository-file-menu)
+  :is([data-slot="button"], [data-slot="toggle-group-item"]):focus-visible,
+.repo-file-workspace .file-search-opener:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+  box-shadow: none;
+}
+:is(.repo-file-workspace, .revision-picker-panel)
+  [data-slot="input-group"]:has(
+    [data-slot="input-group-control"]:focus-visible
+  ):not(:has([aria-invalid="true"])) {
+  outline: 2px solid var(--ring);
+  outline-offset: -1px;
+  box-shadow: none;
+}
 .repo-file-workspace {
   max-width: none;
   padding: 0;
+  color: var(--foreground);
+  background: var(--background);
 }
 .repo-file-workspace .code-layout {
   grid-template-columns:
-    minmax(240px, var(--tree-pane-width, 356px)) 9px
+    minmax(240px, var(--tree-pane-width, 320px)) 1px
     minmax(0, 1fr);
   gap: 0;
 }
@@ -4543,7 +4626,7 @@ main {
 .repo-file-workspace .tree-resizer {
   position: sticky;
   top: 0;
-  height: 100dvh;
+  height: var(--workspace-available-height, 100dvh);
   align-self: start;
 }
 .repo-file-workspace .tree-sidebar {
@@ -4552,23 +4635,76 @@ main {
   border-width: 0;
   border-radius: 0;
 }
+.repo-file-workspace .pane-resizer {
+  border: 0;
+  background: transparent;
+}
+.repo-file-workspace .pane-resizer::before {
+  inset: 0 auto 0 50%;
+  width: 1px;
+  opacity: 1;
+  background: var(--border);
+  transform: translateX(-50%);
+}
+.repo-file-workspace .tree-resizer {
+  /* A one-pixel track owns the border; the wider button remains easy to grab. */
+  width: 9px;
+  min-width: 9px;
+  margin-inline: -4px;
+}
+.repo-file-workspace .pane-resizer::after,
+.code-symbols-resizer > div {
+  width: 3px;
+  height: 24px;
+  background: var(--muted-foreground);
+  opacity: 0.45;
+  border-radius: var(--radius-full);
+  transition:
+    background-color 120ms ease,
+    opacity 120ms ease;
+}
+.repo-file-workspace .pane-resizer:is(:hover, :focus-visible, :active)::after,
+.code-symbols-resizer:is(:hover, :focus-visible, [data-separator="active"])
+  > div {
+  height: 24px;
+  background: var(--info);
+  opacity: 1;
+}
+.repo-file-workspace .pane-resizer:focus-visible,
+.code-symbols-resizer:focus-visible {
+  outline: 0;
+  box-shadow: none;
+}
+.repo-file-workspace .pane-resizer:focus-visible::after,
+.code-symbols-resizer:focus-visible > div {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
 .repo-file-workspace .repository-tree {
   flex: 1;
   height: 0;
   min-height: 0;
-  border-top: 1px solid var(--border);
+  border-top: 0;
 }
 .repo-file-workspace .tree-search-results {
   flex: 1;
   height: 0;
   min-height: 0;
   overscroll-behavior: contain;
+  border-top: 0;
 }
 .repo-file-workspace .code-main {
-  padding: var(--page-block) var(--page-gutter) --spacing(8);
+  padding: --spacing(4);
 }
 .repo-file-workspace .latest-commit {
   flex-wrap: wrap;
+  min-height: 46px;
+  gap: --spacing(2);
+  padding: --spacing(2) --spacing(3);
+}
+.repo-file-workspace .latest-commit .avatar {
+  width: 20px;
+  height: 20px;
 }
 .repo-file-workspace .breadcrumb {
   min-height: 36px;
@@ -4822,7 +4958,14 @@ main {
   overflow-wrap: anywhere;
 }
 .file-panel {
-  margin-top: --spacing(4);
+  /* The toolbar and body own separate edges; none can bleed through corners. */
+  border: 0;
+  overflow: visible;
+}
+.file-body {
+  border: 1px solid var(--border);
+  border-top: 0;
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
   overflow: clip;
 }
 .file-view-controls {
@@ -4845,17 +4988,40 @@ main {
   border-radius: 0;
 }
 .file-actions > [data-slot="button"] {
-  height: 32px;
+  height: 28px;
+  padding-inline: --spacing(2);
+  font-size: var(--text-xs);
 }
 .file-actions > [data-size="icon-sm"] {
-  width: 34px;
+  width: 28px;
+  padding: 0;
 }
 .file-actions > :last-child {
   border-radius: 0 var(--radius-md) var(--radius-md) 0;
 }
+.file-view-controls [data-slot="toggle-group"] {
+  height: 28px;
+  border: 1px solid var(--border);
+  background: var(--segmented-track);
+}
+.file-view-controls [data-slot="toggle-group-item"] {
+  height: 100%;
+  padding-inline: --spacing(3);
+  border: 0;
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+}
+.file-view-controls
+  [data-slot="toggle-group-item"]:is([aria-pressed="true"], [data-state="on"]) {
+  background: var(--segmented-selected);
+  font-weight: 600;
+}
+.file-view-controls [data-slot="toggle-group-item"]:hover {
+  background: var(--accent);
+}
 .file-navigation {
   display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr) minmax(220px, 320px) auto;
+  grid-template-columns: auto auto minmax(0, 1fr) minmax(220px, 360px);
   align-items: center;
   gap: --spacing(2.5);
   min-height: 36px;
@@ -4865,6 +5031,28 @@ main {
   min-width: 0;
   min-height: 32px;
   margin: 0;
+}
+.file-navigation.tree-open {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+.file-navigation-actions {
+  display: flex;
+  gap: --spacing(2.5);
+}
+.file-navigation-actions .file-search-opener {
+  flex: 1;
+}
+.file-scroll-top {
+  display: none;
+}
+.file-navigation[data-stuck]:not(.tree-open) {
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
+}
+.file-navigation[data-stuck] .file-navigation-actions {
+  display: none;
+}
+.file-navigation[data-stuck] .file-scroll-top {
+  display: inline-flex;
 }
 .file-search-opener {
   display: flex;
@@ -4893,20 +5081,36 @@ main {
   white-space: nowrap;
 }
 .file-panel > .panel-header {
-  min-height: 46px;
-  padding: --spacing(2) --spacing(2.5);
+  display: block;
+  min-height: 0;
+  padding: 0;
+  /* Cover body borders and source behind the sticky toolbar's rounded corners. */
+  border: 0;
+  background: var(--background);
 }
-.code-main-file > .breadcrumb {
+.file-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: --spacing(3);
+  min-height: 46px;
+  padding: --spacing(2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  background: var(--muted);
+}
+.code-main-file .file-navigation {
   position: sticky;
   top: 0;
-  z-index: 1;
+  z-index: 2;
   min-height: 48px;
   margin-bottom: 0;
   background: var(--background);
 }
 .code-main-file .file-panel > .panel-header {
   position: sticky;
-  top: 48px;
+  top: var(--file-navigation-height);
   z-index: 1;
 }
 .file-panel .button-link {
@@ -4914,6 +5118,11 @@ main {
 }
 .file-source-workspace {
   min-width: 0;
+  margin-top: --spacing(4);
+}
+.file-viewer {
+  min-width: 0;
+  container-type: inline-size;
 }
 .file-source-code {
   min-width: 0;
@@ -4923,26 +5132,38 @@ main {
   display: flex;
   flex-direction: column;
   position: sticky;
-  top: var(--code-symbols-sticky-top, 0);
+  top: var(--file-navigation-height, 0px);
   align-self: start;
   min-width: 0;
-  height: var(--code-symbols-available-height, 100dvh);
+  max-height: var(--workspace-available-height, 100dvh);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
   overflow: hidden;
   color: var(--foreground);
   background: var(--background);
 }
+.file-source-workspace[data-stacked] > .code-symbols-panel {
+  position: static;
+  height: auto;
+  max-height: 360px;
+  margin: --spacing(4) 0 0;
+}
 .code-symbols-resizer {
   align-items: flex-start;
+  justify-content: flex-start;
+  width: --spacing(4);
+  align-self: flex-start;
+  z-index: 0;
+  /* The viewer owns the edge; a separator stroke would cross the commit row. */
+  inset-inline-start: -1px;
+  border: 0;
+  background: transparent;
 }
 .code-symbols-resizer > div {
-  position: sticky;
-  top: calc(
-    var(--code-symbols-sticky-top, 0px) +
-      var(--code-symbols-available-height, 100dvh) / 2 - 12px
-  );
-  margin-top: calc(
-    var(--code-symbols-available-height, 100dvh) / 2 - --spacing(3)
-  );
+  position: absolute;
+  margin-inline-start: -1px;
+  max-height: 0;
+  transform: translateY(-50%);
 }
 .code-symbols-header {
   display: flex;
@@ -4950,10 +5171,9 @@ main {
   align-items: center;
   justify-content: space-between;
   gap: --spacing(3);
-  min-height: 60px;
-  padding: --spacing(3);
+  min-height: 56px;
+  padding: --spacing(2) --spacing(3);
   background: var(--background);
-  border-bottom: 1px solid var(--border);
 }
 .code-symbols-header > div {
   display: grid;
@@ -4969,11 +5189,10 @@ main {
 .code-symbols-header:has(.code-symbol-back) {
   min-height: 48px;
   padding: --spacing(2) --spacing(3);
-  border-bottom: 0;
 }
 .code-symbols-search {
   flex-shrink: 0;
-  padding: --spacing(3);
+  padding: 0 --spacing(3) --spacing(2);
 }
 .code-symbols-list,
 .code-symbol-detail {
@@ -5024,12 +5243,12 @@ main {
   background: transparent;
   cursor: pointer;
   font: inherit;
-  font-size: var(--text-caption);
+  font-size: var(--text-sm);
   text-align: left;
 }
 .code-symbol-row:hover,
 .code-symbol-row[aria-current="location"] {
-  background: var(--secondary);
+  background: var(--list-hover);
 }
 .code-symbol-row:focus-visible {
   outline: 2px solid var(--ring);
@@ -5039,7 +5258,7 @@ main {
   grid-column: 2;
   grid-row: 1;
   overflow: hidden;
-  font-weight: 500;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -5081,13 +5300,15 @@ main {
 .code-symbol-detail h3 {
   margin-bottom: --spacing(2);
   padding: --spacing(2) --spacing(4);
-  background: var(--muted);
-  border-block: 1px solid var(--border);
 }
 .code-symbol-detail .code-symbol-row {
   grid-template-columns: minmax(3ch, max-content) minmax(0, 1fr);
   width: calc(100% - --spacing(4));
   margin-inline: --spacing(2);
+}
+/* Keep syntax colors on the muted canvas to preserve token contrast on hover. */
+.code-symbol-detail .code-symbol-row:is(:hover, [aria-current="location"]) {
+  background: var(--muted);
 }
 .code-symbol-detail code {
   overflow: hidden;
@@ -5937,7 +6158,7 @@ main {
   .repo-file-workspace .code-main {
     padding: --spacing(4);
   }
-  .file-navigation {
+  .file-navigation:not(.tree-open) {
     grid-template-columns: auto auto minmax(0, 1fr) auto;
   }
   .file-navigation .file-search-opener {
@@ -5962,12 +6183,20 @@ main {
   .data-workbench-badges {
     justify-content: flex-start;
   }
-  .code-symbols-panel {
-    position: static;
-    height: auto;
-    max-height: 360px;
-    border-top: 1px solid var(--border);
-    border-left: 0;
+}
+
+@container (max-width: 600px) {
+  .file-navigation:not(.tree-open) {
+    grid-template-columns: auto auto minmax(0, 1fr) auto;
+  }
+  .file-navigation .file-search-opener {
+    width: 32px;
+    padding: 0;
+    justify-content: center;
+  }
+  .file-navigation .file-search-opener span,
+  .file-navigation .file-search-opener kbd {
+    display: none;
   }
 }
 
@@ -6000,7 +6229,7 @@ main {
     height: auto;
     min-height: 0;
     border-width: 1px;
-    border-radius: var(--radius);
+    border-radius: var(--radius-md);
   }
   .repo-file-workspace .repository-tree {
     height: 300px;
@@ -6013,7 +6242,7 @@ main {
   .repo-file-workspace .code-main {
     padding: 0;
   }
-  .code-main-file > .breadcrumb,
+  .code-main-file .file-navigation,
   .code-main-file .file-panel > .panel-header {
     position: static;
   }
@@ -6022,7 +6251,7 @@ main {
     flex-direction: column;
     gap: --spacing(1.5);
   }
-  .file-panel > .panel-header {
+  .file-toolbar {
     align-items: flex-end;
   }
   .file-metadata {
