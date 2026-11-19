@@ -3983,7 +3983,40 @@
         ["history", 2, "candidate", 200, 14.0, 23, 136.0, 213, 4207.0, 4384, 14.0, 31, 4386.5, 4607, "9f08df672eeafd084e116d2ae4583e007e30c0a7c78e35325132c29644e1ddec"],
         ["history", 3, "candidate", 200, 16.0, 33, 148.5, 233, 4129.5, 4497, 13.0, 22, 4306.0, 4731, "d706033e346e05dcb4e570467503523ffcd9f823f622ec9b0545538801dcfe3b"],
         ["history", 3, "baseline", 200, 16.0, 33, 158.0, 237, 4854.0, 5297, 42.5, 67, 5081.5, 5548, "bd659233440a71e0fbeaaa222eb349e0b3fe286d6359fb72ee4e59e6a05d1d2c"]
-      ]
+      ],
+      "equivalent_rebased_revision": "39616a4656c"
+    },
+    "rebased_ready_close": {
+      "status": "build_and_focused_checks_passed_http_startup_failed",
+      "base_revision": "464d943a045638fcb33746c94f473c284902cc72",
+      "built_revision": "10994bae02260f45e6373c869ee36d6a0d53a475",
+      "release_binary_sha256": "f8c9a0b0d2d0412bc79f35180a6bfa617eb53c4a0dd925fabb211174b550f1d5",
+      "build_receipt_sha256": "109f60a8f1e4cc5d14c4eced4c703a25134858fe8fb2da545a85f56ae71fced4",
+      "build_inputs_match_rebased_tree": true,
+      "ready_close_equivalent_revision": "39616a4656c",
+      "ui_checks": {
+        "typecheck": "passed",
+        "api_unit_tests": 7,
+        "build": "passed",
+        "browser_tests": 18,
+        "receipt_sha256": {
+          "rebase-ui-typecheck.log": "c3901a4df7b6721007437bba5b56bde611e86d06fc920313d504c6deee4219e6",
+          "rebase-ui-unit.log": "85cf331d51d7c63ee5ba418132b8f0fd09329398ae8ecdf743d6408b32905dd2",
+          "rebase-ui-build.log": "ba064ac20b6d25ebdb8df3bff30fd75bc89e3efe1b10d2d7befe7cfa4a7e9408",
+          "rebase-ui-browser.log": "74f501fab3837efb49abd388260d264284315c02ce5dc15a31364e8f73fff3de"
+        }
+      },
+      "http_smoke": {
+        "status": "failed",
+        "checks_reached": 0,
+        "exit_codes": [1],
+        "receipt_sha256": "70c0c34820008ce3651d31cf5798ba23ce4a47111457d176799102b77e6c5276",
+        "server_log_sha256": "2aa233574b62214e335950c6eb276fecaf7d0bcdbdf5a240eebad1a547bb042a",
+        "failure": "cold Repository epoch 9 restore: have transaction 1; next starts at 3; transaction 2 absent",
+        "scope": "failed before serving requests; previous 46-check receipt remains historical"
+      },
+      "dependency_patch": "requires explicit approval; none applied",
+      "acceptance": "open; historical performance failures retained; current-source HTTP restart blocked by dependency recovery"
     }
   }
 }
