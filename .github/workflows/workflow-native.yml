@@ -6,7 +6,6 @@ permissions:
   actions: read
 jobs:
   notebook:
-    name: Hydration and media controls
     runs-on: windows-2025
     timeout-minutes: 120
     defaults:
@@ -48,84 +47,89 @@ jobs:
           npm run build:renderer
           npm run build:electron
           node scripts/package.mjs --dir --publish never
-      - name: Observe Windows failure boundaries
-        run: |
-          python -X utf8 - <<'PYCODE'
-          from pathlib import Path
-          p = Path('tests/e2e/media.spec.ts')
-          s = p.read_text()
-          marker = '      await expect.poll(() => element.evaluate((node: HTMLMediaElement) => Number.isFinite(node.duration) && node.duration > 0)).toBe(true);'
-          observation = r'''
-          try {
-          OBSERVED_ASSERTION
-          } catch (error) {
-            const state = await element.evaluate(async (node: HTMLMediaElement) => {
-              const response = await fetch(node.src, { headers: { Range: "bytes=0-63" } });
-              return { source: node.src, duration: String(node.duration), error: node.error && { code: node.error.code, message: node.error.message }, ready: node.readyState, network: node.networkState, status: response.status, bytes: Array.from(new Uint8Array(await response.arrayBuffer())) };
-            });
-            const evidence = await application!.evaluate(() => (globalThis as typeof globalThis & { mediaEvidence: unknown[] }).mediaEvidence);
-            writeFileSync(test.info().outputPath('media-failure.json'), JSON.stringify({ file, state, evidence }, null, 2));
-            await page.screenshot({ path: test.info().outputPath('media-failure.png') });
-            throw error;
-          }
-          '''
-          assert s.count(marker) == 1
-          p.write_text(s.replace(marker, observation.replace('OBSERVED_ASSERTION', marker)))
-          p = Path('tests/e2e/large-files.spec.ts')
-          s = p.read_text()
-          marker = '      writeFileSync(test.info().outputPath("hydrate-failure.txt"), await page.getByRole("main").innerText());'
-          observation = r'''
-          const files = ['data[1].lfs', 'staged.safetensors', 'lfs.safetensors'].map(file => {
-            const destination = path.join(source, file);
-            try { const bytes = readFileSync(destination); return { file, size: bytes.length, prefix: bytes.subarray(0, 160).toString('hex') }; } catch (error) { return { file, error: String(error) }; }
-          });
-          writeFileSync(test.info().outputPath('hydrate-files.json'), JSON.stringify(files, null, 2));
-          const ids = await call(page, 'file_open', { repo_id: 'large-files', path: 'data[1].lfs' });
-          try {
-            const result = await call(page, 'file_materialize', { repo_id: 'large-files', file_id: ids.file_id, op_id: 'diagnostic-only-retry' });
-            writeFileSync(test.info().outputPath('hydrate-retry.json'), JSON.stringify({ result }, null, 2));
-          } catch (retryError) { writeFileSync(test.info().outputPath('hydrate-retry.json'), JSON.stringify({ error: String(retryError) })); }
-          finally { await call(page, 'file_close', { repo_id: 'large-files', file_id: ids.file_id }); }
-          '''
-          assert s.count(marker) == 1
-          p.write_text(s.replace(marker, marker + observation))
-          PYCODE
-          E2E_SMOKE=1 node node_modules/@playwright/test/cli.js test --project=e2e-smoke --workers=1 large-files.spec.ts media.spec.ts > windows-observation.log 2>&1
-      - name: Retain debug observations
-        if: always()
-        run: |
-          python - <<'PYCODE'
-          from pathlib import Path
-          import shutil
-          source=Path('test-results')
-          if source.exists():
-              shutil.move(str(source), 'debug-test-results')
-          PYCODE
-      - uses: actions/download-artifact@v4
-        if: always()
-        with:
-          name: Crab-native-win-x64
-          path: packages/desktop/release-native-control
-          run-id: 44455996465
-          github-token: ${{ github.token }}
-      - name: Package unchanged optimized media read path
-        if: always()
+      - name: Verify actual Electron PID and save permissions
         run: |
           node <<'JS'
+          const assert = require('node:assert/strict');
           const fs = require('node:fs');
-          fs.rmSync('resources/native/win-x64', { recursive: true, force: true });
-          fs.cpSync('release-native-control', 'resources/native/win-x64', { recursive: true });
+          const path = require('node:path');
+          const { execFileSync } = require('node:child_process');
+          const { _electron: electron } = require('@playwright/test');
+          (async () => {
+            const root = fs.mkdtempSync(path.join(process.env.CARGO_TARGET_DIR, 'platform-contract-'));
+            const source = path.join(root, 'source');
+            fs.mkdirSync(source);
+            const target = path.join(source, 'note.md');
+            fs.writeFileSync(target, 'original');
+            let app;
+            try {
+              app = await electron.launch({ executablePath: path.resolve('release/win-unpacked/Crab.exe'), args: [`--user-data-dir=${path.join(root, 'profile')}`] });
+              const mainPid = await app.evaluate(() => process.pid);
+              const launcherPid = app.process().pid;
+              const write = text => app.evaluate(async ({ app }, { target, text }) => {
+                const load = process.getBuiltinModule('module').createRequire(app.getAppPath() + '/package.json');
+                try { return { bytes: await load('./dist-electron/file-write.cjs').writeTextAtomically(target, text) }; }
+                catch (error) { return { code: error.code, message: error.message }; }
+              }, { target, text });
+              fs.chmodSync(source, 0o500);
+              const directoryMode = await write('directory mode does not deny Windows writes');
+              assert.equal(directoryMode.bytes, 43);
+              fs.chmodSync(source, 0o700);
+              fs.chmodSync(target, 0o444);
+              const readOnlyFile = await write('must fail');
+              assert.equal(readOnlyFile.code, 'EACCES');
+              assert.equal(fs.readFileSync(target, 'utf8'), 'directory mode does not deny Windows writes');
+              fs.chmodSync(target, 0o644);
+              const retry = await write('retry saved');
+              assert.equal(retry.bytes, 11);
+              assert.equal(fs.readFileSync(target, 'utf8'), 'retry saved');
+              const git = args => execFileSync('git', args, { cwd: source });
+              git(['init', '--initial-branch=main']);
+              fs.writeFileSync(target, 'INDEX');
+              git(['add', '--', 'note.md']);
+              const indexBefore = git(['ls-files', '--stage', '-z']);
+              fs.writeFileSync(target, 'DIRTY');
+              const page = await app.firstWindow();
+              await page.waitForFunction(() => Boolean(window.crab?.rpc));
+              const rpc = (method, params) => page.evaluate(async ({ method, params }) => {
+                try { return { result: await window.crab.rpc(method, params) }; }
+                catch (error) { return { error: { code: error.code, message: error.message } }; }
+              }, { method, params });
+              const opened = await rpc('open_local', { repo_id: 'publication-contract', path: source });
+              assert.ok(opened.result, JSON.stringify(opened));
+              const retained = await rpc('file_open', { repo_id: 'publication-contract', path: 'note.md' });
+              assert.ok(retained.result, JSON.stringify(retained));
+              const publication = await rpc('files_restore', { repo_id: 'publication-contract', paths: ['note.md'], op_id: 'retained-publication' });
+              const snapshot = await rpc('read_range', { repo_id: 'publication-contract', file_id: retained.result.file_id, offset: 0, length: 5 });
+              assert.equal(Buffer.from(snapshot.result.bytes_b64, 'base64').toString(), 'DIRTY');
+              const afterPublication = fs.readFileSync(target, 'utf8');
+              await rpc('file_close', { repo_id: 'publication-contract', file_id: retained.result.file_id });
+              const withoutReader = await rpc('files_restore', { repo_id: 'publication-contract', paths: ['note.md'], op_id: 'publication-without-reader' });
+              assert.ok(withoutReader.result, JSON.stringify(withoutReader));
+              assert.equal(fs.readFileSync(target, 'utf8'), 'INDEX');
+              assert.deepEqual(git(['ls-files', '--stage', '-z']), indexBefore);
+              await rpc('close', { repo_id: 'publication-contract' });
+              fs.writeFileSync('windows-publication-contract.json', JSON.stringify({ publication, afterPublication, snapshot: 'DIRTY', withoutReader, final: 'INDEX', indexUnchanged: true }, null, 2));
+              assert.notEqual(mainPid, launcherPid);
+              const closed = app.waitForEvent('close');
+              process.kill(mainPid, 'SIGKILL');
+              await closed;
+              app = undefined;
+              fs.writeFileSync('windows-platform-contracts.json', JSON.stringify({ mainPid, launcherPid, directoryMode, readOnlyFile, retry, closeAfterMainPidKill: true }, null, 2));
+            } finally {
+              fs.chmodSync(source, 0o700);
+              fs.chmodSync(target, 0o644);
+              await app?.close();
+              fs.rmSync(root, { recursive: true, force: true });
+            }
+          })().catch(error => { console.error(error); process.exitCode = 1; });
           JS
-          node scripts/package.mjs --dir --publish never
-      - name: Observe optimized media with unchanged assertions
-        if: always()
-        run: E2E_SMOKE=1 node node_modules/@playwright/test/cli.js test --project=e2e-smoke --workers=1 media.spec.ts > windows-optimized-media.log 2>&1
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: alpha2-windows-performance-proof
+          name: alpha2-windows-live-contracts-proof
           path: |
-            packages/desktop/windows-optimized-media.log
-            packages/desktop/debug-test-results/**
+            packages/desktop/windows-publication-contract.json
+            packages/desktop/windows-platform-contracts.json
             packages/desktop/windows-observation.log
             packages/desktop/test-results/**
