@@ -35,6 +35,12 @@ so unrelated repository Cell reads do not block browsing. The unfiltered catalog
 still supplies the repository list and loads Git access scopes when that
 selector is opened.
 
+Membership reads check the catalog's current provider ETag/version and size on
+every request. An unchanged identity reuses one validated decoded document per
+configured root; a changed identity requires the bounded body read and complete
+validation. Missing catalogs and provider errors never retain a previous grant.
+Catalog mutations retain their exact conditional-write token.
+
 Unchanged browse and background probes share the root/ref/index change probe.
 Immutable descriptors are verified on identity changes and at the existing
 hourly scrub boundary; explicit repair invalidates the cached proof.
