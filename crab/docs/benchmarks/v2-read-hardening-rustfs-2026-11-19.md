@@ -1,6 +1,6 @@
 # V2 read hardening: combined local RustFS qualification
 
-**Status: implementation verified; performance acceptance remains open.**
+**Status: read-surface proof passes; performance and lifecycle acceptance remain open.**
 The frozen engineering gates did not all pass. This report is not a release or
 production-readiness claim. [PR #693](https://github.com/crabbuild/crab/pull/693)
 targets `crab-v2`; [Plan 020](../../../plans/020-crab-v2-read-hardening.md)
@@ -17,7 +17,7 @@ their SHA-256 hashes bind the portable report to those inputs.
 
 ## Source and environment
 
-Production source matches `c5b6d40c45935d642517aab6a45af454cc881f45`.
+The original comparison below matches `c5b6d40c45935d642517aab6a45af454cc881f45`.
 The release/debug server receipts were created from the preceding revision plus
 their archived patch; every recorded compilation input was checked against this
 final tree before publication. The native qualifier was built from the clean
@@ -146,3 +146,84 @@ are included in the portable report. These exercised recoveries do not repair
 or explain the separate old-catalog gap.
 Consult the PR checks for broader suites still running; this report does not
 convert an in-progress job into a pass.
+
+## Subsequent source and recovery qualification
+
+Revision `8ba88f5a452` adds bounded JSON chunks, overlapping fresh durable session
+reads, complete shutdown proof checks and bounded quiet proxy connection reuse.
+Its debug/release receipts bind every compilation input to the current tree.
+Thirty-six auth, fifteen API, two Directory, two peer and two shutdown tests pass,
+as do strict server Clippy and 36 proxy plus 20 read-service tool tests. Existing
+ignored tests remain ignored; no expected result or acceptance threshold changed.
+
+The combined source passes 46 real two-replica Git-read/session checks against
+RustFS, including durable logout followed by replay of the original cookie and
+validator against both replicas. Both requests receive 401. Both server shutdowns
+report complete log/local durability, no pending work or deadline, and exit zero.
+This receipt explicitly retains a separate failed Directory lifecycle gate.
+
+The preceding `03ecadc5e33` matched release run completed all 22 cases and both
+600-second soaks with zero Git mismatches/non-rejection request errors. It still
+failed 30 p95, 18 throughput and one interactive gate, plus one observed upstream
+disconnect. Both RSS plateaus and replica exits passed. Its complete per-cell
+results are retained alongside the older comparison in the JSON companion.
+
+The newer catalog also developed the Directory restore gap: epoch 4 contains
+transactions 1 and 3 without 2. An isolated copy retaining its original format,
+ended authority/session records and Directory objects produces the identical
+restore error on frozen R0. Six short R0 restart cycles on a separate healthy
+fixture pass. A narrower R0 reproducer then creates the gap without injected
+faults: foreign restore, a read-only query, 70 seconds idle, graceful stop, local
+reload and another graceful stop. A subsequent cold restore refuses epoch 2.
+
+Cellar's maintenance checkpoint can stage another transaction after the final
+capture releases its replica mutex for upload, before clean reload closes it.
+The local certificate then retains a position beyond that uploaded cut. A later
+reload skips the missing staged transaction. A current-source cold Repository
+restore fails the same way after the matched run; its exact missing transaction
+2 is preserved locally, timestamped 312 ms after transaction 1. The image verified
+1-CPU/1-GiB startup limits but exited during Repository verification, without OOM;
+the minimum-profile soak was not reached. Dependency patch approval is pending.
+No dependency patch or state repair has been applied. Git browse/session smoke
+does not prove these cold metadata restores.
+
+An actual RustFS CopyObject request subsequently failed with `Disk full` on the
+shared workspace data volume. The task-owned data moved offline to the dedicated
+VM disk; all 19,711 file hashes matched and the original directory is retained.
+The VM disk has approximately 41 GiB free and the same copy now succeeds. This
+capacity fix does not repair the missing transaction. The subsequent matched
+release run uses that provider profile for both variants, with unchanged
+thresholds and original Git prefixes. Both variants complete all 22 cells and
+600-second soaks, with zero Git mismatches, non-rejection request errors and proxy
+errors. Both RSS plateaus and shutdowns pass. Baseline engineering gates all pass;
+the candidate retains 22 failures: eleven p95, ten throughput and one interactive
+gate. One-client late-history p95 improves by about 81%; the mixed soak regresses
+from roughly 18 to 30 ms p95 and 256 to 189 successful requests/second per workload.
+These failed gates remain failures. The native rerun on the VM disk completes
+1,440 Git-oracle queries across 72 cold/warm cells, with twenty interleaved pairs
+per cell. It retains twelve engineering failures. Cold page 100 at 10,000 commits
+falls from 18.325 s to 0.217 s p95 and from 10,055 to 54 median backend reads.
+The older fourteen failures remain in their original receipt.
+
+An auth-only diagnostic isolates the two fresh session reads on an empty catalog.
+Both binaries produce identical session authority, zero request errors and clean
+exits. Overlap improves single-client p95; throughput is similar at 8–64 clients.
+This does not explain the mixed-soak regression. A separate stage diagnostic
+repeats warm native queries 200 times per process in four interleaved pairs.
+Cached blame query work stays near the baseline, while operation cleanup costs
+roughly 30–50 microseconds. These diagnostics do not replace the frozen gates.
+
+The [current-source container/Kubernetes run](https://github.com/crabbuild/crab/actions/runs/44526683530)
+also passes both jobs, including abrupt restart, large LFS and complete-root
+restore on three Kubernetes nodes. The source, image and artifact bindings are
+retained in the JSON report. Those shorter recoveries do not cover the reproduced
+read-only idle/checkpoint/clean-reload sequence.
+
+
+A subsequent ready-close optimization (`37002f85ce2`) polls locator cleanup once
+inline, transferring a pending close to tracked runtime ownership before yielding.
+The red/green regression, ten operation tests, three archive cleanup/cancellation
+tests and strict all-target Clippy pass. Forty diagnostic processes against RustFS
+match native Git. Across their warm samples, the median per-process cleanup p50
+falls from 31.5 to 8 microseconds. This isolates cleanup cost; the full frozen
+acceptance matrix has not been rerun for this follow-up.

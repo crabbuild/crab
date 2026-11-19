@@ -23,9 +23,10 @@
 - **Planned at:** `aafb6d256c5e8d3a8e768d31dd887a18f2afd2e4`, 2026-11-17.
 - **Target:** `crab-v2`; revalidate the target before execution.
 - **Delivery status:** IMPLEMENTED; ACCEPTANCE OPEN. R0–R5 are implemented.
-  Combined local RustFS correctness and enforced minimum-profile functional
-  proof pass; the frozen performance gates do not all pass. R7's measured
-  failures and remaining lifecycle cells are recorded, not waived. See the
+  Source-bound Git-read/session smoke and historical enforced minimum-profile
+  functional proof pass; frozen performance and cold Cellar recovery gates remain
+  failed. R7's measured failures and remaining lifecycle cells are recorded,
+  not waived. See the
   [combined qualification report](../crab/docs/benchmarks/v2-read-hardening-rustfs-2026-11-19.md).
 - **Depends on:** existing read/authority contracts and the applicable resource
   ownership work in `plans/017-local-cache-read-hardening.md`.
@@ -609,6 +610,56 @@ The mounted volume's root is not writable by this user; its existing
 `crabbuild-target/` and `CrabData/` directories are writable. The preflight above
 therefore checks the mount identity and the actual per-worktree target rather
 than incorrectly requiring permission to create a sibling at the volume root.
+
+**Subsequent qualification, 2026-11-19:** revision `8ba88f5a452` adds bounded
+64-KiB JSON chunks, overlapping fresh session/identity-marker reads, complete
+shutdown proof checks and bounded quiet proxy reuse. Source-bound debug/release
+builds, focused tests and strict Clippy pass. Its 46-check two-replica RustFS
+Git-read/session smoke passes, including durable logout and rejection of the
+original cookie/validator by both replicas. Both log/local-durability shutdown
+proofs complete with no pending work and zero exits.
+
+The newer Directory catalog also develops a missing transaction 2 between 1 and
+3. Frozen R0 fails on an isolated copy with the original format and ended
+authority/session records; six short R0 restarts on a healthy fixture pass.
+A narrower R0 reproducer creates the same gap after a read-only foreign restore,
+70 seconds idle, graceful stop, local reload and another stop. Maintenance can
+stage another transaction between the final capture/upload cut and database
+close, leaving the clean-reload certificate ahead of the uploaded position.
+A current-source cold Repository restore also fails after the next matched run;
+its exact transaction 2 remains staged locally. The 1-CPU/1-GiB image starts with
+verified cgroup limits but exits on that Repository verification failure, without
+OOM; its soak is not reached. Dependency patch approval is pending. No dependency
+patch, invented transaction or state repair has been applied.
+
+The preceding `03ecadc5e33` release matrix completes all 22 cells and both
+600-second soaks, but retains 30 p95, 18 throughput and one interactive failure,
+plus one observed upstream disconnect. An actual subsequent RustFS CopyObject
+fails with `Disk full` on the shared workspace volume. Offline migration to the
+dedicated VM disk verifies all 19,711 file hashes, retains the original data and
+makes the same copy succeed; the missing transaction remains missing. The next
+matched run completes all 22 cells and both ten-minute soaks on that provider
+profile with unchanged thresholds and original Git inputs. Both variants have
+zero Git mismatches/non-rejection request errors/proxy errors and pass RSS plateau
+and shutdown proof. Baseline engineering gates pass; candidate retains eleven
+p95, ten throughput and one interactive failure. Its targeted one-client late
+history p95 improves by about 81%, but the mixed soak regresses. The native rerun
+on the VM disk completes 1,440 Git-oracle queries over 72 cold/warm cells and
+retains twelve timing failures; the older fourteen failures remain retained.
+Cold page 100 at 10,000 commits falls from 18.325 s to 0.217 s p95 and from
+10,055 to 54 median backend reads. Current-source CI container and three-node
+Kubernetes recovery jobs pass. The auth-only and warm-stage diagnostics retain
+fresh authority and isolate cleanup overhead without replacing frozen gates.
+Acceptance remains open.
+
+
+A subsequent ready-close optimization (`37002f85ce2`) polls locator cleanup once
+inline, transferring a pending close to tracked runtime ownership before yielding.
+The red/green regression, ten operation tests, three archive cleanup/cancellation
+tests and strict all-target Clippy pass. Forty diagnostic processes against RustFS
+match native Git. Across their warm samples, the median per-process cleanup p50
+falls from 31.5 to 8 microseconds. This isolates cleanup cost; the full frozen
+acceptance matrix has not been rerun for this follow-up.
 
 ### R0 — Freeze the evidence contract and establish a baseline
 
