@@ -42,11 +42,11 @@ export function ReviewFilter({
         <DropdownMenuTrigger asChild>
           <Button
             ref={trigger}
-            variant="ghost"
+            variant="outline"
             size="sm"
             aria-label="Filter by reviews"
           >
-            Reviews <ChevronDownIcon size={14} />
+            Reviews <ChevronDownIcon data-icon="inline-end" />
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent

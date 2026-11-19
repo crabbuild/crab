@@ -13,6 +13,8 @@ import {
 import {
   IssueOpenedIcon,
   CircleIcon,
+  PencilIcon,
+  PersonIcon,
   GitPullRequestIcon,
   TagIcon,
   MilestoneIcon,
@@ -139,7 +141,7 @@ export function DiscussionWorkspace({
     {
       view: root,
       label: pulls ? "Authored by me" : "Created by me",
-      Icon: CircleIcon,
+      Icon: PencilIcon,
       active:
         view === root &&
         mine === true &&
@@ -150,7 +152,7 @@ export function DiscussionWorkspace({
     {
       view: root,
       label: "Assigned to me",
-      Icon: CircleIcon,
+      Icon: PersonIcon,
       active: view === root && assigned === true && reviewRequested !== true,
       query: pulls ? "assignee:@me is:open" : "is:issue assignee:@me is:open",
     },

@@ -204,6 +204,10 @@ moves, so timing details cannot shift a clicked control.
 Both lists group reaction sorting under **Sort → Reactions**. Arrow Right/Left
 enters/leaves the submenu; Escape dismisses the menu. Sorting retains the query
 and direction and discards the previous page cursor.
+State navigation and filter menus use joined buttons, with horizontal scrolling
+for filters on narrow screens. Personal navigation uses a pencil for authored
+work and a person for assignments. Shared Markdown editors retain their header
+and minimum body height across Write/Preview, including the wrapped mobile toolbar.
 
 Use the primitive APIs directly: buttons contain icons with `data-icon`, inputs
 with addons use `InputGroup`, menus compose their groups/items, and forms use

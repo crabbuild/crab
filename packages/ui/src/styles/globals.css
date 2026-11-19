@@ -2418,13 +2418,18 @@ main {
 .discussion-density {
   background: var(--background);
 }
-.issues-filters nav a {
-  color: var(--muted-foreground);
-  padding: --spacing(2) --spacing(3);
-  border-radius: var(--radius);
+.discussion-density > span:not(:first-child) [data-slot="toggle-group-item"] {
+  border-left: 0;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
 }
-.issues-filters nav a.active {
+.discussion-density > span:not(:last-child) [data-slot="toggle-group-item"] {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.discussion-state-controls a[aria-current="page"] {
   color: var(--foreground);
+  background: var(--secondary);
   font-weight: 600;
 }
 .issue-list-panel {
@@ -2433,7 +2438,7 @@ main {
 .issue-list-panel .issues-filters {
   min-height: 48px;
   margin: 0;
-  padding: 0 --spacing(4);
+  padding: --spacing(2) --spacing(4);
   background: var(--muted);
   border-bottom: 1px solid var(--border);
 }
@@ -2721,8 +2726,9 @@ main {
   margin-left: auto;
   overflow-x: auto;
 }
-.editor-toolbar[hidden] {
-  display: none;
+.editor-toolbar[aria-hidden="true"] {
+  /* Retain the toolbar's space so mode changes keep the tabs and body aligned. */
+  visibility: hidden;
 }
 .editor-tool-group {
   display: inline-flex;
@@ -2740,7 +2746,7 @@ main {
   line-height: 1.6;
 }
 .editor-preview {
-  min-height: 170px;
+  min-height: calc(170px + --spacing(4));
 }
 .editor-help {
   padding: 0 --spacing(3) --spacing(2.5);
@@ -2983,12 +2989,6 @@ main {
     flex-basis: 100%;
   }
 
-  .issues-filters nav {
-    gap: 0;
-  }
-  .issues-filters nav a {
-    padding: --spacing(2);
-  }
   .discussion-markdown,
   .discussion-compose.panel {
     padding: --spacing(3.5);
