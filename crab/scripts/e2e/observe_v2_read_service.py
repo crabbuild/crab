@@ -21,7 +21,7 @@ import time
 import urllib.request
 from urllib.parse import urlsplit
 
-from qualify_v2_read_service import endpoint, require, sha256
+from qualify_v2_read_service import canonical_hash, endpoint, require, sha256
 from run_concurrent_push_smoke import RequestCountingProxy
 
 METRICS = (
@@ -172,8 +172,10 @@ class Observation:
         if delta["proxy_errors"]:
             failures.append("provider_proxy_errors")
         report = {"schema":1, "status":"failed" if failures else "observed", "failures":failures,
+                  "profile_sha256":canonical_hash(self.profile),
                   "build_receipt_sha256":sha256(Path(self.profile["build_receipt"])),
                   "observer_sha256":sha256(Path(__file__)), "process_start_identities":self.identities,
+                  "provider_counter_sha256":sha256(Path(__file__).with_name("run_concurrent_push_smoke.py")),
                   "samples":len(self.samples), "duration_seconds":time.monotonic() - self.started,
                   "peak_rss_bytes":[max(sample["replicas"][i]["rss_bytes"] for sample in self.samples)
                                     for i in range(len(self.identities))],
@@ -196,10 +198,16 @@ def main() -> int:
     require(bool(command), "missing measured command")
     observation = Observation(json.loads(args.profile.read_text()), args.output)
     observation.start()
+    result = None
     try:
         result = subprocess.run(command, check=False)
     finally:
         report = observation.finish()
+        report["command_exit_code"] = result.returncode if result is not None else None
+        if result is None or result.returncode:
+            report["failures"].append("measured_command_failed")
+            report["status"] = "failed"
+        (args.output / "report.json").write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
     return result.returncode or int(bool(report["failures"]))
 
 

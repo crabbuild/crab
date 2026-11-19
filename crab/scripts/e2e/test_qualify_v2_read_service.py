@@ -196,6 +196,15 @@ class ReadServiceTests(unittest.TestCase):
                                 "offered_requests_per_second":1, "successful_requests_per_second":0}}}]}
         self.assertIn("mixed:failure_fraction", validate_report(report, self.profile))
 
+    def test_oracle_mismatches_fail_even_inside_an_overload_envelope(self):
+        self.profile["cases"][0]["maximum_failure_fraction"] = .75
+        summary = {"attempts":40,"successes":20,"errors":1,"rejected":19,"oracle_mismatches":1,
+                   "offered_requests_per_second":10,"successful_requests_per_second":5,
+                   "successful_latency_us":{"p50":1,"p95":2},"ttfb_us":{"p50":1,"p95":2}}
+        report = {"schema":1,"binding":self.binding,"cases":[{"name":"mixed","cache":"warm_objects",
+                  "workloads":{"source":summary}}]}
+        self.assertEqual(validate_report(report, self.profile), ["mixed:git_oracle_mismatch"])
+
     def test_p99_requires_at_least_one_thousand_observations(self):
         self.assertNotIn("p99", percentiles(list(range(999))))
         self.assertEqual(percentiles(list(range(1000)))["p99"], 989)
