@@ -1187,6 +1187,34 @@
     "hosted-provider latency excluded from this local RustFS verification"
   ],
   "followups_2026_11_19": {
+    "approved_cellar_checkpoint_fix": {
+      "approval": "User explicitly approved scoped Cellar dependency fix",
+      "sdk_revision": "590640c7ce49ef3fd391bdae9540ba23081cd74b",
+      "sdk_pr": "https://github.com/crabbuild/cellar/pull/176",
+      "published_source": "95f860bcddb1f49dc72453f100154c4eeeb7bfbd",
+      "sdk_reproduction": {
+        "unpatched_failures": 5,
+        "fixed_passes": 5,
+        "repeatability_receipt_sha256": "721959bc88f7c4f46ea89dd1cd425982db1ab8a07bbcc517bc6c6687cc142c8a"
+      },
+      "combined_release_build_receipt_sha256": "a98f52e40d5055fa792f3d0d4fbb3a28d26fc36a8792e86ac09e73d7b9457212",
+      "functional": {
+        "status": "passed",
+        "checks": 49,
+        "receipt_sha256": "4e4d4e635f21d0f8ea24771eb0ff4aca4ebf0f75b335b6307d0e8cf1a977e00c"
+      },
+      "directory_recovery": {
+        "status": "passed",
+        "cycles": [
+          "cold-restore-aged-read-only",
+          "same-local-reload",
+          "independent-cold-restore"
+        ],
+        "complete_replica_shutdowns": 6,
+        "receipt_sha256": "80ab2e5fb48f1db0286744c157422b48606a2e08eaa3aa7428a9b8659d461a34"
+      },
+      "scope": "Fresh valid post-fix roots; exact original Git tips republished canonically. Existing invalid LTX chains remain refused and unchanged. R0 rebuilt with only common approved SDK pin; original binaries/results retained. No performance or remaining lifecycle gate waived."
+    },
     "revision": "8ba88f5a45288979f9d4afb262e0f3faee6555a4",
     "acceptance": "open",
     "builds": {
