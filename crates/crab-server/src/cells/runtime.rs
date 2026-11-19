@@ -21,6 +21,45 @@ pub(crate) struct RunningCells {
     pub client: Arc<CellClient>,
 }
 
+pub(crate) fn finish_shutdown(outcome: cellar::sdk::NodeOutcome) -> Result<()> {
+    let cellar::sdk::NodeOutcome::Stopped(report) = outcome else {
+        return Err(Error::Invalid("Cellar did not stop gracefully"));
+    };
+    // Stopped also represents a bounded, incomplete stop. Only completed
+    // durability phases justify a successful exit or removal of local evidence.
+    let complete = report.ingress_drained
+        && report.application_work_drained
+        && report.pending_application_events == 0
+        && report.cells_drained
+        && report.pending_dispatches == 0
+        && report.log_quiesced
+        && report.local_durability_closed
+        && !report.drain_timed_out
+        && !report.deadline_elapsed;
+    tracing::info!(
+        complete,
+        log_quiesced = report.log_quiesced,
+        local_durability_closed = report.local_durability_closed,
+        clean_reload_prepared = report.clean_reload_prepared,
+        pending_application_events = report.pending_application_events,
+        pending_dispatches = report.pending_dispatches,
+        deadline_elapsed = report.deadline_elapsed,
+        "Cellar shutdown proof"
+    );
+    if let Some(raft) = report.raft {
+        raft.result.map_err(Error::sdk)?;
+        if raft.startup_incomplete {
+            return Err(Error::Invalid("Cellar Raft startup was incomplete"));
+        }
+    }
+    if !complete {
+        return Err(Error::Invalid("Cellar shutdown proof was incomplete"));
+    }
+    // The clean reload certificate is optional: normal recovery remains valid
+    // after a complete drain, and Handoff deliberately does not prepare one.
+    Ok(())
+}
+
 pub(crate) fn bucket(config: &Config) -> Result<Bucket> {
     let selection =
         crate::storage_root::StorageRoot::selection(&config.storage).map_err(Error::sdk)?;
@@ -381,12 +420,7 @@ impl TestRuntime {
             .shutdown(cellar::sdk::ShutdownMode::Preserve)
             .await
             .map_err(Error::sdk)?;
-        if !matches!(outcome, cellar::sdk::NodeOutcome::Stopped(report) if report.cells_drained && report.application_work_drained && !report.drain_timed_out)
-        {
-            return Err(crate::Error::Config(
-                "test Cellar node did not complete its drain",
-            ));
-        }
+        finish_shutdown(outcome)?;
         self.closed
             .store(true, std::sync::atomic::Ordering::Release);
         Ok(())
@@ -402,6 +436,62 @@ impl Drop for TestRuntime {
             // Forced closure cannot prove that begun blocking work has joined.
             // Retain its directory rather than remove live recovery evidence.
             let _retained = directory.keep();
+        }
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::finish_shutdown;
+    use cellar::sdk::{NodeOutcome, ShutdownMode, ShutdownReport};
+
+    fn completed() -> ShutdownReport {
+        ShutdownReport {
+            raft: None,
+            mode: ShutdownMode::Preserve,
+            ingress_drained: true,
+            application_work_drained: true,
+            pending_application_events: 0,
+            cells_drained: true,
+            pending_dispatches: 0,
+            log_quiesced: true,
+            local_durability_closed: true,
+            clean_reload_prepared: false,
+            drain_timed_out: false,
+            deadline_elapsed: false,
+        }
+    }
+
+    #[test]
+    fn incomplete_shutdown_phases_never_report_success() {
+        for phase in 0..9 {
+            let mut report = completed();
+            match phase {
+                0 => report.ingress_drained = false,
+                1 => report.application_work_drained = false,
+                2 => report.pending_application_events = 1,
+                3 => report.cells_drained = false,
+                4 => report.pending_dispatches = 1,
+                5 => report.log_quiesced = false,
+                6 => report.local_durability_closed = false,
+                7 => report.drain_timed_out = true,
+                _ => report.deadline_elapsed = true,
+            }
+            assert!(
+                finish_shutdown(NodeOutcome::Stopped(report)).is_err(),
+                "phase {phase}"
+            );
+        }
+    }
+
+    #[test]
+    fn complete_preserve_and_handoff_do_not_require_a_reload_certificate() {
+        for mode in [ShutdownMode::Preserve, ShutdownMode::Handoff] {
+            let report = ShutdownReport {
+                mode,
+                ..completed()
+            };
+            finish_shutdown(NodeOutcome::Stopped(report)).unwrap();
         }
     }
 }

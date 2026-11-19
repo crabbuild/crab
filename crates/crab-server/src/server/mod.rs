@@ -421,18 +421,8 @@ pub async fn serve(config: Config) -> Result<()> {
                 .await
                 .map_err(crate::cells::Error::sdk)
                 .map_err(crate::Error::Cell)
-                .and_then(|outcome| match outcome {
-                    cellar::sdk::NodeOutcome::Stopped(report)
-                        if report.ingress_drained
-                            && report.application_work_drained
-                            && report.cells_drained
-                            && !report.drain_timed_out =>
-                    {
-                        Ok(())
-                    }
-                    _ => Err(crate::Error::Config(
-                        "Cellar did not complete a graceful shutdown",
-                    )),
+                .and_then(|outcome| {
+                    crate::cells::runtime::finish_shutdown(outcome).map_err(crate::Error::Cell)
                 })
         };
         runtime.shutdown().await;
