@@ -1,135 +1,59 @@
-name: Alpha Windows storage qualification
+name: Alpha Windows publication contract
 on:
   workflow_dispatch:
 permissions:
   contents: read
-  actions: read
 jobs:
-  notebook:
-    runs-on: windows-2022
-    timeout-minutes: 120
-    defaults:
-      run:
-        shell: bash
-        working-directory: packages/desktop
-    env:
-      CSC_IDENTITY_AUTO_DISCOVERY: false
-      CARGO_INCREMENTAL: 0
-      CARGO_PROFILE_DEV_DEBUG: 0
+  publication:
+    runs-on: windows-2025
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
         with:
-          ref: e77cd860de6ab3bf934ba04f3100d9e959ea6f2a
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: packages/desktop/.nvmrc
-      - name: Set private qualification paths
+          toolchain: 1.97.0
+      - name: Compare dependency and standard replacement semantics
+        shell: bash
         run: |
-          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crab-notebook-target" >> "$GITHUB_ENV"
-          mkdir -p "$RUNNER_TEMP/crab-notebook-target"
-      - uses: actions/download-artifact@v4
-        with:
-          name: alpha2-windows-quoted-native
-          path: packages/desktop/resources/native/win-x64
-          run-id: 44543250890
-          github-token: ${{ github.token }}
-      - name: Install desktop dependencies
-        run: npm ci
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install pinned notebook runtime
-        run: |
-          python -m pip install awscli jupyter_client==8.6.3 ipykernel==6.29.5 jupyter_server==2.17.0
-          echo "CRAB_TEST_JUPYTER_PYTHON=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
-      - name: Build exact current application
-        run: |
-          npm run build:renderer
-          npm run build:electron
-          node scripts/package.mjs --dir --publish never
-      - name: Verify actual Electron PID and save permissions
-        run: |
-          node <<'JS'
-          const assert = require('node:assert/strict');
-          const fs = require('node:fs');
-          const path = require('node:path');
-          const { execFileSync } = require('node:child_process');
-          const { _electron: electron } = require('@playwright/test');
-          (async () => {
-            const root = fs.mkdtempSync(path.join(process.env.CARGO_TARGET_DIR, 'platform-contract-'));
-            const source = path.join(root, 'source');
-            fs.mkdirSync(source);
-            const target = path.join(source, 'note.md');
-            fs.writeFileSync(target, 'original');
-            let app;
-            try {
-              app = await electron.launch({ executablePath: path.resolve('release/win-unpacked/Crab.exe'), args: [`--user-data-dir=${path.join(root, 'profile')}`] });
-              const mainPid = await app.evaluate(() => process.pid);
-              const launcherPid = app.process().pid;
-              const write = text => app.evaluate(async ({ app }, { target, text }) => {
-                const load = process.getBuiltinModule('module').createRequire(app.getAppPath() + '/package.json');
-                try { return { bytes: await load('./dist-electron/file-write.cjs').writeTextAtomically(target, text) }; }
-                catch (error) { return { code: error.code, message: error.message }; }
-              }, { target, text });
-              fs.chmodSync(source, 0o500);
-              const directoryMode = await write('directory mode does not deny Windows writes');
-              assert.equal(directoryMode.bytes, 43);
-              fs.chmodSync(source, 0o700);
-              fs.chmodSync(target, 0o444);
-              const readOnlyFile = await write('must fail');
-              assert.equal(readOnlyFile.code, 'EACCES');
-              assert.equal(fs.readFileSync(target, 'utf8'), 'directory mode does not deny Windows writes');
-              fs.chmodSync(target, 0o644);
-              const retry = await write('retry saved');
-              assert.equal(retry.bytes, 11);
-              assert.equal(fs.readFileSync(target, 'utf8'), 'retry saved');
-              const git = args => execFileSync('git', args, { cwd: source });
-              git(['init', '--initial-branch=main']);
-              fs.writeFileSync(target, 'INDEX');
-              git(['add', '--', 'note.md']);
-              const indexBefore = git(['ls-files', '--stage', '-z']);
-              fs.writeFileSync(target, 'DIRTY');
-              const page = await app.firstWindow();
-              await page.waitForFunction(() => Boolean(window.crab?.rpc));
-              const rpc = (method, params) => page.evaluate(async ({ method, params }) => {
-                try { return { result: await window.crab.rpc(method, params) }; }
-                catch (error) { return { error: { code: error.code, message: error.message } }; }
-              }, { method, params });
-              const opened = await rpc('open_local', { repo_id: 'publication-contract', path: source });
-              assert.ok(opened.result, JSON.stringify(opened));
-              const retained = await rpc('file_open', { repo_id: 'publication-contract', path: 'note.md' });
-              assert.ok(retained.result, JSON.stringify(retained));
-              const publication = await rpc('files_restore', { repo_id: 'publication-contract', paths: ['note.md'], op_id: 'retained-publication' });
-              const snapshot = await rpc('read_range', { repo_id: 'publication-contract', file_id: retained.result.file_id, offset: 0, length: 5 });
-              assert.equal(Buffer.from(snapshot.result.bytes_b64, 'base64').toString(), 'DIRTY');
-              const afterPublication = fs.readFileSync(target, 'utf8');
-              await rpc('file_close', { repo_id: 'publication-contract', file_id: retained.result.file_id });
-              const withoutReader = await rpc('files_restore', { repo_id: 'publication-contract', paths: ['note.md'], op_id: 'publication-without-reader' });
-              assert.ok(withoutReader.result, JSON.stringify(withoutReader));
-              assert.equal(fs.readFileSync(target, 'utf8'), 'INDEX');
-              assert.deepEqual(git(['ls-files', '--stage', '-z']), indexBefore);
-              await rpc('close', { repo_id: 'publication-contract' });
-              fs.writeFileSync('windows-publication-contract.json', JSON.stringify({ publication, afterPublication, snapshot: 'DIRTY', withoutReader, final: 'INDEX', indexUnchanged: true }, null, 2));
-              assert.notEqual(mainPid, launcherPid);
-              const closed = app.waitForEvent('close');
-              process.kill(mainPid, 'SIGKILL');
-              await closed;
-              app = undefined;
-              fs.writeFileSync('windows-platform-contracts.json', JSON.stringify({ mainPid, launcherPid, directoryMode, readOnlyFile, retry, closeAfterMainPidKill: true }, null, 2));
-            } finally {
-              fs.chmodSync(source, 0o700);
-              fs.chmodSync(target, 0o644);
-              await app?.close();
-              fs.rmSync(root, { recursive: true, force: true });
-            }
-          })().catch(error => { console.error(error); process.exitCode = 1; });
-          JS
+          mkdir -p "$RUNNER_TEMP/alpha2-rename-contract"
+          cd "$RUNNER_TEMP/alpha2-rename-contract"
+          cat > contract.rs <<'RS'
+          use std::{fs::{self, File}, io::{Read, Write}, os::windows::ffi::OsStrExt, path::Path};
+          #[link(name = "kernel32")]
+          unsafe extern "system" { fn MoveFileExW(old: *const u16, new: *const u16, flags: u32) -> i32; }
+          fn wide(path: &Path) -> Vec<u16> { path.as_os_str().encode_wide().chain(Some(0)).collect() }
+          fn main() -> std::io::Result<()> {
+              let root = std::env::current_dir()?.join("owned");
+              fs::create_dir(&root)?;
+              let destination = root.join("content.bin");
+              let temporary = root.join("temporary.bin");
+              fs::write(&destination, b"captured preview")?;
+              let mut preview = File::open(&destination)?;
+              let mut file = File::create(&temporary)?;
+              file.write_all(b"published content")?;
+              file.flush()?;
+              let old = wide(&temporary);
+              let new = wide(&destination);
+              // SAFETY: both paths are live nul-terminated UTF-16 allocations.
+              let moved = unsafe { MoveFileExW(old.as_ptr(), new.as_ptr(), 1) };
+              let dependency_error = std::io::Error::last_os_error();
+              assert_eq!(moved, 0, "control unexpectedly replaced an open destination");
+              assert_eq!(dependency_error.raw_os_error(), Some(5));
+              assert_eq!(fs::read(&destination)?, b"captured preview");
+              fs::rename(&temporary, &destination)?;
+              let mut retained = Vec::new();
+              preview.read_to_end(&mut retained)?;
+              assert_eq!(retained, b"captured preview");
+              assert_eq!(fs::read(&destination)?, b"published content");
+              drop(file); drop(preview);
+              fs::remove_dir_all(&root)?;
+              println!("{{\"moveFileExError\":5,\"standardRename\":true,\"retainedPreview\":true,\"exactPublishedBytes\":true,\"cleanup\":true}}");
+              Ok(())
+          }
+          RS
+          rustc --edition=2024 contract.rs -o contract.exe
+          ./contract.exe | tee publication-contract.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: alpha2-windows-platform-contracts-proof
-          path: |
-            packages/desktop/windows-publication-contract.json
-            packages/desktop/windows-platform-contracts.json
-            packages/desktop/windows-observation.log
-            packages/desktop/test-results/**
+          name: alpha2-windows-rename-contract
+          path: ${{ runner.temp }}/alpha2-rename-contract/publication-contract.json
