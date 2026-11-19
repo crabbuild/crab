@@ -227,3 +227,15 @@ tests and strict all-target Clippy pass. Forty diagnostic processes against Rust
 match native Git. Across their warm samples, the median per-process cleanup p50
 falls from 31.5 to 8 microseconds. This isolates cleanup cost; the full frozen
 acceptance matrix has not been rerun for this follow-up.
+
+
+The branch is rebased onto `crab-v2` at `464d943a045`, preserving the newer file
+workspace layout and preview-state migration. The rebased code (`10994bae022`)
+builds as a release; UI type checking, seven API transport tests and eighteen
+browser tests pass. Its release SHA-256 is
+`f8c9a0b0d2d0412bc79f35180a6bfa617eb53c4a0dd925fabb211174b550f1d5`.
+The new HTTP smoke fails before public serving: the retained Repository epoch 9
+still contains 1 and 3 without 2. It exits 1 after a complete shutdown proof and
+reaches none of the 46 read checks. The earlier successful 46-check run remains
+historical; it does not qualify this restart. Dependency approval remains pending,
+and the full frozen timing matrix has not been rerun for the ready-close change.
