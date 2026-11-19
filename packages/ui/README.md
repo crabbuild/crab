@@ -211,6 +211,11 @@ dropdowns. Workbench controls use these shared components, including search,
 chart axes, schema actions, presets, and collapsible run history. Its CodeMirror
 SQL editor is a custom `input-group-control` inside `InputGroup`, which owns the
 single border and focus ring while CodeMirror retains completion and shortcuts.
+The SQL heading owns the compact engine/format/encoding metadata; the repository
+breadcrumb already identifies the file. Explain results use a dedicated plan
+view: DuckDB diagrams preserve their exact monospaced whitespace and scroll
+inside the pane, while SQLite retains its native step columns. Completed
+results own their presentation mode, including after failed or cancelled runs.
 Schema and result controls share a grid header track; column filtering sits
 below that track so their separator lines stay aligned as controls wrap.
 CSV/TSV previews up to the existing 50 MB in-memory budget decode Unicode BOMs,

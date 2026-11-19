@@ -2007,6 +2007,99 @@ test("SQL workbench shares form controls and keeps chart axes keyboard accessibl
   }
 });
 
+test("Explain preserves query plans and the compact SQL header across engines", async ({
+  page,
+}) => {
+  const SQL = await initSqlJs();
+  const database = new SQL.Database();
+  database.run(
+    "CREATE TABLE data (name TEXT, score REAL); INSERT INTO data VALUES ('alpha', 1), ('beta', 2)",
+  );
+  const sqlite = database.export();
+  database.close();
+  await routePreviewFiles(page, {
+    "plan.csv": { text: null, bytes: strToU8("name,score\nalpha,1\nbeta,2\n") },
+    "plan.sqlite": { text: null, bytes: sqlite },
+  });
+  for (const extension of ["csv", "sqlite"]) {
+    await page.goto(`/team/project/blob/main/plan.${extension}`);
+    const workbench = page.getByRole("region", {
+      name: `plan.${extension} query workbench`,
+    });
+    await expect(
+      workbench.getByRole("cell", { name: "alpha", exact: true }),
+    ).toBeVisible();
+    const editor = workbench.getByRole("textbox", { name: "SQL query" });
+    await editor.fill(
+      "SELECT a.name, b.score FROM data a JOIN data b ON a.score = b.score",
+    );
+    await workbench
+      .getByRole("button", { name: "Explain", exact: true })
+      .click();
+    const plan = workbench.getByRole("region", {
+      name: "Query plan",
+      exact: true,
+    });
+    await expect(plan).toBeVisible();
+    await expect(
+      workbench.getByRole("button", { name: "Chart", exact: true }),
+    ).toHaveCount(0);
+    await expect(
+      workbench.getByText("Local data workbench", { exact: true }),
+    ).toHaveCount(0);
+    await expect(workbench.locator(".data-query-heading")).toContainText(
+      extension === "sqlite" ? "SQLite" : "DuckDB",
+    );
+    await expect(editor).toHaveAccessibleDescription(/Read-only.*Ctrl\+Space/);
+    if (extension === "csv") {
+      const diagram = plan.locator("pre");
+      await expect(diagram).toContainText("HASH_JOIN");
+      await expect(diagram).toHaveCSS("white-space", "pre");
+      expect((await diagram.innerText()).split("\n").length).toBeGreaterThan(
+        10,
+      );
+      expect((await diagram.boundingBox())!.height).toBeGreaterThan(100);
+    } else {
+      await expect(
+        plan.getByRole("columnheader", { name: "detail", exact: true }),
+      ).toBeVisible();
+      await expect(plan).toContainText("SCAN");
+    }
+    for (const [width, theme] of [
+      [1280, "light"],
+      [390, "dark"],
+    ] as const) {
+      await page.setViewportSize({ width, height: 900 });
+      await selectTheme(page, theme);
+      expect(
+        await page.evaluate(() => document.documentElement.scrollWidth),
+      ).toBeLessThanOrEqual(width);
+      await expectNoAccessibilityViolations(page);
+    }
+    await editor.fill("SELECT missing_column FROM data");
+    await workbench
+      .getByRole("button", { name: "Run query", exact: true })
+      .click();
+    await expect(workbench.getByRole("alert")).toContainText(
+      "Query did not run",
+    );
+    await expect(plan).toBeVisible();
+    await workbench
+      .getByRole("button", { name: "Count rows", exact: true })
+      .click();
+    await workbench
+      .getByRole("button", { name: "Run query", exact: true })
+      .click();
+    await expect(
+      workbench.getByRole("cell", { name: "2", exact: true }),
+    ).toBeVisible();
+    await expect(plan).toHaveCount(0);
+    await expect(
+      workbench.getByRole("button", { name: "Chart", exact: true }),
+    ).toBeVisible();
+  }
+});
+
 test("delimited workbenches preserve encoded text and align their headers", async ({
   page,
 }) => {
@@ -2187,7 +2280,7 @@ test("format-aware previews explore data, office files, media, and databases loc
     .fill("SELECT model, score FROM data");
   await csvWorkbench.getByRole("button", { name: "Explain" }).click();
   await expect(
-    csvWorkbench.getByRole("cell", { name: "physical_plan" }),
+    csvWorkbench.getByRole("region", { name: "Query plan", exact: true }),
   ).toBeVisible();
   const resultDownload = page.waitForEvent("download");
   await csvWorkbench

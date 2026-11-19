@@ -5,7 +5,7 @@ use axum::{
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
-use crab_remote_git::{Blob, Commit, CommitSummary, PageCursor, TreeEntry};
+use crab_remote_git::{Blob, BlobMetadata, Commit, CommitSummary, PageCursor, TreeEntry};
 use serde_json::{Value, json};
 pub(super) const MAX_INLINE_TEXT_BYTES: usize = 1024 * 1024;
 
@@ -100,7 +100,15 @@ pub(super) fn content_json(blob: &Blob) -> Value {
         std::str::from_utf8(&blob.bytes).ok()
     };
     let text = decoded.filter(|_| blob.bytes.len() <= MAX_INLINE_TEXT_BYTES);
-    json!({"oid":blob.metadata.oid.to_string(),"size":blob.bytes.len(),"mode":format!("{:06o}",blob.metadata.mode.raw()),"classification":format!("{:?}",blob.metadata.classification),"text":text,"text_truncated":decoded.is_some() && text.is_none()})
+    file_json(&blob.metadata, text, decoded.is_some() && text.is_none())
+}
+
+pub(super) fn file_json(
+    metadata: &BlobMetadata,
+    text: Option<&str>,
+    text_truncated: bool,
+) -> Value {
+    json!({"oid":metadata.oid.to_string(),"size":metadata.git_size,"mode":format!("{:06o}",metadata.mode.raw()),"classification":format!("{:?}",metadata.classification),"text":text,"text_truncated":text_truncated})
 }
 
 pub(super) fn image_content_type(bytes: &[u8]) -> Option<&'static str> {

@@ -4599,7 +4599,13 @@ main {
   outline-offset: -2px;
   box-shadow: none;
 }
-:is(.repo-file-workspace, .revision-picker-panel)
+/* Pane searches use inset outlines; workbench inputs own their focus ring. */
+:is(
+    .tree-sidebar,
+    .code-symbols-panel,
+    .file-navigation,
+    .revision-picker-panel
+  )
   [data-slot="input-group"]:has(
     [data-slot="input-group-control"]:focus-visible
   ):not(:has([aria-invalid="true"])) {
@@ -5439,7 +5445,6 @@ main {
   min-width: 0;
   background: var(--background);
 }
-.data-workbench-header,
 .data-query-heading,
 .data-query-actions,
 .data-results-toolbar,
@@ -5448,37 +5453,6 @@ main {
   align-items: center;
   justify-content: space-between;
   gap: --spacing(3);
-}
-.data-workbench-header {
-  min-height: 58px;
-  padding: --spacing(2.5) --spacing(3.5);
-  border-bottom: 1px solid var(--border);
-  background:
-    linear-gradient(
-      90deg,
-      color-mix(in srgb, var(--info) 10%, transparent),
-      transparent 42%
-    ),
-    var(--background);
-}
-.data-workbench-header > div:first-child {
-  display: grid;
-  gap: --spacing(0.5);
-  min-width: 0;
-}
-.data-workbench-header strong {
-  overflow: hidden;
-  font-size: var(--text-sm);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.data-workbench-kicker {
-  color: var(--info);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
 }
 .data-workbench-badges {
   display: flex;
@@ -5500,10 +5474,20 @@ main {
   border-bottom: 1px solid var(--border);
   background: var(--secondary);
 }
+.data-query-history-heading,
 .data-query-heading {
   flex-wrap: wrap;
-  margin-bottom: 7px;
   font-size: var(--text-xs);
+}
+.data-query-heading {
+  min-height: 28px;
+  margin-bottom: --spacing(2);
+}
+.data-query-history-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: --spacing(2);
 }
 .sql-editor .cm-editor {
   max-height: min(44vh, 420px);
@@ -5741,6 +5725,32 @@ main {
 }
 .data-results .data-explorer-toolbar {
   border-top: 0;
+}
+.data-query-plan {
+  min-width: 0;
+  max-height: min(58vh, 620px);
+  overflow: auto;
+}
+.data-query-plan > section:not(.data-explorer) {
+  padding: --spacing(3);
+}
+.data-query-plan h3 {
+  margin: 0 0 --spacing(3);
+  color: var(--muted-foreground);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  text-transform: capitalize;
+}
+.data-query-plan pre {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 20px;
+  white-space: pre;
+}
+.data-query-plan .data-grid td {
+  max-width: none;
+  white-space: pre;
 }
 .data-chart {
   min-height: 300px;
@@ -6191,10 +6201,6 @@ main {
   }
   .data-workbench-body {
     grid-template-columns: 180px minmax(0, 1fr);
-  }
-  .data-workbench-header {
-    align-items: flex-start;
-    flex-direction: column;
   }
   .data-workbench-badges {
     justify-content: flex-start;

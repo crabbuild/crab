@@ -3,6 +3,110 @@ use crab_metadata::capsule_protocol::{BrowseIndexes, load_browse_indexes};
 use crab_remote_git::OperationKind;
 
 #[tokio::test]
+async fn large_file_metadata_does_not_materialize_the_blob() {
+    let mut server = fixture_without_cells().await;
+    Arc::get_mut(&mut server).unwrap().options = RepositoryOptions::new(
+        crab_remote_git::ObjectLimits {
+            max_object_bytes: 1024,
+            ..Default::default()
+        },
+        Default::default(),
+    )
+    .unwrap();
+    let repo = repository(&server);
+    let body = vec![b'x'; 1024 * 1024 + 1];
+    let history = crate::test_support::git::history_with_blob(&body);
+    let root = crab_write::capsule_protocol::open_root(&repo.layout)
+        .await
+        .unwrap();
+    publish_next(
+        &repo,
+        root,
+        None,
+        history.oids[0].clone(),
+        Some(history.pack),
+    )
+    .await;
+    let response = router(Arc::clone(&server))
+        .oneshot(
+            Request::builder()
+                .uri("/api/repos/team/repo/file?rev=main&path=asset")
+                .header("host", "localhost:8788")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    close(&server).await;
+    assert_eq!(
+        (
+            status,
+            value["size"].clone(),
+            value["text"].clone(),
+            value["text_truncated"].clone()
+        ),
+        (
+            StatusCode::OK,
+            serde_json::json!(body.len()),
+            serde_json::Value::Null,
+            serde_json::json!(true)
+        )
+    );
+}
+
+#[tokio::test]
+async fn raw_blob_reads_do_not_use_the_json_response_budget() {
+    let mut server = fixture_without_cells().await;
+    Arc::get_mut(&mut server).unwrap().options = RepositoryOptions::new(
+        Default::default(),
+        crab_remote_git::OperationLimits {
+            max_response_bytes: 512,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let repo = repository(&server);
+    let body = vec![b'x'; 1024 * 1024 + 1];
+    let history = crate::test_support::git::history_with_blob(&body);
+    let root = crab_write::capsule_protocol::open_root(&repo.layout)
+        .await
+        .unwrap();
+    publish_next(
+        &repo,
+        root,
+        None,
+        history.oids[0].clone(),
+        Some(history.pack),
+    )
+    .await;
+    let response = router(Arc::clone(&server))
+        .oneshot(
+            Request::builder()
+                .uri("/api/repos/team/repo/blob?rev=main&path=asset")
+                .header("host", "localhost:8788")
+                .header("range", "bytes=0-31")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    close(&server).await;
+    assert_eq!(
+        (status, bytes.as_ref()),
+        (StatusCode::PARTIAL_CONTENT, &body[..32])
+    );
+}
+
+#[tokio::test]
 async fn projection_reads_reuse_the_runtime_cell_during_background_ingestion() {
     let server = fixture().await;
     let repo = repository(&server);

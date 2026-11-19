@@ -1,8 +1,9 @@
 use super::{
     Action, Parameters, Payload,
     representation::{
-        commit_json, commit_summary_json, content_json, display_path, encode_cursor, encode_hex,
-        entry_json, json_attribution_summary, path_history_json,
+        MAX_INLINE_TEXT_BYTES, commit_json, commit_summary_json, content_json, display_path,
+        encode_cursor, encode_hex, entry_json, file_json, json_attribution_summary,
+        path_history_json,
     },
 };
 use crate::{repository::projection, server::Server};
@@ -73,7 +74,15 @@ pub(super) async fn execute(
         Action::Diff => OperationKind::Diff,
         Action::Blame => OperationKind::Blame,
     };
-    let operation = repository.operation(kind, cancellation).await?;
+    let mut limits = server.options.operation_limits();
+    if matches!(action, Action::Blob | Action::Asset) {
+        // Raw bodies have their own bounded allowance. Raising the JSON cap
+        // would admit large tree/diff responses without helping blob reads.
+        limits.max_response_bytes = crate::server::MAX_BLOB_BYTES;
+    }
+    let operation = repository
+        .operation_with_limits(kind, cancellation, limits)
+        .await?;
     let result = async {
         let snapshot = repository.snapshot(&revision, &operation).await?;
         let commit = snapshot.commit(&operation).await?;
@@ -259,7 +268,16 @@ pub(super) async fn execute(
             Action::Asset => {
                 return Ok(Payload::Asset(snapshot.read_blob(&path, &operation).await?));
             }
-            Action::File => content_json(&snapshot.read_blob(&path, &operation).await?),
+            Action::File => {
+                let metadata = snapshot.blob_metadata(&path, &operation).await?;
+                // The viewer needs identity and size before choosing a parser.
+                // Do not inflate large bodies just to discard their inline text.
+                if metadata.git_size > MAX_INLINE_TEXT_BYTES as u64 {
+                    file_json(&metadata, None, true)
+                } else {
+                    content_json(&snapshot.read_blob(&path, &operation).await?)
+                }
+            },
             Action::Changes | Action::Diff => {
                 let base_revision = params.base.as_deref().map(Revision::parse).transpose()?
                     .or_else(|| commit.parents.first().copied().map(Revision::Commit));

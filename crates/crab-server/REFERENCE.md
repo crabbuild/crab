@@ -2442,6 +2442,15 @@ and a resident-cell limit derived from process memory and file descriptors.
 `cells capacity --json` reports the startup resource and admission envelope; it
 is not a throughput or production-scale qualification.
 
+Browser blob reads allow up to 256 MiB per Git object and raw/inline-asset
+response; JSON responses retain their separate 8 MiB cap. File-info requests
+read blob metadata first. Above the 1 MiB inline-text threshold they return the
+size, identity and classification without decoding the full body, with
+`text: null` and `text_truncated: true`. Raw/range requests still verify the Git object
+before returning bytes; this is not an unbounded server-side streaming reader.
+CSV/TSV workbenches above their 50 MiB normalization budget keep HTTP scans;
+whole-file browser parsers retain their independent 50 MiB limit.
+
 `local_disk_limit_bytes` bounds Crab's staging envelope. Native cache usage is
 managed by Cellar; use a filesystem quota for a hard cache-volume bound. Staging
 still checks physical free space and accounts for retained transfer sessions.
