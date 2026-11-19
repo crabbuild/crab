@@ -1647,7 +1647,7 @@ test("source stays beside the file tree across tablet widths and remains reachab
   await expectNoAccessibilityViolations(page);
 });
 
-test("Symbols divider stays centered and controls remain reachable beside the end of a file", async ({
+test("Symbols grip stays at the viewport midpoint across file lengths and scrolling", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1440, height: 1000 });
@@ -1668,14 +1668,11 @@ test("Symbols divider stays centered and controls remain reachable beside the en
           const symbols = parent
             .querySelector(".code-symbols-panel")!
             .getBoundingClientRect();
-          const top = Math.max(toolbar.bottom, source.top);
-          const bottom = Math.max(top, Math.min(innerHeight, source.bottom));
-          const center = (top + bottom) / 2;
           return Math.max(
-            Math.abs(grip.y + grip.height / 2 - center),
+            Math.abs(grip.y + grip.height / 2 - innerHeight / 2),
             Math.abs(grip.x + grip.width / 2 - source.right + 0.5),
-            Math.abs(line.left - source.right + 1),
-            Math.abs(line.bottom - source.bottom),
+            Math.abs(line.x + line.width / 2 - grip.x - grip.width / 2),
+            Math.abs(line.y + line.height / 2 - grip.y - grip.height / 2),
             Math.abs(symbols.top - toolbar.top),
           );
         }),
@@ -1707,6 +1704,29 @@ test("Symbols divider stays centered and controls remain reachable beside the en
       symbols.getByRole("button", { name: "symbol_0 function 1", exact: true }),
     ).toBeVisible();
     await expectAlignedDivider();
+    const grip = (await divider.locator(":scope > div").boundingBox())!;
+    const middle = { x: grip.x + grip.width / 2, y: grip.y + grip.height / 2 };
+    const width = (await symbols.boundingBox())!.width;
+    // Start outside the visible pill, then drag vertically beyond its target.
+    await page.mouse.move(middle.x + 10, middle.y);
+    await expect(divider).toHaveAttribute("data-separator", "hover");
+    await page.mouse.down();
+    await page.mouse.move(middle.x - 50, middle.y + 120, { steps: 8 });
+    await expect(divider).toHaveAttribute("data-separator", "active");
+    await page.mouse.up();
+    await expect
+      .poll(async () => (await symbols.boundingBox())!.width)
+      .toBeGreaterThan(width + 40);
+    await expectAlignedDivider();
+    const draggedWidth = (await symbols.boundingBox())!.width;
+    await divider.press("ArrowRight");
+    await expect
+      .poll(async () => (await symbols.boundingBox())!.width)
+      .toBeLessThan(draggedWidth - 10);
+    await divider.dblclick();
+    await expect
+      .poll(async () => (await symbols.boundingBox())!.width)
+      .toBe(320);
     await page.evaluate(() => window.scrollTo(0, 900));
     await expectAlignedDivider();
     await page.evaluate(() =>

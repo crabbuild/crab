@@ -151,9 +151,10 @@ grant, and this consolidation does not establish full GitHub Enterprise parity.
   The Symbols column retains its width when the viewer grows.
   Its outlined panel fits short outlines and scrolls longer lists internally.
   The viewer owns its right border; the transparent resize gutter avoids a
-  stray stroke beside the commit row. Its resize target ends with the content,
-  and its grip stays centered on the visible content edge below the toolbar,
-  including short files and outlines taller than the source.
+  stray stroke beside the commit row. Its resize control stays at the viewport
+  midpoint across short/long files and scrolling. A compact sticky target
+  preserves short card heights; mouse/touch hit areas expand to 24px/44px.
+  Pointer capture, arrow-key resizing and double-click reset stay library-owned.
   Both sticky sidebars stay inside the visible file workspace when the footer
   appears, keeping their headers and search controls reachable. Columns too
   narrow for the split place Symbols below the viewer.
