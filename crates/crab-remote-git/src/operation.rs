@@ -822,20 +822,31 @@ impl OperationContext {
         self.budget
             .charge(BudgetDimension::LogicalObjects, 1)
             .await?;
-        let key =
-            crate::runtime::ObjectCacheKey::new(&self.state.identity, self.state.generation, oid);
-        let maximum = self.state.options.object_limits().max_object_bytes;
-        if let Some(commit) = self.state.runtime.cached_commit(&key, maximum).await {
+        if let Some(commit) = self.cached_commit(oid).await {
             return Ok(commit);
         }
         let object = self.read_object_uncharged(oid).await?;
         let source_bytes = object.data.len() as u64;
         let commit = self.parse_shared_commit(&object).await?;
+        let key =
+            crate::runtime::ObjectCacheKey::new(&self.state.identity, self.state.generation, oid);
         self.state
             .runtime
             .insert_commit(key, Arc::clone(&commit), source_bytes)
             .await;
         Ok(commit)
+    }
+
+    pub(crate) async fn cached_commit(
+        &self,
+        oid: gix_hash::ObjectId,
+    ) -> Option<crate::objects::SharedCommit> {
+        let key =
+            crate::runtime::ObjectCacheKey::new(&self.state.identity, self.state.generation, oid);
+        self.state
+            .runtime
+            .cached_commit(&key, self.state.options.object_limits().max_object_bytes)
+            .await
     }
 
     pub(crate) async fn read_commits_shared(
@@ -855,7 +866,6 @@ impl OperationContext {
                     .saturating_mul(std::mem::size_of::<Option<crate::objects::SharedCommit>>()),
                 source,
             })?;
-        let maximum = self.state.options.object_limits().max_object_bytes;
         let mut missing = Vec::new();
         missing
             .try_reserve_exact(oids.len())
@@ -868,12 +878,7 @@ impl OperationContext {
         // History already uses this verified parsed cache for point reads.
         // Batching must keep those size checks and avoid reparsing warm commits.
         for oid in oids {
-            let key = crate::runtime::ObjectCacheKey::new(
-                &self.state.identity,
-                self.state.generation,
-                *oid,
-            );
-            let cached = self.state.runtime.cached_commit(&key, maximum).await;
+            let cached = self.cached_commit(*oid).await;
             if cached.is_none() {
                 missing.push(*oid);
             }
