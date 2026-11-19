@@ -46,18 +46,41 @@ jobs:
           python -m pip install awscli jupyter_client==8.6.3 ipykernel==6.29.5 jupyter_server==2.17.0
           echo "CRAB_TEST_JUPYTER_PYTHON=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
       - name: Build and bundle the corrected native CLI
+        id: corrected_cli
         run: |
           cargo build --locked --no-default-features -p crab --bin crab
           node --input-type=module - <<'JS'
           import fs from 'node:fs';
           import path from 'node:path';
+          import { createHash } from 'node:crypto';
+          import { execFileSync } from 'node:child_process';
+          import { createRequire } from 'node:module';
+          const require = createRequire(path.resolve('package.json'));
           const source = path.join(process.env.CARGO_TARGET_DIR, 'debug', 'crab.exe');
           for (const name of ['crab.exe', 'git-remote-crab.exe']) {
             const destination = path.join('resources', 'native', 'win-x64', name);
             fs.unlinkSync(destination);
             fs.linkSync(source, destination);
           }
+          const directory = path.resolve('resources/native/win-x64');
+          const { version } = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const hashes = {};
+          for (const name of ['crab', 'crab-nfs-mount', 'crab-desktop-agent']) {
+            hashes[name + '.exe'] = createHash('sha256').update(fs.readFileSync(path.join(directory, name + '.exe'))).digest('hex');
+          }
+          for (const name of ['crab', 'crab-desktop-agent']) {
+            const actual = execFileSync(path.join(directory, name + '.exe'), ['--version'], { encoding: 'utf8' }).trim();
+            if (actual !== `${name} ${version}`) throw Error('Diagnostic runtime version mismatch');
+          }
+          fs.writeFileSync(path.join(directory, 'runtime.json'), JSON.stringify({ version, platform: process.platform, arch: process.arch, hashes }, null, 2) + '\n');
+          await require('./scripts/verify-native.cjs')({ arch: require('builder-util').Arch.x64, electronPlatformName: process.platform, packager: { projectDir: process.cwd(), appInfo: { version } } });
           JS
+      - uses: actions/upload-artifact@v4
+        if: steps.corrected_cli.outcome == 'success'
+        with:
+          name: alpha2-windows-quoted-native
+          path: packages/desktop/resources/native/win-x64/
+          if-no-files-found: error
       - name: Build exact current application
         run: |
           npm run build:renderer
@@ -71,8 +94,8 @@ jobs:
           s = p.read_text()
           a = s.index('                subprocess.run(["cargo", "test"')
           z = s.index('                identity_spec =', a)
-          # This diagnostic uses the previously qualified identical Rust source;
-          # the current PR still performs its complete native rebuild and tests.
+          # This diagnostic compiles the corrected CLI with minimal features;
+          # the current PR retains the complete release-feature native gates.
           s = s[:a] + s[z:]
           try:
               exec(compile(s, str(p), "exec"), {"__file__": str(p), "__name__": "__main__"})
