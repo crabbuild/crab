@@ -128,13 +128,14 @@ export function ProgressDrawer({ open, onClose }: Props) {
     <div
       id="activity-drawer"
       className={clsx(
-        "fixed inset-x-0 bottom-0 z-40 flex transition-transform duration-200",
-        open ? "translate-y-0" : "translate-y-full",
+        // Reserve workspace space so file actions remain reachable with Activity open.
+        "flex min-h-0 shrink-0",
+        !open && "hidden",
       )}
     >
-      <div className="mx-auto w-full border-t border-border bg-card shadow-2xl">
+      <div className="mx-auto flex max-h-[45vh] w-full flex-col border-t border-border bg-card shadow-2xl">
         {/* Header */}
-        <div className="flex h-9 items-center justify-between border-b border-border px-3 text-xs">
+        <div className="flex h-9 shrink-0 items-center justify-between border-b border-border px-3 text-xs">
           <div className="flex items-center gap-3">
             <span className="flex items-center gap-1.5 font-semibold">
               <Activity size={12} />
@@ -246,7 +247,7 @@ export function ProgressDrawer({ open, onClose }: Props) {
         )}
 
         {/* Body: Job cards + log output */}
-        <div className="flex h-64">
+        <div className="flex h-64 min-h-0">
           {/* Job cards sidebar */}
           {jobEntries.length > 0 && (
             <div className="w-56 shrink-0 overflow-auto border-r border-border bg-background p-2">
