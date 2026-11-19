@@ -274,61 +274,65 @@ function Schema({
             {fieldCount.toLocaleString()} columns
           </span>
         </div>
-        {(fieldCount > 8 || relations.length > 1) && (
-          <InputGroup>
-            <InputGroupInput
-              aria-label="Filter columns"
-              type="search"
-              value={query}
-              placeholder="Filter columns"
-              onChange={(event) => setQuery(event.target.value)}
-            />
-            <InputGroupAddon>
-              <ColumnsIcon aria-hidden="true" />
-            </InputGroupAddon>
-          </InputGroup>
-        )}
       </header>
-      <ol className="data-schema-relations">
-        {visible.map((relation) => (
-          <li className="data-schema-relation" key={relation.name}>
-            <div>
-              <Button
-                variant={relation.name === selected ? "secondary" : "ghost"}
-                size="xs"
-                aria-current={relation.name === selected ? "true" : undefined}
-                title={`Use ${relation.name} for query presets`}
-                onClick={() => onSelect(relation.name)}
-              >
-                <code className="truncate">{relation.name}</code>
-              </Button>
-              <small>
-                {relation.type} · {relation.fields.length.toLocaleString()}
-              </small>
-            </div>
-            <ol>
-              {relation.fields.map((field) => (
-                <li key={field.name}>
-                  <Button
-                    variant="ghost"
-                    size="xs"
-                    className="h-auto"
-                    title={`Insert ${field.name} into the query`}
-                    onClick={() => onInsert(field.name)}
-                  >
-                    <span>{field.name}</span>
-                    <code>{field.type.toLowerCase()}</code>
-                    <small>{field.nullable ? "nullable" : "required"}</small>
-                  </Button>
-                </li>
-              ))}
-            </ol>
-          </li>
-        ))}
-      </ol>
-      {query && !visible.length && (
-        <p className="data-schema-empty">No columns match “{query}”.</p>
-      )}
+      <div className="data-schema-body">
+        {(fieldCount > 8 || relations.length > 1) && (
+          <div className="data-schema-search">
+            <InputGroup>
+              <InputGroupInput
+                aria-label="Filter columns"
+                type="search"
+                value={query}
+                placeholder="Filter columns"
+                onChange={(event) => setQuery(event.target.value)}
+              />
+              <InputGroupAddon>
+                <ColumnsIcon aria-hidden="true" />
+              </InputGroupAddon>
+            </InputGroup>
+          </div>
+        )}
+        <ol className="data-schema-relations">
+          {visible.map((relation) => (
+            <li className="data-schema-relation" key={relation.name}>
+              <div>
+                <Button
+                  variant={relation.name === selected ? "secondary" : "ghost"}
+                  size="xs"
+                  aria-current={relation.name === selected ? "true" : undefined}
+                  title={`Use ${relation.name} for query presets`}
+                  onClick={() => onSelect(relation.name)}
+                >
+                  <code className="truncate">{relation.name}</code>
+                </Button>
+                <small>
+                  {relation.type} · {relation.fields.length.toLocaleString()}
+                </small>
+              </div>
+              <ol>
+                {relation.fields.map((field) => (
+                  <li key={field.name}>
+                    <Button
+                      variant="ghost"
+                      size="xs"
+                      className="h-auto"
+                      title={`Insert ${field.name} into the query`}
+                      onClick={() => onInsert(field.name)}
+                    >
+                      <span>{field.name}</span>
+                      <code>{field.type.toLowerCase()}</code>
+                      <small>{field.nullable ? "nullable" : "required"}</small>
+                    </Button>
+                  </li>
+                ))}
+              </ol>
+            </li>
+          ))}
+        </ol>
+        {query && !visible.length && (
+          <p className="data-schema-empty">No columns match “{query}”.</p>
+        )}
+      </div>
     </aside>
   );
 }
@@ -520,7 +524,9 @@ export function DataWorkbench({ bytes, format, name, size, url }: Props) {
         ? "Isolated in-browser copy"
         : format === "arrow"
           ? "In-memory columnar scan"
-          : "Streaming source scan";
+          : session?.sourceEncoding
+            ? "In-memory text scan"
+            : "Streaming source scan";
   const engine = format === "sqlite" ? "SQLite" : "DuckDB";
   const busy = phase === "running" || phase === "cancelling";
   const selectedRelation =
@@ -537,6 +543,9 @@ export function DataWorkbench({ bytes, format, name, size, url }: Props) {
         <div className="data-workbench-badges">
           <Badge variant="info">{engine}</Badge>
           <span>{format.toUpperCase()}</span>
+          {session?.sourceEncoding && (
+            <span>{session.sourceEncoding.toUpperCase()}</span>
+          )}
           <span>{formatBytes(size)}</span>
           <span>{sourceMode}</span>
           <span>Local only</span>

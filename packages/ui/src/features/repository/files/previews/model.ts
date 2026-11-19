@@ -1,3 +1,25 @@
+export const MAX_PREVIEW_BYTES = 50 * 1024 * 1024;
+
+export function decodeDelimitedText(bytes: Uint8Array) {
+  const littleEndian = bytes[0] === 0xff && bytes[1] === 0xfe;
+  const bigEndian = bytes[0] === 0xfe && bytes[1] === 0xff;
+  const unicodeBom =
+    littleEndian ||
+    bigEndian ||
+    (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf);
+  const encoding = littleEndian ? "utf-16le" : bigEndian ? "utf-16be" : "utf-8";
+  const decoder = new TextDecoder(encoding, { fatal: true });
+  try {
+    return { text: decoder.decode(bytes), encoding: decoder.encoding };
+  } catch (error) {
+    if (unicodeBom) throw error;
+    // Unmarked CSV exports often use Windows-1252. Prefer valid UTF-8 and
+    // expose the chosen encoding rather than replacing undecodable characters.
+    const western = new TextDecoder("windows-1252", { fatal: true });
+    return { text: western.decode(bytes), encoding: western.encoding };
+  }
+}
+
 export type PreviewKind =
   | "markdown"
   | "image"

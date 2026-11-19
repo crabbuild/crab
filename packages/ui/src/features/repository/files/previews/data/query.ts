@@ -46,6 +46,7 @@ export type QuerySession = {
   profileQuery: (fields: QuerySchemaField[], relation: string) => string;
   query: (sql: string) => Promise<QueryResult>;
   relations: QueryRelation[];
+  sourceEncoding?: string;
   sourceRows?: number | bigint;
 };
 

@@ -211,6 +211,15 @@ dropdowns. Workbench controls use these shared components, including search,
 chart axes, schema actions, presets, and collapsible run history. Its CodeMirror
 SQL editor is a custom `input-group-control` inside `InputGroup`, which owns the
 single border and focus ring while CodeMirror retains completion and shortcuts.
+Schema and result controls share a grid header track; column filtering sits
+below that track so their separator lines stay aligned as controls wrap.
+CSV/TSV previews up to the existing 50 MB in-memory budget decode Unicode BOMs,
+otherwise prefer valid UTF-8 and interpret unmarked non-UTF-8 exports as
+Windows-1252. The chosen encoding is visible in the workbench. Only the
+in-browser query copy is normalized; Raw downloads retain the stored bytes.
+Larger CSV/TSV files keep HTTP streaming and require UTF-8. JSON and Parquet
+retain their existing streaming paths; Arrow and SQLite keep their isolated
+in-memory paths.
 The shared Button defaults to `type="button"`; mutations
 must opt into `type="submit"`. Keep native permission, version and replay checks
 in the server even when the UI disables an action.

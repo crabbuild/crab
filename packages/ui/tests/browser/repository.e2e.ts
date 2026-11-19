@@ -2007,6 +2007,90 @@ test("SQL workbench shares form controls and keeps chart axes keyboard accessibl
   }
 });
 
+test("delimited workbenches preserve encoded text and align their headers", async ({
+  page,
+}) => {
+  test.setTimeout(60_000);
+  const columns = [
+    "name",
+    "amount (£)",
+    ...Array.from({ length: 10 }, (_, index) => `field_${index}`),
+  ];
+  const csv = `${columns.join(",")}\ncafé,10,${Array(10).fill("1").join(",")}\n`;
+  const latin1 = Uint8Array.from(csv, (character) => character.charCodeAt(0));
+  const tsv = "name\tamount (£)\ncafé\t10\n";
+  const utf16 = new Uint8Array(2 + tsv.length * 2);
+  const units = new DataView(utf16.buffer);
+  units.setUint16(0, 0xfeff, true);
+  for (let index = 0; index < tsv.length; index++)
+    units.setUint16(2 + index * 2, tsv.charCodeAt(index), true);
+  const rangeRequests: string[] = [];
+  page.on("request", (request) => {
+    if (
+      request.url().includes("/blob?") &&
+      new URL(request.url()).searchParams.get("path_hex") ===
+        pathHex("large.csv")
+    )
+      rangeRequests.push(request.headers()["range"] ?? "");
+  });
+  await routePreviewFiles(page, {
+    "encoded.csv": { text: null, bytes: latin1 },
+    "encoded.tsv": { text: null, bytes: utf16 },
+    "large.csv": {
+      text: null,
+      textTruncated: true,
+      bytes: strToU8("name,value\nlarge,1\n"),
+      size: 5 * 1024 * 1024 * 1024,
+    },
+  });
+  for (const name of ["encoded.csv", "encoded.tsv"]) {
+    await page.goto(`/team/project/blob/main/${name}`);
+    const workbench = page.getByRole("region", {
+      name: `${name} query workbench`,
+    });
+    await expect(
+      workbench.getByRole("columnheader", { name: "amount (£)", exact: true }),
+    ).toBeVisible();
+    await expect(
+      workbench.getByRole("cell", { name: "café", exact: true }),
+    ).toBeVisible();
+    for (const width of [1440, 900]) {
+      await page.setViewportSize({ width, height: 1000 });
+      await expect
+        .poll(() =>
+          workbench.evaluate((node) => {
+            const schema = node
+              .querySelector(".data-schema header")!
+              .getBoundingClientRect();
+            const result = node
+              .querySelector(".data-results-toolbar")!
+              .getBoundingClientRect();
+            return Math.abs(schema.height - result.height);
+          }),
+        )
+        .toBeLessThanOrEqual(1);
+    }
+    await page.setViewportSize({ width: 640, height: 1000 });
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth),
+    ).toBeLessThanOrEqual(640);
+    await expect(
+      workbench.getByRole("button", { name: "Table", exact: true }),
+    ).toBeVisible();
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await workbench.getByRole("button", { name: "Chart", exact: true }).click();
+    await expect(
+      workbench.getByRole("region", { name: "Query result chart" }),
+    ).toBeVisible();
+    await expectNoAccessibilityViolations(page);
+  }
+  await page.goto("/team/project/blob/main/large.csv");
+  await expect(
+    page.getByRole("cell", { name: "large", exact: true }),
+  ).toBeVisible();
+  expect(rangeRequests.some((value) => value.startsWith("bytes="))).toBe(true);
+});
+
 test("format-aware previews explore data, office files, media, and databases locally", async ({
   page,
 }) => {
