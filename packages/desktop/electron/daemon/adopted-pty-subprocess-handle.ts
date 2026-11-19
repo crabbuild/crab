@@ -22,6 +22,7 @@ export class AdoptedPtySubprocessHandle implements SubprocessHandle {
   private readStream: ReadStream;
   private writeStream: fs.WriteStream;
   private disposed = false;
+  private disposal?: Promise<void>;
   private dataCallbacks: Array<(data: string) => void> = [];
   private exitCallbacks: Array<(exitCode: number) => void> = [];
 
@@ -150,13 +151,17 @@ export class AdoptedPtySubprocessHandle implements SubprocessHandle {
    * - write/resize/signal/pause/resume become no-ops
    * - Pending writes finish before the reader closes the descriptor
    */
-  dispose(): void {
-    if (this.disposed) return;
+  dispose(): Promise<void> {
+    if (this.disposal) return this.disposal;
     this.disposed = true;
     this.dataCallbacks = [];
     this.exitCallbacks = [];
     // Explicit destroy closes even an autoClose:false filesystem stream.
     // Finish borrowed writes before the reader closes their shared descriptor.
-    this.writeStream.end(() => this.readStream.destroy());
+    this.disposal = new Promise(resolve => {
+      this.readStream.once("close", resolve);
+      this.writeStream.end(() => this.readStream.destroy());
+    });
+    return this.disposal;
   }
 }

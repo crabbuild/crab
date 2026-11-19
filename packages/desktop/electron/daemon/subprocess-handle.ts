@@ -47,6 +47,7 @@ export class NodePtySubprocessHandle implements SubprocessHandle {
   private pty: IPty;
   private disposed = false;
   private conptyClosing = false;
+  private readonly closed: Promise<void>;
   private dataCallbacks: Array<(data: string) => void> = [];
   private exitCallbacks: Array<(exitCode: number) => void> = [];
 
@@ -63,11 +64,15 @@ export class NodePtySubprocessHandle implements SubprocessHandle {
       }
     });
 
-    this.pty.onExit(({ exitCode }) => {
-      this.cleanup();
-      for (const cb of this.exitCallbacks) {
-        cb(exitCode);
-      }
+    this.closed = new Promise(resolve => {
+      this.pty.onExit(({ exitCode }) => {
+        // Natural exit already closed the console. Enumerating it again can
+        // fail AttachConsole and leave node-pty's helper waiting five seconds.
+        this.conptyClosing = true;
+        this.cleanup();
+        resolve();
+        for (const cb of this.exitCallbacks) cb(exitCode);
+      });
     });
   }
 
@@ -129,16 +134,20 @@ export class NodePtySubprocessHandle implements SubprocessHandle {
    * Release the PTY master fd. After this call:
    * - kill() becomes a no-op (SIGHUP neutralization)
    * - write/resize/signal/pause/resume become no-ops
-   * - The underlying node-pty socket is destroyed
+   * - On Windows, the returned promise waits for the output socket to close
    */
-  dispose(): void {
-    if (this.disposed) return;
-    this.disposed = true;
-    this.dataCallbacks = [];
-    this.exitCallbacks = [];
-    if (process.platform === "win32") this.closeConpty();
-    else this.pty.kill();
-    this.cleanup();
+  dispose(): void | Promise<void> {
+    if (!this.disposed) {
+      this.disposed = true;
+      this.dataCallbacks = [];
+      this.exitCallbacks = [];
+      if (process.platform === "win32") this.closeConpty();
+      else this.pty.kill();
+      this.cleanup();
+    }
+    // ConPTY termination runs asynchronously. Its exit event follows process
+    // termination and output-pipe closure; callers must join it before exit.
+    if (process.platform === "win32") return this.closed;
   }
 
   private closeConpty(): void {

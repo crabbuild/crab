@@ -89,5 +89,6 @@ export interface SubprocessHandle {
   resume(): void;
   onData(cb: (data: string) => void): void;
   onExit(cb: (exitCode: number) => void): void;
-  dispose(): void;
+  /** Release resources; asynchronous owners complete only after handles close. */
+  dispose(): void | Promise<void>;
 }
