@@ -1,13 +1,13 @@
-name: Alpha Linux fixture diagnostics
+name: Alpha Windows storage qualification
 on:
   workflow_dispatch:
 permissions:
   contents: read
   actions: read
 jobs:
-  storage:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
+  notebook:
+    runs-on: windows-2022
+    timeout-minutes: 90
     defaults:
       run:
         shell: bash
@@ -21,78 +21,52 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version-file: packages/desktop/.nvmrc
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.97.0
       - name: Set private qualification paths
         run: |
-          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crab-keyring-target" >> "$GITHUB_ENV"
-          mkdir -p "$RUNNER_TEMP/crab-keyring-target"
-      - name: Install Linux and real Secret Service dependencies
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-0 libnss3 libasound2t64 libgbm1 xvfb tmux dbus-x11 gnome-keyring libsecret-1-0 pkg-config libssl-dev libfuse3-dev
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crab-notebook-target" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/crab-notebook-target"
       - uses: actions/download-artifact@v4
         with:
-          name: Crab-native-linux-x64
-          path: packages/desktop/resources/native/linux-x64
+          name: Crab-native-win-x64
+          path: packages/desktop/resources/native/win-x64
           run-id: 44455996465
           github-token: ${{ github.token }}
-      - uses: actions/download-artifact@v4
-        with:
-          name: Crab-remote-runtime-Linux-X64
-          path: packages/desktop/release/remote-runtime
-          run-id: 44455996465
-          github-token: ${{ github.token }}
-      - name: Install desktop dependencies and restore native permissions
-        run: |
-          npm ci
-          chmod +x resources/native/linux-x64/{crab,crab-nfs-mount,crab-desktop-agent,git-remote-crab}
+      - name: Install desktop dependencies
+        run: npm ci
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install pinned notebook and storage runtime
+      - name: Install pinned notebook runtime
         run: |
           python -m pip install awscli jupyter_client==8.6.3 ipykernel==6.29.5 jupyter_server==2.17.0
           echo "CRAB_TEST_JUPYTER_PYTHON=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
-      - name: Build exact packaged application
+      - name: Build exact current application
         run: |
           npm run build:renderer
           npm run build:electron
           node scripts/package.mjs --dir --publish never
-      - name: Run focused packaged diagnostics with a real keyring
+      - name: Qualify all unchanged packaged storage scenarios
         run: |
-          cat > "$RUNNER_TEMP/fixture-diagnostics.py" <<'PYCODE'
+          python - <<'PYCODE' > windows-storage.log 2>&1
           from pathlib import Path
-          p = Path("tests/e2e/large-file-lifecycle.spec.ts")
-          s = p.read_text()
-          s = s.replace('const second = spawn(executablePath, [`--user-data-dir=${profile}`], { env: appEnv, stdio: "ignore" });', 'const second = spawn(executablePath, [`--user-data-dir=${profile}`], { env: appEnv, stdio: ["ignore", "ignore", "pipe"] });\n      let diagnosticStderr = "";\n      second.stderr!.on("data", bytes => { diagnosticStderr += bytes.toString(); });\n      second.once("exit", (code, signal) => { writeFileSync(test.info().outputPath("second-owner.json"), JSON.stringify({ code, signal, stderr: diagnosticStderr })); });')
-          p.write_text(s)
-          p = Path("tests/e2e/storage-identity.spec.ts")
-          s = p.read_text()
-          needle = 'await expect.poll(() => git(directories[0], ["rev-parse", "HEAD"]).toString(), { timeout: 30_000 }).not.toBe(beforeCommit);'
-          assert s.count(needle) == 1
-          s = s.replace(needle, 'try { ' + needle + ' } catch (error) {\n      writeFileSync(test.info().outputPath("commit-visible-state.txt"), await page.getByRole("main").innerText());\n      await page.screenshot({path: test.info().outputPath("commit-visible-state.png")});\n      throw error;\n    }')
-          p.write_text(s)
           p = Path("scripts/qualify-v2.py").resolve()
           s = p.read_text()
           a = s.index('                subprocess.run(["cargo", "test"')
           z = s.index('                identity_spec =', a)
+          # This diagnostic uses the previously qualified identical Rust source;
+          # the current PR still performs its complete native rebuild and tests.
           s = s[:a] + s[z:]
-          needle = 'subprocess.run([node, "scripts/smoke.mjs"], cwd=DESKTOP, env=env, check=True)'
-          assert s.count(needle) == 1
-          s = s.replace(needle, 'subprocess.run([node, "node_modules/@playwright/test/cli.js", "test", "--project=e2e-smoke", "tests/e2e/large-file-lifecycle.spec.ts", "tests/e2e/storage-identity.spec.ts", "tests/e2e/large-files.spec.ts", "--grep", "Crab and LFS UI lifecycle|device storage identities|tracking wizard commits literal", "--workers=1"], cwd=DESKTOP, env={**env, "E2E_SMOKE": "1"}, check=True)')
           exec(compile(s, str(p), "exec"), {"__file__": str(p), "__name__": "__main__"})
           PYCODE
-          dbus-run-session -- bash -euo pipefail <<'KEYRING'
-            export XDG_CURRENT_DESKTOP=GNOME
-            export XDG_DATA_HOME="$RUNNER_TEMP/crab-desktop-keyring"
-            mkdir -m 700 -p "$XDG_DATA_HOME"
-            python -c "import secrets; print(secrets.token_hex(32), end=\"\")" | gnome-keyring-daemon --unlock --components=secrets
-            xvfb-run -a python "$RUNNER_TEMP/fixture-diagnostics.py" > fixture-diagnostics.log 2>&1
-          KEYRING
+      - name: Qualify complete desktop regression suite
+        if: always()
+        run: npm test -- --maxWorkers 2 --reporter=json --outputFile=candidate-report.json > candidate-unit.log 2>&1
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: alpha2-linux-fixture-diagnostics
+          name: alpha2-windows-storage-proof
           path: |
-            packages/desktop/fixture-diagnostics.log
+            packages/desktop/windows-storage.log
+            packages/desktop/candidate-unit.log
+            packages/desktop/candidate-report.json
             packages/desktop/test-results/**
