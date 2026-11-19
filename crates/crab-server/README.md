@@ -609,8 +609,11 @@ The internal owners are:
 | `cells/repository/{checks,settings,releases,labels,statuses,projection}/` | Feature commands, local persistence/validation, and tests |
 
 Authentication always uses shared durable state, including in-memory object-store
-test fixtures; there is no separate process-local authentication mode. Repository
-construction initializes private cache and maintenance state. Settings
+test fixtures; there is no separate process-local authentication mode. A cached
+session supplies only its marker location, allowing the session record and marker
+to be reread concurrently. The current record selects and validates the marker;
+missing or expired state still denies browser and derived Git credentials.
+Repository construction initializes private cache and maintenance state. Settings
 policy stays in `repository/settings.rs`; repository reads do not forward HTTP
 settings operations. HTTP mutation families share one request identity policy in
 `app.rs`; projection retains its own non-HTTP error contract.
