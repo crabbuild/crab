@@ -431,6 +431,11 @@ export class TerminalHost {
     return this.sessions.size;
   }
 
+  /** Whether retired terminals still own asynchronous resource cleanup. */
+  get hasPendingDisposals(): boolean {
+    return this.pendingDisposals.size > 0;
+  }
+
   /**
    * Whether createOrAttach can reuse an existing live session without spawning.
    * Used by the daemon server to avoid applying new-session quotas to reattach.
