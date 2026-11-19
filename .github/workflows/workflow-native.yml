@@ -33,7 +33,10 @@ jobs:
 
       - name: Set isolated Cargo target directory
         shell: bash
-        run: echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crab-workflow-native-target" >> "$GITHUB_ENV"
+        # Evidence fixtures run before Cargo creates the target directory.
+        run: |
+          mkdir -p "$RUNNER_TEMP/crab-workflow-native-target"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crab-workflow-native-target" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
 

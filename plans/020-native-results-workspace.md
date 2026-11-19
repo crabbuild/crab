@@ -2914,6 +2914,17 @@ of waiting for a new first window. No production shutdown behavior, acceptance
 assertion or timeout budget changes. Runtime artifacts retain their preceding
 digests; the full 108/75 packet retains its original source binding.
 
+The next Windows workflow job fails before compilation: package-binding fixtures
+request temporary directories beneath `CARGO_TARGET_DIR`, but workflow-native
+has only exported that path. Create it in the existing isolated-target setup
+step, before evidence tests run. A fresh local directory reproduces both
+`FileNotFoundError` failures; applying that setup makes all nine evidence tests
+pass without changing assertions. Desktop packaging already creates its target
+before pre-Cargo fixtures; native-runtime builds Cargo first, and SDK does not
+invoke this evidence test entry. No sibling ordering change is needed. Native
+Windows execution still requires the hosted follow-up; this local filesystem
+reproduction does not establish cross-platform execution proof.
+
 ## STOP conditions
 
 Stop the affected slice and report the concrete issue if:
