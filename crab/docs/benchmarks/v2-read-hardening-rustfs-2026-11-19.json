@@ -4206,6 +4206,74 @@
         }
       },
       "peak_rss_bytes": 465481728
+    },
+    "flattened_catalog_open": {
+      "revision": "f339a3221b46b92142f521130ec300a8e5df47d6",
+      "scope": "Choose the existing timeout/plain-open wrapper before awaiting to avoid duplicated captured future state; timeout/error/cancellation semantics preserved. No dependency changes.",
+      "frame_bytes": {
+        "baseline": 7552,
+        "preceding_candidate": 13184,
+        "flattened_candidate": 7808
+      },
+      "before_probe_sha256": "fe399e233539f74c1ffe047bf3510304888e36ce5f32c284c76e380c0ba3b0e9",
+      "after_probe_sha256": "620a8a540d8a1538dd3952d5dc2d09bcb12a6b2fd634af88c867d18b77370534",
+      "tests": {
+        "operation": 10,
+        "deadline_cancellation": 4,
+        "strict_all_targets_clippy": "passed",
+        "operation_receipt_sha256": "ed00882a39277f4f4eadfd35524697c3563526a1d4e551540715784fd316d9f5",
+        "deadline_receipt_sha256": "35b66e16917412b1f7cab4045a0def5487b4c2209d3999b16a9a5e5510554cb4",
+        "clippy_receipt_sha256": "fe116f84ffb6bcc0941e3c0a61beead727f79bab22eeeb9df8be183be48872fa"
+      },
+      "release": {
+        "build_receipt_sha256": "ab9e6665151d9924c2b028fc6f684e896580d267e71c65cb9bd3b5aa27f25072",
+        "binary_sha256": "03cae3a362739356f4c9cc98083070ca79adec77b6e7b84e4471b0845ef0195e",
+        "compiled_inputs_match_current_tree": true
+      },
+      "targeted_controls": {
+        "status": "failed_engineering_gates",
+        "queries_checked": 800,
+        "profile_sha256": "fc6fd841f3b87ba492b1a2e7eaf4f80035bb0cc61525ce7861fac0d58d13f752",
+        "analysis_addendum_sha256": "8129e1e6b536c3ac1e5a851b735e1abc9e7184b3c9d2babdced9e1b63e3f90d6",
+        "raw_report_sha256": "92aa2ebd014dcbf92ae14a8892966ecf3de970ca191a02dea12e8fad2b3d529c",
+        "driver_sha256": "115a8106b1c02956c9c62eee8811a6472529f8e548ab74f07103333e68929267",
+        "bindings": {
+          "baseline": {
+            "binary_sha256": "161d95ee2701238fcce450a48840f479789bdf8ae456a5711bfb0410721b5344",
+            "build_receipt_sha256": "c913d80f6ba13146480a8ff54c485810a2b1cf086185d93e1b247a59b71a6f88",
+            "source_revision": "aafb6d256c5e8d3a8e768d31dd887a18f2afd2e4"
+          },
+          "candidate": {
+            "binary_sha256": "c7075c9a9c47e6b922b1dd88da18217358371e815a7ea12317d839c5ad972d52",
+            "build_receipt_sha256": "486d42de38ee77ac17841d9c5811ca966586d878cc8085aa143dd4757cc99c0c",
+            "source_revision": "f339a3221b46b92142f521130ec300a8e5df47d6"
+          }
+        },
+        "maximum_control_p95_ratio": 1.1,
+        "predeclared_pairs_per_case": 100,
+        "scope": "targeted control qualification, not a replacement for combined HTTP/recovery/resource gates",
+        "columns": ["pairs", "commits", "operation", "cache", "baseline_p50_us", "baseline_p95_us", "candidate_p50_us", "candidate_p95_us", "p95_ratio", "gate"],
+        "cells": [
+          [20, 100, "blob", "cold", 252766, 316389, 262468, 324922, 1.0269699641896526, "passed"],
+          [20, 100, "blob", "warm", 635, 1064, 476, 631, 0.5930451127819549, "passed"],
+          [20, 1000, "attribution", "cold", 80308, 97623, 77698, 98091, 1.0047939522448603, "passed"],
+          [20, 1000, "attribution", "warm", 2070, 2261, 2049, 2151, 0.9513489606368863, "passed"],
+          [20, 1000, "tree", "cold", 73461, 349320, 85766, 323355, 0.9256698728959121, "passed"],
+          [20, 1000, "tree", "warm", 801, 1915, 716, 1792, 0.9357702349869451, "passed"],
+          [20, 1000, "resolve", "cold", 10944, 18146, 11133, 42727, 2.354623608508762, "failed"],
+          [20, 1000, "resolve", "warm", 250, 399, 223, 330, 0.8270676691729323, "passed"],
+          [100, 100, "blob", "cold", 86675, 304396, 90141, 276207, 0.9073936582609495, "passed"],
+          [100, 100, "blob", "warm", 442, 828, 403, 606, 0.7318840579710145, "passed"],
+          [100, 1000, "attribution", "cold", 80993, 106525, 81252, 132593, 1.244712508800751, "failed"],
+          [100, 1000, "attribution", "warm", 2094, 2324, 2065, 2306, 0.9922547332185886, "passed"],
+          [100, 1000, "tree", "cold", 75202, 418842, 75670, 379287, 0.9055610468864154, "passed"],
+          [100, 1000, "tree", "warm", 735, 1983, 698, 1827, 0.9213313161875946, "passed"],
+          [100, 1000, "resolve", "cold", 11218, 51844, 11388, 51839, 0.9999035568243191, "passed"],
+          [100, 1000, "resolve", "warm", 270, 630, 213, 605, 0.9603174603174603, "passed"]
+        ],
+        "historical_failures_retained": true
+      },
+      "remaining": "Cold attribution at 1000 commits retains a 1.245 p95 ratio; investigate I/O vs CPU. Full combined HTTP/restart/minimum-profile gates still require the pending Cellar patch approval."
     }
   }
 }

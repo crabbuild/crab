@@ -691,6 +691,24 @@ core and SDK readers over a one-GiB object on RustFS. The maximum observed RSS i
 This covers that object workload; the HTTP minimum-profile restart/soak remains
 blocked by the Cellar gap and requires the pending dependency approval.
 
+
+A further measured refinement (`f339a3221b4`) removes duplicated async capture
+state from optional catalog opening. The operation-opening future falls from
+13,184 to 7,808 bytes (R0: 7,552), while Tokio's existing timeout implementation
+and plain-open behavior remain in use. Ten operation tests, four deadline/
+cancellation tests, strict Clippy, native Git probes and the release build pass.
+
+A larger targeted profile was fixed before execution: one hundred interleaved
+pairs each for 100-commit blobs and 1,000-commit attribution, trees and a passing
+resolve control, with cold/warm observations and the unchanged 1.1 p95 gate.
+All 800 native Git comparisons pass. Seven of eight timing cells pass; cold
+attribution still fails at 1.245. Cold/warm blob ratios are 0.907/0.732, tree
+ratios 0.906/0.921, and resolve ratios 1.000/0.960. Attribution's warm ratio is
+0.992; its cold median is similar to R0 but the tail needs I/O/CPU diagnosis.
+The first-twenty-prefix analysis and all original failed receipts are retained.
+This targeted profile does not establish the full combined-source R7 matrix;
+HTTP recovery and minimum-profile qualification still await the Cellar fix.
+
 ### R0 — Freeze the evidence contract and establish a baseline
 
 **Scope:** `crates/crab-remote/examples/qualify_remote.rs`, its `support/` owners;
