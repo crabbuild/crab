@@ -47,7 +47,7 @@ jobs:
           node scripts/package.mjs --dir --publish never
       - name: Qualify all unchanged packaged storage scenarios
         run: |
-          python - <<'PYCODE' > windows-storage.log 2>&1
+          python -X utf8 - <<'PYCODE' > windows-storage.log 2>&1
           from pathlib import Path
           p = Path("scripts/qualify-v2.py").resolve()
           s = p.read_text()
