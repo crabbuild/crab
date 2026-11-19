@@ -4958,9 +4958,14 @@ main {
   overflow-wrap: anywhere;
 }
 .file-panel {
-  margin-top: --spacing(4);
-  /* The sticky toolbar owns the top edge so it remains visible on scroll. */
+  /* The toolbar and body own separate edges; none can bleed through corners. */
+  border: 0;
+  overflow: visible;
+}
+.file-body {
+  border: 1px solid var(--border);
   border-top: 0;
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
   overflow: clip;
 }
 .file-view-controls {
@@ -5079,8 +5084,7 @@ main {
   display: block;
   min-height: 0;
   padding: 0;
-  /* Mask scrolling code and side borders outside the toolbar's rounded corners. */
-  margin-inline: -1px;
+  /* Cover body borders and source behind the sticky toolbar's rounded corners. */
   border: 0;
   background: var(--background);
 }
@@ -5114,6 +5118,7 @@ main {
 }
 .file-source-workspace {
   min-width: 0;
+  margin-top: --spacing(4);
 }
 .file-viewer {
   min-width: 0;
@@ -5127,7 +5132,7 @@ main {
   display: flex;
   flex-direction: column;
   position: sticky;
-  top: 0;
+  top: var(--file-navigation-height, 0px);
   align-self: start;
   min-width: 0;
   max-height: var(--workspace-available-height, 100dvh);
@@ -5147,18 +5152,18 @@ main {
   align-items: flex-start;
   justify-content: flex-start;
   width: --spacing(4);
+  align-self: flex-start;
+  z-index: 0;
   /* The viewer owns the edge; a separator stroke would cross the commit row. */
   inset-inline-start: -1px;
   border: 0;
   background: transparent;
 }
 .code-symbols-resizer > div {
-  position: sticky;
+  position: absolute;
   margin-inline-start: -1px;
-  top: calc(var(--workspace-available-height, 100dvh) / 2 - --spacing(3));
-  margin-top: calc(
-    var(--workspace-available-height, 100dvh) / 2 - --spacing(3)
-  );
+  max-height: 0;
+  transform: translateY(-50%);
 }
 .code-symbols-header {
   display: flex;

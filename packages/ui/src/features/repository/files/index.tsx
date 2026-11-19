@@ -103,6 +103,7 @@ export function FileView({
   );
   const [copied, setCopied] = useState(false);
   const [symbolsOpen, setSymbolsOpen] = useState(true);
+  const [body, setBody] = useState<HTMLDivElement | null>(null);
   const [activeSymbol, setActiveSymbol] = useState<CodeSymbol | null>(null);
   const sourceHost = useRef<HTMLElement | null>(null);
   const symbolsRef = useRef<CodeSymbol[]>([]);
@@ -426,170 +427,174 @@ export function FileView({
               </div>
             </div>
           </div>
-          {content.classification !== "OrdinaryGit" && (
-            <div className="file-note">
-              Git object classification: {content.classification}. Downloads
-              contain the exact stored Git blob.
-            </div>
-          )}
-          {view === "blame" && (blame.loading || blame.error) && (
-            <Result state={blame}>{() => null}</Result>
-          )}
-          {view === "preview" && activePreview ? (
-            <Suspense
-              fallback={
-                <div className="file-preview-notice" role="status">
-                  Loading preview tools…
-                </div>
-              }
-            >
-              <FilePreview
-                descriptor={activePreview}
-                repo={repo}
-                rev={rev}
-                revision={revision}
-                directory={parentHex(path)}
-                name={name}
-                text={content.text}
-                size={content.size}
-                blobUrl={endpoint(repo, "blob", { rev, path_hex: path })}
-                theme={theme}
-                codeThemes={codeThemes}
-              />
-            </Suspense>
-          ) : content.text === null ? (
-            <div className="notice">
-              <strong>
-                {content.text_truncated ? "Large text file" : "Binary file"}
-              </strong>
-              <p>
-                {content.text_truncated
-                  ? "Inline source is limited to 1 MB. Download the exact stored bytes to inspect the complete file."
-                  : "Crab does not recognize a safe interactive preview for this format. Download the exact stored bytes to inspect it locally."}
-              </p>
-            </div>
-          ) : view === "blame" ? (
-            blame.data ? (
-              <div className="blame-view" aria-label="Blame view">
-                <div className="blame-view-toolbar">
-                  <div className="blame-age-legend" aria-label="Commit age">
-                    <span>Older</span>
-                    <span className="blame-age-scale" aria-hidden="true" />
-                    <span>Newer</span>
-                  </div>
-                  <span className="blame-contributors">
-                    Contributors{" "}
-                    <strong>
-                      {
-                        new Set(
-                          blame.data.ranges.map((range) => range.commit.author),
-                        ).size
-                      }
-                    </strong>
-                  </span>
-                </div>
-                <div
-                  className="blame-view-grid"
-                  style={
-                    {
-                      "--blame-pane-width": `${blamePaneWidth}%`,
-                    } as CSSProperties
-                  }
-                >
-                  <div
-                    id="blame-commit-pane"
-                    className="blame-rows"
-                    aria-label="Blame commits"
-                  >
-                    {blame.data.ranges.map((range) => (
-                      <div
-                        className="blame-row"
-                        key={`${range.start}:${range.commit.oid}`}
-                        style={
-                          { "--blame-lines": range.lines } as CSSProperties
-                        }
-                      >
-                        <code>
-                          {range.start}–{range.start + range.lines - 1}
-                        </code>
-                        <Link
-                          className="blame-oid"
-                          href={repoHref(repo, {
-                            view: "commit",
-                            rev: range.commit.oid,
-                          })}
-                        >
-                          {short(range.commit.oid)}
-                        </Link>
-                        <span className="blame-author">
-                          {range.commit.author}
-                        </span>
-                        <Link
-                          className="blame-message"
-                          href={repoHref(repo, {
-                            view: "commit",
-                            rev: range.commit.oid,
-                          })}
-                        >
-                          {range.commit.message.split("\n")[0]}
-                        </Link>
-                      </div>
-                    ))}
-                  </div>
-                  <PaneResizer
-                    className="blame-resizer"
-                    label="Resize blame pane"
-                    controls="blame-commit-pane blame-source-pane"
-                    value={blamePaneWidth}
-                    min={MIN_BLAME_PANE_WIDTH}
-                    max={MAX_BLAME_PANE_WIDTH}
-                    defaultValue={DEFAULT_BLAME_PANE_WIDTH}
-                    step={5}
-                    unit="percent"
-                    valueText={`${blamePaneWidth}% blame, ${100 - blamePaneWidth}% source`}
-                    onChange={setBlamePaneWidth}
-                  />
-                  <div
-                    id="blame-source-pane"
-                    className="blame-source"
-                    aria-label="File source"
-                    tabIndex={0}
-                  >
-                    <File
-                      key={`${theme}:${codeThemes.light}:${codeThemes.dark}`}
-                      file={file}
-                      options={options}
-                      style={
-                        {
-                          "--diffs-line-height": "20px",
-                          "--diffs-overflow-override": "visible",
-                        } as CSSProperties
-                      }
-                    />
-                  </div>
-                </div>
+          <div className="file-body" ref={setBody}>
+            {content.classification !== "OrdinaryGit" && (
+              <div className="file-note">
+                Git object classification: {content.classification}. Downloads
+                contain the exact stored Git blob.
               </div>
-            ) : null
-          ) : (
-            <div className="file-source-code">
-              <File
-                key={`${theme}:${codeThemes.light}:${codeThemes.dark}:${symbolLanguage ?? "plain"}`}
-                file={file}
-                options={options}
-              />
-            </div>
-          )}
+            )}
+            {view === "blame" && (blame.loading || blame.error) && (
+              <Result state={blame}>{() => null}</Result>
+            )}
+            {view === "preview" && activePreview ? (
+              <Suspense
+                fallback={
+                  <div className="file-preview-notice" role="status">
+                    Loading preview tools…
+                  </div>
+                }
+              >
+                <FilePreview
+                  descriptor={activePreview}
+                  repo={repo}
+                  rev={rev}
+                  revision={revision}
+                  directory={parentHex(path)}
+                  name={name}
+                  text={content.text}
+                  size={content.size}
+                  blobUrl={endpoint(repo, "blob", { rev, path_hex: path })}
+                  theme={theme}
+                  codeThemes={codeThemes}
+                />
+              </Suspense>
+            ) : content.text === null ? (
+              <div className="notice">
+                <strong>
+                  {content.text_truncated ? "Large text file" : "Binary file"}
+                </strong>
+                <p>
+                  {content.text_truncated
+                    ? "Inline source is limited to 1 MB. Download the exact stored bytes to inspect the complete file."
+                    : "Crab does not recognize a safe interactive preview for this format. Download the exact stored bytes to inspect it locally."}
+                </p>
+              </div>
+            ) : view === "blame" ? (
+              blame.data ? (
+                <div className="blame-view" aria-label="Blame view">
+                  <div className="blame-view-toolbar">
+                    <div className="blame-age-legend" aria-label="Commit age">
+                      <span>Older</span>
+                      <span className="blame-age-scale" aria-hidden="true" />
+                      <span>Newer</span>
+                    </div>
+                    <span className="blame-contributors">
+                      Contributors{" "}
+                      <strong>
+                        {
+                          new Set(
+                            blame.data.ranges.map(
+                              (range) => range.commit.author,
+                            ),
+                          ).size
+                        }
+                      </strong>
+                    </span>
+                  </div>
+                  <div
+                    className="blame-view-grid"
+                    style={
+                      {
+                        "--blame-pane-width": `${blamePaneWidth}%`,
+                      } as CSSProperties
+                    }
+                  >
+                    <div
+                      id="blame-commit-pane"
+                      className="blame-rows"
+                      aria-label="Blame commits"
+                    >
+                      {blame.data.ranges.map((range) => (
+                        <div
+                          className="blame-row"
+                          key={`${range.start}:${range.commit.oid}`}
+                          style={
+                            { "--blame-lines": range.lines } as CSSProperties
+                          }
+                        >
+                          <code>
+                            {range.start}–{range.start + range.lines - 1}
+                          </code>
+                          <Link
+                            className="blame-oid"
+                            href={repoHref(repo, {
+                              view: "commit",
+                              rev: range.commit.oid,
+                            })}
+                          >
+                            {short(range.commit.oid)}
+                          </Link>
+                          <span className="blame-author">
+                            {range.commit.author}
+                          </span>
+                          <Link
+                            className="blame-message"
+                            href={repoHref(repo, {
+                              view: "commit",
+                              rev: range.commit.oid,
+                            })}
+                          >
+                            {range.commit.message.split("\n")[0]}
+                          </Link>
+                        </div>
+                      ))}
+                    </div>
+                    <PaneResizer
+                      className="blame-resizer"
+                      label="Resize blame pane"
+                      controls="blame-commit-pane blame-source-pane"
+                      value={blamePaneWidth}
+                      min={MIN_BLAME_PANE_WIDTH}
+                      max={MAX_BLAME_PANE_WIDTH}
+                      defaultValue={DEFAULT_BLAME_PANE_WIDTH}
+                      step={5}
+                      unit="percent"
+                      valueText={`${blamePaneWidth}% blame, ${100 - blamePaneWidth}% source`}
+                      onChange={setBlamePaneWidth}
+                    />
+                    <div
+                      id="blame-source-pane"
+                      className="blame-source"
+                      aria-label="File source"
+                      tabIndex={0}
+                    >
+                      <File
+                        key={`${theme}:${codeThemes.light}:${codeThemes.dark}`}
+                        file={file}
+                        options={options}
+                        style={
+                          {
+                            "--diffs-line-height": "20px",
+                            "--diffs-overflow-override": "visible",
+                          } as CSSProperties
+                        }
+                      />
+                    </div>
+                  </div>
+                </div>
+              ) : null
+            ) : (
+              <div className="file-source-code">
+                <File
+                  key={`${theme}:${codeThemes.light}:${codeThemes.dark}:${symbolLanguage ?? "plain"}`}
+                  file={file}
+                  options={options}
+                />
+              </div>
+            )}
+          </div>
         </section>
       )}
     </Result>
   );
   return (
-    <FileWorkspace symbols={symbols}>
-      <div className="file-viewer">
-        {navigation}
-        {header}
+    <div className="file-viewer">
+      {navigation}
+      {header}
+      <FileWorkspace content={body} symbols={symbols}>
         {contents}
-      </div>
-    </FileWorkspace>
+      </FileWorkspace>
+    </div>
   );
 }

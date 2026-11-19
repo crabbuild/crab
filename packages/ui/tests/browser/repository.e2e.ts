@@ -1425,7 +1425,7 @@ test("supported source files expose browser-parsed current-file symbols", async 
     .toEqual({ document: 900, source: 0 });
   await expect
     .poll(async () => {
-      const [symbolsBounds, symbolsHeaderTop] = await Promise.all([
+      const [symbolsBounds, symbolsHeaderTop, toolbarTop] = await Promise.all([
         symbols.evaluate((node) => {
           const bounds = node.getBoundingClientRect();
           return {
@@ -1434,9 +1434,10 @@ test("supported source files expose browser-parsed current-file symbols", async 
           };
         }),
         symbolsHeader.evaluate((node) => node.getBoundingClientRect().top),
+        fileHeader.evaluate((node) => node.getBoundingClientRect().top),
       ]);
       return Math.max(
-        Math.abs(symbolsBounds.top),
+        Math.abs(symbolsBounds.top - toolbarTop),
         Math.abs(symbolsBounds.top - symbolsHeaderTop),
         symbolsBounds.bottomOverflow,
       );
@@ -1657,28 +1658,43 @@ test("Symbols divider stays centered and controls remain reachable beside the en
         divider.evaluate((node) => {
           const line = node.getBoundingClientRect();
           const grip = node.firstElementChild!.getBoundingClientRect();
-          const source = node
-            .parentElement!.querySelector(".file-panel")!
+          const parent = node.parentElement!;
+          const source = parent
+            .querySelector(".file-body")!
             .getBoundingClientRect();
-          const center =
-            (Math.max(0, line.top) + Math.min(innerHeight, line.bottom)) / 2;
+          const toolbar = parent
+            .querySelector(".file-toolbar")!
+            .getBoundingClientRect();
+          const symbols = parent
+            .querySelector(".code-symbols-panel")!
+            .getBoundingClientRect();
+          const top = Math.max(toolbar.bottom, source.top);
+          const bottom = Math.max(top, Math.min(innerHeight, source.bottom));
+          const center = (top + bottom) / 2;
           return Math.max(
             Math.abs(grip.y + grip.height / 2 - center),
             Math.abs(grip.x + grip.width / 2 - source.right + 0.5),
             Math.abs(line.left - source.right + 1),
+            Math.abs(line.bottom - source.bottom),
+            Math.abs(symbols.top - toolbar.top),
           );
         }),
       )
       .toBeLessThanOrEqual(0.5);
   };
-  for (const count of [1, 120]) {
+  for (const [count, continuation] of [
+    [1, 0],
+    [30, 0],
+    [1, 200],
+    [120, 200],
+  ]) {
     const text = [
       ...Array.from(
         { length: count },
         (_, index) => `pub fn symbol_${index}() {}`,
       ),
       ...Array.from(
-        { length: 200 },
+        { length: continuation },
         () => "// Source continues below the outline.",
       ),
     ].join("\n");
@@ -1788,9 +1804,13 @@ test("file navigation stays joined to Code and Blame when the explorer toggles w
     if (width > 900) {
       const symbols = page.getByRole("complementary", { name: "Code symbols" });
       await expect
-        .poll(() =>
-          symbols.evaluate((node) => node.getBoundingClientRect().top),
-        )
+        .poll(async () => {
+          const [pane, controls] = await Promise.all([
+            symbols.boundingBox(),
+            toolbar.boundingBox(),
+          ]);
+          return Math.abs(pane!.y - controls!.y);
+        })
         .toBe(0);
       const [controls, pane] = await Promise.all([
         toolbar.boundingBox(),

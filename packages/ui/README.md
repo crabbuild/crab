@@ -134,8 +134,9 @@ grant, and this consolidation does not establish full GitHub Enterprise parity.
 - `src/features/repository/`: browsing, refs, tree, file rendering, commit details,
   and diffs. Preview engines, workers, and their tests stay under `files/`.
   `files/symbols/` owns parsing and the Symbols panel. `files/workspace.tsx`
-  places that panel beside the complete file viewer, with its own viewport-aligned
-  header and scrolling list. Its shadcn Resizable divider supports pointer and
+  places that panel beside the source, aligned with the Code/Blame toolbar
+  below the shared navigation and commit row. Its header stays aligned while
+  scrolling. The shadcn Resizable divider supports pointer and
   keyboard resizing; narrow layouts stack the pane below source. File navigation
   and Code/Blame form one continuous sticky header with the explorer open or
   closed; the controls follow the navigation row's measured height. Scrolled
@@ -144,13 +145,15 @@ grant, and this consolidation does not establish full GitHub Enterprise parity.
   6px corners, thin borders, neutral hover fills, and blue keyboard focus.
   Explorer and Symbols panes start at 320px, with 16px viewer gutters. Search
   fields and tree/symbol rows use 32px sizing; file actions use 28px controls.
-  The toolbar keeps its rounded top border while sticky; joined actions keep a
+  The toolbar and content body own separate borders so scrolled side edges
+  cannot bleed through the rounded toolbar corners. Joined actions keep a
   stable outline on hover. Explorer search shares the Symbols input component.
   The Symbols column retains its width when the viewer grows.
   Its outlined panel fits short outlines and scrolls longer lists internally.
   The viewer owns its right border; the transparent resize gutter avoids a
-  stray stroke beside the commit row. Its grip stays centered on that border
-  within the visible workspace as the document scrolls.
+  stray stroke beside the commit row. Its resize target ends with the content,
+  and its grip stays centered on the visible content edge below the toolbar,
+  including short files and outlines taller than the source.
   Both sticky sidebars stay inside the visible file workspace when the footer
   appears, keeping their headers and search controls reachable. Columns too
   narrow for the split place Symbols below the viewer.
