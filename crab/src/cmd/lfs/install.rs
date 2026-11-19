@@ -462,7 +462,7 @@ fn set_git_config(root: &Path, flag: &str, key: &str, value: &str) -> Result<()>
     Ok(())
 }
 
-// Git LFS executes its agent path directly; Git filters use a POSIX shell.
+// Git LFS quotes its agent filename itself; Git filter values are shell programs.
 // Share these values so install, update and manual instructions keep that boundary.
 pub(super) fn lfs_config(bin: &str, skip_smudge: bool) -> Vec<(&'static str, String)> {
     LFS_TRANSFER_CONFIG_KEYS

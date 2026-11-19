@@ -80,6 +80,8 @@ static documents; scripts and automatic external resource loads are disabled.
 Audio/video restore position, volume, mute, playback rate and paused/playing
 intent after reader replacement. If automatic playback is denied, the recovered
 controls remain available for manual Play.
+Hydration, restoration and dehydration publish complete files atomically while
+existing previews retain their captured bytes, including on Windows.
 
 Notebook execution uses a selected local Python environment with Jupyter Client.
 Run All waits for each cell to finish and stops on failure. Live outputs and

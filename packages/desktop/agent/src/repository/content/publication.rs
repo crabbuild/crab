@@ -433,7 +433,23 @@ pub(super) fn publish<T>(
                 };
             }
             let result = if replace {
-                temporary.persist(path)
+                // Rust replaces open Windows destinations without invalidating
+                // retained previews. Normalize tempfile attributes first, and
+                // preserve descriptor ownership for checked cleanup on failure.
+                let mut owned = tempfile::TempPath::try_from_path(temporary.path().to_path_buf())?;
+                owned.disable_cleanup(true);
+                temporary
+                    .keep()
+                    .and_then(|(file, _)| match std::fs::rename(&owned, path) {
+                        Ok(()) => Ok(file),
+                        Err(error) => {
+                            owned.disable_cleanup(false);
+                            Err(tempfile::PersistError {
+                                error,
+                                file: tempfile::NamedTempFile::from_parts(file, owned),
+                            })
+                        }
+                    })
             } else {
                 temporary.persist_noclobber(path)
             };
@@ -478,6 +494,49 @@ fn close_temporary(temporary: tempfile::NamedTempFile) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replacement_preserves_an_open_preview_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(directory.path()).unwrap();
+        let destination = root.join("content.bin");
+        std::fs::write(&destination, b"captured preview").unwrap();
+        let mut preview = std::fs::File::open(&destination).unwrap();
+        let mut temporary = tempfile::NamedTempFile::new_in(&root).unwrap();
+        std::io::Write::write_all(&mut temporary, b"published content").unwrap();
+
+        // Transfers replace the pathname while an existing preview retains its
+        // descriptor. Closing that reader would invalidate a separate query.
+        publish(temporary, &destination, true, Ok(())).unwrap();
+        let mut captured = Vec::new();
+        preview.read_to_end(&mut captured).unwrap();
+        assert_eq!(
+            (std::fs::read(&destination).unwrap(), captured),
+            (b"published content".to_vec(), b"captured preview".to_vec())
+        );
+    }
+
+    #[test]
+    fn failed_rename_cleans_only_the_owned_temporary() {
+        for replace in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = std::fs::canonicalize(directory.path()).unwrap();
+            let destination = root.join("occupied");
+            std::fs::create_dir(&destination).unwrap();
+            std::fs::write(destination.join("user-file"), b"keep").unwrap();
+            let temporary = tempfile::NamedTempFile::new_in(&root).unwrap();
+            let temporary_path = temporary.path().to_path_buf();
+            let result = publish(temporary, &destination, replace, Ok(()));
+            assert_eq!(
+                (
+                    result.is_err(),
+                    temporary_path.exists(),
+                    std::fs::read(destination.join("user-file")).unwrap(),
+                ),
+                (true, false, b"keep".to_vec())
+            );
+        }
+    }
 
     #[test]
     fn failed_publication_never_cleans_a_replaced_temporary_file() {
