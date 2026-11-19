@@ -56,17 +56,21 @@ jobs:
           # This diagnostic uses the previously qualified identical Rust source;
           # the current PR still performs its complete native rebuild and tests.
           s = s[:a] + s[z:]
-          exec(compile(s, str(p), "exec"), {"__file__": str(p), "__name__": "__main__"})
+          try:
+              exec(compile(s, str(p), "exec"), {"__file__": str(p), "__name__": "__main__"})
+          finally:
+              import os, shutil
+              logs = Path("storage-fixture-command-logs")
+              logs.mkdir(exist_ok=True)
+              for profile in ("alpha", "beta"):
+                  for source in Path(os.environ["RUNNER_TEMP"]).glob(f"r*/{profile}/commands.log"):
+                      shutil.copyfile(source, logs / f"{source.parent.parent.name}-{profile}.log")
           PYCODE
-      - name: Qualify complete desktop regression suite
-        if: always()
-        run: npm test -- --maxWorkers 2 --reporter=json --outputFile=candidate-report.json > candidate-unit.log 2>&1
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: alpha2-windows-storage-proof
+          name: alpha2-windows-storage-commands-proof
           path: |
             packages/desktop/windows-storage.log
-            packages/desktop/candidate-unit.log
-            packages/desktop/candidate-report.json
+            packages/desktop/storage-fixture-command-logs/*.log
             packages/desktop/test-results/**
