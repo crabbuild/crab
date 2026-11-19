@@ -709,6 +709,36 @@ The first-twenty-prefix analysis and all original failed receipts are retained.
 This targeted profile does not establish the full combined-source R7 matrix;
 HTTP recovery and minimum-profile qualification still await the Cellar fix.
 
+
+A fifty-pair instrumented attribution diagnostic on the same native core source
+passes all 100 Git-oracle checks. Its cold p95 is 102.207 ms for the candidate
+and 119.482 ms for R0. Median time outside observed storage is 22.543/23.141 ms;
+storage-active time accounts for most of the variation. The observation covers
+all work under `Store`, not network time alone. The diagnostic does not isolate
+a stable code regression or clear the earlier 100-pair cold-attribution failure.
+Its instrumented source/binary/report hashes are retained; probes are removed
+from production source. No threshold or production behavior changes follow.
+
+
+A fixed independent-growth profile on the same native core source completes
+2,800 Git-oracle queries in 280 processes, with twenty interleaved pairs for each
+of seven fixtures. Each has the same 100 commits, 21 target-file versions and
+final main tip. Separate cells vary visible refs (1/32/512), pack members within
+one physical source (1/4/16), and pending ref-only transactions (0/4/16) while
+retaining one pack member. The canonical capture verifies journal frontiers;
+root-only frontier pointers do not include every pending transaction. Pack
+members and physical source objects are reported separately. Opening/capture
+latency and backend counts remain separate from the query samples and gates.
+Each operation gets a fresh Git runtime; the process shares its Store transport.
+Cold denotes runtime/cache state, without claiming a cold network/provider.
+
+All correctness/drain checks pass; 36 of 140 timing cells fail the unchanged
+1.1 p95 control gate. Complete cells and source/fixture/binary hashes are in the
+JSON companion. Setup errors and the first correlated frontier fixtures remain
+retained and were excluded before timing began. Distinct physical-source object
+growth and wider history sizes remain unqualified. This native proof does not
+clear HTTP recovery, the minimum-profile soak or the combined acceptance gate.
+
 ### R0 — Freeze the evidence contract and establish a baseline
 
 **Scope:** `crates/crab-remote/examples/qualify_remote.rs`, its `support/` owners;
