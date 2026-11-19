@@ -28,6 +28,8 @@ macOS automatic update installation requires a future signed release.
   standardized controls, themes, and terminal font rendering.
 - Unified normal, durable daemon, and SSH terminal controls, preserving sessions
   across reconnects and recovering stale daemon owners.
+- Fixed forced terminal shutdown on Windows so foreground console programs are
+  reaped with their shell.
 - Shared the large-file cache across desktop consumers and streamed Git checkout
   content without buffering complete large blobs.
 - Released Git index copy handles before converted-file publication so Windows
