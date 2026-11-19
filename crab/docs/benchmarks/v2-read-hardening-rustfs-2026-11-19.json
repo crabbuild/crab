@@ -4017,6 +4017,195 @@
       },
       "dependency_patch": "requires explicit approval; none applied",
       "acceptance": "open; historical performance failures retained; current-source HTTP restart blocked by dependency recovery"
+    },
+    "ready_close_native_matrix": {
+      "status": "failed_engineering_gates",
+      "raw_report_sha256": "43d3fb59ff59216ee3172344f56e864014c927a716f07c0659354cdfcd038678",
+      "orchestrator_sha256": "0d84a3dde6c2b656e1ff4ed824d47301cc144ac7a8b65b0743b9ffe42b05f2f2",
+      "bindings": {
+        "baseline": {
+          "qualifier_sha256": "161d95ee2701238fcce450a48840f479789bdf8ae456a5711bfb0410721b5344",
+          "source_receipt_sha256": "c913d80f6ba13146480a8ff54c485810a2b1cf086185d93e1b247a59b71a6f88",
+          "source_revision": "aafb6d256c5e8d3a8e768d31dd887a18f2afd2e4"
+        },
+        "candidate": {
+          "qualifier_sha256": "edc5ab79a05631031027a0e697808feb35245de927796cc867a690cf6fe32a28",
+          "source_receipt_sha256": "5c4c824f45cc82f8f6ac7ed7d12a4e01501d1267585f10b35d0d49d1e0002354",
+          "source_revision": "c335d728acd7598146f8581e76ccaeb28e989b98"
+        }
+      },
+      "provider": "local pinned RustFS; 1 CPU / 3 GiB backend; 2 CPU / 4 GiB VM; dedicated VM data disk; unchanged original Git inputs",
+      "scope": "debug; 20 interleaved pairs per scale/selection; every query has fresh runtime and then a warm repeat; backend counters are logical Store invocations, not HTTP retry counts",
+      "rows": 240,
+      "query_cells": 72,
+      "git_queries_checked": 1440,
+      "thresholds": {
+        "maximum_control_p95_ratio": 1.1,
+        "target_p95_ratio": 0.8
+      },
+      "failures": [
+        {
+          "commits": 100,
+          "operation": "blob",
+          "cache": "cold",
+          "p95_ratio": 1.1318544855622803
+        },
+        {
+          "commits": 100,
+          "operation": "blob",
+          "cache": "warm",
+          "p95_ratio": 1.1072386058981234
+        },
+        {
+          "commits": 1000,
+          "operation": "attribution",
+          "cache": "cold",
+          "p95_ratio": 1.1291648426479888
+        },
+        {
+          "commits": 1000,
+          "operation": "tree",
+          "cache": "warm",
+          "p95_ratio": 1.102661596958175
+        }
+      ],
+      "build_receipt_sha256": "5c4c824f45cc82f8f6ac7ed7d12a4e01501d1267585f10b35d0d49d1e0002354",
+      "compiled_inputs_match_current_tree": true,
+      "columns": ["commits", "operation", "cache", "target", "samples_per_variant", "baseline_p50_us", "baseline_p95_us", "candidate_p50_us", "candidate_p95_us", "p95_ratio", "baseline_median_reads", "candidate_median_reads", "baseline_median_read_bytes", "candidate_median_read_bytes", "gate"],
+      "cells": [
+        [100, "attribution", "cold", false, 20, 76151, 101144, 75311, 85133, 0.8417009412323024, 61.0, 61.0, 62597.0, 62597.0, "passed"],
+        [100, "attribution", "warm", false, 20, 2041, 2209, 1989, 2097, 0.9492983250339521, 0.0, 0.0, 0.0, 0.0, "passed"],
+        [100, "blame", "cold", false, 20, 223051, 277546, 226153, 241440, 0.8699098527811606, 179.0, 179.0, 133772.0, 133772.0, "passed"],
+        [100, "blame", "warm", false, 20, 332, 389, 302, 408, 1.0488431876606683, 0.0, 0.0, 0.0, 0.0, "passed"],
+        [100, "blob", "cold", false, 20, 67210, 76501, 68608, 86588, 1.1318544855622803, 55.0, 55.0, 43319.0, 43319.0, "failed"],
+        [100, "blob", "warm", false, 20, 332, 373, 319, 413, 1.1072386058981234, 0.0, 0.0, 0.0, 0.0, "failed"],
+        [100, "commit", "cold", false, 20, 6685, 7756, 6728, 8130, 1.0482207323362558, 5.0, 5.0, 37365.0, 37365.0, "passed"],
+        [100, "commit", "warm", false, 20, 215, 358, 194, 307, 0.8575418994413407, 0.0, 0.0, 0.0, 0.0, "passed"],
+        [100, "history", "cold", true, 20, 120520, 142946, 25154, 31872, 0.22296531557371316, 104.0, 12.0, 52029.0, 52029.0, "passed"],
+        [100, "history", "warm", false, 20, 772, 908, 617, 778, 0.8568281938325991, 0.0, 0.0, 0.0, 0.0, "passed"],
+        [100, "history-page-1", "cold", true, 20, 115381, 122457, 23707, 30968, 0.252888769118956, 104.0, 12.0, 52029.0, 52029.0, "passed"],
+        [100, "history-page-1", "warm", false, 20, 696, 776, 574, 653, 0.8414948453608248, 0.0, 0.0, 0.0, 0.0, "passed"],
+        [100, "object-batch", "cold", false, 20, 71137, 87395, 70288, 86601, 0.9909148120601865, 55.0, 55.0, 45466.0, 45466.0, "passed"],
+        [100, "object-batch", "warm", false, 20, 1895, 2090, 1919, 2143, 1.0253588516746412, 0.0, 0.0, 0.0, 0.0, "passed"],
+        [100, "object-point", "cold", false, 20, 67697, 79920, 67810, 86903, 1.0873748748748748, 55.0, 55.0, 43319.0, 43319.0, "passed"],
+        [100, "object-point", "warm", false, 20, 328, 436, 305, 420, 0.963302752293578, 0.0, 0.0, 0.0, 0.0, "passed"],
+        [100, "path-history", "cold", false, 20, 224294, 262750, 228633, 272398, 1.0367193149381542, 176.0, 176.0, 133757.0, 133757.0, "passed"],
+        [100, "path-history", "warm", false, 20, 11884, 13214, 12201, 13280, 1.004994702588164, 0.0, 0.0, 0.0, 0.0, "passed"],
+        [100, "resolve", "cold", false, 20, 7492, 8928, 7041, 8439, 0.9452284946236559, 5.0, 5.0, 37365.0, 37365.0, "passed"],
+        [100, "resolve", "warm", false, 20, 229, 449, 220, 303, 0.6748329621380846, 0.0, 0.0, 0.0, 0.0, "passed"],
+        [100, "tree", "cold", false, 20, 68702, 79203, 67286, 84920, 1.0721816092824767, 54.0, 54.0, 43176.0, 43176.0, "passed"],
+        [100, "tree", "warm", false, 20, 682, 803, 644, 776, 0.9663760896637609, 0.0, 0.0, 0.0, 0.0, "passed"],
+        [1000, "attribution", "cold", false, 20, 77438, 82236, 79341, 92858, 1.1291648426479888, 50.0, 50.0, 273687.0, 273687.0, "failed"],
+        [1000, "attribution", "warm", false, 20, 2064, 2340, 2123, 2274, 0.9717948717948718, 0.0, 0.0, 0.0, 0.0, "passed"],
+        [1000, "blame", "cold", false, 20, 1345926, 1449368, 1423353, 1537923, 1.0610990445490724, 951.0, 951.0, 728968.0, 728968.0, "passed"],
+        [1000, "blame", "warm", false, 20, 352, 432, 341, 410, 0.9490740740740741, 0.0, 0.0, 0.0, 0.0, "passed"],
+        [1000, "blob", "cold", false, 20, 65175, 73785, 64483, 72683, 0.9850647150504845, 43.0, 43.0, 189707.0, 189707.0, "passed"],
+        [1000, "blob", "warm", false, 20, 378, 454, 313, 424, 0.933920704845815, 0.0, 0.0, 0.0, 0.0, "passed"],
+        [1000, "commit", "cold", false, 20, 10545, 12213, 10323, 12329, 1.0094980758208467, 7.0, 7.0, 66534.0, 66534.0, "passed"],
+        [1000, "commit", "warm", false, 20, 246, 405, 192, 327, 0.8074074074074075, 0.0, 0.0, 0.0, 0.0, "passed"],
+        [1000, "history", "cold", true, 20, 1405197, 1630027, 231221, 245106, 0.15036928836148114, 1010.0, 76.0, 333664.0, 399064.0, "passed"],
+        [1000, "history", "warm", false, 20, 5245, 5529, 4482, 4716, 0.8529571351058057, 0.0, 0.0, 0.0, 0.0, "passed"],
+        [1000, "history-page-1", "cold", true, 20, 147976, 240481, 36534, 55253, 0.22976035528794375, 109.0, 18.0, 167183.0, 199885.0, "passed"],
+        [1000, "history-page-1", "warm", false, 20, 750, 840, 617, 695, 0.8273809523809523, 0.0, 0.0, 0.0, 0.0, "passed"],
+        [1000, "history-page-10", "cold", true, 20, 1381084, 2040437, 37989, 47591, 0.023323925217980265, 1010.0, 19.0, 333664.0, 232732.0, "passed"],
+        [1000, "history-page-10", "warm", false, 20, 4263, 4469, 611, 649, 0.14522264488699932, 0.0, 0.0, 0.0, 0.0, "passed"],
+        [1000, "object-batch", "cold", false, 20, 70016, 83866, 69181, 83541, 0.9961247704671738, 43.0, 43.0, 191854.0, 191854.0, "passed"],
+        [1000, "object-batch", "warm", false, 20, 1920, 2088, 1916, 2068, 0.9904214559386973, 0.0, 0.0, 0.0, 0.0, "passed"],
+        [1000, "object-point", "cold", false, 20, 66093, 77190, 65462, 73996, 0.95862158310662, 43.0, 43.0, 189707.0, 189707.0, "passed"],
+        [1000, "object-point", "warm", false, 20, 361, 451, 320, 382, 0.8470066518847007, 0.0, 0.0, 0.0, 0.0, "passed"],
+        [1000, "path-history", "cold", false, 20, 1381777, 1476171, 1386039, 1560765, 1.057306368977578, 930.0, 930.0, 728954.0, 728954.0, "passed"],
+        [1000, "path-history", "warm", false, 20, 12931, 14785, 13539, 15186, 1.0271220831924248, 0.0, 0.0, 0.0, 0.0, "passed"],
+        [1000, "resolve", "cold", false, 20, 11257, 12648, 11284, 13381, 1.057953826691967, 7.0, 7.0, 66534.0, 66534.0, "passed"],
+        [1000, "resolve", "warm", false, 20, 242, 342, 205, 350, 1.023391812865497, 0.0, 0.0, 0.0, 0.0, "passed"],
+        [1000, "tree", "cold", false, 20, 65041, 72888, 64839, 73006, 1.0016189221819778, 42.0, 42.0, 189564.0, 189564.0, "passed"],
+        [1000, "tree", "warm", false, 20, 712, 789, 657, 870, 1.102661596958175, 0.0, 0.0, 0.0, 0.0, "failed"],
+        [10000, "attribution", "cold", false, 20, 46667, 54106, 46039, 53750, 0.9934203230695302, 26.0, 26.0, 377618.0, 377618.0, "passed"],
+        [10000, "attribution", "warm", false, 20, 2165, 2353, 2130, 2215, 0.9413514662133446, 0.0, 0.0, 0.0, 0.0, "passed"],
+        [10000, "blame", "cold", false, 20, 1135473, 1277274, 1133389, 1260431, 0.9868133227482905, 667.0, 667.0, 4708972.0, 4708972.0, "passed"],
+        [10000, "blame", "warm", false, 20, 359, 433, 343, 418, 0.9653579676674365, 0.0, 0.0, 0.0, 0.0, "passed"],
+        [10000, "blob", "cold", false, 20, 32854, 39915, 32636, 36981, 0.9264937993235626, 18.0, 18.0, 271596.0, 271596.0, "passed"],
+        [10000, "blob", "warm", false, 20, 336, 400, 304, 351, 0.8775, 0.0, 0.0, 0.0, 0.0, "passed"],
+        [10000, "commit", "cold", false, 20, 11139, 13165, 11216, 12010, 0.9122673756171668, 7.0, 7.0, 72285.0, 72285.0, "passed"],
+        [10000, "commit", "warm", false, 20, 226, 319, 186, 217, 0.6802507836990596, 0.0, 0.0, 0.0, 0.0, "passed"],
+        [10000, "history", "cold", true, 20, 1573010, 1751526, 293513, 329045, 0.18786189871003914, 1041.0, 116.0, 1366389.0, 1711875.0, "passed"],
+        [10000, "history", "warm", false, 20, 5228, 5345, 4399, 4788, 0.8957904583723105, 0.0, 0.0, 0.0, 0.0, "passed"],
+        [10000, "history-page-1", "cold", true, 20, 235637, 295337, 91527, 188981, 0.6398825748213058, 138.0, 55.0, 1133922.0, 1414004.0, "passed"],
+        [10000, "history-page-1", "warm", false, 20, 773, 868, 659, 785, 0.9043778801843319, 0.0, 0.0, 0.0, 0.0, "passed"],
+        [10000, "history-page-10", "cold", true, 20, 1616484, 4048625, 93456, 139279, 0.03440155608385563, 1041.0, 56.0, 1366389.0, 1447438.0, "passed"],
+        [10000, "history-page-10", "warm", false, 20, 4230, 4743, 652, 1239, 0.2612270714737508, 0.0, 0.0, 0.0, 0.0, "passed"],
+        [10000, "history-page-100", "cold", true, 20, 15531957, 29374038, 90249, 181114, 0.006165784901619587, 10055.0, 54.0, 3166706.0, 1381382.0, "passed"],
+        [10000, "history-page-100", "warm", false, 20, 38986, 45205, 649, 745, 0.01648047782324964, 0.0, 0.0, 0.0, 0.0, "passed"],
+        [10000, "object-batch", "cold", false, 20, 65587, 72164, 65785, 72280, 1.0016074496979104, 47.0, 47.0, 1222439.0, 1222439.0, "passed"],
+        [10000, "object-batch", "warm", false, 20, 1910, 2043, 1941, 2072, 1.0141948115516397, 0.0, 0.0, 0.0, 0.0, "passed"],
+        [10000, "object-point", "cold", false, 20, 32903, 42127, 32979, 36165, 0.8584755619911221, 18.0, 18.0, 271596.0, 271596.0, "passed"],
+        [10000, "object-point", "warm", false, 20, 319, 430, 316, 366, 0.8511627906976744, 0.0, 0.0, 0.0, 0.0, "passed"],
+        [10000, "path-history", "cold", false, 20, 1192156, 1397820, 1185109, 1443958, 1.0330071110729564, 696.0, 696.0, 4691860.0, 4691860.0, "passed"],
+        [10000, "path-history", "warm", false, 20, 13742, 14784, 14140, 14884, 1.0067640692640694, 0.0, 0.0, 0.0, 0.0, "passed"],
+        [10000, "resolve", "cold", false, 20, 12313, 15800, 12646, 15882, 1.0051898734177216, 7.0, 7.0, 72285.0, 72285.0, "passed"],
+        [10000, "resolve", "warm", false, 20, 247, 327, 204, 337, 1.0305810397553516, 0.0, 0.0, 0.0, 0.0, "passed"],
+        [10000, "tree", "cold", false, 20, 29631, 35648, 29205, 32448, 0.9102333931777379, 16.0, 16.0, 238721.0, 238721.0, "passed"],
+        [10000, "tree", "warm", false, 20, 649, 721, 610, 674, 0.9348127600554785, 0.0, 0.0, 0.0, 0.0, "passed"]
+      ],
+      "historical_failures_retained": true
+    },
+    "sdk_large_read_ci": {
+      "run_id": 44547716054,
+      "job_id": 135642695263,
+      "job": "SDK 1 GiB read performance",
+      "status": "passed",
+      "artifact_id": 14543479156,
+      "artifact_zip_sha256": "53c5093f132d41347ea730d8d389fa3fd5dd26d5aa816b701678ef255f427cb1",
+      "report_sha256": "a50221b4104b191f92fee49fd27dd5776fe5c2ac945dfce907bcd10b0e9c3683",
+      "source_binding": {
+        "ci_source_revision": "705bb762c68a32118440b6f6a1abd7ecd6942dfb",
+        "ci_source_tree": "40d9219c8bf48a42816dc3f584e28ca22e71b3fb",
+        "pr_head_revision": "c335d728acd7598146f8581e76ccaeb28e989b98",
+        "pr_head_tree": "40d9219c8bf48a42816dc3f584e28ca22e71b3fb",
+        "target_tip": "464d943a045638fcb33746c94f473c284902cc72",
+        "same_tree": true
+      },
+      "scope": "one-GiB object; five cold/warm trials per shared-core and SDK reader; separate from the HTTP minimum resource profile",
+      "trial_groups": {
+        "core_cold": 5,
+        "core_warm": 5,
+        "sdk_cold": 5,
+        "sdk_warm": 5
+      },
+      "medians": {
+        "core_cold": {
+          "wall_seconds": 3.5193154190000087,
+          "origin_requests": 32,
+          "origin_response_bytes": 1277099791
+        },
+        "core_warm": {
+          "wall_seconds": 1.2286621800000148,
+          "origin_requests": 13,
+          "origin_response_bytes": 134218539
+        },
+        "sdk_cold": {
+          "wall_seconds": 3.555814671999997,
+          "origin_requests": 32,
+          "origin_response_bytes": 1277099791
+        },
+        "sdk_warm": {
+          "wall_seconds": 1.1884158290000642,
+          "origin_requests": 13,
+          "origin_response_bytes": 134218539
+        }
+      },
+      "sdk_to_core_ratios": {
+        "cold": {
+          "wall_seconds": 1.0211634317510125,
+          "origin_requests": 1.0,
+          "origin_response_bytes": 1.0
+        },
+        "warm": {
+          "wall_seconds": 0.9642281159821451,
+          "origin_requests": 1.0,
+          "origin_response_bytes": 1.0
+        }
+      },
+      "peak_rss_bytes": 465481728
     }
   }
 }

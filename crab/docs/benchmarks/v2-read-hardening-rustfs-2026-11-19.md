@@ -239,3 +239,21 @@ still contains 1 and 3 without 2. It exits 1 after a complete shutdown proof and
 reaches none of the 46 read checks. The earlier successful 46-check run remains
 historical; it does not qualify this restart. Dependency approval remains pending,
 and the full frozen timing matrix has not been rerun for the ready-close change.
+
+
+The subsequent full native matrix qualifies `c335d728acd` with the ready-close
+change: all 1,440 Git-oracle queries pass across 72 cold/warm cells and twenty
+interleaved pairs per cell. Four p95 controls fail: 100-commit cold/warm blobs
+(ratios 1.132/1.107), 1,000-commit cold attribution (1.129), and 1,000-commit warm
+tree reads (1.103). Every 10,000-commit cell passes, including history pages
+1/10/100. Cold page 100 drops from 29.374 s to 0.181 s p95, with median backend
+reads falling from 10,055 to 54. The same thresholds and original Git inputs apply;
+the older twelve and fourteen failures remain retained. HTTP recovery and the
+combined acceptance gate remain open.
+
+The [SDK read-performance CI job](https://github.com/crabbuild/crab/actions/runs/44547716054)
+passes for the same source tree: five cold/warm trials each compare the shared
+core and SDK readers over a one-GiB object on RustFS. The maximum observed RSS is
+465,481,728 bytes. The artifact hash and merge/head tree equality are verified.
+This covers that object workload; the HTTP minimum-profile restart/soak remains
+blocked by the Cellar gap and requires the pending dependency approval.
