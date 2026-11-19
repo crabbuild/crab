@@ -148,8 +148,9 @@ grant, and this consolidation does not establish full GitHub Enterprise parity.
   stable outline on hover. Explorer search shares the Symbols input component.
   The Symbols column retains its width when the viewer grows.
   Its outlined panel fits short outlines and scrolls longer lists internally.
-  The divider shares the viewer border; its grip stays centered within the
-  visible workspace as the document scrolls.
+  The viewer owns its right border; the transparent resize gutter avoids a
+  stray stroke beside the commit row. Its grip stays centered on that border
+  within the visible workspace as the document scrolls.
   Both sticky sidebars stay inside the visible file workspace when the footer
   appears, keeping their headers and search controls reachable. Columns too
   narrow for the split place Symbols below the viewer.

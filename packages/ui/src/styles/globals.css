@@ -5147,14 +5147,14 @@ main {
   align-items: flex-start;
   justify-content: flex-start;
   width: --spacing(4);
-  /* Own the gutter and share the viewer's border, keeping panel widths literal. */
+  /* The viewer owns the edge; a separator stroke would cross the commit row. */
   inset-inline-start: -1px;
-  border-inline-start: 1px solid var(--border);
+  border: 0;
   background: transparent;
 }
 .code-symbols-resizer > div {
   position: sticky;
-  margin-inline-start: -2px;
+  margin-inline-start: -1px;
   top: calc(var(--workspace-available-height, 100dvh) / 2 - --spacing(3));
   margin-top: calc(
     var(--workspace-available-height, 100dvh) / 2 - --spacing(3)
