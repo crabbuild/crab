@@ -4,12 +4,13 @@ on:
 permissions:
   contents: read
 jobs:
-  fs-proof:
+  terminal-proof:
     runs-on: windows-2022
-    timeout-minutes: 20
+    timeout-minutes: 30
     defaults:
       run:
         shell: bash
+        working-directory: packages/desktop
     steps:
       - uses: actions/checkout@v4
         with:
@@ -17,41 +18,62 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version-file: packages/desktop/.nvmrc
-      - name: Install the exact Electron runtime without native modules
-        run: npm install --ignore-scripts --prefix "$RUNNER_TEMP/crab-fs-probe" electron@45.2.3
-      - name: Compare synchronous and asynchronous owned cleanup
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Set private proof directory
         run: |
-          mkdir -p "$RUNNER_TEMP/crab-fs-proof"
-          export CRAB_FS_PROOF_ROOT="$RUNNER_TEMP/crab-fs-proof"
-          cat > "$RUNNER_TEMP/crab-fs-contract.cjs" <<'JS'
-          const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict'),{execFileSync}=require('node:child_process');
+          mkdir -p "$RUNNER_TEMP/crab-terminal-proof"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crab-terminal-proof" >> "$GITHUB_ENV"
+      - run: npm ci
+      - run: npm run build:electron
+      - name: Compare foreground programs through real daemon reconnection
+        run: |
+          cat > "$RUNNER_TEMP/crab-terminal-proof.cjs" <<'JS'
+          const fs=require('node:fs'),path=require('node:path');
+          const {DaemonServer}=require(path.resolve('dist-electron/daemon/daemon-server.cjs'));
+          const {DaemonClient}=require(path.resolve('dist-electron/daemon/daemon-client.cjs'));
+          const {createNodePtySpawner}=require(path.resolve('dist-electron/daemon/subprocess-handle.cjs'));
+          const consoleNode=process.argv[2];if(!consoleNode||!fs.existsSync(consoleNode))throw Error('Console Node executable missing');
+          const pause=ms=>new Promise(r=>setTimeout(r,ms));
+          const alive=pid=>{try{process.kill(pid,0);return true}catch{return false}};
+          async function until(predicate){const end=Date.now()+5000;while(Date.now()<end){if(predicate())return true;await pause(25)}return false}
           (async()=>{
-           for(const kind of ['readonly-file','git-repository']){
-            const root=fs.mkdtempSync(path.join(process.env.CRAB_FS_PROOF_ROOT,kind+'-'));
-            if(kind==='readonly-file'){const file=path.join(root,'owned.txt');fs.writeFileSync(file,'OWNED');fs.chmodSync(file,0o444);}
-            else{
-             const git=args=>execFileSync('git',args,{cwd:root,stdio:'pipe'});
-             git(['init','--quiet','--template=','--initial-branch=main']);
-             git(['-c','user.name=Fixture','-c','user.email=fixture@example.invalid','-c','commit.gpgSign=false','commit','--quiet','--allow-empty','-m','Owned fixture']);
-            }
-            let synchronousError;
-            try{fs.rmSync(root,{recursive:true,force:true})}catch(error){synchronousError={code:error.code,message:error.message};}
-            const remaining=[];
-            const walk=file=>{if(!fs.existsSync(file))return;const st=fs.lstatSync(file);remaining.push({file:path.relative(root,file),mode:st.mode});if(st.isDirectory())for(const child of fs.readdirSync(file))walk(path.join(file,child));};
-            walk(root);
-            await fs.promises.rm(root,{recursive:true,force:true});
-            assert.equal(fs.existsSync(root),false);
-            const record={version:process.version,electron:process.versions.electron,kind,synchronousError,remaining,asynchronousCleanup:true};
-            fs.appendFileSync(path.join(process.env.CRAB_FS_PROOF_ROOT,'results.jsonl'),JSON.stringify(record)+'\n');
-            console.log('[FS-PROOF]',JSON.stringify(record));
+           const results=[];
+           for(const kind of ['electron-gui','console-node'])for(let iteration=0;iteration<2;iteration++){
+            const root=fs.mkdtempSync(path.join(process.env.CARGO_TARGET_DIR,'foreground-'));
+            fs.writeFileSync(path.join(root,'agent.cjs'),`const fs=require('node:fs');process.on('exit',code=>fs.writeFileSync('exit.json',JSON.stringify({code,pid:process.pid,stdinDestroyed:process.stdin.destroyed})));console.log('agent-ready:'+process.pid);process.stdin.setEncoding('utf8');process.stdin.on('data',line=>console.log('agent-reply:'+process.pid+':'+line.trim()));`);
+            const server=new DaemonServer({socketPath:path.join(root,'daemon-v2.sock'),tokenPath:path.join(root,'daemon-v2.token'),pidPath:path.join(root,'daemon-v2.pid'),spawnSubprocess:createNodePtySpawner(),idleTimeoutMs:0});
+            let output='',resumed='';
+            const options=handler=>({socketDir:root,daemonEntryPath:'',onSessionData:(_id,data)=>handler(data),onSessionExit(){},onAgentStateChange(){}});
+            const client=new DaemonClient(options(data=>output+=data)),reader=new DaemonClient(options(data=>resumed+=data));
+            const result={kind,iteration,version:process.version,consoleNode};
+            try{
+             await server.start();await client.ensureConnected();
+             const sessionId='foreground';const spawned=await client.request('createOrAttach',{sessionId,cwd:root,cols:80,rows:24,env:{HOME:root,ZDOTDIR:root}});result.shellPid=spawned.pid;
+             const command=kind==='electron-gui'?`start "" /b /wait "${process.execPath}" agent.cjs`:`"${consoleNode}" agent.cjs`;
+             await client.request('write',{sessionId,data:command+'\r'});
+             if(!await until(()=>/agent-ready:(\d+)/.test(output)))throw Error('Agent did not become ready');
+             const pid=Number(/agent-ready:(\d+)/.exec(output)[1]);result.pid=pid;result.aliveBefore=alive(pid);
+             try{await client.request('prepare-upgrade',{successorPath:path.resolve('dist-electron/daemon/daemon-main.cjs')});throw Error('Upgrade unexpectedly admitted')}catch(error){if(!/deferred while terminals are running/.test(error.message))throw error}
+             client.disconnect();await client.ensureConnected();const restored=await client.request('createOrAttach',{sessionId,cwd:root,cols:100,rows:35});result.restoredNew=restored.isNew;
+             await reader.ensureConnected();await reader.request('createOrAttach',{sessionId,cwd:root,cols:100,rows:35});
+             await reader.request('write',{sessionId,data:'after-reopen\r'});
+             result.reply=await until(()=>resumed.includes(`agent-reply:${pid}:after-reopen`));result.aliveAfter=alive(pid);result.output=output;result.resumed=resumed;
+             if(fs.existsSync(path.join(root,'exit.json')))result.exit=JSON.parse(fs.readFileSync(path.join(root,'exit.json'),'utf8'));
+            }catch(error){result.error=error.message}
+            finally{client.disconnect();reader.disconnect();await server.shutdown({killSessions:true});await fs.promises.rm(root,{recursive:true,force:true});}
+            results.push(result);console.log('[TERMINAL-PROOF]',JSON.stringify(result));
            }
+           fs.writeFileSync(path.join(process.env.CARGO_TARGET_DIR,'terminal-proof.json'),JSON.stringify(results,null,2));
+           if(results.filter(r=>r.kind==='console-node').some(r=>!r.reply||r.restoredNew!==false||!r.aliveAfter))process.exitCode=1;
           })().catch(error=>{console.error(error);process.exitCode=1});
+          
           JS
-          node "$RUNNER_TEMP/crab-fs-contract.cjs"
-          ELECTRON_RUN_AS_NODE=1 node -e 'const req=require("node:module").createRequire(require("node:path").join(process.argv[1],"package.json"));const child=require("node:child_process").spawnSync(req("electron"),[process.argv[2]],{env:process.env,stdio:"inherit"});if(child.error)throw child.error;process.exitCode=child.status??1' "$RUNNER_TEMP/crab-fs-probe" "$RUNNER_TEMP/crab-fs-contract.cjs"
+          ELECTRON_RUN_AS_NODE=1 node -e 'const child=require("node:child_process").spawnSync(require("electron"),[process.argv[1],process.execPath],{env:process.env,stdio:"inherit"});if(child.error)throw child.error;process.exitCode=child.status??1' "$RUNNER_TEMP/crab-terminal-proof.cjs"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: alpha2-windows-filesystem-contract
-          path: ${{ runner.temp }}/crab-fs-proof/results.jsonl
+          name: alpha2-windows-terminal-contract
+          path: ${{ runner.temp }}/crab-terminal-proof/terminal-proof.json
           retention-days: 7
