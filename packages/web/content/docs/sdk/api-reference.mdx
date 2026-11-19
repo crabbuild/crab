@@ -7,6 +7,7 @@ The SDK exposes one client, one repository facade, and task-specific namespaces.
 | crate root | Client construction, repository selection, core identifiers, errors, and shared write policy |
 | `remote` | Pinned refs, snapshots, Git reads, content streams, and archives |
 | `remote::write` | Streamed commits, atomic ref batches, outcomes, and recovery tokens |
+| `results` | Captured workflow results, comparisons, immutable reports, and verified attachments; requires `results` |
 | `local` | Tool policy, local worktree reads, edits, integration, hydration, and push |
 | `service` | Managed service configuration and repository administration |
 | `operation` | Lazy requests, cancellation, deadlines, limits, progress, and operation identity |
@@ -50,5 +51,42 @@ push uses `local::PushOutcome`, including dry-run and transport outcomes.
 Local pull distinguishes updated, current, conflict, and pending-hydration
 states.
 
-Use generated rustdoc for constructor and error details. Public enums are
-non-exhaustive, so external matches need a fallback arm.
+Use generated rustdoc for constructor, error, and enum matching details.
+
+## Workflow Results
+
+Enable the `results` Cargo feature, which also enables `remote`. Open the remote
+repository through `Client::open`, then read published workflow evidence through
+`repository.remote()?.results()`. Reads use that repository's storage and the
+standard operation deadlines, cancellation, and read limits. Workflow YAML and a
+local worktree are unnecessary.
+
+```rust
+use crab_sdk::results::{ResultsRead, ResultsResponse};
+use crab_sdk::Repository;
+
+async fn print_report(repository: &Repository, id: String) -> crab_sdk::Result<()> {
+    let response = repository
+        .remote()?
+        .results()
+        .read(ResultsRead::Report { id })
+        .await?;
+    if let ResultsResponse::Report(view) = response {
+        println!("{}: {} runs", view.report.title, view.report.comparison.rows.len());
+    }
+    Ok(())
+}
+```
+
+Use `ResultsRead::List` for query-driven run tables and `ResultsRead::Compare`
+for shared comparison and plot semantics. `RunSelection` pins an experiment ID
+and result digest. Report IDs select immutable comparisons; their values and
+selected evidence survive source experiment changes. `Results::blob(hash)` reads
+and verifies retained attachment bytes. Preserve availability and provenance
+states when presenting missing, excluded, or unavailable evidence.
+
+Workflow execution and report publication use the
+[Results CLI](/docs/cli/workflow/results). In Crab Desktop, open
+**Data Workflows → Results**. Direct Results transport and SDK reads have owned
+RustFS qualification. Actual AWS, GCS, Azure, and managed-service Results
+qualification remains open; a compiled provider path does not establish support.

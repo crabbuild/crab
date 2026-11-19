@@ -789,6 +789,19 @@ jobs:
           --features remote,files --test remote_blob
           s3_pack_reads_survive_source_removal_and_keep_snapshots_pinned
           -- --exact --ignored --nocapture
+      - name: Qualify S3 Results publication, cold retrieval and read-only SDK reads
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixture_digest="$(sha256sum crates/crab-sdk/tests/results.rs | cut -d' ' -f1)"
+          python3 crab/scripts/qualify_sdk.py run \
+            --output "$RUNNER_TEMP/sdk-s3-evidence/results.json" \
+            --backend s3 --features results --fixture-digest "$fixture_digest" \
+            --expected-tests 1 --toolchain "$SDK_MSRV" --timeout-seconds 1200 -- \
+            cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features \
+            --features results --test results \
+            live_s3_results_survive_source_removal_and_sdk_reads_are_read_only \
+            -- --exact --ignored --nocapture
       - name: Qualify native S3 writes and restart recovery
         shell: bash
         run: |
@@ -931,6 +944,21 @@ jobs:
           cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features
           --features remote,publish --test azure_read live_azure_read_is_byte_exact_and_read_only
           -- --exact --ignored --nocapture
+      - name: Qualify GCS and Azure Results publication, cold retrieval and read-only SDK reads
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixture_digest="$(sha256sum crates/crab-sdk/tests/results.rs | cut -d' ' -f1)"
+          for provider in gcs azure; do
+            python3 crab/scripts/qualify_sdk.py run \
+              --output "$RUNNER_TEMP/sdk-cloud-evidence/results-${provider}.json" \
+              --backend "$provider" --features results --fixture-digest "$fixture_digest" \
+              --expected-tests 1 --toolchain "$SDK_MSRV" --timeout-seconds 1200 -- \
+              cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features \
+              --features results --test results \
+              "live_${provider}_results_survive_source_removal_and_sdk_reads_are_read_only" \
+              -- --exact --ignored --nocapture
+          done
       - name: Upload cloud evidence
         if: always()
         uses: actions/upload-artifact@v4

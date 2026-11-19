@@ -17,6 +17,7 @@ application uses:
 | Feature | Adds |
 | --- | --- |
 | `remote` | `Client`, unified open, pinned remote reads, and operation controls |
+| `results` | Captured workflow results, comparisons, immutable reports, and attachment reads; implies `remote` |
 | `files` | Verified file streams, ranges, and caching for Git, Crab/Xet, and Git LFS |
 | `publish` | Remote initialization, commits, ref updates, and recovery |
 | `local` | Local worktree workflows; implies `publish` and `files` |
@@ -35,6 +36,12 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 The package is unpublished. Replace `<COMMIT>` with an audited commit from the
 crab-v2 branch. GCS, Azure and managed service capabilities remain preview until
 their credentialed qualification gates pass.
+
+Enable `results` to read published workflow evidence through
+`repository.remote()?.results()`. This uses the opened repository's storage,
+without workflow YAML or a local worktree. See the
+[Results API example](/docs/sdk/api-reference#workflow-results) and
+[Results workspace guide](/docs/cli/workflow/results).
 
 ## Open a direct remote
 

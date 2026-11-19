@@ -2,10 +2,10 @@ name: Desktop v2
 on:
   pull_request:
     branches: [main, crab-v2]
-    paths: ['packages/desktop/**', 'crab/**', 'crates/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/desktop.yml']
+    paths: ['packages/desktop/**', 'packages/workflow-results/**', 'packages/ui/**', 'crab/**', 'crates/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/desktop.yml']
   push:
     branches: [main, crab-v2]
-    paths: ['packages/desktop/**', 'crab/**', 'crates/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/desktop.yml']
+    paths: ['packages/desktop/**', 'packages/workflow-results/**', 'packages/ui/**', 'crab/**', 'crates/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/desktop.yml']
   workflow_dispatch:
   workflow_call:
     inputs:
@@ -353,6 +353,38 @@ jobs:
       - name: Install isolated storage qualification tools
         if: matrix.os == 'macos-15' || runner.os == 'Windows' || runner.os == 'Linux'
         run: python -m pip install awscli
+      - name: Install Results browser qualification dependencies
+        if: matrix.os == 'macos-15' || runner.os == 'Windows' || runner.os == 'Linux'
+        run: |
+          npm --prefix ../ui ci --ignore-scripts
+          npx playwright install chromium
+          node ../ui/node_modules/@playwright/test/cli.js install chromium
+          node ../ui/scripts/build-results-runtime.mjs --check
+          npm --prefix ../ui run build
+      - name: Qualify native Results and immutable offline reports
+        if: matrix.os == 'macos-15' || runner.os == 'Windows' || runner.os == 'Linux'
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a python ../../crab/scripts/qualify_results.py --desktop --http --browser
+          elif [ "$RUNNER_OS" = Windows ]; then
+            python ../../crab/scripts/qualify_results.py --desktop
+          else
+            python ../../crab/scripts/qualify_results.py --desktop --http --browser
+          fi
+      - name: Retain Results acceptance evidence
+        if: always() && (matrix.os == 'macos-15' || runner.os == 'Windows' || runner.os == 'Linux')
+        uses: actions/upload-artifact@v4
+        with:
+          name: Crab-results-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            ${{ env.CARGO_TARGET_DIR }}/results-acceptance/*.json
+            ${{ env.CARGO_TARGET_DIR }}/results-acceptance/*.log
+            ${{ env.CARGO_TARGET_DIR }}/results-acceptance/*.html
+            ${{ env.CARGO_TARGET_DIR }}/results-acceptance/*.png
+            ${{ env.CARGO_TARGET_DIR }}/results-acceptance/browser/*.json
+            ${{ env.CARGO_TARGET_DIR }}/results-acceptance/browser/*.png
+          if-no-files-found: error
+          retention-days: 14
       - name: Qualify native v2 storage through the packaged app
         if: matrix.os == 'macos-15' || runner.os == 'Windows' || runner.os == 'Linux'
         run: |
