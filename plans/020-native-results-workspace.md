@@ -2880,6 +2880,40 @@ removes trailing whitespace only; both client typechecks pass. The preceding
 108/75 packet retains its original `8ca8af99…` identity; CI must qualify the
 published head. The prior native timeout remains unresolved pending investigation.
 
+PR [#694](https://github.com/crabbuild/crab/pull/694) targets `crab-v2` from
+`feat/native-results-workspace`; the initial published head is `67dae2e8eee`.
+Existing PR workflows trigger automatically. The first completed Replica gate
+passes. Desktop theme finds stale browser fixture composition: its content still
+uses the retired `experiments` value while production exposes `results` and
+`queue`. Align both fixtures with the production values, keeping the existing
+assertions unchanged. The failing keyboard test, sibling tab styling test and
+accessibility check then pass locally. Hosted proof for the correction is pending.
+Desktop product/Electron typechecks pass. The current native acceptance test
+passes once in 60.536 seconds, with zero skips/retries and all four main/child/
+stdio exit sequences retained. Its source tree is `769b9e78…`; it is focused
+evidence, not a replacement full qualification packet.
+
+Timeout diagnostics retain three separate, credential-free packets under this
+checkout's external target: `results-pr-native-timeout/` (ten complete journeys),
+`results-pr-close-phases/` (42 focused closes), and
+`results-pr-close-native-stack/` (100 OS-watched closes). All pass; the original
+360-second timeout does not recur. Ten complete journeys record 40 clean Node
+main exits; one journey includes 22–29-second Playwright closes despite Node
+cleanup finishing within 0.8 seconds. The focused phase probe reproduces
+10–14-second closes: the parent receives the child exit event late, followed
+within milliseconds by stdio closure. These observations contradict retained
+stdio as the explanation for those captured delays. They do not distinguish
+Electron native teardown from delayed event delivery in the parent worker.
+The independent OS watcher then observes 100 fast closes (145–331 ms), so no
+native stack is captured. Do not equate these shorter delays with the untraced
+360-second failure or claim its cause has been established.
+
+Retain bounded native-test lifecycle timestamps and named restart steps in the
+existing CI log artifacts. On failure, inspect an existing live window instead
+of waiting for a new first window. No production shutdown behavior, acceptance
+assertion or timeout budget changes. Runtime artifacts retain their preceding
+digests; the full 108/75 packet retains its original source binding.
+
 ## STOP conditions
 
 Stop the affected slice and report the concrete issue if:

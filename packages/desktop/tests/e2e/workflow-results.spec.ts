@@ -7,6 +7,7 @@ import {
 } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -170,6 +171,15 @@ test("Results retains an actual comparison after restart and cold remote report 
   const storage = await resultsStorageProxy(process.env.AWS_ENDPOINT_URL_S3!);
   let app: ElectronApplication | undefined;
   let activeHandle: Record<string, unknown> | undefined;
+  const lifecycleFile = path.join(
+    process.env.CRAB_RESULTS_EVIDENCE ?? root,
+    "native-process-lifecycle.log",
+  );
+  const recordLifecycle = (phase: string, pid: number | undefined) =>
+    appendFileSync(
+      lifecycleFile,
+      JSON.stringify({ phase, pid, wall_ms: Date.now() }) + "\n",
+    );
   const launch = async () => {
     app = await electron.launch({
       executablePath: packagedExecutable(),
@@ -180,6 +190,20 @@ test("Results retains an actual comparison after restart and cold remote report 
         AWS_ENDPOINT_URL_S3: storage.endpoint,
       },
     });
+    const child = app.process();
+    child.once("exit", () => recordLifecycle("child.exit", child.pid));
+    child.once("close", () => recordLifecycle("child.stdio.close", child.pid));
+    await app.evaluate(({ app }, file) => {
+      const fs = process.getBuiltinModule("node:fs") as typeof import("node:fs");
+      const record = (phase: string) =>
+        fs.appendFileSync(
+          file,
+          JSON.stringify({ phase, pid: process.pid, wall_ms: Date.now() }) + "\n",
+        );
+      for (const event of ["before-quit", "will-quit", "window-all-closed"] as const)
+        app.prependListener(event, () => record(event));
+      process.once("exit", () => record("main.node.exit"));
+    }, lifecycleFile);
     const page = await app.firstWindow();
     await expect
       .poll(async () => {
@@ -191,6 +215,15 @@ test("Results retains an actual comparison after restart and cold remote report 
       })
       .toBeTruthy();
     return page;
+  };
+  const close = async (phase: string) => {
+    await test.step(`Close desktop: ${phase}`, async () => {
+      const pid = app!.process().pid;
+      recordLifecycle(`${phase}.close.start`, pid);
+      await app!.close();
+      recordLifecycle(`${phase}.close.end`, pid);
+    });
+    app = undefined;
   };
   const open = async (page: Page, directory: string) => {
     const handle = await call(page, "open_local", {
@@ -412,8 +445,7 @@ test("Results retains an actual comparison after restart and cold remote report 
     await applyRange.focus();
     await page.keyboard.press("Enter");
     await expect(applyRange).toBeFocused();
-    await app!.close();
-    app = undefined;
+    await close("working comparison");
     page = await launch();
     await open(page, repo);
     await expect(
@@ -438,8 +470,7 @@ test("Results retains an actual comparison after restart and cold remote report 
     await expect(
       page.getByRole("status").filter({ hasText: "Report published" }),
     ).toBeVisible({ timeout: 90_000 });
-    await app!.close();
-    app = undefined;
+    await close("published report");
     page = await launch();
     await open(page, repo);
     await checkReport(page, id);
@@ -477,8 +508,7 @@ test("Results retains an actual comparison after restart and cold remote report 
       ),
       fullPage: true,
     });
-    await app!.close();
-    app = undefined;
+    await close("retrieved report");
     page = await launch();
     await open(page, cold);
     await checkReport(page, id);
@@ -634,7 +664,8 @@ test("Results retains an actual comparison after restart and cold remote report 
       },
     });
   } catch (error) {
-    const page = await app?.firstWindow();
+    // Failure capture must not wait for a future window during a failed close.
+    const page = app?.windows().find((window) => !window.isClosed());
     await page
       ?.screenshot({
         path: path.join(

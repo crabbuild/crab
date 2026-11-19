@@ -89,7 +89,8 @@ function WorkspaceFixture() {
             <WorkflowTabs />
             <TabsContent value="editor">Workflow editor</TabsContent>
             <TabsContent value="status">Workflow status</TabsContent>
-            <TabsContent value="experiments">Workflow experiments</TabsContent>
+            <TabsContent value="results">Workflow results</TabsContent>
+            <TabsContent value="queue">Workflow experiments</TabsContent>
           </Tabs>
         </ResizablePanel>
         <ResizableHandle aria-label="Resize workflow output" aria-orientation="horizontal" />
