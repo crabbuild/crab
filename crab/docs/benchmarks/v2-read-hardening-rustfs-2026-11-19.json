@@ -1,0 +1,1189 @@
+{
+  "schema": 1,
+  "scope": "Plan 020 first-wave implementation; dedicated local RustFS functional and engineering measurements; no hosted latency or minimum-cgroup readiness claim",
+  "builds": {
+    "release_candidate": {
+      "source_revision": "e932a9927cb007e77ab7528fdcfc87889a7b4965",
+      "source_patch_sha256": "7cc0a71539ce4a7580d810af4379cfb74c3135b19f5ca450a67fbd9da93d9a25",
+      "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1",
+      "build_profile": "release; incremental=false; cargo build -p crab-server --locked --release --bin crab-server",
+      "receipt_sha256": "c4ca5e99e777a1c4ee4ff48848dcfd9a8e0fbf8e7501a72600b1c3949ff95f98",
+      "source_inputs_sha256": "61ccfff47b592b06457b5d4921f835c6804f8cbe5d580f49844f43d7486cc1da",
+      "binary_sha256": "208e69027fe9e549b2437f8b07dbb42ee39a00400c980d15e5e5165ec7af2664"
+    },
+    "debug_candidate": {
+      "source_revision": "e932a9927cb007e77ab7528fdcfc87889a7b4965",
+      "source_patch_sha256": "135443e4d372880a51198ff00ff770141a109e42fbe0544392ff4e4639388c0d",
+      "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1",
+      "build_profile": "dev; incremental=false; cargo build -p crab-server --locked --bin crab-server",
+      "receipt_sha256": "d7308b17e967d787e0f83e411c3ba5b6bf47c331e0d63176c93cb1c26bc0e21f",
+      "source_inputs_sha256": "61ccfff47b592b06457b5d4921f835c6804f8cbe5d580f49844f43d7486cc1da",
+      "binary_sha256": "9a0d40026dd49866bad44aad141280a2ab39dbf9689c14e44802d82055536bba"
+    },
+    "native_candidate": {
+      "source_revision": "c5b6d40c45935d642517aab6a45af454cc881f45",
+      "source_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1",
+      "build_profile": "debug; incremental=false; cargo build -p crab-remote --locked --features publication --example qualify_remote",
+      "receipt_sha256": "4536f3de6577bb0c66513e6adc7d2822a9108c25e8d49874d2155f24c3de15f2",
+      "source_inputs_sha256": "61ccfff47b592b06457b5d4921f835c6804f8cbe5d580f49844f43d7486cc1da",
+      "binary_sha256": "6c88ff6da6880e43e8a5cf9b5149da4d4ccd359adc3add29c8fecadf4c918dc6"
+    },
+    "release_baseline": {
+      "source_revision": "aafb6d256c5e8d3a8e768d31dd887a18f2afd2e4",
+      "source_patch_sha256": "9a62dea546d2cbea052a8734f9d6cecb5f96d1143f7a5ba254e26851d309328b",
+      "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1",
+      "build_profile": "release; cargo build -p crab-server --locked --release --bin crab-server; jobs=2",
+      "receipt_sha256": "c913d80f6ba13146480a8ff54c485810a2b1cf086185d93e1b247a59b71a6f88",
+      "source_inputs_sha256": "f5443723a9b0408e3eee559d3e966e4d4a070a8130da71f71ea2df96f6d4960a",
+      "binary_sha256": "f775ca701ed78bb2bb3c449d627d758d553379532291cf813096f12773d7c59f"
+    }
+  },
+  "functional": {
+    "raw_report_sha256": "73bf951f0049dfb987cfb612a7d6197be58966efc5a6da8b5e40db73e76dd1a2",
+    "checks": 43,
+    "failed_checks": [],
+    "exit_codes": [
+      0,
+      0
+    ],
+    "cold_blame_producer_deltas": {
+      "a": 1.0,
+      "b": 1.0
+    },
+    "http_abort": {
+      "error_type": "RemoteDisconnected",
+      "drain_seconds": 0.00413262500660494,
+      "producer_delta": 1.0,
+      "remaining": {
+        "crab_git_active_cpu_jobs": 0.0,
+        "crab_git_active_blame_producers": 0.0,
+        "crab_git_active_blame_waiters": 0.0,
+        "crab_git_active_origin_operations": 0.0
+      }
+    },
+    "browser_receipt_sha256": "0808f548395e078d8812a17d5fb2205757d07331cc0be07e15e9f3d7f878be32"
+  },
+  "retained_failures": {
+    "original_native_r1_comparison_sha256": "2c28bbca76d5ac767d84b2e6b4adaf6015bba8d309238032a0c71c62873169fb",
+    "one_gib_backend_oom_sha256": "320136528dd460464be020c3623e305820ec85c8b5694b8fed0f835a02c977b5",
+    "pre_fix_matched_http_summary_sha256": "947a49ccb6bef7d4b6a6fc8efce6da134b15ba0b91fc093bbe7631e817869c32",
+    "short_startup_rss_failure_sha256": "e7efa0532bbcd2ecbc2886a5830a3aff42521a1e39131575aedd10e1d5c522d2"
+  },
+  "metadata_restore_gap": {
+    "frozen_control_receipt_sha256": "7eddc957abea5fddaca3b64582336443a9d69c48ff74747080465a3cef09e1f0",
+    "object_listing_sha256": "ace1f6d06ba604d51a41702cadaec992c16b2b3cc914ea9bcc26f4d2510d3fb8",
+    "old_namespace_preserved": true
+  },
+  "status": "functional_passed_engineering_gates_open",
+  "raw_summary_sha256": "3076861b2d041f5741da8dd26f996d4a5fb9ccfbdb24af3397aa6499f45bb49a",
+  "native": {
+    "status": "failed_engineering_gates",
+    "raw_report_sha256": "06e075a412a0530a27dd00f30c713edadd103fae19460605254d0496ea22cc17",
+    "orchestrator_sha256": "5d709bdd040a1bb9369689d7bdedc019b1a99041a88ea2f7ea0346035f48c482",
+    "bindings": {
+      "baseline": {
+        "qualifier_sha256": "161d95ee2701238fcce450a48840f479789bdf8ae456a5711bfb0410721b5344",
+        "source_receipt_sha256": "c913d80f6ba13146480a8ff54c485810a2b1cf086185d93e1b247a59b71a6f88",
+        "source_revision": "aafb6d256c5e8d3a8e768d31dd887a18f2afd2e4"
+      },
+      "candidate": {
+        "qualifier_sha256": "6c88ff6da6880e43e8a5cf9b5149da4d4ccd359adc3add29c8fecadf4c918dc6",
+        "source_receipt_sha256": "4536f3de6577bb0c66513e6adc7d2822a9108c25e8d49874d2155f24c3de15f2",
+        "source_revision": "c5b6d40c45935d642517aab6a45af454cc881f45"
+      }
+    },
+    "provider": "local pinned RustFS; 1 CPU / 3 GiB backend; 2 CPU / 4 GiB VM",
+    "scope": "debug; 20 interleaved pairs per scale/selection; every query has fresh runtime and then a warm repeat; backend counters are logical Store invocations, not HTTP retry counts",
+    "rows": 240,
+    "query_cells": 72,
+    "git_queries_checked": 1440,
+    "thresholds": {
+      "maximum_control_p95_ratio": 1.1,
+      "target_p95_ratio": 0.8
+    },
+    "failures": [
+      {
+        "commits": 100,
+        "operation": "history",
+        "cache": "warm",
+        "p95_ratio": 1.2430703624733475
+      },
+      {
+        "commits": 1000,
+        "operation": "blame",
+        "cache": "warm",
+        "p95_ratio": 1.2834928229665072
+      },
+      {
+        "commits": 10000,
+        "operation": "attribution",
+        "cache": "cold",
+        "p95_ratio": 2.449574657975304
+      },
+      {
+        "commits": 10000,
+        "operation": "blame",
+        "cache": "cold",
+        "p95_ratio": 2.4799566832380897
+      },
+      {
+        "commits": 10000,
+        "operation": "blame",
+        "cache": "warm",
+        "p95_ratio": 1.5401785714285714
+      },
+      {
+        "commits": 10000,
+        "operation": "blob",
+        "cache": "cold",
+        "p95_ratio": 1.2269322778478535
+      },
+      {
+        "commits": 10000,
+        "operation": "object-batch",
+        "cache": "warm",
+        "p95_ratio": 2.3235908141962422
+      },
+      {
+        "commits": 10000,
+        "operation": "object-point",
+        "cache": "cold",
+        "p95_ratio": 1.2940853353151203
+      },
+      {
+        "commits": 10000,
+        "operation": "object-point",
+        "cache": "warm",
+        "p95_ratio": 1.1696750902527075
+      },
+      {
+        "commits": 10000,
+        "operation": "path-history",
+        "cache": "cold",
+        "p95_ratio": 1.3400942701170395
+      },
+      {
+        "commits": 10000,
+        "operation": "path-history",
+        "cache": "warm",
+        "p95_ratio": 1.2214818763326225
+      },
+      {
+        "commits": 10000,
+        "operation": "resolve",
+        "cache": "warm",
+        "p95_ratio": 1.269320843091335
+      },
+      {
+        "commits": 10000,
+        "operation": "tree",
+        "cache": "cold",
+        "p95_ratio": 1.7323025021085183
+      },
+      {
+        "commits": 10000,
+        "operation": "tree",
+        "cache": "warm",
+        "p95_ratio": 2.09954233409611
+      }
+    ],
+    "columns": [
+      "commits",
+      "operation",
+      "cache",
+      "target",
+      "baseline_p50_us",
+      "baseline_p95_us",
+      "candidate_p50_us",
+      "candidate_p95_us",
+      "baseline_read_invocations_median",
+      "candidate_read_invocations_median",
+      "baseline_read_bytes_median",
+      "candidate_read_bytes_median",
+      "p95_ratio",
+      "gate"
+    ],
+    "cells": [
+      [100,"attribution","cold",false,97950,540598,97566,308483,61.0,61.0,62597.0,62597.0,0.5706328917236098,"passed"],
+      [100,"attribution","warm",false,2052,9574,2074,2470,0.0,0.0,0.0,0.0,0.25799039064132023,"passed"],
+      [100,"blame","cold",false,290892,1287920,288965,1136417,179.0,179.0,133772.0,133772.0,0.8823661407540841,"passed"],
+      [100,"blame","warm",false,339,1137,350,1003,0.0,0.0,0.0,0.0,0.882145998240985,"passed"],
+      [100,"blob","cold",false,86275,665530,84514,418143,55.0,55.0,43319.0,43319.0,0.628285727164816,"passed"],
+      [100,"blob","warm",false,343,911,348,922,0.0,0.0,0.0,0.0,1.0120746432491767,"passed"],
+      [100,"commit","cold",false,8498,47971,8791,19271,5.0,5.0,37365.0,37365.0,0.40172187363198597,"passed"],
+      [100,"commit","warm",false,228,619,259,351,0.0,0.0,0.0,0.0,0.567043618739903,"passed"],
+      [100,"history","cold",true,155871,851612,30119,92094,104.0,12.0,52029.0,52029.0,0.108140796512966,"passed"],
+      [100,"history","warm",false,762,1407,673,1749,0.0,0.0,0.0,0.0,1.2430703624733475,"failed"],
+      [100,"history-page-1","cold",true,150339,173540,28988,34044,104.0,12.0,52029.0,52029.0,0.19617379278552496,"passed"],
+      [100,"history-page-1","warm",false,809,937,688,838,0.0,0.0,0.0,0.0,0.8943436499466382,"passed"],
+      [100,"object-batch","cold",false,88073,385454,89266,322728,55.0,55.0,45466.0,45466.0,0.8372672225479565,"passed"],
+      [100,"object-batch","warm",false,1925,5590,2012,5437,0.0,0.0,0.0,0.0,0.9726296958855098,"passed"],
+      [100,"object-point","cold",false,82575,356367,93708,309126,55.0,55.0,43319.0,43319.0,0.8674372206180707,"passed"],
+      [100,"object-point","warm",false,355,2078,370,961,0.0,0.0,0.0,0.0,0.4624639076034649,"passed"],
+      [100,"path-history","cold",false,282981,1780668,322143,1011000,176.0,176.0,133757.0,133757.0,0.5677644569341393,"passed"],
+      [100,"path-history","warm",false,12235,18130,12524,18645,0.0,0.0,0.0,0.0,1.0284059569773856,"passed"],
+      [100,"resolve","cold",false,8917,47478,9678,17256,5.0,5.0,37365.0,37365.0,0.36345254644256286,"passed"],
+      [100,"resolve","warm",false,229,503,244,378,0.0,0.0,0.0,0.0,0.7514910536779325,"passed"],
+      [100,"tree","cold",false,88714,359520,85536,344019,54.0,54.0,43176.0,43176.0,0.9568841789052069,"passed"],
+      [100,"tree","warm",false,684,1789,723,1741,0.0,0.0,0.0,0.0,0.9731693683622136,"passed"],
+      [1000,"attribution","cold",false,108558,506331,108050,349085,50.0,50.0,273687.0,273687.0,0.689440306834857,"passed"],
+      [1000,"attribution","warm",false,2108,4304,2132,3057,0.0,0.0,0.0,0.0,0.7102695167286245,"passed"],
+      [1000,"blame","cold",false,1981309,9702344,1978104,7507892,951.0,951.0,728968.0,728968.0,0.7738224907300751,"passed"],
+      [1000,"blame","warm",false,385,836,404,1073,0.0,0.0,0.0,0.0,1.2834928229665072,"failed"],
+      [1000,"blob","cold",false,104371,453268,98027,350521,43.0,43.0,189707.0,189707.0,0.773319537227424,"passed"],
+      [1000,"blob","warm",false,408,1128,391,1105,0.0,0.0,0.0,0.0,0.9796099290780141,"passed"],
+      [1000,"commit","cold",false,17457,108693,15380,48619,7.0,7.0,66534.0,66534.0,0.44730571425942794,"passed"],
+      [1000,"commit","warm",false,313,1006,264,615,0.0,0.0,0.0,0.0,0.6113320079522863,"passed"],
+      [1000,"history","cold",true,2081393,11204483,290991,1230859,1010.0,76.0,333664.0,399064.0,0.10985415391321492,"passed"],
+      [1000,"history","warm",false,5429,10841,4588,9494,0.0,0.0,0.0,0.0,0.8757494696061249,"passed"],
+      [1000,"history-page-1","cold",true,210078,255882,47425,53786,109.0,18.0,167183.0,199885.0,0.21019845084843794,"passed"],
+      [1000,"history-page-1","warm",false,815,945,707,872,0.0,0.0,0.0,0.0,0.9227513227513228,"passed"],
+      [1000,"history-page-10","cold",true,1981407,2198479,49345,56369,1010.0,19.0,333664.0,232732.0,0.025639999290418512,"passed"],
+      [1000,"history-page-10","warm",false,4311,4701,707,845,0.0,0.0,0.0,0.0,0.1797489895766858,"passed"],
+      [1000,"object-batch","cold",false,100229,553439,97596,428514,43.0,43.0,191854.0,191854.0,0.7742750330208027,"passed"],
+      [1000,"object-batch","warm",false,1975,5766,2009,5634,0.0,0.0,0.0,0.0,0.9771071800208116,"passed"],
+      [1000,"object-point","cold",false,95303,709252,98491,328267,43.0,43.0,189707.0,189707.0,0.46283549429539855,"passed"],
+      [1000,"object-point","warm",false,408,1243,382,949,0.0,0.0,0.0,0.0,0.7634754625905068,"passed"],
+      [1000,"path-history","cold",false,1956365,9111315,2013242,6659587,930.0,930.0,728954.0,728954.0,0.7309139240603579,"passed"],
+      [1000,"path-history","warm",false,13305,20606,13496,14008,0.0,0.0,0.0,0.0,0.6798019994176453,"passed"],
+      [1000,"resolve","cold",false,19037,64988,18308,58199,7.0,7.0,66534.0,66534.0,0.8955345602265034,"passed"],
+      [1000,"resolve","warm",false,352,842,347,722,0.0,0.0,0.0,0.0,0.8574821852731591,"passed"],
+      [1000,"tree","cold",false,97682,449407,95172,333106,42.0,42.0,189564.0,189564.0,0.741212308664529,"passed"],
+      [1000,"tree","warm",false,735,1977,730,1873,0.0,0.0,0.0,0.0,0.947395042994436,"passed"],
+      [10000,"attribution","cold",false,65533,88517,65718,216829,26.0,26.0,377618.0,377618.0,2.449574657975304,"failed"],
+      [10000,"attribution","warm",false,2232,2526,2235,2521,0.0,0.0,0.0,0.0,0.9980205859065716,"passed"],
+      [10000,"blame","cold",false,1659315,2039857,1695324,5058757,667.0,667.0,4708972.0,4708972.0,2.4799566832380897,"failed"],
+      [10000,"blame","warm",false,388,448,407,690,0.0,0.0,0.0,0.0,1.5401785714285714,"failed"],
+      [10000,"blob","cold",false,46094,114955,49331,141042,18.0,18.0,271596.0,271596.0,1.2269322778478535,"failed"],
+      [10000,"blob","warm",false,368,1011,392,669,0.0,0.0,0.0,0.0,0.6617210682492581,"passed"],
+      [10000,"commit","cold",false,16279,46949,16180,21770,7.0,7.0,72285.0,72285.0,0.4636946473833308,"passed"],
+      [10000,"commit","warm",false,233,394,271,394,0.0,0.0,0.0,0.0,1.0,"passed"],
+      [10000,"history","cold",true,2313068,4359115,377416,573032,1041.0,116.0,1366389.0,1711875.0,0.13145604096244307,"passed"],
+      [10000,"history","warm",false,5240,6063,4486,4975,0.0,0.0,0.0,0.0,0.8205508824014515,"passed"],
+      [10000,"history-page-1","cold",true,336100,380275,114783,127292,138.0,55.0,1133922.0,1414004.0,0.33473670370126885,"passed"],
+      [10000,"history-page-1","warm",false,788,970,673,758,0.0,0.0,0.0,0.0,0.7814432989690722,"passed"],
+      [10000,"history-page-10","cold",true,2376304,2611734,117301,129200,1041.0,56.0,1366389.0,1447438.0,0.04946905006405706,"passed"],
+      [10000,"history-page-10","warm",false,4194,4772,711,770,0.0,0.0,0.0,0.0,0.16135792120704107,"passed"],
+      [10000,"history-page-100","cold",true,23741719,28892939,112264,131151,10055.0,54.0,3166706.0,1381382.0,0.004539205928479619,"passed"],
+      [10000,"history-page-100","warm",false,38992,43637,658,811,0.0,0.0,0.0,0.0,0.018585145633292846,"passed"],
+      [10000,"object-batch","cold",false,84158,285622,83938,279663,47.0,47.0,1222439.0,1222439.0,0.9791367611738592,"passed"],
+      [10000,"object-batch","warm",false,2014,2395,2038,5565,0.0,0.0,0.0,0.0,2.3235908141962422,"failed"],
+      [10000,"object-point","cold",false,46103,123794,47149,160200,18.0,18.0,271596.0,271596.0,1.2940853353151203,"failed"],
+      [10000,"object-point","warm",false,363,831,390,972,0.0,0.0,0.0,0.0,1.1696750902527075,"failed"],
+      [10000,"path-history","cold",false,1755458,2280256,1775935,3055758,696.0,696.0,4691860.0,4691860.0,1.3400942701170395,"failed"],
+      [10000,"path-history","warm",false,14061,15008,14143,18332,0.0,0.0,0.0,0.0,1.2214818763326225,"failed"],
+      [10000,"resolve","cold",false,17116,43693,17813,33640,7.0,7.0,72285.0,72285.0,0.7699173780697137,"passed"],
+      [10000,"resolve","warm",false,297,427,265,542,0.0,0.0,0.0,0.0,1.269320843091335,"failed"],
+      [10000,"tree","cold",false,41159,53355,43829,92427,16.0,16.0,238721.0,238721.0,1.7323025021085183,"failed"],
+      [10000,"tree","warm",false,716,874,721,1835,0.0,0.0,0.0,0.0,2.09954233409611,"failed"]
+    ]
+  },
+  "http": {
+    "status": "failed_engineering_gates",
+    "baseline_report_sha256": "63f8ae2b241ec164e56683f7f5e350802884bf79bb0bc4f56f3fd2adc4ccb53a",
+    "candidate_report_sha256": "09dcb6ec9b5078284034cbcb9d32abfd568d1ac24cdfb963c014e3e5c2f147cd",
+    "orchestrator_sha256": "3189ab218887904a4c9c1c451a4de8000cc4708c67976b3ca03bf010b71683dc",
+    "workload_sha256": "750fb582ca814cdc3269712a55843814e9edad0ec2076d5146f9e5171fa7139f",
+    "fixture_commit": "561f91481e823f1bcbdb7aa3592c29985ac64e9a",
+    "thresholds": {
+      "minimum_successes": 20,
+      "maximum_failure_fraction": 0.01,
+      "target_p95_ratio": 0.8,
+      "maximum_control_regression_ratio": 1.1,
+      "maximum_interactive_ratio": 2
+    },
+    "case_envelopes": {
+      "small-1": 0.01,
+      "expensive-1": 0.01,
+      "mixed-1": 0.01,
+      "distinct-1": 0.01,
+      "small-8": 0.01,
+      "expensive-8": 0.01,
+      "mixed-8": 0.01,
+      "distinct-8": 0.01,
+      "small-16": 0.01,
+      "expensive-16": 0.01,
+      "mixed-16": 0.01,
+      "distinct-16": 0.01,
+      "small-32": 0.75,
+      "expensive-32": 0.75,
+      "mixed-32": 0.75,
+      "distinct-32": 0.75,
+      "small-64": 0.75,
+      "expensive-64": 0.75,
+      "mixed-64": 0.75,
+      "distinct-64": 0.75,
+      "small-distinct-16": 0.01,
+      "soak-16": 0.01
+    },
+    "baseline_engineering_failures": [
+      "mixed-1:interactive_latency",
+      "mixed-8:interactive_latency",
+      "mixed-64:interactive_latency"
+    ],
+    "failures": [
+      "mixed-8:interactive_latency",
+      "mixed-16:interactive_latency",
+      "mixed-64:interactive_latency",
+      "mixed-8:preview:p95_regression",
+      "mixed-8:preview:throughput_regression",
+      "mixed-8:history:p95_regression",
+      "mixed-8:history:throughput_regression",
+      "mixed-8:raw:p95_regression",
+      "mixed-8:raw:throughput_regression",
+      "mixed-8:blame:p95_regression",
+      "mixed-8:blame:throughput_regression",
+      "mixed-8:late-history:throughput_regression",
+      "expensive-16:blame:p95_regression",
+      "expensive-16:blame:throughput_regression",
+      "expensive-16:late-history:p95_regression",
+      "expensive-16:late-history:throughput_regression",
+      "expensive-16:raw:p95_regression",
+      "expensive-16:raw:throughput_regression",
+      "mixed-16:preview:p95_regression",
+      "mixed-16:preview:throughput_regression",
+      "mixed-16:history:p95_regression",
+      "mixed-16:history:throughput_regression",
+      "mixed-16:raw:p95_regression",
+      "mixed-16:raw:throughput_regression",
+      "mixed-16:blame:p95_regression",
+      "mixed-16:blame:throughput_regression",
+      "mixed-16:late-history:p95_regression",
+      "mixed-16:late-history:throughput_regression",
+      "small-32:preview:p95_regression",
+      "small-32:preview:throughput_regression",
+      "expensive-32:blame:p95_regression",
+      "expensive-32:late-history:p95_regression",
+      "expensive-32:raw:p95_regression",
+      "mixed-32:preview:p95_regression",
+      "mixed-32:preview:throughput_regression",
+      "mixed-32:history:p95_regression",
+      "mixed-32:history:throughput_regression",
+      "mixed-32:raw:p95_regression",
+      "mixed-32:raw:throughput_regression",
+      "mixed-32:blame:p95_regression",
+      "mixed-32:blame:throughput_regression",
+      "mixed-32:late-history:p95_regression",
+      "mixed-32:late-history:throughput_regression",
+      "distinct-32:preview-distinct:p95_regression",
+      "distinct-32:preview-distinct:throughput_regression",
+      "distinct-32:history:p95_regression",
+      "distinct-32:history:throughput_regression",
+      "distinct-32:raw-distinct:p95_regression",
+      "distinct-32:raw-distinct:throughput_regression",
+      "distinct-32:blame-distinct:p95_regression",
+      "distinct-32:blame-distinct:throughput_regression",
+      "distinct-32:late-history:p95_regression",
+      "distinct-32:late-history:throughput_regression",
+      "small-64:preview:p95_regression",
+      "small-64:preview:throughput_regression",
+      "expensive-64:blame:p95_regression",
+      "expensive-64:blame:throughput_regression",
+      "expensive-64:late-history:p95_regression",
+      "expensive-64:late-history:throughput_regression",
+      "expensive-64:raw:p95_regression",
+      "expensive-64:raw:throughput_regression",
+      "mixed-64:preview:p95_regression",
+      "mixed-64:history:p95_regression",
+      "mixed-64:raw:p95_regression",
+      "mixed-64:blame:p95_regression",
+      "mixed-64:late-history:p95_regression",
+      "distinct-64:preview-distinct:p95_regression",
+      "distinct-64:preview-distinct:throughput_regression",
+      "distinct-64:history:p95_regression",
+      "distinct-64:history:throughput_regression",
+      "distinct-64:raw-distinct:p95_regression",
+      "distinct-64:raw-distinct:throughput_regression",
+      "distinct-64:blame-distinct:p95_regression",
+      "distinct-64:blame-distinct:throughput_regression",
+      "distinct-64:late-history:p95_regression",
+      "distinct-64:late-history:throughput_regression",
+      "small-distinct-16:preview-distinct:p95_regression",
+      "small-distinct-16:preview-distinct:throughput_regression"
+    ],
+    "exit_codes": [
+      0,
+      0
+    ],
+    "resources": {
+      "status": "failed",
+      "failures": [
+        "provider_proxy_errors"
+      ],
+      "duration_seconds": 863.8312769589829,
+      "peak_rss_bytes": [
+        140148736,
+        240107520
+      ],
+      "admitted_work_drained": true,
+      "rss_plateau": "passed",
+      "provider": {
+        "response_body_bytes": 1319037194,
+        "requests": 2238179,
+        "request_body_bytes": 822541,
+        "operations": {
+          "get": 2231748,
+          "head": 2,
+          "list": 5642,
+          "put": 787
+        },
+        "statuses": {
+          "2xx": 2238160,
+          "4xx": 18,
+          "5xx": 1
+        },
+        "methods": {
+          "GET": 2237390,
+          "HEAD": 2,
+          "PUT": 787
+        },
+        "classes": {
+          ".crab:get": 2226172,
+          ".crab:head": 1,
+          ".crab:list": 1942,
+          ".crab:put": 784,
+          "r0-debug-baseline-20-20261118:get": 5576,
+          "r0-debug-baseline-20-20261118:head": 1,
+          "r0-debug-baseline-20-20261118:list": 3700,
+          "r0-debug-baseline-20-20261118:put": 3
+        },
+        "categories": {
+          ".crab": 2228899,
+          "r0-debug-baseline-20-20261118": 9280
+        },
+        "class_request_body_bytes": {
+          ".crab:put": 822355,
+          "r0-debug-baseline-20-20261118:put": 186
+        },
+        "class_response_body_bytes": {
+          ".crab:get": 1312912748,
+          ".crab:list": 828518,
+          ".crab:put": 2296,
+          "r0-debug-baseline-20-20261118:get": 3020800,
+          "r0-debug-baseline-20-20261118:list": 2272832
+        },
+        "proxy_errors": {
+          "RemoteDisconnected": 1
+        }
+      },
+      "quota_enforcement": "native processes on shared 32-GiB host; no process CPU/RAM quota; observed ceiling 1 GiB each"
+    },
+    "columns": [
+      "case",
+      "workload",
+      "target",
+      "baseline_attempts",
+      "candidate_attempts",
+      "baseline_successes",
+      "candidate_successes",
+      "baseline_rejected",
+      "candidate_rejected",
+      "baseline_errors",
+      "candidate_errors",
+      "baseline_p95_us",
+      "candidate_p95_us",
+      "baseline_ttfb_p95_us",
+      "candidate_ttfb_p95_us",
+      "baseline_successes_per_second",
+      "candidate_successes_per_second",
+      "p95_ratio",
+      "throughput_ratio",
+      "candidate_open_p95_ms",
+      "candidate_read_p95_ms",
+      "candidate_encode_p95_ms",
+      "candidate_total_p95_ms"
+    ],
+    "cells": [
+      ["small-1","preview",false,2086,2530,2086,2530,0,0,0,0,9217.417,5091.083,9205.875,5079.666,208.51937164849286,252.97819750440325,0.5523329366567662,1.2132119692498207,0.002,0.075,0.032,0.11],
+      ["expensive-1","blame",false,643,932,643,932,0,0,0,0,9083.25,4308.041,9068.417,4292.417,63.77222452634092,93.17295732213515,0.4742840943494895,1.461027242097386,0.001,0.047,0.073,0.123],
+      ["expensive-1","late-history",true,643,932,643,932,0,0,0,0,8976.208,4253.75,8962.291,4239.25,63.77222452634092,93.17295732213515,0.4738916477871279,1.461027242097386,0.001,0.072,0.005,0.086],
+      ["expensive-1","raw",false,643,931,643,931,0,0,0,0,6373.958,4169.459,6363.333,4162.75,63.77222452634092,93.07298633788393,0.6541397040896724,1.4594596163011442,0.001,0.057,0.0,0.061],
+      ["mixed-1","preview",false,264,551,264,551,0,0,0,0,42093.042,4960.916,42073.0,4953.125,26.39593436613407,55.07631535016181,0.11785596298789715,2.0865453969617613,0.002,0.071,0.03,0.106],
+      ["mixed-1","history",false,263,551,263,551,0,0,0,0,18589.334,4727.125,18575.667,4691.833,26.29594976626235,55.07631535016181,0.25429232698707765,2.094479029649829,0.001,0.106,0.008,0.123],
+      ["mixed-1","raw",false,263,551,263,551,0,0,0,0,29595.667,4976.709,29584.959,4968.792,26.29594976626235,55.07631535016181,0.1681566764486166,2.094479029649829,0.002,0.066,0.0,0.072],
+      ["mixed-1","blame",false,263,551,263,551,0,0,0,0,25103.709,4833.209,25085.834,4819.042,26.29594976626235,55.07631535016181,0.1925296775866865,2.094479029649829,0.001,0.053,0.078,0.133],
+      ["mixed-1","late-history",false,263,551,263,551,0,0,0,0,16660.5,4819.209,16650.208,4808.042,26.29594976626235,55.07631535016181,0.2892595660394346,2.094479029649829,0.001,0.082,0.005,0.098],
+      ["distinct-1","preview-distinct",false,306,510,306,510,0,0,0,0,26401.584,4893.291,26390.917,4878.5,30.591091366368126,50.99190503487673,0.18534081136949968,1.666887409284694,0.002,0.072,0.031,0.106],
+      ["distinct-1","history",false,306,511,306,511,0,0,0,0,28217.75,4810.5,28198.333,4796.166,30.591091366368126,51.0918891623961,0.17047780209265445,1.670155815969566,0.002,0.114,0.008,0.131],
+      ["distinct-1","raw-distinct",false,306,510,306,510,0,0,0,0,11123.125,4850.625,11112.25,4842.375,30.591091366368126,50.99190503487673,0.4360847333820307,1.666887409284694,0.002,0.065,0.0,0.071],
+      ["distinct-1","blame-distinct",false,306,510,306,510,0,0,0,0,7787.791,4860.583,7776.416,4847.833,30.591091366368126,50.99190503487673,0.6241285879397636,1.666887409284694,0.002,0.058,0.049,0.109],
+      ["distinct-1","late-history",false,306,510,306,510,0,0,0,0,14286.709,5048.875,14273.875,5029.166,30.591091366368126,50.99190503487673,0.35339664299174844,1.666887409284694,0.002,0.087,0.005,0.105],
+      ["small-8","preview",false,8676,10994,8676,10994,0,0,0,0,14564.792,10278.458,14554.709,10262.375,867.2297652192572,1098.8358348317508,0.7057057869415506,1.2670642532131469,0.002,0.11,0.065,0.169],
+      ["expensive-8","blame",false,1528,2793,1528,2793,0,0,0,0,67785.041,21984.291,67774.791,21967.792,152.43363846365145,278.9843466473138,0.324323636538038,1.8302019781141616,0.003,0.11,0.194,0.302],
+      ["expensive-8","late-history",false,1527,2792,1527,2792,0,0,0,0,71063.375,21485.709,71055.166,21469.417,152.33387822905482,278.88445966319375,0.3023457442036773,1.830744827777921,0.003,0.167,0.01,0.198],
+      ["expensive-8","raw",false,1524,2793,1524,2793,0,0,0,0,70490.958,20902.875,70479.458,20889.375,152.0345975252649,278.9843466473138,0.2965327127487755,1.835005657846745,0.004,0.127,0.0,0.138],
+      ["mixed-8","preview",false,1382,1155,1382,1155,0,0,0,0,34303.875,39126.959,34294.75,39095.709,138.05233807313854,115.05309065074634,1.1405988099012139,0.8334019709959025,0.004,0.157,0.129,0.258],
+      ["mixed-8","history",false,1382,1156,1382,1156,0,0,0,0,24154.875,42074.667,24142.5,42056.042,138.05233807313854,115.15270371624483,1.7418706161799637,0.834123531143951,0.004,0.244,0.017,0.285],
+      ["mixed-8","raw",false,1384,1156,1384,1156,0,0,0,0,27858.834,43937.125,27852.125,43917.5,138.25212438004613,115.15270371624483,1.5771343840162155,0.8329181503185985,0.005,0.145,0.0,0.162],
+      ["mixed-8","blame",false,1383,1156,1383,1156,0,0,0,0,30180.166,45177.708,30164.291,45168.0,138.15223122659233,115.15270371624483,1.4969337146787065,0.83352040494645,0.004,0.123,0.202,0.31],
+      ["mixed-8","late-history",false,1384,1156,1384,1156,0,0,0,0,38126.916,41386.334,38118.791,41368.459,138.25212438004613,115.15270371624483,1.0854886348531312,0.8329181503185985,0.004,0.187,0.01,0.221],
+      ["distinct-8","preview-distinct",false,825,1567,825,1567,0,0,0,0,73071.25,35004.958,73063.208,34985.792,82.40513177555111,156.60639831297024,0.47905240433138885,1.900444728849205,0.004,0.125,0.078,0.208],
+      ["distinct-8","history",false,827,1566,827,1566,0,0,0,0,75918.25,33559.5,75904.667,33526.667,82.60490179197669,156.50645804601876,0.44204786069225777,1.8946388731282293,0.003,0.219,0.015,0.252],
+      ["distinct-8","raw-distinct",false,830,1566,830,1566,0,0,0,0,72023.042,34288.334,72015.917,34276.917,82.90455681661506,156.50645804601876,0.4760745040455248,1.8877907808157177,0.004,0.122,0.0,0.132],
+      ["distinct-8","blame-distinct",false,830,1566,830,1566,0,0,0,0,70386.125,33234.875,70376.459,33216.0,82.90455681661506,156.50645804601876,0.47217935353025897,1.8877907808157177,0.003,0.113,0.092,0.203],
+      ["distinct-8","late-history",false,828,1568,828,1568,0,0,0,0,66561.541,33113.375,66547.375,33091.625,82.70478680018948,156.70633857992172,0.49748510179474364,1.8947674571547617,0.003,0.164,0.01,0.195],
+      ["small-16","preview",false,5458,11511,5458,11511,0,0,0,0,91028.834,18966.833,91021.5,18960.0,544.7713763064316,1148.9878539983918,0.20836071568268136,2.109119355331347,0.003,0.132,0.077,0.201],
+      ["expensive-16","blame",false,2891,2164,2891,2158,0,6,0,0,28480.333,57849.084,28468.0,57679.75,288.6011397107767,215.29716629832458,2.0311940875129517,0.7460024811893878,0.004,0.129,0.286,0.438],
+      ["expensive-16","late-history",false,2889,2168,2889,2162,0,6,0,0,28768.709,57678.291,28762.292,57652.041,288.40148482339464,215.69623426180618,2.0048967438893417,0.7479026482609471,0.004,0.195,0.011,0.232],
+      ["expensive-16","raw",false,2892,2161,2892,2156,0,5,0,0,28400.625,58724.125,28392.958,58704.917,288.7009671544677,215.09763231658377,2.0677053762021083,0.745053383217442,0.004,0.149,0.0,0.163],
+      ["mixed-16","preview",false,1940,1402,1940,1402,0,0,0,0,22804.125,53254.375,22790.458,53235.791,193.7536865963051,139.91301974587535,2.3352956975985704,0.7221179746499001,0.004,0.148,0.219,0.348],
+      ["mixed-16","history",false,1939,1400,1939,1400,0,0,0,0,23050.833,54737.875,23041.416,54715.084,193.65381356197713,139.71342913282845,2.374659301900283,0.7214597356127689,0.004,0.246,0.017,0.285],
+      ["mixed-16","raw",false,1938,1400,1938,1400,0,0,0,0,23061.333,52653.333,23049.875,52639.958,193.55394052764913,139.71342913282845,2.2831868825622528,0.7218320058581831,0.004,0.137,0.0,0.154],
+      ["mixed-16","blame",false,1938,1398,1938,1398,0,0,0,0,22915.375,55233.583,22901.959,55215.334,193.55394052764913,139.51383851978156,2.410328567610174,0.7208008172783857,0.004,0.117,0.297,0.418],
+      ["mixed-16","late-history",false,1935,1398,1935,1398,0,0,0,0,23477.875,52747.458,23471.75,52731.542,193.25432142466516,139.51383851978156,2.2466879136208027,0.7219183379253289,0.004,0.186,0.011,0.223],
+      ["distinct-16","preview-distinct",false,1935,1997,1935,1997,0,0,0,0,22856.792,24614.042,22848.792,24604.084,193.25520604671948,199.49793103993244,1.076880867621318,1.0323030107230529,0.004,0.133,0.103,0.224],
+      ["distinct-16","history",false,1938,1997,1938,1997,0,0,0,0,23372.292,25172.25,23364.084,25165.0,193.55482652121052,199.49793103993244,1.0770124727176948,1.0307050184463917,0.003,0.224,0.016,0.258],
+      ["distinct-16","raw-distinct",false,1936,1997,1936,1997,0,0,0,0,22604.75,24169.834,22594.666,24165.125,193.3550795382165,199.49793103993244,1.0692369524104446,1.03176979635801,0.004,0.132,0.0,0.142],
+      ["distinct-16","blame-distinct",false,1940,2000,1940,2000,0,0,0,0,23351.375,24966.167,23330.542,24959.75,193.75457350420456,199.79762748115417,1.0691519021899138,1.031189219782822,0.003,0.115,0.12,0.223],
+      ["distinct-16","late-history",false,1938,2000,1938,2000,0,0,0,0,23306.958,25154.292,23276.25,25144.959,193.55482652121052,199.79762748115417,1.0792610515709515,1.032253398544208,0.003,0.179,0.01,0.212],
+      ["small-32","preview",false,11088,9480,10936,9429,152,51,0,0,38907.833,67464.208,38895.5,67457.458,1090.7130371410797,941.2873316648283,1.7339492538687518,0.8630018158874141,0.004,0.139,0.199,0.37],
+      ["expensive-32","blame",false,3698,3340,3648,3312,50,28,0,0,37800.708,57602.959,37788.791,57539.959,363.8856236570228,328.8430122197704,1.5238592621069427,0.9036988296347714,0.003,0.113,0.213,0.318],
+      ["expensive-32","late-history",false,3695,3342,3644,3318,51,24,0,0,38947.209,56524.958,38936.625,56498.208,363.486626262662,329.43874231437144,1.4513224298049185,0.9063297478139211,0.003,0.176,0.01,0.209],
+      ["expensive-32","raw",false,3699,3342,3645,3312,54,30,0,0,38184.125,56361.666,38177.0,56350.417,363.5863756112522,328.8430122197704,1.4760496934262601,0.9044426146797384,0.004,0.133,0.0,0.145],
+      ["mixed-32","preview",false,1931,888,1901,888,30,0,0,0,48663.208,128335.792,48657.125,128315.959,189.80625504145766,88.44967809402375,2.6372242454710344,0.465999806353613,0.006,0.19,0.4,1.339],
+      ["mixed-32","history",false,1933,895,1901,889,32,6,0,0,48200.208,128512.375,48111.0,128494.584,189.80625504145766,88.54928358737287,2.6662203407918903,0.46652458091031745,0.005,0.296,0.018,0.364],
+      ["mixed-32","raw",false,1931,898,1903,887,28,11,0,0,49203.166,127666.083,49196.833,127646.916,190.00594599889214,88.35007260067462,2.5946721192697235,0.46498583050232417,0.007,0.171,0.0,0.247],
+      ["mixed-32","blame",false,1939,897,1909,887,30,10,0,0,49442.75,119735.959,49429.334,119718.084,190.60501887119554,88.35007260067462,2.42170912823417,0.46352437687057246,0.005,0.143,0.493,0.985],
+      ["mixed-32","late-history",false,1933,894,1899,890,34,4,0,0,50278.541,135951.666,50270.791,135910.709,189.6065640840232,88.648889080722,2.7039699899008607,0.4675412452568767,0.005,0.226,0.011,0.282],
+      ["distinct-32","preview-distinct",false,2043,1682,2014,1681,29,1,0,0,47864.25,57190.458,47856.958,57167.583,200.99057967770543,167.27009015026326,1.194847051818424,0.8322285075175463,0.004,0.145,0.254,0.398],
+      ["distinct-32","history",false,2045,1685,2019,1679,26,6,0,0,46741.5,58897.959,46696.042,58872.792,201.48956324194998,167.0710775504414,1.2600784955553417,0.8291798089304574,0.004,0.244,0.02,0.284],
+      ["distinct-32","raw-distinct",false,2049,1681,2020,1676,29,5,0,0,45859.542,60500.792,45854.125,60483.709,201.58935995479888,166.77255865070862,1.3192628918971758,0.8272884972108795,0.004,0.138,0.0,0.152],
+      ["distinct-32","blame-distinct",false,2046,1676,2015,1670,31,6,0,0,46077.541,56586.083,46068.583,56579.167,201.09037639055433,166.17552085124308,1.2280621268396246,0.8263723199189791,0.004,0.12,0.266,0.399],
+      ["distinct-32","late-history",false,2047,1683,2020,1676,27,7,0,0,46918.458,56371.0,46910.458,56361.125,201.58935995479888,166.77255865070862,1.2014674480563705,0.8272884972108795,0.004,0.199,0.011,0.233],
+      ["small-64","preview",false,11662,7538,11169,7274,493,264,0,0,73568.0,148083.625,73542.833,148069.0,1111.857748348431,721.8165803512472,2.0128809400826446,0.6491986779994506,0.004,0.153,0.345,0.564],
+      ["expensive-64","blame",false,3212,1444,3066,1309,146,135,0,0,89207.625,305148.083,89184.417,305109.292,305.1467108075204,128.44008026162777,3.420650230291413,0.42091255029992725,0.005,0.138,0.601,1.079],
+      ["expensive-64","late-history",false,3219,1442,3055,1313,164,129,0,0,90025.333,301281.5,89963.417,301260.667,304.0519248261496,128.83256331819499,3.346630220184801,0.4237189532408278,0.005,0.212,0.012,0.266],
+      ["expensive-64","raw",false,3213,1451,3058,1295,155,156,0,0,89199.291,308468.0,89189.708,308447.375,304.3505028210689,127.06638956364243,3.4581889221518587,0.4175001795162014,0.005,0.168,0.0,0.2],
+      ["mixed-64","preview",false,1146,1113,1054,1065,92,48,0,0,175488.417,319195.792,175476.625,319173.792,104.3345778901896,105.32641793563467,1.8188994889617134,1.0095063407117912,0.005,0.165,0.444,0.936],
+      ["mixed-64","history",false,1149,1102,1058,1055,91,47,0,0,179865.208,317164.5,179853.458,317125.875,104.73053454252428,104.3374374855348,1.7633454714599388,0.9962465859769878,0.004,0.257,0.018,0.313],
+      ["mixed-64","raw",false,1149,1093,1053,1033,96,60,0,0,180322.041,317498.416,180315.208,317493.333,104.23558872710593,102.16168049531512,1.7607299376120085,0.9801036454332271,0.005,0.152,0.0,0.178],
+      ["mixed-64","blame",false,1153,1097,1067,1029,86,68,0,0,174688.792,304133.542,174677.25,304116.708,105.62143701027733,101.76608831527518,1.7410020329180595,0.9634984260380115,0.004,0.127,0.542,0.763],
+      ["mixed-64","late-history",false,1146,1091,1048,1015,98,76,0,0,180467.0,303536.583,180381.625,303506.292,103.74064291168757,100.38151568513538,1.6819506225514913,0.967619949787551,0.004,0.195,0.011,0.235],
+      ["distinct-64","preview-distinct",false,1857,1361,1772,1288,85,73,0,0,118832.708,198785.625,118825.333,198755.917,176.35641819004718,128.0941292944924,1.6728191113847208,0.7263366460326619,0.005,0.153,0.232,0.449],
+      ["distinct-64","history",false,1860,1371,1767,1298,93,73,0,0,124427.75,204790.416,124416.959,204772.416,175.85879849989468,129.088648931872,1.645858066227188,0.7340471448288061,0.004,0.266,0.017,0.313],
+      ["distinct-64","raw-distinct",false,1862,1371,1746,1300,116,71,0,0,117386.0,231356.625,117377.875,231337.334,173.76879580125416,129.28755285934793,1.9709047501405619,0.7440205375378149,0.004,0.146,0.0,0.162],
+      ["distinct-64","blame-distinct",false,1859,1367,1772,1311,87,56,0,0,116874.458,220446.416,116866.417,220431.25,176.35641819004718,130.38152446046547,1.8861812903551605,0.7393069432832451,0.004,0.125,0.238,0.4],
+      ["distinct-64","late-history",false,1863,1367,1778,1308,85,59,0,0,118332.709,193040.375,118314.084,193014.459,176.95356181823018,130.0831685692516,1.6313357196952196,0.7351260253403394,0.004,0.196,0.011,0.237],
+      ["small-distinct-16","preview-distinct",false,8977,5986,8977,5986,0,0,0,0,25137.25,51006.209,25126.583,50986.292,896.630155872078,597.6178325444531,2.02910855403833,0.666515428497048,0.005,0.148,0.258,0.4],
+      ["soak-16","preview",false,104335,113580,104335,113580,0,0,0,0,34154.75,28800.208,34137.0,28787.5,173.87432726671824,189.27419434309925,0.8432270182039101,1.0885689527514781,0.004,0.139,0.132,0.265],
+      ["soak-16","history",false,104336,113582,104336,113554,0,28,0,0,34113.917,28832.792,34093.083,28817.208,173.8759937671952,189.23086691703023,0.8451914800636937,1.088309333664507,0.003,0.234,0.016,0.27],
+      ["soak-16","raw",false,104338,113581,104338,113543,0,38,0,0,33992.75,28765.333,33981.333,28750.083,173.87932676814918,189.2125360829241,0.8462196497782615,1.0881830497033165,0.004,0.13,0.0,0.142],
+      ["soak-16","blame",false,104336,113583,104336,113539,0,44,0,0,34171.917,28824.042,34144.083,28800.0,173.8759937671952,189.2058703250673,0.8435008782211428,1.0881655726344688,0.003,0.111,0.213,0.318],
+      ["soak-16","late-history",false,104338,113581,104338,113548,0,33,0,0,35571.042,28778.334,35550.625,28761.375,173.87932676814918,189.22086828024507,0.8090382620784625,1.088230969128103,0.003,0.176,0.01,0.208]
+    ],
+    "provider_by_case": {
+      "small-1": {
+        "response_body_bytes": 5688805,
+        "requests": 9407,
+        "request_body_bytes": 12741,
+        "operations": {
+          "get": 9307,
+          "head": 2,
+          "list": 82,
+          "put": 16
+        },
+        "statuses": {
+          "2xx": 9403,
+          "4xx": 4
+        },
+        "proxy_errors": {
+
+        }
+      },
+      "expensive-1": {
+        "response_body_bytes": 6080273,
+        "requests": 10273,
+        "request_body_bytes": 12446,
+        "operations": {
+          "get": 10179,
+          "list": 83,
+          "put": 11
+        },
+        "statuses": {
+          "2xx": 10273
+        },
+        "proxy_errors": {
+
+        }
+      },
+      "mixed-1": {
+        "response_body_bytes": 5926376,
+        "requests": 10063,
+        "request_body_bytes": 9057,
+        "operations": {
+          "get": 9983,
+          "list": 71,
+          "put": 9
+        },
+        "statuses": {
+          "2xx": 10063
+        },
+        "proxy_errors": {
+
+        }
+      },
+      "distinct-1": {
+        "response_body_bytes": 5539379,
+        "requests": 9398,
+        "request_body_bytes": 12658,
+        "operations": {
+          "get": 9302,
+          "list": 83,
+          "put": 13
+        },
+        "statuses": {
+          "2xx": 9397,
+          "4xx": 1
+        },
+        "proxy_errors": {
+
+        }
+      },
+      "small-8": {
+        "response_body_bytes": 23275736,
+        "requests": 39503,
+        "request_body_bytes": 9867,
+        "operations": {
+          "get": 39412,
+          "list": 81,
+          "put": 10
+        },
+        "statuses": {
+          "2xx": 39503
+        },
+        "proxy_errors": {
+
+        }
+      },
+      "expensive-8": {
+        "response_body_bytes": 19084037,
+        "requests": 32384,
+        "request_body_bytes": 12444,
+        "operations": {
+          "get": 32302,
+          "list": 71,
+          "put": 11
+        },
+        "statuses": {
+          "2xx": 32384
+        },
+        "proxy_errors": {
+
+        }
+      },
+      "mixed-8": {
+        "response_body_bytes": 11518464,
+        "requests": 19549,
+        "request_body_bytes": 12444,
+        "operations": {
+          "get": 19456,
+          "list": 82,
+          "put": 11
+        },
+        "statuses": {
+          "2xx": 19549
+        },
+        "proxy_errors": {
+
+        }
+      },
+      "distinct-8": {
+        "response_body_bytes": 14555604,
+        "requests": 24706,
+        "request_body_bytes": 9867,
+        "operations": {
+          "get": 24618,
+          "list": 78,
+          "put": 10
+        },
+        "statuses": {
+          "2xx": 24706
+        },
+        "proxy_errors": {
+
+        }
+      },
+      "small-16": {
+        "response_body_bytes": 24588829,
+        "requests": 41724,
+        "request_body_bytes": 12658,
+        "operations": {
+          "get": 41631,
+          "list": 80,
+          "put": 13
+        },
+        "statuses": {
+          "2xx": 41723,
+          "4xx": 1
+        },
+        "proxy_errors": {
+
+        }
+      },
+      "expensive-16": {
+        "response_body_bytes": 15373882,
+        "requests": 26093,
+        "request_body_bytes": 12444,
+        "operations": {
+          "get": 26004,
+          "list": 78,
+          "put": 11
+        },
+        "statuses": {
+          "2xx": 26093
+        },
+        "proxy_errors": {
+
+        }
+      },
+      "mixed-16": {
+        "response_body_bytes": 15153822,
+        "requests": 25717,
+        "request_body_bytes": 9057,
+        "operations": {
+          "get": 25631,
+          "list": 77,
+          "put": 9
+        },
+        "statuses": {
+          "2xx": 25717
+        },
+        "proxy_errors": {
+
+        }
+      },
+      "distinct-16": {
+        "response_body_bytes": 21713050,
+        "requests": 36848,
+        "request_body_bytes": 12444,
+        "operations": {
+          "get": 36754,
+          "list": 83,
+          "put": 11
+        },
+        "statuses": {
+          "2xx": 36848
+        },
+        "proxy_errors": {
+
+        }
+      },
+      "small-32": {
+        "response_body_bytes": 21215465,
+        "requests": 36002,
+        "request_body_bytes": 13254,
+        "operations": {
+          "get": 35917,
+          "list": 73,
+          "put": 12
+        },
+        "statuses": {
+          "2xx": 36002
+        },
+        "proxy_errors": {
+
+        }
+      },
+      "expensive-32": {
+        "response_body_bytes": 22245803,
+        "requests": 37752,
+        "request_body_bytes": 9271,
+        "operations": {
+          "get": 37656,
+          "list": 85,
+          "put": 11
+        },
+        "statuses": {
+          "2xx": 37751,
+          "4xx": 1
+        },
+        "proxy_errors": {
+
+        }
+      },
+      "mixed-32": {
+        "response_body_bytes": 9527612,
+        "requests": 16171,
+        "request_body_bytes": 12444,
+        "operations": {
+          "get": 16086,
+          "list": 74,
+          "put": 11
+        },
+        "statuses": {
+          "2xx": 16171
+        },
+        "proxy_errors": {
+
+        }
+      },
+      "distinct-32": {
+        "response_body_bytes": 17772230,
+        "requests": 30161,
+        "request_body_bytes": 9867,
+        "operations": {
+          "get": 30074,
+          "list": 77,
+          "put": 10
+        },
+        "statuses": {
+          "2xx": 30161
+        },
+        "proxy_errors": {
+
+        }
+      },
+      "small-64": {
+        "response_body_bytes": 16611821,
+        "requests": 28190,
+        "request_body_bytes": 12444,
+        "operations": {
+          "get": 28106,
+          "list": 73,
+          "put": 11
+        },
+        "statuses": {
+          "2xx": 28190
+        },
+        "proxy_errors": {
+
+        }
+      },
+      "expensive-64": {
+        "response_body_bytes": 10213700,
+        "requests": 17332,
+        "request_body_bytes": 12444,
+        "operations": {
+          "get": 17250,
+          "list": 71,
+          "put": 11
+        },
+        "statuses": {
+          "2xx": 17332
+        },
+        "proxy_errors": {
+
+        }
+      },
+      "mixed-64": {
+        "response_body_bytes": 12014222,
+        "requests": 20388,
+        "request_body_bytes": 10081,
+        "operations": {
+          "get": 20300,
+          "list": 76,
+          "put": 12
+        },
+        "statuses": {
+          "2xx": 20387,
+          "4xx": 1
+        },
+        "proxy_errors": {
+
+        }
+      },
+      "distinct-64": {
+        "response_body_bytes": 15396045,
+        "requests": 26128,
+        "request_body_bytes": 11634,
+        "operations": {
+          "get": 26045,
+          "list": 73,
+          "put": 10
+        },
+        "statuses": {
+          "2xx": 26128
+        },
+        "proxy_errors": {
+
+        }
+      },
+      "small-distinct-16": {
+        "response_body_bytes": 11927863,
+        "requests": 20242,
+        "request_body_bytes": 13254,
+        "operations": {
+          "get": 20158,
+          "list": 72,
+          "put": 12
+        },
+        "statuses": {
+          "2xx": 20242
+        },
+        "proxy_errors": {
+
+        }
+      },
+      "soak-16": {
+        "response_body_bytes": 1013559573,
+        "requests": 1720051,
+        "request_body_bytes": 573904,
+        "operations": {
+          "get": 1715527,
+          "list": 3977,
+          "put": 547
+        },
+        "statuses": {
+          "2xx": 1720040,
+          "4xx": 10,
+          "5xx": 1
+        },
+        "proxy_errors": {
+          "RemoteDisconnected": 1
+        }
+      }
+    }
+  },
+  "minimum_profile": {
+    "schema": 1,
+    "status": "passed",
+    "scope": "enforced 1 CPU / 1 GiB Linux container functional proof; linux/amd64 image emulated on aarch64 VM, not native latency or soak proof",
+    "binding": {
+      "workflow_run": 44495718456,
+      "artifact": 14518338404,
+      "zip_sha256": "4212129cffc751d19464e8283c4e54bcc4177e8e33f8dc2a8107abad27f8aa5b",
+      "image_archive_sha256": "b6ee6972bec26196edb9a0bc0cbe83f8566cf5f61b4c5430caea14965d4840b2",
+      "source_revision": "69c031c685429a345b565b4127827e069a624d6d",
+      "head_revision": "c5b6d40c45935d642517aab6a45af454cc881f45",
+      "source_tree": "9a75812dbad8b070d41d674db8694f74554fa72d",
+      "pr_merge_tree_equals_head": true,
+      "image_id": "sha256:57cd8d9a001b139f43d7afac31d49d4a28d7b179ba923e4dbeec926494ee1f53",
+      "platform": "linux/amd64"
+    },
+    "checks": [
+      {
+        "name": "owned-vm-forwarding-active",
+        "passed": true
+      },
+      {
+        "name": "enforced-docker-cpu-and-memory",
+        "passed": true
+      },
+      {
+        "name": "minimum-profile-public-ready",
+        "passed": true
+      },
+      {
+        "name": "startup-authority-sees-cgroup-limits",
+        "passed": true
+      },
+      {
+        "name": "real-oauth-session",
+        "passed": true
+      },
+      {
+        "name": "commits-equals-native-git",
+        "passed": true
+      },
+      {
+        "name": "file-preview-equals-native-git",
+        "passed": true
+      },
+      {
+        "name": "blob-equals-native-git",
+        "passed": true
+      },
+      {
+        "name": "blame-equals-native-git",
+        "passed": true
+      },
+      {
+        "name": "preview-large.rs-equals-native-git",
+        "passed": true
+      },
+      {
+        "name": "preview-large-binary.dat-equals-native-git",
+        "passed": true
+      },
+      {
+        "name": "preview-large-nonutf8.dat-equals-native-git",
+        "passed": true
+      },
+      {
+        "name": "preview-boundary.txt-equals-native-git",
+        "passed": true
+      },
+      {
+        "name": "preview-over-boundary.txt-equals-native-git",
+        "passed": true
+      },
+      {
+        "name": "preview-empty.txt-equals-native-git",
+        "passed": true
+      },
+      {
+        "name": "preview-binary.dat-equals-native-git",
+        "passed": true
+      },
+      {
+        "name": "preview-nonutf8.dat-equals-native-git",
+        "passed": true
+      },
+      {
+        "name": "preview-small.rs-equals-native-git",
+        "passed": true
+      },
+      {
+        "name": "raw-oversize-budget-preserved",
+        "passed": true
+      },
+      {
+        "name": "eight-cold-readers-share-one-producer",
+        "passed": true
+      },
+      {
+        "name": "managed-resident-capacity-fits-minimum",
+        "passed": true
+      },
+      {
+        "name": "admitted-work-drained",
+        "passed": true
+      },
+      {
+        "name": "authorized-preview-revalidates",
+        "passed": true
+      },
+      {
+        "name": "cgroup-no-oom",
+        "passed": true
+      },
+      {
+        "name": "clean-minimum-profile-shutdown",
+        "passed": true
+      }
+    ],
+    "quota": {
+      "memory_bytes": 1073741824,
+      "nano_cpus": 1000000000,
+      "swap_bytes": 1073741824
+    },
+    "orchestrator_sha256": "9fe13a61f3ac188f3fc1a75a0ff20783c57b56f499bded1cd1e5ceedab3fefa9",
+    "capacity": {
+      "version": 2,
+      "resources": {
+        "memory_bytes": 1073741824,
+        "disk_limit_bytes": 34359738368,
+        "disk_capacity_bytes": 34359738368,
+        "free_disk_bytes": 7939325952,
+        "available_file_descriptors": 524276,
+        "job_credits": 1
+      },
+      "admission": {
+        "max_active_cells": 8,
+        "memory_limit_bytes": 1073741824,
+        "local_disk_bytes": 6351460762,
+        "disk_reserve_bytes": 1587865190
+      }
+    },
+    "cold_blame_producer_delta": 1.0,
+    "memory.max": "1073741824",
+    "memory.peak": "418279424",
+    "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0",
+    "cpu.max": "100000 100000",
+    "exit_code": 0,
+    "raw_report_sha256": "2f28cacbe27fff312ad3896bce15f8f03e48462eea2bd25d9a8c9d54b146253d"
+  },
+  "diagnostic": {
+    "scope": "diagnostic, one replica per variant, alternating warm cases, 20 seconds per cell, three repetitions; does not replace frozen two-replica qualification",
+    "raw_report_sha256": "823359affe88e7d2df32a03723055c7b1af77267a74beb24cac0a35c41ec1c7c",
+    "orchestrator_sha256": "d88d76e5d8053a2257f1f8b698a5a7a3594d5df84fac247e716a4dce828a8f01",
+    "exit_codes": [
+      0,
+      0
+    ],
+    "conclusion": "ratios vary in both directions; no causal attribution or replacement of failed frozen matrix",
+    "rows": [
+      {
+        "case": "small-8",
+        "repeat": 0,
+        "preview_p95_ratio": 0.9047735798170986,
+        "preview_throughput_ratio": 1.0202628390513562
+      },
+      {
+        "case": "small-8",
+        "repeat": 1,
+        "preview_p95_ratio": 0.9614331849859656,
+        "preview_throughput_ratio": 0.9991478887613633
+      },
+      {
+        "case": "small-8",
+        "repeat": 2,
+        "preview_p95_ratio": 0.8496210455667735,
+        "preview_throughput_ratio": 1.1210543048631312
+      },
+      {
+        "case": "mixed-8",
+        "repeat": 0,
+        "preview_p95_ratio": 1.1534401654320636,
+        "preview_throughput_ratio": 0.9392805117043497
+      },
+      {
+        "case": "mixed-8",
+        "repeat": 1,
+        "preview_p95_ratio": 0.5138817647786031,
+        "preview_throughput_ratio": 1.3958108644518274
+      },
+      {
+        "case": "mixed-8",
+        "repeat": 2,
+        "preview_p95_ratio": 0.983990521569346,
+        "preview_throughput_ratio": 1.0448922689424702
+      },
+      {
+        "case": "mixed-16",
+        "repeat": 0,
+        "preview_p95_ratio": 1.7106068255958513,
+        "preview_throughput_ratio": 0.6821907104889026
+      },
+      {
+        "case": "mixed-16",
+        "repeat": 1,
+        "preview_p95_ratio": 1.308301477134015,
+        "preview_throughput_ratio": 0.8521593680246452
+      },
+      {
+        "case": "mixed-16",
+        "repeat": 2,
+        "preview_p95_ratio": 0.6540714827023245,
+        "preview_throughput_ratio": 1.2822140042178678
+      }
+    ]
+  },
+  "ci_recovery": {
+    "workflow_url": "https://github.com/crabbuild/crab/actions/runs/44495718456",
+    "source_revision": "69c031c685429a345b565b4127827e069a624d6d",
+    "source_tree_equals_head": true,
+    "image_id": "sha256:57cd8d9a001b139f43d7afac31d49d4a28d7b179ba923e4dbeec926494ee1f53",
+    "process_artifact": 14519725450,
+    "process_archive_sha256": "0d17aa3e06fcf171a1614accf86e038eb23d505846a5075cc50e7dd6794e16eb",
+    "process_receipt_sha256": "edec6e67581c8e5822eb1bd1938b34a81b27a8ea07465ca64ca0da0028f76262",
+    "git_push": true,
+    "process_restart": true,
+    "abrupt_process_restart": true,
+    "restored_into_empty_cache": true,
+    "git_refs_verified": true,
+    "kubernetes_artifact": 14518954654,
+    "kubernetes_archive_sha256": "37cce395edc789ecc3d8bdccb4d8961b99c42a1de1315c711f4816a61fc01a67",
+    "kubernetes_receipt_sha256": "baa001e8da2b4734df398b75e3925b6b80e20adbdb72a6086c79ae5bb7f79131",
+    "native_pods": 3,
+    "sigkill_exit_code": 137,
+    "empty_cache_restore": true,
+    "root_copy_sha256_and_metadata_verified": true,
+    "restored_objects": 198,
+    "restored_bytes": 3221442914,
+    "stock_git_lfs_bytes": 3221225472,
+    "stock_git_lfs": true,
+    "crash_clone": true,
+    "restored_clone": true,
+    "range_resume": true
+  },
+  "remaining_scope": [
+    "frozen native and HTTP latency/throughput engineering gates remain failed",
+    "one upstream meter RemoteDisconnected in final HTTP observation",
+    "old catalog Cellar metadata restore gap reproduced by frozen R0; damaged namespace retained",
+    "minimum-profile sustained-load and native-architecture performance qualification",
+    "independent ref/source/frontier growth and remaining lifecycle qualification",
+    "hosted-provider latency excluded from this local RustFS verification"
+  ]
+}

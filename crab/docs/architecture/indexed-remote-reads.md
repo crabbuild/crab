@@ -94,6 +94,14 @@ remains enabled under `python -O`.
 
 ### Read-hardening measurements
 
+The [combined Plan 020 RustFS report](../benchmarks/v2-read-hardening-rustfs-2026-11-19.md)
+records the implemented seek history, metadata preview, shared blame, resident/
+CPU ownership and authorized HTTP revalidation changes. The final native matrix
+passes 1,440 Git query checks; combined HTTP proof passes 43 checks and an enforced
+1-CPU/1-GiB functional run passes 25. Frozen latency/throughput gates and broader
+lifecycle qualification remain open. This does not close the initiative's later
+delivery gates or establish hosted-provider latency.
+
 The `history-pages` qualifier selection measures first-parent pages 1, 10 and
 100 with a fixed 100-commit page size, where those pages exist. It prepares the
 actual opaque continuations in a separate runtime, records that work as

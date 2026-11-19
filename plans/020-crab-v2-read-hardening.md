@@ -22,9 +22,11 @@
 - **Category:** performance, correctness, resource ownership, qualification.
 - **Planned at:** `aafb6d256c5e8d3a8e768d31dd887a18f2afd2e4`, 2026-11-17.
 - **Target:** `crab-v2`; revalidate the target before execution.
-- **Delivery status:** IN PROGRESS. R0–R5 have implementation and focused
-  proof; combined provider/resource qualification remains in progress. See
-  the execution record below for checked source and outstanding proof.
+- **Delivery status:** IMPLEMENTED; ACCEPTANCE OPEN. R0–R5 are implemented.
+  Combined local RustFS correctness and enforced minimum-profile functional
+  proof pass; the frozen performance gates do not all pass. R7's measured
+  failures and remaining lifecycle cells are recorded, not waived. See the
+  [combined qualification report](../crab/docs/benchmarks/v2-read-hardening-rustfs-2026-11-19.md).
 - **Depends on:** existing read/authority contracts and the applicable resource
   ownership work in `plans/017-local-cache-read-hardening.md`.
 
@@ -49,16 +51,16 @@ interactive capacity. Verification and authorization remain authoritative on
 cache hits. Every claimed improvement has deterministic work counters plus
 real HTTP/provider measurements.
 
-| Packet | Deliverable                                                              | Effort | Risk | Depends on             | Status       |
-| ------ | ------------------------------------------------------------------------ | ------ | ---- | ---------------------- | ------------ |
-| R0     | Freeze contracts, add missing measurements, retain the baseline          | M      | MED  | —                      | IN PROGRESS  |
-| R1     | Resume first-parent history without prefix rewalking                     | M      | HIGH | R0                     | IN PROGRESS  |
-| R2     | Add a truthful metadata-first file-preview representation                | M      | MED  | R0                     | IN PROGRESS  |
-| R3     | Coalesce blame with independent waiter budgets and fair HTTP admission   | L      | HIGH | R0                     | IN PROGRESS  |
-| R4     | Bound and offload cache verification and diff CPU work                   | M      | HIGH | R0; coordinate with R3 | IN PROGRESS  |
-| R5     | Add authorized conditional reads for selected representations            | M      | HIGH | R2                     | IN PROGRESS  |
-| R6     | Decide whether persistent attribution or a new range representation pays | L      | HIGH | R1–R5 measurements     | DEFERRED     |
-| R7     | Qualify the combined source and publish the supported envelope           | L      | HIGH | R1–R5                  | IN PROGRESS  |
+| Packet | Deliverable                                                              | Effort | Risk | Depends on             | Status      |
+| ------ | ------------------------------------------------------------------------ | ------ | ---- | ---------------------- | ----------- |
+| R0     | Freeze contracts, add missing measurements, retain the baseline          | M      | MED  | —                      | MEASURED    |
+| R1     | Resume first-parent history without prefix rewalking                     | M      | HIGH | R0                     | IMPLEMENTED |
+| R2     | Add a truthful metadata-first file-preview representation                | M      | MED  | R0                     | IMPLEMENTED |
+| R3     | Coalesce blame with independent waiter budgets and fair HTTP admission   | L      | HIGH | R0                     | IMPLEMENTED |
+| R4     | Bound and offload cache verification and diff CPU work                   | M      | HIGH | R0; coordinate with R3 | IMPLEMENTED |
+| R5     | Add authorized conditional reads for selected representations            | M      | HIGH | R2                     | IMPLEMENTED |
+| R6     | Decide whether persistent attribution or a new range representation pays | L      | HIGH | R1–R5 measurements     | DEFERRED    |
+| R7     | Qualify the combined source and publish the supported envelope           | L      | HIGH | R1–R5                  | GATES OPEN  |
 
 Recommended order: R0; R1 and R2; R4; R3; R5; R7. R1 and R2 can use independent
 worktrees after R0 freezes their contracts. R3 and R4 share runtime/budget code;
@@ -446,8 +448,8 @@ with 45.55-second query p95; page 1 p95 was 0.478 seconds. These are local debug
 measurements, not hosted or release latency claims. The HTTP driver's 13 tests,
 qualifier counters, five server metrics tests, and embedded UI build pass.
 
-The user selected local RustFS for verification. A task-owned Colima profile
-runs the pinned RustFS image with one CPU and 1 GiB container memory inside a
+The user selected local RustFS for verification. Initially, a task-owned Colima
+profile ran the pinned RustFS image with one CPU and 1 GiB memory inside a
 2-CPU/4-GiB VM. Fixture data, VM disks, and receipts reside on the mounted
 Workspace volume. Other Docker profiles and normal installed binaries are
 untouched. Complete HTTP/resource/replica baselines, deliberate server-side
@@ -570,6 +572,38 @@ remain. These changes pass 189 library tests, 19 focused native Git regressions,
 three qualifier-counter tests, strict affected-crate Clippy and 20 qualification
 tool tests. Source-bound rebuilds and the final matched qualification follow;
 the earlier failures remain in the evidence set.
+
+**Final combined qualification, 2026-11-19:**
+
+The final production tree at `c5b6d40c459` completes 1,440 native Git query
+checks across all 72 cold/warm cells, with twenty interleaved pairs per cell.
+Cold page 100 at 10,000 commits uses a median 54 backend reads versus 10,055,
+with p95 0.131 versus 28.893 seconds. Fourteen native p95 controls still fail.
+The final release HTTP matrix completes all 22 cells per variant, including
+600-second mixed soaks, with zero Git mismatches and zero non-rejection request
+errors. Both RSS plateau checks pass and both variants exit zero. The candidate
+retains 41 p95, 34 throughput and three interactive-latency gate failures; its
+provider observer also retains one upstream connection failure. An alternating
+short-run diagnostic varies in both directions and does not clear these gates.
+
+Final combined debug HTTP proof passes 43 checks, including a real mid-blame
+socket abort with one producer and all admitted work drained. An exact-source
+Linux image additionally passes 25 checks with enforced 1-CPU/1-GiB cgroups:
+startup detects those limits, eight cold callers share one producer, managed
+capacity is at most 256 MiB, cgroup memory peaks at 418,279,424 bytes, no OOM
+occurs and shutdown exits zero. The amd64 image runs emulated on the arm64 VM;
+this proves minimum-profile functionality, not native latency or a sustained
+minimum-profile soak. Failed fixture setup attempts remain retained.
+
+The old catalog develops a non-contiguous Cellar LTX restore plan after earlier
+runs. The frozen R0 binary fails on the same preserved state; no dependency
+patch or data repair is applied. Final matched/functional runs use a previously
+unused catalog that adopts the identical original Git prefixes. Their restarts
+pass, without claiming recovery of the old epoch. The portable report binds all
+build/source inputs, thresholds, successful and failed cells, provider counts,
+resource limits and retained failures. It also names the remaining lifecycle
+and resource proof; R7 acceptance remains open. Local RustFS replaces hosted S3
+for this execution, without establishing hosted latency.
 
 The mounted volume's root is not writable by this user; its existing
 `crabbuild-target/` and `CrabData/` directories are writable. The preflight above
@@ -874,11 +908,11 @@ These are debug diagnostic inputs, not the combined release acceptance result.
 The exact candidate hash is recorded in `native-comparison.json`; no persistent
 format is accepted from these measurements.
 
-| Option | Measured cold evidence | Decision and next proof |
-| ------ | ---------------------- | ----------------------- |
-| Persist comparison maps | On 10,000 commits, R0/R1 blame query p95 is 1.953/3.523 seconds with the same median 667 backend reads. An interleaved repeat improves cold timing but retains a warm p95 failure. This does not isolate Myers as the dominant cost. | Defer. First isolate comparison CPU from ancestry, verified object reads and output. Measure map bytes and preparation CPU per eliminated comparison. |
-| Persist complete line origins | The same blame baseline is expensive, but repository page 100 already falls from 45.55 seconds/10,055 reads to 0.147 seconds/54 reads without a new format. Shared producers and retained results must be qualified before adding another persistent cache. | Defer. Measure remaining cold blame after the combined changes, varying unrelated history independently from file changes. Compare origin-index publication/storage cost with the existing change-point path. |
-| Independently verified Git/LFS ranges | The real 9 MiB plain/delta preview corpus proves bounded metadata output and preserved full-response rejection. It does not establish a cold random-range latency or provider-byte baseline. Alpha.1 CRC validation can still fetch a large encoded base. | Defer; missing range baseline. Measure authenticated cold range amplification separately for Git and LFS. Existing Xet chunk integrity does not prove either representation. |
+| Option                                | Measured cold evidence                                                                                                                                                                                                                                      | Decision and next proof                                                                                                                                                                                       |
+| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Persist comparison maps               | On 10,000 commits, R0/R1 blame query p95 is 1.953/3.523 seconds with the same median 667 backend reads. An interleaved repeat improves cold timing but retains a warm p95 failure. This does not isolate Myers as the dominant cost.                        | Defer. First isolate comparison CPU from ancestry, verified object reads and output. Measure map bytes and preparation CPU per eliminated comparison.                                                         |
+| Persist complete line origins         | The same blame baseline is expensive, but repository page 100 already falls from 45.55 seconds/10,055 reads to 0.147 seconds/54 reads without a new format. Shared producers and retained results must be qualified before adding another persistent cache. | Defer. Measure remaining cold blame after the combined changes, varying unrelated history independently from file changes. Compare origin-index publication/storage cost with the existing change-point path. |
+| Independently verified Git/LFS ranges | The real 9 MiB plain/delta preview corpus proves bounded metadata output and preserved full-response rejection. It does not establish a cold random-range latency or provider-byte baseline. Alpha.1 CRC validation can still fetch a large encoded base.   | Defer; missing range baseline. Measure authenticated cold range amplification separately for Git and LFS. Existing Xet chunk integrity does not prove either representation.                                  |
 
 Before revisiting any option, its separate design must bind a repository UUID,
 immutable snapshot/input IDs and semantics version; publish only complete
@@ -972,17 +1006,17 @@ baseline and a declared deployment/resource profile.
 
 ## Review and completion checklist
 
-- [ ] Source/release contract audit and drift checks recorded.
-- [ ] Every packet has a commit/evidence receipt or an explicit pending reason.
+- [x] Source/release contract audit and drift checks recorded.
+- [x] Every packet has a commit/evidence receipt or an explicit pending reason.
 - [ ] R0–R5 and R7 pass their stated gates on the combined source.
-- [ ] Original cursor, `/file`, Diff, checksum, and range assertions remain.
-- [ ] HTTP authorization precedes cache/validator success on every touched path.
-- [ ] SDK, browser/server, and shared-reader consumers have appropriate proof;
+- [x] Original cursor, `/file`, Diff, checksum, and range assertions remain.
+- [x] HTTP authorization precedes cache/validator success on every touched path.
+- [x] SDK, browser/server, and shared-reader consumers have appropriate proof;
       first-party browser mocks are never offered as provider I/O evidence.
-- [ ] No new environment knob, unapproved dependency change, hidden fallback,
+- [x] No new environment knob, unapproved dependency change, hidden fallback,
       or unsupported production format was introduced.
-- [ ] Local Cargo targets and qualification data stayed on the mounted volume.
-- [ ] Documentation includes measured limits and unresolved provider/lifecycle
+- [x] Local Cargo targets and qualification data stayed on the mounted volume.
+- [x] Documentation includes measured limits and unresolved provider/lifecycle
       gates; Plan 020 and its index status distinguish implementation from proof.
 
 ## STOP conditions
