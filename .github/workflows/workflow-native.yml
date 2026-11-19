@@ -1,12 +1,12 @@
-name: Alpha notebook Windows qualification
+name: Alpha Linux fixture diagnostics
 on:
   workflow_dispatch:
 permissions:
   contents: read
   actions: read
 jobs:
-  notebook:
-    runs-on: windows-2022
+  storage:
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     defaults:
       run:
@@ -17,60 +17,82 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 3d1162a42ef332b257d1d18bfb32a15698aa660a
+          ref: cd249ad5e42141269aa18041333cb703d7a32672
       - uses: actions/setup-node@v4
         with:
           node-version-file: packages/desktop/.nvmrc
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.0
       - name: Set private qualification paths
         run: |
-          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crab-notebook-target" >> "$GITHUB_ENV"
-          mkdir -p "$RUNNER_TEMP/crab-notebook-target"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crab-keyring-target" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/crab-keyring-target"
+      - name: Install Linux and real Secret Service dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-0 libnss3 libasound2t64 libgbm1 xvfb tmux dbus-x11 gnome-keyring libsecret-1-0 pkg-config libssl-dev libfuse3-dev
       - uses: actions/download-artifact@v4
         with:
-          name: Crab-native-win-x64
-          path: packages/desktop/resources/native/win-x64
+          name: Crab-native-linux-x64
+          path: packages/desktop/resources/native/linux-x64
           run-id: 44455996465
           github-token: ${{ github.token }}
-      - name: Install desktop dependencies
-        run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: Crab-remote-runtime-Linux-X64
+          path: packages/desktop/release/remote-runtime
+          run-id: 44455996465
+          github-token: ${{ github.token }}
+      - name: Install desktop dependencies and restore native permissions
+        run: |
+          npm ci
+          chmod +x resources/native/linux-x64/{crab,crab-nfs-mount,crab-desktop-agent,git-remote-crab}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install pinned notebook runtime
+      - name: Install pinned notebook and storage runtime
         run: |
-          python -m pip install jupyter_client==8.6.3 ipykernel==6.29.5 jupyter_server==2.17.0
+          python -m pip install awscli jupyter_client==8.6.3 ipykernel==6.29.5 jupyter_server==2.17.0
           echo "CRAB_TEST_JUPYTER_PYTHON=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
-      - name: Build exact control application
+      - name: Build exact packaged application
         run: |
           npm run build:renderer
           npm run build:electron
           node scripts/package.mjs --dir --publish never
-      - name: Record unchanged notebook control
-        continue-on-error: true
-        run: E2E_SMOKE=1 npx playwright test tests/e2e/notebook-kernel.spec.ts --project=e2e-smoke --workers=1 > control-notebook.log 2>&1
-      - name: Apply only production correction and new regression
-        working-directory: .
+      - name: Run focused packaged diagnostics with a real keyring
         run: |
-          python - <<'PYCODE'
-          import base64, subprocess
-          patch = base64.b64decode('ZGlmZiAtLWdpdCBhL3BhY2thZ2VzL2Rlc2t0b3AvZWxlY3Ryb24vanVweXRlci1ydW50aW1lLnB5IGIvcGFja2FnZXMvZGVza3RvcC9lbGVjdHJvbi9qdXB5dGVyLXJ1bnRpbWUucHkKaW5kZXggOWYyOTQyMmQyNzAuLjVmM2NkMDNjNzY2IDEwMDY0NAotLS0gYS9wYWNrYWdlcy9kZXNrdG9wL2VsZWN0cm9uL2p1cHl0ZXItcnVudGltZS5weQorKysgYi9wYWNrYWdlcy9kZXNrdG9wL2VsZWN0cm9uL2p1cHl0ZXItcnVudGltZS5weQpAQCAtMzUsMTIgKzM1LDE4IEBAIGNsYXNzIExvY2FsS2VybmVsOgogICAgICAgICBzZWxmLmNsaWVudCA9IE5vbmUKIAogICAgIGFzeW5jIGRlZiBsYXVuY2goc2VsZiwgcmVzdGFydD1GYWxzZSk6Ci0gICAgICAgIGlmIHJlc3RhcnQ6Ci0gICAgICAgICAgICBzZWxmLmNsaWVudC5zdG9wX2NoYW5uZWxzKCkKLSAgICAgICAgICAgIGF3YWl0IHNlbGYubWFuYWdlci5yZXN0YXJ0X2tlcm5lbChub3c9RmFsc2UpCi0gICAgICAgICAgICByZXR1cm4KLSAgICAgICAgIyBLZWVwIG5hdGl2ZSBrZXJuZWwgd3JpdGVzIG91dCBvZiB0aGUgd29ya2VyJ3Mgc3Rkb3V0IHByb3RvY29sLgotICAgICAgICBhd2FpdCBzZWxmLm1hbmFnZXIuc3RhcnRfa2VybmVsKGN3ZD1zZWxmLmN3ZCwgc3RkaW49c3VicHJvY2Vzcy5ERVZOVUxMLCBzdGRvdXQ9c3lzLnN0ZGVyciwgc3RkZXJyPXN5cy5zdGRlcnIpCisgICAgICAgIHRyeToKKyAgICAgICAgICAgIGlmIHJlc3RhcnQ6CisgICAgICAgICAgICAgICAgc2VsZi5jbGllbnQuc3RvcF9jaGFubmVscygpCisgICAgICAgICAgICAgICAgYXdhaXQgc2VsZi5tYW5hZ2VyLnJlc3RhcnRfa2VybmVsKG5vdz1GYWxzZSkKKyAgICAgICAgICAgICAgICByZXR1cm4KKyAgICAgICAgICAgICMgS2VlcCBuYXRpdmUga2VybmVsIHdyaXRlcyBvdXQgb2YgdGhlIHdvcmtlcidzIHN0ZG91dCBwcm90b2NvbC4KKyAgICAgICAgICAgIGF3YWl0IHNlbGYubWFuYWdlci5zdGFydF9rZXJuZWwoY3dkPXNlbGYuY3dkLCBzdGRpbj1zdWJwcm9jZXNzLkRFVk5VTEwsIHN0ZG91dD1zeXMuc3RkZXJyLCBzdGRlcnI9c3lzLnN0ZGVycikKKyAgICAgICAgZXhjZXB0IE9TRXJyb3IgYXMgZXJyb3I6CisgICAgICAgICAgICAjIFdpbmRvd3MgcHJvY2VzcyBlcnJvcnMgb21pdCB0aGUgZmlsZW5hbWUuIEtlZXAgbGF1bmNoIGNvbnRleHQgYXQKKyAgICAgICAgICAgICMgdGhlIGtlcm5lbCBvd25lciBzbyBib3RoIHN0YXJ0dXAgYW5kIHJlc3RhcnQgcmVtYWluIGFjdGlvbmFibGUuCisgICAgICAgICAgICBleGVjdXRhYmxlID0gc2VsZi5tYW5hZ2VyLmZvcm1hdF9rZXJuZWxfY21kKClbMF0KKyAgICAgICAgICAgIHJhaXNlIFJ1bnRpbWVFcnJvcihmIkNvdWxkIG5vdCBsYXVuY2gga2VybmVsIHtzZWxmLm1hbmFnZXIua2VybmVsX25hbWUhcn0gdXNpbmcge2V4ZWN1dGFibGUhcn0gaW4ge3NlbGYuY3dkIXJ9OiB7ZXJyb3J9IikgZnJvbSBlcnJvcgogCiAgICAgYXN5bmMgZGVmIHJlYWR5KHNlbGYpOgogICAgICAgICBzZWxmLmNsaWVudCA9IHNlbGYubWFuYWdlci5jbGllbnQoKQpkaWZmIC0tZ2l0IGEvcGFja2FnZXMvZGVza3RvcC90ZXN0cy9qdXB5dGVyLWtlcm5lbC5zcGVjLnRzIGIvcGFja2FnZXMvZGVza3RvcC90ZXN0cy9qdXB5dGVyLWtlcm5lbC5zcGVjLnRzCmluZGV4IGEwMWNkY2JjYjVmLi43M2I4MDg3NmJjMSAxMDA2NDQKLS0tIGEvcGFja2FnZXMvZGVza3RvcC90ZXN0cy9qdXB5dGVyLWtlcm5lbC5zcGVjLnRzCisrKyBiL3BhY2thZ2VzL2Rlc2t0b3AvdGVzdHMvanVweXRlci1rZXJuZWwuc3BlYy50cwpAQCAtMyw2ICszLDcgQEAgaW1wb3J0IHsgcHJvbWlzZXMgYXMgZnMgfSBmcm9tICJub2RlOmZzIjsKIGltcG9ydCAqIGFzIHBhdGggZnJvbSAibm9kZTpwYXRoIjsKIGltcG9ydCB7IHRtcGRpciB9IGZyb20gIm5vZGU6b3MiOwogaW1wb3J0IHsgcmFuZG9tVVVJRCB9IGZyb20gIm5vZGU6Y3J5cHRvIjsKK2ltcG9ydCB7IGV4ZWNGaWxlU3luYyB9IGZyb20gIm5vZGU6Y2hpbGRfcHJvY2VzcyI7CiBpbXBvcnQgeyBKdXB5dGVyS2VybmVsIH0gZnJvbSAiLi4vZWxlY3Ryb24vanVweXRlci1rZXJuZWwiOwogaW1wb3J0IHR5cGUgeyBLZXJuZWxPdXRwdXQgfSBmcm9tICIuLi9lbGVjdHJvbi9qdXB5dGVyLXR5cGVzIjsKIApAQCAtNzcsNiArNzgsMzcgQEAgZGVzY3JpYmUucnVuSWYocHl0aG9uKSgicmVmZXJlbmNlIEp1cHl0ZXIgcnVudGltZSBvd25lcnNoaXAiLCAoKSA9PiB7CiAgICAgZXhwZWN0KChhd2FpdCBmcy5yZWFkZGlyKHJvb3QpKS5maWx0ZXIobmFtZSA9PiBuYW1lLnN0YXJ0c1dpdGgoImNyYWIta2VybmVsLSIpKSkudG9FcXVhbChbXSk7CiAgIH0sIDQ1XzAwMCk7CiAKKyAgaXQuZWFjaChbInN0YXJ0dXAiLCAicmVzdGFydCJdKSgiaWRlbnRpZmllcyB0aGUgZXhlY3V0YWJsZSB3aGVuICVzIGZhaWxzIHdpdGhvdXQgYW4gT1MgZmlsZW5hbWUiLCBhc3luYyBwaGFzZSA9PiB7CisgICAgY29uc3QgZXhlY3V0YWJsZSA9IHBhdGguam9pbihyb290LCAidW5hdmFpbGFibGUta2VybmVsIik7CisgICAgY29uc3QgcmVzdWx0ID0gZXhlY0ZpbGVTeW5jKHB5dGhvbiEsIFsiLWMiLCBgCitpbXBvcnQgYXN5bmNpbywgaW1wb3J0bGliLnV0aWwsIGpzb24sIHN5cworZnJvbSB1bml0dGVzdC5tb2NrIGltcG9ydCBwYXRjaAorc3BlYyA9IGltcG9ydGxpYi51dGlsLnNwZWNfZnJvbV9maWxlX2xvY2F0aW9uKCJjcmFiX2p1cHl0ZXIiLCBzeXMuYXJndlsxXSkKK3J1bnRpbWUgPSBpbXBvcnRsaWIudXRpbC5tb2R1bGVfZnJvbV9zcGVjKHNwZWMpCitzcGVjLmxvYWRlci5leGVjX21vZHVsZShydW50aW1lKQorYXN5bmMgZGVmIGNoZWNrKCk6CisgICAga2VybmVsID0gcnVudGltZS5Mb2NhbEtlcm5lbCgicHl0aG9uMyIsIHN5cy5hcmd2WzJdLCBzeXMuYXJndlsyXSkKKyAgICBpZiBzeXMuYXJndlszXSA9PSAicmVzdGFydCI6CisgICAgICAgIGF3YWl0IGtlcm5lbC5sYXVuY2goKQorICAgICAgICBhd2FpdCBrZXJuZWwucmVhZHkoKQorICAgIGtlcm5lbC5tYW5hZ2VyLmtlcm5lbF9zcGVjLmFyZ3ZbMF0gPSBzeXMuYXJndls0XQorICAgIG1pc3NpbmcgPSBGaWxlTm90Rm91bmRFcnJvcigyLCAiVGhlIHN5c3RlbSBjYW5ub3QgZmluZCB0aGUgZmlsZSBzcGVjaWZpZWQiKQorICAgIHRyeToKKyAgICAgICAgIyBXaW5kb3dzIENyZWF0ZVByb2Nlc3Mgb21pdHMgdGhlIGV4ZWN1dGFibGUgZnJvbSBGaWxlTm90Rm91bmRFcnJvci4KKyAgICAgICAgIyBJbmplY3QgdGhhdCBkZXBlbmRlbmN5IGVycm9yIGFmdGVyIHJlYWwgSnVweXRlciBsYXVuY2ggcHJlcGFyYXRpb24uCisgICAgICAgIHdpdGggcGF0Y2goImp1cHl0ZXJfY2xpZW50LmxhdW5jaGVyLlBvcGVuIiwgc2lkZV9lZmZlY3Q9bWlzc2luZyk6CisgICAgICAgICAgICBhd2FpdCBrZXJuZWwubGF1bmNoKHJlc3RhcnQ9c3lzLmFyZ3ZbM10gPT0gInJlc3RhcnQiKQorICAgIGV4Y2VwdCBFeGNlcHRpb24gYXMgZXJyb3I6CisgICAgICAgIHByaW50KGpzb24uZHVtcHMoeyJtZXNzYWdlIjogc3RyKGVycm9yKSwgImNhdXNlUmV0YWluZWQiOiBlcnJvci5fX2NhdXNlX18gaXMgbWlzc2luZ30pKQorICAgIGZpbmFsbHk6CisgICAgICAgIGF3YWl0IGtlcm5lbC5jbG9zZSgpCithc3luY2lvLnJ1bihjaGVjaygpKQorYCwgcGF0aC5yZXNvbHZlKF9fZGlybmFtZSwgIi4uL2VsZWN0cm9uL2p1cHl0ZXItcnVudGltZS5weSIpLCByb290LCBwaGFzZSwgZXhlY3V0YWJsZV0sIHsgZW5jb2Rpbmc6ICJ1dGY4IiwgdGltZW91dDogMzBfMDAwIH0pOworICAgIGNvbnN0IGZhaWx1cmUgPSBKU09OLnBhcnNlKHJlc3VsdCkgYXMgeyBtZXNzYWdlOiBzdHJpbmc7IGNhdXNlUmV0YWluZWQ6IGJvb2xlYW4gfTsKKyAgICBleHBlY3QoZmFpbHVyZS5tZXNzYWdlKS50b0NvbnRhaW4oZXhlY3V0YWJsZSk7CisgICAgZXhwZWN0KGZhaWx1cmUuY2F1c2VSZXRhaW5lZCkudG9CZSh0cnVlKTsKKyAgfSwgNDVfMDAwKTsKKwogICBpdCgicm91dGVzIGJhY2tncm91bmQgb3V0cHV0IGFmdGVyIGV4ZWN1dGlvbiBpcyBpZGxlIHRvIGl0cyBvcmlnaW5hbCByZXF1ZXN0IiwgYXN5bmMgKCkgPT4gewogICAgIGF3YWl0IGtlcm5lbC5zdGFydCgpOwogICAgIGNvbnN0IHJlbGVhc2UgPSBwYXRoLmpvaW4ocm9vdCwgInJlbGVhc2UiKSwgZG9uZSA9IHBhdGguam9pbihyb290LCAiYmFja2dyb3VuZC1kb25lIik7Cg==')
-          subprocess.run(['git', 'apply', '-'], input=patch, check=True)
+          cat > "$RUNNER_TEMP/fixture-diagnostics.py" <<'PYCODE'
+          from pathlib import Path
+          p = Path("tests/e2e/large-file-lifecycle.spec.ts")
+          s = p.read_text()
+          s = s.replace('const second = spawn(executablePath, [`--user-data-dir=${profile}`], { env: appEnv, stdio: "ignore" });', 'const second = spawn(executablePath, [`--user-data-dir=${profile}`], { env: appEnv, stdio: ["ignore", "ignore", "pipe"] });\n      let diagnosticStderr = "";\n      second.stderr!.on("data", bytes => { diagnosticStderr += bytes.toString(); });\n      second.once("exit", (code, signal) => { writeFileSync(test.info().outputPath("second-owner.json"), JSON.stringify({ code, signal, stderr: diagnosticStderr })); });')
+          p.write_text(s)
+          p = Path("tests/e2e/storage-identity.spec.ts")
+          s = p.read_text()
+          needle = 'await expect.poll(() => git(directories[0], ["rev-parse", "HEAD"]).toString(), { timeout: 30_000 }).not.toBe(beforeCommit);'
+          assert s.count(needle) == 1
+          s = s.replace(needle, 'try { ' + needle + ' } catch (error) {\n      writeFileSync(test.info().outputPath("commit-visible-state.txt"), await page.getByRole("main").innerText());\n      await page.screenshot({path: test.info().outputPath("commit-visible-state.png")});\n      throw error;\n    }')
+          p.write_text(s)
+          p = Path("scripts/qualify-v2.py").resolve()
+          s = p.read_text()
+          a = s.index('                subprocess.run(["cargo", "test"')
+          z = s.index('                identity_spec =', a)
+          s = s[:a] + s[z:]
+          needle = 'subprocess.run([node, "scripts/smoke.mjs"], cwd=DESKTOP, env=env, check=True)'
+          assert s.count(needle) == 1
+          s = s.replace(needle, 'subprocess.run([node, "node_modules/@playwright/test/cli.js", "test", "--project=e2e-smoke", "tests/e2e/large-file-lifecycle.spec.ts", "tests/e2e/storage-identity.spec.ts", "tests/e2e/large-files.spec.ts", "--grep", "Crab and LFS UI lifecycle|device storage identities|tracking wizard commits literal", "--workers=1"], cwd=DESKTOP, env={**env, "E2E_SMOKE": "1"}, check=True)')
+          exec(compile(s, str(p), "exec"), {"__file__": str(p), "__name__": "__main__"})
           PYCODE
-      - name: Rebuild candidate application in a separate runtime directory
-        run: |
-          npm run build:electron
-          node scripts/package.mjs --dir --publish never -c.directories.output=release-candidate
-      - name: Qualify unchanged packaged notebook scenarios
-        run: CRAB_PACKAGED_APP="$(node -p 'require("node:path").resolve("release-candidate/win-unpacked/Crab.exe")')" E2E_SMOKE=1 npx playwright test tests/e2e/notebook-kernel.spec.ts tests/e2e/notebook-remote-kernel.spec.ts --project=e2e-smoke --workers=1 > candidate-notebook.log 2>&1
-      - name: Qualify complete desktop regression suite
-        run: npm test -- --maxWorkers 2 --reporter=json --outputFile=candidate-report.json > candidate-unit.log 2>&1
+          dbus-run-session -- bash -euo pipefail <<'KEYRING'
+            export XDG_CURRENT_DESKTOP=GNOME
+            export XDG_DATA_HOME="$RUNNER_TEMP/crab-desktop-keyring"
+            mkdir -m 700 -p "$XDG_DATA_HOME"
+            python -c "import secrets; print(secrets.token_hex(32), end=\"\")" | gnome-keyring-daemon --unlock --components=secrets
+            xvfb-run -a python "$RUNNER_TEMP/fixture-diagnostics.py" > fixture-diagnostics.log 2>&1
+          KEYRING
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: alpha2-windows-notebook-proof
+          name: alpha2-linux-fixture-diagnostics
           path: |
-            packages/desktop/control-notebook.log
-            packages/desktop/candidate-notebook.log
-            packages/desktop/candidate-unit.log
-            packages/desktop/candidate-report.json
+            packages/desktop/fixture-diagnostics.log
             packages/desktop/test-results/**
