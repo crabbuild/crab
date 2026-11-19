@@ -5,7 +5,7 @@ use crate::{
     repository::catalog::RepositorySet, transfer_admission::TransferAdmission,
 };
 use capacity::CellCapacityReport;
-use crab_remote_git::{OperationLimits, RemoteGitRuntime, RepositoryOptions};
+use crab_remote_git::{ObjectLimits, OperationLimits, RemoteGitRuntime, RepositoryOptions};
 use std::{
     sync::{
         Arc,
@@ -24,6 +24,7 @@ pub(crate) mod management;
 pub(crate) mod storage;
 
 pub(crate) const MAX_RELEASE_ASSET_BYTES: u64 = 512 * 1024 * 1024;
+pub(crate) const MAX_BLOB_BYTES: u64 = 256 * 1024 * 1024;
 const READ_ADMISSION_CAPACITY: usize = 16;
 const GIT_ADMISSION_CAPACITY: usize = 4;
 const APP_ADMISSION_CAPACITY: usize = 8;
@@ -214,7 +215,12 @@ pub async fn serve(config: Config) -> Result<()> {
         );
     }
     let options = RepositoryOptions::new(
-        Default::default(),
+        ObjectLimits {
+            max_packed_entry_bytes: MAX_BLOB_BYTES,
+            max_inflated_entry_bytes: MAX_BLOB_BYTES,
+            max_object_bytes: MAX_BLOB_BYTES,
+            ..Default::default()
+        },
         OperationLimits {
             max_duration: Duration::from_secs(5 * 60),
             max_logical_objects: 5_000_000,

@@ -30,6 +30,7 @@ import {
 } from "@primer/octicons-react";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { DataTable } from "./explorer";
+import { QueryPlan } from "./plan";
 import { displayCell, type TableData } from "../model";
 import {
   defaultDataQuery,
@@ -352,7 +353,7 @@ export function DataWorkbench({ bytes, format, name, size, url }: Props) {
   const [generation, setGeneration] = useState(0);
   const [session, setSession] = useState<QuerySession>();
   const [query, setQuery] = useState(defaultDataQuery);
-  const [result, setResult] = useState<QueryResult>();
+  const [result, setResult] = useState<QueryResult & { mode: RunMode }>();
   const [error, setError] = useState<WorkbenchError>();
   const [notice, setNotice] = useState<string>();
   const [phase, setPhase] = useState<EnginePhase>("starting");
@@ -404,7 +405,7 @@ export function DataWorkbench({ bytes, format, name, size, url }: Props) {
           setSession(value);
           setQuery(value.defaultQuery);
           setRelationName(value.relations[0]?.name);
-          setResult(initial);
+          setResult({ ...initial, mode: "query" });
           setPhase("ready");
           if (restarting.current) {
             restarting.current = false;
@@ -455,7 +456,9 @@ export function DataWorkbench({ bytes, format, name, size, url }: Props) {
           ? await session.explain(sql)
           : await session.query(sql);
       if (id === request.current) {
-        setResult(value);
+        // Keep presentation attached to the completed result, so a failed or
+        // cancelled operation cannot relabel the previous query as a plan.
+        setResult({ ...value, mode });
         setView("table");
         setPhase("ready");
         recordRun({
@@ -535,28 +538,19 @@ export function DataWorkbench({ bytes, format, name, size, url }: Props) {
   const shortName = name.split("/").pop() ?? name;
   return (
     <section className="data-workbench" aria-label={`${name} query workbench`}>
-      <header className="data-workbench-header">
-        <div>
-          <span className="data-workbench-kicker">Local data workbench</span>
-          <strong title={shortName}>{shortName}</strong>
-        </div>
-        <div className="data-workbench-badges">
-          <Badge variant="info">{engine}</Badge>
-          <span>{format.toUpperCase()}</span>
-          {session?.sourceEncoding && (
-            <span>{session.sourceEncoding.toUpperCase()}</span>
-          )}
-          <span>{formatBytes(size)}</span>
-          <span>{sourceMode}</span>
-          <span>Local only</span>
-        </div>
-      </header>
       <div className="data-workbench-editor">
         <div className="data-query-heading">
           <strong>SQL query</strong>
-          <span className="muted" id={helpId}>
-            Read-only · Ctrl+Space completes · ⌘/Ctrl+Enter runs
-          </span>
+          <div className="data-workbench-badges">
+            <Badge variant="info">{engine}</Badge>
+            <span>{format.toUpperCase()}</span>
+            {session?.sourceEncoding && (
+              <span>{session.sourceEncoding.toUpperCase()}</span>
+            )}
+            <span>{formatBytes(size)}</span>
+            <span>{sourceMode}</span>
+            <span>Local only</span>
+          </div>
         </div>
         <SqlEditor
           ref={editor}
@@ -643,12 +637,17 @@ export function DataWorkbench({ bytes, format, name, size, url }: Props) {
           </div>
         </div>
         <Collapsible className="data-query-history">
-          <CollapsibleTrigger asChild>
-            <Button variant="ghost" size="xs" className="my-2">
-              <HistoryIcon data-icon="inline-start" /> Recent runs
-              <Badge variant="secondary">{history.length}</Badge>
-            </Button>
-          </CollapsibleTrigger>
+          <div className="data-query-history-heading">
+            <CollapsibleTrigger asChild>
+              <Button variant="ghost" size="xs" className="my-2">
+                <HistoryIcon data-icon="inline-start" /> Recent runs
+                <Badge variant="secondary">{history.length}</Badge>
+              </Button>
+            </CollapsibleTrigger>
+            <span id={helpId}>
+              Read-only · Ctrl+Space completes · ⌘/Ctrl+Enter runs
+            </span>
+          </div>
           <CollapsibleContent>
             {history.length ? (
               <div className="data-query-history-content">
@@ -724,34 +723,38 @@ export function DataWorkbench({ bytes, format, name, size, url }: Props) {
         />
         <div className="data-results">
           <div className="data-results-toolbar">
-            <ToggleGroup
-              role="group"
-              type="single"
-              variant="outline"
-              spacing={0}
-              aria-label="Result view"
-              value={view}
-              onValueChange={(value) => {
-                if (value === "chart" || value === "table") setView(value);
-              }}
-            >
-              <ToggleGroupItem
-                value="table"
-                role="button"
-                aria-pressed={view === "table"}
-                aria-checked={undefined}
+            {result?.mode === "explain" ? (
+              <strong>Query plan</strong>
+            ) : (
+              <ToggleGroup
+                role="group"
+                type="single"
+                variant="outline"
+                spacing={0}
+                aria-label="Result view"
+                value={view}
+                onValueChange={(value) => {
+                  if (value === "chart" || value === "table") setView(value);
+                }}
               >
-                Table
-              </ToggleGroupItem>
-              <ToggleGroupItem
-                value="chart"
-                role="button"
-                aria-pressed={view === "chart"}
-                aria-checked={undefined}
-              >
-                Chart
-              </ToggleGroupItem>
-            </ToggleGroup>
+                <ToggleGroupItem
+                  value="table"
+                  role="button"
+                  aria-pressed={view === "table"}
+                  aria-checked={undefined}
+                >
+                  Table
+                </ToggleGroupItem>
+                <ToggleGroupItem
+                  value="chart"
+                  role="button"
+                  aria-pressed={view === "chart"}
+                  aria-checked={undefined}
+                >
+                  Chart
+                </ToggleGroupItem>
+              </ToggleGroup>
+            )}
             <div className="data-results-actions">
               <span className="data-query-stats" aria-live="polite">
                 {phase === "starting" ? (
@@ -770,11 +773,17 @@ export function DataWorkbench({ bytes, format, name, size, url }: Props) {
                   "Stopping query…"
                 ) : result ? (
                   <>
-                    {result.data.rows.length.toLocaleString()} rows ·{" "}
-                    {result.elapsedMs.toFixed(0)} ms
-                    {session?.sourceRows !== undefined && (
-                      <> · {session.sourceRows.toLocaleString()} source rows</>
+                    {result.mode === "query" && (
+                      <>{result.data.rows.length.toLocaleString()} rows · </>
                     )}
+                    {result.elapsedMs.toFixed(0)} ms
+                    {result.mode === "query" &&
+                      session?.sourceRows !== undefined && (
+                        <>
+                          {" "}
+                          · {session.sourceRows.toLocaleString()} source rows
+                        </>
+                      )}
                     {result.truncated && (
                       <> · {MAX_QUERY_ROWS.toLocaleString()} row cap</>
                     )}
@@ -809,7 +818,9 @@ export function DataWorkbench({ bytes, format, name, size, url }: Props) {
             </div>
           </div>
           {result &&
-            (view === "chart" ? (
+            (result.mode === "explain" ? (
+              <QueryPlan data={result.data} engine={engine} />
+            ) : view === "chart" ? (
               <ResultChart data={result.data} />
             ) : (
               <DataTable data={result.data} name="Query results" />
