@@ -27,14 +27,14 @@ jobs:
           echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crab-terminal-proof" >> "$GITHUB_ENV"
       - run: npm ci
       - run: npm run build:electron
-      - name: Compare foreground programs through real daemon reconnection
+      - name: Write owned foreground probe
         run: |
           cat > "$RUNNER_TEMP/crab-terminal-proof.cjs" <<'JS'
           const fs=require('node:fs'),path=require('node:path');
           const {DaemonServer}=require(path.resolve('dist-electron/daemon/daemon-server.cjs'));
           const {DaemonClient}=require(path.resolve('dist-electron/daemon/daemon-client.cjs'));
           const {createNodePtySpawner}=require(path.resolve('dist-electron/daemon/subprocess-handle.cjs'));
-          const consoleNode=process.argv[2];if(!consoleNode||!fs.existsSync(consoleNode))throw Error('Console Node executable missing');
+          const phase=process.argv[3];const consoleNode=process.argv[2];if(!consoleNode||!fs.existsSync(consoleNode))throw Error('Console Node executable missing');
           const pause=ms=>new Promise(r=>setTimeout(r,ms));
           const alive=pid=>{try{process.kill(pid,0);return true}catch{return false}};
           async function until(predicate){const end=Date.now()+5000;while(Date.now()<end){if(predicate())return true;await pause(25)}return false}
@@ -47,7 +47,7 @@ jobs:
             let output='',resumed='';
             const options=handler=>({socketDir:root,daemonEntryPath:'',onSessionData:(_id,data)=>handler(data),onSessionExit(){},onAgentStateChange(){}});
             const client=new DaemonClient(options(data=>output+=data)),reader=new DaemonClient(options(data=>resumed+=data));
-            const result={kind,iteration,version:process.version,consoleNode};
+            const result={phase,kind,iteration,version:process.version,consoleNode};
             try{
              await server.start();await client.ensureConnected();
              const sessionId='foreground';const spawned=await client.request('createOrAttach',{sessionId,cwd:root,cols:80,rows:24,env:{HOME:root,ZDOTDIR:root}});result.shellPid=spawned.pid;
@@ -62,18 +62,115 @@ jobs:
              result.reply=await until(()=>resumed.includes(`agent-reply:${pid}:after-reopen`));result.aliveAfter=alive(pid);result.output=output;result.resumed=resumed;
              if(fs.existsSync(path.join(root,'exit.json')))result.exit=JSON.parse(fs.readFileSync(path.join(root,'exit.json'),'utf8'));
             }catch(error){result.error=error.message}
-            finally{client.disconnect();reader.disconnect();await server.shutdown({killSessions:true});await fs.promises.rm(root,{recursive:true,force:true});}
-            results.push(result);console.log('[TERMINAL-PROOF]',JSON.stringify(result));
+            finally{
+             client.disconnect();reader.disconnect();const closing=Date.now();await server.shutdown({killSessions:true});
+             const pids=[result.pid,result.shellPid].filter(pid=>Number.isSafeInteger(pid)&&pid>0&&pid!==process.pid);
+             result.physicalExit=await until(()=>pids.every(pid=>!alive(pid)));result.shutdownMs=Date.now()-closing;
+             result.remainingPids=pids.filter(alive);
+             results.push(result);fs.writeFileSync(path.join(process.env.CARGO_TARGET_DIR,phase+'-terminal-proof.json'),JSON.stringify(results,null,2));console.log('[TERMINAL-PROOF]',JSON.stringify(result));
+             for(const pid of result.remainingPids){try{process.kill(pid)}catch{}}
+             await until(()=>pids.every(pid=>!alive(pid)));
+             await fs.promises.rm(root,{recursive:true,force:true});
+            }
            }
-           fs.writeFileSync(path.join(process.env.CARGO_TARGET_DIR,'terminal-proof.json'),JSON.stringify(results,null,2));
-           if(results.filter(r=>r.kind==='console-node').some(r=>!r.reply||r.restoredNew!==false||!r.aliveAfter))process.exitCode=1;
+           fs.writeFileSync(path.join(process.env.CARGO_TARGET_DIR,phase+'-terminal-proof.json'),JSON.stringify(results,null,2));
+           if(results.filter(r=>r.kind==='console-node').some(r=>!r.reply||r.restoredNew!==false||!r.aliveAfter||(phase==='candidate'&&!r.physicalExit)))process.exitCode=1;
           })().catch(error=>{console.error(error);process.exitCode=1});
           
           JS
-          ELECTRON_RUN_AS_NODE=1 node -e 'const child=require("node:child_process").spawnSync(require("electron"),[process.argv[1],process.execPath],{env:process.env,stdio:"inherit"});if(child.error)throw child.error;process.exitCode=child.status??1' "$RUNNER_TEMP/crab-terminal-proof.cjs"
+      - name: Measure current foreground and shutdown ownership
+        continue-on-error: true
+        run: |
+          ELECTRON_RUN_AS_NODE=1 node -e 'const child=require("node:child_process").spawnSync(require("electron"),[process.argv[1],process.execPath,"control"],{env:process.env,stdio:"inherit"});if(child.error)throw child.error;process.exitCode=child.status??1' "$RUNNER_TEMP/crab-terminal-proof.cjs"
+      - name: Apply ConPTY ownership candidate
+        working-directory: .
+        run: |
+          cat > "$RUNNER_TEMP/conpty.patch" <<'PATCH'
+          diff --git a/packages/desktop/electron/daemon/subprocess-handle.ts b/packages/desktop/electron/daemon/subprocess-handle.ts
+          index 5be9b161056..3935aaa97ab 100644
+          --- a/packages/desktop/electron/daemon/subprocess-handle.ts
+          +++ b/packages/desktop/electron/daemon/subprocess-handle.ts
+          @@ -6,9 +6,9 @@
+            * - Explicit dispose() releases the master fd (node-pty leaks it until GC)
+            * - After dispose(), kill() is neutralized to prevent SIGHUP-to-recycled-PID
+            *
+          - * The `forceKill()` method uses `process.kill(pid, 'SIGKILL')` directly,
+          - * bypassing the neutralization — callers must ensure forceKill is called
+          - * BEFORE dispose() when both are needed (kill timeout path).
+          + * On POSIX, forceKill bypasses neutralization with SIGKILL and must precede
+          + * disposal. Windows termination belongs to ConPTY, which enumerates console
+          + * members before killing them; terminating the shell first can orphan children.
+            */
+           
+           import type { IPty } from "node-pty";
+          @@ -38,14 +38,15 @@ export type SubprocessSpawner = (opts: SubprocessSpawnOptions) => SubprocessHand
+            * Production SubprocessHandle wrapping a node-pty IPty instance.
+            *
+            * After dispose(), the kill() method becomes a no-op to prevent sending
+          - * signals to a recycled PID. forceKill() is NOT neutralized by dispose —
+          - * callers must call forceKill BEFORE dispose when both are needed.
+          + * signals to a recycled PID. POSIX forceKill is not neutralized by dispose;
+          + * callers must call it first. Windows requests console termination only once.
+            */
+           export class NodePtySubprocessHandle implements SubprocessHandle {
+             readonly pid: number;
+             readonly fd: number;
+             private pty: IPty;
+             private disposed = false;
+          +  private conptyClosing = false;
+             private dataCallbacks: Array<(data: string) => void> = [];
+             private exitCallbacks: Array<(exitCode: number) => void> = [];
+           
+          @@ -83,12 +84,15 @@ export class NodePtySubprocessHandle implements SubprocessHandle {
+             kill(signal?: string): void {
+               // Neutralized after dispose to prevent SIGHUP-to-recycled-PID
+               if (this.disposed) return;
+          -    // ConPTY owns termination on Windows; node-pty rejects signal arguments
+          -    // before killing anything, leaving the shell and its working directory live.
+          -    this.pty.kill(process.platform === "win32" ? undefined : signal);
+          +    if (process.platform === "win32") this.closeConpty();
+          +    else this.pty.kill(signal);
+             }
+           
+             forceKill(): void {
+          +    if (process.platform === "win32") {
+          +      this.closeConpty();
+          +      return;
+          +    }
+               // Uses process.kill directly — NOT neutralized by dispose.
+               // Callers MUST call forceKill BEFORE dispose when both are needed.
+               try {
+          @@ -132,9 +136,18 @@ export class NodePtySubprocessHandle implements SubprocessHandle {
+               this.disposed = true;
+               this.dataCallbacks = [];
+               this.exitCallbacks = [];
+          -    this.pty.kill();
+          +    if (process.platform === "win32") this.closeConpty();
+          +    else this.pty.kill();
+               this.cleanup();
+             }
+          +
+          +  private closeConpty(): void {
+          +    // A second kill can enumerate after the console has closed. Let the first
+          +    // request retain ownership of node-pty's asynchronous process-tree teardown.
+          +    if (this.conptyClosing) return;
+          +    this.conptyClosing = true;
+          +    this.pty.kill();
+          +  }
+           }
+           
+           /**
+          
+          PATCH
+          git apply --check "$RUNNER_TEMP/conpty.patch"
+          git apply "$RUNNER_TEMP/conpty.patch"
+      - run: npm run build:electron
+      - name: Measure candidate foreground and shutdown ownership
+        run: |
+          ELECTRON_RUN_AS_NODE=1 node -e 'const child=require("node:child_process").spawnSync(require("electron"),[process.argv[1],process.execPath,"candidate"],{env:process.env,stdio:"inherit"});if(child.error)throw child.error;process.exitCode=child.status??1' "$RUNNER_TEMP/crab-terminal-proof.cjs"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: alpha2-windows-terminal-contract
-          path: ${{ runner.temp }}/crab-terminal-proof/terminal-proof.json
+          path: ${{ runner.temp }}/crab-terminal-proof/*-terminal-proof.json
           retention-days: 7
