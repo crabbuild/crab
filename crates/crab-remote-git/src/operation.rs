@@ -124,9 +124,16 @@ impl TrackedLocatorSession {
         let Some(session) = self.session.take() else {
             return Ok(());
         };
+        let mut close = Box::pin(session.close());
+        if let std::task::Poll::Ready(result) = futures_util::poll!(&mut close) {
+            return result;
+        }
+        // Resource-free sessions close immediately. A pending close transfers
+        // to runtime ownership before yielding, so caller cancellation cannot
+        // abandon a live metadata reader.
         let (sender, receiver) = oneshot::channel();
         self.runtime.track_cleanup(async move {
-            let _ = sender.send(session.close().await);
+            let _ = sender.send(close.await);
         });
         receiver.await.map_err(|_| {
             crab_metadata::error::MetadataError::Internal(
@@ -1509,6 +1516,18 @@ fn check_cancelled(cancellation: &CancellationToken) -> Result<()> {
 #[cfg(test)]
 mod close_fault_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn resource_free_locator_close_completes_without_scheduling_cleanup() {
+        use futures_util::FutureExt;
+
+        let runtime = Arc::new(crate::RemoteGitRuntime::default());
+        let session =
+            TrackedLocatorSession::new(GitObjectLocatorSession::without_catalog(), runtime.clone());
+        let closed = session.close().now_or_never();
+        runtime.shutdown().await;
+        assert!(matches!(closed, Some(Ok(()))));
+    }
 
     fn close_failure() -> crab_metadata::error::MetadataError {
         crab_metadata::error::MetadataError::Io {
