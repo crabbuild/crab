@@ -1,176 +1,76 @@
-name: Workflow native execution
+name: Alpha notebook Windows qualification
 on:
   workflow_dispatch:
 permissions:
   contents: read
+  actions: read
 jobs:
-  terminal-proof:
+  notebook:
     runs-on: windows-2022
-    timeout-minutes: 30
+    timeout-minutes: 60
     defaults:
       run:
         shell: bash
         working-directory: packages/desktop
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: false
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 8bbceef61a0772b880b5c9b4f80aea954db37d31
+          ref: 3d1162a42ef332b257d1d18bfb32a15698aa660a
       - uses: actions/setup-node@v4
         with:
           node-version-file: packages/desktop/.nvmrc
+      - name: Set private qualification paths
+        run: |
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crab-notebook-target" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/crab-notebook-target"
+      - uses: actions/download-artifact@v4
+        with:
+          name: Crab-native-win-x64
+          path: packages/desktop/resources/native/win-x64
+          run-id: 44455996465
+          github-token: ${{ github.token }}
+      - name: Install desktop dependencies
+        run: npm ci
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Set private proof directory
+      - name: Install pinned notebook runtime
         run: |
-          mkdir -p "$RUNNER_TEMP/crab-terminal-proof"
-          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crab-terminal-proof" >> "$GITHUB_ENV"
-      - run: npm ci
-      - run: npm run build:electron
-      - name: Write owned foreground probe
+          python -m pip install jupyter_client==8.6.3 ipykernel==6.29.5 jupyter_server==2.17.0
+          echo "CRAB_TEST_JUPYTER_PYTHON=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
+      - name: Build exact control application
         run: |
-          cat > "$RUNNER_TEMP/crab-terminal-proof.cjs" <<'JS'
-          const fs=require('node:fs'),path=require('node:path');
-          const {DaemonServer}=require(path.resolve('dist-electron/daemon/daemon-server.cjs'));
-          const {DaemonClient}=require(path.resolve('dist-electron/daemon/daemon-client.cjs'));
-          const {createNodePtySpawner}=require(path.resolve('dist-electron/daemon/subprocess-handle.cjs'));
-          const phase=process.argv[3];const consoleNode=process.argv[2];if(!consoleNode||!fs.existsSync(consoleNode))throw Error('Console Node executable missing');
-          const pause=ms=>new Promise(r=>setTimeout(r,ms));
-          const alive=pid=>{try{process.kill(pid,0);return true}catch{return false}};
-          async function until(predicate){const end=Date.now()+5000;while(Date.now()<end){if(predicate())return true;await pause(25)}return false}
-          (async()=>{
-           const results=[];
-           for(const kind of ['electron-gui','console-node'])for(let iteration=0;iteration<2;iteration++){
-            const root=fs.mkdtempSync(path.join(process.env.CARGO_TARGET_DIR,'foreground-'));
-            fs.writeFileSync(path.join(root,'agent.cjs'),`const fs=require('node:fs');process.on('exit',code=>fs.writeFileSync('exit.json',JSON.stringify({code,pid:process.pid,stdinDestroyed:process.stdin.destroyed})));console.log('agent-ready:'+process.pid);process.stdin.setEncoding('utf8');process.stdin.on('data',line=>console.log('agent-reply:'+process.pid+':'+line.trim()));`);
-            const server=new DaemonServer({socketPath:path.join(root,'daemon-v2.sock'),tokenPath:path.join(root,'daemon-v2.token'),pidPath:path.join(root,'daemon-v2.pid'),spawnSubprocess:createNodePtySpawner(),idleTimeoutMs:0});
-            let output='',resumed='';
-            const options=handler=>({socketDir:root,daemonEntryPath:'',onSessionData:(_id,data)=>handler(data),onSessionExit(){},onAgentStateChange(){}});
-            const client=new DaemonClient(options(data=>output+=data)),reader=new DaemonClient(options(data=>resumed+=data));
-            const result={phase,kind,iteration,version:process.version,consoleNode};
-            try{
-             await server.start();await client.ensureConnected();
-             const sessionId='foreground';const spawned=await client.request('createOrAttach',{sessionId,cwd:root,cols:80,rows:24,env:{HOME:root,ZDOTDIR:root}});result.shellPid=spawned.pid;
-             const command=kind==='electron-gui'?`start "" /b /wait "${process.execPath}" agent.cjs`:`"${consoleNode}" agent.cjs`;
-             await client.request('write',{sessionId,data:command+'\r'});
-             if(!await until(()=>/agent-ready:(\d+)/.test(output)))throw Error('Agent did not become ready');
-             const pid=Number(/agent-ready:(\d+)/.exec(output)[1]);result.pid=pid;result.aliveBefore=alive(pid);
-             try{await client.request('prepare-upgrade',{successorPath:path.resolve('dist-electron/daemon/daemon-main.cjs')});throw Error('Upgrade unexpectedly admitted')}catch(error){if(!/deferred while terminals are running/.test(error.message))throw error}
-             client.disconnect();await client.ensureConnected();const restored=await client.request('createOrAttach',{sessionId,cwd:root,cols:100,rows:35});result.restoredNew=restored.isNew;
-             await reader.ensureConnected();await reader.request('createOrAttach',{sessionId,cwd:root,cols:100,rows:35});
-             await reader.request('write',{sessionId,data:'after-reopen\r'});
-             result.reply=await until(()=>resumed.includes(`agent-reply:${pid}:after-reopen`));result.aliveAfter=alive(pid);result.output=output;result.resumed=resumed;
-             if(fs.existsSync(path.join(root,'exit.json')))result.exit=JSON.parse(fs.readFileSync(path.join(root,'exit.json'),'utf8'));
-            }catch(error){result.error=error.message}
-            finally{
-             client.disconnect();reader.disconnect();const closing=Date.now();await server.shutdown({killSessions:true});
-             const pids=[result.pid,result.shellPid].filter(pid=>Number.isSafeInteger(pid)&&pid>0&&pid!==process.pid);
-             result.physicalExit=await until(()=>pids.every(pid=>!alive(pid)));result.shutdownMs=Date.now()-closing;
-             result.remainingPids=pids.filter(alive);
-             results.push(result);fs.writeFileSync(path.join(process.env.CARGO_TARGET_DIR,phase+'-terminal-proof.json'),JSON.stringify(results,null,2));console.log('[TERMINAL-PROOF]',JSON.stringify(result));
-             for(const pid of result.remainingPids){try{process.kill(pid)}catch{}}
-             await until(()=>pids.every(pid=>!alive(pid)));
-             await fs.promises.rm(root,{recursive:true,force:true});
-            }
-           }
-           fs.writeFileSync(path.join(process.env.CARGO_TARGET_DIR,phase+'-terminal-proof.json'),JSON.stringify(results,null,2));
-           if(results.filter(r=>r.kind==='console-node').some(r=>!r.reply||r.restoredNew!==false||!r.aliveAfter||(phase==='candidate'&&!r.physicalExit)))process.exitCode=1;
-          })().catch(error=>{console.error(error);process.exitCode=1});
-          
-          JS
-      - name: Measure current foreground and shutdown ownership
+          npm run build:renderer
+          npm run build:electron
+          node scripts/package.mjs --dir --publish never
+      - name: Record unchanged notebook control
         continue-on-error: true
-        run: |
-          ELECTRON_RUN_AS_NODE=1 node -e 'const child=require("node:child_process").spawnSync(require("electron"),[process.argv[1],process.execPath,"control"],{env:process.env,stdio:"inherit"});if(child.error)throw child.error;process.exitCode=child.status??1' "$RUNNER_TEMP/crab-terminal-proof.cjs"
-      - name: Apply ConPTY ownership candidate
+        run: E2E_SMOKE=1 npx playwright test tests/e2e/notebook-kernel.spec.ts --project=e2e-smoke --workers=1 > control-notebook.log 2>&1
+      - name: Apply only production correction and new regression
         working-directory: .
         run: |
-          cat > "$RUNNER_TEMP/conpty.patch" <<'PATCH'
-          diff --git a/packages/desktop/electron/daemon/subprocess-handle.ts b/packages/desktop/electron/daemon/subprocess-handle.ts
-          index 5be9b161056..3935aaa97ab 100644
-          --- a/packages/desktop/electron/daemon/subprocess-handle.ts
-          +++ b/packages/desktop/electron/daemon/subprocess-handle.ts
-          @@ -6,9 +6,9 @@
-            * - Explicit dispose() releases the master fd (node-pty leaks it until GC)
-            * - After dispose(), kill() is neutralized to prevent SIGHUP-to-recycled-PID
-            *
-          - * The `forceKill()` method uses `process.kill(pid, 'SIGKILL')` directly,
-          - * bypassing the neutralization — callers must ensure forceKill is called
-          - * BEFORE dispose() when both are needed (kill timeout path).
-          + * On POSIX, forceKill bypasses neutralization with SIGKILL and must precede
-          + * disposal. Windows termination belongs to ConPTY, which enumerates console
-          + * members before killing them; terminating the shell first can orphan children.
-            */
-           
-           import type { IPty } from "node-pty";
-          @@ -38,14 +38,15 @@ export type SubprocessSpawner = (opts: SubprocessSpawnOptions) => SubprocessHand
-            * Production SubprocessHandle wrapping a node-pty IPty instance.
-            *
-            * After dispose(), the kill() method becomes a no-op to prevent sending
-          - * signals to a recycled PID. forceKill() is NOT neutralized by dispose —
-          - * callers must call forceKill BEFORE dispose when both are needed.
-          + * signals to a recycled PID. POSIX forceKill is not neutralized by dispose;
-          + * callers must call it first. Windows requests console termination only once.
-            */
-           export class NodePtySubprocessHandle implements SubprocessHandle {
-             readonly pid: number;
-             readonly fd: number;
-             private pty: IPty;
-             private disposed = false;
-          +  private conptyClosing = false;
-             private dataCallbacks: Array<(data: string) => void> = [];
-             private exitCallbacks: Array<(exitCode: number) => void> = [];
-           
-          @@ -83,12 +84,15 @@ export class NodePtySubprocessHandle implements SubprocessHandle {
-             kill(signal?: string): void {
-               // Neutralized after dispose to prevent SIGHUP-to-recycled-PID
-               if (this.disposed) return;
-          -    // ConPTY owns termination on Windows; node-pty rejects signal arguments
-          -    // before killing anything, leaving the shell and its working directory live.
-          -    this.pty.kill(process.platform === "win32" ? undefined : signal);
-          +    if (process.platform === "win32") this.closeConpty();
-          +    else this.pty.kill(signal);
-             }
-           
-             forceKill(): void {
-          +    if (process.platform === "win32") {
-          +      this.closeConpty();
-          +      return;
-          +    }
-               // Uses process.kill directly — NOT neutralized by dispose.
-               // Callers MUST call forceKill BEFORE dispose when both are needed.
-               try {
-          @@ -132,9 +136,18 @@ export class NodePtySubprocessHandle implements SubprocessHandle {
-               this.disposed = true;
-               this.dataCallbacks = [];
-               this.exitCallbacks = [];
-          -    this.pty.kill();
-          +    if (process.platform === "win32") this.closeConpty();
-          +    else this.pty.kill();
-               this.cleanup();
-             }
-          +
-          +  private closeConpty(): void {
-          +    // A second kill can enumerate after the console has closed. Let the first
-          +    // request retain ownership of node-pty's asynchronous process-tree teardown.
-          +    if (this.conptyClosing) return;
-          +    this.conptyClosing = true;
-          +    this.pty.kill();
-          +  }
-           }
-           
-           /**
-          
-          PATCH
-          git apply --check "$RUNNER_TEMP/conpty.patch"
-          git apply "$RUNNER_TEMP/conpty.patch"
-      - run: npm run build:electron
-      - name: Measure candidate foreground and shutdown ownership
+          python - <<'PYCODE'
+          import base64, subprocess
+          patch = base64.b64decode('ZGlmZiAtLWdpdCBhL3BhY2thZ2VzL2Rlc2t0b3AvZWxlY3Ryb24vanVweXRlci1ydW50aW1lLnB5IGIvcGFja2FnZXMvZGVza3RvcC9lbGVjdHJvbi9qdXB5dGVyLXJ1bnRpbWUucHkKaW5kZXggOWYyOTQyMmQyNzAuLjVmM2NkMDNjNzY2IDEwMDY0NAotLS0gYS9wYWNrYWdlcy9kZXNrdG9wL2VsZWN0cm9uL2p1cHl0ZXItcnVudGltZS5weQorKysgYi9wYWNrYWdlcy9kZXNrdG9wL2VsZWN0cm9uL2p1cHl0ZXItcnVudGltZS5weQpAQCAtMzUsMTIgKzM1LDE4IEBAIGNsYXNzIExvY2FsS2VybmVsOgogICAgICAgICBzZWxmLmNsaWVudCA9IE5vbmUKIAogICAgIGFzeW5jIGRlZiBsYXVuY2goc2VsZiwgcmVzdGFydD1GYWxzZSk6Ci0gICAgICAgIGlmIHJlc3RhcnQ6Ci0gICAgICAgICAgICBzZWxmLmNsaWVudC5zdG9wX2NoYW5uZWxzKCkKLSAgICAgICAgICAgIGF3YWl0IHNlbGYubWFuYWdlci5yZXN0YXJ0X2tlcm5lbChub3c9RmFsc2UpCi0gICAgICAgICAgICByZXR1cm4KLSAgICAgICAgIyBLZWVwIG5hdGl2ZSBrZXJuZWwgd3JpdGVzIG91dCBvZiB0aGUgd29ya2VyJ3Mgc3Rkb3V0IHByb3RvY29sLgotICAgICAgICBhd2FpdCBzZWxmLm1hbmFnZXIuc3RhcnRfa2VybmVsKGN3ZD1zZWxmLmN3ZCwgc3RkaW49c3VicHJvY2Vzcy5ERVZOVUxMLCBzdGRvdXQ9c3lzLnN0ZGVyciwgc3RkZXJyPXN5cy5zdGRlcnIpCisgICAgICAgIHRyeToKKyAgICAgICAgICAgIGlmIHJlc3RhcnQ6CisgICAgICAgICAgICAgICAgc2VsZi5jbGllbnQuc3RvcF9jaGFubmVscygpCisgICAgICAgICAgICAgICAgYXdhaXQgc2VsZi5tYW5hZ2VyLnJlc3RhcnRfa2VybmVsKG5vdz1GYWxzZSkKKyAgICAgICAgICAgICAgICByZXR1cm4KKyAgICAgICAgICAgICMgS2VlcCBuYXRpdmUga2VybmVsIHdyaXRlcyBvdXQgb2YgdGhlIHdvcmtlcidzIHN0ZG91dCBwcm90b2NvbC4KKyAgICAgICAgICAgIGF3YWl0IHNlbGYubWFuYWdlci5zdGFydF9rZXJuZWwoY3dkPXNlbGYuY3dkLCBzdGRpbj1zdWJwcm9jZXNzLkRFVk5VTEwsIHN0ZG91dD1zeXMuc3RkZXJyLCBzdGRlcnI9c3lzLnN0ZGVycikKKyAgICAgICAgZXhjZXB0IE9TRXJyb3IgYXMgZXJyb3I6CisgICAgICAgICAgICAjIFdpbmRvd3MgcHJvY2VzcyBlcnJvcnMgb21pdCB0aGUgZmlsZW5hbWUuIEtlZXAgbGF1bmNoIGNvbnRleHQgYXQKKyAgICAgICAgICAgICMgdGhlIGtlcm5lbCBvd25lciBzbyBib3RoIHN0YXJ0dXAgYW5kIHJlc3RhcnQgcmVtYWluIGFjdGlvbmFibGUuCisgICAgICAgICAgICBleGVjdXRhYmxlID0gc2VsZi5tYW5hZ2VyLmZvcm1hdF9rZXJuZWxfY21kKClbMF0KKyAgICAgICAgICAgIHJhaXNlIFJ1bnRpbWVFcnJvcihmIkNvdWxkIG5vdCBsYXVuY2gga2VybmVsIHtzZWxmLm1hbmFnZXIua2VybmVsX25hbWUhcn0gdXNpbmcge2V4ZWN1dGFibGUhcn0gaW4ge3NlbGYuY3dkIXJ9OiB7ZXJyb3J9IikgZnJvbSBlcnJvcgogCiAgICAgYXN5bmMgZGVmIHJlYWR5KHNlbGYpOgogICAgICAgICBzZWxmLmNsaWVudCA9IHNlbGYubWFuYWdlci5jbGllbnQoKQpkaWZmIC0tZ2l0IGEvcGFja2FnZXMvZGVza3RvcC90ZXN0cy9qdXB5dGVyLWtlcm5lbC5zcGVjLnRzIGIvcGFja2FnZXMvZGVza3RvcC90ZXN0cy9qdXB5dGVyLWtlcm5lbC5zcGVjLnRzCmluZGV4IGEwMWNkY2JjYjVmLi43M2I4MDg3NmJjMSAxMDA2NDQKLS0tIGEvcGFja2FnZXMvZGVza3RvcC90ZXN0cy9qdXB5dGVyLWtlcm5lbC5zcGVjLnRzCisrKyBiL3BhY2thZ2VzL2Rlc2t0b3AvdGVzdHMvanVweXRlci1rZXJuZWwuc3BlYy50cwpAQCAtMyw2ICszLDcgQEAgaW1wb3J0IHsgcHJvbWlzZXMgYXMgZnMgfSBmcm9tICJub2RlOmZzIjsKIGltcG9ydCAqIGFzIHBhdGggZnJvbSAibm9kZTpwYXRoIjsKIGltcG9ydCB7IHRtcGRpciB9IGZyb20gIm5vZGU6b3MiOwogaW1wb3J0IHsgcmFuZG9tVVVJRCB9IGZyb20gIm5vZGU6Y3J5cHRvIjsKK2ltcG9ydCB7IGV4ZWNGaWxlU3luYyB9IGZyb20gIm5vZGU6Y2hpbGRfcHJvY2VzcyI7CiBpbXBvcnQgeyBKdXB5dGVyS2VybmVsIH0gZnJvbSAiLi4vZWxlY3Ryb24vanVweXRlci1rZXJuZWwiOwogaW1wb3J0IHR5cGUgeyBLZXJuZWxPdXRwdXQgfSBmcm9tICIuLi9lbGVjdHJvbi9qdXB5dGVyLXR5cGVzIjsKIApAQCAtNzcsNiArNzgsMzcgQEAgZGVzY3JpYmUucnVuSWYocHl0aG9uKSgicmVmZXJlbmNlIEp1cHl0ZXIgcnVudGltZSBvd25lcnNoaXAiLCAoKSA9PiB7CiAgICAgZXhwZWN0KChhd2FpdCBmcy5yZWFkZGlyKHJvb3QpKS5maWx0ZXIobmFtZSA9PiBuYW1lLnN0YXJ0c1dpdGgoImNyYWIta2VybmVsLSIpKSkudG9FcXVhbChbXSk7CiAgIH0sIDQ1XzAwMCk7CiAKKyAgaXQuZWFjaChbInN0YXJ0dXAiLCAicmVzdGFydCJdKSgiaWRlbnRpZmllcyB0aGUgZXhlY3V0YWJsZSB3aGVuICVzIGZhaWxzIHdpdGhvdXQgYW4gT1MgZmlsZW5hbWUiLCBhc3luYyBwaGFzZSA9PiB7CisgICAgY29uc3QgZXhlY3V0YWJsZSA9IHBhdGguam9pbihyb290LCAidW5hdmFpbGFibGUta2VybmVsIik7CisgICAgY29uc3QgcmVzdWx0ID0gZXhlY0ZpbGVTeW5jKHB5dGhvbiEsIFsiLWMiLCBgCitpbXBvcnQgYXN5bmNpbywgaW1wb3J0bGliLnV0aWwsIGpzb24sIHN5cworZnJvbSB1bml0dGVzdC5tb2NrIGltcG9ydCBwYXRjaAorc3BlYyA9IGltcG9ydGxpYi51dGlsLnNwZWNfZnJvbV9maWxlX2xvY2F0aW9uKCJjcmFiX2p1cHl0ZXIiLCBzeXMuYXJndlsxXSkKK3J1bnRpbWUgPSBpbXBvcnRsaWIudXRpbC5tb2R1bGVfZnJvbV9zcGVjKHNwZWMpCitzcGVjLmxvYWRlci5leGVjX21vZHVsZShydW50aW1lKQorYXN5bmMgZGVmIGNoZWNrKCk6CisgICAga2VybmVsID0gcnVudGltZS5Mb2NhbEtlcm5lbCgicHl0aG9uMyIsIHN5cy5hcmd2WzJdLCBzeXMuYXJndlsyXSkKKyAgICBpZiBzeXMuYXJndlszXSA9PSAicmVzdGFydCI6CisgICAgICAgIGF3YWl0IGtlcm5lbC5sYXVuY2goKQorICAgICAgICBhd2FpdCBrZXJuZWwucmVhZHkoKQorICAgIGtlcm5lbC5tYW5hZ2VyLmtlcm5lbF9zcGVjLmFyZ3ZbMF0gPSBzeXMuYXJndls0XQorICAgIG1pc3NpbmcgPSBGaWxlTm90Rm91bmRFcnJvcigyLCAiVGhlIHN5c3RlbSBjYW5ub3QgZmluZCB0aGUgZmlsZSBzcGVjaWZpZWQiKQorICAgIHRyeToKKyAgICAgICAgIyBXaW5kb3dzIENyZWF0ZVByb2Nlc3Mgb21pdHMgdGhlIGV4ZWN1dGFibGUgZnJvbSBGaWxlTm90Rm91bmRFcnJvci4KKyAgICAgICAgIyBJbmplY3QgdGhhdCBkZXBlbmRlbmN5IGVycm9yIGFmdGVyIHJlYWwgSnVweXRlciBsYXVuY2ggcHJlcGFyYXRpb24uCisgICAgICAgIHdpdGggcGF0Y2goImp1cHl0ZXJfY2xpZW50LmxhdW5jaGVyLlBvcGVuIiwgc2lkZV9lZmZlY3Q9bWlzc2luZyk6CisgICAgICAgICAgICBhd2FpdCBrZXJuZWwubGF1bmNoKHJlc3RhcnQ9c3lzLmFyZ3ZbM10gPT0gInJlc3RhcnQiKQorICAgIGV4Y2VwdCBFeGNlcHRpb24gYXMgZXJyb3I6CisgICAgICAgIHByaW50KGpzb24uZHVtcHMoeyJtZXNzYWdlIjogc3RyKGVycm9yKSwgImNhdXNlUmV0YWluZWQiOiBlcnJvci5fX2NhdXNlX18gaXMgbWlzc2luZ30pKQorICAgIGZpbmFsbHk6CisgICAgICAgIGF3YWl0IGtlcm5lbC5jbG9zZSgpCithc3luY2lvLnJ1bihjaGVjaygpKQorYCwgcGF0aC5yZXNvbHZlKF9fZGlybmFtZSwgIi4uL2VsZWN0cm9uL2p1cHl0ZXItcnVudGltZS5weSIpLCByb290LCBwaGFzZSwgZXhlY3V0YWJsZV0sIHsgZW5jb2Rpbmc6ICJ1dGY4IiwgdGltZW91dDogMzBfMDAwIH0pOworICAgIGNvbnN0IGZhaWx1cmUgPSBKU09OLnBhcnNlKHJlc3VsdCkgYXMgeyBtZXNzYWdlOiBzdHJpbmc7IGNhdXNlUmV0YWluZWQ6IGJvb2xlYW4gfTsKKyAgICBleHBlY3QoZmFpbHVyZS5tZXNzYWdlKS50b0NvbnRhaW4oZXhlY3V0YWJsZSk7CisgICAgZXhwZWN0KGZhaWx1cmUuY2F1c2VSZXRhaW5lZCkudG9CZSh0cnVlKTsKKyAgfSwgNDVfMDAwKTsKKwogICBpdCgicm91dGVzIGJhY2tncm91bmQgb3V0cHV0IGFmdGVyIGV4ZWN1dGlvbiBpcyBpZGxlIHRvIGl0cyBvcmlnaW5hbCByZXF1ZXN0IiwgYXN5bmMgKCkgPT4gewogICAgIGF3YWl0IGtlcm5lbC5zdGFydCgpOwogICAgIGNvbnN0IHJlbGVhc2UgPSBwYXRoLmpvaW4ocm9vdCwgInJlbGVhc2UiKSwgZG9uZSA9IHBhdGguam9pbihyb290LCAiYmFja2dyb3VuZC1kb25lIik7Cg==')
+          subprocess.run(['git', 'apply', '-'], input=patch, check=True)
+          PYCODE
+      - name: Rebuild candidate application
         run: |
-          ELECTRON_RUN_AS_NODE=1 node -e 'const child=require("node:child_process").spawnSync(require("electron"),[process.argv[1],process.execPath,"candidate"],{env:process.env,stdio:"inherit"});if(child.error)throw child.error;process.exitCode=child.status??1' "$RUNNER_TEMP/crab-terminal-proof.cjs"
+          npm run build:electron
+          node scripts/package.mjs --dir --publish never
+      - name: Qualify unchanged packaged notebook scenarios
+        run: E2E_SMOKE=1 npx playwright test tests/e2e/notebook-kernel.spec.ts tests/e2e/notebook-remote-kernel.spec.ts --project=e2e-smoke --workers=1 > candidate-notebook.log 2>&1
+      - name: Qualify complete desktop regression suite
+        run: npm test -- --maxWorkers 2 --reporter=json --outputFile=candidate-report.json > candidate-unit.log 2>&1
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: alpha2-windows-terminal-contract
-          path: ${{ runner.temp }}/crab-terminal-proof/*-terminal-proof.json
-          retention-days: 7
+          name: alpha2-windows-notebook-proof
+          path: |
+            packages/desktop/control-notebook.log
+            packages/desktop/candidate-notebook.log
+            packages/desktop/candidate-unit.log
+            packages/desktop/candidate-report.json
+            packages/desktop/test-results/**
