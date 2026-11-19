@@ -23,18 +23,15 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version-file: packages/desktop/.nvmrc
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.97.0
       - name: Set private qualification paths
         run: |
           echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crab-notebook-target" >> "$GITHUB_ENV"
           mkdir -p "$RUNNER_TEMP/crab-notebook-target"
       - uses: actions/download-artifact@v4
         with:
-          name: Crab-native-win-x64
+          name: alpha2-windows-quoted-native
           path: packages/desktop/resources/native/win-x64
-          run-id: 44455996465
+          run-id: 44543250890
           github-token: ${{ github.token }}
       - name: Install desktop dependencies
         run: npm ci
@@ -45,73 +42,58 @@ jobs:
         run: |
           python -m pip install awscli jupyter_client==8.6.3 ipykernel==6.29.5 jupyter_server==2.17.0
           echo "CRAB_TEST_JUPYTER_PYTHON=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
-      - name: Build and bundle the corrected native CLI
-        id: corrected_cli
-        run: |
-          cargo build --locked --no-default-features -p crab --bin crab
-          node --input-type=module - <<'JS'
-          import fs from 'node:fs';
-          import path from 'node:path';
-          import { createHash } from 'node:crypto';
-          import { execFileSync } from 'node:child_process';
-          import { createRequire } from 'node:module';
-          const require = createRequire(path.resolve('package.json'));
-          const source = path.join(process.env.CARGO_TARGET_DIR, 'debug', 'crab.exe');
-          for (const name of ['crab.exe', 'git-remote-crab.exe']) {
-            const destination = path.join('resources', 'native', 'win-x64', name);
-            fs.unlinkSync(destination);
-            fs.linkSync(source, destination);
-          }
-          const directory = path.resolve('resources/native/win-x64');
-          const { version } = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-          const hashes = {};
-          for (const name of ['crab', 'crab-nfs-mount', 'crab-desktop-agent']) {
-            hashes[name + '.exe'] = createHash('sha256').update(fs.readFileSync(path.join(directory, name + '.exe'))).digest('hex');
-          }
-          for (const name of ['crab', 'crab-desktop-agent']) {
-            const actual = execFileSync(path.join(directory, name + '.exe'), ['--version'], { encoding: 'utf8' }).trim();
-            if (actual !== `${name} ${version}`) throw Error('Diagnostic runtime version mismatch');
-          }
-          fs.writeFileSync(path.join(directory, 'runtime.json'), JSON.stringify({ version, platform: process.platform, arch: process.arch, hashes }, null, 2) + '\n');
-          await require('./scripts/verify-native.cjs')({ arch: require('builder-util').Arch.x64, electronPlatformName: process.platform, packager: { projectDir: process.cwd(), appInfo: { version } } });
-          JS
-      - uses: actions/upload-artifact@v4
-        if: steps.corrected_cli.outcome == 'success'
-        with:
-          name: alpha2-windows-quoted-native
-          path: packages/desktop/resources/native/win-x64/
-          if-no-files-found: error
       - name: Build exact current application
         run: |
           npm run build:renderer
           npm run build:electron
           node scripts/package.mjs --dir --publish never
-      - name: Qualify all unchanged packaged storage scenarios
+      - name: Observe Windows failure boundaries
         run: |
-          python -X utf8 - <<'PYCODE' > windows-storage.log 2>&1
+          python -X utf8 - <<'PYCODE'
           from pathlib import Path
-          p = Path("scripts/qualify-v2.py").resolve()
+          p = Path('tests/e2e/media.spec.ts')
           s = p.read_text()
-          a = s.index('                subprocess.run(["cargo", "test"')
-          z = s.index('                identity_spec =', a)
-          # This diagnostic compiles the corrected CLI with minimal features;
-          # the current PR retains the complete release-feature native gates.
-          s = s[:a] + s[z:]
-          try:
-              exec(compile(s, str(p), "exec"), {"__file__": str(p), "__name__": "__main__"})
-          finally:
-              import os, shutil
-              logs = Path("storage-fixture-command-logs")
-              logs.mkdir(exist_ok=True)
-              for profile in ("alpha", "beta"):
-                  for source in Path(os.environ["RUNNER_TEMP"]).glob(f"r*/{profile}/commands.log"):
-                      shutil.copyfile(source, logs / f"{source.parent.parent.name}-{profile}.log")
+          marker = '      await expect.poll(() => element.evaluate((node: HTMLMediaElement) => Number.isFinite(node.duration) && node.duration > 0)).toBe(true);'
+          observation = r'''
+          try {
+          OBSERVED_ASSERTION
+          } catch (error) {
+            const state = await element.evaluate(async (node: HTMLMediaElement) => {
+              const response = await fetch(node.src, { headers: { Range: "bytes=0-63" } });
+              return { source: node.src, duration: String(node.duration), error: node.error && { code: node.error.code, message: node.error.message }, ready: node.readyState, network: node.networkState, status: response.status, bytes: Array.from(new Uint8Array(await response.arrayBuffer())) };
+            });
+            const evidence = await application!.evaluate(() => (globalThis as typeof globalThis & { mediaEvidence: unknown[] }).mediaEvidence);
+            writeFileSync(test.info().outputPath('media-failure.json'), JSON.stringify({ file, state, evidence }, null, 2));
+            await page.screenshot({ path: test.info().outputPath('media-failure.png') });
+            throw error;
+          }
+          '''
+          assert s.count(marker) == 1
+          p.write_text(s.replace(marker, observation.replace('OBSERVED_ASSERTION', marker)))
+          p = Path('tests/e2e/large-files.spec.ts')
+          s = p.read_text()
+          marker = '      writeFileSync(test.info().outputPath("hydrate-failure.txt"), await page.getByRole("main").innerText());'
+          observation = r'''
+          const files = ['data[1].lfs', 'staged.safetensors', 'lfs.safetensors'].map(file => {
+            const destination = path.join(source, file);
+            try { const bytes = readFileSync(destination); return { file, size: bytes.length, prefix: bytes.subarray(0, 160).toString('hex') }; } catch (error) { return { file, error: String(error) }; }
+          });
+          writeFileSync(test.info().outputPath('hydrate-files.json'), JSON.stringify(files, null, 2));
+          const ids = await call(page, 'file_open', { repo_id: 'large-files', path: 'data[1].lfs' });
+          try {
+            const result = await call(page, 'file_materialize', { repo_id: 'large-files', file_id: ids.file_id, op_id: 'diagnostic-only-retry' });
+            writeFileSync(test.info().outputPath('hydrate-retry.json'), JSON.stringify({ result }, null, 2));
+          } catch (retryError) { writeFileSync(test.info().outputPath('hydrate-retry.json'), JSON.stringify({ error: String(retryError) })); }
+          finally { await call(page, 'file_close', { repo_id: 'large-files', file_id: ids.file_id }); }
+          '''
+          assert s.count(marker) == 1
+          p.write_text(s.replace(marker, marker + observation))
           PYCODE
+          E2E_SMOKE=1 node node_modules/@playwright/test/cli.js test --project=e2e-smoke --workers=1 large-files.spec.ts media.spec.ts > windows-observation.log 2>&1
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: alpha2-windows-quoted-cli-proof
+          name: alpha2-windows-boundary-proof
           path: |
-            packages/desktop/windows-storage.log
-            packages/desktop/storage-fixture-command-logs/*.log
+            packages/desktop/windows-observation.log
             packages/desktop/test-results/**
