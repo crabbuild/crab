@@ -59,7 +59,8 @@ describe("Orchestrator UI State persistence", () => {
 
   afterEach(async () => {
     await Promise.all(owners.splice(0).map(owner => owner.shutdown()));
-    fs.rmSync(directory, { recursive: true, force: true });
+    // Electron’s Windows sync remover rejects Git’s read-only objects.
+    await fs.promises.rm(directory, { recursive: true, force: true });
   });
 
   describe("SQLite-only cutoff", () => {
