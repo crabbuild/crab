@@ -555,7 +555,15 @@ def compare_baseline(report: dict, baseline: dict, profile: dict) -> list[str]:
             "comparison requires a baseline and a candidate trial")
     require(report["workload_sha256"] == baseline["workload_sha256"] == workload_identity(profile),
             "baseline workload/resource/threshold profile differs")
-    require(not validate_report(baseline, profile), "baseline did not pass measurement gates")
+    # A baseline may demonstrate the starvation this change is meant to fix.
+    # Keep that engineering failure, while rejecting incomplete/error-prone
+    # measurements and enforcing the unchanged candidate target separately.
+    baseline_failures = validate_report(baseline, profile)
+    require(all(failure.endswith(":interactive_latency") for failure in baseline_failures),
+            "baseline did not pass measurement gates")
+    require(re.fullmatch(r"[0-9a-f]{40}", baseline.get("fixture_commit", "")) is not None
+            and report.get("fixture_commit") == baseline["fixture_commit"], "baseline fixture differs")
+    require(report["binding"]["compiler"] == baseline["binding"]["compiler"], "baseline compiler differs")
     targets = {(target["case"], target["workload"]) for target in profile["targets"]}
     previous = {case["name"]:case for case in baseline["cases"]}
     failures = []

@@ -166,6 +166,10 @@ The version-1 profile requires:
   `baseline_report` enables matched-profile p95 and control-throughput checks.
   Changing workloads, case schedules, resources, provider or thresholds changes
   the frozen workload hash and rejects comparison with the old baseline.
+  Comparisons also require the same fixture commit and compiler. A measured
+  baseline can fail the interactive-latency target it is intended to expose;
+  that failure remains in its receipt. It does not waive candidate targets or
+  permit incomplete, incorrect or excessively rejected baseline measurements.
 
 The build receipt names `server_binary`, its `server_binary_sha256`,
 `source_revision`, `source_patch_sha256`, `compiler`, `build_profile`, and the
