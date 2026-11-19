@@ -626,6 +626,33 @@ class RequestCountingProxyTest(unittest.TestCase):
         self.assertEqual(snapshot["requests"], 2)
         self.assertEqual(snapshot["proxy_errors"], {})
 
+    def test_quiet_upstream_reuse_does_not_depend_on_immediate_eof_readiness(self) -> None:
+        UpstreamHandler.close_idle_get = True
+        endpoint = urllib.parse.urlsplit(self.proxy.url)
+        client = http.client.HTTPConnection(endpoint.hostname, endpoint.port, timeout=2)
+        responses = []
+        # EOF can arrive immediately after a readiness probe. Withhold that hint
+        # while exercising real closed TCP links through a persistent client.
+        with patch("run_concurrent_push_smoke.selectors.DefaultSelector") as selector:
+            selector.return_value.__enter__.return_value.select.return_value = []
+            try:
+                client.request("GET", "/crab/e2e-concurrent-push/run/first")
+                response = client.getresponse()
+                responses.append((response.status, response.read()))
+                self.assertTrue(UpstreamHandler.idle_closed.wait(timeout=2))
+                UpstreamHandler.close_idle_get = False
+                time.sleep(1.1)
+                client.request("GET", "/crab/e2e-concurrent-push/run/second")
+                response = client.getresponse()
+                responses.append((response.status, response.read()))
+            finally:
+                client.close()
+
+        self.assertEqual(responses, [(200, b""), (200, b"")])
+        self.assertEqual(len(set(UpstreamHandler.request_ports)), 2)
+        snapshot = self.proxy.snapshot()
+        self.assertEqual((snapshot["requests"], snapshot["proxy_errors"]), (2, {}))
+
     def test_lightweight_snapshot_uses_path_cursor_without_copying_history(self) -> None:
         self.proxy.trace_paths = True
         before = self.proxy.snapshot(include_paths=False)
