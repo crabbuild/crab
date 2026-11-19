@@ -49,8 +49,10 @@ fn declarations() -> String {
         String::from("// Generated from crab-workflow Results contracts; do not edit.\n");
     for declaration in types {
         source.push_str("\n// prettier-ignore\nexport ");
-        source.push_str(&declaration);
-        source.push('\n');
+        for line in declaration.lines() {
+            source.push_str(line.trim_end());
+            source.push('\n');
+        }
     }
     source
 }

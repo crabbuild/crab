@@ -9,6 +9,7 @@ export default defineConfig({
   base: "./",
   plugins: [react()],
   resolve: {
+    dedupe: ["vega", "vega-lite", "vega-interpreter"],
     alias: {
       "@": path.resolve(__dirname, "src"),
     },
@@ -26,6 +27,7 @@ export default defineConfig({
     },
   },
   server: {
+    fs: {allow: [__dirname, path.resolve(__dirname, "../workflow-results"), path.resolve(__dirname, "../../crates/crab-workflow/assets")]},
     port: 5173,
     strictPort: true,
   },

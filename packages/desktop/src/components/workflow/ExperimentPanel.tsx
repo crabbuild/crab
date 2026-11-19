@@ -19,7 +19,7 @@ import {
   Square,
   XCircle,
 } from "lucide-react";
-import { useCallback,useEffect,useState } from "react";
+import { useCallback,useEffect,useRef,useState } from "react";
 import { rpc } from "../../ipc";
 import type { ExperimentEntry,ExpStatusKind } from "../../lib/workflow-types";
 
@@ -41,22 +41,31 @@ export function ExperimentPanel({ repoId }: Props) {
   const [paramKey, setParamKey] = useState("");
   const [paramValues, setParamValues] = useState("");
   const [jobs, setJobs] = useState(2);
+  const requestVersion = useRef(0);
 
   const fetchExperiments = useCallback(async () => {
+    const version = ++requestVersion.current;
     setLoading(true);
     try {
       const result = await rpc.workflowExpList(repoId);
+      // An older mount/refresh reply must not hide a run just enqueued by
+      // a newer request. Loading belongs to that same request identity.
+      if (version !== requestVersion.current) return;
       setExperiments(result.experiments);
     } catch {
+      if (version !== requestVersion.current) return;
       // Silently handle — queue might not exist yet.
       setExperiments([]);
     } finally {
-      setLoading(false);
+      if (version === requestVersion.current) setLoading(false);
     }
   }, [repoId]);
 
   useEffect(() => {
     fetchExperiments();
+    return () => {
+      requestVersion.current += 1;
+    };
   }, [fetchExperiments]);
 
   const handleEnqueue = useCallback(async () => {

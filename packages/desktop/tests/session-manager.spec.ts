@@ -66,6 +66,27 @@ function makeSession(repoPath: string, overrides?: Partial<RepoSession>): Partia
 // ---------------------------------------------------------------------------
 
 describe("SessionManager", () => {
+  it("persists the first view update without a repository switch", () => {
+    const manager = new SessionManager();
+    const viewState = { workflowResultsV1: { report: "a".repeat(64) } };
+    manager.update("/repos/first", { viewState });
+    manager.flush();
+    expect(new SessionManager().activate("/repos/first")?.viewState).toEqual(viewState);
+  });
+
+  it("preserves cold session fields when a view is updated before activation", () => {
+    const previous = new SessionManager();
+    previous.deactivate("/repos/cold", makeSession("/repos/cold"));
+    previous.flush();
+    const current = new SessionManager();
+    current.update("/repos/cold", { activeView: "workflow" });
+    current.flush();
+    const restored = new SessionManager().activate("/repos/cold");
+    expect({ activeView: restored?.activeView, viewState: restored?.viewState }).toEqual({
+      activeView: "workflow", viewState: { selectedCommit: "abc123" },
+    });
+  });
+
   describe("deactivate → activate round-trip", () => {
     it("preserves all fields through deactivate and activate from cache", () => {
       const mgr = new SessionManager();

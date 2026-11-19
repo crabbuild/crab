@@ -1,7 +1,7 @@
 import { Badge } from "@/components/ui/badge";
 import { TabsList, TabsTrigger } from "@/components/ui/tabs";
 
-export type WorkflowTab = "editor" | "status" | "experiments";
+export type WorkflowTab = "editor" | "status" | "results" | "queue";
 
 interface Props {
   outdatedCount?: number;
@@ -17,8 +17,11 @@ export function WorkflowTabs({ outdatedCount, runningExpCount }: Props) {
           Status
           {!!outdatedCount && <Badge variant="outline" className="ml-1.5 border-warning/30 bg-warning/10 px-1 text-[10px] text-warning">{outdatedCount}</Badge>}
         </TabsTrigger>
-        <TabsTrigger value="experiments">
-          Experiments
+        <TabsTrigger value="results">
+          Results
+        </TabsTrigger>
+        <TabsTrigger value="queue">
+          Queue
           {!!runningExpCount && <Badge variant="outline" className="ml-1.5 border-info/30 bg-info/10 px-1 text-[10px] text-info">{runningExpCount}</Badge>}
         </TabsTrigger>
       </TabsList>

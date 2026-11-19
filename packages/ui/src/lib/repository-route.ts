@@ -253,6 +253,8 @@ export function repositoryRoute(url: URL, refs?: Refs): RepositoryRoute | null {
         view: "issues",
         issue: tail[0] && decodeURIComponent(tail[0]),
       };
+    if (page === "results" && !tail.length)
+      return { ...route, view: "results" };
     if (page === "projects" && tail.length <= 1)
       return {
         ...route,

@@ -72,6 +72,7 @@ const PullRequests = lazy(() =>
     default: module.PullRequests,
   })),
 );
+const ResultsPage = lazy(() => import("@/features/results"));
 const ProjectsPage = lazy(() => import("@/features/projects"));
 const ActivityPage = lazy(() => import("@/features/activity"));
 const MilestonesPage = lazy(() => import("@/features/milestones"));
@@ -124,6 +125,7 @@ export function RepositoryPage({
   const canWrite = repo.access === "write" && !repo.archived;
   const refs = useRequest<Refs>(
     view === "projects" ||
+      view === "results" ||
       view === "issues" ||
       view === "labels" ||
       view === "milestones" ||
@@ -375,7 +377,8 @@ export function RepositoryPage({
                 view !== "pulls" &&
                 view !== "settings" &&
                 view !== "activity" &&
-                view !== "projects",
+                view !== "projects" &&
+                view !== "results",
             },
             {
               view: "issues",
@@ -388,6 +391,12 @@ export function RepositoryPage({
               label: "Pull requests",
               icon: GitPullRequestIcon,
               active: view === "pulls",
+            },
+            {
+              view: "results",
+              label: "Results",
+              icon: ProjectIcon,
+              active: view === "results",
             },
             {
               view: "projects",
@@ -442,6 +451,21 @@ export function RepositoryPage({
             }
           >
             <ProjectsPage repo={repo} url={url} project={route?.project} />
+          </Suspense>
+        ) : view === "results" ? (
+          <Suspense fallback={<div className="notice">Loading Results…</div>}>
+            <ResultsPage
+              key={JSON.stringify([
+                repo.id,
+                identity?.issuer,
+                identity?.subject,
+              ])}
+              repo={{ ...repo, csrf }}
+              account={JSON.stringify(
+                identity ? [identity.issuer, identity.subject] : ["local"],
+              )}
+              reportId={url.searchParams.get("report")}
+            />
           </Suspense>
         ) : view === "activity" ? (
           <Suspense

@@ -800,6 +800,7 @@ test("GitHub paths retain file context, pin permalinks, and restore browser hist
     "Code",
     "Issues",
     "Pull requests",
+    "Results",
     "Projects",
     "Activity",
     "Settings",
@@ -807,6 +808,9 @@ test("GitHub paths retain file context, pin permalinks, and restore browser hist
   await expect(
     navigation.getByRole("link", { name: "Pull requests" }),
   ).toHaveAttribute("href", "/team/project/pulls");
+  await expect(
+    navigation.getByRole("link", { name: "Results", exact: true }),
+  ).toHaveAttribute("href", "/team/project/results");
   await expect(
     navigation.getByRole("link", { name: "Projects", exact: true }),
   ).toHaveAttribute("href", "/team/project/projects");

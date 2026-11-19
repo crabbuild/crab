@@ -148,7 +148,7 @@ expanded executions belonging to that template. **Cancel** requests shutdown;
 The next run can then acquire the execution lock. Conditional and frozen skips
 are counted separately from completed stages.
 The shared **Output** dock shows command output, stage progress (including
-upstream stages in other files), and errors below Editor, Status, and Experiments.
+upstream stages in other files), and errors below Editor, Status, and Queue.
 Use **Output** in the top bar to show it, the close button to dismiss it, and
 its upper divider to resize it. Both dividers support arrow-key resizing.
 The panel remembers its height; dismissing it keeps the current run logs.
@@ -164,5 +164,19 @@ remote cache replay (`crab run --cache-only`) or publication
 (`crab run --cache-push`); failures of those requested remote operations remain
 visible.
 
-The **Status** tab checks stage freshness; **Experiments** manages parameterized
-runs. **Import DVC workflow** in the sidebar imports DVC pipeline definitions.
+The **Status** tab checks stage freshness; **Queue** schedules parameterized
+runs. **Results**, inside Data Workflows, compares retained metrics, synchronized
+curves, images, and evidence. It remains available without a workflow file.
+Selections persist per repository. Save a comparison as an immutable report,
+publish it to object storage, and retrieve it by ID in another clone.
+Apply previews file writes and deletions before replacing local edits. Resume
+previews its checkpoint and current HEAD. Reproduce, Promote artifact, and Create
+branch explain their requirements for the selected captured run.
+Manual CLI saves appear as **saved**, with observed metrics, parameters and plots.
+Apply and Create branch restore their saved workspace; execution-dependent actions
+remain unavailable. Preview refuses altered captured observations before Apply can
+replace files.
+A refused preview explains that workspace files were not changed. Expand
+**Diagnostics** for the captured CLI error. Restore or retrieve damaged experiment
+bytes before choosing Apply again; **Refresh view** only refreshes Results reads.
+**Import DVC workflow** in the sidebar imports DVC pipeline definitions.
