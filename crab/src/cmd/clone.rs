@@ -687,6 +687,7 @@ fn run_git_clone_no_checkout_from(
     local: bool,
 ) -> Result<()> {
     let bin = crate::cmd::init::crab_binary_path();
+    let bin = gix_quote::single(bin.as_bytes().into());
 
     let mut cmd = Command::new("git");
     cmd.arg("clone");
