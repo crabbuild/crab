@@ -280,8 +280,9 @@ for (const kind of ["crab", "lfs"] as const) {
           if (!native) throw new Error("Owned native process was not found");
           process.kill(Number(native[1]), "SIGKILL");
         } else {
+          const mainPid = await application!.evaluate(() => process.pid);
           const closed = application!.waitForEvent("close");
-          process.kill(application!.process().pid!, "SIGKILL");
+          process.kill(mainPid, "SIGKILL");
           await closed;
           application = undefined;
           await expect.poll(async () => (await transport("stats")).stream_blocked).toBe(0);
