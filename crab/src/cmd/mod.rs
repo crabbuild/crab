@@ -62,6 +62,7 @@ pub mod release;
 pub mod repack;
 pub mod replica;
 pub mod reset;
+pub mod results;
 pub mod run;
 pub mod setup;
 pub mod ship;

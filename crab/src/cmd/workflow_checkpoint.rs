@@ -682,10 +682,13 @@ fn set_private_permissions(path: &Path) -> Result<()> {
             key: "workflow_checkpoint_control_dir_acl".to_owned(),
             origin: "USERNAME is unavailable".to_owned(),
         })?;
+        // Control setup precedes JSON/JSONL output. Keep icacls progress and
+        // diagnostics on stderr so the structured result remains parseable.
         let status = std::process::Command::new("icacls")
             .arg(path)
             .args(["/inheritance:r", "/grant:r"])
             .arg(format!("{user}:F"))
+            .stdout(std::io::stderr())
             .status()
             .map_err(CrabError::Io)?;
         if !status.success() {

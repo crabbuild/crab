@@ -49,30 +49,13 @@ pub struct Graph {
     toposorted: Vec<StageName>,
 }
 
-impl Graph {
-    /// Build a DAG from parsed stages.
-    ///
-    /// Returns:
-    /// - [`WorkflowError::WorkflowDuplicateOutput`] if two stages
-    ///   declare the same normalized out path.
-    /// - [`WorkflowError::WorkflowUndefinedOut`] if a
-    ///   [`Dep::StageOut`] references a missing stage, or an out
-    ///   path the producer does not declare.
-    /// - [`WorkflowError::WorkflowCycle`] if the inferred DAG has a
-    ///   cycle (including self-loops). The `stages` field lists
-    ///   the members of one discovered cycle in order so the user
-    ///   can read it back as a loop.
-    pub fn build(stages: &BTreeMap<StageName, Stage>) -> Result<Self> {
-        let mut inner = DiGraph::<StageName, ()>::new();
-        let mut indices: BTreeMap<StageName, NodeIndex> = BTreeMap::new();
+struct OutputOwners {
+    file_producers: BTreeMap<PathBuf, StageName>,
+    dir_producers: BTreeMap<PathBuf, StageName>,
+}
 
-        // Materialize every node first so edge insertion below
-        // can index by name in either order.
-        for name in stages.keys() {
-            let idx = inner.add_node(name.clone());
-            indices.insert(name.clone(), idx);
-        }
-
+impl OutputOwners {
+    fn new(stages: &BTreeMap<StageName, Stage>) -> Result<Self> {
         // Producers indexed by normalized out path. Duplicate
         // declarations are a hard error: the edge-inference rule
         // below would pick an arbitrary producer, and at runtime
@@ -112,6 +95,75 @@ impl Graph {
             }
         }
 
+        Ok(Self {
+            file_producers,
+            dir_producers,
+        })
+    }
+
+    fn producer(&self, path: &Path) -> Option<&StageName> {
+        self.file_producers
+            .get(path)
+            .or_else(|| find_directory_producer(&self.dir_producers, path))
+    }
+}
+
+/// Returns local dependency paths without an unconditional, stateless selected producer.
+pub(crate) fn source_paths(stages: &BTreeMap<StageName, Stage>) -> Result<BTreeSet<PathBuf>> {
+    let owners = OutputOwners::new(stages)?;
+    let mut paths = BTreeSet::new();
+    for stage in stages.values() {
+        for dep in &stage.deps {
+            let path = match dep {
+                Dep::Path(path) => stage_path(stage, path),
+                Dep::StageOut { out, .. } => normalize_path(out),
+                _ => continue,
+            };
+            // Frozen/conditional stages can reuse existing outputs, and persist
+            // keeps pre-run state. Selection alone cannot prove those bytes replaceable.
+            let regenerated = owners
+                .producer(&path)
+                .and_then(|name| stages.get(name))
+                .is_some_and(|producer| {
+                    !producer.frozen
+                        && producer.condition.is_none()
+                        && !producer.persist
+                        && producer.outs.iter().all(|out| !out.persist)
+                });
+            if !regenerated {
+                paths.insert(path);
+            }
+        }
+    }
+    Ok(paths)
+}
+
+impl Graph {
+    /// Build a DAG from parsed stages.
+    ///
+    /// Returns:
+    /// - [`WorkflowError::WorkflowDuplicateOutput`] if two stages
+    ///   declare the same normalized out path.
+    /// - [`WorkflowError::WorkflowUndefinedOut`] if a
+    ///   [`Dep::StageOut`] references a missing stage, or an out
+    ///   path the producer does not declare.
+    /// - [`WorkflowError::WorkflowCycle`] if the inferred DAG has a
+    ///   cycle (including self-loops). The `stages` field lists
+    ///   the members of one discovered cycle in order so the user
+    ///   can read it back as a loop.
+    pub fn build(stages: &BTreeMap<StageName, Stage>) -> Result<Self> {
+        let mut inner = DiGraph::<StageName, ()>::new();
+        let mut indices: BTreeMap<StageName, NodeIndex> = BTreeMap::new();
+
+        // Materialize every node first so edge insertion below
+        // can index by name in either order.
+        for name in stages.keys() {
+            let idx = inner.add_node(name.clone());
+            indices.insert(name.clone(), idx);
+        }
+
+        let owners = OutputOwners::new(stages)?;
+
         // Walk every dep and either (a) resolve explicit
         // Dep::StageOut to its producer, or (b) infer an edge from
         // path matching against producer outs.
@@ -145,11 +197,7 @@ impl Graph {
                     }
                     Dep::Path(path) => {
                         let normalized = stage_path(stage, path);
-                        if let Some(producer) = file_producers.get(&normalized) {
-                            edges.insert((producer.clone(), consumer_name.clone()));
-                        } else if let Some(producer) =
-                            find_directory_producer(&dir_producers, &normalized)
-                        {
+                        if let Some(producer) = owners.producer(&normalized) {
                             edges.insert((producer.clone(), consumer_name.clone()));
                         }
                         // Otherwise the dep is an external input
@@ -432,10 +480,10 @@ fn producer_declares(stage: &Stage, normalized_path: &Path) -> bool {
 /// `consumer_path`: either the out's path equals the consumer
 /// path (exact dir match) or the consumer path descends into the
 /// producer's directory.
-fn find_directory_producer(
-    dir_producers: &BTreeMap<PathBuf, StageName>,
+fn find_directory_producer<'a>(
+    dir_producers: &'a BTreeMap<PathBuf, StageName>,
     consumer_path: &Path,
-) -> Option<StageName> {
+) -> Option<&'a StageName> {
     // Longest-prefix wins: a consumer at `data/sub/file.csv` with
     // producers at `data/` and `data/sub/` should attach to the
     // more specific one.
@@ -448,7 +496,7 @@ fn find_directory_producer(
             }
         }
     }
-    best.map(|(_, p)| p.clone())
+    best.map(|(_, p)| p)
 }
 
 /// Same-as-Path::starts_with but comparing components to avoid
@@ -557,6 +605,66 @@ mod tests {
 
     fn path_dep(path: &str) -> Dep {
         Dep::Path(PathBuf::from(path))
+    }
+
+    #[test]
+    fn source_paths_follow_selected_producer_ownership_and_working_directories() {
+        let mut producer = make_stage(
+            "prepare",
+            vec![path_dep("raw")],
+            vec![dir_out("features"), file_out("ready.txt")],
+        );
+        producer.1.wdir = Some("work".into());
+        let mut consumer = make_stage(
+            "train",
+            vec![
+                path_dep("./features/train.csv"),
+                path_dep("features_backup/data.csv"),
+                Dep::StageOut {
+                    stage: producer.0.clone(),
+                    out: "work/ready.txt".into(),
+                },
+            ],
+            Vec::new(),
+        );
+        consumer.1.wdir = Some("work".into());
+        let selected = make_workflow(vec![producer, consumer.clone()]);
+        assert_eq!(
+            source_paths(&selected).unwrap(),
+            BTreeSet::from([
+                PathBuf::from("work/raw"),
+                "work/features_backup/data.csv".into(),
+            ])
+        );
+        assert_eq!(
+            source_paths(&make_workflow(vec![consumer])).unwrap(),
+            BTreeSet::from([
+                PathBuf::from("work/features/train.csv"),
+                "work/features_backup/data.csv".into(),
+                "work/ready.txt".into(),
+            ])
+        );
+    }
+
+    #[test]
+    fn skipped_and_persistent_producers_do_not_remove_required_source_bytes() {
+        for variant in 0..4 {
+            let mut producer = make_stage("prepare", Vec::new(), vec![file_out("data.csv")]);
+            match variant {
+                0 => producer.1.frozen = true,
+                1 => {
+                    producer.1.condition = Some(crate::StageCondition::FileExists("enabled".into()))
+                }
+                2 => producer.1.persist = true,
+                _ => producer.1.outs[0].persist = true,
+            }
+            let consumer = make_stage("train", vec![path_dep("data.csv")], Vec::new());
+            let selected = make_workflow(vec![producer, consumer]);
+            assert_eq!(
+                source_paths(&selected).unwrap(),
+                BTreeSet::from([PathBuf::from("data.csv")])
+            );
+        }
     }
 
     #[test]

@@ -42,6 +42,7 @@ mod task_diff;
 mod task_workspace;
 mod watcher;
 mod workflow;
+mod workflow_results;
 mod workspace_discovery;
 mod worktree;
 

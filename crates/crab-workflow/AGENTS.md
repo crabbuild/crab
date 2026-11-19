@@ -59,12 +59,35 @@ execution. Parsing and graph construction are sequential caller-owned steps.
   Source: `crates/crab-workflow/src/yaml.rs`.
 - Reject duplicate output ownership and cycles before execution; preserve deterministic topological decisions.
   Source: `crates/crab-workflow/src/graph.rs`.
+- Explicit Results migration converts supported v1 metadata without inferring
+  current inputs or execution. `ResultOrigin::ExperimentMetadata` forbids capture
+  evidence; ordinary readers remain canonical-only. Create-only installation
+  cannot downgrade current roots. Source: `crates/crab-workflow/src/results/migration.rs`, `crates/crab-workflow/src/results/local.rs`
+  and `crab/src/cmd/exp/results_migration.rs`.
+- Results source-input capture shares the planner's output ownership. Generated
+  inputs from ordinary selected producers are regenerated; dependencies on
+  unselected, frozen, conditional or persistent producers remain required bytes.
+  Source: `graph::source_paths` and `results::ResultCapture::begin`.
+- Results capture also retains initial bytes explicitly materialized by copy,
+  checkpoint resume and prior reproduction, including selected stage outputs.
+  Deduplicate these paths before charging capture budgets; replay descendants
+  must preserve the same initial-state closure. The CLI runner supplies actual
+  materialization paths, not output declarations inferred after execution.
+- Reproduction input directories are closed trees: replace captured roots and
+  recreate empty descendants before verified file restoration. Validate the
+  sorted, bounded directory closure before touching the owned temporary tree;
+  current/base-commit children cannot fill gaps in captured directory state.
 - Keep per-attempt journal transitions separate from retry and DAG scheduling; inspect resume and journal consumers before changing durable state.
   Source: `crates/crab-workflow/src/executor.rs`.
+- Executor admission journals the resolved stage hash and dependency digests before
+  commands or cache replay. Results reads these per-attempt facts; lockfile deps
+  cannot substitute for directory, produced or external inputs. External input
+  locations stay absent from publishable evidence. Output witnesses retain size
+  for promotion verification. Source: `journal/admission.rs` and `results/stages.rs`.
 
 ## Features and platform
 
-Empty default. `watch` enables notify; `gix-facade` enables gix; `testing` exposes test helpers; `crash-injection` enables fault-injection paths. Use exact feature slices for changes; do not enable crash injection incidentally.
+Empty default. `watch` enables notify; `gix-facade` enables gix; `testing` exposes test helpers; `schema` derives Results/plot JSON Schema for CLI output contracts; `crash-injection` enables fault-injection paths. Use exact feature slices for changes; do not enable crash injection incidentally.
 
 ## Verification
 

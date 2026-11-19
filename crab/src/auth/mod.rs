@@ -17,7 +17,7 @@ use object_store::aws::AwsCredential;
 use tokio_util::sync::CancellationToken;
 
 use crate::core::config::{AuthConfig, AuthProvider, Config};
-use crate::core::error::{CrabError, Result};
+use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::storage::store::{BucketIdentity, Store};
 
 pub use ::crab_auth::{
@@ -26,7 +26,8 @@ pub use ::crab_auth::{
     GcpWorkloadIdentityConfig, StaticAuthConfig,
 };
 use crab_auth_store::{
-    AuthStoreError, ManagedRepositoryError, RefreshingObjectStore, RefreshingStoreParts,
+    AuthStoreError, ManagedRepositoryError, ManagedRepositoryResolver, RefreshingObjectStore,
+    RefreshingStoreParts,
 };
 use crab_storage::BuiltObjectStore;
 #[cfg(feature = "tier-s3")]
@@ -451,15 +452,26 @@ pub async fn build_repository_url_store(
 }
 
 /// Build one direct store and retain the authenticated v2 root admission read.
+///
+/// Installed managed authorities are rejected before resolving direct credentials.
 pub async fn build_repository_url_store_with_root(
     config: &Config,
     url: impl Into<crab_git::url::CrabUrl>,
     operation: &str,
     cancel: &CancellationToken,
 ) -> Result<(Store, crab_metadata::capsule_protocol::RootSnapshot)> {
+    check_cancelled(cancel)?;
     let url = url.into();
-    let repository_prefix = url.repo_path.clone();
     let remote_url = format!("crab://{}/{}", url.bucket, url.repo_path);
+    let cache_directory =
+        crab_auth::token_cache::expand_token_cache_path(&config.auth.token_cache_path);
+    // Repository URLs honor installed managed authorities before any direct
+    // credentials are selected. Ignoring profiles can write to a same-named bucket.
+    let url: crab_git::CrabUrl = ManagedRepositoryResolver::new(cache_directory)
+        .classify(&remote_url)?
+        .require_direct()?
+        .into();
+    let repository_prefix = url.repo_path.clone();
     let store = build_store(config, url, operation, cancel).await?;
     let root = open_repository_root(&store, &repository_prefix, &remote_url).await?;
     Ok((store, root))
@@ -556,6 +568,21 @@ mod tests {
     use std::sync::{LazyLock, Mutex, MutexGuard};
 
     static ENV_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    #[tokio::test]
+    async fn direct_repository_cancellation_precedes_profile_and_credentials() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let url = crab_git::CrabUrl {
+            bucket: "crab.build".into(),
+            repo_path: "team/models".into(),
+        };
+        let error = build_repository_url_store(&Config::default(), url, "results", &cancel)
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(error, CrabError::Cancelled));
+    }
 
     #[tokio::test]
     async fn repository_validation_requires_v2_root_without_creating_state() {

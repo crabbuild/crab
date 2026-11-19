@@ -758,6 +758,24 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::workflow::workflow_template_completions(&work_dir, p).await
         },
+        "workflow_results_read" => {
+            let p: crate::workflow_results::ReadParams = decode(&method, params)?;
+            let repo = state.get(&p.repo_id).await?;
+            let scope = repo.read_scope();
+            let read = repo.results_read(p.request, scope.clone());
+            let result = cancellable_read(state, p.op_id, &scope, read).await?;
+            Ok(serde_json::to_value(result)?)
+        },
+        "workflow_results_save_report" => {
+            let p: crate::workflow_results::SaveParams = decode(&method, params)?;
+            let root = state.get_work_dir(&p.repo_id).await?;
+            crate::workflow_results::save_report(&root, p.draft).await
+        },
+        "workflow_results_action" => {
+            let p: crate::workflow_results::ActionParams = decode(&method, params)?;
+            let root = state.get_work_dir(&p.repo_id).await?;
+            crate::workflow_results::action(&root, p).await
+        },
         "workflow_exp_list" => {
             let p: crate::workflow::WorkflowExpListParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;

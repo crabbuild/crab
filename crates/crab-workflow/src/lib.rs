@@ -30,6 +30,7 @@ pub mod param_ref;
 pub mod params;
 mod params_runtime;
 pub mod plot_config;
+pub mod results;
 pub mod resume;
 pub mod retry;
 pub mod run_state;

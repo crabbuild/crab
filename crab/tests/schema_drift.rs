@@ -102,6 +102,10 @@ fn schemas_up_to_date() {
             schema_value::<WorkflowStageFailed>(),
         ),
         ("workflow.run", schema_value::<WorkflowRunSummary>()),
+        (
+            "workflow.results",
+            schema_value::<crab::cmd::results::ResultsPayload>(),
+        ),
         // Command result payloads
         ("add", schema_value::<AddSummary>()),
         ("audit.event", schema_value::<AuditEvent>()),

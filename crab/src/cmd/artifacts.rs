@@ -173,8 +173,8 @@ struct ArtifactVersionPayload {
     version_ref: String,
 }
 
-#[derive(Debug, Serialize)]
-struct ArtifactPromotionPayload {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct ArtifactPromotionPayload {
     name: String,
     stage: String,
     version_id: String,
@@ -348,10 +348,84 @@ fn run_version_create(root: &Path, args: &ArtifactVersionCreateArgs) -> Result<(
 }
 
 fn run_promote(root: &Path, args: &ArtifactPromoteArgs) -> Result<()> {
+    let payload = promote(root, args, None)?;
+    emit_payload(
+        args.json,
+        args.jsonl,
+        ARTIFACTS_SCHEMA,
+        payload,
+        |payload| {
+            println!(
+                "Promoted {} to {} ({})",
+                payload.name, payload.stage, payload.version_id
+            );
+        },
+    )?;
+    Ok(())
+}
+
+pub(crate) fn promote_result(
+    root: &Path,
+    args: &ArtifactPromoteArgs,
+    result: &crab_workflow::results::SealedResult,
+) -> Result<ArtifactPromotionPayload> {
+    result.verify()?;
+    if result.snapshot.origin == crab_workflow::results::ResultOrigin::ExperimentMetadata {
+        return Err(CrabError::Configuration {
+            key: "results promotion".into(),
+            origin: "Imported experiment metadata has no captured artifact bytes to promote. Run a new experiment to capture output evidence".into(),
+        });
+    }
+    promote(root, args, Some(result))
+}
+
+fn promote(
+    root: &Path,
+    args: &ArtifactPromoteArgs,
+    result: Option<&crab_workflow::results::SealedResult>,
+) -> Result<ArtifactPromotionPayload> {
     let remote = remote_context(root)?;
     let registry_path = registry_path(root);
     let _registry_lock = lock_registry(&registry_path)?;
     let (_, mut registry, registry_path) = load_state(root)?;
+    if let Some(result) = result {
+        let manifest = if let Some((store, prefix)) = remote.as_ref() {
+            crate::cmd::lfs::block_on_runtime(async {
+                read_remote_artifact(store, prefix, &args.name, Some(&args.version), None)
+                    .await
+                    .map_err(CrabError::from)
+            })?
+            .manifest
+        } else {
+            registry
+                .resolve(&args.name, Some(&args.version), None)?
+                .clone()
+        };
+        let hash = manifest
+            .content_hash
+            .strip_prefix("b3:")
+            .unwrap_or_default();
+        let snapshot = &result.snapshot;
+        let retained = snapshot.attachments.iter().any(|a| {
+            a.path == manifest.path
+                && a.kind == crab_workflow::results::AttachmentKind::Output
+                && a.hash.as_deref() == Some(hash)
+                && a.size == manifest.size
+                && a.state == crab_workflow::results::Availability::Present
+        });
+        let witnessed = snapshot
+            .stages
+            .iter()
+            .filter(|stage| stage.state == "Committed")
+            .flat_map(|stage| &stage.outputs)
+            .any(|output| {
+                output.path == manifest.path && output.hash == hash && output.size == manifest.size
+            });
+        if snapshot.status != "success" || !(retained || witnessed) {
+            return Err(CrabError::Configuration {key:"results promotion".into(),origin:
+                "Immutable artifact version does not match this successful run's retained output or committed output witness".into()});
+        }
+    }
     if let Some((store, prefix)) = remote.as_ref() {
         crate::cmd::lfs::block_on_runtime(async {
             promote_remote_artifact(
@@ -388,19 +462,7 @@ fn run_promote(root: &Path, args: &ArtifactPromoteArgs) -> Result<()> {
         version_id: args.version.clone(),
         stage_ref: artifact_stage_ref(&args.name, &args.stage)?,
     };
-    emit_payload(
-        args.json,
-        args.jsonl,
-        ARTIFACTS_SCHEMA,
-        payload,
-        |payload| {
-            println!(
-                "Promoted {} to {} ({})",
-                payload.name, payload.stage, payload.version_id
-            );
-        },
-    )?;
-    Ok(())
+    Ok(payload)
 }
 
 fn run_get(root: &Path, args: &ArtifactGetArgs) -> Result<()> {

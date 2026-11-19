@@ -381,6 +381,13 @@ async fn run_inner(
         StageState::CacheChecked,
         &cache_checked_payload(&stage_hash, hit.is_some(), hit.is_some()),
     )?;
+    journal.record_admission(
+        run_id,
+        stage_name,
+        attempt,
+        &stage_hash.0,
+        admitted_inputs(resolved),
+    )?;
 
     if let Some(entry) = hit {
         // Cache-hit fast-forward. Local cache bytes still need to be
@@ -2059,6 +2066,33 @@ struct CacheCheckedPayload<'a> {
     hit_source: &'static str,
 }
 
+fn admitted_inputs(
+    resolved: &ResolvedStage,
+) -> impl Iterator<Item = (Option<String>, [u8; 32])> + '_ {
+    let external_keys: std::collections::BTreeSet<String> = resolved
+        .stage
+        .deps
+        .iter()
+        .filter_map(|dep| match dep {
+            Dep::Url { url, .. } => Some(url.clone()),
+            Dep::StageOut { stage, out } if out.is_absolute() => {
+                Some(format!("{}:{}", stage.as_str(), out.to_string_lossy()))
+            }
+            _ => None,
+        })
+        .collect();
+    let mut external_hashes = std::collections::BTreeSet::new();
+    resolved.dep_hashes.iter().filter_map(move |(key, hash)| {
+        // External locations can contain credentials or private absolute paths.
+        // Retain content identity without publishing a locator or its fingerprint.
+        let external = external_keys.contains(key) || Path::new(key).is_absolute();
+        if external && !external_hashes.insert(*hash) {
+            return None;
+        }
+        Some(((!external).then(|| key.clone()), *hash))
+    })
+}
+
 fn cache_checked_payload(hash: &StageHash, hit: bool, local: bool) -> String {
     let hex = hash.as_hex();
     let payload = CacheCheckedPayload {
@@ -2767,6 +2801,41 @@ mod tests {
         }
     }
 
+    #[test]
+    fn admission_preserves_hashes_without_external_locations_or_fingerprints() {
+        let url = "https://example.test/data?token=synthetic-test-secret";
+        let mut stage = Stage::new(
+            StageName::parse("train").unwrap(),
+            Cmd::Argv(vec!["runtime".into()]),
+        );
+        stage.deps = vec![
+            Dep::Url {
+                url: url.into(),
+                digest: None,
+            },
+            Dep::Url {
+                url: "https://example.test/same-data".into(),
+                digest: None,
+            },
+        ];
+        let mut resolved = make_resolved(stage);
+        resolved.dep_hashes = BTreeMap::from([
+            (url.into(), [1; 32]),
+            ("https://example.test/same-data".into(), [1; 32]),
+            ("dataset".into(), [2; 32]),
+            ("prepare:features.csv".into(), [3; 32]),
+        ]);
+        let facts: Vec<_> = admitted_inputs(&resolved).collect();
+        assert_eq!(
+            facts,
+            vec![
+                (Some("dataset".into()), [2; 32]),
+                (None, [1; 32]),
+                (Some("prepare:features.csv".into()), [3; 32])
+            ]
+        );
+    }
+
     fn test_cfg(tmp: &TempDir) -> ExecutorConfig {
         ExecutorConfig {
             workflow_root: tmp.path().join(".crab/workflow"),
@@ -3197,21 +3266,27 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn cache_hit_skips_child_execution() {
-        // Populate the cache by running once, then run again with a
-        // sentinel command that would fail if executed. The second
-        // call must hit and succeed without re-running.
         let tmp = TempDir::new().unwrap();
         let src = tmp.path().join("src.txt");
         std::fs::write(&src, b"y").unwrap();
         let dest = tmp.path().join("dest.txt");
+        let marker = tmp.path().join("executions.txt");
 
         let cfg = test_cfg(&tmp);
 
         let first_stage = Stage {
+            deps: vec![Dep::Path(src.clone())],
             outs: vec![Out::new(dest.clone(), OutKind::File)],
-            ..Stage::new(StageName::parse("hitme").unwrap(), copy_cmd(&src, &dest))
+            ..Stage::new(
+                StageName::parse("hitme").unwrap(),
+                copy_and_append_cmd(&src, &dest, &marker),
+            )
         };
-        let resolved_first = make_resolved(first_stage.clone());
+        let mut resolved_first = make_resolved(first_stage);
+        resolved_first.dep_hashes.insert(
+            src.to_string_lossy().into_owned(),
+            *blake3::hash(b"y").as_bytes(),
+        );
         let run_1 = Uuid::now_v7();
         let j1 = open_journal(&tmp, run_1);
         prepare_stage(&j1, run_1, "hitme");
@@ -3220,24 +3295,21 @@ mod tests {
             .await
             .unwrap();
 
-        // Second run: same resolved stage (same hash), but replace
-        // cmd with a failure so we can prove the child never ran.
-        let mut second = first_stage;
-        second.cmd = Cmd::Shell("exit 99".into());
-        let mut resolved_second = make_resolved(second);
-        // Keep the hash identical to the first attempt by borrowing
-        // the original command back in the hash inputs. (In real use
-        // the ResolvedStage always reflects what actually runs — we
-        // force it here to exercise the hit branch deterministically.)
-        resolved_second.cmd = resolved_first.cmd.clone();
-
         let run_2 = Uuid::now_v7();
         let j2 = open_journal(&tmp, run_2);
         prepare_stage(&j2, run_2, "hitme");
-        let entry_second = run_local(&resolved_second, &cfg, &j2, run_2, 1)
+        let entry_second = run_local(&resolved_first, &cfg, &j2, run_2, 1)
             .await
-            .expect("cache hit must not execute the failing cmd");
+            .unwrap();
         assert_eq!(entry_second.stage_hash, entry_first.stage_hash);
+        assert_eq!(std::fs::read_to_string(marker).unwrap().lines().count(), 1);
+        assert_eq!(
+            j2.admitted_inputs(run_2, "hitme", 1, 1).unwrap(),
+            vec![(None, *blake3::hash(b"y").as_bytes())]
+        );
+        let row = j2.latest_stage_row(run_2, "hitme").unwrap().unwrap();
+        assert_eq!(row.stage_hash, Some(entry_second.stage_hash.0));
+        assert_eq!(row.state, StageState::LockfileUpdated);
     }
 
     #[tokio::test(flavor = "multi_thread")]

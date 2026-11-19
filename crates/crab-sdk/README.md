@@ -6,8 +6,8 @@
 
 `crab-sdk` is the asynchronous Rust client for Crab repositories. One `Client`
 opens remote repositories and local Git worktrees through the same `Repository`
-facade. Task-specific APIs live in the `remote`, `local`, `managed`, `storage`,
-and `operation` modules.
+facade. Task-specific APIs live in the `remote`, `results`, `local`, `managed`,
+`storage`, and `operation` modules.
 
 > [!IMPORTANT]
 > `crab-sdk` is not published on crates.io yet. Depend on a pinned Git revision
@@ -38,6 +38,7 @@ application.
 | Feature | API | Implies |
 | --- | --- | --- |
 | `remote` | Client construction, remote repositories, refs, snapshots, and raw Git reads | — |
+| `results` | Captured workflow results, comparisons, immutable reports, and verified attachment reads | `remote` |
 | `files` | Verified file streams, ranges, and caching for Git, Crab/Xet, and Git LFS | `remote` |
 | `publish` | Remote initialization, commit creation, atomic ref updates, and recovery | `remote` |
 | `local` | Local clone, fetch, edit, integration, hydration, and push workflows | `publish`, `files` |
@@ -52,6 +53,9 @@ Typical dependency configurations are:
 ```toml
 # Remote metadata and raw Git objects
 crab-sdk = { git = "https://github.com/crabbuild/crab", rev = "<COMMIT>", default-features = false, features = ["remote"] }
+
+# Captured workflow results and immutable reports
+crab-sdk = { git = "https://github.com/crabbuild/crab", rev = "<COMMIT>", default-features = false, features = ["results"] }
 
 # Remote logical content and writes
 crab-sdk = { git = "https://github.com/crabbuild/crab", rev = "<COMMIT>", default-features = false, features = ["files", "publish"] }
@@ -257,9 +261,19 @@ pass it to `Client::clone_local`.
 | Clone a local worktree | `client.clone_local(locator, destination, options)` |
 | Configure an existing worktree | `client.configure_local(path)` |
 | Read or write remote state | `repository.remote()?` |
+| Read captured workflow results and reports | `repository.remote()?.results()` with the `results` feature |
 | Use local workflows | `repository.local()?` |
 | Administer managed repositories | `client.managed()` |
 | Drain workers and resources | `client.close().await` |
+
+Results reads use the opened repository's storage and operation limits, including
+cancellation and deadlines. A `RunSelection` pins both an experiment ID and its
+result digest; a report ID selects an immutable comparison with retained evidence.
+Published Results can be read without workflow YAML or a local worktree.
+Workflow execution and publication use the
+[Results CLI](https://crab.build/docs/cli/workflow/results).
+See the [SDK Results reference](https://crab.build/docs/sdk/api-reference#workflow-results)
+for an example and the current provider qualification limits.
 
 All asynchronous SDK operations return lazy `operation::Request` values. Use
 `Request::with_options` before awaiting to apply a timeout, deadline,

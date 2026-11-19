@@ -53,6 +53,7 @@ pub(crate) async fn serve(request: Request) -> Response {
                         | "labels"
                         | "milestones"
                         | "activity"
+                        | "results"
                         | "new"
                         | "upload"
                         | "edit"
@@ -127,6 +128,11 @@ mod tests {
             ("/team/repo.name/compare/main...feature%2Fx", StatusCode::OK),
             ("/team/repo.name/releases/tag/v1.0.0", StatusCode::OK),
             ("/team/repo.name/settings/access", StatusCode::OK),
+            ("/team/repo.name/results", StatusCode::OK),
+            (
+                "/team/repo.name/results?report=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                StatusCode::OK,
+            ),
             ("/-/profile", StatusCode::OK),
             (
                 "/-/users/01900000-0000-7000-8000-000000000001",

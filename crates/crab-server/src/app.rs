@@ -568,12 +568,17 @@ pub(crate) async fn admit(
     };
     // Admission covers producing the response, not consuming its body. Streaming
     // handlers must retain their own transfer permit and cancellation ownership.
+    let timeout_message = if request.method().is_safe() {
+        "The read request timed out. Retry the read."
+    } else {
+        "Collaboration request timed out; retry the same submission to recover a possible completed write"
+    };
     let started = Instant::now();
     let response = tokio::select! {
         () = server.cancellation.cancelled() => (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":{"message":"Server is shutting down; retry the same submission after restart"}}))).into_response(),
         response = tokio::time::timeout(Duration::from_secs(30), next.run(request)) => match response {
             Ok(response) => response,
-            Err(_) => (StatusCode::GATEWAY_TIMEOUT, Json(json!({"error":{"message":"Collaboration request timed out; retry the same submission to recover a possible completed write"}}))).into_response(),
+            Err(_) => (StatusCode::GATEWAY_TIMEOUT, Json(json!({"error":{"message":timeout_message}}))).into_response(),
         },
     };
     (

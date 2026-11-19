@@ -92,6 +92,14 @@ Repository pages use GitHub-style paths. **Code**, **Issues**, **Pull requests**
 **Go to file** (keyboard `T`) opens file search, and **Add file** offers the
 existing create and upload actions.
 
+**Results** reads captured workflow runs and immutable reports from repository
+object storage, including repositories without workflow YAML. Open a frozen
+comparison with `/{owner}/{name}/results?report={report-id}`; direct links and
+reloads use the embedded application. Current repository grants protect every
+report and evidence read. Writers can publish reports; model/input/checkpoint
+payloads remain immutable links, while metrics, plots and other render evidence
+form the report's retained body. Execution actions use Desktop or the CLI.
+
 Issue and pull-request list rows show their opening, closing or merge-completion
 time, with relative dates and keyboard-accessible exact-time tooltips. Later
 edits keep the original closure time; reopening clears it. Prepare existing

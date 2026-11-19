@@ -129,17 +129,46 @@ pub async fn run_json(
         command.current_dir(cwd);
     }
     let output = command.output().await?;
-    if !output.status.success() {
-        return Err(AgentError::Cli {
-            status: output.status.code().unwrap_or(-1),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        });
+    json_reply(output)
+}
+
+fn json_reply(output: Output) -> Result<serde_json::Value> {
+    let failed = || AgentError::Cli {
+        status: output.status.code().unwrap_or(-1),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    };
+    let mut envelope: serde_json::Value = match serde_json::from_slice(&output.stdout) {
+        Ok(envelope) => envelope,
+        // Argument parsing, startup and signals can end a process before it
+        // emits JSON. Semantic CLI failures use its error envelope, not logs.
+        Err(_) if !output.status.success() => return Err(failed()),
+        Err(error) => return Err(error.into()),
+    };
+    if let Some(error) = envelope.get_mut("error") {
+        return Err(command_error(
+            output.status.code().unwrap_or(-1),
+            error.take(),
+        ));
     }
-    let mut envelope: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    if !output.status.success() {
+        return Err(failed());
+    }
     envelope
         .get_mut("data")
         .map(serde_json::Value::take)
         .ok_or_else(|| AgentError::Other("Crab returned no structured response data".into()))
+}
+
+pub(crate) fn command_error(status: i32, error: serde_json::Value) -> AgentError {
+    match (error["code"].as_str(), error["message"].as_str()) {
+        (Some(code), Some(message)) => AgentError::Command {
+            status,
+            code: code.into(),
+            message: message.into(),
+            details: error,
+        },
+        _ => AgentError::Other("Crab returned an invalid structured error".into()),
+    }
 }
 
 pub async fn run_structured(
@@ -403,6 +432,52 @@ pub fn resolve_crab_bin() -> std::path::PathBuf {
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+
+    #[cfg(unix)]
+    #[test]
+    fn structured_failures_preserve_semantic_error_details_instead_of_tracing_logs() {
+        use std::os::unix::process::ExitStatusExt;
+        let error = serde_json::json!({
+            "code": "CRAB-E0020", "message": "captured output differs", "retryable": false,
+            "details": { "path": "model.bin" }, "source_chain": [{ "message": "verified cause" }],
+        });
+        for status in [0, 4] {
+            let output = Output {
+                status: ExitStatus::from_raw(status << 8),
+                stdout: serde_json::to_vec(&serde_json::json!({ "error": error })).unwrap(),
+                stderr: b"structured tracing diagnostics".to_vec(),
+            };
+            let AgentError::Command {
+                code,
+                message,
+                details,
+                ..
+            } = json_reply(output).unwrap_err()
+            else {
+                panic!("a CLI error envelope must never become success or tracing text");
+            };
+            assert_eq!(
+                (code.as_str(), message.as_str(), &details),
+                ("CRAB-E0020", "captured output differs", &error)
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_processes_without_error_envelopes_preserve_diagnostics_and_never_return_data() {
+        use std::os::unix::process::ExitStatusExt;
+        for stdout in [Vec::new(), br#"{"data":{"partial":true}}"#.to_vec()] {
+            let output = Output {
+                status: ExitStatus::from_raw(2 << 8),
+                stdout,
+                stderr: b"startup failed".to_vec(),
+            };
+            assert!(
+                matches!(json_reply(output), Err(AgentError::Cli { status: 2, stderr }) if stderr == "startup failed")
+            );
+        }
+    }
 
     #[tokio::test]
     async fn inspection_keeps_index_bytes_unchanged_after_a_metadata_change() {

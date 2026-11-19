@@ -19,9 +19,12 @@ publish = ["remote", "crab-read/hydration", "dep:crab-remote", "crab-remote/publ
 local = ["publish", "files", "crab-remote/local", "dep:dunce", "dep:toml"]
 service = ["remote", "dep:crab-auth", "dep:crab-auth-store", "dep:crab-git", "dep:uuid"]
 
+results = ["remote", "dep:crab-workflow", "dep:serde", "dep:serde_json"]
+
 files = ["remote", "crab-read/hydration", "crab-metadata/file-index-reader", "dep:crab-lfs", "dep:crab-git", "dep:futures-util", "dep:crab-cache", "dep:crab-cache-store", "dep:crab-types", "dep:tracing"]
 
 [dependencies]
+crab-workflow = { workspace = true, optional = true }
 crab-remote = { workspace = true, optional = true }
 crab-write = { workspace = true, optional = true }
 crab-coordination = { workspace = true, optional = true, features = ["object-store-lock"] }

@@ -122,7 +122,14 @@ impl ExperimentWorktree {
         // this point the tmpdir still reflects the commit we pinned.
         let base_commit = resolve_head_commit(&git_dir, &repo_root_abs)?;
 
-        Self::create_resolved(repo_root_abs, git_dir, exp_id, base_commit, param_overrides)
+        Self::create_resolved(
+            repo_root_abs,
+            git_dir,
+            exp_id,
+            base_commit,
+            param_overrides,
+            None,
+        )
     }
 
     /// Create a fresh experiment tmpdir from a previously captured
@@ -143,6 +150,44 @@ impl ExperimentWorktree {
             exp_id,
             base_commit.to_owned(),
             param_overrides,
+            None,
+        )
+    }
+
+    /// Restores retained effective inputs without live overrides or local configuration.
+    pub fn reproduce(
+        repo_root: &Path,
+        exp_id: ExperimentId,
+        spec: &crate::results::ReproductionSpec,
+        local: &crate::results::LocalResults,
+    ) -> Result<Self> {
+        spec.validate_inputs()?;
+        if !spec.unavailable_reasons.is_empty() {
+            return Err(CrabError::Configuration {
+                key: "exp reproduce".into(),
+                origin: spec.unavailable_reasons.join("; "),
+            });
+        }
+        for runtime in &spec.runtimes {
+            if crate::results::runtime_witness(&runtime.program)? != *runtime {
+                return Err(CrabError::Configuration {
+                    key: "exp reproduce".into(),
+                    origin: format!(
+                        "Runtime {} differs from the captured runtime",
+                        runtime.program
+                    ),
+                });
+            }
+        }
+        let root = absolutize(repo_root)?;
+        let git_dir = resolve_git_dir(&root)?;
+        Self::create_resolved(
+            root,
+            git_dir,
+            exp_id,
+            spec.source_commit.clone(),
+            &BTreeMap::new(),
+            Some((spec, local)),
         )
     }
 
@@ -152,6 +197,10 @@ impl ExperimentWorktree {
         exp_id: ExperimentId,
         base_commit: String,
         param_overrides: &BTreeMap<String, String>,
+        reproduction: Option<(
+            &crate::results::ReproductionSpec,
+            &crate::results::LocalResults,
+        )>,
     ) -> Result<Self> {
         let parent_dir = repo_root_abs.join(EXP_WORKTREE_PARENT_REL);
         let tmpdir = parent_dir.join(exp_id.to_string());
@@ -172,10 +221,74 @@ impl ExperimentWorktree {
         let guard = CleanupOnDrop::new(&tmpdir);
 
         checkout_commit_into(&git_dir, &repo_root_abs, &tmpdir, &base_commit)?;
-        copy_repo_config_into_worktree(&repo_root_abs, &tmpdir)?;
-
-        let param_overrides = crate::hydra::compose_if_enabled(&tmpdir, param_overrides)?;
-        apply_overrides(&tmpdir, &param_overrides)?;
+        if let Some((spec, local)) = reproduction {
+            // Directory replacement removes base-checkout entries. Keep the
+            // existing restoration modes and link refusals before clearing them.
+            let modes = spec
+                .files
+                .iter()
+                .map(|attachment| {
+                    let path = tmpdir.join(&attachment.path);
+                    crate::atomic::ensure_parent_not_symlink(&path)?;
+                    match fs::symlink_metadata(&path) {
+                        Ok(metadata) if metadata.file_type().is_symlink() => {
+                            Err(CrabError::Configuration {
+                                key: "exp reproduce".into(),
+                                origin: "retained input targets a symlink".into(),
+                            })
+                        }
+                        Ok(_) => file_mode(&path),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0o644),
+                        Err(error) => Err(CrabError::Io(error)),
+                    }
+                })
+                .collect::<Result<Vec<_>>>()?;
+            for (index, directory) in spec.directories.iter().enumerate() {
+                let path = tmpdir.join(directory);
+                crate::atomic::ensure_parent_not_symlink(&path)?;
+                // Clear each captured tree once. Nested entries recreate empty
+                // directories within that same replacement.
+                if !spec.directories[..index]
+                    .iter()
+                    .any(|parent| Path::new(directory).starts_with(parent))
+                {
+                    match fs::symlink_metadata(&path) {
+                        Ok(metadata) if metadata.is_dir() || metadata.file_type().is_symlink() => {
+                            fs::remove_dir_all(&path)?
+                        }
+                        Ok(_) => fs::remove_file(&path)?,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(CrabError::Io(error)),
+                    }
+                }
+                fs::create_dir_all(path)?;
+            }
+            for (attachment, mode) in spec.files.iter().zip(modes) {
+                let hash = attachment
+                    .hash
+                    .as_deref()
+                    .ok_or_else(|| CrabError::Configuration {
+                        key: "exp reproduce".into(),
+                        origin: format!("Input {} is unavailable", attachment.path),
+                    })?;
+                let bytes = local.blob(hash)?;
+                if bytes.len() as u64 != attachment.size {
+                    return Err(CrabError::CorruptObject {
+                        path: attachment.path.clone(),
+                        reason: "input size mismatch".into(),
+                    });
+                }
+                let path = tmpdir.join(&attachment.path);
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                write_atomic(&path, &bytes, exp_id.0, mode)?;
+            }
+        } else {
+            copy_repo_config_into_worktree(&repo_root_abs, &tmpdir)?;
+            let param_overrides = crate::hydra::compose_if_enabled(&tmpdir, param_overrides)?;
+            apply_overrides(&tmpdir, &param_overrides)?;
+        }
 
         // Commit the cleanup guard: we've succeeded, the worktree
         // handle's Drop takes over responsibility.

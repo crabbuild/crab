@@ -108,6 +108,25 @@ fn validate<T: Serialize>(name: &str, value: &T) {
     assert_valid(name, &json);
 }
 
+#[test]
+fn results_payloads_use_owner_shapes_and_reject_malformed_reports() {
+    validate(
+        "workflow.results",
+        &crab::cmd::results::ResultsPayload::Page(crab_workflow::results::RunPage {
+            generation: "a".repeat(64),
+            total: 0,
+            columns: Vec::new(),
+            display_columns: Vec::new(),
+            rows: Vec::new(),
+            next_cursor: None,
+        }),
+    );
+    assert_invalid(
+        "workflow.results",
+        &serde_json::json!({"id":"a".repeat(64), "report":{"bogus":true}}),
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Event payload types
 // ---------------------------------------------------------------------------

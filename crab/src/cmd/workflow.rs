@@ -190,6 +190,35 @@ mod tests {
 
         assert!(matches!(error, CrabError::Cancelled));
     }
+
+    #[tokio::test]
+    async fn remote_resolution_classifies_installed_profiles_before_credentials() {
+        use crab_auth::managed::{
+            ServiceProfile, ServiceProfileStore, ServiceTrust, service_profile_directory,
+        };
+
+        let repo = tempfile::tempdir().unwrap();
+        let tokens = repo.path().join("tokens");
+        ServiceProfileStore::new(service_profile_directory(&tokens))
+            .store(&ServiceProfile::new("code.corp.example", ServiceTrust::default()).unwrap())
+            .unwrap();
+        std::fs::write(
+            repo.path().join("crab.toml"),
+            "[remote]\nurl = 'crab://code.corp.example/team/models'\n",
+        )
+        .unwrap();
+        let mut config = Config::default();
+        config.auth.token_cache_path = tokens.to_string_lossy().into_owned();
+        // A direct-store attempt fails locally for this incomplete provider,
+        // without reading ambient credentials or contacting any endpoint.
+        config.auth.provider = crate::core::config::AuthProvider::AwsOidc;
+        let error = build_remote_store_for(repo.path(), &config, None, &CancellationToken::new())
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(error, CrabError::Configuration { key, origin }
+            if key.contains("managed repository support is not enabled") && origin == "code.corp.example"));
+    }
 }
 
 pub(crate) async fn build_remote_store_for(

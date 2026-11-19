@@ -8,6 +8,22 @@ pub type Result<T> = std::result::Result<T, WorkflowError>;
 /// Errors returned by workflow contract and planning modules.
 #[derive(Debug, thiserror::Error)]
 pub enum WorkflowError {
+    /// Stored Results bytes violate their versioned or content identity contract.
+    #[error("corrupt Results object at {path}: {source}")]
+    ResultsStored {
+        path: String,
+        #[source]
+        source: Box<WorkflowError>,
+    },
+    /// A result document could not be encoded or decoded.
+    #[error("invalid workflow result document: {0}")]
+    ResultsJson(#[source] serde_json::Error),
+    /// A result parameter document contains invalid TOML.
+    #[error("invalid workflow result TOML: {0}")]
+    ResultsToml(#[source] toml::de::Error),
+    /// A result text document contains invalid UTF-8.
+    #[error("invalid workflow result text: {0}")]
+    ResultsUtf8(#[source] std::str::Utf8Error),
     /// The clock cannot produce a valid persisted timestamp.
     #[error("invalid timestamp: {0}")]
     Timestamp(#[from] crab_types::time::TimestampError),
