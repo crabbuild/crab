@@ -270,153 +270,159 @@ export function FileView({
       {(content) => (
         <section className="panel file-panel" aria-label={`File ${name}`}>
           <div className="panel-header">
-            <div className="file-view-controls">
-              <ToggleGroup
-                role="group"
-                type="single"
-                variant="outline"
-                spacing={0}
-                aria-label="File view"
-                value={view}
-                onValueChange={(next) => {
-                  if (next !== "code" && next !== "preview" && next !== "blame")
-                    return;
-                  setView(next === "blame" ? "code" : next);
-                  if (blameView || next === "blame")
-                    navigate(
-                      repoHref(repo, {
-                        rev: revision,
-                        path,
-                        kind: "Blob",
-                        view: next === "blame" ? "blame" : "code",
-                      }) + window.location.hash,
-                    );
-                }}
-              >
-                <ToggleGroupItem
-                  value="code"
-                  role="button"
-                  aria-pressed={view === "code"}
-                  aria-checked={undefined}
+            <div className="file-toolbar">
+              <div className="file-view-controls">
+                <ToggleGroup
+                  role="group"
+                  type="single"
+                  variant="outline"
+                  spacing={0}
+                  aria-label="File view"
+                  value={view}
+                  onValueChange={(next) => {
+                    if (
+                      next !== "code" &&
+                      next !== "preview" &&
+                      next !== "blame"
+                    )
+                      return;
+                    setView(next === "blame" ? "code" : next);
+                    if (blameView || next === "blame")
+                      navigate(
+                        repoHref(repo, {
+                          rev: revision,
+                          path,
+                          kind: "Blob",
+                          view: next === "blame" ? "blame" : "code",
+                        }) + window.location.hash,
+                      );
+                  }}
                 >
-                  {content.text === null ? "Info" : "Code"}
-                </ToggleGroupItem>
-                {activePreview && (
                   <ToggleGroupItem
-                    value="preview"
+                    value="code"
                     role="button"
-                    aria-pressed={view === "preview"}
+                    aria-pressed={view === "code"}
                     aria-checked={undefined}
                   >
-                    Preview
+                    {content.text === null ? "Info" : "Code"}
                   </ToggleGroupItem>
-                )}
-                {content.text !== null &&
-                  content.classification === "OrdinaryGit" && (
+                  {activePreview && (
                     <ToggleGroupItem
-                      value="blame"
+                      value="preview"
                       role="button"
-                      aria-pressed={view === "blame"}
+                      aria-pressed={view === "preview"}
                       aria-checked={undefined}
                     >
-                      Blame
+                      Preview
                     </ToggleGroupItem>
                   )}
-              </ToggleGroup>
-              <span className="file-metadata muted">
-                {content.text === null
-                  ? content.text_truncated
-                    ? (activePreview?.label ?? "Large text file")
-                    : (activePreview?.label ?? "Binary file")
-                  : `${content.text === "" ? 0 : content.text.split("\n").length - Number(content.text.endsWith("\n"))} lines`}{" "}
-                <span aria-hidden="true">·</span> {formatSize(content.size)}
-              </span>
-            </div>
-            <div className="file-actions">
-              {view === "code" && symbolLanguage && !symbolsOpen && (
-                <Button
-                  aria-label="Open code symbols"
-                  size="icon-sm"
-                  onClick={() => setSymbolsOpen(true)}
-                  variant="outline"
-                >
-                  <CodeIcon data-icon="inline-start" />
-                </Button>
-              )}
-              <Button asChild variant="outline">
-                <a href={endpoint(repo, "blob", { rev, path_hex: path })}>
-                  Raw
-                </a>
-              </Button>
-              {content.text !== null && (
-                <Button
-                  aria-label={
-                    copied ? "File contents copied" : "Copy file contents"
-                  }
-                  size="icon-sm"
-                  onClick={async () => {
-                    try {
-                      await navigator.clipboard.writeText(content.text ?? "");
-                      setCopied(true);
-                    } catch {
-                      setCopied(false);
-                    }
-                  }}
-                  variant="outline"
-                >
-                  <CopyIcon data-icon="inline-start" />
-                </Button>
-              )}
-              <Button asChild variant="outline" size="icon-sm">
-                <a
-                  href={endpoint(repo, "blob", { rev, path_hex: path })}
-                  download={name.split("/").pop()}
-                  aria-label="Download raw file"
-                  title="Download raw file"
-                >
-                  <DownloadIcon data-icon="inline-start" />
-                </a>
-              </Button>
-              {write &&
-                content.text !== null &&
-                content.classification === "OrdinaryGit" && (
+                  {content.text !== null &&
+                    content.classification === "OrdinaryGit" && (
+                      <ToggleGroupItem
+                        value="blame"
+                        role="button"
+                        aria-pressed={view === "blame"}
+                        aria-checked={undefined}
+                      >
+                        Blame
+                      </ToggleGroupItem>
+                    )}
+                </ToggleGroup>
+                <span className="file-metadata muted">
+                  {content.text === null
+                    ? content.text_truncated
+                      ? (activePreview?.label ?? "Large text file")
+                      : (activePreview?.label ?? "Binary file")
+                    : `${content.text === "" ? 0 : content.text.split("\n").length - Number(content.text.endsWith("\n"))} lines`}{" "}
+                  <span aria-hidden="true">·</span> {formatSize(content.size)}
+                </span>
+              </div>
+              <div className="file-actions">
+                {view === "code" && symbolLanguage && !symbolsOpen && (
                   <Button
-                    aria-label="Edit this file"
+                    aria-label="Open code symbols"
                     size="icon-sm"
+                    onClick={() => setSymbolsOpen(true)}
+                    variant="outline"
+                  >
+                    <CodeIcon data-icon="inline-start" />
+                  </Button>
+                )}
+                <Button asChild variant="outline">
+                  <a href={endpoint(repo, "blob", { rev, path_hex: path })}>
+                    Raw
+                  </a>
+                </Button>
+                {content.text !== null && (
+                  <Button
+                    aria-label={
+                      copied ? "File contents copied" : "Copy file contents"
+                    }
+                    size="icon-sm"
+                    onClick={async () => {
+                      try {
+                        await navigator.clipboard.writeText(content.text ?? "");
+                        setCopied(true);
+                      } catch {
+                        setCopied(false);
+                      }
+                    }}
+                    variant="outline"
+                  >
+                    <CopyIcon data-icon="inline-start" />
+                  </Button>
+                )}
+                <Button asChild variant="outline" size="icon-sm">
+                  <a
+                    href={endpoint(repo, "blob", { rev, path_hex: path })}
+                    download={name.split("/").pop()}
+                    aria-label="Download raw file"
+                    title="Download raw file"
+                  >
+                    <DownloadIcon data-icon="inline-start" />
+                  </a>
+                </Button>
+                {write &&
+                  content.text !== null &&
+                  content.classification === "OrdinaryGit" && (
+                    <Button
+                      aria-label="Edit this file"
+                      size="icon-sm"
+                      onClick={() =>
+                        navigate(
+                          repoHref(repo, {
+                            rev: write.branch,
+                            view: "edit",
+                            path,
+                            kind: "Blob",
+                          }),
+                        )
+                      }
+                      variant="outline"
+                    >
+                      <PencilIcon data-icon="inline-start" />
+                    </Button>
+                  )}
+                {write && (
+                  <Button
+                    aria-label="Delete this file"
+                    size="icon-sm"
+                    variant="outline"
                     onClick={() =>
                       navigate(
                         repoHref(repo, {
                           rev: write.branch,
-                          view: "edit",
+                          view: "delete",
                           path,
                           kind: "Blob",
                         }),
                       )
                     }
-                    variant="outline"
                   >
-                    <PencilIcon data-icon="inline-start" />
+                    <TrashIcon data-icon="inline-start" />
                   </Button>
                 )}
-              {write && (
-                <Button
-                  aria-label="Delete this file"
-                  size="icon-sm"
-                  variant="outline"
-                  onClick={() =>
-                    navigate(
-                      repoHref(repo, {
-                        rev: write.branch,
-                        view: "delete",
-                        path,
-                        kind: "Blob",
-                      }),
-                    )
-                  }
-                >
-                  <TrashIcon data-icon="inline-start" />
-                </Button>
-              )}
+              </div>
             </div>
           </div>
           {content.classification !== "OrdinaryGit" && (

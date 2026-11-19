@@ -4925,9 +4925,25 @@ main {
   white-space: nowrap;
 }
 .file-panel > .panel-header {
+  display: block;
+  min-height: 0;
+  padding: 0;
+  /* Mask scrolling code and side borders outside the toolbar's rounded corners. */
+  margin-inline: -1px;
+  border: 0;
+  background: var(--background);
+}
+.file-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: --spacing(3);
   min-height: 46px;
   padding: --spacing(2) --spacing(2.5);
-  border-top: 1px solid var(--border);
+  border: 1px solid var(--border);
+  border-radius: var(--radius) var(--radius) 0 0;
+  background: var(--muted);
 }
 .code-main-file .file-navigation {
   position: sticky;
@@ -6075,7 +6091,7 @@ main {
     flex-direction: column;
     gap: --spacing(1.5);
   }
-  .file-panel > .panel-header {
+  .file-toolbar {
     align-items: flex-end;
   }
   .file-metadata {
