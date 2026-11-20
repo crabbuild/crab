@@ -509,6 +509,7 @@ mod platform {
     use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
     use std::path::{Component, Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
 
     use fs4::fs_std::FileExt;
 
@@ -812,11 +813,23 @@ mod platform {
         }
 
         fn publication(&self) -> Result<MutationGuard<'_>> {
-            // Completed fills run on blocking workers. Serialize sibling writes
-            // through their fsync/rename instead of discarding valid cache data.
-            // Maintenance keeps nonblocking mutation admission.
-            FileExt::lock_exclusive(&self.file)?;
-            Ok(MutationGuard(&self.file))
+            // Fills in the same directory share this short namespace lock.
+            // Use the catalog admission's two-second bound; ordinary
+            // writer contention must not discard otherwise cacheable ranges.
+            let timeout = Duration::from_secs(2);
+            let started = Instant::now();
+            loop {
+                match self.mutation() {
+                    Err(CacheError::Io(error))
+                        if error.kind() == io::ErrorKind::WouldBlock
+                            && started.elapsed() < timeout =>
+                    {
+                        let remaining = timeout.saturating_sub(started.elapsed());
+                        std::thread::sleep(Duration::from_millis(1).min(remaining));
+                    }
+                    result => return result,
+                }
+            }
         }
 
         fn remove_payload(&self, name: &CString, dry_run: bool) -> Result<u64> {
