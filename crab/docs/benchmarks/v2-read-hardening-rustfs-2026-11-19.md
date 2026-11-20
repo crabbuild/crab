@@ -496,3 +496,30 @@ keep the original queries and thresholds. Release growth is also fixed at 100
 pairs before its first sample, following the twenty-pair native screen's noisy
 tails. The declared minimum is twenty; no threshold or post-result sample tuning
 is introduced. Earlier results and the original unstarted runner are retained.
+
+
+### Frontend packaging and interrupted self-calibration
+
+Current ARM64 CI stops in the frontend build: the Results UI imports shared
+contracts/model and chart-runtime files that the Docker frontend stage omitted.
+The context now admits the shared TypeScript package and copies those inputs
+plus the chart module/declarations into their canonical paths. Shared-model
+changes also trigger the container gate. Both native ARM64 Node 22.23.2 frontend
+builds pass. The four external source files equal the compiled Git revision;
+the original manifest omitted the workflow-results package, so its exact Git
+blobs and hashes are recorded in a supplemental closure without rewriting an
+old receipt. Linux and host builds have different chunk hashes and retain
+separate manifests. Full shipping-image qualification is retried separately.
+The Rust/UI sources used by the existing native and RustFS proofs are unchanged.
+
+The first fixed native confirmation reaches only baseline self-calibration:
+200 processes pass every Git check and drain, but the identical binary's warm
+p95 ratio is 0.564, outside the symmetric 1.10 calibration band. Cold ratio is
+1.015. New foreign compilation appears after the initial quiet preflight;
+the entire experiment is rejected and no candidate result is accepted.
+Before any new samples, pair-level admission is declared: require fifteen
+quiet seconds before each full pair, then validate both arms against independent
+compiler observations before computing statistics. Interrupted pairs remain
+complete retained trials. The target remains 100 valid pairs with unchanged
+queries, binaries, worker count and gates. Growth and HTTP use the same declared
+validity checks; no valid performance failure or original receipt is waived.

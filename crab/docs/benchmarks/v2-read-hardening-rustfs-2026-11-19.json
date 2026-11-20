@@ -6407,5 +6407,101 @@
     "original_unstarted_20_pair_script_sha256": "06b062fa289391a84341076930bdea73d4dd4506293b62517ea380c67d1872a9",
     "reason": "Increase precision before any release growth samples, following the native 20-pair screen; fixed 100, same exact query/Git oracle, no p99 under 1000 and no threshold or sample-count tuning after results. Bounded progress reports avoid repeated full-proof serialization during measurements.",
     "prerequisite": "Native 100-pair baseline calibration must pass before release growth timing."
+  },
+  "frontend_packaging_integration": {
+    "status": "passed_frontend_build",
+    "compiled_server_source": "0fa518caf5edf2d767040e1a9bf98e37f17383ad",
+    "runtime_server_binary_sha256": "7b5ccafe0dd93646140ca4001a778265741be23a5e7a83030f2fa3b01f8410a2",
+    "frontend_image_id": "sha256:ce7fc76dca50a5bd19de046bc43afd388bca8f2b135ee2dcf4fd57b88be0f2f5",
+    "frontend_node": "v22.23.2",
+    "frontend_platform": "linux/arm64",
+    "frontend_dist_manifest_sha256": "6293db557faab203fd6120012335327e867bed3fd7e8dd2711ba3e514bb5de1a",
+    "frontend_files": 400,
+    "different_paths_or_hashes_from_host_frontend": 71,
+    "external_source_inputs": {
+      "packages/workflow-results/contracts.ts": {
+        "sha256": "ce28d9c38ff49420bb246d51be59301a049335efc7bbbd3e753dd3feec5839b5",
+        "compiled_git_blob": "df8433fa56ce5de908beacf558eb8bd92ac6b84b"
+      },
+      "packages/workflow-results/model.ts": {
+        "sha256": "47bcb5f2c3a8c5d6594cc1a0e9fda2da5b477b2faac4d5762816fef3e5804ced",
+        "compiled_git_blob": "356f922b2d07fa5311af42b6f69d447282df18c1"
+      },
+      "crates/crab-workflow/assets/results-runtime.mjs": {
+        "sha256": "11c0f0078ac36a004ad335133e2692886e4d4747e9b5fa262f7df6ebc291dfcf",
+        "compiled_git_blob": "ff30842491752f7c8948a006b5fe9dd306abe48e"
+      },
+      "crates/crab-workflow/assets/results-runtime.d.mts": {
+        "sha256": "87ae530bcfd0488bff7b791c65506fb9add76fb21600dff285abb5c15dde4d27",
+        "compiled_git_blob": "8d78db379ddb27c3d566c24384d992aa36d5b669"
+      }
+    },
+    "original_manifest_gap": "workflow-results model/contracts are outside the original UI source-input dictionary; their exact compiled Git blobs and matching current/container bytes are recorded here. No original receipt is rewritten.",
+    "changed_original_captured_files": ["crates/crab-server/deploy/Dockerfile"],
+    "scope": "Only Docker frontend source inclusion and build trigger change; original Rust/UI source matches compiled revision. Linux Node22 and host frontend outputs have different chunk hashes, retained separately. Existing native/RustFS proof retains its executable; full shipping image proof follows in CI.",
+    "dockerfile_sha256": "59deaa65034a07d92d0b52a064762c4d8dcf27204a15d71678d957bb22c928a8",
+    "dockerignore_sha256": "d5eff77fbc5cc0e0fa049743cdd7f9f501836d6389d747bcbb31113389254bb2",
+    "build_log_sha256": "ef7ef1019010dd59d059443ae042beb94e5ab89fd3a2ea79ee3b24a0c379232a"
+  },
+  "interrupted_native_self_calibration": {
+    "status": "environment_rejected_compiler_overlap",
+    "raw_report_sha256": "b98106ebf5687a3450d5524c95bd581d9895950211c68ffce8fbca087a0dc42c",
+    "orchestration_sha256": "82e34ed10417d96ccb935762fc18a93609f66fc453a4bcf08c5a8051accfe9aa",
+    "baseline_only_processes": 200,
+    "candidate_processes": 0,
+    "git_queries_checked": 200,
+    "cells": [
+      {
+        "commits": 100,
+        "operation": "object-batch",
+        "cache": "cold",
+        "kind": "calibration",
+        "a": {
+          "query_us": {
+            "p50": 47476,
+            "p95": 80854
+          },
+          "backend_reads_median": 55.0,
+          "backend_bytes_median": 45466.0
+        },
+        "b": {
+          "query_us": {
+            "p50": 46745,
+            "p95": 82085
+          },
+          "backend_reads_median": 55.0,
+          "backend_bytes_median": 45466.0
+        },
+        "p95_ratio": 1.0152249734088603,
+        "gate": "passed"
+      },
+      {
+        "commits": 100,
+        "operation": "object-batch",
+        "cache": "warm",
+        "kind": "calibration",
+        "a": {
+          "query_us": {
+            "p50": 253,
+            "p95": 647
+          },
+          "backend_reads_median": 0.0,
+          "backend_bytes_median": 0.0
+        },
+        "b": {
+          "query_us": {
+            "p50": 249,
+            "p95": 365
+          },
+          "backend_reads_median": 0.0,
+          "backend_bytes_median": 0.0
+        },
+        "p95_ratio": 0.5641421947449768,
+        "gate": "failed"
+      }
+    ],
+    "compiler_events_during_measurement": 89,
+    "scope": "Exact same baseline executable in both arms; failed symmetric calibration, not an accepted candidate comparison. Retained unchanged. No threshold or sample-count retry.",
+    "next_protocol": "Before new samples, admit and validate every complete pair using independent compiler observations; retain interrupted pairs separately, exactly 100 valid pairs, same binaries, queries, worker count and thresholds."
   }
 }
