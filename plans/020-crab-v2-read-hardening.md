@@ -1009,6 +1009,17 @@ exits. The failed unconfigured smoke and correct fresh retry are both retained.
 Earlier performance measurements keep their actual compiled revision; R7
 performance acceptance remains open.
 
+The next rebase onto `bf61ce615b4` preserves all 27 patches exactly. Both
+`734c11b54fb` release builds, 27 focused Rust tests, strict Clippy and all 54
+two-replica RustFS checks pass. A 360,000-request signed provider-only 1/2/1-CPU
+control identifies provider throttling and the Python meter's concurrent
+throughput ceiling. Every original timing failure remains; a streaming meter's
+counter parity passes 828 offline cases and sixteen live checks. Its full
+36-cell capacity probe confirms the higher-throughput relay preserves all
+request/byte checks, drains and restores the provider quota. The qualification report binds these results
+and prior image CI recovery to their actual source and image hashes. R7 remains
+open.
+
 ### R0 — Freeze the evidence contract and establish a baseline
 
 **Scope:** `crates/crab-remote/examples/qualify_remote.rs`, its `support/` owners;

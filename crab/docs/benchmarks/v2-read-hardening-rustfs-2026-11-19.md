@@ -594,3 +594,69 @@ The first smoke lacked its fixture environment and stopped before serving;
 its failed receipt remains alongside the correctly configured fresh retry.
 `small_blame_integrated_followup` retains every build/proof hash. The full HTTP
 measurements above keep their original `8b806338bd6` binding and failures.
+
+## Rebased current proof and provider-meter controls
+
+Current application builds are bound to `734c11b54fb`, after rebasing onto
+`bf61ce615b4`. Git range comparison proves all 27 patches identical. Both release
+builds, 27 focused tests, strict all-target server Clippy and all 54 real
+two-replica RustFS smoke checks pass. Both actual durability proofs complete,
+admitted work drains and both processes exit zero. The upstream workflow
+`serde_json` feature changed server inputs, so these builds were repeated; all
+552 native-qualifier inputs remain identical and keep their original compiled
+revision. Earlier performance measurements keep their actual source bindings.
+
+A separate signed provider-only probe checks 360,000 real metadata GET/HEAD
+requests, with every body SHA-256 and HEAD length checked and no retries. At 128
+clients, direct RustFS median throughput changes from approximately 4.6k to
+7.1k and back to 4.8k requests/s across a 1/2/1-CPU reversal. The Python-metered
+path remains near 3.9k requests/s. Other cells vary; all 36 cells, CPU throttling
+and request counts are retained in JSON. The original quota is restored. This
+identifies fixture and instrumentation limits; it does not waive failed
+baseline repeatability or qualify product latency.
+
+A streaming relay candidate matches the canonical meter's complete counter
+schema on 828 offline cases and 21 live signed SDK requests. Sixteen live checks
+cover exact ranges, streamed PUT, conditional conflict, copy, multipart
+completion/abort, list, all actual attempt counts and deletion of its own
+temporary objects. The initial setup failure occurs before any S3 request and
+is retained; the retry uses the bundled dependency's verified retry and stream
+contracts. The complete 36-cell capacity probe also checks 360,000 signed requests. With
+RustFS at two CPUs and 32 clients, median metered/direct throughput is
+9.6k/9.7k requests/s. The first one-CPU direct control varies substantially and
+is retained alongside every cell; low-concurrency relay overhead remains. The
+provider returns to one CPU, the meter drains and exits zero. This supports a
+new matched measurement profile, not product performance acceptance.
+
+The preceding `8b806338bd6` ARM64 image CI also passes actual process recovery,
+with source/image/artifact hashes verified. Its receipt proves abrupt restart,
+an empty-cache restore and a 330-object Root copy with byte hashes and metadata
+verified, followed by application-state and Git-ref checks. This remains prior
+image evidence. Current-source image/recovery CI and combined performance
+acceptance remain open.
+
+The verified relay is `crab/scripts/e2e/native_provider_meter.mjs`. It requires
+Node 22 and an existing output directory. It accepts only a local HTTP upstream;
+its service file supplies `meter_url` and `provider_url` for the qualification
+observer. It streams without caching, retrying, or fault injection. The Python
+fault fixture remains the owner of corruption/authorization fault tests.
+
+```json
+{
+  "upstream": "http://127.0.0.1:9000",
+  "key_prefix": "bucket/e2e-prefix",
+  "services": "qualification/services.json",
+  "final": "qualification/provider-final.json"
+}
+```
+
+Run `node crab/scripts/e2e/native_provider_meter.mjs qualification/meter.json`;
+stop it with SIGTERM in its own process/container namespace after callers
+drain. `python3 -B -m unittest discover -s crab/scripts/e2e -p
+test_native_provider_meter.py` verifies canonical counter parity. The current
+server, worker quotas, fixed sample counts and engineering thresholds are
+unchanged. A fresh 400-process baseline-only calibration on the corrected two-CPU provider
+passes object-batch cold/warm controls but fails commit cold/warm repeatability.
+Its ratios are 0.709/0.372 despite similar medians; all original thresholds and
+samples remain. Full combined HTTP proof remains required, and product timing
+acceptance stays open.

@@ -10,6 +10,7 @@ on:
       - "crab/scripts/e2e/test_run_capsule_k8s_rustfs.py"
       - "crab/scripts/e2e/*v2_read_service.py"
       - "crab/scripts/e2e/verify_v2_browser_revalidation.mjs"
+      - "crab/scripts/e2e/*native_provider_meter*"
       - "crab/scripts/e2e/*remote_read_scaling*.py"
       - "crab/docs/design/capsule-layered-packs.md"
       - "crab/scripts/verify-large-repo-rustfs-report.py"
@@ -46,6 +47,7 @@ on:
       - "crab/scripts/e2e/test_run_capsule_k8s_rustfs.py"
       - "crab/scripts/e2e/*v2_read_service.py"
       - "crab/scripts/e2e/verify_v2_browser_revalidation.mjs"
+      - "crab/scripts/e2e/*native_provider_meter*"
       - "crab/scripts/e2e/*remote_read_scaling*.py"
       - "crab/docs/design/capsule-layered-packs.md"
       - "crab/scripts/verify-large-repo-rustfs-report.py"
@@ -92,11 +94,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+
       - name: Verify report contract tests
         run: |
           python3 -m unittest crab/scripts/e2e/test_verify_large_repo_rustfs_report.py
           python3 -m unittest crab/scripts/e2e/test_run_capsule_k8s_rustfs.py
           python3 -m unittest discover -s crab/scripts/e2e -p 'test_*v2_read_service.py'
+          python3 -B -m unittest discover -s crab/scripts/e2e -p test_native_provider_meter.py
           python3 -m unittest discover -s crab/scripts/e2e -p test_remote_read_scaling.py
           python3 -m py_compile \
             crab/scripts/e2e/run_large_repo_rustfs.py \

@@ -7364,5 +7364,493 @@
         "sha256": "c5cde675be4b40c48b45692ecbf78d539cc284d271b1aead298461864d80f986"
       }
     ]
+  },
+  "post_bf61_integrated_followup": {
+    "status": "current_functional_and_build_passed_performance_acceptance_open",
+    "source_revision": "734c11b54fb5d086bb995a71d28df4d9ababfe5e",
+    "upstream_base": "bf61ce615b4",
+    "all_27_rebased_patches_identical": true,
+    "rebase_proof_sha256": "c9a467d5ff1604e6307bc771d6451e5d7970f5091645768a7810d3237224d694",
+    "native_input_closure": {
+      "revision": "734c11b54fb5d086bb995a71d28df4d9ababfe5e",
+      "base_revision": "bf61ce615b4f4459a5ebffc571d300c3a7dd5b2b",
+      "checked_inputs": 552,
+      "mismatches": [],
+      "scope": "Native qualifier input closure compared exactly after #699/#700 rebase; original measured binary/source binding retained. Server workflow dependency changed and requires new builds; no claimed server equivalence."
+    },
+    "focused_tests": 27,
+    "strict_server_all_target_clippy": "passed",
+    "focused_report_sha256": "d634f0eea5244e46c86c622e9eddb77f763c857b6b17ea887762e64bdbbeba14",
+    "builds": {
+      "macos": {
+        "source_revision": "734c11b54fb5d086bb995a71d28df4d9ababfe5e",
+        "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1",
+        "cellar_revision": "590640c7ce49ef3fd391bdae9540ba23081cd74b",
+        "server_binary_sha256": "9dafa7d192d263ff0338a76e1aeef57776ff127c67068f3dd9eb0cddae9946ac",
+        "receipt_sha256": "0437cea6edd8c7615e0c9a881ecfe4a0bf6febeef699e45545410a7f197d6e81"
+      },
+      "linux_arm64": {
+        "source_revision": "734c11b54fb5d086bb995a71d28df4d9ababfe5e",
+        "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1",
+        "cellar_revision": "590640c7ce49ef3fd391bdae9540ba23081cd74b",
+        "server_binary_sha256": "19b455451aa25df8cc2737dad1de433e9fd04f75069d43ef804b3df00e0f3d1a",
+        "receipt_sha256": "b3495b142f9bbcc46b51d31dd90eff2ba7749365467823ee9aa0431c30dcbbef"
+      }
+    },
+    "linux_image": {
+      "image_id": "sha256:52f887d34c6b7a4a0143ea8f1cfd03d35163c54d6f6d133dd34dda5773a8b943",
+      "platform": "linux/arm64",
+      "native_source": "9019ebb7a8a05469c3c3ff039b352268d72c2b44",
+      "server_source": "734c11b54fb5d086bb995a71d28df4d9ababfe5e",
+      "qualifier_binary_sha256": "8cf86f25455ea371c33d985dd4b19493223ba837e698adae7e7d526cfc7ff2f9",
+      "server_binary_sha256": "19b455451aa25df8cc2737dad1de433e9fd04f75069d43ef804b3df00e0f3d1a",
+      "native_build_receipt_sha256": "10a340203a94464396eb82f48aa97f70ff9cd6cd22eb98b922e736de13a9c891",
+      "server_build_receipt_sha256": "b3495b142f9bbcc46b51d31dd90eff2ba7749365467823ee9aa0431c30dcbbef",
+      "runtime_parent_image": "sha256:c4e8434b95ba89fb10035d2a631c8ab0fc26d14d2446997ae899c0f9ad33d142",
+      "all_runtime_parent_layers_match": true
+    },
+    "linux_packaging_sha256": "66faa2cb730ecb6eced448fae9c2f887f5c2c2f37fe5d4a94a4ec84f7788e05a",
+    "smoke": {
+      "status": "passed",
+      "checks": 54,
+      "raw_report_sha256": "e3fa522ebddc156cc8c37d271999e3009bb72e0d76ada3f7ee0d92a49e6c1d7c",
+      "exit_codes": [
+        0,
+        0
+      ],
+      "shutdown_proofs": [
+        {
+          "replica": "a",
+          "valid": true,
+          "actual_line": "2026-11-20T06:45:12.446954Z  INFO Cellar shutdown proof complete=true log_quiesced=true local_durability_closed=true clean_reload_prepared=true pending_application_events=0 pending_dispatches=0 deadline_elapsed=false"
+        },
+        {
+          "replica": "b",
+          "valid": true,
+          "actual_line": "2026-11-20T06:45:10.296946Z  INFO Cellar shutdown proof complete=true log_quiesced=true local_durability_closed=true clean_reload_prepared=true pending_application_events=0 pending_dispatches=0 deadline_elapsed=false"
+        }
+      ],
+      "admitted_work_drained": true,
+      "cold_blame_producer_deltas": {
+        "a": 1.0,
+        "b": 1.0
+      }
+    },
+    "scope": "Current server builds include the upstream workflow float_roundtrip feature; server builds were repeated. All552native qualifier inputs are unchanged; its actual compiled source9019 and earlier measurements retain their original bindings. Earlier8b fullHTTP34failed gates and failed same-baseline calibration remain unchanged."
+  },
+  "provider_python_capacity_control": {
+    "status": "measured_provider_capacity_diagnostic",
+    "acceptance": false,
+    "profile_sha256": "327c2ab12ef152d9c649fe96882bd5a548c01137d0d34d629e362b9765793937",
+    "raw_report_sha256": "7b4a9e0d4006498359fa85ccb7a5b3509e05595ed97a2f032889cdcea3bb1933",
+    "requests_checked": 360000,
+    "signed_object_bytes": 1347,
+    "signed_object_sha256": "5a3e6266f098d4c6370e0068f10dbd2975cf829164746ec539c6615a0b27391e",
+    "cpu_stages": [
+      1,
+      2,
+      1
+    ],
+    "provider_cpu_restored": true,
+    "scope": "Real signed GET/HEAD2:1mix; each GET SHA256 and HEAD length checked; no retries. Product callers paused/drained and no owned compilation. At128clients direct medianRPS rises~4.6k to7.1k thenreturns~4.8k; Python meter stays~3.9k. Other cells vary; this diagnoses local provider/meter limits, does not waive failed baseline calibration or qualify product latency.",
+    "cells": [
+      {"stage": 0, "provider_cpus": 1, "repeat": 0, "arm": "direct", "concurrency": 1, "meter_requests": 0, "successful_rps": 2247.4288003139122, "query_us": {"p50": 430.597, "p95": 591.489, "p99": 699.415}, "client_cpu_microseconds": {"user": 880733, "system": 206071}, "provider_cpu_delta": {"nr_periods": 48, "nr_throttled": 0, "throttled_usec": 0, "usage_usec": 2748069}},
+      {"stage": 0, "provider_cpus": 1, "repeat": 0, "arm": "meter", "concurrency": 1, "meter_requests": 10000, "successful_rps": 1545.8715094418415, "query_us": {"p50": 622.861, "p95": 832.691, "p99": 976.393}, "client_cpu_microseconds": {"user": 965703, "system": 186136}, "provider_cpu_delta": {"nr_periods": 69, "nr_throttled": 0, "throttled_usec": 0, "usage_usec": 3008990}},
+      {"stage": 0, "provider_cpus": 1, "repeat": 1, "arm": "meter", "concurrency": 1, "meter_requests": 10000, "successful_rps": 1460.1634711996612, "query_us": {"p50": 638.622, "p95": 844.96, "p99": 1112.809}, "client_cpu_microseconds": {"user": 1033313, "system": 197176}, "provider_cpu_delta": {"nr_periods": 72, "nr_throttled": 7, "throttled_usec": 422694, "usage_usec": 3598806}},
+      {"stage": 0, "provider_cpus": 1, "repeat": 1, "arm": "direct", "concurrency": 1, "meter_requests": 0, "successful_rps": 2227.3699454102275, "query_us": {"p50": 438.933, "p95": 580.899, "p99": 644.155}, "client_cpu_microseconds": {"user": 832361, "system": 174276}, "provider_cpu_delta": {"nr_periods": 48, "nr_throttled": 0, "throttled_usec": 0, "usage_usec": 2777087}},
+      {"stage": 0, "provider_cpus": 1, "repeat": 0, "arm": "direct", "concurrency": 32, "meter_requests": 0, "successful_rps": 5139.622662894143, "query_us": {"p50": 2144.648, "p95": 58531.04, "p99": 73329.807}, "client_cpu_microseconds": {"user": 753489, "system": 95585}, "provider_cpu_delta": {"nr_periods": 23, "nr_throttled": 19, "throttled_usec": 2637560, "usage_usec": 1951907}},
+      {"stage": 0, "provider_cpus": 1, "repeat": 0, "arm": "meter", "concurrency": 32, "meter_requests": 10000, "successful_rps": 3546.6194415089, "query_us": {"p50": 7794.113, "p95": 19732.317, "p99": 27837.489}, "client_cpu_microseconds": {"user": 1123695, "system": 191884}, "provider_cpu_delta": {"nr_periods": 32, "nr_throttled": 25, "throttled_usec": 352486, "usage_usec": 2810806}},
+      {"stage": 0, "provider_cpus": 1, "repeat": 1, "arm": "meter", "concurrency": 32, "meter_requests": 10000, "successful_rps": 3701.1311269631315, "query_us": {"p50": 7656.143, "p95": 18026.73, "p99": 23578.967}, "client_cpu_microseconds": {"user": 1117975, "system": 161036}, "provider_cpu_delta": {"nr_periods": 31, "nr_throttled": 24, "throttled_usec": 275242, "usage_usec": 2696427}},
+      {"stage": 0, "provider_cpus": 1, "repeat": 1, "arm": "direct", "concurrency": 32, "meter_requests": 0, "successful_rps": 4962.932539267436, "query_us": {"p50": 2169.459, "p95": 62759.266, "p99": 74874.718}, "client_cpu_microseconds": {"user": 732835, "system": 126040}, "provider_cpu_delta": {"nr_periods": 23, "nr_throttled": 20, "throttled_usec": 2039836, "usage_usec": 2036133}},
+      {"stage": 0, "provider_cpus": 1, "repeat": 0, "arm": "direct", "concurrency": 128, "meter_requests": 0, "successful_rps": 4534.485641177575, "query_us": {"p50": 10718.966, "p95": 82135.981, "p99": 87694.965}, "client_cpu_microseconds": {"user": 841870, "system": 130899}, "provider_cpu_delta": {"nr_periods": 25, "nr_throttled": 22, "throttled_usec": 2832797, "usage_usec": 2198232}},
+      {"stage": 0, "provider_cpus": 1, "repeat": 0, "arm": "meter", "concurrency": 128, "meter_requests": 10000, "successful_rps": 3851.348070419157, "query_us": {"p50": 29243.619, "p95": 69056.427, "p99": 91956.717}, "client_cpu_microseconds": {"user": 1150786, "system": 197360}, "provider_cpu_delta": {"nr_periods": 29, "nr_throttled": 25, "throttled_usec": 599904, "usage_usec": 2557430}},
+      {"stage": 0, "provider_cpus": 1, "repeat": 1, "arm": "meter", "concurrency": 128, "meter_requests": 10000, "successful_rps": 3911.438832247947, "query_us": {"p50": 29181.779, "p95": 66949.019, "p99": 88320.52}, "client_cpu_microseconds": {"user": 1106866, "system": 205488}, "provider_cpu_delta": {"nr_periods": 29, "nr_throttled": 24, "throttled_usec": 464217, "usage_usec": 2533711}},
+      {"stage": 0, "provider_cpus": 1, "repeat": 1, "arm": "direct", "concurrency": 128, "meter_requests": 0, "successful_rps": 4632.01057098554, "query_us": {"p50": 10792.021, "p95": 80346.153, "p99": 84507.602}, "client_cpu_microseconds": {"user": 831188, "system": 108302}, "provider_cpu_delta": {"nr_periods": 26, "nr_throttled": 21, "throttled_usec": 2406333, "usage_usec": 2132963}},
+      {"stage": 1, "provider_cpus": 2, "repeat": 0, "arm": "direct", "concurrency": 1, "meter_requests": 0, "successful_rps": 2284.453191839085, "query_us": {"p50": 414.152, "p95": 596.846, "p99": 687.862}, "client_cpu_microseconds": {"user": 860194, "system": 173212}, "provider_cpu_delta": {"nr_periods": 47, "nr_throttled": 0, "throttled_usec": 0, "usage_usec": 2770044}},
+      {"stage": 1, "provider_cpus": 2, "repeat": 0, "arm": "meter", "concurrency": 1, "meter_requests": 10000, "successful_rps": 1542.1541784792457, "query_us": {"p50": 630.03, "p95": 824.746, "p99": 930.93}, "client_cpu_microseconds": {"user": 949845, "system": 192520}, "provider_cpu_delta": {"nr_periods": 69, "nr_throttled": 0, "throttled_usec": 0, "usage_usec": 3012999}},
+      {"stage": 1, "provider_cpus": 2, "repeat": 1, "arm": "meter", "concurrency": 1, "meter_requests": 10000, "successful_rps": 1480.9636966419662, "query_us": {"p50": 653.416, "p95": 853.156, "p99": 992.152}, "client_cpu_microseconds": {"user": 1067306, "system": 176623}, "provider_cpu_delta": {"nr_periods": 72, "nr_throttled": 0, "throttled_usec": 0, "usage_usec": 3202609}},
+      {"stage": 1, "provider_cpus": 2, "repeat": 1, "arm": "direct", "concurrency": 1, "meter_requests": 0, "successful_rps": 1885.3406814551754, "query_us": {"p50": 468.715, "p95": 891.148, "p99": 1482.917}, "client_cpu_microseconds": {"user": 1095734, "system": 201100}, "provider_cpu_delta": {"nr_periods": 57, "nr_throttled": 0, "throttled_usec": 0, "usage_usec": 3345688}},
+      {"stage": 1, "provider_cpus": 2, "repeat": 0, "arm": "direct", "concurrency": 32, "meter_requests": 0, "successful_rps": 4432.095311067957, "query_us": {"p50": 5668.631, "p95": 18571.437, "p99": 29914.257}, "client_cpu_microseconds": {"user": 1723081, "system": 263348}, "provider_cpu_delta": {"nr_periods": 27, "nr_throttled": 14, "throttled_usec": 291125, "usage_usec": 4173859}},
+      {"stage": 1, "provider_cpus": 2, "repeat": 0, "arm": "meter", "concurrency": 32, "meter_requests": 10000, "successful_rps": 2067.2095253971997, "query_us": {"p50": 11904.417, "p95": 39685.944, "p99": 59462.363}, "client_cpu_microseconds": {"user": 2246004, "system": 342342}, "provider_cpu_delta": {"nr_periods": 52, "nr_throttled": 0, "throttled_usec": 0, "usage_usec": 4657909}},
+      {"stage": 1, "provider_cpus": 2, "repeat": 1, "arm": "meter", "concurrency": 32, "meter_requests": 10000, "successful_rps": 2451.8576830613906, "query_us": {"p50": 9384.467, "p95": 35413.644, "p99": 57392.643}, "client_cpu_microseconds": {"user": 1592707, "system": 275849}, "provider_cpu_delta": {"nr_periods": 45, "nr_throttled": 0, "throttled_usec": 0, "usage_usec": 3784026}},
+      {"stage": 1, "provider_cpus": 2, "repeat": 1, "arm": "direct", "concurrency": 32, "meter_requests": 0, "successful_rps": 3643.9102871983787, "query_us": {"p50": 5830.057, "p95": 21278.049, "p99": 57476.047}, "client_cpu_microseconds": {"user": 1716650, "system": 244609}, "provider_cpu_delta": {"nr_periods": 31, "nr_throttled": 12, "throttled_usec": 304199, "usage_usec": 4441659}},
+      {"stage": 1, "provider_cpus": 2, "repeat": 0, "arm": "direct", "concurrency": 128, "meter_requests": 0, "successful_rps": 6008.964924995725, "query_us": {"p50": 12506.322, "p95": 52407.05, "p99": 81394.848}, "client_cpu_microseconds": {"user": 1234980, "system": 179136}, "provider_cpu_delta": {"nr_periods": 20, "nr_throttled": 10, "throttled_usec": 339207, "usage_usec": 3185236}},
+      {"stage": 1, "provider_cpus": 2, "repeat": 0, "arm": "meter", "concurrency": 128, "meter_requests": 10000, "successful_rps": 3834.2884311923835, "query_us": {"p50": 28453.964, "p95": 74327.525, "p99": 100115.687}, "client_cpu_microseconds": {"user": 1130930, "system": 225075}, "provider_cpu_delta": {"nr_periods": 29, "nr_throttled": 0, "throttled_usec": 0, "usage_usec": 2697049}},
+      {"stage": 1, "provider_cpus": 2, "repeat": 1, "arm": "meter", "concurrency": 128, "meter_requests": 10000, "successful_rps": 3920.7436753058587, "query_us": {"p50": 28312.954, "p95": 71111.323, "p99": 92915.38}, "client_cpu_microseconds": {"user": 1138392, "system": 194563}, "provider_cpu_delta": {"nr_periods": 28, "nr_throttled": 0, "throttled_usec": 0, "usage_usec": 2656004}},
+      {"stage": 1, "provider_cpus": 2, "repeat": 1, "arm": "direct", "concurrency": 128, "meter_requests": 0, "successful_rps": 8179.491641420843, "query_us": {"p50": 10443.779, "p95": 46770.309, "p99": 51535.349}, "client_cpu_microseconds": {"user": 901718, "system": 113868}, "provider_cpu_delta": {"nr_periods": 15, "nr_throttled": 7, "throttled_usec": 297496, "usage_usec": 2276502}},
+      {"stage": 2, "provider_cpus": 1, "repeat": 0, "arm": "direct", "concurrency": 1, "meter_requests": 0, "successful_rps": 2145.4956992139846, "query_us": {"p50": 451.966, "p95": 620.543, "p99": 718.663}, "client_cpu_microseconds": {"user": 918883, "system": 167838}, "provider_cpu_delta": {"nr_periods": 50, "nr_throttled": 0, "throttled_usec": 0, "usage_usec": 2926298}},
+      {"stage": 2, "provider_cpus": 1, "repeat": 0, "arm": "meter", "concurrency": 1, "meter_requests": 10000, "successful_rps": 1429.4144126523586, "query_us": {"p50": 658.497, "p95": 865.133, "p99": 1049.787}, "client_cpu_microseconds": {"user": 1033663, "system": 193278}, "provider_cpu_delta": {"nr_periods": 74, "nr_throttled": 6, "throttled_usec": 378286, "usage_usec": 3645939}},
+      {"stage": 2, "provider_cpus": 1, "repeat": 1, "arm": "meter", "concurrency": 1, "meter_requests": 10000, "successful_rps": 1456.9596192570086, "query_us": {"p50": 662.128, "p95": 876.23, "p99": 1010.86}, "client_cpu_microseconds": {"user": 1063469, "system": 202361}, "provider_cpu_delta": {"nr_periods": 73, "nr_throttled": 0, "throttled_usec": 0, "usage_usec": 3228309}},
+      {"stage": 2, "provider_cpus": 1, "repeat": 1, "arm": "direct", "concurrency": 1, "meter_requests": 0, "successful_rps": 2104.625737208514, "query_us": {"p50": 458.37, "p95": 616.364, "p99": 716.699}, "client_cpu_microseconds": {"user": 946930, "system": 168744}, "provider_cpu_delta": {"nr_periods": 52, "nr_throttled": 0, "throttled_usec": 0, "usage_usec": 2975278}},
+      {"stage": 2, "provider_cpus": 1, "repeat": 0, "arm": "direct", "concurrency": 32, "meter_requests": 0, "successful_rps": 4916.152999880463, "query_us": {"p50": 2223.599, "p95": 60527.23, "p99": 72863.459}, "client_cpu_microseconds": {"user": 741285, "system": 126536}, "provider_cpu_delta": {"nr_periods": 24, "nr_throttled": 20, "throttled_usec": 3090943, "usage_usec": 2025971}},
+      {"stage": 2, "provider_cpus": 1, "repeat": 0, "arm": "meter", "concurrency": 32, "meter_requests": 10000, "successful_rps": 3463.9351206780857, "query_us": {"p50": 8066.501, "p95": 19936.102, "p99": 26891.088}, "client_cpu_microseconds": {"user": 1155378, "system": 219678}, "provider_cpu_delta": {"nr_periods": 32, "nr_throttled": 26, "throttled_usec": 393973, "usage_usec": 2878364}},
+      {"stage": 2, "provider_cpus": 1, "repeat": 1, "arm": "meter", "concurrency": 32, "meter_requests": 10000, "successful_rps": 3825.5060685276662, "query_us": {"p50": 7358.464, "p95": 17779.992, "p99": 23535.891}, "client_cpu_microseconds": {"user": 1005111, "system": 203321}, "provider_cpu_delta": {"nr_periods": 30, "nr_throttled": 24, "throttled_usec": 222188, "usage_usec": 2608882}},
+      {"stage": 2, "provider_cpus": 1, "repeat": 1, "arm": "direct", "concurrency": 32, "meter_requests": 0, "successful_rps": 5098.133352018876, "query_us": {"p50": 2146.659, "p95": 62978.464, "p99": 74076.27}, "client_cpu_microseconds": {"user": 722993, "system": 118876}, "provider_cpu_delta": {"nr_periods": 23, "nr_throttled": 19, "throttled_usec": 2440117, "usage_usec": 1991997}},
+      {"stage": 2, "provider_cpus": 1, "repeat": 0, "arm": "direct", "concurrency": 128, "meter_requests": 0, "successful_rps": 4771.133372069052, "query_us": {"p50": 10178.697, "p95": 79047.322, "p99": 86132.544}, "client_cpu_microseconds": {"user": 811245, "system": 143496}, "provider_cpu_delta": {"nr_periods": 24, "nr_throttled": 20, "throttled_usec": 2480374, "usage_usec": 2113643}},
+      {"stage": 2, "provider_cpus": 1, "repeat": 0, "arm": "meter", "concurrency": 128, "meter_requests": 10000, "successful_rps": 3937.7494654116244, "query_us": {"p50": 28721.752, "p95": 69067.73, "p99": 92122.508}, "client_cpu_microseconds": {"user": 1091174, "system": 207487}, "provider_cpu_delta": {"nr_periods": 29, "nr_throttled": 24, "throttled_usec": 448725, "usage_usec": 2512891}},
+      {"stage": 2, "provider_cpus": 1, "repeat": 1, "arm": "meter", "concurrency": 128, "meter_requests": 10000, "successful_rps": 3957.835608377915, "query_us": {"p50": 28612.463, "p95": 69650.897, "p99": 92316.162}, "client_cpu_microseconds": {"user": 1075469, "system": 209892}, "provider_cpu_delta": {"nr_periods": 29, "nr_throttled": 23, "throttled_usec": 477664, "usage_usec": 2493914}},
+      {"stage": 2, "provider_cpus": 1, "repeat": 1, "arm": "direct", "concurrency": 128, "meter_requests": 0, "successful_rps": 4634.540223237395, "query_us": {"p50": 10550.717, "p95": 78456.511, "p99": 80278.906}, "client_cpu_microseconds": {"user": 831412, "system": 128993}, "provider_cpu_delta": {"nr_periods": 24, "nr_throttled": 21, "throttled_usec": 2541760, "usage_usec": 2127407}}
+    ]
+  },
+  "native_provider_meter_counter_validation": {
+    "status": "counter_parity_and_capacity_verified_product_acceptance_open",
+    "acceptance": false,
+    "offline": {
+      "status": "passed",
+      "cases": 828,
+      "meter_sha256": "b520107ee13c4477d686d6d821fd57532d43a974318c69afaca344accd4e7811",
+      "canonical_meter_sha256": "30a864285b5b62a1512e23064dd0e496284c3edabc87f39a4b0ee844100697a9",
+      "scope": "Exact offline classification/accounting parity with canonical Python meter for all counters, HTTP operations, payload bytes, statuses and transport errors. Live signed-S3 and capacity verification still required."
+    },
+    "live": {
+      "checks": [
+        {
+          "name": "existing-signed-catalog-body",
+          "passed": true
+        },
+        {
+          "name": "existing-head-length",
+          "passed": true
+        },
+        {
+          "name": "existing-range-bytes",
+          "passed": true
+        },
+        {
+          "name": "actual-missing-error-preserved",
+          "passed": true
+        },
+        {
+          "name": "streamed-put-get-byte-identical",
+          "passed": true
+        },
+        {
+          "name": "streamed-range-byte-identical",
+          "passed": true
+        },
+        {
+          "name": "streamed-head-length",
+          "passed": true
+        },
+        {
+          "name": "create-only-conflict-status-preserved",
+          "passed": true
+        },
+        {
+          "name": "copy-byte-identical",
+          "passed": true
+        },
+        {
+          "name": "signed-list-prefix",
+          "passed": true
+        },
+        {
+          "name": "multipart-complete-byte-identical",
+          "passed": true
+        },
+        {
+          "name": "multipart-abort",
+          "passed": true
+        },
+        {
+          "name": "all-owned-objects-deleted",
+          "passed": true
+        },
+        {
+          "name": "all-live-counters-exactly-match-canonical",
+          "passed": true
+        },
+        {
+          "name": "all-actual-sdk-attempts-counted-once",
+          "passed": true
+        },
+        {
+          "name": "no-proxy-errors",
+          "passed": true
+        }
+      ],
+      "meter_sha256": "b520107ee13c4477d686d6d821fd57532d43a974318c69afaca344accd4e7811",
+      "driver_sha256": "642ba42523be3e631bb7dc93c23a4b91f48030256864c77b6dfe23d85beb906e",
+      "counter_snapshot": {
+        "requests": 21,
+        "request_body_bytes": 18875664,
+        "response_body_bytes": 19076753,
+        "methods": {
+          "GET": 9,
+          "HEAD": 2,
+          "PUT": 4,
+          "POST": 4,
+          "DELETE": 2
+        },
+        "operations": {
+          "get": 7,
+          "head": 2,
+          "put": 2,
+          "copy": 1,
+          "list": 2,
+          "multipart_create": 2,
+          "multipart_part": 1,
+          "multipart_complete": 1,
+          "multipart_abort": 1,
+          "delete": 1,
+          "delete_batch": 1
+        },
+        "categories": {
+          "read-hardening-postfix-candidate-20261119": 3,
+          "read-hardening-native-meter-live-20261119": 17,
+          "outside-repository": 1
+        },
+        "classes": {
+          "read-hardening-postfix-candidate-20261119:get": 2,
+          "read-hardening-postfix-candidate-20261119:head": 1,
+          "read-hardening-native-meter-live-20261119:get": 5,
+          "read-hardening-native-meter-live-20261119:put": 2,
+          "read-hardening-native-meter-live-20261119:head": 1,
+          "read-hardening-native-meter-live-20261119:copy": 1,
+          "read-hardening-native-meter-live-20261119:list": 2,
+          "read-hardening-native-meter-live-20261119:multipart_create": 2,
+          "read-hardening-native-meter-live-20261119:multipart_part": 1,
+          "read-hardening-native-meter-live-20261119:multipart_complete": 1,
+          "read-hardening-native-meter-live-20261119:multipart_abort": 1,
+          "read-hardening-native-meter-live-20261119:delete": 1,
+          "outside-repository:delete_batch": 1
+        },
+        "class_request_body_bytes": {
+          "read-hardening-postfix-candidate-20261119:get": 0,
+          "read-hardening-postfix-candidate-20261119:head": 0,
+          "read-hardening-native-meter-live-20261119:get": 0,
+          "read-hardening-native-meter-live-20261119:put": 12583424,
+          "read-hardening-native-meter-live-20261119:head": 0,
+          "read-hardening-native-meter-live-20261119:copy": 0,
+          "read-hardening-native-meter-live-20261119:list": 0,
+          "read-hardening-native-meter-live-20261119:multipart_create": 0,
+          "read-hardening-native-meter-live-20261119:multipart_part": 6291712,
+          "read-hardening-native-meter-live-20261119:multipart_complete": 185,
+          "read-hardening-native-meter-live-20261119:multipart_abort": 0,
+          "read-hardening-native-meter-live-20261119:delete": 0,
+          "outside-repository:delete_batch": 343
+        },
+        "class_response_body_bytes": {
+          "read-hardening-postfix-candidate-20261119:get": 1445,
+          "read-hardening-postfix-candidate-20261119:head": 0,
+          "read-hardening-native-meter-live-20261119:get": 19071884,
+          "read-hardening-native-meter-live-20261119:put": 164,
+          "read-hardening-native-meter-live-20261119:head": 0,
+          "read-hardening-native-meter-live-20261119:copy": 175,
+          "read-hardening-native-meter-live-20261119:list": 1336,
+          "read-hardening-native-meter-live-20261119:multipart_create": 870,
+          "read-hardening-native-meter-live-20261119:multipart_part": 0,
+          "read-hardening-native-meter-live-20261119:multipart_complete": 501,
+          "read-hardening-native-meter-live-20261119:multipart_abort": 0,
+          "read-hardening-native-meter-live-20261119:delete": 0,
+          "outside-repository:delete_batch": 378
+        },
+        "statuses": {
+          "2xx": 19,
+          "4xx": 2
+        },
+        "proxy_errors": {}
+      },
+      "actual_sdk_attempts": 21,
+      "node_version": "v22.23.2",
+      "node_exit": 0
+    },
+    "live_report_sha256": "63a90a8b3144e4eaf0532e2a865b5d5a284bdd0c0d3a8fad69206eaa66072caf",
+    "retained_setup_failure": "Initial live attempt stopped before any S3 request because the bundled AWSCLI client uses max_attempts=1 rather than total_max_attempts. Its zero-check receipt is retained; the retry uses fresh directories and dependency-source-verified retry/body-close contracts.",
+    "scope": "Streaming relay only; no cache or retry. Exact counters verified on828offline cases and21live S3 attempts. All360000capacity requests pass byte/HEAD checks. At2providerCPU/32clients medianRPS9622metered vs9746direct removes the earlier Python ceiling; low-concurrency overhead and unstable first1CPUdirect control are retained. No product latency/acceptance verdict.",
+    "capacity": {
+      "profile_sha256": "105351c2aecdb1ecd3bca19425a0d56d656eb18a48b5c99d9924bd988f2a02b8",
+      "raw_report_sha256": "8daf5a3b055bf6a82391b9a64ebd999b98a0e1e22fe609d02e3e5be5f680a53c",
+      "requests_checked": 360000,
+      "provider_cpu_stages": [
+        1,
+        2,
+        1
+      ],
+      "provider_cpu_restored": true,
+      "meter_exit_code": 0,
+      "active_requests_at_shutdown": 0,
+      "peak_meter_rss_bytes": 83066880,
+      "cells": [
+        {"stage": 0, "provider_cpus": 1, "repeat": 0, "arm": "direct", "concurrency": 1, "meter_requests": 0, "successful_rps": 319.28134604712346, "query_us": {"p50": 1684.114, "p95": 10596.428, "p99": 22722.406}, "client_cpu_microseconds": {"user": 5413190, "system": 1085915}, "provider_cpu_delta": {"nr_periods": 317, "nr_throttled": 2, "throttled_usec": 9827, "usage_usec": 14394163}},
+        {"stage": 0, "provider_cpus": 1, "repeat": 0, "arm": "meter", "concurrency": 1, "meter_requests": 10000, "successful_rps": 908.4240090944566, "query_us": {"p50": 816.377, "p95": 2181.138, "p99": 3585.175}, "client_cpu_microseconds": {"user": 1783998, "system": 263928}, "provider_cpu_delta": {"nr_periods": 113, "nr_throttled": 0, "throttled_usec": 0, "usage_usec": 4809819}},
+        {"stage": 0, "provider_cpus": 1, "repeat": 1, "arm": "meter", "concurrency": 1, "meter_requests": 10000, "successful_rps": 1542.1486897598152, "query_us": {"p50": 614.162, "p95": 853.685, "p99": 1154.488}, "client_cpu_microseconds": {"user": 1011952, "system": 182923}, "provider_cpu_delta": {"nr_periods": 69, "nr_throttled": 0, "throttled_usec": 0, "usage_usec": 3199127}},
+        {"stage": 0, "provider_cpus": 1, "repeat": 1, "arm": "direct", "concurrency": 1, "meter_requests": 0, "successful_rps": 2033.3538729999234, "query_us": {"p50": 450.068, "p95": 599.319, "p99": 694.045}, "client_cpu_microseconds": {"user": 857470, "system": 175302}, "provider_cpu_delta": {"nr_periods": 53, "nr_throttled": 6, "throttled_usec": 462697, "usage_usec": 3270464}},
+        {"stage": 0, "provider_cpus": 1, "repeat": 0, "arm": "direct", "concurrency": 32, "meter_requests": 0, "successful_rps": 5066.146901880288, "query_us": {"p50": 2179.67, "p95": 60543.132, "p99": 72103.767}, "client_cpu_microseconds": {"user": 715398, "system": 150172}, "provider_cpu_delta": {"nr_periods": 23, "nr_throttled": 19, "throttled_usec": 2710552, "usage_usec": 2036792}},
+        {"stage": 0, "provider_cpus": 1, "repeat": 0, "arm": "meter", "concurrency": 32, "meter_requests": 10000, "successful_rps": 5209.292578437708, "query_us": {"p50": 2713.658, "p95": 48869.897, "p99": 64021.253}, "client_cpu_microseconds": {"user": 775336, "system": 94929}, "provider_cpu_delta": {"nr_periods": 22, "nr_throttled": 18, "throttled_usec": 1554565, "usage_usec": 1969180}},
+        {"stage": 0, "provider_cpus": 1, "repeat": 1, "arm": "meter", "concurrency": 32, "meter_requests": 10000, "successful_rps": 5211.828686959654, "query_us": {"p50": 2689.892, "p95": 51795.419, "p99": 62763.529}, "client_cpu_microseconds": {"user": 753395, "system": 95968}, "provider_cpu_delta": {"nr_periods": 22, "nr_throttled": 19, "throttled_usec": 2171896, "usage_usec": 1976901}},
+        {"stage": 0, "provider_cpus": 1, "repeat": 1, "arm": "direct", "concurrency": 32, "meter_requests": 0, "successful_rps": 4560.637338341415, "query_us": {"p50": 2385.814, "p95": 62758.115, "p99": 74129.476}, "client_cpu_microseconds": {"user": 828268, "system": 109995}, "provider_cpu_delta": {"nr_periods": 25, "nr_throttled": 21, "throttled_usec": 2691304, "usage_usec": 2221161}},
+        {"stage": 0, "provider_cpus": 1, "repeat": 0, "arm": "direct", "concurrency": 128, "meter_requests": 0, "successful_rps": 4039.4641558374346, "query_us": {"p50": 13828.665, "p95": 80817.467, "p99": 87485.704}, "client_cpu_microseconds": {"user": 896218, "system": 136126}, "provider_cpu_delta": {"nr_periods": 28, "nr_throttled": 24, "throttled_usec": 3074329, "usage_usec": 2482991}},
+        {"stage": 0, "provider_cpus": 1, "repeat": 0, "arm": "meter", "concurrency": 128, "meter_requests": 10000, "successful_rps": 3906.5446816524936, "query_us": {"p50": 17663.558, "p95": 75858.029, "p99": 80350.026}, "client_cpu_microseconds": {"user": 1021458, "system": 108181}, "provider_cpu_delta": {"nr_periods": 29, "nr_throttled": 25, "throttled_usec": 2428382, "usage_usec": 2506193}},
+        {"stage": 0, "provider_cpus": 1, "repeat": 1, "arm": "meter", "concurrency": 128, "meter_requests": 10000, "successful_rps": 4565.110383529094, "query_us": {"p50": 14558.088, "p95": 72192.439, "p99": 79077.888}, "client_cpu_microseconds": {"user": 892573, "system": 95278}, "provider_cpu_delta": {"nr_periods": 26, "nr_throttled": 21, "throttled_usec": 2732010, "usage_usec": 2229139}},
+        {"stage": 0, "provider_cpus": 1, "repeat": 1, "arm": "direct", "concurrency": 128, "meter_requests": 0, "successful_rps": 4238.525540797119, "query_us": {"p50": 12326.028, "p95": 79347.605, "p99": 87810.066}, "client_cpu_microseconds": {"user": 892250, "system": 122874}, "provider_cpu_delta": {"nr_periods": 27, "nr_throttled": 23, "throttled_usec": 2817574, "usage_usec": 2347878}},
+        {"stage": 1, "provider_cpus": 2, "repeat": 0, "arm": "direct", "concurrency": 1, "meter_requests": 0, "successful_rps": 2341.7296109418626, "query_us": {"p50": 415.305, "p95": 567.3, "p99": 687.453}, "client_cpu_microseconds": {"user": 858292, "system": 157084}, "provider_cpu_delta": {"nr_periods": 46, "nr_throttled": 0, "throttled_usec": 0, "usage_usec": 2679416}},
+        {"stage": 1, "provider_cpus": 2, "repeat": 0, "arm": "meter", "concurrency": 1, "meter_requests": 10000, "successful_rps": 1471.0388092895014, "query_us": {"p50": 655.365, "p95": 826.022, "p99": 1025.61}, "client_cpu_microseconds": {"user": 984791, "system": 170668}, "provider_cpu_delta": {"nr_periods": 72, "nr_throttled": 0, "throttled_usec": 0, "usage_usec": 3326360}},
+        {"stage": 1, "provider_cpus": 2, "repeat": 1, "arm": "meter", "concurrency": 1, "meter_requests": 10000, "successful_rps": 1494.2558841109671, "query_us": {"p50": 648.721, "p95": 810.588, "p99": 966.873}, "client_cpu_microseconds": {"user": 939703, "system": 180076}, "provider_cpu_delta": {"nr_periods": 71, "nr_throttled": 0, "throttled_usec": 0, "usage_usec": 3296193}},
+        {"stage": 1, "provider_cpus": 2, "repeat": 1, "arm": "direct", "concurrency": 1, "meter_requests": 0, "successful_rps": 2044.8353774351262, "query_us": {"p50": 472.652, "p95": 614.458, "p99": 697.983}, "client_cpu_microseconds": {"user": 859280, "system": 168262}, "provider_cpu_delta": {"nr_periods": 53, "nr_throttled": 0, "throttled_usec": 0, "usage_usec": 2980913}},
+        {"stage": 1, "provider_cpus": 2, "repeat": 0, "arm": "direct", "concurrency": 32, "meter_requests": 0, "successful_rps": 9520.760423211168, "query_us": {"p50": 2184.228, "p95": 5524.278, "p99": 34414.92}, "client_cpu_microseconds": {"user": 748370, "system": 107760}, "provider_cpu_delta": {"nr_periods": 15, "nr_throttled": 5, "throttled_usec": 331152, "usage_usec": 1995877}},
+        {"stage": 1, "provider_cpus": 2, "repeat": 0, "arm": "meter", "concurrency": 32, "meter_requests": 10000, "successful_rps": 9517.803427263932, "query_us": {"p50": 2955.811, "p95": 5818.806, "p99": 14575.185}, "client_cpu_microseconds": {"user": 775506, "system": 90950}, "provider_cpu_delta": {"nr_periods": 14, "nr_throttled": 4, "throttled_usec": 16584, "usage_usec": 1909212}},
+        {"stage": 1, "provider_cpus": 2, "repeat": 1, "arm": "meter", "concurrency": 32, "meter_requests": 10000, "successful_rps": 9726.608656595527, "query_us": {"p50": 2888.613, "p95": 5405.862, "p99": 9910.185}, "client_cpu_microseconds": {"user": 775327, "system": 93073}, "provider_cpu_delta": {"nr_periods": 14, "nr_throttled": 2, "throttled_usec": 16418, "usage_usec": 1879305}},
+        {"stage": 1, "provider_cpus": 2, "repeat": 1, "arm": "direct", "concurrency": 32, "meter_requests": 0, "successful_rps": 9971.564975628282, "query_us": {"p50": 2195.227, "p95": 5662, "p99": 30480.333}, "client_cpu_microseconds": {"user": 741010, "system": 117688}, "provider_cpu_delta": {"nr_periods": 14, "nr_throttled": 6, "throttled_usec": 290472, "usage_usec": 1932691}},
+        {"stage": 1, "provider_cpus": 2, "repeat": 0, "arm": "direct", "concurrency": 128, "meter_requests": 0, "successful_rps": 8015.150365463204, "query_us": {"p50": 11243.349, "p95": 44587.005, "p99": 52559.172}, "client_cpu_microseconds": {"user": 920897, "system": 133412}, "provider_cpu_delta": {"nr_periods": 17, "nr_throttled": 7, "throttled_usec": 289596, "usage_usec": 2233132}},
+        {"stage": 1, "provider_cpus": 2, "repeat": 0, "arm": "meter", "concurrency": 128, "meter_requests": 10000, "successful_rps": 8433.329186890262, "query_us": {"p50": 13330.609, "p95": 26076.88, "p99": 56052.31}, "client_cpu_microseconds": {"user": 912124, "system": 86175}, "provider_cpu_delta": {"nr_periods": 15, "nr_throttled": 1, "throttled_usec": 2572, "usage_usec": 2026646}},
+        {"stage": 1, "provider_cpus": 2, "repeat": 1, "arm": "meter", "concurrency": 128, "meter_requests": 10000, "successful_rps": 9248.763804911796, "query_us": {"p50": 12421.067, "p95": 27215.812, "p99": 45768.283}, "client_cpu_microseconds": {"user": 813839, "system": 89758}, "provider_cpu_delta": {"nr_periods": 15, "nr_throttled": 0, "throttled_usec": 0, "usage_usec": 1850722}},
+        {"stage": 1, "provider_cpus": 2, "repeat": 1, "arm": "direct", "concurrency": 128, "meter_requests": 0, "successful_rps": 9172.307768943028, "query_us": {"p50": 9780.25, "p95": 42403.317, "p99": 57357.148}, "client_cpu_microseconds": {"user": 829494, "system": 132661}, "provider_cpu_delta": {"nr_periods": 15, "nr_throttled": 7, "throttled_usec": 214104, "usage_usec": 2064744}},
+        {"stage": 2, "provider_cpus": 1, "repeat": 0, "arm": "direct", "concurrency": 1, "meter_requests": 0, "successful_rps": 2119.089825524765, "query_us": {"p50": 445.882, "p95": 626.034, "p99": 894.255}, "client_cpu_microseconds": {"user": 872937, "system": 151001}, "provider_cpu_delta": {"nr_periods": 51, "nr_throttled": 0, "throttled_usec": 0, "usage_usec": 2856866}},
+        {"stage": 2, "provider_cpus": 1, "repeat": 0, "arm": "meter", "concurrency": 1, "meter_requests": 10000, "successful_rps": 1534.27150388321, "query_us": {"p50": 608.096, "p95": 883.096, "p99": 1310.772}, "client_cpu_microseconds": {"user": 1035278, "system": 186401}, "provider_cpu_delta": {"nr_periods": 69, "nr_throttled": 0, "throttled_usec": 0, "usage_usec": 3168604}},
+        {"stage": 2, "provider_cpus": 1, "repeat": 1, "arm": "meter", "concurrency": 1, "meter_requests": 10000, "successful_rps": 1469.4369660062393, "query_us": {"p50": 627.411, "p95": 907.869, "p99": 1340.443}, "client_cpu_microseconds": {"user": 1014831, "system": 187865}, "provider_cpu_delta": {"nr_periods": 74, "nr_throttled": 3, "throttled_usec": 141570, "usage_usec": 3724611}},
+        {"stage": 2, "provider_cpus": 1, "repeat": 1, "arm": "direct", "concurrency": 1, "meter_requests": 0, "successful_rps": 2203.3524785303593, "query_us": {"p50": 441.132, "p95": 579.13, "p99": 661.266}, "client_cpu_microseconds": {"user": 811267, "system": 165105}, "provider_cpu_delta": {"nr_periods": 50, "nr_throttled": 0, "throttled_usec": 0, "usage_usec": 2761900}},
+        {"stage": 2, "provider_cpus": 1, "repeat": 0, "arm": "direct", "concurrency": 32, "meter_requests": 0, "successful_rps": 5139.8833253167, "query_us": {"p50": 2162.523, "p95": 62161.225, "p99": 71068.354}, "client_cpu_microseconds": {"user": 741899, "system": 110657}, "provider_cpu_delta": {"nr_periods": 24, "nr_throttled": 19, "throttled_usec": 2351461, "usage_usec": 1973973}},
+        {"stage": 2, "provider_cpus": 1, "repeat": 0, "arm": "meter", "concurrency": 32, "meter_requests": 10000, "successful_rps": 4986.465578054379, "query_us": {"p50": 3118.006, "p95": 49569.352, "p99": 56057.783}, "client_cpu_microseconds": {"user": 839632, "system": 84550}, "provider_cpu_delta": {"nr_periods": 24, "nr_throttled": 20, "throttled_usec": 1883879, "usage_usec": 1994168}},
+        {"stage": 2, "provider_cpus": 1, "repeat": 1, "arm": "meter", "concurrency": 32, "meter_requests": 10000, "successful_rps": 4856.886579359452, "query_us": {"p50": 3040.704, "p95": 51053.742, "p99": 59351.437}, "client_cpu_microseconds": {"user": 793284, "system": 99370}, "provider_cpu_delta": {"nr_periods": 25, "nr_throttled": 20, "throttled_usec": 1714441, "usage_usec": 2087906}},
+        {"stage": 2, "provider_cpus": 1, "repeat": 1, "arm": "direct", "concurrency": 32, "meter_requests": 0, "successful_rps": 5050.401206093989, "query_us": {"p50": 2169.786, "p95": 62661.015, "p99": 71137.811}, "client_cpu_microseconds": {"user": 737115, "system": 117589}, "provider_cpu_delta": {"nr_periods": 24, "nr_throttled": 19, "throttled_usec": 2029973, "usage_usec": 1958859}},
+        {"stage": 2, "provider_cpus": 1, "repeat": 0, "arm": "direct", "concurrency": 128, "meter_requests": 0, "successful_rps": 4859.151032504117, "query_us": {"p50": 10039.451, "p95": 78791.707, "p99": 83061.479}, "client_cpu_microseconds": {"user": 823634, "system": 127398}, "provider_cpu_delta": {"nr_periods": 26, "nr_throttled": 20, "throttled_usec": 2808873, "usage_usec": 2044243}},
+        {"stage": 2, "provider_cpus": 1, "repeat": 0, "arm": "meter", "concurrency": 128, "meter_requests": 10000, "successful_rps": 4879.377004032716, "query_us": {"p50": 13956.516, "p95": 70841.373, "p99": 75777.037}, "client_cpu_microseconds": {"user": 843469, "system": 107793}, "provider_cpu_delta": {"nr_periods": 23, "nr_throttled": 20, "throttled_usec": 1659936, "usage_usec": 2044340}},
+        {"stage": 2, "provider_cpus": 1, "repeat": 1, "arm": "meter", "concurrency": 128, "meter_requests": 10000, "successful_rps": 4825.703349906655, "query_us": {"p50": 14116.26, "p95": 70191.682, "p99": 75700.217}, "client_cpu_microseconds": {"user": 892046, "system": 83963}, "provider_cpu_delta": {"nr_periods": 24, "nr_throttled": 20, "throttled_usec": 1955078, "usage_usec": 2060260}},
+        {"stage": 2, "provider_cpus": 1, "repeat": 1, "arm": "direct", "concurrency": 128, "meter_requests": 0, "successful_rps": 4938.699396299411, "query_us": {"p50": 10120.283, "p95": 78955.869, "p99": 81963.571}, "client_cpu_microseconds": {"user": 816370, "system": 122795}, "provider_cpu_delta": {"nr_periods": 23, "nr_throttled": 20, "throttled_usec": 2291217, "usage_usec": 2056104}}
+      ]
+    },
+    "public_meter_path": "crab/scripts/e2e/native_provider_meter.mjs"
+  },
+  "prior_ci_image_recovery": {
+    "status": "verified",
+    "run_id": 44673250099,
+    "job_id": 136078927837,
+    "artifact_id": 14604179795,
+    "source_revision": "8b806338bd66b892bdc3f15dff2cf71d6aa0a634",
+    "image_digest": "sha256:208cd6e77c6b89dac853c7a5dae754a83cccbc3241dffaff439faf1c9960501e",
+    "receipt_sha256": "b3129834b7745f8653ed6315a9298c4d469c115922fcaa23fcc7f5f8e7d82962",
+    "scope": "Actual CI process recovery/application/Git evidence on preceding8b image only; not relabeled as current734 or Kubernetes recovery proof.",
+    "recovery": {
+      "abrupt_process_restart": true,
+      "boto3_version": "1.43.126",
+      "forced_exit_status": 137,
+      "root_copy": {
+        "source": "s3://crab-cellar-test/repositories",
+        "destination": "s3://crab-project-restore-1c895669a6254d3ca43ae40e121ca041/repositories/",
+        "objects": 330,
+        "bytes": 1507627,
+        "sha256_and_metadata_verified": true,
+        "elapsed_seconds": 2.9970100389998606
+      },
+      "restored_into_empty_cache": true,
+      "application_state_verified": true,
+      "git_refs_verified": true,
+      "offline_copy_and_restore_seconds": 3.638619091999999
+    }
+  },
+  "native_meter_profile_calibration": {
+    "status": "failed_calibration",
+    "acceptance": false,
+    "profile_sha256": "9431600cd54c2dae46162bc3d0daecac46cb6930991a28097e84a181af214be6",
+    "raw_report_sha256": "bd592a944063d2e728be5565b33cb04c3448c46cc002a6cc6d1bcec804940ae6",
+    "fresh_baseline_processes": 400,
+    "git_queries_checked": 400,
+    "pairs_per_case": 100,
+    "provider_cpus": 2,
+    "parent_vm_profile": "The prior final_testbed_declaration digest records the unchanged6CPU/8GiB VM; the new frozen profile explicitly overrides only provider CPU to2 before these observations.",
+    "cells": [
+      {
+        "commits": 100,
+        "operation": "object-batch",
+        "cache": "cold",
+        "kind": "calibration",
+        "a": {
+          "query_us": {
+            "p50": 41340,
+            "p95": 48494
+          },
+          "median_backend_reads": 55.0,
+          "median_backend_bytes": 45466.0
+        },
+        "b": {
+          "query_us": {
+            "p50": 41194,
+            "p95": 49528
+          },
+          "median_backend_reads": 55.0,
+          "median_backend_bytes": 45466.0
+        },
+        "target": false,
+        "p95_ratio": 1.02132222542995,
+        "gate": "passed"
+      },
+      {
+        "commits": 100,
+        "operation": "object-batch",
+        "cache": "warm",
+        "kind": "calibration",
+        "a": {
+          "query_us": {
+            "p50": 247,
+            "p95": 314
+          },
+          "median_backend_reads": 0.0,
+          "median_backend_bytes": 0.0
+        },
+        "b": {
+          "query_us": {
+            "p50": 248,
+            "p95": 302
+          },
+          "median_backend_reads": 0.0,
+          "median_backend_bytes": 0.0
+        },
+        "target": false,
+        "p95_ratio": 0.9617834394904459,
+        "gate": "passed"
+      },
+      {
+        "commits": 10000,
+        "operation": "commit",
+        "cache": "cold",
+        "kind": "calibration",
+        "a": {
+          "query_us": {
+            "p50": 14237,
+            "p95": 54622
+          },
+          "median_backend_reads": 7.0,
+          "median_backend_bytes": 72285.0
+        },
+        "b": {
+          "query_us": {
+            "p50": 13894,
+            "p95": 38751
+          },
+          "median_backend_reads": 7.0,
+          "median_backend_bytes": 72285.0
+        },
+        "target": false,
+        "p95_ratio": 0.7094394200139138,
+        "gate": "failed"
+      },
+      {
+        "commits": 10000,
+        "operation": "commit",
+        "cache": "warm",
+        "kind": "calibration",
+        "a": {
+          "query_us": {
+            "p50": 111,
+            "p95": 1037
+          },
+          "median_backend_reads": 0.0,
+          "median_backend_bytes": 0.0
+        },
+        "b": {
+          "query_us": {
+            "p50": 113,
+            "p95": 386
+          },
+          "median_backend_reads": 0.0,
+          "median_backend_bytes": 0.0
+        },
+        "target": false,
+        "p95_ratio": 0.3722275795564127,
+        "gate": "failed"
+      }
+    ],
+    "scope": "Exact same baseline executable, original two cases and original symmetric1/1.1..1.1band, no candidate verdict. Object-batch cold/warm pass; commit cold/warm fail despite similar medians. All failed calibration receipts remain retained, and no threshold/sample adjustment follows."
   }
 }
