@@ -63,18 +63,20 @@ impl RemoteGitSnapshot {
         const PREFETCH: usize = 16;
 
         let mut items = Vec::new();
+        let mut commits = Vec::new();
         let mut next = Some(start);
         while items.len() < page.limit()
             && let Some(oid) = next
         {
             operation.ensure_active()?;
-            let commits = if let Some(commit) = operation.cached_commit(oid).await {
+            commits.clear();
+            if let Some(commit) = operation.cached_commit(oid).await {
                 // Verified raw parents already determine the next commit. The
                 // graph only accelerates cold batching; consulting it again
                 // would add metadata work to every parsed-cache hit.
                 operation.charge(BudgetDimension::HistoryCommits, 1).await?;
                 operation.charge(BudgetDimension::LogicalObjects, 1).await?;
-                vec![commit.value.clone()]
+                commits.push(commit.value.clone());
             } else if let Some(graph) = &self.commit_graph {
                 // Unknown commit messages can exhaust the response budget. Bound
                 // speculation by the existing object/response limits first.
@@ -98,7 +100,7 @@ impl RemoteGitSnapshot {
                         stage: CorruptionStage::CommitGraph,
                     });
                 }
-                let commits = path_history_commits(&oids, operation).await?;
+                commits = path_history_commits(&oids, operation).await?;
                 if !graph.parents_match(&commits, operation).await?
                     || !commits
                         .windows(2)
@@ -108,17 +110,16 @@ impl RemoteGitSnapshot {
                         stage: CorruptionStage::CommitGraph,
                     });
                 }
-                commits
             } else {
-                vec![path_history_commit(oid, operation).await?]
-            };
+                commits.push(path_history_commit(oid, operation).await?);
+            }
             items
                 .try_reserve(commits.len())
                 .map_err(|source| Error::Allocation {
                     requested: commits.len().saturating_mul(mem::size_of::<Commit>()),
                     source,
                 })?;
-            for commit in commits {
+            for commit in commits.drain(..) {
                 operation
                     .charge(
                         BudgetDimension::ResponseBytes,
