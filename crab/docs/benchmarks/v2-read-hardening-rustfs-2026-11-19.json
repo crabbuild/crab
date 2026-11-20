@@ -14220,5 +14220,240 @@
       "workflow": "https://github.com/crabbuild/crab/actions/runs/44769392808"
     },
     "remaining": "Full source-matched combined HTTP gates/minimum-resource soak and repeatability remain open. All earlier failures retained. Independent growth and naturally aged cold-reader GC checks pass."
+  },
+  "http_provider_headroom_repeatability": {
+    "runtime_source_revision": "ba6c06009dd6c53b1775243c8ed10a7e35cf6e67",
+    "runtime_binaries_identical_to": "a5d6015e2c81a6a7cc4770361a1e20bb4193267a",
+    "binary_equivalence": {
+      "mac": {
+        "old_source": "a5d6015e2c81a6a7cc4770361a1e20bb4193267a",
+        "new_source": "ba6c06009dd6c53b1775243c8ed10a7e35cf6e67",
+        "old_binary_sha256": "c4c38992706f163bdc3b86c9ea11b67faad2a9fc47b3d35de6bb3cf439f373f3",
+        "new_binary_sha256": "c4c38992706f163bdc3b86c9ea11b67faad2a9fc47b3d35de6bb3cf439f373f3",
+        "binary_identical": true,
+        "changed_inputs": [
+          "crates/crab-workflow/assets/results-runtime.js",
+          "crates/crab-workflow/assets/results-runtime.mjs",
+          "packages/ui/tests/browser/results-chart-runtime.e2e.ts"
+        ]
+      },
+      "linux": {
+        "old_source": "a5d6015e2c81a6a7cc4770361a1e20bb4193267a",
+        "new_source": "ba6c06009dd6c53b1775243c8ed10a7e35cf6e67",
+        "old_binary_sha256": "e7fefff2fbcd3c8ceb2520132157b3319d7c7746950882ed163a1c7d98741b09",
+        "new_binary_sha256": "e7fefff2fbcd3c8ceb2520132157b3319d7c7746950882ed163a1c7d98741b09",
+        "binary_identical": true,
+        "changed_inputs": [
+          "crates/crab-workflow/assets/results-runtime.js",
+          "crates/crab-workflow/assets/results-runtime.mjs",
+          "packages/ui/tests/browser/results-chart-runtime.e2e.ts"
+        ]
+      }
+    },
+    "acceptance": false,
+    "prior_failed_http_calibration": {
+      "summary_sha256": "7bef0c5fd22102c960f4fdd1899f808d26d04355885f93819eb4bb4cf98a242e",
+      "failed_cells": 5,
+      "status": "failed_http_calibration",
+      "scope": "SameR0Root/binary,20fixedpairs percase,1CPUprovider. Allobservations retained."
+    },
+    "provider_reversal": {
+      "status": "diagnostic_provider_capacity_reversal",
+      "acceptance": false,
+      "source_report_sha256": "64cd07ec9cbc7f3049a46b84ffc9f752413c3a114a83c5a14521dd65ecb8d749",
+      "source_profile_sha256": "9a0ae8cc5b2eb743bff166898f5f53e32cbcc9c25037dad7b2cc4c507ae78498",
+      "cells": [
+        {
+          "stage": 0,
+          "provider_cpus": 1,
+          "case": "small-16",
+          "successful_rps_median": 2855.7013047487426,
+          "preview_p95_us_median": 7982.9035,
+          "provider_cpu_cores_median": 0.9950519986934153,
+          "provider_throttled_usec": 120,
+          "minimum_rps": 2748.013667181987,
+          "maximum_rps": 2889.8260625245503
+        },
+        {
+          "stage": 0,
+          "provider_cpus": 1,
+          "case": "mixed-64",
+          "successful_rps_median": 2643.2474012185676,
+          "preview_p95_us_median": 32559.5625,
+          "provider_cpu_cores_median": 0.9666442409608234,
+          "provider_throttled_usec": 185,
+          "minimum_rps": 2551.3308050641244,
+          "maximum_rps": 2739.16302931072
+        },
+        {
+          "stage": 1,
+          "provider_cpus": 2,
+          "case": "small-16",
+          "successful_rps_median": 3539.0680777972393,
+          "preview_p95_us_median": 7273.0875,
+          "provider_cpu_cores_median": 1.7505454835050425,
+          "provider_throttled_usec": 0,
+          "minimum_rps": 3383.4911480754504,
+          "maximum_rps": 3615.343876420451
+        },
+        {
+          "stage": 1,
+          "provider_cpus": 2,
+          "case": "mixed-64",
+          "successful_rps_median": 3273.1786902354097,
+          "preview_p95_us_median": 27807.343500000003,
+          "provider_cpu_cores_median": 1.611973209612907,
+          "provider_throttled_usec": 0,
+          "minimum_rps": 2928.733451347701,
+          "maximum_rps": 3338.348831270344
+        },
+        {
+          "stage": 2,
+          "provider_cpus": 1,
+          "case": "small-16",
+          "successful_rps_median": 2778.1739500970107,
+          "preview_p95_us_median": 8241.972,
+          "provider_cpu_cores_median": 0.9927386314073823,
+          "provider_throttled_usec": 37,
+          "minimum_rps": 2534.0045386484053,
+          "maximum_rps": 2886.3726615999954
+        },
+        {
+          "stage": 2,
+          "provider_cpus": 1,
+          "case": "mixed-64",
+          "successful_rps_median": 2529.1051709458343,
+          "preview_p95_us_median": 36691.766,
+          "provider_cpu_cores_median": 0.9641790861700621,
+          "provider_throttled_usec": 15,
+          "minimum_rps": 1146.8401961310271,
+          "maximum_rps": 2686.5324045462985
+        }
+      ],
+      "limitations": "BackendCPUcapacityhelpsfirst2CPUstage, but returned1CPUstagehasadditionalvariance; notsolecauseverdict or performanceacceptance. All36trials/errors/oracles/resources retained."
+    },
+    "http_repeatability": {
+      "status": "passed_same_executable_http_calibration",
+      "summary_sha256": "bdc27fb4d4fbd733fe9b8f1c2ad179658c15132ed30ea07f60af3330c3312d4e",
+      "report_sha256": "218ed3bb54c41015db8c216087dfa6e3253139d1b6953f43822014d570d11257",
+      "profile_sha256": "892990a9d03d955af0805911363e9dda0ab7c33c61e5ca09dd70b6a0d9ce1767",
+      "trials": 80,
+      "pairs_per_case": 20,
+      "provider_resource_proof": {
+        "NanoCpus": 2000000000,
+        "CpusetCpus": "0,5",
+        "Memory": 3221225472,
+        "MemorySwap": 3221225472
+      },
+      "product_quota": "Each replica1CPU/1GiB/no additional swap; unchanged frompriorprofile.",
+      "cells": [
+        {
+          "case": "small-16",
+          "workload": "preview",
+          "p95_ratio": 1.0607171118579595,
+          "throughput_ratio": 0.9680600442694396,
+          "gate": "passed",
+          "a_p95_us": 7522.871,
+          "b_p95_us": 7979.638,
+          "a_successful_rps": 3360.5836635931905,
+          "b_successful_rps": 3253.2467701491796
+        },
+        {
+          "case": "mixed-64",
+          "workload": "preview",
+          "p95_ratio": 1.059771537749579,
+          "throughput_ratio": 0.9760377570097882,
+          "gate": "passed",
+          "a_p95_us": 29635.443,
+          "b_p95_us": 31406.799,
+          "a_successful_rps": 624.4181414030026,
+          "b_successful_rps": 609.4556821712074
+        },
+        {
+          "case": "mixed-64",
+          "workload": "history",
+          "p95_ratio": 1.0663563284225173,
+          "throughput_ratio": 0.9758569531707441,
+          "gate": "passed",
+          "a_p95_us": 29588.361,
+          "b_p95_us": 31551.736,
+          "a_successful_rps": 624.7024961775036,
+          "b_successful_rps": 609.620274557937
+        },
+        {
+          "case": "mixed-64",
+          "workload": "raw",
+          "p95_ratio": 1.057050212622175,
+          "throughput_ratio": 0.9751201515782424,
+          "gate": "passed",
+          "a_p95_us": 29619.206,
+          "b_p95_us": 31308.988,
+          "a_successful_rps": 624.8471679048813,
+          "b_successful_rps": 609.3010650806433
+        },
+        {
+          "case": "mixed-64",
+          "workload": "blame",
+          "p95_ratio": 1.0623371061403906,
+          "throughput_ratio": 0.9761881356990953,
+          "gate": "passed",
+          "a_p95_us": 29560.66,
+          "b_p95_us": 31403.386,
+          "a_successful_rps": 624.5927452119067,
+          "b_successful_rps": 609.7200275195913
+        },
+        {
+          "case": "mixed-64",
+          "workload": "late-history",
+          "p95_ratio": 1.0737427091745864,
+          "throughput_ratio": 0.9766024732032885,
+          "gate": "passed",
+          "a_p95_us": 31319.842,
+          "b_p95_us": 33629.452,
+          "a_successful_rps": 624.3532885596953,
+          "b_successful_rps": 609.7449657600049
+        }
+      ],
+      "exit_codes": {
+        "baseline": {
+          "a": 0,
+          "b": 0
+        },
+        "candidate": {
+          "a": 0,
+          "b": 0
+        }
+      },
+      "candidate_shutdown_proofs": {
+        "a": {
+          "passed": true,
+          "fields": {
+            "complete": "true",
+            "log_quiesced": "true",
+            "local_durability_closed": "true",
+            "pending_application_events": "0",
+            "pending_dispatches": "0",
+            "deadline_elapsed": "false"
+          }
+        },
+        "b": {
+          "passed": true,
+          "fields": {
+            "complete": "true",
+            "log_quiesced": "true",
+            "local_durability_closed": "true",
+            "pending_application_events": "0",
+            "pending_dispatches": "0",
+            "deadline_elapsed": "false"
+          }
+        }
+      },
+      "resource_failures": {
+        "baseline": [],
+        "candidate": []
+      }
+    },
+    "qualification_status": "Currentoriginal128trial/22case/3round/2x600secondsoakcomparisonrunning, unchangednumericgates.72cellnative100pairconfirmationqueuedsequentially; R7acceptanceopen.",
+    "evidence_storage": "Completedpriorjournalsarelosslesslygziparchivedwithoriginalbyte/newline/SHA256roundtripverification; report/profilefilesunchanged. CleanVMcache/targetedunusedblocktrimonlybetweenphases; realwarmingbeforetiming. Noobservationsorfailedgatesdeleted."
   }
 }
