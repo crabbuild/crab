@@ -7271,5 +7271,98 @@
       ["soak-16","late-history",115525,0,0,0,14334.833,23453.971,23441.717,192.48456625386424,1.364,null,127268,27,0,0,12499.42,21227.347,21214.87,212.0966250632507,0.09,0.005,0.905064093410877,1.1018889939649525,[]]
     ],
     "scope": "Complete dedicated local RustFS native Linux provider/client HTTP matrix, direct read workers; unchanged original gates. Zero request/Git errors, resource and current shutdown checks pass, mixed soak relative controls pass.34short-case timing/throughput failures remain. Earlier same-baseline calibration fails, so no combined native timing acceptance or hosted-S3/SLA claim. R0 predates new drain gauges; their unavailable baseline state stays null."
+  },
+  "small_blame_integrated_followup": {
+    "status": "focused_and_current_functional_passed_performance_acceptance_open",
+    "source_revision": "b31db6b10724b6c3cd5920b391f8af2e05dc92b3",
+    "focused_tests": 27,
+    "strict_server_all_target_clippy": "passed",
+    "focused_report_sha256": "b91a97a75aac64928d04af14a47365b0c93f7b0337ccffc5b22c3ed3ef94fefc",
+    "red": {
+      "status": "reproduced",
+      "exit_code": 101,
+      "case": "api::response_json::tests::cached_small_blame_does_not_wait_for_large_cpu_work",
+      "log_sha256": "1d4e5498d672b0e4482c9cb29f7d33a91fb74af75165293c2aed3ffdb3bcca32",
+      "test_patch_sha256": "9751118710d7f95b49ca3b59ed33702830f95a270a467cc774fa5d09b00d3ff8",
+      "seed_response": "200; exact body retained",
+      "failure": "cached small blame waited for occupied CPU capacity"
+    },
+    "green_log_sha256": "260619da5b9dbac3ab1bf959b48c2746311817716f56c90518c264125ec5d588",
+    "builds": {
+      "macos": {
+        "source_revision": "b31db6b10724b6c3cd5920b391f8af2e05dc92b3",
+        "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1",
+        "cellar_revision": "590640c7ce49ef3fd391bdae9540ba23081cd74b",
+        "server_binary_sha256": "a88c6e24dc3b91cd1ee463fdc21e6723301abd1f49dff30d5b02d642a50546d7",
+        "receipt_sha256": "b3a7f14768a134383d2697caf1fbc705c0892c41157c9bf87ecb453fb32794b4"
+      },
+      "linux_arm64": {
+        "source_revision": "b31db6b10724b6c3cd5920b391f8af2e05dc92b3",
+        "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1",
+        "cellar_revision": "590640c7ce49ef3fd391bdae9540ba23081cd74b",
+        "server_binary_sha256": "e5955e796161d99cf15ff9af2cae31b0d61c18d1ae96925e39249f67492cfe8b",
+        "receipt_sha256": "38f155411aaebecbd85a707691f5e0b3e2b85b260d892bfe71ec183618ebe08d"
+      }
+    },
+    "linux_packaging_sha256": "232fac3906c10680baae92a4f6d16d263c469ff6ea8010126074b248cdce2c0e",
+    "smoke": {
+      "status": "passed",
+      "checks": 54,
+      "raw_report_sha256": "f5d53016d16639788dc334d88ef1860eb7aab6310387468597f6db40f12db607",
+      "exit_codes": [
+        0,
+        0
+      ],
+      "actual_shutdown_proofs": [
+        {
+          "replica": "a",
+          "valid": true,
+          "actual_line": "2026-11-20T06:06:30.962400Z  INFO Cellar shutdown proof complete=true log_quiesced=true local_durability_closed=true clean_reload_prepared=true pending_application_events=0 pending_dispatches=0 deadline_elapsed=false"
+        },
+        {
+          "replica": "b",
+          "valid": true,
+          "actual_line": "2026-11-20T06:06:28.278093Z  INFO Cellar shutdown proof complete=true log_quiesced=true local_durability_closed=true clean_reload_prepared=true pending_application_events=0 pending_dispatches=0 deadline_elapsed=false"
+        }
+      ],
+      "admitted_work_drained": true,
+      "cold_blame_producer_deltas": {
+        "a": 1.0,
+        "b": 1.0
+      }
+    },
+    "retained_setup_failure": "First smoke started without the fixture environment and attempted instance credentials before serving; its empty-check failure and log remain retained. Retry sources the existing rustfs.env and uses fresh data directories.",
+    "scope": "Typed blame output bound/CPU-queue fix only. Current54-check real two-replica RustFS proof passes; all previous fullHTTP timing data stay bound to8b and do not qualify this newer source."
+  },
+  "sdk_dynamic_voter_twenty_case_control": {
+    "status": "completed_red_control",
+    "run_url": "https://github.com/crabbuild/cellar/actions/runs/44666801495",
+    "scope": "Exact dynamic-voter20freshprocesscontrol: published20pass/0fail,fixed19pass/1replacement-deadlinefailure. No assertion that this is pre-existing or caused by checkpoint fix; earlier raw failures retained.",
+    "raw_control_sha256": "053f143078ccc089323733eefc853d69e4afa74f7104f697c0568af90a95de02",
+    "published": {
+      "source": "95f860bcddb1f49dc72453f100154c4eeeb7bfbd",
+      "fresh_processes": 20,
+      "passed": 20,
+      "failed": 0,
+      "job_id": 136057956882,
+      "log_sha256": "8724440d5178263494dff9542cdecac968f7b4d82a98e7b7db5778351dcc5282"
+    },
+    "fixed": {
+      "source": "590640c7ce49ef3fd391bdae9540ba23081cd74b",
+      "fresh_processes": 20,
+      "passed": 19,
+      "failed": 1,
+      "job_id": 136057957042,
+      "failure": "replace before restart handoff: deadline elapsed; checkpoint linkage unclassified",
+      "log_sha256": "f4f57730f83065a09459b96d31b781e45eeaff5fe8c8fb500fe409e674fd9c10"
+    },
+    "failed_case_logs": [
+      {
+        "file": "repetition-12-case-1.log",
+        "passed": false,
+        "replacement_deadline": true,
+        "sha256": "c5cde675be4b40c48b45692ecbf78d539cc284d271b1aead298461864d80f986"
+      }
+    ]
   }
 }
