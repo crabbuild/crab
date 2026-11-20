@@ -1501,6 +1501,17 @@ tests if:
 
 ## Maintenance and reference notes
 
+Current metadata optimization: `a5d6015e2c8` batches adjacent cold pages within
+an admitted lookup wave, preserving the existing bounded cache and per-page
+verification. At 10,000 commits, object-batch query reads fall 45 → 32 with the
+same 1,230,261 bytes; history falls 115 → 108 with identical bytes. All 400
+focused Git oracles, 311 focused Rust tests, 54 current two-replica HTTP checks
+and 200 independent-growth functional Git queries pass. No timing gate is
+waived. Remaining work: same-executable repeatability and combined-load gates,
+the full independent-growth matrix, current minimum-profile soak, and naturally
+aged cold-reader retention across repository-only GC. Source-bound details live
+in the qualification report's metadata lookup-wave section and JSON receipt.
+
 R0 tooling and thresholds must evolve together with cursor/representation/schema
 changes. New query shapes need native oracles before timing acceptance. Any new
 index format or stronger blame semantics requires new semantics-version keys

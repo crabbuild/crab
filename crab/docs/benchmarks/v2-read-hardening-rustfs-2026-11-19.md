@@ -719,3 +719,37 @@ failed baseline calibrations prevent treating these ratios as accepted product
 latency. Metadata work remains the next code priority: the 10,000-commit blame
 query reports 173 decoded index blocks (4,595,000 bytes); its readers already
 have bounded page caches, so distinct-page work and lookup batching need tracing.
+
+## Exact metadata lookup-wave batching
+
+Code `a5d6015e2c8` groups adjacent requested cold pages within one admitted
+lookup wave, capped at 64 KiB per merged transfer. It reuses the existing bounded
+page cache and preserves each page's reference/hash validation. Warm pages and
+unselected gaps are excluded. Whole-wave admission precedes any transfer,
+including fully warm lookups. Existing proof-region read-ahead is unchanged.
+No storage format, dependency, cache capacity or configuration changes.
+
+The new regression reproduces 14 transfers before and two after, with identical
+7,497 bytes. Five new tests cover offsets, duplicate/missing keys, warm reuse,
+gaps, group size, corruption and budget-before-I/O. All 113 focused metadata
+tests and 198 reader tests pass, together with strict all-target Clippy,
+payload/storage feature checks and formatting. Four current release executables
+are source-bound: native qualifier and server on both macOS and ARM64 Linux.
+
+All 400 canonical Git comparisons pass across 20 alternating before/after pairs
+for five operations at 1,000 and 10,000 commits. Every cold comparison transfers
+the same bytes. At 10,000 commits, object-batch query reads fall **45 → 32**
+(1,230,261 bytes); first-parent history reads fall **115 → 108**
+(1,713,443 bytes). Other measured operations keep their previous request counts.
+Readers retain enforced 1 CPU / 1 GiB / no additional swap, and both drain and
+exit zero without OOM. These are deterministic work reductions; ten descriptive
+timing failures remain recorded and timing acceptance stays open.
+
+All 54 current two-replica HTTP smoke checks pass; both servers emit complete
+actual durability proofs and exit zero. All ten independent-growth fixtures
+also pass two fresh current-source repetitions: 200 canonical Git queries at
+1 CPU / 1 GiB / no additional swap, with peak cgroup memory below 12 MB.
+This establishes functional/resource behavior; it does not replace the full
+growth timing matrix or minimum-profile soak. A fresh cold capture is held for
+naturally aged repository-only GC qualification. Same-executable repeatability,
+combined-load gates and current minimum-resource lifecycle proof remain open.
