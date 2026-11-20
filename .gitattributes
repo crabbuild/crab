@@ -1,0 +1,2 @@
+# Offline Results exports embed and verify these bytes on every platform.
+/crates/crab-workflow/assets/** text eol=lf
