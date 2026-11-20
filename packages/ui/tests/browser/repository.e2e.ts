@@ -1672,16 +1672,27 @@ test("Symbols grip stays at the viewport midpoint across file lengths and scroll
           const symbols = parent
             .querySelector(".code-symbols-panel")!
             .getBoundingClientRect();
+          const tree = parent
+            .closest(".code-layout")!
+            .querySelector(".tree-resizer")!;
+          const treeTarget = tree
+            .querySelector(".pane-resizer-target")!
+            .getBoundingClientRect();
+          const treeGripY =
+            tree.getBoundingClientRect().top +
+            parseFloat(getComputedStyle(tree, "::after").top);
           return Math.max(
             Math.abs(grip.y + grip.height / 2 - innerHeight / 2),
             Math.abs(grip.x + grip.width / 2 - source.right + 0.5),
             Math.abs(line.x + line.width / 2 - grip.x - grip.width / 2),
             Math.abs(line.y + line.height / 2 - grip.y - grip.height / 2),
             Math.abs(symbols.top - toolbar.top),
+            Math.abs(treeTarget.y + treeTarget.height / 2 - innerHeight / 2),
+            Math.abs(treeGripY - innerHeight / 2),
           );
         }),
       )
-      .toBeLessThanOrEqual(0.5);
+      .toBeLessThanOrEqual(0.02);
   };
   for (const [count, continuation] of [
     [1, 0],
@@ -1711,7 +1722,7 @@ test("Symbols grip stays at the viewport midpoint across file lengths and scroll
     const grip = (await divider.locator(":scope > div").boundingBox())!;
     const middle = { x: grip.x + grip.width / 2, y: grip.y + grip.height / 2 };
     const width = (await symbols.boundingBox())!.width;
-    // Start outside the visible pill, then drag vertically beyond its target.
+    // Start beside the grip, then drag vertically beyond its target.
     await page.mouse.move(middle.x + 10, middle.y);
     await expect(divider).toHaveAttribute("data-separator", "hover");
     await page.mouse.down();
@@ -1768,6 +1779,13 @@ test("Symbols grip stays at the viewport midpoint across file lengths and scroll
       await page.mouse.wheel(0, -10000);
       await expect.poll(() => list.evaluate((node) => node.scrollTop)).toBe(0);
       expect(await page.evaluate(() => window.scrollY)).toBe(documentPosition);
+    }
+  }
+  for (const height of [720, 1200]) {
+    await page.setViewportSize({ width: 1440, height });
+    for (const top of [0, 900, Number.MAX_SAFE_INTEGER]) {
+      await page.evaluate((top) => window.scrollTo(0, top), top);
+      await expectAlignedDivider();
     }
   }
 });
@@ -2490,9 +2508,12 @@ test("blame and source panes resize with pointer and keyboard controls", async (
   const initialWidth = (await blamePane.boundingBox())?.width ?? 0;
   const handle = await separator.boundingBox();
   if (!handle) throw new Error("Blame resize handle is not visible");
-  await page.mouse.move(handle.x + handle.width / 2, handle.y + 20);
+  const grabX = handle.x + 2;
+  await page.mouse.move(grabX, handle.y + 20);
   await page.mouse.down();
-  await page.mouse.move(handle.x + handle.width / 2 + 120, handle.y + 20);
+  await page.mouse.move(grabX + 1, handle.y + 20);
+  await expect(separator).toHaveAttribute("aria-valuenow", "48");
+  await page.mouse.move(grabX + 120, handle.y + 20);
   await page.mouse.up();
   await expect
     .poll(async () => (await blamePane.boundingBox())?.width ?? 0)
@@ -2504,6 +2525,84 @@ test("blame and source panes resize with pointer and keyboard controls", async (
   await expect(separator).toHaveAttribute("aria-valuenow", "30");
   await separator.dblclick();
   await expect(separator).toHaveAttribute("aria-valuenow", "48");
+
+  const touch = await page.context().newCDPSession(page);
+  const sendTouches = (
+    type: "touchStart" | "touchMove" | "touchEnd" | "touchCancel",
+    touchPoints: { id: number; x: number; y: number }[],
+  ) => touch.send("Input.dispatchTouchEvent", { type, touchPoints });
+  try {
+    await touch.send("Emulation.setTouchEmulationEnabled", {
+      enabled: true,
+      maxTouchPoints: 2,
+    });
+    const box = (await separator.boundingBox())!;
+    const first = {
+      id: 1,
+      x: box.x + box.width / 2,
+      y: box.y + box.height / 2,
+    };
+    const moved = { ...first, x: first.x + 40 };
+    await sendTouches("touchStart", [first]);
+    await sendTouches("touchMove", [moved]);
+    await expect
+      .poll(async () => Number(await separator.getAttribute("aria-valuenow")))
+      .toBeGreaterThan(48);
+    const ownedValue = await separator.getAttribute("aria-valuenow");
+    const current = (await separator.boundingBox())!;
+    const second = { id: 2, x: current.x + current.width / 2, y: moved.y + 20 };
+    // Capture the secondary native pointer before React rejects its pointerdown.
+    // Its later capture loss must not end the owning pointer's drag.
+    await separator.evaluate((node) => {
+      node.addEventListener(
+        "pointerdown",
+        (event) => {
+          const pointerId = (event as PointerEvent).pointerId;
+          node.setAttribute("data-captured-pointer", String(pointerId));
+          node.setPointerCapture(pointerId);
+        },
+        { once: true },
+      );
+    });
+    await sendTouches("touchStart", [moved, second]);
+    await sendTouches("touchMove", [moved, { ...second, x: second.x + 80 }]);
+    await expect(separator).toHaveAttribute("aria-valuenow", ownedValue!);
+    const captured = Number(
+      await separator.getAttribute("data-captured-pointer"),
+    );
+    expect(captured).toBeGreaterThan(0);
+    await separator.evaluate(
+      (node, pointerId) => node.releasePointerCapture(pointerId),
+      captured,
+    );
+    const secondaryMoved = { ...second, x: second.x + 81 };
+    await sendTouches("touchMove", [moved, secondaryMoved]);
+    await sendTouches("touchMove", [
+      { ...moved, x: moved.x + 40 },
+      secondaryMoved,
+    ]);
+    await expect
+      .poll(async () => Number(await separator.getAttribute("aria-valuenow")))
+      .toBeGreaterThan(Number(ownedValue));
+    const beforeCancel = await separator.getAttribute("aria-valuenow");
+    await sendTouches("touchCancel", []);
+
+    const resumed = {
+      ...first,
+      x: (await separator.boundingBox())!.x + box.width / 2,
+    };
+    await sendTouches("touchStart", [resumed]);
+    await sendTouches("touchMove", [{ ...resumed, x: resumed.x + 40 }]);
+    await expect
+      .poll(async () => Number(await separator.getAttribute("aria-valuenow")))
+      .toBeGreaterThan(Number(beforeCancel));
+    await sendTouches("touchEnd", []);
+  } finally {
+    await separator.evaluate((node) =>
+      node.removeAttribute("data-captured-pointer"),
+    );
+    await touch.detach();
+  }
 });
 
 test("file tree controls align the branch picker and place collapse after search", async ({
@@ -2550,7 +2649,7 @@ test("file tree controls align the branch picker and place collapse after search
   await expect(page.locator("#repository-tree-search")).toBeFocused();
 });
 
-test("file tree scrolls independently and its resize grip follows the sticky pane", async ({
+test("file tree scrolls independently while its resize grip stays viewport-centered", async ({
   page,
 }) => {
   const source = "A line of repository content.\n".repeat(200);
@@ -2587,8 +2686,16 @@ test("file tree scrolls independently and its resize grip follows the sticky pan
   );
   await expect(treeScroll).toBeVisible();
   await expect(treeScroll).toHaveCSS("overscroll-behavior-y", "contain");
-  await treeScroll.hover();
   const pagePosition = await page.evaluate(() => window.scrollY);
+  const scrollport = (await treeScroll.boundingBox())!;
+  const scrollbarX = scrollport.x + scrollport.width - 3;
+  await page.mouse.move(scrollbarX, scrollport.y + 40);
+  await page.mouse.wheel(0, 500);
+  await expect
+    .poll(() => treeScroll.evaluate((node) => node.scrollTop))
+    .toBeGreaterThan(0);
+  await expect(separator).toHaveAttribute("aria-valuenow", "320");
+  await treeScroll.hover();
   await page.mouse.wheel(0, 10000);
   await expect
     .poll(() =>
@@ -2616,8 +2723,12 @@ test("file tree scrolls independently and its resize grip follows the sticky pan
       .poll(async () => {
         const pane = (await sidebar.boundingBox())!;
         const divider = (await separator.boundingBox())!;
-        return Math.abs(
-          divider.y + divider.height / 2 - (pane.y + pane.height / 2),
+        const grip = (await separator
+          .locator(".pane-resizer-target")
+          .boundingBox())!;
+        return Math.max(
+          Math.abs(divider.y + divider.height / 2 - (pane.y + pane.height / 2)),
+          Math.abs(grip.y + grip.height / 2 - page.viewportSize()!.height / 2),
         );
       })
       .toBeLessThanOrEqual(1);
@@ -2646,11 +2757,15 @@ test("file tree and content panes resize with pointer and keyboard controls", as
   await expectNoAccessibilityViolations(page);
 
   const initialWidth = (await treePane.boundingBox())?.width ?? 0;
-  const handle = await separator.boundingBox();
+  const handle = await separator.locator(".pane-resizer-target").boundingBox();
   if (!handle) throw new Error("File tree resize handle is not visible");
-  await page.mouse.move(handle.x + handle.width / 2, handle.y + 20);
+  const grabX = handle.x + 2;
+  const grabY = handle.y + handle.height / 2;
+  await page.mouse.move(grabX, grabY);
   await page.mouse.down();
-  await page.mouse.move(handle.x + handle.width / 2 + 120, handle.y + 20);
+  await page.mouse.move(grabX + 1, grabY);
+  await expect(separator).toHaveAttribute("aria-valuenow", "321");
+  await page.mouse.move(grabX + 120, grabY);
   await page.mouse.up();
   await expect
     .poll(async () => (await treePane.boundingBox())?.width ?? 0)

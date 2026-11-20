@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import { Link } from "@/components/navigation/link";
 import { Button } from "@/components/ui/button";
+import { ButtonGroup } from "@/components/ui/button-group";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -120,10 +121,7 @@ export function DiscussionListControls({
     ([key]) => key === filters.sort,
   )?.[1];
   const reactionSelected = reactionSorts.some(([key]) => key === filters.sort);
-  const filterKinds =
-    view === "pulls"
-      ? (["authors", "labels", "milestones", "assignees", "reviewers"] as const)
-      : (["authors", "labels", "milestones", "assignees"] as const);
+  const filterKinds = ["authors", "labels", "milestones", "assignees"] as const;
   const change = (values: Partial<typeof filters>) =>
     navigate(repoHref(repo, { view, ...filters, ...values }));
   return (
@@ -136,43 +134,46 @@ export function DiscussionListControls({
           </span>
         ) : navigation?.kind === "state" ? (
           <nav
+            className="discussion-state-controls"
             aria-label={
               view === "issues" ? "Issue state" : "Pull request state"
             }
           >
-            {(["open", "closed"] as const).map((state) => {
-              const query = navigation[state];
-              const label = (
-                <>
-                  {state === "open" ? "Open" : "Closed"}{" "}
-                  <span className="discussion-state-count">
-                    {new Intl.NumberFormat().format(data.counts[state])}
-                  </span>
-                </>
-              );
-              return query === null ? (
-                <Button
-                  key={state}
-                  variant="ghost"
-                  size="sm"
-                  disabled
-                  title="Shorten this search to change its state filter"
-                >
-                  {label}
-                </Button>
-              ) : (
-                <Link
-                  key={state}
-                  className={navigation.selected === state ? "active" : ""}
-                  aria-current={
-                    navigation.selected === state ? "page" : undefined
-                  }
-                  href={repoHref(repo, { view, ...filters, q: query })}
-                >
-                  {label}
-                </Link>
-              );
-            })}
+            <ButtonGroup>
+              {(["open", "closed"] as const).map((state) => {
+                const query = navigation[state];
+                const label = (
+                  <>
+                    {state === "open" ? "Open" : "Closed"}{" "}
+                    <span className="discussion-state-count">
+                      {new Intl.NumberFormat().format(data.counts[state])}
+                    </span>
+                  </>
+                );
+                return query === null ? (
+                  <Button
+                    key={state}
+                    variant="outline"
+                    size="sm"
+                    disabled
+                    title="Shorten this search to change its state filter"
+                  >
+                    {label}
+                  </Button>
+                ) : (
+                  <Button asChild variant="outline" size="sm" key={state}>
+                    <Link
+                      aria-current={
+                        navigation.selected === state ? "page" : undefined
+                      }
+                      href={repoHref(repo, { view, ...filters, q: query })}
+                    >
+                      {label}
+                    </Link>
+                  </Button>
+                );
+              })}
+            </ButtonGroup>
           </nav>
         ) : (
           <h3 className="m-0 text-sm font-medium">
@@ -181,78 +182,98 @@ export function DiscussionListControls({
           </h3>
         )}
       </div>
-      <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-1">
-        {filterKinds.map((kind) => (
+      <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center gap-2">
+        <div className="min-w-0 max-w-full overflow-x-auto p-1 -m-1">
+          <ButtonGroup aria-label="Discussion filters">
+            {filterKinds.map((kind) => (
+              <DiscussionFilter
+                key={kind}
+                kind={kind}
+                repo={repo}
+                query={discussionQuery(url, view)}
+                onSelect={(q) => change({ q })}
+              />
+            ))}
+            <DropdownMenu
+              modal={false}
+              open={sortOpen}
+              onOpenChange={setSortOpen}
+            >
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  aria-label="Sort discussions"
+                >
+                  Sort <ChevronDownIcon data-icon="inline-end" />
+                </Button>
+              </DropdownMenuTrigger>
+              {/* Closing scopes must unmount before a rapid reopen during refresh. */}
+              {sortOpen && (
+                <DropdownMenuContent align="end" className="w-48" tabIndex={0}>
+                  <DropdownMenuGroup>
+                    <DropdownMenuLabel>Sort by</DropdownMenuLabel>
+                    <DropdownMenuRadioGroup
+                      value={filters.sort}
+                      onValueChange={(sort) => change({ sort })}
+                    >
+                      {sorts.map(([value, label]) => (
+                        <DropdownMenuRadioItem key={value} value={value}>
+                          {label}
+                        </DropdownMenuRadioItem>
+                      ))}
+                    </DropdownMenuRadioGroup>
+                    <DropdownMenuSub>
+                      <DropdownMenuSubTrigger>
+                        Reactions
+                        {reactionSelected && <CheckIcon aria-hidden="true" />}
+                      </DropdownMenuSubTrigger>
+                      <DropdownMenuPortal>
+                        <DropdownMenuSubContent className="w-48">
+                          <DropdownMenuRadioGroup
+                            value={filters.sort}
+                            onValueChange={(sort) => change({ sort })}
+                          >
+                            {reactionSorts.map(([value, label]) => (
+                              <DropdownMenuRadioItem key={value} value={value}>
+                                {label}
+                              </DropdownMenuRadioItem>
+                            ))}
+                          </DropdownMenuRadioGroup>
+                        </DropdownMenuSubContent>
+                      </DropdownMenuPortal>
+                    </DropdownMenuSub>
+                  </DropdownMenuGroup>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuLabel>Order</DropdownMenuLabel>
+                  <DropdownMenuRadioGroup
+                    value={filters.direction}
+                    onValueChange={(direction) => change({ direction })}
+                  >
+                    <DropdownMenuRadioItem value="desc">
+                      {filters.sort === "created" || filters.sort === "updated"
+                        ? "Newest first"
+                        : "Highest first"}
+                    </DropdownMenuRadioItem>
+                    <DropdownMenuRadioItem value="asc">
+                      {filters.sort === "created" || filters.sort === "updated"
+                        ? "Oldest first"
+                        : "Lowest first"}
+                    </DropdownMenuRadioItem>
+                  </DropdownMenuRadioGroup>
+                </DropdownMenuContent>
+              )}
+            </DropdownMenu>
+          </ButtonGroup>
+        </div>
+        {view === "pulls" && (
           <DiscussionFilter
-            key={kind}
-            kind={kind}
+            kind="reviewers"
             repo={repo}
             query={discussionQuery(url, view)}
             onSelect={(q) => change({ q })}
           />
-        ))}
-        <DropdownMenu modal={false} open={sortOpen} onOpenChange={setSortOpen}>
-          <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="sm" aria-label="Sort discussions">
-              Sort <ChevronDownIcon size={14} />
-            </Button>
-          </DropdownMenuTrigger>
-          {/* Closing scopes must unmount before a rapid reopen during refresh. */}
-          {sortOpen && (
-            <DropdownMenuContent align="end" className="w-48" tabIndex={0}>
-              <DropdownMenuGroup>
-                <DropdownMenuLabel>Sort by</DropdownMenuLabel>
-                <DropdownMenuRadioGroup
-                  value={filters.sort}
-                  onValueChange={(sort) => change({ sort })}
-                >
-                  {sorts.map(([value, label]) => (
-                    <DropdownMenuRadioItem key={value} value={value}>
-                      {label}
-                    </DropdownMenuRadioItem>
-                  ))}
-                </DropdownMenuRadioGroup>
-                <DropdownMenuSub>
-                  <DropdownMenuSubTrigger>
-                    Reactions
-                    {reactionSelected && <CheckIcon aria-hidden="true" />}
-                  </DropdownMenuSubTrigger>
-                  <DropdownMenuPortal>
-                    <DropdownMenuSubContent className="w-48">
-                      <DropdownMenuRadioGroup
-                        value={filters.sort}
-                        onValueChange={(sort) => change({ sort })}
-                      >
-                        {reactionSorts.map(([value, label]) => (
-                          <DropdownMenuRadioItem key={value} value={value}>
-                            {label}
-                          </DropdownMenuRadioItem>
-                        ))}
-                      </DropdownMenuRadioGroup>
-                    </DropdownMenuSubContent>
-                  </DropdownMenuPortal>
-                </DropdownMenuSub>
-              </DropdownMenuGroup>
-              <DropdownMenuSeparator />
-              <DropdownMenuLabel>Order</DropdownMenuLabel>
-              <DropdownMenuRadioGroup
-                value={filters.direction}
-                onValueChange={(direction) => change({ direction })}
-              >
-                <DropdownMenuRadioItem value="desc">
-                  {filters.sort === "created" || filters.sort === "updated"
-                    ? "Newest first"
-                    : "Highest first"}
-                </DropdownMenuRadioItem>
-                <DropdownMenuRadioItem value="asc">
-                  {filters.sort === "created" || filters.sort === "updated"
-                    ? "Oldest first"
-                    : "Lowest first"}
-                </DropdownMenuRadioItem>
-              </DropdownMenuRadioGroup>
-            </DropdownMenuContent>
-          )}
-        </DropdownMenu>
+        )}
         <ToggleGroup
           className="discussion-density"
           type="single"

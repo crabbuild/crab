@@ -186,8 +186,8 @@ function CatalogFilter({
       }}
     >
       <PopoverTrigger asChild>
-        <Button variant="ghost" size="sm" aria-label={text.title}>
-          {text.trigger} <ChevronDownIcon size={14} />
+        <Button variant="outline" size="sm" aria-label={text.title}>
+          {text.trigger} <ChevronDownIcon data-icon="inline-end" />
         </Button>
       </PopoverTrigger>
       {/* Each opening owns its focus scope; rapid reopen must not reuse a closing popup. */}

@@ -1,4 +1,4 @@
-import type { KeyboardEvent, PointerEvent } from "react";
+import { useRef, type KeyboardEvent, type PointerEvent } from "react";
 
 type Props = {
   className: string;
@@ -31,6 +31,9 @@ export function PaneResizer({
   valueText,
   onChange,
 }: Props) {
+  const drag = useRef<{ pointerId: number; x: number; value: number } | null>(
+    null,
+  );
   const update = (next: number) => onChange(clamp(next, min, max));
   return (
     <button
@@ -44,7 +47,7 @@ export function PaneResizer({
       aria-valuemax={max}
       aria-valuenow={value}
       aria-valuetext={valueText}
-      title="Drag or use arrow keys to resize"
+      title="Drag or use arrow keys to resize. Double-click to reset."
       onDoubleClick={() => update(defaultValue)}
       onKeyDown={(event: KeyboardEvent<HTMLButtonElement>) => {
         let next: number | undefined;
@@ -57,21 +60,41 @@ export function PaneResizer({
         update(next);
       }}
       onPointerDown={(event: PointerEvent<HTMLButtonElement>) => {
+        if (drag.current || event.button !== 0 || !event.isPrimary) return;
         event.preventDefault();
+        // Preserve the grab offset so widening the target cannot make the pane jump.
+        drag.current = { pointerId: event.pointerId, x: event.clientX, value };
         event.currentTarget.setPointerCapture(event.pointerId);
       }}
       onPointerMove={(event: PointerEvent<HTMLButtonElement>) => {
-        if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+        if (
+          drag.current?.pointerId !== event.pointerId ||
+          !event.currentTarget.hasPointerCapture(event.pointerId)
+        )
+          return;
         const container = event.currentTarget.parentElement;
         if (!container) return;
         event.preventDefault();
         const bounds = container.getBoundingClientRect();
-        const offset = event.clientX - bounds.left;
-        update(unit === "percent" ? (offset / bounds.width) * 100 : offset);
+        const delta = event.clientX - drag.current.x;
+        const distance =
+          unit === "percent" ? (delta / bounds.width) * 100 : delta;
+        update(drag.current.value + distance);
       }}
       onPointerUp={(event: PointerEvent<HTMLButtonElement>) => {
-        event.currentTarget.releasePointerCapture(event.pointerId);
+        if (
+          drag.current?.pointerId === event.pointerId &&
+          event.currentTarget.hasPointerCapture(event.pointerId)
+        )
+          event.currentTarget.releasePointerCapture(event.pointerId);
       }}
-    />
+      onLostPointerCapture={(event: PointerEvent<HTMLButtonElement>) => {
+        if (drag.current?.pointerId === event.pointerId) drag.current = null;
+      }}
+    >
+      {/* The tree limits hits to this target to keep its scrollbar reachable.
+          Events still bubble to the separator, which owns pointer capture. */}
+      <span className="pane-resizer-target" aria-hidden="true" />
+    </button>
   );
 }

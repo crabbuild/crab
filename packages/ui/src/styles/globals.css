@@ -2418,13 +2418,18 @@ main {
 .discussion-density {
   background: var(--background);
 }
-.issues-filters nav a {
-  color: var(--muted-foreground);
-  padding: --spacing(2) --spacing(3);
-  border-radius: var(--radius);
+.discussion-density > span:not(:first-child) [data-slot="toggle-group-item"] {
+  border-left: 0;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
 }
-.issues-filters nav a.active {
+.discussion-density > span:not(:last-child) [data-slot="toggle-group-item"] {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.discussion-state-controls a[aria-current="page"] {
   color: var(--foreground);
+  background: var(--secondary);
   font-weight: 600;
 }
 .issue-list-panel {
@@ -2433,7 +2438,7 @@ main {
 .issue-list-panel .issues-filters {
   min-height: 48px;
   margin: 0;
-  padding: 0 --spacing(4);
+  padding: --spacing(2) --spacing(4);
   background: var(--muted);
   border-bottom: 1px solid var(--border);
 }
@@ -2721,8 +2726,9 @@ main {
   margin-left: auto;
   overflow-x: auto;
 }
-.editor-toolbar[hidden] {
-  display: none;
+.editor-toolbar[aria-hidden="true"] {
+  /* Retain the toolbar's space so mode changes keep the tabs and body aligned. */
+  visibility: hidden;
 }
 .editor-tool-group {
   display: inline-flex;
@@ -2740,7 +2746,7 @@ main {
   line-height: 1.6;
 }
 .editor-preview {
-  min-height: 170px;
+  min-height: calc(170px + --spacing(4));
 }
 .editor-help {
   padding: 0 --spacing(3) --spacing(2.5);
@@ -2983,12 +2989,6 @@ main {
     flex-basis: 100%;
   }
 
-  .issues-filters nav {
-    gap: 0;
-  }
-  .issues-filters nav a {
-    padding: --spacing(2);
-  }
   .discussion-markdown,
   .discussion-compose.panel {
     padding: --spacing(3.5);
@@ -4654,9 +4654,35 @@ main {
 }
 .repo-file-workspace .tree-resizer {
   /* A one-pixel track owns the border; the wider button remains easy to grab. */
-  width: 9px;
-  min-width: 9px;
-  margin-inline: -4px;
+  --resize-target-width: 24px;
+  --resize-target-height: --spacing(11);
+  /* Convert the viewport midpoint into the sticky rail's coordinates. */
+  --tree-grip-center: clamp(
+    calc(var(--resize-target-height) / 2),
+    calc(50dvh - var(--workspace-visible-top, 0px)),
+    calc(100% - var(--resize-target-height) / 2)
+  );
+  width: var(--resize-target-width);
+  min-width: var(--resize-target-width);
+  margin-inline: calc((1px - var(--resize-target-width)) / 2);
+  pointer-events: none;
+}
+.repo-file-workspace .tree-resizer::after {
+  top: var(--tree-grip-center);
+}
+.repo-file-workspace .tree-resizer > .pane-resizer-target {
+  position: absolute;
+  top: var(--tree-grip-center);
+  left: 0;
+  width: 100%;
+  height: var(--resize-target-height);
+  transform: translateY(-50%);
+  pointer-events: auto;
+}
+@media (pointer: coarse) {
+  .repo-file-workspace .tree-resizer {
+    --resize-target-width: 44px;
+  }
 }
 .repo-file-workspace .pane-resizer::after,
 .code-symbols-resizer > div {
@@ -5173,23 +5199,15 @@ main {
   width: --spacing(4);
   align-self: flex-start;
   z-index: 0;
-  /* Keep the target and grip centered on the viewer's one-pixel edge. */
-  transform: translateX(calc(-50% - 0.5px));
+  /* Align in layout so a fractional transform cannot shift the painted grip. */
+  margin-left: calc(-1 * --spacing(2) - 0.5px);
+  margin-right: calc(--spacing(2) + 0.5px);
   border: 0;
-  border-radius: var(--radius-full);
   background: transparent;
   cursor: col-resize;
 }
 .code-symbols-resizer > div {
   pointer-events: none;
-}
-.code-symbols-resizer:is(
-  :hover,
-  :focus-visible,
-  [data-separator="hover"],
-  [data-separator="active"]
-) {
-  background: var(--muted);
 }
 .code-symbols-header {
   display: flex;

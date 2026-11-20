@@ -209,7 +209,8 @@ export function Editor({
           className="editor-toolbar"
           role="toolbar"
           aria-label={`${label} formatting`}
-          hidden={preview}
+          aria-hidden={preview}
+          inert={preview}
         >
           {MARKDOWN_TOOLS.map((group, groupIndex) => (
             <span className="editor-tool-group" key={group[0].format}>

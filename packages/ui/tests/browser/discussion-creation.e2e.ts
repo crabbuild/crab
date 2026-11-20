@@ -155,6 +155,24 @@ for (const kind of ["issues", "pulls"] as const) {
     await page
       .getByRole("textbox", { name: "Description", exact: true })
       .fill("Original creation body");
+    const editor = page.locator(".discussion-editor");
+    const header = editor.locator(".editor-header");
+    const tabs = editor.getByRole("tablist");
+    const headerBefore = await header.boundingBox();
+    const tabsBefore = await tabs.boundingBox();
+    const heightBefore = (await editor.boundingBox())!.height;
+    await editor.getByRole("tab", { name: "Preview", exact: true }).click();
+    expect(await header.boundingBox()).toEqual(headerBefore);
+    expect(await tabs.boundingBox()).toEqual(tabsBefore);
+    expect((await editor.boundingBox())!.height).toBe(heightBefore);
+    await expect(editor.getByRole("toolbar")).toHaveCount(0);
+    await expect(
+      editor.getByRole("tabpanel", { name: "Preview" }),
+    ).toContainText("Original creation body");
+    await editor.getByRole("tab", { name: "Write", exact: true }).click();
+    await expect(
+      editor.getByRole("textbox", { name: "Description" }),
+    ).toHaveValue("Original creation body");
     await chooseMetadata(page);
     const submit = page.getByRole("button", {
       name: kind === "issues" ? "Create issue" : "Create pull request",

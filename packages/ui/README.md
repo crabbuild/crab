@@ -155,6 +155,14 @@ grant, and this consolidation does not establish full GitHub Enterprise parity.
   midpoint across short/long files and scrolling. A compact sticky target
   preserves short card heights; mouse/touch hit areas expand to 24px/44px.
   Pointer capture, arrow-key resizing and double-click reset stay library-owned.
+  Tree and Symbols dividers share a 3×24px grip, thin blue interaction feedback,
+  and the viewport midpoint while scrolling, including when the footer appears.
+  They share resize/reset instructions. Grab areas around the grip cover 24px for
+  mice and 44px for touch without covering the tree's scrollbar;
+  the tree preserves the pointer's grab offset while dragging. Symbols alignment
+  uses layout offsets so a fractional transform does not shift its painted grip.
+  The explorer uses Pierre Trees' colored `complete` icon set, matching the diff
+  tree's file-type coverage while retaining the folder disclosure and folder mark.
   Both sticky sidebars stay inside the visible file workspace when the footer
   appears, keeping their headers and search controls reachable. Columns too
   narrow for the split place Symbols below the viewer.
@@ -204,6 +212,10 @@ moves, so timing details cannot shift a clicked control.
 Both lists group reaction sorting under **Sort → Reactions**. Arrow Right/Left
 enters/leaves the submenu; Escape dismisses the menu. Sorting retains the query
 and direction and discards the previous page cursor.
+State navigation and filter menus use joined buttons, with horizontal scrolling
+for filters on narrow screens. Personal navigation uses a pencil for authored
+work and a person for assignments. Shared Markdown editors retain their header
+and minimum body height across Write/Preview, including the wrapped mobile toolbar.
 
 Use the primitive APIs directly: buttons contain icons with `data-icon`, inputs
 with addons use `InputGroup`, menus compose their groups/items, and forms use
