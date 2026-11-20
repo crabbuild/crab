@@ -563,5 +563,21 @@ private and receives bounds only through its typed preview/blame callers.
 Six encoding, one worst-case escaping, fifteen API, two revalidation and one
 read-admission tests pass, together with strict all-target server Clippy.
 The red queue regression and all prior timing failures remain retained.
-Current integrated release builds and combined RustFS qualification are pending;
-these focused checks do not close R7.
+The `8b806338bd6` macOS and native ARM64 Linux release builds complete. The
+current embedded UI and server pass all 54 two-replica RustFS checks, with exact
+Git parity, real browser/session behavior, full drain and zero exits. Build, ELF,
+image and smoke hashes are in `small_preview_integrated_followup` in the JSON.
+
+The prospectively declared six-vCPU/eight-GiB test VM retains the same RustFS
+image/data and per-worker 1 CPU / 1 GiB limits. Four hundred fresh baseline-only
+processes match Git without throttling or OOM. Cold and warm commit p95 ratios
+are 0.786 and 0.832, failing the original symmetric repeatability band; both
+object-batch cells pass. No candidate timing verdict follows from that run.
+The full current Linux HTTP run completes all 128 trials: three rounds of every
+short case plus both 600-second soaks. All requests match Git without non-rejection
+errors; resources, current admitted-work drain, actual durability fields and all
+four zero exits pass. R0/candidate soaks complete 577,627/636,366 successful
+requests, with 0/106 rejections; every relative soak control passes.
+Thirty-four short-case p95/throughput gates fail. All 76 comparison cells and
+failed gates are retained in `current_native_linux_http_full`; acceptance stays
+open. Sparse capacity samples do not establish admission saturation as the cause.

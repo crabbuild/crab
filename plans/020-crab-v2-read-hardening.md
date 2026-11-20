@@ -990,8 +990,14 @@ Typed previews now admit an escaping-aware bound rounded to output chunks;
 one-chunk work runs on the request task, while larger output retains CPU
 admission. Serialization stays canonical, cancellation and last-frame ownership
 remain, and the 8-MiB ceiling is unchanged. Twenty-five focused tests and strict
-all-target server Clippy pass. Rebuilt integrated RustFS proof remains required;
-R7 is open.
+all-target server Clippy pass. Both release builds at `8b806338bd6` complete,
+and all 54 current two-replica RustFS smoke checks pass. The dedicated Linux
+baseline-only calibration retains 400 successful Git queries but fails two
+original repeatability cells. Its full measurements are retained in the
+qualification report. The full current Linux HTTP matrix completes 128 trials
+with Git parity, resource/drain/durability proof and zero exits; both ten-minute
+soak comparisons pass. Thirty-four short-case timing/throughput gates remain
+failed and retained with all 76 comparison cells. R7 stays open.
 
 ### R0 — Freeze the evidence contract and establish a baseline
 
