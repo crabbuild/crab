@@ -2566,6 +2566,7 @@ test("blame and source panes resize with pointer and keyboard controls", async (
     await expect
       .poll(async () => Number(await separator.getAttribute("aria-valuenow")))
       .toBeGreaterThan(Number(ownedValue));
+    const beforeCancel = await separator.getAttribute("aria-valuenow");
     await sendTouches("touchCancel", []);
 
     const resumed = {
@@ -2576,7 +2577,7 @@ test("blame and source panes resize with pointer and keyboard controls", async (
     await sendTouches("touchMove", [{ ...resumed, x: resumed.x + 40 }]);
     await expect
       .poll(async () => Number(await separator.getAttribute("aria-valuenow")))
-      .toBeGreaterThan(Number(ownedValue));
+      .toBeGreaterThan(Number(beforeCancel));
     await sendTouches("touchEnd", []);
   } finally {
     await separator.evaluate((node) =>
