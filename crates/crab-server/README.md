@@ -368,6 +368,10 @@ To build outside Docker, run from the repository root. You need Node 22.12+,
 Rust, an existing bucket, and storage credentials. Build the frontend first:
 `build.rs` embeds its output.
 
+The frontend also uses `packages/workflow-results/` and the shared chart runtime
+in `crates/crab-workflow/assets/`. Container builds copy these inputs before
+compiling the frontend.
+
 Choose a unique Cargo target directory for this checkout on the mounted workspace
 volume, following root `AGENTS.md`. This example uses `/Volumes/Workspace`:
 
