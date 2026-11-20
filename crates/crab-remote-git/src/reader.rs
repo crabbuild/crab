@@ -2146,6 +2146,42 @@ impl RemoteGitReader {
                     .await
             }
             CoalescedRangeSource::Object(path) => {
+                // A batch inside one captured member shares point-read windows.
+                // Cross-member batches retain physical source coalescing; a
+                // pack window must never include another member's bytes.
+                if let Some(first) = range.entries.first()
+                    && range
+                        .entries
+                        .iter()
+                        .all(|entry| entry.locator.pack_id == first.locator.pack_id)
+                {
+                    let pack_id = first.locator.pack_id;
+                    let source = self.pack_source(&pack_id).ok_or(Error::Corrupt {
+                        stage: CorruptionStage::PackEntry,
+                    })?;
+                    if source.path.as_ref() != Some(path) {
+                        return Err(Error::Corrupt {
+                            stage: CorruptionStage::PackEntry,
+                        });
+                    }
+                    let start =
+                        range
+                            .start
+                            .checked_sub(source.object_offset)
+                            .ok_or(Error::Corrupt {
+                                stage: CorruptionStage::PackEntry,
+                            })?;
+                    let end =
+                        range
+                            .end
+                            .checked_sub(source.object_offset)
+                            .ok_or(Error::Corrupt {
+                                stage: CorruptionStage::PackEntry,
+                            })?;
+                    return self
+                        .read_pack_range(&pack_id, start, end, budget, cancellation)
+                        .await;
+                }
                 self.read_object_range(path, range.start, range.end, budget, cancellation)
                     .await
             }
@@ -2490,9 +2526,7 @@ impl RemoteGitReader {
         if gix_features::hash::crc32(bytes) != locator.location.crc32 {
             // Reject this read without retrying origin. A later request must
             // not inherit a speculative window containing corrupt entry bytes.
-            self.runtime
-                .discard_pack_window(&self.identity, locator.pack_id)
-                .await;
+            self.runtime.discard_pack_windows().await;
             return Err(Error::PackedEntryCrcMismatch { oid });
         }
         Ok(())
@@ -4689,6 +4723,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn embedded_coalesced_reads_reuse_pack_windows() {
+        let pack_id = MerkleHash::from_hex(&"11".repeat(32)).unwrap();
+        let reader = reader_with_embedded_pack_sources(&[(pack_id, 1, 100, 64)]);
+        let source = reader.pack_source(&pack_id).unwrap();
+        let path = source.path.clone().unwrap();
+        reader
+            .store
+            .put(&path, Bytes::from(vec![7; 300]))
+            .await
+            .unwrap();
+        let budget =
+            OperationBudget::new(crate::OperationLimits::default(), reader.runtime.clone());
+        for offset in [12, 28] {
+            let range = CoalescedRange {
+                source: CoalescedRangeSource::Object(path.clone()),
+                start: 100 + offset,
+                end: 108 + offset,
+                extra_bytes: 0,
+                entries: vec![CoalescedRangeEntry {
+                    oid: gix_hash::ObjectId::from([4; 20]),
+                    locator: GitObjectLocator {
+                        ordinal: 0,
+                        pack_id,
+                        location: GitObjectLocation {
+                            pack_offset: offset,
+                            entry_len: 8,
+                            crc32: 0,
+                        },
+                        metadata: Default::default(),
+                    },
+                    source_start: 100 + offset,
+                }],
+            };
+            let bytes = reader
+                .read_coalesced_range(&range, &budget, &CancellationToken::new())
+                .await
+                .unwrap();
+            assert_eq!(bytes, Bytes::from(vec![7; 8]));
+        }
+        reader.runtime.shutdown().await;
+        assert_eq!(
+            budget
+                .usage()
+                .await
+                .amount(BudgetDimension::StorageRequests),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn pack_read_ahead_preserves_tight_and_disabled_cache_admission() {
         for (options, maximum) in [
             (crate::RuntimeOptions::default(), 16),
@@ -4838,10 +4922,13 @@ mod tests {
         let runtime = Arc::new(RemoteGitRuntime::default());
         let (reader, pack_id, bytes) = stored_pack_reader(runtime.clone(), "repository").await;
         let corrupt = runtime
-            .reserve_bytes(64 * 1024)
+            .reserve_bytes(crate::runtime::PACK_WINDOW_BYTES as usize)
             .await
             .unwrap()
-            .bind(Bytes::from(vec![0; 64 * 1024]))
+            .bind(Bytes::from(vec![
+                0;
+                crate::runtime::PACK_WINDOW_BYTES as usize
+            ]))
             .unwrap();
         runtime
             .cache_pack_window(&reader.identity, pack_id, 0, corrupt)

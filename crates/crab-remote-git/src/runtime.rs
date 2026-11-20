@@ -23,7 +23,8 @@ use crate::{
     RepositoryOptions, Result, SharedBlame,
 };
 
-pub(crate) const PACK_WINDOW_BYTES: u64 = 64 * 1024;
+pub(crate) const PACK_WINDOW_BYTES: u64 = 4 * 1024;
+const PACK_WINDOWS: usize = 8;
 
 /// Process-wide bounds for remote Git caches and execution admission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -291,7 +292,7 @@ pub struct RemoteGitRuntime {
     pack_index_flight_admission: Arc<Semaphore>,
     generated_pack_flight_admission: Arc<Semaphore>,
     object_cache: Mutex<BoundedLru<ObjectCacheKey, Arc<GitObject>>>,
-    pack_window: Mutex<Option<(PackIndexCacheKey, u64, bytes::Bytes)>>,
+    pack_windows: Mutex<BoundedLru<(PackIndexCacheKey, u64), bytes::Bytes>>,
     pack_index_cache: Mutex<BoundedLru<PackIndexCacheKey, Arc<PackIndex>>>,
     parsed_cache: Mutex<BoundedLru<ObjectCacheKey, ParsedObject>>,
     blame_cache: Mutex<BoundedLru<BlameCacheKey, BlameCacheValue>>,
@@ -324,7 +325,7 @@ impl RemoteGitRuntime {
         // allocation. Active caller/worker owners survive eviction and remain
         // charged; reject immediately if they still exhaust the envelope.
         let mut evicted = self.object_cache.lock().await.clear();
-        evicted += usize::from(self.pack_window.lock().await.take().is_some());
+        evicted += self.pack_windows.lock().await.clear();
         evicted += self.pack_index_cache.lock().await.clear();
         evicted += self.parsed_cache.lock().await.clear();
         evicted += self.blame_cache.lock().await.clear();
@@ -412,7 +413,12 @@ impl RemoteGitRuntime {
                 options.max_object_cache_entries,
                 options.max_object_cache_bytes,
             )),
-            pack_window: Mutex::new(None),
+            pack_windows: Mutex::new(BoundedLru::new(
+                options.max_object_cache_entries.min(PACK_WINDOWS),
+                options
+                    .max_object_cache_bytes
+                    .min(PACK_WINDOWS * PACK_WINDOW_BYTES as usize),
+            )),
             pack_index_cache: Mutex::new(BoundedLru::new(
                 options.max_pack_index_cache_entries,
                 options.max_pack_index_cache_bytes,
@@ -633,13 +639,11 @@ impl RemoteGitRuntime {
         start: u64,
         end: u64,
     ) -> Option<bytes::Bytes> {
-        let window = self.pack_window.lock().await;
-        let (key, offset, bytes) = window.as_ref()?;
-        if *key != PackIndexCacheKey::new(identity, pack_id) {
-            return None;
-        }
-        let start = usize::try_from(start.checked_sub(*offset)?).ok()?;
-        let end = usize::try_from(end.checked_sub(*offset)?).ok()?;
+        let offset = start / PACK_WINDOW_BYTES * PACK_WINDOW_BYTES;
+        let key = (PackIndexCacheKey::new(identity, pack_id), offset);
+        let bytes = self.pack_windows.lock().await.get(&key)?;
+        let start = usize::try_from(start.checked_sub(offset)?).ok()?;
+        let end = usize::try_from(end.checked_sub(offset)?).ok()?;
         bytes.get(start..end)?;
         Some(bytes.slice(start..end))
     }
@@ -651,24 +655,17 @@ impl RemoteGitRuntime {
         offset: u64,
         bytes: bytes::Bytes,
     ) {
-        // Delta unwinding is sequential. Retain only its most recent window,
-        // inside the existing resident envelope, regardless of repository count.
-        *self.pack_window.lock().await =
-            Some((PackIndexCacheKey::new(identity, pack_id), offset, bytes));
+        // Delta walks alternate between nearby bases and distant selected
+        // entries. Small bounded windows retain both without large overreads.
+        let key = (PackIndexCacheKey::new(identity, pack_id), offset);
+        let length = bytes.len();
+        self.pack_windows.lock().await.insert(key, bytes, length);
     }
 
-    pub(crate) async fn discard_pack_window(
-        &self,
-        identity: &RepositoryIdentity,
-        pack_id: MerkleHash,
-    ) {
-        let mut window = self.pack_window.lock().await;
-        if window
-            .as_ref()
-            .is_some_and(|(key, ..)| *key == PackIndexCacheKey::new(identity, pack_id))
-        {
-            *window = None;
-        }
+    pub(crate) async fn discard_pack_windows(&self) {
+        // All windows are disposable. Clear them together so no cached bytes
+        // from a corrupt pack survive a later independent retry.
+        self.pack_windows.lock().await.clear();
     }
 
     pub(crate) async fn exact_miss_is_cached(&self, key: &ObjectCacheKey) -> bool {

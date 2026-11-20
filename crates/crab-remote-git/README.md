@@ -40,21 +40,23 @@ index misses are definitive. Physical placement never assigns catalog ordinals
 or authorizes ref visibility; ordinary unindexed snapshots retain their existing
 pack-index inspection path until background readiness is published.
 
-Small physical pack reads retain the most recent 64-KiB read-ahead window in
-the shared runtime. Serial delta dependencies can reuse neighbouring encoded
-bytes instead of issuing one range request per entry. Its identity includes
-repository placement and immutable pack content; captured member bounds, caller
-byte admission, CRCs and reconstructed object hashes still apply. Cached bytes
-are raw input, not an object or visibility proof. Corrupt entry bytes discard
-the window and fail the current read without retrying origin.
+Small physical pack reads retain up to eight 4-KiB read-ahead windows in the
+shared runtime. Serial delta dependencies and batches inside one embedded pack
+reuse neighbouring encoded bytes instead of issuing one range request per
+entry. Their identity includes repository placement and immutable pack content;
+captured member bounds, caller byte admission, CRCs and reconstructed object
+hashes still apply. Cached bytes are raw input, not an object or visibility
+proof. Corrupt entry bytes discard the windows and fail the current read
+without retrying origin.
 
-The window fits the existing resident envelope, is evicted on allocation
-pressure, and retains its reservation through every borrowed byte slice. There
-is only one window regardless of repository count. Disabled or smaller object
-caches retain exact reads; speculative reads require both current byte budget
-and memory admission. Inline packs and already coalesced source ranges keep
-their existing paths. Account opening I/O separately: prefetching while
-resolving a snapshot can reduce later query I/O without making total I/O zero.
+The windows fit the existing resident envelope, are evicted on allocation
+pressure, and retain their reservation through every borrowed byte slice. Their
+combined cache is at most 32 KiB regardless of repository count, also capped by
+existing object-cache entry/byte limits. Disabled or smaller object caches
+retain exact reads; speculative reads require both current byte budget and
+memory admission. Inline packs and source ranges spanning multiple members
+keep their existing paths. Account opening I/O separately and publish read-ahead
+bytes alongside request savings; fewer requests do not imply zero total I/O.
 
 Delta reads retain the selected physical representation. OFS bases and in-pack
 REF bases resolve inside their source pack. External REF lookup starts with
