@@ -1,0 +1,285 @@
+{
+  "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+  "data": {
+    "values": "<DVC_METRIC_DATA>"
+  },
+  "config": {
+    "view": {
+      "stroke": null
+    },
+    "range": {
+      "category": [
+        "#3b82f6",
+        "#d97706",
+        "#0d9488",
+        "#a855f7"
+      ]
+    },
+    "font": "system-ui"
+  },
+  "params": [
+    {
+      "name": "decision_threshold",
+      "value": 0.5,
+      "bind": {
+        "input": "range",
+        "min": 0.05,
+        "max": 0.95,
+        "step": 0.05,
+        "name": "Decision threshold "
+      }
+    },
+    {
+      "name": "selected_cohort",
+      "value": "All",
+      "bind": {
+        "input": "select",
+        "options": [
+          "All",
+          "Established",
+          "New customer",
+          "Cross-border"
+        ],
+        "name": "Cohort "
+      }
+    }
+  ],
+  "transform": [
+    {
+      "filter": "selected_cohort === 'All' || datum.cohort === selected_cohort"
+    },
+    {
+      "calculate": "datum.score >= decision_threshold ? 'Positive' : 'Negative'",
+      "as": "prediction"
+    },
+    {
+      "calculate": "datum.label === 1 ? 'Positive' : 'Negative'",
+      "as": "actual"
+    }
+  ],
+  "vconcat": [
+    {
+      "title": "Score distribution \u00b7 drag to inspect a score band",
+      "width": 720,
+      "height": 190,
+      "layer": [
+        {
+          "params": [
+            {
+              "name": "score_band",
+              "select": {
+                "type": "interval",
+                "encodings": [
+                  "x"
+                ]
+              }
+            }
+          ],
+          "mark": {
+            "type": "bar",
+            "opacity": 0.55
+          },
+          "encoding": {
+            "x": {
+              "field": "score",
+              "type": "quantitative",
+              "bin": {
+                "maxbins": 25
+              },
+              "scale": {
+                "domain": [
+                  0,
+                  1
+                ]
+              },
+              "title": "Predicted risk"
+            },
+            "y": {
+              "aggregate": "count",
+              "type": "quantitative",
+              "stack": null,
+              "title": "Observations"
+            },
+            "color": {
+              "field": "<DVC_METRIC_COLOR>",
+              "type": "nominal",
+              "title": null,
+              "legend": {
+                "orient": "top",
+                "labelLimit": 180,
+                "columns": 2
+              }
+            },
+            "tooltip": [
+              {
+                "field": "<DVC_METRIC_COLOR>"
+              },
+              {
+                "aggregate": "count",
+                "title": "Observations"
+              }
+            ]
+          }
+        },
+        {
+          "data": {
+            "values": [
+              {}
+            ]
+          },
+          "mark": {
+            "type": "rule",
+            "color": "currentColor",
+            "strokeDash": [
+              5,
+              4
+            ]
+          },
+          "encoding": {
+            "x": {
+              "datum": {
+                "expr": "decision_threshold"
+              },
+              "type": "quantitative"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "title": "Confusion matrix \u00b7 selected cohort and score band",
+      "transform": [
+        {
+          "filter": {
+            "param": "score_band"
+          }
+        }
+      ],
+      "facet": {
+        "column": {
+          "field": "<DVC_METRIC_COLOR>",
+          "type": "nominal",
+          "title": null,
+          "header": {
+            "labelLimit": 160
+          }
+        }
+      },
+      "spec": {
+        "width": 155,
+        "height": 145,
+        "encoding": {
+          "x": {
+            "field": "prediction",
+            "type": "nominal",
+            "title": "Predicted"
+          },
+          "y": {
+            "field": "actual",
+            "type": "nominal",
+            "title": "Actual"
+          }
+        },
+        "layer": [
+          {
+            "mark": {
+              "type": "rect",
+              "cornerRadius": 3
+            },
+            "encoding": {
+              "color": {
+                "field": "observations",
+                "type": "quantitative",
+                "scale": {
+                  "range": [
+                    "#eff6ff",
+                    "#93c5fd"
+                  ]
+                },
+                "title": "Observations",
+                "legend": {
+                  "orient": "bottom",
+                  "direction": "horizontal",
+                  "gradientLength": 220
+                }
+              },
+              "tooltip": [
+                {
+                  "field": "actual"
+                },
+                {
+                  "field": "prediction"
+                },
+                {
+                  "field": "observations"
+                }
+              ]
+            }
+          },
+          {
+            "mark": {
+              "type": "text",
+              "fontSize": 14,
+              "fontWeight": 600
+            },
+            "encoding": {
+              "text": {
+                "field": "observations",
+                "type": "quantitative"
+              },
+              "color": {
+                "value": "#172554"
+              }
+            }
+          }
+        ],
+        "transform": [
+          {
+            "aggregate": [
+              {
+                "op": "count",
+                "as": "observations"
+              }
+            ],
+            "groupby": [
+              "actual",
+              "prediction",
+              "<DVC_METRIC_COLOR>"
+            ]
+          },
+          {
+            "impute": "observations",
+            "key": "prediction",
+            "keyvals": [
+              "Negative",
+              "Positive"
+            ],
+            "groupby": [
+              "actual",
+              "<DVC_METRIC_COLOR>"
+            ],
+            "value": 0
+          },
+          {
+            "impute": "observations",
+            "key": "actual",
+            "keyvals": [
+              "Negative",
+              "Positive"
+            ],
+            "groupby": [
+              "prediction",
+              "<DVC_METRIC_COLOR>"
+            ],
+            "value": 0
+          }
+        ]
+      }
+    }
+  ],
+  "resolve": {
+    "scale": {
+      "color": "independent"
+    }
+  }
+}

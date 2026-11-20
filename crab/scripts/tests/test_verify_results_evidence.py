@@ -20,7 +20,7 @@ class ResultsEvidenceTests(unittest.TestCase):
         self.proof = {"schema": 1, "passed": True, "source_sha": "a"*40,
                       "source_tree": "b"*64, "runtime_sha256": "c"*64,
                       "checks": dict.fromkeys(MODULE.CORE | MODULE.FAULTS | MODULE.DESKTOP | MODULE.HTTP | MODULE.BROWSER, True),
-                      "tests": {"core": 1, "checkpoint": 1, "inputs": 5, "settings": 1, "workspace": 8, "migration": 3, "restore": 2, "charts":12, "templates":9, "authored_plots":2, "partial_templates":1, "matrices":5, "matrix_cli":1, "faults": 2, "transfers": 1, "transport": 1, "sdk":1, "discovery":1, "agent": 1, "agent_errors": 3, "desktop": 4, "http": 2, "browser":7, "browser_http":1},
+                      "tests": {"core": 1, "checkpoint": 1, "inputs": 5, "settings": 1, "workspace": 8, "migration": 3, "restore": 2, "charts":12, "templates":9, "authored_plots":2, "partial_templates":1, "matrices":5, "matrix_cli":1, "faults": 2, "transfers": 1, "transport": 1, "sdk":1, "discovery":1, "agent": 1, "agent_errors": 3, "desktop": 5, "http": 2, "browser":7, "browser_http":1},
                       "binaries": dict.fromkeys(["cli", "packaged_cli", "agent", "application"], "d"*64),
                       "provider": "native-rustfs-s3", "platform": "Darwin-arm64",
                       "workflow_run": "qualification", "workflow_attempt": "1"}

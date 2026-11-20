@@ -181,6 +181,7 @@ test("Results retains an actual comparison after restart and cold remote report 
       JSON.stringify({ phase, pid, wall_ms: Date.now() }) + "\n",
     );
   const launch = async () => {
+    recordLifecycle("launch.start", undefined);
     app = await electron.launch({
       executablePath: packagedExecutable(),
       args: [`--user-data-dir=${path.join(root, "profile")}`],
@@ -191,6 +192,7 @@ test("Results retains an actual comparison after restart and cold remote report 
       },
     });
     const child = app.process();
+    recordLifecycle("launch.connected", child.pid);
     child.once("exit", () => recordLifecycle("child.exit", child.pid));
     child.once("close", () => recordLifecycle("child.stdio.close", child.pid));
     await app.evaluate(({ app }, file) => {
@@ -204,7 +206,9 @@ test("Results retains an actual comparison after restart and cold remote report 
         app.prependListener(event, () => record(event));
       process.once("exit", () => record("main.node.exit"));
     }, lifecycleFile);
+    recordLifecycle("firstWindow.start", child.pid);
     const page = await app.firstWindow();
+    recordLifecycle("firstWindow.end", child.pid);
     await expect
       .poll(async () => {
         try {

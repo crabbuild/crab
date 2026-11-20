@@ -1,4 +1,5 @@
 use super::*;
+use std::path::Path;
 
 fn capture(local: &LocalResults, offset: u32, template: &str) -> SealedResult {
     let bytes = format!(
@@ -280,6 +281,76 @@ fn template_metadata_never_overwrites_selected_source_columns() {
         rows.iter()
             .all(|row| row["rev"] == 1 && row["series"] == 2 && row["__crab_value"] == 3)
     );
+}
+
+#[test]
+fn compound_templates_keep_typed_auxiliary_fields_without_duplicating_observations() {
+    let directory = tempfile::tempdir().unwrap();
+    let template = json!({
+        "data":{"values":"<DVC_METRIC_DATA>"},
+        "facet":{"column":{"field":"cohort","type":"nominal"}},
+        "spec":{"layer":[
+            {"mark":"area","encoding":{"x":{"field":"epoch","type":"quantitative"},
+                "y":{"field":"lower","type":"quantitative"},"y2":{"field":"upper"}}},
+            {"mark":"line","encoding":{"y":{"field":"<DVC_METRIC_Y>","type":"quantitative"},
+                "color":"<DVC_METRIC_COLOR>"}}
+        ]}
+    });
+    std::fs::write(directory.path().join("compound.json"), template.to_string()).unwrap();
+    for (path, bytes) in [
+        ("scores.json", br#"[{"epoch":1,"score":0.8,"lower":0.7,"upper":0.9,"cohort":"mobile","enabled":true,"note":null,"rev":"authored","step":42}]"#.as_slice()),
+        ("scores.yaml", b"- epoch: 1\n  score: 0.8\n  lower: 0.7\n  upper: 0.9\n  cohort: mobile\n  enabled: true\n  note: null\n  rev: authored\n  step: 42\n".as_slice()),
+        ("scores.csv", b"epoch,score,lower,upper,cohort,enabled,note,rev,step\n1,0.8,0.7,0.9,mobile,true,,authored,42\n".as_slice()),
+        ("scores.tsv", b"epoch\tscore\tlower\tupper\tcohort\tenabled\tnote\trev\tstep\n1\t0.8\t0.7\t0.9\tmobile\ttrue\t\tauthored\t42\n".as_slice()),
+    ] {
+        let config: crate::PlotConfig = serde_json::from_value(json!({
+            "path":path,"x":"epoch","y":["score"],"template":"compound.json"
+        })).unwrap();
+        let data = plots::parse_plot_data_bytes(&config.path, bytes, &config).unwrap();
+        let spec = plot_specs::build_vega_spec(&config, "Cohorts", &data, directory.path()).unwrap();
+        let rows = spec["data"]["values"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "{path}: one row per selected measure");
+        let row = &rows[0];
+        assert_eq!((row["lower"].clone(), row["upper"].clone(), row["cohort"].clone()),
+            (json!(0.7), json!(0.9), json!("mobile")), "{path}");
+        assert!(row["note"].is_null(), "{path}");
+        assert_eq!((row["rev"].clone(), row["step"].clone()), (json!("authored"), json!(42)));
+        let color = spec["spec"]["layer"][1]["encoding"]["color"]["field"].as_str().unwrap();
+        assert_ne!(color, "rev");
+        assert_eq!(row["enabled"], if path.ends_with("json") || path.ends_with("yaml") {
+            json!(true)
+        } else { json!("true") });
+        assert_eq!(serde_json::to_value(&data).unwrap(), json!({
+            "y_fields":["score"],"rows":[{"x":"1","y_values":["0.8"]}]
+        }), "tagged CLI rows remain unchanged");
+    }
+}
+
+#[test]
+fn cross_file_template_coordinates_override_only_x_source_fields() {
+    let directory = tempfile::tempdir().unwrap();
+    let config: crate::PlotConfig = serde_json::from_value(json!({
+        "path":"scores.json","x":"epoch\\axis","y":["score"],"template":"simple"
+    }))
+    .unwrap();
+    let mut data = plots::parse_plot_data_bytes(
+        &config.path,
+        br#"[{"epoch\\axis":99,"score":0.8,"cohort":"mobile","__crab_x":42}]"#,
+        &config,
+    )
+    .unwrap();
+    let source = plots::parse_plot_data_bytes(
+        Path::new("x.json"),
+        br#"[{"epoch\\axis":3,"cohort":"must not replace"}]"#,
+        &config,
+    )
+    .unwrap();
+    data.rows[0].replace_x(source.rows.into_iter().next().unwrap());
+    let spec = plot_specs::build_vega_spec(&config, "Cross-file", &data, directory.path()).unwrap();
+    assert_eq!(spec["data"]["values"][0]["epoch\\axis"], 3);
+    assert_eq!(spec["data"]["values"][0]["cohort"], "mobile");
+    assert_eq!(spec["data"]["values"][0]["__crab_x"], 42);
+    assert_eq!(spec["encoding"]["x"]["field"], "__crab_x_");
 }
 
 #[test]

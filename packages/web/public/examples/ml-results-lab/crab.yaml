@@ -1,0 +1,65 @@
+params: [params.json]
+artifacts:
+  classifier:
+    path: models/classifier.json
+    type: model
+    desc: Synthetic customer risk classifier
+  forecaster:
+    path: models/forecaster.json
+    type: model
+    desc: Synthetic daily demand forecaster
+plots:
+  - plots/learning.json:
+      x: epoch
+      y: [train_loss, validation_loss]
+      title: Learning · train and validation
+      template: linear
+  - plots/diagnostics.json:
+      x: x
+      y: y
+      title: Classification · discrimination and calibration
+      template: templates/diagnostics.json
+  - plots/cohorts.json:
+      x: cohort
+      y: score
+      title: Cohorts · 95% Wilson intervals
+      template: templates/cohorts.json
+  - plots/predictions.json:
+      x: score
+      y: label
+      title: Decision lab · threshold and cohort exploration
+      template: templates/decision.json
+  - plots/forecast.json:
+      x: day
+      y: prediction
+      title: Demand · forecast, residual band and errors
+      template: templates/forecast.json
+stages:
+  prepare:
+    cmd: python3 src/lab.py prepare
+    deps: [src/lab.py]
+    outs: [data/customers.json, data/demand.json, data/benchmark.json]
+  train:
+    cmd: python3 src/lab.py train
+    deps: [src/lab.py, data/customers.json]
+    params: [train.capacity, train.l2, train.epochs, train.learning_rate]
+    outs: [models/classifier.json]
+    plots:
+      - plots/learning.json
+  evaluate:
+    cmd: python3 src/lab.py evaluate
+    deps: [src/lab.py, data/customers.json, data/benchmark.json, models/classifier.json]
+    params: [evaluate.threshold]
+    metrics: [metrics/classification.json]
+    plots:
+      - plots/diagnostics.json
+      - plots/cohorts.json
+      - plots/predictions.json
+  forecast:
+    cmd: python3 src/lab.py forecast
+    deps: [src/lab.py, data/demand.json, data/benchmark.json]
+    params: [train.capacity, train.l2]
+    outs: [models/forecaster.json]
+    metrics: [metrics/forecast.json]
+    plots:
+      - plots/forecast.json

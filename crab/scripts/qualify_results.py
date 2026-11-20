@@ -42,6 +42,7 @@ def source_tree():
     files = git("ls-files", "-z", "--cached", "--others", "--exclude-standard", "--",
                 "Cargo.toml", "Cargo.lock", ".cargo",
                 "crab", "crates", "packages/desktop", "packages/ui", "packages/workflow-results",
+                "packages/web/public/examples/ml-results-lab",
                 ".github/workflows/desktop.yml", ".github/workflows/workflow-native.yml",
                 ".github/workflows/sdk.yml").split(b"\0")
     for name in sorted(set(files) - {b""}):
@@ -363,13 +364,13 @@ def main():
                         env.update(E2E_SMOKE="1", PLAYWRIGHT_JSON_OUTPUT_FILE=str(output / "desktop.json"))
                         with (output / "desktop.log").open("w") as stream:
                             subprocess.run(["node", str(ROOT / "packages/desktop/node_modules/@playwright/test/cli.js"), "test", "tests/e2e/workflow-results.spec.ts",
-                                "tests/e2e/results-offline.spec.ts", "tests/e2e/results-actions.spec.ts", "tests/e2e/results-authored-failures.spec.ts", "--project=e2e-smoke", "--workers=1", "--reporter=list,json"],
+                                "tests/e2e/results-offline.spec.ts", "tests/e2e/results-actions.spec.ts", "tests/e2e/results-authored-failures.spec.ts", "tests/e2e/results-complex.spec.ts", "--project=e2e-smoke", "--workers=1", "--reporter=list,json"],
                                 cwd=ROOT / "packages/desktop", env=env, stdout=stream, stderr=stream, timeout=480, check=True)
                         tests = list(specs(json.loads((output / "desktop.json").read_text())))
-                        if len(tests) != 4 or any(test["tests"][0]["results"][0]["status"] != "passed" for test in tests):
+                        if len(tests) != 5 or any(test["tests"][0]["results"][0]["status"] != "passed" for test in tests):
                             raise RuntimeError("Packaged Results tests were missing, skipped, or failed")
                         proof["checks"].update(dict.fromkeys(verifier.DESKTOP, True))
-                        proof["tests"]["desktop"] = 4
+                        proof["tests"]["desktop"] = 5
                         proof["resources"]["desktop"] = json.loads((output / "native-resource-envelope.json").read_text())
                     if browser:
                         browser_case = "api::results::tests::browser::browser_publishes_real_run_reports_and_rechecks_revoked_access"

@@ -1,0 +1,127 @@
+{
+  "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+  "data": {
+    "values": "<DVC_METRIC_DATA>"
+  },
+  "config": {
+    "view": {
+      "stroke": null
+    },
+    "range": {
+      "category": [
+        "#3b82f6",
+        "#d97706",
+        "#0d9488",
+        "#a855f7"
+      ]
+    },
+    "font": "system-ui"
+  },
+  "facet": {
+    "column": {
+      "field": "measure",
+      "type": "nominal",
+      "title": null,
+      "sort": [
+        "Precision",
+        "Recall",
+        "Accuracy"
+      ]
+    }
+  },
+  "spec": {
+    "width": 235,
+    "height": 230,
+    "encoding": {
+      "y": {
+        "field": "cohort",
+        "type": "nominal",
+        "title": null,
+        "axis": {
+          "labelLimit": 120
+        }
+      },
+      "yOffset": {
+        "field": "<DVC_METRIC_COLOR>"
+      },
+      "color": {
+        "field": "<DVC_METRIC_COLOR>",
+        "type": "nominal",
+        "title": null,
+        "legend": {
+          "orient": "top",
+          "labelLimit": 180,
+          "columns": 2
+        }
+      }
+    },
+    "layer": [
+      {
+        "mark": {
+          "type": "rule",
+          "strokeWidth": 2,
+          "opacity": 0.5
+        },
+        "encoding": {
+          "x": {
+            "field": "lower",
+            "type": "quantitative",
+            "scale": {
+              "domain": [
+                0,
+                1
+              ]
+            },
+            "title": "Held-out proportion"
+          },
+          "x2": {
+            "field": "upper"
+          }
+        }
+      },
+      {
+        "mark": {
+          "type": "point",
+          "filled": true,
+          "size": 55
+        },
+        "encoding": {
+          "x": {
+            "field": "score",
+            "type": "quantitative",
+            "scale": {
+              "domain": [
+                0,
+                1
+              ]
+            }
+          },
+          "tooltip": [
+            {
+              "field": "<DVC_METRIC_COLOR>"
+            },
+            {
+              "field": "cohort"
+            },
+            {
+              "field": "score",
+              "format": ".3f"
+            },
+            {
+              "field": "lower",
+              "format": ".3f"
+            },
+            {
+              "field": "upper",
+              "format": ".3f"
+            },
+            {
+              "field": "count",
+              "title": "Denominator"
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

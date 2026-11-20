@@ -24,6 +24,10 @@ pub struct PlotRow {
     pub(super) missing_values: Vec<bool>,
     #[serde(skip)]
     pub(super) index: usize,
+    // Templates need the complete observation for facets, filters and bounds.
+    // Keep the tagged CLI string-row contract independent of rendering fields.
+    #[serde(skip)]
+    pub(super) fields: serde_json::Map<String, serde_json::Value>,
 }
 
 impl PlotRow {
@@ -121,6 +125,17 @@ fn read_delimited_plot_data(text: &str, config: &PlotConfig, delimiter: char) ->
                 })
                 .collect(),
             index: i,
+            fields: headers
+                .iter()
+                .enumerate()
+                .map(|(index, field)| {
+                    let value = cols.get(index).copied().unwrap_or("");
+                    (
+                        field.clone(),
+                        super::plot_specs::plot_scalar(value, value.is_empty()),
+                    )
+                })
+                .collect(),
         });
     }
     PlotData { y_fields, rows }
@@ -200,6 +215,7 @@ fn read_object_array_plot_data(
                 .map(|key| obj.get(key).is_none_or(serde_json::Value::is_null))
                 .collect(),
             index: i,
+            fields: obj.as_object().cloned().unwrap_or_default(),
         });
     }
     Ok(PlotData { y_fields, rows })

@@ -1236,3 +1236,112 @@ the warmed baseline. Product limits remain unchanged. The passing packet
 explicitly leaves whole-plan completion false. Actual cloud/managed and other native platform execution,
 the prior native timeout and whole-plan completion remain open. Results remains
 a Data Workflows tab, with no native sidebar entry.
+
+## Compound visualization example and fractional persistence
+
+`packages/web/public/examples/ml-results-lab/` provides a reproducible Python
+standard-library workflow: four real queued configurations, classification and
+forecasting, separate training/validation/test splits, and two model artifacts.
+Five plot groups contain learning overlays; precision/recall, ROC and calibration;
+cohort Wilson intervals; a threshold/cohort/brush explorer with exact confusion
+counts; and forecasts, validation-calibrated residual bands and residuals.
+The benchmark input manifest hashes both datasets and evaluator source. The
+example driver also checks their recorded input witnesses before declaring
+comparability and assigning metric objectives.
+
+The canonical parser retains every observation column internally. Authored
+Vega-Lite templates can reference auxiliary fields without selecting them as y
+series and multiplying observations. JSON/YAML preserve auxiliary types;
+CSV/TSV normalize numbers and empty cells. Metadata and coordinate aliases
+reserve all source-column names. Cross-file coordinates replace only declared
+x values. Tagged CLI string rows, schema, storage layout, offline URL rejection
+and display budgets stay unchanged. Compatible simple curves retain shared
+cursor/range behavior; compound templates own their authored interactions.
+
+A real four-run comparison exposed fractional deltas failing exact report
+verification after JSON reload. `crab-workflow` enables serde_json 1.0.151's
+`float_roundtrip` feature, keeping exact verification rather than adding float
+tolerances. Dependency source `src/de.rs::f64_from_parts` selects its concise
+float parser under this feature. No dependency version, lockfile, override or
+vendor change. The minimal save/reopen regression fails before the feature and
+passes afterward; the originally failing report also reopens unchanged.
+
+Focused proof: 51 Results-owner tests pass (two dedicated scale tests remain
+ignored), CLI build and formatting pass, and documentation links pass. The
+actual example produces four successful runs, five unsampled chart groups and
+3,632 observations. Browser proof exercises threshold changes, cohort filtering
+(532 observations), brushing (432), test-only forecast filtering (84), learning
+zoom and reopening; zero network attempts, page errors or console errors. Nine
+screenshots retain those real rendered states.
+
+Owned loopback RustFS proof publishes the runs/report, removes all local Results
+and working templates, retrieves the report and all four runs, then rebuilds
+five healthy charts. Offline HTML SHA-256 is byte-identical before and after:
+`a4d15a2aeeb8553c85f92724bce2349751a3f1bf8948060926a7252224d97739`.
+Report: `2e5164ef4d9efcd921c1936dabe2c5d5e49d5e64376914253a118dee23d19c13`.
+Evidence is retained in this worktree's external target under `results-lab-proof/`
+and the local screenshot gallery's `complex/` directory. Browser brush targeting
+and the fixture Python environment were corrected in the external harness;
+production timing/assertions were not relaxed. This is scoped CLI/shared-owner/
+offline-browser evidence, not a new native package, cross-platform, live-cloud
+or whole-plan qualification. The earlier native timeout remains unresolved.
+
+## Native compound visualization qualification
+
+`packages/desktop/tests/e2e/results-complex.spec.ts` runs the public lab in the
+packaged application under **Data Workflows → Results**. Native enqueue admits
+four two-parameter configurations; the visible Queue Start action executes them
+with the bundled CLI. The case binds the captured benchmark witness, objectives
+and baseline, verifies all five chart groups, and drives threshold/cohort/brush,
+forecast-period and curve-range controls. It reopens the same profile, verifies
+four selected runs and the epoch range, saves and publishes a report, then
+retrieves it from a fresh Git clone after removing the workflow and templates.
+The recovered chart still responds to threshold and cohort changes. Successful
+evidence is written only after application and owned daemon cleanup completes.
+
+The native two-column chart grid clipped authored compound views. Results now
+stacks plots at the available width, matching browser/offline layout ownership;
+the shared renderer still preserves authored facet/concatenation geometry and
+allows horizontal scrolling when a view exceeds its container. The native case
+asserts that these four compound examples fit a 1600-pixel viewport. Example
+axis guides inherit the theme, with series colors legible on light and dark
+surfaces. Data transformations and frozen-report semantics are unchanged.
+
+The first complete packaged macOS arm64 run passed in 67.5 seconds, capturing
+14 screenshots, four runs, five charts, 432 brushed observations, 84 test-period
+forecast points and zero page errors. Its immutable report is
+`b72246458cf583858741690fe8801c48674b2747d6039df1e4b85dc05da80f6f`.
+A final-source rerun passes both the complex case (26.7 seconds) and the existing
+Results recovery/failure case (55.9 seconds); all six closes finish below
+350 milliseconds. Its report is
+`4061187a141f08d81b9608bc97aa0ed844bb93be949220e560027240e2f66738`.
+Qualification now requires five native cases and binds the consumed example's
+Python, YAML and template sources. This is real native/owned-RustFS proof,
+not live-cloud or cross-platform qualification.
+
+## Native timeout investigation
+
+The retained historical failure reached 360 seconds with a further worker
+teardown timeout. Its only useful screenshot precedes the first restart; it
+has no operation stack or process sample identifying the blocked boundary.
+New phase records distinguish launch connection, first window, JavaScript exit,
+child exit and stdio closure. They do not change production shutdown policy or
+increase acceptance timeouts.
+
+Thirty real comparison/close reproductions, six complete restart/cold-retrieval
+journeys (three without added phase instrumentation), and twenty minimal
+Electron controls passed. These controls used the earlier packaged application;
+they do not establish the new compound-feature acceptance. Some real closes
+were slow: JavaScript cleanup completed within a fraction of a second, followed
+by a much longer native process wait. Matching Electron 45.2.3 symbols identify
+`BrowserProcessIOThread::ProcessHostCleanUp` → `WaitForExitWithTimeout` in Chromium's
+network-service shutdown. Electron's DEPS pins Chromium 156.0.8078.80; that source
+bounds this wait by build configuration. This explains observed short stalls,
+not the historical six-minute failure.
+
+The complex native acceptance also completes all three closes. There is no
+reproduced six-minute failure, proven root cause, or justified production fix.
+The historical timeout remains open. Do not interpret passing repetitions as a
+fix, introduce force-quit timers, or bypass native owner draining. Evidence stays
+in the external target under `native-timeout-audit/`, `native-timeout-full-audit/`,
+`native-timeout-untraced/` and `native-complex-results/`.
