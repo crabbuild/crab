@@ -312,7 +312,8 @@ jobs:
   cross-platform-contract:
     name: Protocol contract (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    # Cold native compilation and post-job cache upload share this deadline.
+    timeout-minutes: 60
     defaults:
       run:
         shell: bash
