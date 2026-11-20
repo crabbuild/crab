@@ -2981,6 +2981,39 @@ workstream remains open until every required gate passes.
 
 ## Maintenance notes
 
+### Rich visualization examples (implemented; scoped proof)
+
+Extend the canonical plot parser/template owner to retain auxiliary source
+columns for filters, facets, tooltips and uncertainty bounds. Internal fields
+remain absent from tagged CLI string rows; captured bytes and Results schema
+stay unchanged. Cross-file x coordinates still override only the declared x.
+CLI, native, browser and offline reports consume this same normalization.
+
+Add a reproducible, dependency-free classification and forecasting workflow
+with real trained model metrics, compound interactive templates and cohort
+evaluation. Verify source-column collision safety, typed auxiliary values,
+offline rendering and user-operated controls. This slice does not expand chart
+budgets, enable external data, or close outstanding platform/lifecycle gates.
+
+The actual four-run example exposed report reload failure for fractional metric
+deltas. Preserve exact verification and enable serde_json's `float_roundtrip`
+at the workflow owner; add a save/reopen regression before changing the feature.
+No dependency version, lockfile, schema or storage layout change. The dependency
+feature unifies into CLI/SDK/desktop/server consumers; verify decimal captures
+and frozen reports, not just in-memory comparison equality.
+
+Delivered: auxiliary observation fields, collision-safe metadata, unchanged
+CLI rows; reproducible four-run classification/forecasting lab and four authored
+compound templates. Five chart groups / 3,632 observations render unsampled.
+51 owner tests, CLI build, formatting and documentation links pass. Nine actual
+offline screenshots cover threshold/cohort/brush changes, period filtering,
+linked curve zoom and reopening; zero network/console/page errors. Owned RustFS
+cold retrieval restores the same report bytes and all four runs with working
+templates absent. Detailed identities and scope: `crab/docs/design/native-results.md`
+(Compound visualization example and fractional persistence). PR #694 is merged;
+this follow-up targets its updated `crab-v2` base. New native packaging, other
+platform/provider gates and the earlier native timeout remain open.
+
 Review schema, identity, publication order and lifetime together for every new
 attachment/report field. Display transforms cannot mutate frozen reports.
 Distinguish live names from frozen labels, observed evidence from inferred

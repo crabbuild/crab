@@ -39,8 +39,15 @@ pub(super) fn build_template_vega_spec(
         .cloned()
         .collect();
     let multiple = y_fields.len() > 1;
-    let x_coordinate = coordinate_field(x_field, &y_fields.iter().cloned().collect::<Vec<_>>());
     let mut occupied = y_fields.clone();
+    occupied.extend(
+        revisions
+            .iter()
+            .flat_map(|(_, data)| &data.rows)
+            .flat_map(|row| row.fields.keys())
+            .cloned(),
+    );
+    let x_coordinate = coordinate_field(x_field, &occupied.iter().cloned().collect::<Vec<_>>());
     occupied.extend([x_field.to_owned(), x_coordinate.clone(), "step".to_owned()]);
     // Metadata must never replace authored columns used by template expressions.
     // Prefer DVC's names, allocating private names only when the input owns them.
@@ -71,8 +78,8 @@ pub(super) fn build_template_vega_spec(
     let mut values = Vec::new();
     for (revision, data) in revisions {
         for row in &data.rows {
-            let mut object = serde_json::Map::new();
-            object.insert("step".into(), row.index.into());
+            let mut object = row.fields.clone();
+            object.entry("step").or_insert_with(|| row.index.into());
             object.insert(x_field.into(), plot_scalar(&row.x, row.x_missing));
             if x_coordinate != x_field {
                 object.insert(x_coordinate.clone(), plot_scalar(&row.x, row.x_missing));

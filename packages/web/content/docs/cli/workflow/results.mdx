@@ -258,3 +258,26 @@ crab results promote <experiment-id> --digest <result-digest> \
   --name model --version <immutable-version> --stage staging \
   --expected <current-version> --json
 ```
+
+## Rich visualization example
+
+The [Results lab example](/examples/ml-results-lab/README.md) queues four real
+configurations for synthetic classification and demand forecasting. It exports
+learning curves, precision/recall and ROC panels, calibration, cohort intervals,
+a threshold/cohort explorer with linked confusion matrices, and forecast bands
+with residuals. Run `run-demo.py --destination /path/to/new/results-lab` from a
+copy of the example directory, then open Data Workflows → Results or the
+exported offline HTML.
+
+Authored Vega-Lite templates receive every source-row field, including columns
+outside the selected x/y. Use auxiliary fields for facets, filters, tooltips,
+uncertainty bounds and compound views. JSON/YAML preserve auxiliary value types;
+CSV/TSV normalize numbers and empty cells. Selecting multiple y fields emits one
+row per measure, so select a single measure when computing observation counts.
+Template metadata never overwrites authored columns; use DVC anchors for
+revision/grouping fields rather than assuming their generated names.
+
+Bound sliders, menus and selection brushes operate on retained observations.
+They do not change frozen metrics or rerun models. Compound templates own their
+interactions; automatic linked cursors remain limited to compatible simple
+curves. Existing point/series/byte budgets and offline data restrictions apply.

@@ -1236,3 +1236,52 @@ the warmed baseline. Product limits remain unchanged. The passing packet
 explicitly leaves whole-plan completion false. Actual cloud/managed and other native platform execution,
 the prior native timeout and whole-plan completion remain open. Results remains
 a Data Workflows tab, with no native sidebar entry.
+
+## Compound visualization example and fractional persistence
+
+`packages/web/public/examples/ml-results-lab/` provides a reproducible Python
+standard-library workflow: four real queued configurations, classification and
+forecasting, separate training/validation/test splits, and two model artifacts.
+Five plot groups contain learning overlays; precision/recall, ROC and calibration;
+cohort Wilson intervals; a threshold/cohort/brush explorer with exact confusion
+counts; and forecasts, validation-calibrated residual bands and residuals.
+The benchmark input manifest hashes both datasets and evaluator source. The
+example driver also checks their recorded input witnesses before declaring
+comparability and assigning metric objectives.
+
+The canonical parser retains every observation column internally. Authored
+Vega-Lite templates can reference auxiliary fields without selecting them as y
+series and multiplying observations. JSON/YAML preserve auxiliary types;
+CSV/TSV normalize numbers and empty cells. Metadata and coordinate aliases
+reserve all source-column names. Cross-file coordinates replace only declared
+x values. Tagged CLI string rows, schema, storage layout, offline URL rejection
+and display budgets stay unchanged. Compatible simple curves retain shared
+cursor/range behavior; compound templates own their authored interactions.
+
+A real four-run comparison exposed fractional deltas failing exact report
+verification after JSON reload. `crab-workflow` enables serde_json 1.0.151's
+`float_roundtrip` feature, keeping exact verification rather than adding float
+tolerances. Dependency source `src/de.rs::f64_from_parts` selects its concise
+float parser under this feature. No dependency version, lockfile, override or
+vendor change. The minimal save/reopen regression fails before the feature and
+passes afterward; the originally failing report also reopens unchanged.
+
+Focused proof: 51 Results-owner tests pass (two dedicated scale tests remain
+ignored), CLI build and formatting pass, and documentation links pass. The
+actual example produces four successful runs, five unsampled chart groups and
+3,632 observations. Browser proof exercises threshold changes, cohort filtering
+(532 observations), brushing (432), test-only forecast filtering (84), learning
+zoom and reopening; zero network attempts, page errors or console errors. Nine
+screenshots retain those real rendered states.
+
+Owned loopback RustFS proof publishes the runs/report, removes all local Results
+and working templates, retrieves the report and all four runs, then rebuilds
+five healthy charts. Offline HTML SHA-256 is byte-identical before and after:
+`a4d15a2aeeb8553c85f92724bce2349751a3f1bf8948060926a7252224d97739`.
+Report: `2e5164ef4d9efcd921c1936dabe2c5d5e49d5e64376914253a118dee23d19c13`.
+Evidence is retained in this worktree's external target under `results-lab-proof/`
+and the local screenshot gallery's `complex/` directory. Browser brush targeting
+and the fixture Python environment were corrected in the external harness;
+production timing/assertions were not relaxed. This is scoped CLI/shared-owner/
+offline-browser evidence, not a new native package, cross-platform, live-cloud
+or whole-plan qualification. The earlier native timeout remains unresolved.

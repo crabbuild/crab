@@ -1,0 +1,232 @@
+{
+  "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+  "data": {
+    "values": "<DVC_METRIC_DATA>"
+  },
+  "config": {
+    "view": {
+      "stroke": null
+    },
+    "axis": {
+      "gridColor": "#e9edf2",
+      "labelColor": "#596579",
+      "titleColor": "#334155"
+    },
+    "range": {
+      "category": [
+        "#2563eb",
+        "#ea580c",
+        "#059669",
+        "#9333ea"
+      ]
+    },
+    "font": "system-ui"
+  },
+  "params": [
+    {
+      "name": "forecast_split",
+      "value": "All",
+      "bind": {
+        "input": "select",
+        "options": [
+          "All",
+          "validation",
+          "test"
+        ],
+        "name": "Period "
+      }
+    }
+  ],
+  "transform": [
+    {
+      "filter": "forecast_split === 'All' || datum.split === forecast_split"
+    }
+  ],
+  "vconcat": [
+    {
+      "title": "Demand forecast \u00b7 shaded band calibrated on validation residuals",
+      "width": 720,
+      "height": 240,
+      "encoding": {
+        "x": {
+          "field": "day",
+          "type": "quantitative",
+          "title": "Day"
+        },
+        "color": {
+          "field": "<DVC_METRIC_COLOR>",
+          "type": "nominal",
+          "title": null,
+          "legend": {
+            "orient": "top",
+            "labelLimit": 180,
+            "columns": 2
+          }
+        }
+      },
+      "layer": [
+        {
+          "mark": {
+            "type": "area",
+            "opacity": 0.1
+          },
+          "encoding": {
+            "y": {
+              "field": "lower",
+              "type": "quantitative",
+              "title": "Demand",
+              "scale": {
+                "zero": false
+              }
+            },
+            "y2": {
+              "field": "upper"
+            }
+          }
+        },
+        {
+          "mark": {
+            "type": "line",
+            "strokeWidth": 2
+          },
+          "encoding": {
+            "y": {
+              "field": "prediction",
+              "type": "quantitative",
+              "scale": {
+                "zero": false
+              }
+            },
+            "tooltip": [
+              {
+                "field": "<DVC_METRIC_COLOR>"
+              },
+              {
+                "field": "day"
+              },
+              {
+                "field": "prediction",
+                "format": ".1f"
+              },
+              {
+                "field": "actual",
+                "format": ".1f"
+              },
+              {
+                "field": "lower",
+                "format": ".1f"
+              },
+              {
+                "field": "upper",
+                "format": ".1f"
+              },
+              {
+                "field": "split"
+              }
+            ]
+          }
+        },
+        {
+          "transform": [
+            {
+              "aggregate": [
+                {
+                  "op": "mean",
+                  "field": "actual",
+                  "as": "actual"
+                }
+              ],
+              "groupby": [
+                "day"
+              ]
+            }
+          ],
+          "mark": {
+            "type": "line",
+            "color": "#334155",
+            "strokeDash": [
+              3,
+              3
+            ],
+            "strokeWidth": 1.5
+          },
+          "encoding": {
+            "y": {
+              "field": "actual",
+              "type": "quantitative",
+              "scale": {
+                "zero": false
+              }
+            },
+            "color": {
+              "value": "#334155"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "title": "Residuals \u00b7 observed minus predicted",
+      "width": 720,
+      "height": 140,
+      "mark": {
+        "type": "point",
+        "filled": true,
+        "size": 18,
+        "opacity": 0.65
+      },
+      "encoding": {
+        "x": {
+          "field": "day",
+          "type": "quantitative",
+          "title": "Day"
+        },
+        "y": {
+          "field": "residual",
+          "type": "quantitative",
+          "title": "Residual"
+        },
+        "color": {
+          "field": "<DVC_METRIC_COLOR>",
+          "type": "nominal",
+          "title": null,
+          "legend": {
+            "orient": "top",
+            "labelLimit": 180,
+            "columns": 2
+          }
+        },
+        "shape": {
+          "field": "split",
+          "type": "nominal",
+          "legend": {
+            "orient": "bottom",
+            "direction": "horizontal",
+            "title": "Split"
+          }
+        },
+        "tooltip": [
+          {
+            "field": "<DVC_METRIC_COLOR>"
+          },
+          {
+            "field": "day"
+          },
+          {
+            "field": "residual",
+            "format": ".2f"
+          },
+          {
+            "field": "split"
+          }
+        ]
+      }
+    }
+  ],
+  "resolve": {
+    "scale": {
+      "x": "shared",
+      "color": "shared"
+    }
+  }
+}
