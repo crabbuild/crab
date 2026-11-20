@@ -73,6 +73,8 @@ macOS automatic update installation requires a future signed release.
 
 ### Rust SDK
 
+- Retained concurrent decoded-range cache fills through sibling publication
+  contention, avoiding unnecessary origin downloads on warm reads.
 - Renamed Cargo features: `write` becomes `publish`, `content` becomes `files`,
   and `managed` becomes `service`. Update SDK dependency feature lists before
   building against this alpha; retired feature names are not accepted.

@@ -68,7 +68,9 @@ Saved root budgets use the same FULL WAL synchronization policy; disposable
 accounting retains NORMAL synchronization. The private publication owner flushes
 file contents before rename and the captured parent afterward. Parent creation,
 unlink and journal retirement after observed absence also require directory
-flushes. HTTP completion keeps exact journal authority for `responses/` scratch
+flushes. Unix publication waits up to two seconds for a sibling's parent-directory
+lock; cleanup and cancellation cleanup keep nonblocking lock acquisition.
+HTTP completion keeps exact journal authority for `responses/` scratch
 until its final handle closes. Full filesystem power-loss recovery
 remains a separate qualification gate.
 The family participates in stats,
