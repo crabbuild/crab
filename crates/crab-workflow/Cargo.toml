@@ -1,7 +1,8 @@
 [package]
 name = "crab-workflow"
 version = "0.1.0"
-publish = false
+# SDK Results tarballs must resolve this support crate without workspace paths.
+publish = true
 edition.workspace = true
 license.workspace = true
 description = "Workflow contracts and runtime engine for Crab."
