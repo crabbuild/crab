@@ -137,8 +137,11 @@ retain admission until their last transport owner releases them. Shared blame
 uses one producer with independent waiter budgets; serialization retains its
 managed result and byte admission, rendering one range at a time.
 Preview and blame JSON use bounded 64-KiB output chunks under the unchanged
-8-MiB response limit. Small replies do not allocate the full ceiling; each
-transport-held chunk retains the complete output reservation until its last owner.
+8-MiB response limit. Typed previews reserve an escaping-aware output bound,
+rounded to chunks. Previews bounded to one chunk encode on the request task,
+so bulk CPU work cannot delay their serialization; larger replies retain CPU
+admission. Each transport-held chunk retains the complete output reservation
+until its last owner.
 
 CPU admission follows measured process job credits, capped at 16. Disposable Git
 cache byte caps scale to at most one eighth of effective process memory, up to

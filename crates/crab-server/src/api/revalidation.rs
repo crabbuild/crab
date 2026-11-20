@@ -8,14 +8,6 @@ use super::{Action, representation, response_json};
 use crate::server::Server;
 use std::time::{Duration, Instant};
 
-#[derive(serde::Serialize)]
-#[serde(transparent)]
-struct RetainedPreview {
-    value: representation::FilePreview,
-    #[serde(skip)]
-    _memory: crab_remote_git::ReadReservation,
-}
-
 pub(super) fn shared_cause(mut error: &Error) -> &Error {
     while let Error::SharedRead { source } = error {
         error = source;
@@ -142,16 +134,9 @@ pub(super) async fn read(
             .await?;
         let value = representation::file_preview_metadata(snapshot, metadata, operation).await?;
         let encoding = Instant::now();
-        let bytes = response_json::encode(
-            &server.runtime,
-            operation.cancellation(),
-            RetainedPreview {
-                value,
-                _memory: memory,
-            },
-            0,
-        )
-        .await?;
+        let bytes =
+            response_json::preview(&server.runtime, operation.cancellation(), value, memory)
+                .await?;
         encoded = encoding.elapsed();
         ([("content-type", "application/json")], bytes).into_response()
     } else {

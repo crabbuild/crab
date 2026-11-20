@@ -37,6 +37,24 @@ pub(super) struct FilePreview {
     preview: FilePreviewState,
 }
 
+impl FilePreview {
+    pub(super) fn maximum_encoded_bytes(&self) -> usize {
+        let text = match &self.preview {
+            FilePreviewState::Inline { text } => text.len(),
+            FilePreviewState::OmittedSize
+            | FilePreviewState::Binary
+            | FilePreviewState::UnsupportedEncoding => 0,
+        };
+        let strings = [&self.oid, &self.mode, &self.classification, &self.commit];
+        let bytes = strings
+            .into_iter()
+            .fold(text, |bytes, value| bytes.saturating_add(value.len()));
+        // JSON escapes expand one input byte by at most six bytes. The fixed
+        // field names, enum tags, punctuation and two u64s fit within 256 bytes.
+        bytes.saturating_mul(6).saturating_add(256)
+    }
+}
+
 #[cfg(test)]
 pub(super) async fn file_preview(
     snapshot: &RemoteGitSnapshot,
@@ -329,4 +347,33 @@ pub(super) fn decode_hex(value: &str) -> std::result::Result<Vec<u8>, ApiError> 
                 .map_err(|_| ApiError::Input("Invalid hex bytes"))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_encoding_bound_covers_escaped_text_and_metadata() {
+        for preview in [
+            FilePreviewState::OmittedSize,
+            FilePreviewState::Binary,
+            FilePreviewState::UnsupportedEncoding,
+            FilePreviewState::Inline {
+                text: "\u{1}\"\n\\é🐚".repeat(20_000),
+            },
+        ] {
+            let value = FilePreview {
+                oid: "\"\\\u{1}".repeat(20),
+                size: u64::MAX,
+                mode: "\"\\\u{1}".repeat(20),
+                classification: "\"\\\u{1}".repeat(20),
+                commit: "\"\\\u{1}".repeat(20),
+                generation: u64::MAX,
+                preview,
+            };
+            let bytes = serde_json::to_vec(&value).unwrap();
+            assert!(bytes.len() <= value.maximum_encoded_bytes());
+        }
+    }
 }

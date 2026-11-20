@@ -545,3 +545,23 @@ shutdown proofs complete. The corrected three-round API diagnostic passes the or
 candidate/R0 at one client and 40.48/36.89 ms at sixteen; mixed preview p95 is
 48.01/56.58 ms. All correctness, resource and shutdown checks pass. The bounded
 subset keeps its original binary labels; full combined qualification is pending.
+
+
+### Bounded small-preview encoding
+
+The corrected small-read trace isolates encoding queue time: at sixteen clients,
+candidate encoding p95 is 0.941 ms and handler total is 1.261 ms, versus R0's
+0.257 ms handler total. A deterministic test holds the only CPU permit and
+confirms that the original small serializer waits behind it.
+
+Typed previews now derive an upper bound from their strings and fixed fields,
+including JSON's six-byte worst-case escape, and reserve rounded output capacity.
+A preview bounded to one 64-KiB chunk serializes without waiting for bulk CPU
+work. Large encoding retains admission; the 8-MiB ceiling, byte identity,
+cancellation and last-frame ownership remain. The generic serializer becomes
+private and receives bounds only through its typed preview/blame callers.
+Six encoding, one worst-case escaping, fifteen API, two revalidation and one
+read-admission tests pass, together with strict all-target server Clippy.
+The red queue regression and all prior timing failures remain retained.
+Current integrated release builds and combined RustFS qualification are pending;
+these focused checks do not close R7.
