@@ -77,14 +77,15 @@ integrate them sequentially. R6 is not required for accepting the first wave.
    pages and unselected gaps are excluded; independent page validation remains.
    Further changes require a measured remaining bottleneck.
 2. **Combined-load gates and repeatability:** four original native A/A controls
-   pass after 4,000 Git-verified fresh processes on the declared CPU-placement
-   profile. HTTP repeatability remains separate: earlier failures and 21 failed
-   gates from the latest complete short matrix are retained. Both full HTTP
-   attempts reach measurement-driver limits; streaming exact statistics now use
-   covering indexes and persist the completed loop receipt before aggregation.
-   A 1,483,163-record replay passes under 128 MiB. Investigate the measured
-   pre-handler delay with controlled provider-capacity and HTTP A/A probes
-   before rerunning all original cases, durations and numeric gates.
+   pass after 4,000 Git-verified fresh processes. A fixed 20-pair HTTP baseline
+   control fails five mixed-load p95 gates on the one-CPU provider; all results
+   remain retained. A 36-trial 1/2/1 provider-CPU reversal measures backend
+   saturation. The prospectively declared two-provider-CPU profile passes all
+   six HTTP A/A workload cells after 80 trials, with unchanged per-replica
+   1-CPU/1-GiB limits and symmetric 10% gates. The original 128-trial comparison
+   and two 600-second soaks are running; full native scaling follows. Exact
+   indexed statistics, early loop receipts and native journals preserve all
+   observations without changing percentiles, workload duration or numeric gates.
 3. **Independent growth and minimum-resource lifecycle:** all 200 original growth
    timing controls pass across 2,000 fresh processes and 20,000 canonical Git
    queries, with 1 CPU / 1 GiB / no additional swap per reader. The naturally

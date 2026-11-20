@@ -842,3 +842,38 @@ restored clones plus range resume for a 3-GiB object. Its full Root copy verifie
 These results complete the recorded growth and aged-reader lifecycle checks;
 combined HTTP performance, repeatability and minimum-resource soak acceptance
 remain open. Controlled provider/HTTP diagnostics are separate from acceptance.
+
+
+## HTTP repeatability and provider capacity
+
+The rebased `ba6c06009dd` macOS and ARM64 Linux release builds are byte-identical
+to the measured `a5d6015e2c8` binaries. All 54 two-replica RustFS smoke checks
+pass again. Only upstream Results assets and a UI browser test differ in their
+source manifests; read-crate inputs remain identical.
+
+A fixed 20-pair baseline HTTP A/A control completes all 80 trials on native Linux
+journals, with zero measured request errors/Git mismatches, no resource failures,
+all four exits zero and complete candidate durability proofs. At one provider
+CPU, five mixed-load p95 controls fail: ratios 1.175–1.197, despite throughput
+ratios around 0.949. The full comparison does not start on that profile.
+
+A subsequent fixed 36-trial, same-Root 1/2/1 provider-CPU reversal uses production
+logging and native journals. Mixed-load median throughput is 2,643 → 3,273 →
+2,529 requests/sec; preview p95 is 32.6 → 27.8 → 36.7 ms. Provider utilization
+is approximately 0.97 → 1.61 → 0.96 CPU cores. The return phase includes further
+variance; this supports backend headroom without identifying a sole cause.
+
+The prospectively declared two-provider-CPU profile retains **1 CPU / 1 GiB /
+no additional swap per Crab replica**, all original workloads/durations and
+numeric gates. Its 20-pair baseline A/A control completes all 80 trials and
+passes all six workload cells. P95 ratios are 1.057–1.074; throughput ratios are
+0.968–0.977, all inside the unchanged symmetric 1/1.10–1.10 band. Correctness,
+resources, shutdown and actual durability proofs pass. This establishes HTTP
+repeatability for this local profile; prior failed profiles remain retained.
+
+Completed prior journals are archived losslessly with every original byte,
+newline count and SHA-256 verified by decompression. Reports and profiles remain
+unchanged. VM caches retaining deleted shared-file handles and unused ext4
+blocks are reclaimed only between phases; real fixture warming precedes timing.
+The full original 128-trial comparison and two ten-minute soaks are running;
+72-cell native confirmation follows sequentially. R7 acceptance remains open.
