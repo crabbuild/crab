@@ -23,6 +23,7 @@ import {
   Pencil,
   Plus,
   RefreshCw,
+  Tag,
   Trash2,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -35,7 +36,7 @@ import { RebaseDialog } from "../components/RebaseDialog";
 import { ToolbarAction, ViewToolbar } from "../components/ViewToolbar";
 import { getWatchPath, useFileWatcher } from "../hooks/useFileWatcher";
 import { useSessionScroll } from "../hooks/useSessionScroll";
-import { RefEntry, RefKind, rpc } from "../ipc";
+import { RefEntry, rpc } from "../ipc";
 import { CommandContext, executeCommand } from "../lib/command-registry";
 import { publishToast } from "../lib/toasts";
 import { OpenRepo } from "../state";
@@ -65,6 +66,9 @@ function setStoredPullMode(repoId: string, branch: string, mode: PullMode): void
     // Silently ignore storage failures
   }
 }
+
+const REF_ROW = "flex min-h-7 w-full items-center gap-1.5 rounded-md px-2 text-xs";
+const SECTION_ROW = `${REF_ROW} min-h-8 justify-start text-[11px] uppercase tracking-wider text-muted-foreground hover:text-foreground`;
 
 interface Props {
   repo: OpenRepo;
@@ -559,7 +563,7 @@ export function BranchesView({ repo, selectedBranch, onSelectBranch }: Props) {
         )}
         {/* Preserve mounted actions and their geometry while background reads run. */}
         {refs && (
-          <div className="py-1">
+          <div className="space-y-2 px-2 py-2">
             <TreeSection
               title="Local"
               node={localTree}
@@ -787,18 +791,18 @@ function TreeSection({
   const count = countBranches(node);
 
   return (
-    <div className="mb-1">
+    <div>
       <Button
         variant="ghost"
         size="compact"
         type="button"
-        className="flex w-full items-center gap-1 px-3 py-1 text-[11px] uppercase tracking-wider text-muted-foreground hover:text-foreground"
+        className={SECTION_ROW}
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
       >
         {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
         {title}
-        <span className="ml-auto text-[10px]">({count})</span>
+        <span className="ml-auto tabular-nums">{count}</span>
       </Button>
       {open && (
         <div role="listbox" aria-label={`${title} branches`}>
@@ -959,7 +963,7 @@ function FolderNode({
   onPushSuccess,
 }: FolderNodeProps) {
   const [open, setOpen] = useState(true);
-  const paddingLeft = 12 + depth * 12;
+  const paddingLeft = `min(${20 + depth * 12}px, 25%)`;
 
   return (
     <div>
@@ -967,13 +971,13 @@ function FolderNode({
         variant="ghost"
         size="compact"
         type="button"
-        className="flex w-full items-center gap-1 py-0.5 text-[12px] text-muted-foreground hover:bg-background hover:text-foreground"
+        className={`${REF_ROW} justify-start py-0 text-muted-foreground`}
         style={{ paddingLeft }}
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
       >
-        {open ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
-        <span className="font-mono text-[11px]">{node.segment}/</span>
+        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        <span className="truncate font-mono" title={node.prefix}>{node.segment}/</span>
       </Button>
       {open && (
         <TreeNodeList
@@ -1039,7 +1043,7 @@ function BranchRow({
   onPushSuccess,
 }: BranchRowProps) {
   const renameInputRef = useRef<HTMLInputElement>(null);
-  const paddingLeft = 12 + depth * 12 + 16; // extra indent past folder chevron
+  const paddingLeft = `min(${20 + depth * 12}px, 25%)`;
   const isRenaming = renamingBranch === branch.name;
   const leaf = leafName(branch.name);
 
@@ -1098,9 +1102,10 @@ function BranchRow({
   if (isRenaming) {
     return (
       <div
-        className="flex items-center gap-1 py-0.5"
+        className={REF_ROW}
         style={{ paddingLeft }}
       >
+        <GitBranch size={12} className="shrink-0 text-muted-foreground" aria-hidden />
         <Input
           ref={renameInputRef}
           className="min-w-0 flex-1 rounded border border-primary bg-background px-1 py-0.5 font-mono text-[11px] focus-visible:outline-none"
@@ -1120,8 +1125,9 @@ function BranchRow({
   return (
     <div
       className={clsx(
-        "group flex items-center gap-1 py-0.5 text-[12px]",
-        isSelected ? "bg-primary/15" : "hover:bg-background",
+        REF_ROW,
+        "group cursor-pointer",
+        isSelected ? "bg-primary/15" : "hover:bg-accent",
       )}
       style={{ paddingLeft }}
       onClick={onSelect}
@@ -1130,15 +1136,13 @@ function BranchRow({
       role="option"
       aria-selected={isSelected}
     >
-      {branch.is_head && (
-        <span className="shrink-0 text-primary" title="HEAD">
-          *
-        </span>
-      )}
+      <GitBranch
+        size={12}
+        className={clsx("shrink-0", branch.is_head ? "text-primary" : "text-muted-foreground")}
+        aria-hidden
+      />
       <span
-        className={`min-w-0 flex-1 truncate font-mono text-[11px] ${
-          branch.is_head ? "font-bold text-foreground" : "text-foreground"
-        }`}
+        className={clsx("min-w-0 flex-1 truncate font-mono text-foreground", branch.is_head && "font-semibold")}
         title={branch.name}
       >
         {leaf}
@@ -1225,7 +1229,7 @@ function BranchRow({
       )}
 
       <AheadBehindChips branch={branch} />
-      <KindBadge kind={branch.kind} />
+      {branch.is_head && <span className="shrink-0 text-[10px] text-muted-foreground">HEAD</span>}
     </div>
   );
 }
@@ -1285,44 +1289,33 @@ function AheadBehindChips({ branch }: { branch: RefEntry }) {
   );
 }
 
-// ── Kind badge ─────────────────────────────────────────────────────
-
-function KindBadge({ kind }: { kind: RefKind }) {
-  if (kind === "branch") return null; // default, no badge needed in local section
-  const label = kind === "remote" ? "R" : kind === "tag" ? "T" : kind;
-  return (
-    <span className="shrink-0 rounded bg-card px-1 text-[9px] uppercase text-muted-foreground">
-      {label}
-    </span>
-  );
-}
-
 // ── Tag section (flat list, no tree) ───────────────────────────────
 
 function TagSection({ tags }: { tags: RefEntry[] }) {
   const [open, setOpen] = useState(false);
   return (
-    <div className="mb-1">
+    <div>
       <Button
         variant="ghost"
         size="compact"
         type="button"
-        className="flex w-full items-center gap-1 px-3 py-1 text-[11px] uppercase tracking-wider text-muted-foreground hover:text-foreground"
+        className={SECTION_ROW}
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
       >
         {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
         Tags
-        <span className="ml-auto text-[10px]">({tags.length})</span>
+        <span className="ml-auto tabular-nums">{tags.length}</span>
       </Button>
       {open && (
         <div>
           {tags.map((t) => (
             <div
               key={t.name}
-              className="flex items-center gap-1 py-0.5 pl-6 text-[12px] hover:bg-background"
+              className={`${REF_ROW} pl-5 hover:bg-accent`}
             >
-              <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-foreground">
+              <Tag size={12} className="shrink-0 text-muted-foreground" aria-hidden />
+              <span className="min-w-0 flex-1 truncate font-mono text-foreground" title={t.name}>
                 {t.name}
               </span>
               <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
