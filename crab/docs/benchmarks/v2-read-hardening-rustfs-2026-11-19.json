@@ -11637,5 +11637,1087 @@
       },
       "next_work": "Trace distinct-page work, lookup batching and cache lifetimes within the existing format and cache ownership."
     }
+  },
+  "metadata_wave_batching": {
+    "source_revision": "a5d6015e2c81a6a7cc4770361a1e20bb4193267a",
+    "status": "deterministic_io_and_functional_passed_timing_open",
+    "implementation": "Shared PageCache merges only adjacent requested cold pages in an admitted lookup wave, at most64KiB per merged transfer. Per-page hashes/reference checks and existing cache/region ownership preserved. No overread or new configuration.",
+    "test_report_sha256": "6c9dff1716fe6f54021741e5d3d4cd315ac42e5b87a27c4c79a82d8a6390c9b4",
+    "focused_tests_passed": 311,
+    "native": {
+      "report_sha256": "f907b2dbebb62bfea89912370f14a645ee6707d56b47e3c4361e6266d8f4c742",
+      "profile_sha256": "f815975a3f5a681627544521ec6a1614dea6585987a52c14d393c9dcf17a2049",
+      "processes": 400,
+      "git_queries_checked": 400,
+      "cells": [
+        {
+          "commits": 1000,
+          "operation": "attribution",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 24296,
+              "p95": 30308
+            },
+            "median_backend_reads": 22.0,
+            "median_backend_bytes": 281541.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 38.0,
+              "median_backend_bytes": 337451.0,
+              "elapsed_us": {
+                "p50": 39990,
+                "p95": 45733
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 24165,
+              "p95": 26807
+            },
+            "median_backend_reads": 22.0,
+            "median_backend_bytes": 281541.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 38.0,
+              "median_backend_bytes": 337451.0,
+              "elapsed_us": {
+                "p50": 38039,
+                "p95": 45647
+              }
+            }
+          },
+          "target": true,
+          "p95_ratio": 0.8844859443051339,
+          "gate": "failed"
+        },
+        {
+          "commits": 1000,
+          "operation": "attribution",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 312,
+              "p95": 331
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 38.0,
+              "median_backend_bytes": 337451.0,
+              "elapsed_us": {
+                "p50": 39990,
+                "p95": 45733
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 296,
+              "p95": 347
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 38.0,
+              "median_backend_bytes": 337451.0,
+              "elapsed_us": {
+                "p50": 38039,
+                "p95": 45647
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 1.0483383685800605,
+          "gate": "passed"
+        },
+        {
+          "commits": 1000,
+          "operation": "blame",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 171058,
+              "p95": 256778
+            },
+            "median_backend_reads": 179.0,
+            "median_backend_bytes": 885049.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 195.0,
+              "median_backend_bytes": 940959.0,
+              "elapsed_us": {
+                "p50": 187663,
+                "p95": 272830
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 177985,
+              "p95": 208929
+            },
+            "median_backend_reads": 179.0,
+            "median_backend_bytes": 885049.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 195.0,
+              "median_backend_bytes": 940959.0,
+              "elapsed_us": {
+                "p50": 194295,
+                "p95": 232607
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 0.8136561543434406,
+          "gate": "passed"
+        },
+        {
+          "commits": 1000,
+          "operation": "blame",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 80,
+              "p95": 107
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 195.0,
+              "median_backend_bytes": 940959.0,
+              "elapsed_us": {
+                "p50": 187663,
+                "p95": 272830
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 76,
+              "p95": 94
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 195.0,
+              "median_backend_bytes": 940959.0,
+              "elapsed_us": {
+                "p50": 194295,
+                "p95": 232607
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 0.8785046728971962,
+          "gate": "passed"
+        },
+        {
+          "commits": 1000,
+          "operation": "blob",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 18127,
+              "p95": 26421
+            },
+            "median_backend_reads": 14.0,
+            "median_backend_bytes": 197418.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 30.0,
+              "median_backend_bytes": 253328.0,
+              "elapsed_us": {
+                "p50": 34983,
+                "p95": 50168
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 18472,
+              "p95": 24652
+            },
+            "median_backend_reads": 14.0,
+            "median_backend_bytes": 197418.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 30.0,
+              "median_backend_bytes": 253328.0,
+              "elapsed_us": {
+                "p50": 34909,
+                "p95": 50282
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 0.933045683357935,
+          "gate": "passed"
+        },
+        {
+          "commits": 1000,
+          "operation": "blob",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 55,
+              "p95": 69
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 30.0,
+              "median_backend_bytes": 253328.0,
+              "elapsed_us": {
+                "p50": 34983,
+                "p95": 50168
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 59,
+              "p95": 81
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 30.0,
+              "median_backend_bytes": 253328.0,
+              "elapsed_us": {
+                "p50": 34909,
+                "p95": 50282
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 1.173913043478261,
+          "gate": "failed"
+        },
+        {
+          "commits": 1000,
+          "operation": "history",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 113512,
+              "p95": 261057
+            },
+            "median_backend_reads": 75.0,
+            "median_backend_bytes": 400628.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 91.0,
+              "median_backend_bytes": 456538.0,
+              "elapsed_us": {
+                "p50": 130930,
+                "p95": 320426
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 102533,
+              "p95": 254320
+            },
+            "median_backend_reads": 74.0,
+            "median_backend_bytes": 400628.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 90.0,
+              "median_backend_bytes": 456538.0,
+              "elapsed_us": {
+                "p50": 120891,
+                "p95": 294136
+              }
+            }
+          },
+          "target": true,
+          "p95_ratio": 0.9741933753931133,
+          "gate": "failed"
+        },
+        {
+          "commits": 1000,
+          "operation": "history",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 728,
+              "p95": 852
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 91.0,
+              "median_backend_bytes": 456538.0,
+              "elapsed_us": {
+                "p50": 130930,
+                "p95": 320426
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 698,
+              "p95": 814
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 90.0,
+              "median_backend_bytes": 456538.0,
+              "elapsed_us": {
+                "p50": 120891,
+                "p95": 294136
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 0.9553990610328639,
+          "gate": "passed"
+        },
+        {
+          "commits": 1000,
+          "operation": "object-batch",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 16432,
+              "p95": 21250
+            },
+            "median_backend_reads": 14.0,
+            "median_backend_bytes": 197418.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 30.0,
+              "median_backend_bytes": 253328.0,
+              "elapsed_us": {
+                "p50": 30577,
+                "p95": 36331
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 17158,
+              "p95": 22231
+            },
+            "median_backend_reads": 14.0,
+            "median_backend_bytes": 197418.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 30.0,
+              "median_backend_bytes": 253328.0,
+              "elapsed_us": {
+                "p50": 31934,
+                "p95": 41490
+              }
+            }
+          },
+          "target": true,
+          "p95_ratio": 1.0461647058823529,
+          "gate": "failed"
+        },
+        {
+          "commits": 1000,
+          "operation": "object-batch",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 212,
+              "p95": 235
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 30.0,
+              "median_backend_bytes": 253328.0,
+              "elapsed_us": {
+                "p50": 30577,
+                "p95": 36331
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 234,
+              "p95": 287
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 30.0,
+              "median_backend_bytes": 253328.0,
+              "elapsed_us": {
+                "p50": 31934,
+                "p95": 41490
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 1.221276595744681,
+          "gate": "failed"
+        },
+        {
+          "commits": 10000,
+          "operation": "attribution",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 26030,
+              "p95": 28510
+            },
+            "median_backend_reads": 24.0,
+            "median_backend_bytes": 385440.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 42.0,
+              "median_backend_bytes": 441785.0,
+              "elapsed_us": {
+                "p50": 44662,
+                "p95": 50720
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 25965,
+              "p95": 34466
+            },
+            "median_backend_reads": 24.0,
+            "median_backend_bytes": 385440.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 42.0,
+              "median_backend_bytes": 441785.0,
+              "elapsed_us": {
+                "p50": 44518,
+                "p95": 65772
+              }
+            }
+          },
+          "target": true,
+          "p95_ratio": 1.2089091546825674,
+          "gate": "failed"
+        },
+        {
+          "commits": 10000,
+          "operation": "attribution",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 347,
+              "p95": 395
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 42.0,
+              "median_backend_bytes": 441785.0,
+              "elapsed_us": {
+                "p50": 44662,
+                "p95": 50720
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 323,
+              "p95": 416
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 42.0,
+              "median_backend_bytes": 441785.0,
+              "elapsed_us": {
+                "p50": 44518,
+                "p95": 65772
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 1.0531645569620254,
+          "gate": "passed"
+        },
+        {
+          "commits": 10000,
+          "operation": "blame",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 456005,
+              "p95": 1371594
+            },
+            "median_backend_reads": 254.0,
+            "median_backend_bytes": 4905647.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 272.0,
+              "median_backend_bytes": 4961992.0,
+              "elapsed_us": {
+                "p50": 487656,
+                "p95": 1397209
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 427221,
+              "p95": 1250513
+            },
+            "median_backend_reads": 254.0,
+            "median_backend_bytes": 4905647.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 272.0,
+              "median_backend_bytes": 4961992.0,
+              "elapsed_us": {
+                "p50": 448829,
+                "p95": 1332497
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 0.9117224193165033,
+          "gate": "passed"
+        },
+        {
+          "commits": 10000,
+          "operation": "blame",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 108,
+              "p95": 433
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 272.0,
+              "median_backend_bytes": 4961992.0,
+              "elapsed_us": {
+                "p50": 487656,
+                "p95": 1397209
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 109,
+              "p95": 319
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 272.0,
+              "median_backend_bytes": 4961992.0,
+              "elapsed_us": {
+                "p50": 448829,
+                "p95": 1332497
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 0.7367205542725174,
+          "gate": "passed"
+        },
+        {
+          "commits": 10000,
+          "operation": "blob",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 23693,
+              "p95": 86937
+            },
+            "median_backend_reads": 16.0,
+            "median_backend_bytes": 283371.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 34.0,
+              "median_backend_bytes": 339716.0,
+              "elapsed_us": {
+                "p50": 47561,
+                "p95": 120968
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 21044,
+              "p95": 60891
+            },
+            "median_backend_reads": 16.0,
+            "median_backend_bytes": 283371.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 34.0,
+              "median_backend_bytes": 339716.0,
+              "elapsed_us": {
+                "p50": 43341,
+                "p95": 83262
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 0.7004037406397736,
+          "gate": "passed"
+        },
+        {
+          "commits": 10000,
+          "operation": "blob",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 62,
+              "p95": 190
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 34.0,
+              "median_backend_bytes": 339716.0,
+              "elapsed_us": {
+                "p50": 47561,
+                "p95": 120968
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 59,
+              "p95": 246
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 34.0,
+              "median_backend_bytes": 339716.0,
+              "elapsed_us": {
+                "p50": 43341,
+                "p95": 83262
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 1.2947368421052632,
+          "gate": "failed"
+        },
+        {
+          "commits": 10000,
+          "operation": "history",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 128226,
+              "p95": 132417
+            },
+            "median_backend_reads": 115.0,
+            "median_backend_bytes": 1713443.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 133.0,
+              "median_backend_bytes": 1769788.0,
+              "elapsed_us": {
+                "p50": 146234,
+                "p95": 150853
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 125111,
+              "p95": 158386
+            },
+            "median_backend_reads": 108.0,
+            "median_backend_bytes": 1713443.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 126.0,
+              "median_backend_bytes": 1769788.0,
+              "elapsed_us": {
+                "p50": 145283,
+                "p95": 178499
+              }
+            }
+          },
+          "target": true,
+          "p95_ratio": 1.1961153024158528,
+          "gate": "failed"
+        },
+        {
+          "commits": 10000,
+          "operation": "history",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 739,
+              "p95": 808
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 133.0,
+              "median_backend_bytes": 1769788.0,
+              "elapsed_us": {
+                "p50": 146234,
+                "p95": 150853
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 729,
+              "p95": 865
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 126.0,
+              "median_backend_bytes": 1769788.0,
+              "elapsed_us": {
+                "p50": 145283,
+                "p95": 178499
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 1.0705445544554455,
+          "gate": "passed"
+        },
+        {
+          "commits": 10000,
+          "operation": "object-batch",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 31763,
+              "p95": 39610
+            },
+            "median_backend_reads": 45.0,
+            "median_backend_bytes": 1230261.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 63.0,
+              "median_backend_bytes": 1286606.0,
+              "elapsed_us": {
+                "p50": 50080,
+                "p95": 58824
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 27320,
+              "p95": 36710
+            },
+            "median_backend_reads": 32.0,
+            "median_backend_bytes": 1230261.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 50.0,
+              "median_backend_bytes": 1286606.0,
+              "elapsed_us": {
+                "p50": 45832,
+                "p95": 53749
+              }
+            }
+          },
+          "target": true,
+          "p95_ratio": 0.9267861651098207,
+          "gate": "failed"
+        },
+        {
+          "commits": 10000,
+          "operation": "object-batch",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 235,
+              "p95": 304
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 63.0,
+              "median_backend_bytes": 1286606.0,
+              "elapsed_us": {
+                "p50": 50080,
+                "p95": 58824
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 230,
+              "p95": 517
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 50.0,
+              "median_backend_bytes": 1286606.0,
+              "elapsed_us": {
+                "p50": 45832,
+                "p95": 53749
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 1.700657894736842,
+          "gate": "failed"
+        }
+      ],
+      "descriptive_failed_cells": 10,
+      "acceptance": false,
+      "scope": "20 fixed alternating before53433f8c3ef/aftera5d6015e2c8 pairs at1000/10000commits for five operations. All bytes and Git results identical; prior failed calibration prevents timing acceptance. Native images carry an inherited53433server, unused in this comparison."
+    },
+    "combined_images": {
+      "baseline": {
+        "image_id": "sha256:c5a6c23f033736e2f5a40b5ea90408c132ae1b0335ebc68e3cca77c8e0ab550d",
+        "platform": "linux/arm64",
+        "native_source": "aafb6d256c5e8d3a8e768d31dd887a18f2afd2e4",
+        "server_source": "aafb6d256c5e8d3a8e768d31dd887a18f2afd2e4",
+        "qualifier_binary_sha256": "43410c5d208416ed102598096e3e24de1e0d5c3d577de7c18127c84bcdfde96e",
+        "server_binary_sha256": "4b5349e90885a359204cd68d89c30659134d6255b006e16ab21248bc2928e80c",
+        "native_build_receipt_sha256": "ac01b3334650046eb5b943507ea259c7865788894078fe6b01a2c322df4fac14",
+        "server_build_receipt_sha256": "a054efd6c58094b1fd8121a108ac06dd8633f67f585aeb19b15f3e6f740371f5",
+        "runtime_parent_image": "sha256:c4e8434b95ba89fb10035d2a631c8ab0fc26d14d2446997ae899c0f9ad33d142",
+        "all_runtime_parent_layers_match": true
+      },
+      "candidate": {
+        "image_id": "sha256:dba4624deb59112ab3b45ff58442fbc8e321203924c3ea9e2a16bd7f817f1421",
+        "platform": "linux/arm64",
+        "native_source": "a5d6015e2c81a6a7cc4770361a1e20bb4193267a",
+        "server_source": "a5d6015e2c81a6a7cc4770361a1e20bb4193267a",
+        "qualifier_binary_sha256": "84ff1a8045cb92d97430bc6c58ad0fa07b8dde9b058863283a8a7d8c4378d739",
+        "server_binary_sha256": "e7fefff2fbcd3c8ceb2520132157b3319d7c7746950882ed163a1c7d98741b09",
+        "native_build_receipt_sha256": "88ec8d8ed8dc24b60966f773a511fa92c7899b3051f0581bd6eb78436caee3fc",
+        "server_build_receipt_sha256": "80f5bdcfa137316b32cd6b64f46c1faf327294f9e3ccfd38901010e3f1d44fff",
+        "runtime_parent_image": "sha256:c4e8434b95ba89fb10035d2a631c8ab0fc26d14d2446997ae899c0f9ad33d142",
+        "all_runtime_parent_layers_match": true
+      }
+    },
+    "http": {
+      "report_sha256": "81f64d3c8b236d50584e9d4108d7d546fb7409d368cfb18605ee644dd4ad5d59",
+      "checks": 54,
+      "exit_codes": [
+        0,
+        0
+      ],
+      "shutdown_proofs": [
+        {
+          "replica": "a",
+          "valid": true,
+          "actual_line": "2026-11-20T15:41:57.821085Z  INFO Cellar shutdown proof complete=true log_quiesced=true local_durability_closed=true clean_reload_prepared=true pending_application_events=0 pending_dispatches=0 deadline_elapsed=false"
+        },
+        {
+          "replica": "b",
+          "valid": true,
+          "actual_line": "2026-11-20T15:41:55.718112Z  INFO Cellar shutdown proof complete=true log_quiesced=true local_durability_closed=true clean_reload_prepared=true pending_application_events=0 pending_dispatches=0 deadline_elapsed=false"
+        }
+      ],
+      "scope": "Current Mac release functional two-replica smoke, no cgroup or latency claim."
+    },
+    "growth_functional": {
+      "report_sha256": "2df7c097f4cae55754461feecb5ff2c49176ccf4e920882dd36b64e6cda2c3b0",
+      "fixtures": 10,
+      "processes": 20,
+      "queries_checked": 200,
+      "quota_proofs": {
+        "baseline": {
+          "cpu.max": "100000 100000",
+          "memory.max": "1073741824",
+          "memory.swap.max": "0"
+        },
+        "candidate": {
+          "cpu.max": "100000 100000",
+          "memory.max": "1073741824",
+          "memory.swap.max": "0"
+        }
+      },
+      "resources": {
+        "baseline": {
+          "memory.peak": "9302016",
+          "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0",
+          "cpu.stat": "usage_usec 7508735\nuser_usec 4231144\nsystem_usec 3277591\ncore_sched.force_idle_usec 0\nnr_periods 463\nnr_throttled 3\nthrottled_usec 251734\nnr_bursts 0\nburst_usec 0"
+        },
+        "candidate": {
+          "memory.peak": "11522048",
+          "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0",
+          "cpu.stat": "usage_usec 6952851\nuser_usec 4127379\nsystem_usec 2825472\ncore_sched.force_idle_usec 0\nnr_periods 395\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0"
+        }
+      },
+      "scope": "Two current-source repetitions across ten independent fixtures,1CPU/1GiB/noextraSwap. Functional/resource proof only; full100pair matrix pending."
+    },
+    "open": [
+      "same-executable timing repeatability and combined-load engineering gates",
+      "full independent-growth performance matrix",
+      "current-source minimum-profile600s soak",
+      "naturally aged cold reader across repo-only GC (fresh canonical capture held)"
+    ]
   }
 }
