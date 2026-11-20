@@ -207,7 +207,7 @@ fn retained_observation(local: &LocalResults) -> (SealedResult, Report) {
     let report = Report::new(
         "Retained comparison".into(),
         compare(
-            &[run.clone()],
+            std::slice::from_ref(&run),
             &ComparisonSpec {
                 baseline: run.snapshot.experiment_id.clone(),
                 ..Default::default()
