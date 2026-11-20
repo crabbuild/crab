@@ -587,6 +587,10 @@ the seed succeeds, but the same cached reply waits behind the held CPU permit.
 Blame now derives its output bound from range framing, parent IDs, lossy author
 and message text, and the additional message hex. Small output uses the existing
 single-chunk path; large output retains CPU admission and the 8-MiB ceiling.
-All 27 focused tests and strict all-target Clippy pass. Its new release/live
-verification is pending; the full HTTP measurements above keep their original
-`8b806338bd6` binding and failures.
+All 27 focused tests and strict all-target Clippy pass. Both source-bound
+`b31db6b1072` release builds complete, and all 54 current two-replica RustFS
+checks pass with Git parity, complete actual durability fields and zero exits.
+The first smoke lacked its fixture environment and stopped before serving;
+its failed receipt remains alongside the correctly configured fresh retry.
+`small_blame_integrated_followup` retains every build/proof hash. The full HTTP
+measurements above keep their original `8b806338bd6` binding and failures.

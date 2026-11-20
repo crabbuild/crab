@@ -1003,8 +1003,11 @@ The same occupied-CPU regression is confirmed for cached small blame replies.
 Their typed bound now includes lossy text, message hex, parent IDs and framing,
 and uses the existing single-chunk encoding path. Large replies retain CPU
 admission and the 8-MiB ceiling. Twenty-seven focused checks and strict all-target
-Clippy pass; new source-bound release/live proof remains pending. Earlier
-performance measurements are retained under their actual compiled revision.
+Clippy pass. Both `b31db6b1072` release builds and all 54 current two-replica
+RustFS checks pass, including exact Git bytes, complete durability and zero
+exits. The failed unconfigured smoke and correct fresh retry are both retained.
+Earlier performance measurements keep their actual compiled revision; R7
+performance acceptance remains open.
 
 ### R0 — Freeze the evidence contract and establish a baseline
 
