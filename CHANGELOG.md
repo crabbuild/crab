@@ -24,6 +24,8 @@ macOS automatic update installation requires a future signed release.
   panels, local runs, and restored workflow output.
 - Added a Results workspace for comparing captured workflow runs, metrics,
   curves, and retained evidence, with matching CLI and server access.
+- Added a runnable machine-learning Results example with compound plots and
+  exact metric-value round trips.
 - Kept editor controls responsive during language-server version discovery and
   cancelled pending probes during shutdown.
 - Simplified workspace, repository, Explorer, Search, and Git navigation;
