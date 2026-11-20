@@ -55,7 +55,8 @@ combined cache is at most 32 KiB regardless of repository count, also capped by
 existing object-cache entry/byte limits. Disabled or smaller object caches
 retain exact reads; speculative reads require both current byte budget and
 memory admission. Inline packs and source ranges spanning multiple members
-keep their existing paths. Account opening I/O separately and publish read-ahead
+keep their existing paths. Multi-entry batches may reuse cached windows but
+fetch their planned range exactly on a miss. Account opening I/O separately and publish read-ahead
 bytes alongside request savings; fewer requests do not imply zero total I/O.
 
 Delta reads retain the selected physical representation. OFS bases and in-pack
