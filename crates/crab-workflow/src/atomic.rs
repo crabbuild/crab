@@ -72,6 +72,12 @@ pub(crate) fn ensure_parent_not_symlink(path: &Path) -> Result<()> {
             normal_components += 1;
         }
         current.push(component.as_os_str());
+        // Canonical Windows drive prefixes are not directories. Append the
+        // root before inspecting them, or bare verbatim-prefix queries fail
+        // before any repository parent can be checked.
+        if matches!(component, Component::Prefix(_)) {
+            continue;
+        }
         match fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 if allow_system_ancestor_link && normal_components == 1 {
@@ -88,4 +94,32 @@ pub(crate) fn ensure_parent_not_symlink(path: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_roots_validate_existing_and_missing_parents() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(temporary.path()).unwrap();
+        for parent in [root.clone(), root.join("missing").join("nested")] {
+            ensure_parent_not_symlink(&parent.join("entry")).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_roots_still_reject_nested_symlinks() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(temporary.path()).unwrap();
+        let target = root.join("target");
+        fs::create_dir(&target).unwrap();
+        std::os::unix::fs::symlink(&target, root.join("redirect")).unwrap();
+        assert!(matches!(
+            ensure_parent_not_symlink(&root.join("redirect").join("entry")),
+            Err(WorkflowError::YamlInvalid { key, .. }) if key == "destination_parent_symlink"
+        ));
+    }
 }
