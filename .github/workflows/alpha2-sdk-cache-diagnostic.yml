@@ -1,0 +1,83 @@
+name: Alpha SDK cache publication diagnosis
+'on':
+  workflow_dispatch: {}
+permissions:
+  contents: read
+env:
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUST_MIN_STACK: 8388608
+  SDK_MSRV: 1.97.0
+  SDK_RUSTDOC_NIGHTLY: nightly-2026-06-19
+  RUSTFS_IMAGE: rustfs/rustfs:1.0.0-beta.8-glibc
+jobs:
+  read-performance:
+    name: Trace exact SDK cache admission and warm reads
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      AWS_ACCESS_KEY_ID: crab
+      AWS_SECRET_ACCESS_KEY: crab
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_REGION: us-east-1
+      AWS_EC2_METADATA_DISABLED: true
+      AWS_ENDPOINT_URL: http://127.0.0.1:9000
+      AWS_ENDPOINT_URL_S3: http://127.0.0.1:9000
+      AWS_ALLOW_HTTP: true
+      AWS_VIRTUAL_HOSTED_STYLE_REQUEST: false
+      CRAB_SDK_LARGE_BUCKET: crab-sdk-large
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        ref: 2a05cb2b06d1bf4320834598e18b4c76a05acc51
+    - uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ env.SDK_MSRV }}
+    - run: sudo apt-get update -y && sudo apt-get install -y libfuse3-dev pipx
+    - run: pipx install awscli && echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+    - uses: Swatinem/rust-cache@v2
+    - name: Start RustFS and create fixture inputs
+      run: "docker run -d --name sdk-performance-rustfs -p 9000:9000 \\\n  -e RUSTFS_ACCESS_KEY=crab -e RUSTFS_SECRET_KEY=crab \\\n  \"${RUSTFS_IMAGE}\" server /data\
+        \ --address :9000\nfor _ in $(seq 1 60); do\n  if curl -fsS http://127.0.0.1:9000/health/ready >/dev/null; then break; fi\n  sleep 1\ndone\ncurl -fsS http://127.0.0.1:9000/health/ready\
+        \ >/dev/null\naws --endpoint-url \"$AWS_ENDPOINT_URL\" s3api create-bucket --bucket \"$CRAB_SDK_LARGE_BUCKET\"\nmkdir -p \"$RUNNER_TEMP/sdk-large-inputs\"\
+        \ \"$RUNNER_TEMP/sdk-read-cache\"\npython3 crab/scripts/generate-sdk-fixtures.py \"$RUNNER_TEMP/sdk-large-inputs\"\necho \"CRAB_SDK_LARGE_INPUTS=$RUNNER_TEMP/sdk-large-inputs\"\
+        \ >> \"$GITHUB_ENV\"\n"
+    - name: Publish deterministic 1 GiB fixture
+      run: "cargo \"+${SDK_MSRV}\" test -p crab-sdk --locked --release \\\n  --no-default-features --features remote,files --test remote_blob \\\n  large::publish_large_qualification_repository\
+        \ -- --exact --ignored --nocapture \\\n  | tee \"$RUNNER_TEMP/sdk-large-publish.log\"\nresult=\"$(grep -oE 'commit=[0-9a-f]{40} crab_bytes=[0-9]+ crab_blake3=[0-9a-f]{64}'\
+        \ \\\n  \"$RUNNER_TEMP/sdk-large-publish.log\" | tail -1)\"\ntest -n \"$result\"\ncommit=\"${result#commit=}\"\ncommit=\"${commit%% *}\"\ndigest=\"${result##*crab_blake3=}\"\
+        \ndigest=\"${digest%% *}\"\necho \"SDK_LARGE_COMMIT=$commit\" >> \"$GITHUB_ENV\"\necho \"SDK_LARGE_BLAKE3=$digest\" >> \"$GITHUB_ENV\"\n"
+    - name: Enable warning diagnostics without changing reader or benchmark behavior
+      run: "python3 - <<'PYCODE'\nfrom pathlib import Path\nfor name in (\"core_crab_read.rs\", \"remote_read.rs\"):\n    path = Path(\"crates/crab-sdk/examples\"\
+        ) / name\n    source = path.read_text()\n    position = source.index(\"{\", source.index(\"async fn main()\")) + 1\n    observe = '\\n    // [DEBUG-alpha2-cache]\
+        \ Diagnostic entrypoint only.\\n    tracing_subscriber::fmt().with_max_level(tracing::Level::WARN).with_ansi(false).with_thread_ids(true).with_writer(std::io::stderr).init();\\\
+        n'\n    path.write_text(source[:position] + observe + source[position:])\nPYCODE\n"
+    - name: Build optimized shared-core and SDK readers
+      run: cargo "+${SDK_MSRV}" build -p crab-sdk --locked --release --no-default-features --features remote,files --example core_crab_read --example remote_read
+    - name: Run five cold and warm pairs
+      run: python3 crab/scripts/qualify_sdk.py benchmark-read --output "$RUNNER_TEMP/sdk-read-performance" --cache-root "$RUNNER_TEMP/sdk-read-cache" --core "$CARGO_TARGET_DIR/release/examples/core_crab_read"
+        --sdk "$CARGO_TARGET_DIR/release/examples/remote_read" --upstream "$AWS_ENDPOINT_URL" --backend rustfs --fixture-digest 9fd9c7f85fc053365cb38a217ddab35a1b22ea647a293c96f85c7bde0ef23b2a
+        --bucket "$CRAB_SDK_LARGE_BUCKET" --repository repository --branch main --path crab --commit "$SDK_LARGE_COMMIT" --bytes 1073741824 --blake3 "$SDK_LARGE_BLAKE3"
+        --toolchain "$SDK_MSRV"
+    - name: Capture service log and cleanup
+      if: always()
+      run: 'mkdir -p "$RUNNER_TEMP/sdk-read-performance"
+
+        cp "$RUNNER_TEMP/sdk-large-publish.log" "$RUNNER_TEMP/sdk-read-performance/" 2>/dev/null || true
+
+        docker logs sdk-performance-rustfs > "$RUNNER_TEMP/sdk-read-performance/rustfs.log" 2>&1 || true
+
+        docker rm -f sdk-performance-rustfs >/dev/null 2>&1 || true
+
+        '
+    - name: Upload performance evidence
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: sdk-read-performance-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ runner.temp }}/sdk-read-performance/**
+        if-no-files-found: error
+        retention-days: 30
