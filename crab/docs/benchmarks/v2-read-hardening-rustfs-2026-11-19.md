@@ -581,3 +581,12 @@ requests, with 0/106 rejections; every relative soak control passes.
 Thirty-four short-case p95/throughput gates fail. All 76 comparison cells and
 failed gates are retained in `current_native_linux_http_full`; acceptance stays
 open. Sparse capacity samples do not establish admission saturation as the cause.
+
+The occupied-CPU regression also reproduces for a cached small blame response:
+the seed succeeds, but the same cached reply waits behind the held CPU permit.
+Blame now derives its output bound from range framing, parent IDs, lossy author
+and message text, and the additional message hex. Small output uses the existing
+single-chunk path; large output retains CPU admission and the 8-MiB ceiling.
+All 27 focused tests and strict all-target Clippy pass. Its new release/live
+verification is pending; the full HTTP measurements above keep their original
+`8b806338bd6` binding and failures.

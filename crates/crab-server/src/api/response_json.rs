@@ -259,32 +259,46 @@ pub(super) async fn blame(
     blame: SharedBlame,
     generation: u64,
 ) -> crab_remote_git::Result<Body> {
-    // Lossy UTF-8, hex, parent IDs and serde Value nodes exist for at most one
-    // range. Admit their conservative capacity before constructing those nodes.
-    let temporary = blame
-        .ranges
-        .iter()
-        .map(|range| {
-            let commit = &range.commit;
-            commit
-                .author
-                .name
-                .len()
-                .saturating_add(commit.message.len())
-                .saturating_add(commit.parents.len().saturating_mul(64))
-                .saturating_add(1024)
-                .saturating_mul(12)
-        })
-        .max()
-        .unwrap_or(0);
+    let (temporary, maximum) = blame_encoding_budget(&blame);
     encode(
         runtime,
         cancellation,
         BlameReply { blame, generation },
         temporary,
-        MAX_BYTES,
+        maximum,
     )
     .await
+}
+
+fn blame_encoding_budget(blame: &crab_remote_git::Blame) -> (usize, usize) {
+    // Lossy UTF-8, hex, parent IDs and serde Value nodes exist for at most one
+    // range. Admit their conservative capacity before constructing those nodes.
+    blame
+        .ranges
+        .iter()
+        .fold((0usize, 256usize), |(temporary, maximum), range| {
+            let commit = &range.commit;
+            let author = commit.author.name.len();
+            let message = commit.message.len();
+            let parents = commit.parents.len();
+            let range_temporary = author
+                .saturating_add(message)
+                .saturating_add(parents.saturating_mul(64))
+                .saturating_add(1024)
+                .saturating_mul(12);
+            // Lossy UTF-8 expands at most 3x and JSON escaping at most 6x;
+            // messages also emit hex. Fixed range fields fit in 512 bytes,
+            // and each parent ID fits in 128 bytes with quotes and separators.
+            let range_maximum = author
+                .saturating_mul(18)
+                .saturating_add(message.saturating_mul(20))
+                .saturating_add(parents.saturating_mul(128))
+                .saturating_add(512);
+            (
+                temporary.max(range_temporary),
+                maximum.saturating_add(range_maximum).min(MAX_BYTES),
+            )
+        })
 }
 
 #[cfg(test)]
@@ -364,6 +378,132 @@ mod tests {
         let complete = (matches!(result, Ok(Ok(_))), large.is_err());
         runtime.shutdown().await;
         assert_eq!(complete, (true, true));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cached_small_blame_does_not_wait_for_large_cpu_work() {
+        use crab_metadata::capsule_protocol::{Capsule, CapsuleRefEdit, CapsuleTransaction};
+        use tower::ServiceExt;
+
+        let history = crate::test_support::git::history_with_blob(b"source line\n");
+        let commit = history.oids[0].clone();
+        let mut server = crate::test_support::server::fixture_without_cells().await;
+        Arc::get_mut(&mut server).unwrap().runtime = Arc::new(
+            RemoteGitRuntime::new(
+                crab_remote_git::RuntimeOptions {
+                    max_decode_concurrency: 1,
+                    ..Default::default()
+                },
+                Arc::new(crab_remote_git::NoopMetrics),
+            )
+            .unwrap(),
+        );
+        let repository = server.repositories.values().pop().unwrap();
+        let root = crab_write::capsule_protocol::open_root(&repository.layout)
+            .await
+            .unwrap();
+        let transaction = CapsuleTransaction::new(
+            root.record().digest(),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some(commit.clone()),
+                None,
+            )],
+        )
+        .unwrap();
+        let capsule = Capsule::build(&transaction, vec![history.pack], Vec::new()).unwrap();
+        crab_write::capsule_protocol::publish(&repository.layout, root, &transaction, capsule)
+            .await
+            .unwrap();
+        let app = crate::server::http::router(server.clone());
+        let request = || {
+            axum::http::Request::builder()
+                .uri(format!(
+                    "/api/repos/team/repo/blame?rev={commit}&path=asset"
+                ))
+                .header("host", "localhost")
+                .body(Body::empty())
+                .unwrap()
+        };
+        let seeded = app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(seeded.status(), axum::http::StatusCode::OK);
+        let expected = seeded.into_body().collect().await.unwrap().to_bytes();
+        let (ready, started) = tokio::sync::oneshot::channel();
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let runtime = server.runtime.clone();
+        let worker = tokio::spawn(async move {
+            runtime
+                .run_cpu(&CancellationToken::new(), move || {
+                    ready.send(()).unwrap();
+                    let _ = held.recv();
+                    Ok(())
+                })
+                .await
+        });
+        started.await.unwrap();
+        let response = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            app.oneshot(request()),
+        )
+        .await;
+        drop(release);
+        worker.await.unwrap().unwrap();
+        let identical = match response {
+            Ok(Ok(response)) if response.status() == axum::http::StatusCode::OK => {
+                response.into_body().collect().await.unwrap().to_bytes() == expected
+            }
+            _ => false,
+        };
+        drop(expected);
+        crate::test_support::server::close(&server).await;
+        assert!(
+            identical,
+            "cached small blame waited for occupied CPU capacity"
+        );
+    }
+
+    #[test]
+    fn blame_encoding_bound_covers_lossy_text_hex_and_numeric_extremes() {
+        use crab_remote_git::{Blame, BlameRange, Commit, GitPath, Signature};
+
+        let id = gix_hash::ObjectId::from_hex(b"1111111111111111111111111111111111111111").unwrap();
+        for repetitions in [0, 1, 2048] {
+            let text = Bytes::from([0, b'"', b'\\', b'\n', 0xff].repeat(repetitions));
+            let author = Signature {
+                name: text.clone(),
+                email: Bytes::new(),
+                seconds: i64::MIN,
+                offset_seconds: i32::MAX,
+            };
+            let commit = Commit {
+                oid: id,
+                tree: id,
+                parents: vec![id; 16],
+                author: author.clone(),
+                committer: author,
+                encoding: None,
+                message: text,
+                signature_headers: Vec::new(),
+            };
+            let blame = Blame {
+                commit: id,
+                path: GitPath::root(),
+                ranges: vec![BlameRange {
+                    start: u64::MAX,
+                    lines: u64::MAX,
+                    commit,
+                    source_path: GitPath::root(),
+                }],
+            };
+            let (_, maximum) = blame_encoding_budget(&blame);
+            let range = &blame.ranges[0];
+            let value = serde_json::json!({
+                "ranges": [{"start":range.start,"lines":range.lines,"commit":commit_json(&range.commit)}],
+                "commit":blame.commit.to_string(),"generation":u64::MAX,
+            });
+            assert!(serde_json::to_vec(&value).unwrap().len() <= maximum);
+        }
     }
 
     #[tokio::test]
