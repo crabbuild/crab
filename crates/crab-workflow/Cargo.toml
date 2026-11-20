@@ -39,7 +39,8 @@ object_store = { workspace = true, features = ["aws", "gcp", "azure", "fs", "htt
 reqwest = { workspace = true, features = ["blocking", "rustls-tls", "stream"] }
 rusqlite = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+# Captured metric values and computed deltas must survive exact digest verification.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 schemars = { workspace = true, optional = true }
 serde_yaml = { workspace = true }
 petgraph = "0.6"

@@ -72,6 +72,20 @@ fn canonical_bytes_ignore_struct_and_nested_object_insertion_order() {
 }
 
 #[test]
+fn fractional_comparison_deltas_survive_immutable_report_reload() {
+    let directory = tempfile::tempdir().unwrap();
+    let local = LocalResults::new(directory.path()).unwrap();
+    let baseline = run(json!({"score":0.21126147547586607,"mae":11.160956597346098}));
+    let candidate = run(json!({"score":0.21421571303794523,"mae":15.129878564199515}));
+    local.install(&baseline).unwrap();
+    local.install(&candidate).unwrap();
+    let comparison = compare(&[baseline.clone(), candidate], &spec(&baseline)).unwrap();
+    let report = Report::new("Fractional metrics".into(), comparison, Vec::new()).unwrap();
+    let id = local.save_report(&report).unwrap();
+    assert_eq!(local.report(&id).unwrap(), report);
+}
+
+#[test]
 fn reproduction_trees_reject_unsafe_or_ambiguous_directory_identities() {
     let spec = ReproductionSpec {
         source_commit: "0".repeat(40),
