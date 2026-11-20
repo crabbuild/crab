@@ -1672,12 +1672,23 @@ test("Symbols grip stays at the viewport midpoint across file lengths and scroll
           const symbols = parent
             .querySelector(".code-symbols-panel")!
             .getBoundingClientRect();
+          const tree = parent
+            .closest(".code-layout")!
+            .querySelector(".tree-resizer")!;
+          const treeTarget = tree
+            .querySelector(".pane-resizer-target")!
+            .getBoundingClientRect();
+          const treeGripY =
+            tree.getBoundingClientRect().top +
+            parseFloat(getComputedStyle(tree, "::after").top);
           return Math.max(
             Math.abs(grip.y + grip.height / 2 - innerHeight / 2),
             Math.abs(grip.x + grip.width / 2 - source.right + 0.5),
             Math.abs(line.x + line.width / 2 - grip.x - grip.width / 2),
             Math.abs(line.y + line.height / 2 - grip.y - grip.height / 2),
             Math.abs(symbols.top - toolbar.top),
+            Math.abs(treeTarget.y + treeTarget.height / 2 - innerHeight / 2),
+            Math.abs(treeGripY - innerHeight / 2),
           );
         }),
       )
@@ -1768,6 +1779,13 @@ test("Symbols grip stays at the viewport midpoint across file lengths and scroll
       await page.mouse.wheel(0, -10000);
       await expect.poll(() => list.evaluate((node) => node.scrollTop)).toBe(0);
       expect(await page.evaluate(() => window.scrollY)).toBe(documentPosition);
+    }
+  }
+  for (const height of [720, 1200]) {
+    await page.setViewportSize({ width: 1440, height });
+    for (const top of [0, 900, Number.MAX_SAFE_INTEGER]) {
+      await page.evaluate((top) => window.scrollTo(0, top), top);
+      await expectAlignedDivider();
     }
   }
 });
@@ -2631,7 +2649,7 @@ test("file tree controls align the branch picker and place collapse after search
   await expect(page.locator("#repository-tree-search")).toBeFocused();
 });
 
-test("file tree scrolls independently and its resize grip follows the sticky pane", async ({
+test("file tree scrolls independently while its resize grip stays viewport-centered", async ({
   page,
 }) => {
   const source = "A line of repository content.\n".repeat(200);
@@ -2705,8 +2723,12 @@ test("file tree scrolls independently and its resize grip follows the sticky pan
       .poll(async () => {
         const pane = (await sidebar.boundingBox())!;
         const divider = (await separator.boundingBox())!;
-        return Math.abs(
-          divider.y + divider.height / 2 - (pane.y + pane.height / 2),
+        const grip = (await separator
+          .locator(".pane-resizer-target")
+          .boundingBox())!;
+        return Math.max(
+          Math.abs(divider.y + divider.height / 2 - (pane.y + pane.height / 2)),
+          Math.abs(grip.y + grip.height / 2 - page.viewportSize()!.height / 2),
         );
       })
       .toBeLessThanOrEqual(1);
@@ -2735,7 +2757,7 @@ test("file tree and content panes resize with pointer and keyboard controls", as
   await expectNoAccessibilityViolations(page);
 
   const initialWidth = (await treePane.boundingBox())?.width ?? 0;
-  const handle = await separator.boundingBox();
+  const handle = await separator.locator(".pane-resizer-target").boundingBox();
   if (!handle) throw new Error("File tree resize handle is not visible");
   const grabX = handle.x + 2;
   const grabY = handle.y + handle.height / 2;

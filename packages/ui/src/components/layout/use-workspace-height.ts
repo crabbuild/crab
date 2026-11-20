@@ -15,6 +15,7 @@ export function useWorkspaceHeight(workspace: HTMLElement | null) {
         "--workspace-available-height",
         `${Math.max(0, bottom - top)}px`,
       );
+      workspace.style.setProperty("--workspace-visible-top", `${top}px`);
     };
     const schedule = () => {
       cancelAnimationFrame(frame);
@@ -31,6 +32,7 @@ export function useWorkspaceHeight(workspace: HTMLElement | null) {
       window.removeEventListener("resize", schedule);
       window.removeEventListener("scroll", schedule);
       workspace.style.removeProperty("--workspace-available-height");
+      workspace.style.removeProperty("--workspace-visible-top");
     };
   }, [workspace]);
 }

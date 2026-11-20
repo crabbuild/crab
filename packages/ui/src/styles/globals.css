@@ -4655,17 +4655,27 @@ main {
 .repo-file-workspace .tree-resizer {
   /* A one-pixel track owns the border; the wider button remains easy to grab. */
   --resize-target-width: 24px;
+  --resize-target-height: --spacing(11);
+  /* Convert the viewport midpoint into the sticky rail's coordinates. */
+  --tree-grip-center: clamp(
+    calc(var(--resize-target-height) / 2),
+    calc(50dvh - var(--workspace-visible-top, 0px)),
+    calc(100% - var(--resize-target-height) / 2)
+  );
   width: var(--resize-target-width);
   min-width: var(--resize-target-width);
   margin-inline: calc((1px - var(--resize-target-width)) / 2);
   pointer-events: none;
 }
+.repo-file-workspace .tree-resizer::after {
+  top: var(--tree-grip-center);
+}
 .repo-file-workspace .tree-resizer > .pane-resizer-target {
   position: absolute;
-  top: 50%;
+  top: var(--tree-grip-center);
   left: 0;
   width: 100%;
-  height: --spacing(11);
+  height: var(--resize-target-height);
   transform: translateY(-50%);
   pointer-events: auto;
 }
