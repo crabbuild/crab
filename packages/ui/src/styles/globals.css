@@ -4670,7 +4670,12 @@ main {
     opacity 120ms ease;
 }
 .repo-file-workspace .pane-resizer:is(:hover, :focus-visible, :active)::after,
-.code-symbols-resizer:is(:hover, :focus-visible, [data-separator="active"])
+.code-symbols-resizer:is(
+    :hover,
+    :focus-visible,
+    [data-separator="hover"],
+    [data-separator="active"]
+  )
   > div {
   height: 24px;
   background: var(--info);
@@ -5126,6 +5131,11 @@ main {
   min-width: 0;
   margin-top: --spacing(4);
 }
+.file-source-workspace[data-group] {
+  --symbols-handle-size: --spacing(11);
+  /* Reserve room for the centered control without stretching either card. */
+  min-height: calc(50dvh + var(--symbols-handle-size) / 2);
+}
 .file-viewer {
   min-width: 0;
   container-type: inline-size;
@@ -5155,21 +5165,31 @@ main {
   margin: --spacing(4) 0 0;
 }
 .code-symbols-resizer {
-  align-items: flex-start;
-  justify-content: flex-start;
+  position: sticky;
+  top: calc(50dvh - var(--symbols-handle-size) / 2);
+  height: var(--symbols-handle-size);
+  align-items: center;
+  justify-content: center;
   width: --spacing(4);
   align-self: flex-start;
   z-index: 0;
-  /* The viewer owns the edge; a separator stroke would cross the commit row. */
-  inset-inline-start: -1px;
+  /* Keep the target and grip centered on the viewer's one-pixel edge. */
+  transform: translateX(calc(-50% - 0.5px));
   border: 0;
+  border-radius: var(--radius-full);
   background: transparent;
+  cursor: col-resize;
 }
 .code-symbols-resizer > div {
-  position: absolute;
-  margin-inline-start: -1px;
-  max-height: 0;
-  transform: translateY(-50%);
+  pointer-events: none;
+}
+.code-symbols-resizer:is(
+  :hover,
+  :focus-visible,
+  [data-separator="hover"],
+  [data-separator="active"]
+) {
+  background: var(--muted);
 }
 .code-symbols-header {
   display: flex;

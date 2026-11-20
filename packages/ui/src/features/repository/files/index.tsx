@@ -103,7 +103,6 @@ export function FileView({
   );
   const [copied, setCopied] = useState(false);
   const [symbolsOpen, setSymbolsOpen] = useState(true);
-  const [body, setBody] = useState<HTMLDivElement | null>(null);
   const [activeSymbol, setActiveSymbol] = useState<CodeSymbol | null>(null);
   const sourceHost = useRef<HTMLElement | null>(null);
   const symbolsRef = useRef<CodeSymbol[]>([]);
@@ -427,7 +426,7 @@ export function FileView({
               </div>
             </div>
           </div>
-          <div className="file-body" ref={setBody}>
+          <div className="file-body">
             {content.classification !== "OrdinaryGit" && (
               <div className="file-note">
                 Git object classification: {content.classification}. Downloads
@@ -592,9 +591,7 @@ export function FileView({
     <div className="file-viewer">
       {navigation}
       {header}
-      <FileWorkspace content={body} symbols={symbols}>
-        {contents}
-      </FileWorkspace>
+      <FileWorkspace symbols={symbols}>{contents}</FileWorkspace>
     </div>
   );
 }

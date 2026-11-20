@@ -7,11 +7,9 @@ import {
 
 export function FileWorkspace({
   children,
-  content,
   symbols,
 }: {
   children: ReactNode;
-  content: HTMLElement | null;
   symbols: ReactNode;
 }) {
   const [workspace, setWorkspace] = useState<HTMLDivElement | null>(null);
@@ -22,11 +20,6 @@ export function FileWorkspace({
     const parent = workspace?.parentElement;
     if (!workspace || !parent) return;
     const navigation = parent.querySelector<HTMLElement>(".file-navigation");
-    const toolbar = content?.previousElementSibling;
-    const separator = workspace.querySelector<HTMLElement>(
-      ".code-symbols-resizer",
-    );
-    const grip = separator?.querySelector<HTMLElement>(":scope > div");
     const narrow = matchMedia("(max-width: 900px)");
     let frame = 0;
     const measure = () => {
@@ -44,23 +37,6 @@ export function FileWorkspace({
         "--workspace-available-height",
         `${Math.max(0, bottom - Math.max(inset, bounds.top))}px`,
       );
-      if (!content || !separator || !grip) return;
-      const source = content.getBoundingClientRect();
-      if (source.width === 0) return;
-      // The content edge, not a taller Symbols list or page, owns the grip.
-      // Exclude the sticky toolbar so the grip cannot overlap either header.
-      const top = Math.max(
-        source.top,
-        inset,
-        toolbar?.getBoundingClientRect().bottom ?? 0,
-      );
-      const visibleHeight = Math.max(
-        0,
-        Math.min(innerHeight, source.bottom) - top,
-      );
-      separator.style.height = `${Math.max(0, source.bottom - bounds.top)}px`;
-      grip.style.top = `${top + visibleHeight / 2 - bounds.top}px`;
-      grip.style.maxHeight = `${visibleHeight}px`;
     };
     const schedule = () => {
       cancelAnimationFrame(frame);
@@ -68,7 +44,7 @@ export function FileWorkspace({
     };
     measure();
     const observer = new ResizeObserver(schedule);
-    for (const node of [workspace, parent, navigation, toolbar, content]) {
+    for (const node of [workspace, parent, navigation]) {
       if (node) observer.observe(node);
     }
     window.addEventListener("resize", schedule);
@@ -79,11 +55,8 @@ export function FileWorkspace({
       window.removeEventListener("resize", schedule);
       window.removeEventListener("scroll", schedule);
       workspace.style.removeProperty("--workspace-available-height");
-      separator?.style.removeProperty("height");
-      grip?.style.removeProperty("top");
-      grip?.style.removeProperty("max-height");
     };
-  }, [workspace, content]);
+  }, [workspace]);
 
   if (!symbols || stacked)
     return (
@@ -97,12 +70,13 @@ export function FileWorkspace({
       </div>
     );
 
-  // Intrinsic height keeps short files compact. Visible overflow lets the
-  // document own scrolling and preserves both sticky column headers.
+  // Cards keep intrinsic height while the separator reserves viewport space.
+  // Visible overflow preserves document scrolling and both sticky headers.
   return (
     <ResizablePanelGroup
       elementRef={setWorkspace}
       orientation="horizontal"
+      resizeTargetMinimumSize={{ coarse: 44, fine: 24 }}
       className="file-source-workspace"
       style={{ height: "auto", overflow: "visible" }}
     >
@@ -113,6 +87,7 @@ export function FileWorkspace({
         withHandle
         className="code-symbols-resizer"
         aria-label="Resize symbols pane"
+        title="Drag to resize. Double-click to reset."
       />
       <ResizablePanel
         defaultSize={320}
