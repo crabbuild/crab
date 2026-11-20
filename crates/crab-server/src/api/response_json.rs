@@ -15,7 +15,7 @@ use serde::{
 };
 use tokio_util::sync::CancellationToken;
 
-use super::representation::commit_json;
+use super::representation::{FilePreview, commit_json};
 
 const MAX_BYTES: usize = 8 * 1024 * 1024;
 const CHUNK_BYTES: usize = 64 * 1024;
@@ -30,12 +30,13 @@ const CHUNK_CONTROL_BYTES: usize = MAX_CHUNKS
 struct BoundedWriter {
     chunks: Vec<Vec<u8>>,
     bytes: usize,
+    maximum: usize,
     exceeded: bool,
     allocation: Option<std::collections::TryReserveError>,
 }
 
 impl BoundedWriter {
-    fn new() -> crab_remote_git::Result<Self> {
+    fn new(maximum: usize) -> crab_remote_git::Result<Self> {
         let mut chunks = Vec::new();
         chunks
             .try_reserve_exact(MAX_CHUNKS)
@@ -46,6 +47,7 @@ impl BoundedWriter {
         Ok(Self {
             chunks,
             bytes: 0,
+            maximum,
             exceeded: false,
             allocation: None,
         })
@@ -55,7 +57,7 @@ impl BoundedWriter {
 impl Write for BoundedWriter {
     fn write(&mut self, mut bytes: &[u8]) -> std::io::Result<usize> {
         let length = bytes.len();
-        if length > MAX_BYTES - self.bytes {
+        if length > self.maximum - self.bytes {
             self.exceeded = true;
             return Err(std::io::Error::other("HTTP response byte limit exceeded"));
         }
@@ -131,49 +133,95 @@ impl http_body::Body for JsonBody {
     }
 }
 
-pub(super) async fn encode<T: Serialize + Send + 'static>(
+async fn encode<T: Serialize + Send + 'static>(
     runtime: &Arc<RemoteGitRuntime>,
     cancellation: &CancellationToken,
     value: T,
     temporary_bytes: usize,
+    maximum: usize,
 ) -> crab_remote_git::Result<Body> {
+    if cancellation.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
+    let maximum = maximum.min(MAX_BYTES);
+    let capacity = maximum.div_ceil(CHUNK_BYTES) * CHUNK_BYTES;
     let memory = runtime
         .reserve_bytes(
-            MAX_BYTES
+            capacity
                 .saturating_add(CHUNK_CONTROL_BYTES)
                 .saturating_add(temporary_bytes),
         )
         .await?;
-    runtime
-        .run_cpu(cancellation, move || {
-            // Most replies are small. Allocate output as it is encoded, while
-            // retaining the complete admission and emitting no partial success.
-            let mut writer = BoundedWriter::new()?;
-            if let Err(source) = serde_json::to_writer(&mut writer, &value) {
-                if writer.exceeded {
-                    return Err(Error::LimitExceeded {
-                        limit: "HTTP response bytes",
-                        actual: MAX_BYTES as u64 + 1,
-                        maximum: MAX_BYTES as u64,
-                    });
-                }
-                if let Some(source) = writer.allocation {
-                    return Err(Error::Allocation {
-                        requested: CHUNK_BYTES,
-                        source,
-                    });
-                }
-                return Err(Error::Consumer {
-                    source: Box::new(source),
+    let token = cancellation.clone();
+    let encode = move || {
+        if token.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        // Most replies are small. Allocate output as it is encoded, while
+        // retaining the complete admission and emitting no partial success.
+        let mut writer = BoundedWriter::new(maximum)?;
+        if let Err(source) = serde_json::to_writer(&mut writer, &value) {
+            if writer.exceeded {
+                return Err(Error::LimitExceeded {
+                    limit: "HTTP response bytes",
+                    actual: maximum as u64 + 1,
+                    maximum: maximum as u64,
                 });
             }
-            Ok(Body::new(JsonBody {
-                chunks: writer.chunks.into_iter(),
-                remaining: writer.bytes,
-                memory: Arc::new(memory),
-            }))
-        })
-        .await
+            if let Some(source) = writer.allocation {
+                return Err(Error::Allocation {
+                    requested: CHUNK_BYTES,
+                    source,
+                });
+            }
+            return Err(Error::Consumer {
+                source: Box::new(source),
+            });
+        }
+        if token.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        Ok(Body::new(JsonBody {
+            chunks: writer.chunks.into_iter(),
+            remaining: writer.bytes,
+            memory: Arc::new(memory),
+        }))
+    };
+    // A preview that fits one chunk has bounded serialization work and must
+    // not queue behind bulk decodes. Larger replies retain CPU admission.
+    if maximum <= CHUNK_BYTES {
+        encode()
+    } else {
+        runtime.run_cpu(cancellation, encode).await
+    }
+}
+
+#[derive(Serialize)]
+#[serde(transparent)]
+struct RetainedPreview {
+    value: FilePreview,
+    #[serde(skip)]
+    _memory: ReadReservation,
+}
+
+pub(super) async fn preview(
+    runtime: &Arc<RemoteGitRuntime>,
+    cancellation: &CancellationToken,
+    value: FilePreview,
+    memory: ReadReservation,
+) -> crab_remote_git::Result<Body> {
+    let maximum = value.maximum_encoded_bytes();
+    encode(
+        runtime,
+        cancellation,
+        RetainedPreview {
+            value,
+            _memory: memory,
+        },
+        0,
+        maximum,
+    )
+    .await
 }
 
 struct BlameReply {
@@ -234,6 +282,7 @@ pub(super) async fn blame(
         cancellation,
         BlameReply { blame, generation },
         temporary,
+        MAX_BYTES,
     )
     .await
 }
@@ -246,7 +295,7 @@ mod tests {
 
     #[test]
     fn small_json_does_not_allocate_the_response_ceiling() {
-        let mut writer = BoundedWriter::new().unwrap();
+        let mut writer = BoundedWriter::new(MAX_BYTES).unwrap();
         serde_json::to_writer(&mut writer, &serde_json::json!({"text": "small"})).unwrap();
         assert_eq!(
             writer.chunks.iter().map(Vec::capacity).sum::<usize>(),
@@ -255,12 +304,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn small_output_keeps_only_one_chunk_of_admission() {
+        let runtime = Arc::new(RemoteGitRuntime::default());
+        let mut body = encode(&runtime, &CancellationToken::new(), "small", 0, 512)
+            .await
+            .unwrap();
+        let frame = body.frame().await.unwrap().unwrap();
+        drop(body);
+        let held = runtime.snapshot().await.resident_bytes;
+        drop(frame);
+        let released = runtime.snapshot().await.resident_bytes;
+        runtime.shutdown().await;
+        assert!((CHUNK_BYTES..CHUNK_BYTES * 2).contains(&held) && released == 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn small_encoding_does_not_wait_for_large_cpu_work() {
+        let runtime = Arc::new(
+            RemoteGitRuntime::new(
+                crab_remote_git::RuntimeOptions {
+                    max_decode_concurrency: 1,
+                    ..Default::default()
+                },
+                Arc::new(crab_remote_git::NoopMetrics),
+            )
+            .unwrap(),
+        );
+        let (ready, started) = tokio::sync::oneshot::channel();
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let worker_runtime = runtime.clone();
+        let worker = tokio::spawn(async move {
+            worker_runtime
+                .run_cpu(&CancellationToken::new(), move || {
+                    ready.send(()).unwrap();
+                    let _ = held.recv();
+                    Ok(())
+                })
+                .await
+        });
+        started.await.unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            encode(&runtime, &CancellationToken::new(), "small", 0, 512),
+        )
+        .await;
+        let large = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            encode(
+                &runtime,
+                &CancellationToken::new(),
+                "a".repeat(CHUNK_BYTES * 2),
+                0,
+                MAX_BYTES,
+            ),
+        )
+        .await;
+        drop(release);
+        worker.await.unwrap().unwrap();
+        let complete = (matches!(result, Ok(Ok(_))), large.is_err());
+        runtime.shutdown().await;
+        assert_eq!(complete, (true, true));
+    }
+
+    #[tokio::test]
     async fn chunk_boundaries_preserve_exact_json_and_content_length() {
         let runtime = Arc::new(RemoteGitRuntime::default());
         for length in [0, CHUNK_BYTES - 1, CHUNK_BYTES * 2, MAX_BYTES - 2] {
             let value = "a".repeat(length);
             let expected = serde_json::to_vec(&value).unwrap();
-            let body = encode(&runtime, &CancellationToken::new(), value, 0)
+            let body = encode(&runtime, &CancellationToken::new(), value, 0, MAX_BYTES)
                 .await
                 .unwrap();
             assert_eq!(body.size_hint().exact(), Some(expected.len() as u64));
@@ -277,6 +389,7 @@ mod tests {
             &CancellationToken::new(),
             "a".repeat(MAX_BYTES - 1),
             0,
+            MAX_BYTES,
         )
         .await;
         assert!(
@@ -294,6 +407,7 @@ mod tests {
             &CancellationToken::new(),
             "a".repeat(CHUNK_BYTES * 2),
             0,
+            MAX_BYTES,
         )
         .await
         .unwrap();

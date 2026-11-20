@@ -982,6 +982,17 @@ bound and unchanged. The corrected three-round small/mixed API subset passes its
 including the same-load interactive reference. Its original binary labels stay
 explicit; full combined qualification remains required and R7 stays open.
 
+### Bounded small-preview serialization
+
+The corrected trace shows 0.941 ms encoding p95 on the small sixteen-client
+case. A deterministic occupied-CPU test reproduces the queue dependency.
+Typed previews now admit an escaping-aware bound rounded to output chunks;
+one-chunk work runs on the request task, while larger output retains CPU
+admission. Serialization stays canonical, cancellation and last-frame ownership
+remain, and the 8-MiB ceiling is unchanged. Twenty-five focused tests and strict
+all-target server Clippy pass. Rebuilt integrated RustFS proof remains required;
+R7 is open.
+
 ### R0 — Freeze the evidence contract and establish a baseline
 
 **Scope:** `crates/crab-remote/examples/qualify_remote.rs`, its `support/` owners;
