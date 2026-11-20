@@ -4654,9 +4654,15 @@ main {
 }
 .repo-file-workspace .tree-resizer {
   /* A one-pixel track owns the border; the wider button remains easy to grab. */
-  width: 9px;
-  min-width: 9px;
-  margin-inline: -4px;
+  --resize-target-width: 24px;
+  width: var(--resize-target-width);
+  min-width: var(--resize-target-width);
+  margin-inline: calc((1px - var(--resize-target-width)) / 2);
+}
+@media (pointer: coarse) {
+  .repo-file-workspace .tree-resizer {
+    --resize-target-width: 44px;
+  }
 }
 .repo-file-workspace .pane-resizer::after,
 .code-symbols-resizer > div {
@@ -5173,23 +5179,15 @@ main {
   width: --spacing(4);
   align-self: flex-start;
   z-index: 0;
-  /* Keep the target and grip centered on the viewer's one-pixel edge. */
-  transform: translateX(calc(-50% - 0.5px));
+  /* Align in layout so a fractional transform cannot shift the painted grip. */
+  margin-left: calc(-1 * --spacing(2) - 0.5px);
+  margin-right: calc(--spacing(2) + 0.5px);
   border: 0;
-  border-radius: var(--radius-full);
   background: transparent;
   cursor: col-resize;
 }
 .code-symbols-resizer > div {
   pointer-events: none;
-}
-.code-symbols-resizer:is(
-  :hover,
-  :focus-visible,
-  [data-separator="hover"],
-  [data-separator="active"]
-) {
-  background: var(--muted);
 }
 .code-symbols-header {
   display: flex;

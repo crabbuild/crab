@@ -155,6 +155,12 @@ grant, and this consolidation does not establish full GitHub Enterprise parity.
   midpoint across short/long files and scrolling. A compact sticky target
   preserves short card heights; mouse/touch hit areas expand to 24px/44px.
   Pointer capture, arrow-key resizing and double-click reset stay library-owned.
+  Tree and Symbols dividers share a 3×24px grip, thin blue interaction feedback,
+  and resize/reset instructions. Targets cover 24px for mice and 44px for touch;
+  the tree preserves the pointer's grab offset while dragging. Symbols alignment
+  uses layout offsets so a fractional transform does not shift its painted grip.
+  The explorer uses Pierre Trees' colored `complete` icon set, matching the diff
+  tree's file-type coverage while retaining the folder disclosure and folder mark.
   Both sticky sidebars stay inside the visible file workspace when the footer
   appears, keeping their headers and search controls reachable. Columns too
   narrow for the split place Symbols below the viewer.

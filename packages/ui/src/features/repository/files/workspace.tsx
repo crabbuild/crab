@@ -87,7 +87,7 @@ export function FileWorkspace({
         withHandle
         className="code-symbols-resizer"
         aria-label="Resize symbols pane"
-        title="Drag to resize. Double-click to reset."
+        title="Drag or use arrow keys to resize. Double-click to reset."
       />
       <ResizablePanel
         defaultSize={320}

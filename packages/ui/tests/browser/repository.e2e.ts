@@ -1681,7 +1681,7 @@ test("Symbols grip stays at the viewport midpoint across file lengths and scroll
           );
         }),
       )
-      .toBeLessThanOrEqual(0.5);
+      .toBeLessThanOrEqual(0.02);
   };
   for (const [count, continuation] of [
     [1, 0],
@@ -1711,7 +1711,7 @@ test("Symbols grip stays at the viewport midpoint across file lengths and scroll
     const grip = (await divider.locator(":scope > div").boundingBox())!;
     const middle = { x: grip.x + grip.width / 2, y: grip.y + grip.height / 2 };
     const width = (await symbols.boundingBox())!.width;
-    // Start outside the visible pill, then drag vertically beyond its target.
+    // Start beside the grip, then drag vertically beyond its target.
     await page.mouse.move(middle.x + 10, middle.y);
     await expect(divider).toHaveAttribute("data-separator", "hover");
     await page.mouse.down();
@@ -2490,9 +2490,12 @@ test("blame and source panes resize with pointer and keyboard controls", async (
   const initialWidth = (await blamePane.boundingBox())?.width ?? 0;
   const handle = await separator.boundingBox();
   if (!handle) throw new Error("Blame resize handle is not visible");
-  await page.mouse.move(handle.x + handle.width / 2, handle.y + 20);
+  const grabX = handle.x + 2;
+  await page.mouse.move(grabX, handle.y + 20);
   await page.mouse.down();
-  await page.mouse.move(handle.x + handle.width / 2 + 120, handle.y + 20);
+  await page.mouse.move(grabX + 1, handle.y + 20);
+  await expect(separator).toHaveAttribute("aria-valuenow", "48");
+  await page.mouse.move(grabX + 120, handle.y + 20);
   await page.mouse.up();
   await expect
     .poll(async () => (await blamePane.boundingBox())?.width ?? 0)
@@ -2648,9 +2651,12 @@ test("file tree and content panes resize with pointer and keyboard controls", as
   const initialWidth = (await treePane.boundingBox())?.width ?? 0;
   const handle = await separator.boundingBox();
   if (!handle) throw new Error("File tree resize handle is not visible");
-  await page.mouse.move(handle.x + handle.width / 2, handle.y + 20);
+  const grabX = handle.x + 2;
+  await page.mouse.move(grabX, handle.y + 20);
   await page.mouse.down();
-  await page.mouse.move(handle.x + handle.width / 2 + 120, handle.y + 20);
+  await page.mouse.move(grabX + 1, handle.y + 20);
+  await expect(separator).toHaveAttribute("aria-valuenow", "321");
+  await page.mouse.move(grabX + 120, handle.y + 20);
   await page.mouse.up();
   await expect
     .poll(async () => (await treePane.boundingBox())?.width ?? 0)
