@@ -12719,5 +12719,640 @@
       "current-source minimum-profile600s soak",
       "naturally aged cold reader across repo-only GC (fresh canonical capture held)"
     ]
+  },
+  "streaming_measurement_and_aged_lifecycle": {
+    "runtime_source_revision": "a5d6015e2c81a6a7cc4770361a1e20bb4193267a",
+    "calibration": {
+      "status": "passed_same_executable_calibration",
+      "profile_sha256": "866981f60d5d2e14a8c9d05b8cd2f0c857d5f7ca18048374f2fdc8521a7c526b",
+      "quota_proofs": {
+        "baseline": {
+          "NanoCpus": 1000000000,
+          "Memory": 1073741824,
+          "MemorySwap": 1073741824,
+          "CpusetCpus": "1",
+          "cpuset.cpus.effective": "1",
+          "cpu.max": "100000 100000",
+          "memory.max": "1073741824",
+          "memory.swap.max": "0"
+        }
+      },
+      "provider_resource_proof": {
+        "CpusetCpus": "0",
+        "NanoCpus": 1000000000,
+        "Memory": 3221225472,
+        "MemorySwap": 3221225472
+      },
+      "calibration_cells": [
+        {
+          "commits": 100,
+          "operation": "object-batch",
+          "cache": "cold",
+          "kind": "calibration",
+          "a": {
+            "query_us": {
+              "p50": 20105,
+              "p95": 25772,
+              "p99": 62030
+            },
+            "median_backend_reads": 55.0,
+            "median_backend_bytes": 45466.0
+          },
+          "b": {
+            "query_us": {
+              "p50": 20040,
+              "p95": 27080,
+              "p99": 57273
+            },
+            "median_backend_reads": 55.0,
+            "median_backend_bytes": 45466.0
+          },
+          "target": false,
+          "p95_ratio": 1.0507527549278286,
+          "gate": "passed"
+        },
+        {
+          "commits": 100,
+          "operation": "object-batch",
+          "cache": "warm",
+          "kind": "calibration",
+          "a": {
+            "query_us": {
+              "p50": 185,
+              "p95": 219,
+              "p99": 360
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0
+          },
+          "b": {
+            "query_us": {
+              "p50": 185,
+              "p95": 223,
+              "p99": 432
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0
+          },
+          "target": false,
+          "p95_ratio": 1.0182648401826484,
+          "gate": "passed"
+        },
+        {
+          "commits": 10000,
+          "operation": "commit",
+          "cache": "cold",
+          "kind": "calibration",
+          "a": {
+            "query_us": {
+              "p50": 4315,
+              "p95": 4901,
+              "p99": 5594
+            },
+            "median_backend_reads": 7.0,
+            "median_backend_bytes": 72285.0
+          },
+          "b": {
+            "query_us": {
+              "p50": 4330,
+              "p95": 4878,
+              "p99": 5609
+            },
+            "median_backend_reads": 7.0,
+            "median_backend_bytes": 72285.0
+          },
+          "target": false,
+          "p95_ratio": 0.9953070801877167,
+          "gate": "passed"
+        },
+        {
+          "commits": 10000,
+          "operation": "commit",
+          "cache": "warm",
+          "kind": "calibration",
+          "a": {
+            "query_us": {
+              "p50": 33,
+              "p95": 39,
+              "p99": 44
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0
+          },
+          "b": {
+            "query_us": {
+              "p50": 33,
+              "p95": 39,
+              "p99": 47
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0
+          },
+          "target": false,
+          "p95_ratio": 1.0,
+          "gate": "passed"
+        }
+      ],
+      "final_cgroups": {
+        "baseline": {
+          "memory.peak": "5136384",
+          "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0",
+          "cpu.stat": "usage_usec 66024454\nuser_usec 46476428\nsystem_usec 19548025\ncore_sched.force_idle_usec 0\nnr_periods 3586\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0"
+        }
+      },
+      "git_queries_checked": 4000,
+      "started_at": 1795190472.020566,
+      "ended_at": 1795190833.233451,
+      "report_sha256": "e126a386dacbb21719753213f92244df50278cadbd9996a1fe7c0913b082472a"
+    },
+    "capacity_failure": {
+      "report_sha256": "d58a95e289f37766bd3a2bbb79326c5890c7533f555436a3455a225d3a85ad6a",
+      "short_trials_completed": 126,
+      "short_request_errors": 0,
+      "short_git_mismatches": 0,
+      "source": "Per-client share of one-million-sample in-memory limit reached during candidate600secondsoak. Entire126trials and1000016rawsoaksamples retained. Fourworkersdrain/exit0; bothcandidatedurabilityproofspass. Numericgatesunchanged; incompletefullrunnotaccepted."
+    },
+    "streaming_replay": {
+      "status": "passed",
+      "source_sha256": "3f6b5c7bec4756c4e6619fe4885a567c8bf3325ec6a750c45846b9181f26b071",
+      "old_driver_sha256": "bbb0880895cc170455af3ff4afe43d7dd3ad0131adacaf0fce339e15b52de7ce",
+      "new_driver_sha256": "8254ade762f197325931e306bb35834ee441a96ceb1a804a06db4ea68c6eafd6",
+      "aggregation_sha256": "da874d3fc2af718e3acc7874cdee30bbdb3d2d436f7fd6bc8733f401c64af075",
+      "prior_summary_fields_exactly_equal_on_4000_samples": true,
+      "address_space_limit_bytes": 134217728,
+      "peak_rss_bytes": 33058816,
+      "samples_including_setup_and_warmup": 1000016,
+      "elapsed_seconds": 85.6345231209998,
+      "scope": "Failed-soak raw journal replay, no request samples discarded. 600 is a comparison denominator only; this replay does not qualify a600secondmeasurement. Exact nearest-rank statistics and all errors preserved. SQL temp workspace deleted.",
+      "summaries": {
+        "preview": {
+          "attempts": 197611,
+          "successes": 197611,
+          "rejected": 0,
+          "errors": 0,
+          "oracle_mismatches": 0,
+          "client_cancellations": 0,
+          "warmup_attempts": 2405,
+          "setup_attempts": 0,
+          "elapsed_seconds": 600,
+          "offered_requests_per_second": 329.3516666666667,
+          "successful_requests_per_second": 329.3516666666667,
+          "latency_us": {
+            "p50": 5316.165,
+            "p95": 8989.442,
+            "p99": 13115.572
+          },
+          "successful_latency_us": {
+            "p50": 5316.165,
+            "p95": 8989.442,
+            "p99": 13115.572
+          },
+          "ttfb_us": {
+            "p50": 5309.52,
+            "p95": 8981.409,
+            "p99": 13108.694
+          },
+          "server_timing_ms": {
+            "open": {
+              "samples": 197611,
+              "p50": 0.001,
+              "p95": 0.002,
+              "p99": 0.005
+            },
+            "read": {
+              "samples": 197611,
+              "p50": 0.034,
+              "p95": 0.057,
+              "p99": 0.103
+            },
+            "encode": {
+              "samples": 197611,
+              "p50": 0.003,
+              "p95": 0.004,
+              "p99": 0.009
+            },
+            "total": {
+              "samples": 197611,
+              "p50": 0.039,
+              "p95": 0.067,
+              "p99": 0.138
+            }
+          }
+        },
+        "history": {
+          "attempts": 197600,
+          "successes": 197573,
+          "rejected": 27,
+          "errors": 0,
+          "oracle_mismatches": 0,
+          "client_cancellations": 0,
+          "warmup_attempts": 2400,
+          "setup_attempts": 0,
+          "elapsed_seconds": 600,
+          "offered_requests_per_second": 329.3333333333333,
+          "successful_requests_per_second": 329.28833333333336,
+          "latency_us": {
+            "p50": 5357.485,
+            "p95": 9036.936,
+            "p99": 13204.872
+          },
+          "successful_latency_us": {
+            "p50": 5357.608,
+            "p95": 9037.139,
+            "p99": 13204.872
+          },
+          "ttfb_us": {
+            "p50": 5344.129,
+            "p95": 9020.659,
+            "p99": 13182.834
+          },
+          "server_timing_ms": {
+            "open": {
+              "samples": 197573,
+              "p50": 0.001,
+              "p95": 0.002,
+              "p99": 0.004
+            },
+            "read": {
+              "samples": 197573,
+              "p50": 0.067,
+              "p95": 0.1,
+              "p99": 0.178
+            },
+            "encode": {
+              "samples": 197573,
+              "p50": 0.007,
+              "p95": 0.009,
+              "p99": 0.019
+            },
+            "total": {
+              "samples": 197573,
+              "p50": 0.08,
+              "p95": 0.118,
+              "p99": 0.237
+            }
+          }
+        },
+        "raw": {
+          "attempts": 197603,
+          "successes": 197579,
+          "rejected": 24,
+          "errors": 0,
+          "oracle_mismatches": 0,
+          "client_cancellations": 0,
+          "warmup_attempts": 2397,
+          "setup_attempts": 0,
+          "elapsed_seconds": 600,
+          "offered_requests_per_second": 329.3383333333333,
+          "successful_requests_per_second": 329.29833333333335,
+          "latency_us": {
+            "p50": 5301.032,
+            "p95": 8978.147,
+            "p99": 13176.815
+          },
+          "successful_latency_us": {
+            "p50": 5301.195,
+            "p95": 8979.085,
+            "p99": 13178.101
+          },
+          "ttfb_us": {
+            "p50": 5295.329,
+            "p95": 8971.502,
+            "p99": 13172.477
+          },
+          "server_timing_ms": {
+            "open": {
+              "samples": 197579,
+              "p50": 0.001,
+              "p95": 0.002,
+              "p99": 0.005
+            },
+            "read": {
+              "samples": 197579,
+              "p50": 0.027,
+              "p95": 0.048,
+              "p99": 0.088
+            },
+            "encode": {
+              "samples": 197579,
+              "p50": 0.0,
+              "p95": 0.0,
+              "p99": 0.0
+            },
+            "total": {
+              "samples": 197579,
+              "p50": 0.03,
+              "p95": 0.054,
+              "p99": 0.115
+            }
+          }
+        },
+        "blame": {
+          "attempts": 197607,
+          "successes": 197588,
+          "rejected": 19,
+          "errors": 0,
+          "oracle_mismatches": 0,
+          "client_cancellations": 0,
+          "warmup_attempts": 2393,
+          "setup_attempts": 0,
+          "elapsed_seconds": 600,
+          "offered_requests_per_second": 329.345,
+          "successful_requests_per_second": 329.31333333333333,
+          "latency_us": {
+            "p50": 5337.649,
+            "p95": 9025.696,
+            "p99": 13158.749
+          },
+          "successful_latency_us": {
+            "p50": 5337.786,
+            "p95": 9026.055,
+            "p99": 13158.759
+          },
+          "ttfb_us": {
+            "p50": 5324.248,
+            "p95": 9006.981,
+            "p99": 13139.993
+          },
+          "server_timing_ms": {
+            "open": {
+              "samples": 197588,
+              "p50": 0.001,
+              "p95": 0.002,
+              "p99": 0.004
+            },
+            "read": {
+              "samples": 197588,
+              "p50": 0.022,
+              "p95": 0.04,
+              "p99": 0.072
+            },
+            "encode": {
+              "samples": 197588,
+              "p50": 0.042,
+              "p95": 0.055,
+              "p99": 0.097
+            },
+            "total": {
+              "samples": 197588,
+              "p50": 0.067,
+              "p95": 0.097,
+              "p99": 0.194
+            }
+          }
+        },
+        "late-history": {
+          "attempts": 197610,
+          "successes": 197583,
+          "rejected": 27,
+          "errors": 0,
+          "oracle_mismatches": 0,
+          "client_cancellations": 0,
+          "warmup_attempts": 2390,
+          "setup_attempts": 0,
+          "elapsed_seconds": 600,
+          "offered_requests_per_second": 329.35,
+          "successful_requests_per_second": 329.305,
+          "latency_us": {
+            "p50": 5323.762,
+            "p95": 9009.329,
+            "p99": 13085.493
+          },
+          "successful_latency_us": {
+            "p50": 5323.832,
+            "p95": 9009.727,
+            "p99": 13087.791
+          },
+          "ttfb_us": {
+            "p50": 5312.319,
+            "p95": 8993.315,
+            "p99": 13063.955
+          },
+          "server_timing_ms": {
+            "open": {
+              "samples": 197583,
+              "p50": 0.001,
+              "p95": 0.002,
+              "p99": 0.004
+            },
+            "read": {
+              "samples": 197583,
+              "p50": 0.045,
+              "p95": 0.073,
+              "p99": 0.129
+            },
+            "encode": {
+              "samples": 197583,
+              "p50": 0.004,
+              "p95": 0.005,
+              "p99": 0.012
+            },
+            "total": {
+              "samples": 197583,
+              "p50": 0.056,
+              "p95": 0.089,
+              "p99": 0.176
+            }
+          }
+        }
+      }
+    },
+    "aged_lifecycle": {
+      "report_sha256": "0f70d9394cd96c75e888d67a6a10810b94c233ee4e79f75108a0aa5b0cfbe3ad",
+      "status": "passed",
+      "checks": [
+        {
+          "name": "cold-capture-pins-original-tip",
+          "passed": true
+        },
+        {
+          "name": "captured-index-body-older-than-one-hour",
+          "passed": true
+        },
+        {
+          "name": "deleted-path-fails-with-path-not-found",
+          "passed": true
+        },
+        {
+          "name": "deleted-path-failure-drains-provider-work",
+          "passed": true
+        },
+        {
+          "name": "current-index-body-differs-from-captured-body",
+          "passed": true
+        },
+        {
+          "name": "aged-captured-index-retained-through-gc",
+          "passed": true
+        },
+        {
+          "name": "captured-reader-exits-cleanly",
+          "passed": true
+        },
+        {
+          "name": "captured-reader-completes-all-three-cold-queries",
+          "passed": true
+        },
+        {
+          "name": "captured-blob-is-byte-identical-to-old-git",
+          "passed": true
+        },
+        {
+          "name": "captured-path-history-equals-old-git",
+          "passed": true
+        },
+        {
+          "name": "captured-attribution-selects-old-git-tree",
+          "passed": true
+        },
+        {
+          "name": "captured-last-change-attribution-equals-old-git",
+          "passed": true
+        },
+        {
+          "name": "captured-cold-queries-drain-provider-work",
+          "passed": true
+        }
+      ],
+      "git_queries_checked": 40,
+      "naturally_aged_index": {
+        "key": "e2e-add-commit-push/metadata-retention-20261120/metadata/git-object-index/layers/2424e34656f8d651c3efc04fe1672650241f08355550a7980d7f24acfa0fe0ac.bin",
+        "last_modified": "2026-11-20T15:54:59+00:00",
+        "age_seconds": 148.493019,
+        "size": 37216,
+        "etag": "\"c2d86a197f0ad74ec1681a0a0ae3c4af\"",
+        "age_at_release_seconds": 3601.121424
+      },
+      "repository_gc": {
+        "packs_deleted": 0,
+        "derived_index_objects_deleted": 4,
+        "xorbs_deleted": 0,
+        "shards_deleted": 0,
+        "file_index_entries_deleted": 0,
+        "bytes_reclaimed": 8101,
+        "dry_run": false,
+        "cancelled": false,
+        "partial_enumeration": false,
+        "delete_failures": 0,
+        "reconciliation_failed": false,
+        "active_pack_bytes": 160178,
+        "retained_history_pack_bytes": 104141,
+        "grace_period_pack_bytes": 11192,
+        "collectible_pack_bytes": 0
+      },
+      "scope": "Canonical ordinary/force push, mode/delete/recreate, cold captured derived reads across real repository GC of naturally aged RustFS objects; no bucket GC or timestamp overrides"
+    },
+    "current_runtime_ci": {
+      "run": "https://github.com/crabbuild/crab/actions/runs/44769392808",
+      "source_revision": "1757972eda21e6ff143528883232abb9c7e6572d",
+      "image_digest": "sha256:5d10f97b2110d318e924a97a9948827a13e18e14731bbdf9d37012c2581c987e",
+      "receipt_sha256": "46a3e469993e32564c0faba7f2efea5b238546907644627bdde2a9ba4ccba257",
+      "process_job": 136402667201,
+      "process_job_conclusion": "success",
+      "process_restart": true,
+      "recovery": {
+        "abrupt_process_restart": true,
+        "boto3_version": "1.43.126",
+        "forced_exit_status": 137,
+        "root_copy": {
+          "source": "s3://crab-cellar-test/repositories",
+          "destination": "s3://crab-project-restore-c6dc101cb0c34775ab2ae3ea7d3a7e70/repositories/",
+          "objects": 332,
+          "bytes": 1504252,
+          "sha256_and_metadata_verified": true,
+          "elapsed_seconds": 3.2108835330000147
+        },
+        "restored_into_empty_cache": true,
+        "application_state_verified": true,
+        "git_refs_verified": true,
+        "offline_copy_and_restore_seconds": 3.904294058000005
+      },
+      "kubernetes_job": 136416192098,
+      "kubernetes_status_at_recording": "completed_success"
+    },
+    "cellar_stage_control": {
+      "run_url": "https://github.com/crabbuild/cellar/actions/runs/44687745874",
+      "scope": "100 repetitions per revision; identical test-only stage instrumentation. All10failures are inside replace physical-completion, before verified() starts restart handoff; do not infer a whole-fleet acceptance verdict or sole root cause from stage localization. Original20pairresults retained.",
+      "rows": [
+        {
+          "source": "95f860bcddb1f49dc72453f100154c4eeeb7bfbd",
+          "passed": 97,
+          "failed": 3,
+          "failures": [
+            {
+              "file": "repetition-89-case-1.log",
+              "sha256": "ad6c765f8ea178b9c561e382ed5bb27b28ace73f1032aabac25149ec6e0648d9",
+              "last_stage": "physical-completion",
+              "failure": "replace before restart handoff: deadline elapsed"
+            },
+            {
+              "file": "repetition-98-case-1.log",
+              "sha256": "8e58fbeb717e6c5220e11ac992691d6155024268dfebfe63521de801a43c2515",
+              "last_stage": "physical-completion",
+              "failure": "replace before restart handoff: deadline elapsed"
+            },
+            {
+              "file": "repetition-82-case-1.log",
+              "sha256": "ad6c765f8ea178b9c561e382ed5bb27b28ace73f1032aabac25149ec6e0648d9",
+              "last_stage": "physical-completion",
+              "failure": "replace before restart handoff: deadline elapsed"
+            }
+          ],
+          "diagnostic_patch_sha256": "06ec03667be627693aaaedc21f25f8f6ac3e9e8ac8bb2ddf83641676a09ed86e"
+        },
+        {
+          "source": "590640c7ce49ef3fd391bdae9540ba23081cd74b",
+          "passed": 93,
+          "failed": 7,
+          "failures": [
+            {
+              "file": "repetition-46-case-1.log",
+              "sha256": "48c0716cbc5fa5c964044c36904532c9a666a01cda8df5c556965325b9f28069",
+              "last_stage": "physical-completion",
+              "failure": "replace before restart handoff: deadline elapsed"
+            },
+            {
+              "file": "repetition-13-case-1.log",
+              "sha256": "8a95f3a3462d37c97a3b5841f1d04ca4f37ab08fea1832cab3be701a78357c4e",
+              "last_stage": "physical-completion",
+              "failure": "replace before restart handoff: deadline elapsed"
+            },
+            {
+              "file": "repetition-21-case-1.log",
+              "sha256": "c7b515d87ea090b822ed50f775576afbf7e2e8f1830b117eda870b0354e3e9d3",
+              "last_stage": "physical-completion",
+              "failure": "replace before restart handoff: deadline elapsed"
+            },
+            {
+              "file": "repetition-79-case-1.log",
+              "sha256": "59318a5d950e7ec13c3bb83e70f1c7c0306ac2880b5b6c9cd755d6c8a69bf659",
+              "last_stage": "physical-completion",
+              "failure": "replace before restart handoff: deadline elapsed"
+            },
+            {
+              "file": "repetition-10-case-1.log",
+              "sha256": "ea0827efe17f26dc4da7090e4db1295e4d0e0d76d63a80789374a5f5a8c61416",
+              "last_stage": "physical-completion",
+              "failure": "replace before restart handoff: deadline elapsed"
+            },
+            {
+              "file": "repetition-64-case-1.log",
+              "sha256": "b4e94aacbbc874849c74c5616d499e770d8b826b14f60c90dc3487138d8c28e9",
+              "last_stage": "physical-completion",
+              "failure": "replace before restart handoff: deadline elapsed"
+            },
+            {
+              "file": "repetition-53-case-1.log",
+              "sha256": "818e8e290140bf8e17c1ec2bc542dac347008bd484a09f240ecad21c67e04f51",
+              "last_stage": "physical-completion",
+              "failure": "replace before restart handoff: deadline elapsed"
+            }
+          ],
+          "diagnostic_patch_sha256": "06ec03667be627693aaaedc21f25f8f6ac3e9e8ac8bb2ddf83641676a09ed86e"
+        }
+      ]
+    },
+    "acceptance": false,
+    "next": "Full128trial rerun with canonical streaming driver, unchanged cases/thresholds/durations and fixedCPUprofile; then full100pair independentgrowth. NoRust/UI/dependencydiffagainstcompileda5."
   }
 }

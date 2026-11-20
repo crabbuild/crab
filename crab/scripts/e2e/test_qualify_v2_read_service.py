@@ -14,7 +14,7 @@ import unittest
 from urllib.parse import parse_qs, urlsplit
 
 from qualify_v2_read_service import (GitOracle, Transport, compare_baseline, load_headers,
-                                     percentiles, run_case, server_timings, summarize, validate_profile,
+                                     percentiles, read_journal, run_case, server_timings, summarize, validate_profile,
                                      validate_report, wire_workloads, workload_identity)
 
 
@@ -98,9 +98,10 @@ class ReadServiceTests(unittest.TestCase):
         oracle = GitOracle(self.source, self.head)
         oracle.prepare(self.workload, "target.rs")
         with (self.root / "journal.jsonl").open("w") as journal:
-            records, elapsed = run_case(self.profile["cases"][0], {"source":self.workload}, [url], {},
-                                        "owner/repository", oracle, journal)
-        summary = summarize(records, elapsed)
+            elapsed = run_case(self.profile["cases"][0], {"source":self.workload}, [url], {},
+                               "owner/repository", oracle, journal)
+        records = list(read_journal(self.root / "journal.jsonl"))
+        summary = summarize(iter(records), elapsed, self.root)["source"]
         self.assertGreater(summary["successes"], 0)
         self.assertEqual(summary["errors"], 0)
         self.assertTrue(all(item["ttfb_us"] <= item["elapsed_us"] for item in records))
@@ -113,9 +114,10 @@ class ReadServiceTests(unittest.TestCase):
             with self.subTest(status=status):
                 url = self.serve(status, corrupt)
                 with (self.root / f"journal-{status}.jsonl").open("w") as journal:
-                    records, elapsed = run_case(self.profile["cases"][0], {"source":self.workload}, [url], {},
-                                                "owner/repository", oracle, journal)
-                summary = summarize(records, elapsed)
+                    elapsed = run_case(self.profile["cases"][0], {"source":self.workload}, [url], {},
+                                       "owner/repository", oracle, journal)
+                summary = summarize(read_journal(self.root / f"journal-{status}.jsonl"),
+                                    elapsed, self.root)["source"]
                 self.assertEqual(summary["successful_requests_per_second"], 0)
                 self.assertEqual(summary["attempts"], summary["errors"] + summary["rejected"])
 
@@ -142,8 +144,8 @@ class ReadServiceTests(unittest.TestCase):
         transport = Transport([self.serve(delay=.2)], {}, 1)
         self.addCleanup(transport.close)
         record, _ = transport.get(0, "/api/repos/owner/repository/blob", "blob", cancel_after=.01)
-        record["phase"] = "measured"
-        summary = summarize([record], 1)
+        record.update(phase="measured", workload="source")
+        summary = summarize(iter([record]), 1, self.root)["source"]
         self.assertEqual((summary["successes"], summary["errors"], summary["client_cancellations"]), (0, 1, 1))
         self.assertFalse(transport.connections)
 
@@ -219,6 +221,45 @@ class ReadServiceTests(unittest.TestCase):
     def test_p99_requires_at_least_one_thousand_observations(self):
         self.assertNotIn("p99", percentiles(list(range(999))))
         self.assertEqual(percentiles(list(range(1000)))["p99"], 989)
+
+    def test_journal_statistics_preserve_all_samples_and_exact_quantile_ranks(self):
+        path = self.root / "samples.jsonl"
+        with path.open("w") as journal:
+            journal.write("earlier case is outside the selected range\n")
+            start = journal.tell()
+            for i in range(1000):
+                record = {"workload":"source", "phase":"measured", "status":200, "error":None,
+                          "elapsed_us":i + .25, "ttfb_us":i / 2,
+                          "server_timing_ms":{"read":i / 1000}}
+                journal.write(json.dumps(record) + "\n")
+            for status, error in ((429, None), (503, None), (200, "GitOracleMismatch"),
+                                  (0, "ClientCancelled")):
+                record.update(status=status, error=error, elapsed_us=2000)
+                journal.write(json.dumps(record) + "\n")
+            for phase in ("warmup", "setup"):
+                record.update(phase=phase)
+                journal.write(json.dumps(record) + "\n")
+            end = journal.tell()
+            journal.write("later case is outside the selected range\n")
+        summary = summarize(read_journal(path, start, end), 2, self.root)["source"]
+        self.assertEqual({key:summary[key] for key in ("attempts", "successes", "rejected", "errors",
+                         "oracle_mismatches", "client_cancellations", "warmup_attempts", "setup_attempts")},
+                         {"attempts":1004, "successes":1000, "rejected":1, "errors":3,
+                          "oracle_mismatches":1, "client_cancellations":1,
+                          "warmup_attempts":1, "setup_attempts":1})
+        self.assertEqual(summary["successful_latency_us"], {"p50":499.25, "p95":949.25, "p99":989.25})
+        self.assertEqual(summary["latency_us"], {"p50":501.25, "p95":953.25, "p99":993.25})
+        self.assertEqual(summary["server_timing_ms"], {
+            "read":{"samples":1000, "p50":.499, "p95":.949, "p99":.989}})
+        self.assertEqual(summary["successful_requests_per_second"], 500)
+        self.assertFalse(list(self.root.glob("sample-summary-*")))
+
+    def test_failed_journal_replay_removes_its_temporary_workspace(self):
+        path = self.root / "malformed.jsonl"
+        path.write_text("not a measurement\n")
+        with self.assertRaises(json.JSONDecodeError):
+            summarize(read_journal(path), 1, self.root)
+        self.assertFalse(list(self.root.glob("sample-summary-*")))
 
     def test_capture_query_and_serialization_timings_remain_separate(self):
         self.assertEqual(server_timings("open;dur=1.5, read;dur=2, encode;dur=0.25, total;dur=4"),
