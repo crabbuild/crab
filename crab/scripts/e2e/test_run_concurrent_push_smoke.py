@@ -473,6 +473,21 @@ class RequestCountingProxyTest(unittest.TestCase):
         self.upstream.server_close()
         self.upstream_thread.join(timeout=5)
 
+    def test_accepted_socket_disables_nagle_for_unbuffered_responses(self) -> None:
+        UpstreamHandler.get_body = b"small response"
+        options = []
+        handler = self.proxy.server.RequestHandlerClass
+        setup = handler.setup
+
+        def observe_socket(connection):
+            setup(connection)
+            options.append(bool(connection.connection.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY)))
+
+        with patch.object(handler, "setup", observe_socket):
+            with urllib.request.urlopen(self.proxy.url + "/crab/e2e-concurrent-push/run/one") as response:
+                response.read()
+        self.assertEqual(options, [True])
+
     def test_forwards_body_and_records_bounded_request_class(self) -> None:
         request = urllib.request.Request(
             self.proxy.url

@@ -969,6 +969,19 @@ complete retained trials. The target remains 100 valid pairs with unchanged
 queries, binaries, worker count and gates. Growth and HTTP use the same declared
 validity checks; no valid performance failure or original receipt is waived.
 
+### Native Linux provider-meter correction
+
+A new Linux probe isolates a measurement defect: separate unbuffered header/body
+writes add median 41.13 ms through the provider meter, versus 1.94 µs directly
+from RustFS. Disabling Nagle on accepted meter sockets reduces its body transfer
+to 2.40 µs. The regression fails on archived old source; Mac and Linux socket,
+stream, connection-reuse and fault tests pass, including a separate Linux run
+with the descriptor prerequisite. The affected experiment stops before any
+timed row and drains all workers. Earlier Mac measurements remain separately
+bound and unchanged. The corrected three-round small/mixed API subset passes its original gates,
+including the same-load interactive reference. Its original binary labels stay
+explicit; full combined qualification remains required and R7 stays open.
+
 ### R0 — Freeze the evidence contract and establish a baseline
 
 **Scope:** `crates/crab-remote/examples/qualify_remote.rs`, its `support/` owners;
