@@ -5170,5 +5170,571 @@
       }
     ],
     "scope": "Both actual replicas; 9 MiB raw byte identity under upstream allowance, tagged /file budget, preview/CRC/Git parity, fresh catalog denial before 304, real disconnect/drain, Chromium wire 200/304/401, durable logout and Directory ready"
+  },
+  "post_713c_integration": {
+    "status": "passed_focused_and_live_proof_acceptance_open",
+    "upstream_revision": "713c722f562d65f22d6a9ea1a93df6d681be8021",
+    "compiled_revision": "0fa518caf5edf2d767040e1a9bf98e37f17383ad",
+    "server_binary_sha256": "7b5ccafe0dd93646140ca4001a778265741be23a5e7a83030f2fa3b01f8410a2",
+    "build_receipt_sha256": "cea5ebf0666baa623bebf2cc6b5b0041fb7296cac625ac82fa64d7b4617e7c0c",
+    "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1",
+    "build_profile": "release; incremental=false; cargo build -p crab-server --locked --release --bin crab-server",
+    "focused_logs": {
+      "api.log": "ae793e134f28ff0ea92196392aeaaececcc05e48cd5d66e66ee39597a0e34e8e",
+      "browse.log": "3b9db43a4ee6187e5cb6147d0b8d52aefec9f63be8bdb4a1434db7e2a4b163b7",
+      "clippy.log": "47b3d28cf6add8c5363afc5421aae22727db4e003c5a6f13b9214a247d8735fd",
+      "format.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "lock-review.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "npm-ci.log": "3cc19bf37fcb2edb5dcbd0da88f71fcebb0bb111f78db35b3660860be3799034",
+      "results-boundary.log": "474bdd2cab57d77bacf90b1fd90f4b41f2aab0eacdeb089087de1f358da26e0c",
+      "ui-browser.log": "38b8432070299a24bdc5bed6a28099104a8068c9cfa465decb39325484ffe0b5",
+      "ui-build.log": "2bfd31488c6d93578b8185e5010b7e1924499d39df5d9726b10a95d660b634fe",
+      "ui-runtime-check.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "ui-typecheck.log": "c3901a4df7b6721007437bba5b56bde611e86d06fc920313d504c6deee4219e6",
+      "ui-unit.log": "c65ae07794231b03762e2fddefbc30960054010b0d9e221a8a84797a3be093f3"
+    },
+    "focused_counts": {
+      "api": 15,
+      "browse": 17,
+      "results_authorization_boundary": 1,
+      "results_upstream_live_tests_ignored": 2,
+      "selected_ui_unit": 35,
+      "selected_browser": 10
+    },
+    "lockfiles": "Exact upstream package-lock restored after npm install optional-metadata drift; npm ci and unchanged-lock check pass. Unrelated upstream lock edges retained.",
+    "live": {
+      "report_sha256": "1fe945d9ed450772b592e43b322e31ecce22231e4663f27f77d0cd4f89da15c2",
+      "orchestrator_sha256": "8712f7f1a9601a684b7544e41cec79c5d1a6faec11c6cba61e00443c5dea1944",
+      "checks": [
+        {
+          "name": "replica-a-public-ready",
+          "passed": true
+        },
+        {
+          "name": "replica-b-public-ready",
+          "passed": true
+        },
+        {
+          "name": "native-directory-initialized-ready",
+          "passed": true
+        },
+        {
+          "name": "native-directory-ready-on-a",
+          "passed": true
+        },
+        {
+          "name": "native-directory-ready-on-b",
+          "passed": true
+        },
+        {
+          "name": "real-github-fixture-login",
+          "passed": true
+        },
+        {
+          "name": "session-cookie-present",
+          "passed": true
+        },
+        {
+          "name": "first-http-history-equals-git",
+          "passed": true
+        },
+        {
+          "name": "configured-signer-crosses-real-replicas",
+          "passed": true
+        },
+        {
+          "name": "file-http-equals-native-git",
+          "passed": true
+        },
+        {
+          "name": "file-preview-http-equals-native-git",
+          "passed": true
+        },
+        {
+          "name": "blob-http-equals-native-git",
+          "passed": true
+        },
+        {
+          "name": "blame-http-equals-native-git",
+          "passed": true
+        },
+        {
+          "name": "preview-large.rs-equals-native-git",
+          "passed": true
+        },
+        {
+          "name": "preview-large.rs-bounded-json",
+          "passed": true
+        },
+        {
+          "name": "preview-large-binary.dat-equals-native-git",
+          "passed": true
+        },
+        {
+          "name": "preview-large-binary.dat-bounded-json",
+          "passed": true
+        },
+        {
+          "name": "preview-large-nonutf8.dat-equals-native-git",
+          "passed": true
+        },
+        {
+          "name": "preview-large-nonutf8.dat-bounded-json",
+          "passed": true
+        },
+        {
+          "name": "preview-boundary.txt-equals-native-git",
+          "passed": true
+        },
+        {
+          "name": "preview-over-boundary.txt-equals-native-git",
+          "passed": true
+        },
+        {
+          "name": "preview-over-boundary.txt-bounded-json",
+          "passed": true
+        },
+        {
+          "name": "preview-empty.txt-equals-native-git",
+          "passed": true
+        },
+        {
+          "name": "preview-binary.dat-equals-native-git",
+          "passed": true
+        },
+        {
+          "name": "preview-nonutf8.dat-equals-native-git",
+          "passed": true
+        },
+        {
+          "name": "preview-small.rs-equals-native-git",
+          "passed": true
+        },
+        {
+          "name": "raw-within-upstream-allowance-equals-native-git",
+          "passed": true
+        },
+        {
+          "name": "tagged-file-response-budget-still-rejects",
+          "passed": true
+        },
+        {
+          "name": "chunked-json-keeps-exact-wire-content-length",
+          "passed": true
+        },
+        {
+          "name": "preview-private-revalidation-policy",
+          "passed": true
+        },
+        {
+          "name": "preview-weak-list-wire-304",
+          "passed": true
+        },
+        {
+          "name": "fresh-catalog-denial-precedes-cached-304-on-57793",
+          "passed": true
+        },
+        {
+          "name": "fresh-catalog-denial-precedes-cached-304-on-57794",
+          "passed": true
+        },
+        {
+          "name": "catalog-head-failure-was-actually-injected",
+          "passed": true
+        },
+        {
+          "name": "restored-catalog-authority-permits-normal-304",
+          "passed": true
+        },
+        {
+          "name": "matching-star-does-not-authorize-missing-path",
+          "passed": true
+        },
+        {
+          "name": "raw-and-preview-validators-are-distinct",
+          "passed": true
+        },
+        {
+          "name": "raw-strong-if-range-is-exact",
+          "passed": true
+        },
+        {
+          "name": "weak-if-range-sends-complete-verified-body",
+          "passed": true
+        },
+        {
+          "name": "sixteen-real-cold-blame-readers-equal-native-git",
+          "passed": true
+        },
+        {
+          "name": "one-cold-blame-producer-per-process",
+          "passed": true
+        },
+        {
+          "name": "http-abort-observes-an-admitted-cold-producer",
+          "passed": true
+        },
+        {
+          "name": "http-abort-closes-the-real-client",
+          "passed": true
+        },
+        {
+          "name": "http-abort-drains-one-producer-and-admitted-work",
+          "passed": true
+        },
+        {
+          "name": "real-chromium-http-cache-revalidation",
+          "passed": true
+        },
+        {
+          "name": "durable-server-logout-completes",
+          "passed": true
+        },
+        {
+          "name": "revoked-original-cookie-cannot-return-304-on-57793",
+          "passed": true
+        },
+        {
+          "name": "revoked-original-cookie-cannot-return-304-on-57794",
+          "passed": true
+        },
+        {
+          "name": "functional-resource-samples-and-admitted-work-drained",
+          "passed": true
+        },
+        {
+          "name": "a-sized-body-metric-present",
+          "passed": true
+        },
+        {
+          "name": "a-checksum-metric-present",
+          "passed": true
+        },
+        {
+          "name": "b-sized-body-metric-present",
+          "passed": true
+        },
+        {
+          "name": "b-checksum-metric-present",
+          "passed": true
+        },
+        {
+          "name": "provider-proxy-has-no-errors",
+          "passed": true
+        }
+      ],
+      "exit_codes": [0,0],
+      "shutdown_proofs": [
+        {
+          "replica": "a",
+          "valid": true,
+          "actual_line": "2026-11-20T00:20:48.221349Z  INFO Cellar shutdown proof complete=true log_quiesced=true local_durability_closed=true clean_reload_prepared=true pending_application_events=0 pending_dispatches=0 deadline_elapsed=false"
+        },
+        {
+          "replica": "b",
+          "valid": true,
+          "actual_line": "2026-11-20T00:20:46.467684Z  INFO Cellar shutdown proof complete=true log_quiesced=true local_durability_closed=true clean_reload_prepared=true pending_application_events=0 pending_dispatches=0 deadline_elapsed=false"
+        }
+      ],
+      "resources": {
+        "schema": 1,
+        "status": "observed",
+        "failures": [],
+        "profile_sha256": "d81c6c7a73d6be4a5b589ce0fcba6e21a61d3c92ee2818cc7aeab42ece9309d1",
+        "build_receipt_sha256": "cea5ebf0666baa623bebf2cc6b5b0041fb7296cac625ac82fa64d7b4617e7c0c",
+        "observer_sha256": "9738657b4aff5cef158284ab4b862c63c7b15b3ca904b6ed3617985d59dad3d6",
+        "process_start_identities": ["97701:Thu Nov 19 17:20:33 2026","97976:Thu Nov 19 17:20:40 2026"],
+        "provider_counter_sha256": "4476c451bc3a56f1f9c5f21cd8e2c0591a3ca342088cd0c969056276d5af3cfa",
+        "samples": 4,
+        "duration_seconds": 2.816657584044151,
+        "peak_rss_bytes": [479969280,91127808],
+        "last": {
+          "elapsed_seconds": 2.796575042011682,
+          "replicas": [
+            {
+              "rss_bytes": 479969280,
+              "ps_cpu_percent": 3.1,
+              "metrics": {
+                "crab_git_cache_verification_bytes_total": 9123.0,
+                "crab_git_blame_producers_total": 1.0,
+                "crab_git_active_blame_waiters": 0.0,
+                "crab_server_admission_available_permits{class=\"read\"}": 16.0,
+                "crab_server_admission_available_permits{class=\"maintenance\"}": 2.0,
+                "crab_server_admission_available_permits{class=\"git_transfer\"}": 4.0,
+                "crab_server_admission_available_permits{class=\"application\"}": 8.0,
+                "crab_server_admission_available_permits{class=\"bulk_read\"}": 12.0,
+                "crab_git_resident_read_bytes": 3797913.0,
+                "crab_git_active_cpu_jobs": 0.0,
+                "crab_git_resident_read_capacity_bytes": 437256192.0,
+                "crab_git_active_blame_producers": 0.0,
+                "crab_server_active_sized_response_bytes{method=\"head\"}": 0.0,
+                "crab_server_active_sized_response_bytes{method=\"get\"}": 0.0,
+                "crab_server_active_sized_response_bytes{method=\"delete\"}": 0.0,
+                "crab_server_active_sized_response_bytes{method=\"other\"}": 0.0,
+                "crab_server_active_sized_response_bytes{method=\"put\"}": 0.0,
+                "crab_server_active_sized_response_bytes{method=\"post\"}": 0.0,
+                "crab_git_cache_bytes{class=\"object\"}": 3374980.0,
+                "crab_git_cache_bytes{class=\"parsed\"}": 157663.0,
+                "crab_git_cache_bytes{class=\"pack_index\"}": 0.0,
+                "crab_git_cache_bytes{class=\"blame\"}": 33696.0,
+                "crab_git_cache_bytes{class=\"negative\"}": 0.0,
+                "crab_git_active_origin_operations": 0.0,
+                "crab_cellar_rss_bytes": 479969280.0
+              }
+            },
+            {
+              "rss_bytes": 91127808,
+              "ps_cpu_percent": 0.4,
+              "metrics": {
+                "crab_git_cache_verification_bytes_total": 10585421.0,
+                "crab_git_blame_producers_total": 3.0,
+                "crab_server_admission_available_permits{class=\"git_transfer\"}": 4.0,
+                "crab_server_admission_available_permits{class=\"read\"}": 16.0,
+                "crab_server_admission_available_permits{class=\"bulk_read\"}": 12.0,
+                "crab_server_admission_available_permits{class=\"application\"}": 8.0,
+                "crab_server_admission_available_permits{class=\"maintenance\"}": 2.0,
+                "crab_git_cache_bytes{class=\"negative\"}": 0.0,
+                "crab_git_cache_bytes{class=\"blame\"}": 67392.0,
+                "crab_git_cache_bytes{class=\"pack_index\"}": 0.0,
+                "crab_git_cache_bytes{class=\"object\"}": 15343851.0,
+                "crab_git_cache_bytes{class=\"parsed\"}": 314194.0,
+                "crab_git_resident_read_capacity_bytes": 437256192.0,
+                "crab_git_resident_read_bytes": 16136192.0,
+                "crab_git_active_cpu_jobs": 0.0,
+                "crab_server_active_sized_response_bytes{method=\"put\"}": 0.0,
+                "crab_server_active_sized_response_bytes{method=\"get\"}": 0.0,
+                "crab_server_active_sized_response_bytes{method=\"delete\"}": 0.0,
+                "crab_server_active_sized_response_bytes{method=\"other\"}": 0.0,
+                "crab_server_active_sized_response_bytes{method=\"head\"}": 0.0,
+                "crab_server_active_sized_response_bytes{method=\"post\"}": 0.0,
+                "crab_git_active_blame_producers": 0.0,
+                "crab_git_active_origin_operations": 0.0,
+                "crab_git_active_blame_waiters": 0.0,
+                "crab_cellar_rss_bytes": 91127808.0
+              }
+            }
+          ]
+        },
+        "admitted_work_drained": true,
+        "rss_plateau": "insufficient_duration",
+        "provider": {
+          "requests": 2391,
+          "request_body_bytes": 3557,
+          "response_body_bytes": 6627147,
+          "classes": {
+            "outside-repository:delete_batch": 2,
+            "read-hardening-postfix-candidate-20261119:get": 2280,
+            "read-hardening-postfix-candidate-20261119:head": 40,
+            "read-hardening-postfix-candidate-20261119:list": 40,
+            "read-hardening-postfix-candidate-20261119:put": 29
+          },
+          "methods": {
+            "GET": 2320,
+            "HEAD": 40,
+            "POST": 2,
+            "PUT": 29
+          },
+          "operations": {
+            "delete_batch": 2,
+            "get": 2280,
+            "head": 40,
+            "list": 40,
+            "put": 29
+          },
+          "class_request_body_bytes": {
+            "outside-repository:delete_batch": 587,
+            "read-hardening-postfix-candidate-20261119:put": 2970
+          },
+          "class_response_body_bytes": {
+            "outside-repository:delete_batch": 691,
+            "read-hardening-postfix-candidate-20261119:get": 6599752,
+            "read-hardening-postfix-candidate-20261119:list": 26376,
+            "read-hardening-postfix-candidate-20261119:put": 328
+          },
+          "categories": {
+            "outside-repository": 2,
+            "read-hardening-postfix-candidate-20261119": 2389
+          },
+          "statuses": {
+            "2xx": 2382,
+            "4xx": 9
+          },
+          "proxy_errors": {
+
+          }
+        },
+        "quota_enforcement": "none: native processes on 32-GiB host; functional smoke, not timed qualification",
+        "limits": {
+          "maximum_late_rss_ratio": 1.1,
+          "sample_interval_seconds": 1
+        }
+      }
+    },
+    "scope": "Current combined source and embedded UI; no hosted/provider-wide or timing acceptance claim."
+  },
+  "native_release_screen": {
+    "status": "failed_engineering_gates",
+    "raw_report_sha256": "5965841e9740657f4a7aa3ed58ac1774aa641b8e7ac4f9d2d9223710744ec017",
+    "orchestrator_sha256": "db3f5d00c50690c2498d51b55156431fd4de7bb15571ff6b584f2dd86c3dac0b",
+    "bindings": {
+      "baseline": {
+        "qualifier_sha256": "d1635a8f1914f29c4e73af4e83664c54f1aff22a23a4a3256cea2a993145cb24",
+        "source_receipt_sha256": "98e136fa29d5a227f3ff2cb3623c441ed1175fab0b54d6c9a79aa298b98b0ed5",
+        "source_revision": "aafb6d256c5e8d3a8e768d31dd887a18f2afd2e4"
+      },
+      "candidate": {
+        "qualifier_sha256": "8c39f57fdf603e334aa951017b4b3dd7e9618c8a861f9967674c46f51d39932c",
+        "source_receipt_sha256": "5399a47a23f151fba739bd8fa43a034b312960237f7f4fda94bd7e9586de977c",
+        "source_revision": "3dacba2bbe59a6c73b0305ce49aa99903ecae19d"
+      }
+    },
+    "provider": "local pinned RustFS; 1 CPU / 3 GiB backend; 2 CPU / 4 GiB VM",
+    "scope": "release; 20 interleaved pairs per scale/selection; every query has fresh runtime and then a warm repeat; additive shipping profile declared in native-release-qualification-profile.json before builds; retained debug failures unchanged; backend counters are logical Store invocations, not HTTP retry counts",
+    "query_cells": 72,
+    "git_queries_checked": 1440,
+    "thresholds": {
+      "maximum_control_p95_ratio": 1.1,
+      "target_p95_ratio": 0.8
+    },
+    "failures": [
+      {
+        "commits": 100,
+        "operation": "object-batch",
+        "cache": "warm",
+        "p95_ratio": 1.3753148614609572
+      },
+      {
+        "commits": 100,
+        "operation": "resolve",
+        "cache": "cold",
+        "p95_ratio": 1.6670231865235494
+      },
+      {
+        "commits": 10000,
+        "operation": "blame",
+        "cache": "cold",
+        "p95_ratio": 1.2538679674987878
+      },
+      {
+        "commits": 10000,
+        "operation": "blob",
+        "cache": "cold",
+        "p95_ratio": 1.208973287612022
+      },
+      {
+        "commits": 10000,
+        "operation": "commit",
+        "cache": "cold",
+        "p95_ratio": 1.211152573399986
+      },
+      {
+        "commits": 10000,
+        "operation": "commit",
+        "cache": "warm",
+        "p95_ratio": 1.4395604395604396
+      },
+      {
+        "commits": 10000,
+        "operation": "history",
+        "cache": "warm",
+        "p95_ratio": 1.370332996972755
+      },
+      {
+        "commits": 10000,
+        "operation": "object-batch",
+        "cache": "cold",
+        "p95_ratio": 1.1644461841718976
+      },
+      {
+        "commits": 10000,
+        "operation": "object-point",
+        "cache": "cold",
+        "p95_ratio": 1.221947853874646
+      }
+    ],
+    "summary_sha256": "73646c97dd83691a4650e493f5e7adf605e4dd86792091a6167c46b873300031",
+    "current_source_equivalence_receipt_sha256": "a2ccab8e0aece4910cc40f216522a334ae7a3eeec748c4c32f031b699fbe2550",
+    "current_source_equivalence": "All 15 local dependency trees and all 404 used lock records match; root manifest identical. Server/UI/SDK/workflow changes are outside this qualifier executable. Original compiled source and archived patch remain recorded, not relabeled.",
+    "fixed_confirmation_status": "pending: declared 100-pair same-baseline calibration followed by 100-pair confirmation for failed operation groups; unchanged thresholds; original screen retained",
+    "columns": ["commits","operation","cache","target","samples_per_variant","baseline_p50_us","baseline_p95_us","candidate_p50_us","candidate_p95_us","baseline_median_reads","candidate_median_reads","baseline_median_bytes","candidate_median_bytes","p95_ratio","gate"],
+    "cells": [
+      [100,"attribution","cold",false,20,54259,313272,50476,341188,61.0,61.0,62597.0,62597.0,1.089111060037284,"passed"],
+      [100,"attribution","warm",false,20,299,677,284,330,0.0,0.0,0.0,0.0,0.4874446085672083,"passed"],
+      [100,"blame","cold",false,20,155873,1022494,145160,636459,179.0,179.0,133772.0,133772.0,0.6224574422930599,"passed"],
+      [100,"blame","warm",false,20,71,144,62,124,0.0,0.0,0.0,0.0,0.8611111111111112,"passed"],
+      [100,"blob","cold",false,20,44716,343308,44489,264080,55.0,55.0,43319.0,43319.0,0.7692218066575787,"passed"],
+      [100,"blob","warm",false,20,63,223,59,108,0.0,0.0,0.0,0.0,0.484304932735426,"passed"],
+      [100,"commit","cold",false,20,4346,29780,4689,29451,5.0,5.0,37365.0,37365.0,0.9889523169912693,"passed"],
+      [100,"commit","warm",false,20,56,121,34,120,0.0,0.0,0.0,0.0,0.9917355371900827,"passed"],
+      [100,"history","cold",true,20,88079,508141,11607,58912,104.0,12.0,52029.0,52029.0,0.11593632476025355,"passed"],
+      [100,"history","warm",false,20,118,249,98,219,0.0,0.0,0.0,0.0,0.8795180722891566,"passed"],
+      [100,"history-page-1","cold",true,20,78923,94569,10638,13176,104.0,12.0,52029.0,52029.0,0.13932684071947468,"passed"],
+      [100,"history-page-1","warm",false,20,104,128,83,95,0.0,0.0,0.0,0.0,0.7421875,"passed"],
+      [100,"object-batch","cold",false,20,45696,322996,46198,246123,55.0,55.0,45466.0,45466.0,0.7620001486086515,"passed"],
+      [100,"object-batch","warm",false,20,212,397,225,546,0.0,0.0,0.0,0.0,1.3753148614609572,"failed"],
+      [100,"object-point","cold",false,20,47173,330777,44848,106521,55.0,55.0,43319.0,43319.0,0.32203266853499485,"passed"],
+      [100,"object-point","warm",false,20,75,129,56,104,0.0,0.0,0.0,0.0,0.8062015503875969,"passed"],
+      [100,"path-history","cold",false,20,147282,971741,144671,811539,176.0,176.0,133757.0,133757.0,0.8351391986136224,"passed"],
+      [100,"path-history","warm",false,20,1132,2560,1118,2318,0.0,0.0,0.0,0.0,0.90546875,"passed"],
+      [100,"resolve","cold",false,20,5275,26179,5373,43641,5.0,5.0,37365.0,37365.0,1.6670231865235494,"failed"],
+      [100,"resolve","warm",false,20,65,98,58,97,0.0,0.0,0.0,0.0,0.9897959183673469,"passed"],
+      [100,"tree","cold",false,20,44034,275959,43700,279384,54.0,54.0,43176.0,43176.0,1.0124112639921148,"passed"],
+      [100,"tree","warm",false,20,128,286,111,259,0.0,0.0,0.0,0.0,0.9055944055944056,"passed"],
+      [1000,"attribution","cold",false,20,58502,91250,61630,91722,50.0,50.0,273687.0,273687.0,1.005172602739726,"passed"],
+      [1000,"attribution","warm",false,20,333,436,317,436,0.0,0.0,0.0,0.0,1.0,"passed"],
+      [1000,"blame","cold",false,20,1170730,1730406,1121419,1589633,951.0,951.0,728968.0,728968.0,0.9186474156931957,"passed"],
+      [1000,"blame","warm",false,20,112,1518,80,186,0.0,0.0,0.0,0.0,0.1225296442687747,"passed"],
+      [1000,"blob","cold",false,20,54468,98292,53703,72751,43.0,43.0,189707.0,189707.0,0.740151792617914,"passed"],
+      [1000,"blob","warm",false,20,66,236,63,171,0.0,0.0,0.0,0.0,0.7245762711864406,"passed"],
+      [1000,"commit","cold",false,20,8992,27113,8775,22567,7.0,7.0,66534.0,66534.0,0.8323313539630436,"passed"],
+      [1000,"commit","warm",false,20,57,216,45,86,0.0,0.0,0.0,0.0,0.39814814814814814,"passed"],
+      [1000,"history","cold",true,20,1278621,2244262,105528,183073,1010.0,76.0,333664.0,399064.0,0.0815738091185432,"passed"],
+      [1000,"history","warm",false,20,685,1675,633,709,0.0,0.0,0.0,0.0,0.42328358208955225,"passed"],
+      [1000,"history-page-1","cold",true,20,122008,186833,20864,28694,109.0,18.0,167183.0,199885.0,0.1535810054968876,"passed"],
+      [1000,"history-page-1","warm",false,20,116,167,94,102,0.0,0.0,0.0,0.0,0.6107784431137725,"passed"],
+      [1000,"history-page-10","cold",true,20,1139083,1312236,21512,26057,1010.0,19.0,333664.0,232732.0,0.019856946463898264,"passed"],
+      [1000,"history-page-10","warm",false,20,539,618,91,121,0.0,0.0,0.0,0.0,0.19579288025889968,"passed"],
+      [1000,"object-batch","cold",false,20,54093,86585,54033,86677,43.0,43.0,191854.0,191854.0,1.001062539700872,"passed"],
+      [1000,"object-batch","warm",false,20,243,338,247,331,0.0,0.0,0.0,0.0,0.9792899408284024,"passed"],
+      [1000,"object-point","cold",false,20,52978,106573,54456,87029,43.0,43.0,189707.0,189707.0,0.8166139641372581,"passed"],
+      [1000,"object-point","warm",false,20,92,242,69,108,0.0,0.0,0.0,0.0,0.4462809917355372,"passed"],
+      [1000,"path-history","cold",false,20,1182012,2051921,1136981,1594121,930.0,930.0,728954.0,728954.0,0.776891995354597,"passed"],
+      [1000,"path-history","warm",false,20,1426,1708,1429,1797,0.0,0.0,0.0,0.0,1.0521077283372364,"passed"],
+      [1000,"resolve","cold",false,20,12140,23985,10363,25800,7.0,7.0,66534.0,66534.0,1.0756722951844904,"passed"],
+      [1000,"resolve","warm",false,20,70,425,61,93,0.0,0.0,0.0,0.0,0.2188235294117647,"passed"],
+      [1000,"tree","cold",false,20,51832,113750,55316,72787,42.0,42.0,189564.0,189564.0,0.6398857142857143,"passed"],
+      [1000,"tree","warm",false,20,150,228,134,249,0.0,0.0,0.0,0.0,1.0921052631578947,"passed"],
+      [10000,"attribution","cold",false,20,33312,44064,33374,42214,26.0,26.0,377618.0,377618.0,0.9580156136528686,"passed"],
+      [10000,"attribution","warm",false,20,348,461,329,387,0.0,0.0,0.0,0.0,0.8394793926247288,"passed"],
+      [10000,"blame","cold",false,20,854475,1293121,885788,1621403,667.0,667.0,4708972.0,4708972.0,1.2538679674987878,"failed"],
+      [10000,"blame","warm",false,20,83,171,70,171,0.0,0.0,0.0,0.0,1.0,"passed"],
+      [10000,"blob","cold",false,20,24874,34703,24552,41955,18.0,18.0,271596.0,271596.0,1.208973287612022,"failed"],
+      [10000,"blob","warm",false,20,73,311,58,107,0.0,0.0,0.0,0.0,0.3440514469453376,"passed"],
+      [10000,"commit","cold",false,20,9571,14203,9582,17202,7.0,7.0,72285.0,72285.0,1.211152573399986,"failed"],
+      [10000,"commit","warm",false,20,54,91,35,131,0.0,0.0,0.0,0.0,1.4395604395604396,"failed"],
+      [10000,"history","cold",true,20,1375564,1850674,185629,303338,1041.0,116.0,1366389.0,1711875.0,0.163906771262794,"passed"],
+      [10000,"history","warm",false,20,664,991,632,1358,0.0,0.0,0.0,0.0,1.370332996972755,"failed"],
+      [10000,"history-page-1","cold",true,20,170126,196892,45669,48777,138.0,55.0,1133922.0,1414004.0,0.24773479877293136,"passed"],
+      [10000,"history-page-1","warm",false,20,119,169,89,103,0.0,0.0,0.0,0.0,0.6094674556213018,"passed"],
+      [10000,"history-page-10","cold",true,20,1225992,1651595,45861,52970,1041.0,56.0,1366389.0,1447438.0,0.03207202734326515,"passed"],
+      [10000,"history-page-10","warm",false,20,536,647,90,107,0.0,0.0,0.0,0.0,0.16537867078825347,"passed"],
+      [10000,"history-page-100","cold",true,20,11583125,15892490,43797,47671,10055.0,54.0,3166706.0,1381382.0,0.002999592889471694,"passed"],
+      [10000,"history-page-100","warm",false,20,5140,5766,90,141,0.0,0.0,0.0,0.0,0.02445369406867846,"passed"],
+      [10000,"object-batch","cold",false,20,47425,71531,50022,83294,47.0,47.0,1222439.0,1222439.0,1.1644461841718976,"failed"],
+      [10000,"object-batch","warm",false,20,232,482,228,299,0.0,0.0,0.0,0.0,0.6203319502074689,"passed"],
+      [10000,"object-point","cold",false,20,22829,41307,25876,50475,18.0,18.0,271596.0,271596.0,1.221947853874646,"failed"],
+      [10000,"object-point","warm",false,20,77,298,55,169,0.0,0.0,0.0,0.0,0.5671140939597316,"passed"],
+      [10000,"path-history","cold",false,20,957786,1581835,979606,1378019,696.0,696.0,4691860.0,4691860.0,0.8711521745314776,"passed"],
+      [10000,"path-history","warm",false,20,1627,2191,1565,1886,0.0,0.0,0.0,0.0,0.8607941579187586,"passed"],
+      [10000,"resolve","cold",false,20,14058,34791,13948,30872,7.0,7.0,72285.0,72285.0,0.8873559253830013,"passed"],
+      [10000,"resolve","warm",false,20,51,130,35,100,0.0,0.0,0.0,0.0,0.7692307692307693,"passed"],
+      [10000,"tree","cold",false,20,22897,68441,23998,63021,16.0,16.0,238721.0,238721.0,0.9208077029850528,"passed"],
+      [10000,"tree","warm",false,20,138,198,117,163,0.0,0.0,0.0,0.0,0.8232323232323232,"passed"]
+    ]
+  },
+  "request_journal_archives": {
+    "manifest_sha256": "3997f1d41600cecef2e6bba21bd50bfdb08338ab18de5edd25c7011a4e45c748",
+    "archives": 16,
+    "scope": "Completed journals only; original and gzip hashes, decoded-byte equivalence checked before unlinking raw files; all reports and failures retained."
   }
 }

@@ -885,6 +885,34 @@ catalog denial before cached `304`, real disconnect/drain, Chromium 200/304/401,
 durable logout and native Directory checks pass. Both replicas exit zero with
 complete actual durability fields and zero pending work.
 
+
+
+### Results workspace integration and native release screen
+
+The branch integrates `crab-v2` commit `713c722f562`; the source-bound server
+release is built from `0fa518caf5ed` with the embedded Results UI. Locked npm
+installation preserves the exact upstream lockfile. Fifteen API, seventeen browse,
+one Results authorization-boundary, 35 selected UI unit and ten browser tests
+pass, together with formatting, strict server all-target Clippy, UI typecheck,
+bundled-runtime validation and the production build. Two upstream Results live
+tests remain ignored; they are not counted as passed read-path qualification.
+All 54 two-replica RustFS smoke checks pass again on this executable. Both
+replicas exit zero with complete actual durability fields and drained work.
+
+The native release screen completes 240 fresh processes and 1,440 native Git
+query oracles across all 72 cold/warm cells. Correctness and backend drain pass;
+nine timing controls fail the unchanged 1.10 p95 gate. All fifteen linked local
+crate trees, 404 used dependency records and the root manifest match the rebased
+source. This equivalence is restricted to the native qualifier; current HTTP
+proof remains independently source-bound. The predeclared 100-pair baseline
+calibration and baseline/candidate confirmation are pending. No timing failure
+is waived. The current Linux image minimum profile and independent-growth
+comparisons also remain pending.
+
+Sixteen completed request journals now have verified lossless gzip archives.
+Their original byte hashes, compressed hashes and paths remain in the manifest;
+all original reports, thresholds and failed cells remain available.
+
 ### R0 — Freeze the evidence contract and establish a baseline
 
 **Scope:** `crates/crab-remote/examples/qualify_remote.rs`, its `support/` owners;
