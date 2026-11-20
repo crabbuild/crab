@@ -541,27 +541,31 @@ impl RemoteGitRuntime {
         F: FnOnce() -> Result<T> + Send + 'static,
         T: Send + 'static,
     {
-        let _lifetime = self.tasks.token();
+        let lifetime = self.tasks.token();
         let permit = self.decode_permit(cancellation).await?;
         let cancellation = cancellation.clone();
         let observation =
             crate::metrics::WorkObservation::new(self.metrics.clone(), MetricKind::CpuJob, 1);
-        self.spawn_blocking(move || {
-            // Dropping the awaiting future cannot stop admitted blocking work.
-            // Its actual worker owns capacity until its buffers and task exit.
-            let _permit = permit;
-            let _observation = observation;
-            if cancellation.is_cancelled() {
-                return Err(Error::Cancelled);
-            }
-            let result = task();
-            if cancellation.is_cancelled() && result.is_ok() {
-                return Err(Error::Cancelled);
-            }
-            result
-        })
-        .await
-        .map_err(|source| Error::DecodeTask { source })?
+        let (result, permit, observation, lifetime) = self
+            .spawn_blocking(move || {
+                let result = if cancellation.is_cancelled() {
+                    Err(Error::Cancelled)
+                } else {
+                    let result = task();
+                    if cancellation.is_cancelled() && result.is_ok() {
+                        Err(Error::Cancelled)
+                    } else {
+                        result
+                    }
+                };
+                // A detached JoinHandle may retain its output after the worker
+                // exits. Drop output before admission and tracker ownership.
+                (result, permit, observation, lifetime)
+            })
+            .await
+            .map_err(|source| Error::DecodeTask { source })?;
+        drop((permit, observation, lifetime));
+        result
     }
 
     pub(crate) fn origin_admission(&self) -> Arc<Semaphore> {
