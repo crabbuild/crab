@@ -1345,3 +1345,50 @@ The historical timeout remains open. Do not interpret passing repetitions as a
 fix, introduce force-quit timers, or bypass native owner draining. Evidence stays
 in the external target under `native-timeout-audit/`, `native-timeout-full-audit/`,
 `native-timeout-untraced/` and `native-complex-results/`.
+
+## Desktop control and layout consistency
+
+Results composes the desktop's existing shadcn/Radix Select, Checkbox,
+InputGroup, Badge, Empty and Dialog components. Report, baseline and objective
+choosers follow the same grouped options and empty-value namespacing as other
+workflow controls. Their persisted values and workflow-owned contracts are
+unchanged. Authored Vega controls remain owned by their retained specifications.
+
+The toolbar and scrollable content share responsive 16/24-pixel gutters.
+Catalog rows separate experiment names from IDs; the comparison's wider pinned
+run column uses the same hierarchy and keeps the original accessible name.
+Table headers, objective controls, charts, dataset fields and evidence previews
+use the existing spacing scale and compact 32-pixel controls. Empty previews
+and immutable/baseline labels use shared component composition. Charts retain
+full available width and their own horizontal overflow.
+
+A loaded report exposes its complete ID in a named group. During reader failure,
+the chooser retains the selected report while the unavailable body is cleared.
+Native tests inspect the selected Radix option's complete ID in that state;
+they do not require stale report content to remain visible. Tests keep actual
+Apply, reproduction, checkpoint resume, artifact CAS, missing/corrupt evidence,
+restart and cold retrieval checks, and add keyboard open/Escape/focus recovery
+for the baseline chooser.
+
+The shared chart renderer also excludes Vega-Lite 5.23's generated interval
+brush rectangles from the accessibility tree, alongside its existing Voronoi
+hit regions. The compiler's `src/compile/selection/interval.ts` emits data-free,
+clipped rectangles named with `_brush` / `_brush_bg` suffixes. The filter applies
+to compiled Vega-Lite gesture layers; authored raw-Vega marks remain exposed.
+The example's threshold rule carries an expression-backed description announcing
+the current threshold. Top-level template descriptions name the compound views.
+The native complex case scans WCAG A/AA with axe after verifying that its scoped
+Results surface contains no frames. A browser renderer probe additionally checks
+exact counts, the changing threshold label and an authored raw-Vega mark with a
+brush-like name, with networking denied.
+
+Final scoped proof: 51 Results-owner tests pass (two dedicated cases remain
+ignored); fresh owner-generated browser fixtures pass all four renderer cases.
+The final packaged macOS arm64 application passes all five Results acceptance
+cases in 212.5 seconds. A further actual four-run journey checks light, dark,
+high-contrast light and high-contrast dark at 900, 1280 and 1600 pixels: all
+12 combinations have zero scoped WCAG A/AA violations, 24-pixel content gutters
+and no workspace-level horizontal overflow. Tables and authored charts retain
+local scrolling. Twenty additional theme/menu captures join the 14 feature
+screenshots; restart and cold recovery still pass. The original native timeout
+remains a separate open investigation; shutdown policy is unchanged.

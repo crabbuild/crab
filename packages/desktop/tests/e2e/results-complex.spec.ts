@@ -1,3 +1,5 @@
+import { chooseSelect } from "../helpers/select";
+import AxeBuilder from "@axe-core/playwright";
 import {
   test,
   expect,
@@ -267,7 +269,16 @@ test("complex trained Results remain interactive through native restart and cold
     const selections = page.getByRole("checkbox", { name: /^Compare / });
     await expect(selections).toHaveCount(4);
     for (const selection of await selections.all()) await selection.check();
-    await page.getByLabel("Baseline run").selectOption(ids[0]);
+    await chooseSelect(page.getByLabel("Baseline run"), ids[0]);
+    const baseline = page.getByRole("combobox", {
+      name: "Baseline run",
+      exact: true,
+    });
+    await baseline.focus();
+    await baseline.press("ArrowDown");
+    await expect(page.getByRole("listbox")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(baseline).toBeFocused();
     const workspace = page.getByLabel("Results workspace", { exact: true });
     for (const [metric, direction] of [
       ["metrics/classification.json/f1", "maximize"],
@@ -275,7 +286,10 @@ test("complex trained Results remain interactive through native restart and cold
       ["metrics/forecast.json/mae", "minimize"],
       ["metrics/forecast.json/rmse", "minimize"],
     ])
-      await workspace.getByLabel("Objective " + metric).selectOption(direction);
+      await chooseSelect(
+        workspace.getByLabel("Objective " + metric),
+        direction,
+      );
     for (const id of ids) {
       await workspace
         .getByRole("region", { name: "Metric comparison", exact: true })
@@ -302,8 +316,25 @@ test("complex trained Results remain interactive through native restart and cold
         .getByRole("button", { name: "Set identity", exact: true })
         .click();
     }
+    await expect(
+      workspace
+        .getByRole("region", { name: "Metric comparison", exact: true })
+        .locator(".text-success, .text-warning"),
+    ).toHaveCount(12);
     await expect(workspace.locator(".crab-results-chart > svg")).toHaveCount(5);
     await expect(workspace.getByRole("alert")).toHaveCount(0);
+    await expect(workspace.locator("iframe, frame")).toHaveCount(0);
+    const accessibility = await new AxeBuilder({ page })
+      .setLegacyMode()
+      .include('[aria-label="Results workspace"]')
+      .withTags(["wcag2a", "wcag2aa"])
+      .analyze();
+    expect(
+      accessibility.violations.map(({ id, nodes }) => ({
+        id,
+        nodes: nodes.map((node) => node.failureSummary),
+      })),
+    ).toEqual([]);
     await workspace.locator(":scope > .overflow-auto").evaluate((e) => {
       e.scrollTop = 0;
     });
@@ -407,10 +438,8 @@ test("complex trained Results remain interactive through native restart and cold
       .getByRole("button", { name: "Save report", exact: true })
       .click();
     await prompt(page, /Save immutable report/, "Native Results lab");
-    await expect(page.getByLabel("Open immutable report")).toHaveValue(
-      /^[0-9a-f]{64}$/,
-    );
-    const report = await page.getByLabel("Open immutable report").inputValue();
+    await expect(page.getByLabel("Report ID")).toHaveText(/^[0-9a-f]{64}$/);
+    const report = await page.getByLabel("Report ID").innerText();
     await shot(page, "native-saved-report");
     await page
       .getByRole("button", { name: "Publish report", exact: true })
@@ -430,7 +459,7 @@ test("complex trained Results remain interactive through native restart and cold
       .getByRole("button", { name: "Retrieve report", exact: true })
       .click();
     await prompt(page, /Open immutable report/, report);
-    await expect(page.getByLabel("Open immutable report")).toHaveValue(report);
+    await expect(page.getByLabel("Report ID")).toHaveText(report);
     await expect(page.locator(".crab-results-chart > svg")).toHaveCount(5);
     await expect(page.getByRole("alert")).toHaveCount(0);
     await shot(page, "native-cold-report");

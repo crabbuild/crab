@@ -59,6 +59,10 @@ than duplicating it in every child. These examples use documented Vega-Lite
 [parameters](https://vega.github.io/vega-lite/docs/parameter.html), and
 [selections](https://vega.github.io/vega-lite/docs/selection.html).
 
+Give compound views a top-level `description` and meaningful reference marks
+a description, including a live expression when their value changes. Generated
+brush hit regions remain interactive without adding empty screen-reader marks.
+
 Charts use the bundled offline renderer. External data/URLs and supplied
 JavaScript are refused. Results retains its existing run/series/point/byte
 budgets; statistical/compound views are refused when reducing rows would change

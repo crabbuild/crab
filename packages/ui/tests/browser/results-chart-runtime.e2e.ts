@@ -11,6 +11,7 @@ type Rendered = Omit<Awaited<ReturnType<typeof render>>, "view"> & {
 type Embed = (...args: Parameters<typeof render>) => Promise<Rendered>;
 declare global {
   interface Window {
+    vegaEmbed: Embed;
     resultsChartProbe: {
       views: { result: Rendered; elapsed: number }[];
     };
@@ -544,6 +545,48 @@ test("offline plots preserve gaps and authored transformed and compound semantic
     path: path.join(evidence!, "browser/chart-builtins-narrow.png"),
     fullPage: true,
   });
+  const authoredMarkExposed = await page.evaluate(async () => {
+    const host = document.body.appendChild(document.createElement("div"));
+    const result = await window.vegaEmbed(
+      host,
+      {
+        $schema: "https://vega.github.io/schema/vega/v5.json",
+        width: 100,
+        height: 100,
+        marks: [
+          {
+            name: "authored_brush",
+            type: "rect",
+            clip: true,
+            encode: {
+              enter: {
+                x: { value: 0 },
+                y: { value: 0 },
+                width: { value: 50 },
+                height: { value: 40 },
+                description: { value: "Authored comparison value" },
+              },
+            },
+          },
+        ],
+      },
+      {
+        onError: (error) => {
+          throw error;
+        },
+      },
+    );
+    try {
+      const mark = host.querySelector(
+        '[aria-label="Authored comparison value"]',
+      );
+      return Boolean(mark && !mark.closest('[aria-hidden="true"]'));
+    } finally {
+      result.finalize();
+      host.remove();
+    }
+  });
+  expect(authoredMarkExposed).toBe(true);
   expect(errors).toEqual([]);
   expect(attempted).toEqual([]);
 });

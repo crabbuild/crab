@@ -1,3 +1,4 @@
+import { chooseSelect } from "../helpers/select";
 import { expect, type Page } from "@playwright/test";
 import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -51,7 +52,7 @@ export async function checkStorageFailures({
     "workflow Results operation failed",
     { timeout: 180_000 },
   );
-  await expect(page.getByLabel("Open immutable report")).toHaveValue(reportId);
+  await expect(page.getByLabel("Report ID")).toHaveText(reportId);
   await expect(values).toContainText("0.2");
   await expect(workspace.locator("g.mark-line path")).toHaveCount(4);
   const viewport = await page.evaluate(() => ({
@@ -192,7 +193,7 @@ export async function checkResultsFailures({
   await expect(
     workspace.getByLabel("Metric comparison", { exact: true }),
   ).toContainText("0.2");
-  await expect(page.getByLabel("Open immutable report")).toHaveValue(reportId);
+  await expect(page.getByLabel("Report ID")).toHaveText(reportId);
   await page.screenshot({
     path: path.join(output, "native-results-missing-evidence.png"),
     fullPage: true,
@@ -203,7 +204,7 @@ export async function checkResultsFailures({
   await expect(workspace.locator("pre")).toContainText("step,loss");
 
   await open(page, source);
-  await page.getByLabel("Open immutable report").selectOption("");
+  await chooseSelect(page.getByLabel("Open immutable report"), "");
   const failed = workspace
     .getByRole("row")
     .filter({ hasText: "failed" })
@@ -325,7 +326,13 @@ export async function checkResultsFailures({
   await expect(workspace.getByRole("alert")).toContainText(
     "native session ended",
   );
-  await expect(page.getByLabel("Open immutable report")).toHaveValue(reportId);
+  // A closed reader clears report bodies. The chooser must still pin the
+  // complete selected ID so reopening can recover the same report.
+  await page.getByLabel("Open immutable report").click();
+  await expect(
+    page.locator(`[role="option"][data-value=":${reportId}"]`),
+  ).toHaveAttribute("data-state", "checked");
+  await page.keyboard.press("Escape");
   await page.screenshot({
     path: path.join(output, "native-results-closed-session.png"),
     fullPage: true,

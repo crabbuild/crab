@@ -1,5 +1,6 @@
 {
   "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+  "description": "Precision\u2013recall, ROC and calibration curves comparing retained predictions across selected runs.",
   "data": {
     "values": "<DVC_METRIC_DATA>"
   },

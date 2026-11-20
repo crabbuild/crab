@@ -1,3 +1,4 @@
+import { chooseSelect } from "../helpers/select";
 import {
   test,
   expect,
@@ -434,7 +435,7 @@ console.log('acknowledged iteration', iteration);
       .getByRole("button", { name: "Save report", exact: true })
       .click();
     await prompt(/Save immutable report/, "Native action provenance");
-    await expect(page.getByLabel("Open immutable report")).toHaveValue(
+    await expect(page.getByLabel("Report ID")).toHaveText(
       /^[a-f0-9]{64}$/,
     );
     cli(["exp", "rename", source.id, "Renamed after reproduction"]);
@@ -493,7 +494,7 @@ console.log('acknowledged iteration', iteration);
     rmSync(manualAssets, { recursive: true });
     writeFileSync(path.join(repo, "model.json"), "today's model");
     writeFileSync(path.join(repo, "params.json"), JSON.stringify({ factor: 99 }));
-    await page.getByLabel("Open immutable report").selectOption("");
+    await chooseSelect(page.getByLabel("Open immutable report"), "");
     await page.getByRole("button", { name: "Refresh Results", exact: true }).click();
     const comparisons = page.getByRole("checkbox", { name: /^Compare / });
     for (let index = 0; index < await comparisons.count(); index++) {
@@ -605,7 +606,7 @@ console.log('acknowledged iteration', iteration);
     renameSync(path.join(repo, ".crab/workflow/results"), path.join(root, "results-before-cold-retrieval"));
     cli(["results", "report", "pull", report.id]);
     await page.getByRole("button", { name: "Refresh Results", exact: true }).click();
-    await page.getByLabel("Open immutable report").selectOption(report.id);
+    await chooseSelect(page.getByLabel("Open immutable report"), report.id);
     await expect(manualChart.getByText("Recorded manual curve", { exact: true })).toBeVisible();
     await expect(manualChart.locator("svg .mark-line path")).toHaveCount(1);
     await expect(page.getByRole("button", { name: "Apply", exact: true })).toBeDisabled();
@@ -627,7 +628,7 @@ console.log('acknowledged iteration', iteration);
     expect(show(importedId).snapshot.origin).toBe("experiment_metadata");
     expect(show(importedId).snapshot.parameters).toEqual([]);
     expect(show(importedId).snapshot.stages).toEqual([]);
-    await page.getByLabel("Open immutable report").selectOption("");
+    await chooseSelect(page.getByLabel("Open immutable report"), "");
     await page.getByRole("button", { name: "Refresh Results", exact: true }).click();
     const importedChoice = page.getByRole("checkbox", { name: "Compare Imported before Results", exact: true });
     const importedRow = page.getByRole("row").filter({ has: importedChoice });
@@ -653,7 +654,7 @@ console.log('acknowledged iteration', iteration);
     renameSync(path.join(repo, ".crab/workflow/results"), path.join(root, "results-before-imported-retrieval"));
     cli(["results", "report", "pull", importedReport.id]);
     await page.getByRole("button", { name: "Refresh Results", exact: true }).click();
-    await page.getByLabel("Open immutable report").selectOption(importedReport.id);
+    await chooseSelect(page.getByLabel("Open immutable report"), importedReport.id);
     await expect(importedComparison).toContainText("0.375");
     await expect(importedComparison).toContainText("Imported experiment metadata");
     await expect(workingResults).not.toContainText("recorded-private-argument-must-not-be-replayed");
