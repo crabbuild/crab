@@ -159,12 +159,17 @@ export async function render(target, spec, options) {
     };
     scales(compiled);
   }
-  // Vega-Lite 5's nearest-selection compiler emits transparent Voronoi hit
-  // regions without inheriting mark aria:false. They carry no result content.
+  // Vega-Lite 5 generates unnamed brush rectangles and Voronoi hit targets.
+  // These interaction layers carry no result content; keep data marks readable.
   const accessibleMarks = (marks) =>
     marks?.map((mark) => ({
       ...mark,
-      ...(mark.transform?.some((transform) => transform.type === "voronoi")
+      ...(mark.transform?.some((transform) => transform.type === "voronoi") ||
+      (lite &&
+        mark.type === "rect" &&
+        mark.clip === true &&
+        !mark.from &&
+        /_brush(?:_bg)?$/.test(mark.name ?? ""))
         ? { aria: false }
         : {}),
       ...(mark.marks ? { marks: accessibleMarks(mark.marks) } : {}),

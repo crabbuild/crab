@@ -1,3 +1,4 @@
+import { chooseSelect } from "../helpers/select";
 import {
   test,
   expect,
@@ -196,13 +197,20 @@ test("Results retains an actual comparison after restart and cold remote report 
     child.once("exit", () => recordLifecycle("child.exit", child.pid));
     child.once("close", () => recordLifecycle("child.stdio.close", child.pid));
     await app.evaluate(({ app }, file) => {
-      const fs = process.getBuiltinModule("node:fs") as typeof import("node:fs");
+      const fs = process.getBuiltinModule(
+        "node:fs",
+      ) as typeof import("node:fs");
       const record = (phase: string) =>
         fs.appendFileSync(
           file,
-          JSON.stringify({ phase, pid: process.pid, wall_ms: Date.now() }) + "\n",
+          JSON.stringify({ phase, pid: process.pid, wall_ms: Date.now() }) +
+            "\n",
         );
-      for (const event of ["before-quit", "will-quit", "window-all-closed"] as const)
+      for (const event of [
+        "before-quit",
+        "will-quit",
+        "window-all-closed",
+      ] as const)
         app.prependListener(event, () => record(event));
       process.once("exit", () => record("main.node.exit"));
     }, lifecycleFile);
@@ -258,7 +266,7 @@ test("Results retains an actual comparison after restart and cold remote report 
     return handle;
   };
   const checkReport = async (page: Page, id: string) => {
-    await expect(page.getByLabel("Open immutable report")).toHaveValue(id);
+    await expect(page.getByLabel("Report ID")).toHaveText(id);
     const workspace = page.getByLabel("Results workspace", { exact: true });
     await expect(workspace).toContainText("0.1");
     await expect(workspace).toContainText("0.2");
@@ -336,7 +344,7 @@ test("Results retains an actual comparison after restart and cold remote report 
       .click();
     for (const input of await workspace.getByLabel(/^X maximum /).all())
       await expect(input).toHaveValue("0.5");
-    await expect(page.getByLabel("Open immutable report")).toHaveValue(id);
+    await expect(page.getByLabel("Report ID")).toHaveText(id);
     await expect(workspace.getByRole("alert")).toHaveCount(0);
   };
   try {
@@ -371,10 +379,11 @@ test("Results retains an actual comparison after restart and cold remote report 
     };
     const newer = await runId("0.2");
     const older = await runId("0.1");
-    await page.getByLabel("Baseline run").selectOption(older);
-    await page
-      .getByLabel("Objective metrics.json/score")
-      .selectOption("maximize");
+    await chooseSelect(page.getByLabel("Baseline run"), older);
+    await chooseSelect(
+      page.getByLabel("Objective metrics.json/score"),
+      "maximize",
+    );
     await bindDataset(page, newer);
     await bindDataset(page, older);
     const candidate = page
@@ -399,8 +408,8 @@ test("Results retains an actual comparison after restart and cold remote report 
       0,
     );
     await scoreColumn.check();
-    await expect(page.getByLabel("Objective metrics.json/score")).toHaveValue(
-      "maximize",
+    await expect(page.getByLabel("Objective metrics.json/score")).toHaveText(
+      "Maximize",
     );
     await page.getByText("Columns", { exact: true }).click();
     await page.getByRole("button", { name: "Apply", exact: true }).click();
@@ -462,10 +471,8 @@ test("Results retains an actual comparison after restart and cold remote report 
       .getByRole("button", { name: "Save report", exact: true })
       .click();
     await prompt(page, /Save immutable report/, "Real validation comparison");
-    await expect(page.getByLabel("Open immutable report")).toHaveValue(
-      /^[0-9a-f]{64}$/,
-    );
-    const id = await page.getByLabel("Open immutable report").inputValue();
+    await expect(page.getByLabel("Report ID")).toHaveText(/^[0-9a-f]{64}$/);
+    const id = await page.getByLabel("Report ID").innerText();
     expect(id).toMatch(/^[0-9a-f]{64}$/);
     await checkReport(page, id);
     await page
@@ -573,7 +580,7 @@ test("Results retains an actual comparison after restart and cold remote report 
       timeout: 60_000,
     });
     await page.getByRole("tab", { name: "Results", exact: true }).click();
-    await page.getByLabel("Open immutable report").selectOption("");
+    await chooseSelect(page.getByLabel("Open immutable report"), "");
     const failed = page
       .getByLabel("Results workspace", { exact: true })
       .getByRole("row")
@@ -631,7 +638,7 @@ test("Results retains an actual comparison after restart and cold remote report 
         .getByRole("button", { name: "Data Workflows", exact: true })
         .click();
       await page.getByRole("tab", { name: "Results", exact: true }).click();
-      await page.getByLabel("Open immutable report").selectOption(id);
+      await chooseSelect(page.getByLabel("Open immutable report"), id);
       await checkReport(page, id);
       return handle;
     };
@@ -690,8 +697,8 @@ test("Results retains an actual comparison after restart and cold remote report 
         await page.locator("body").innerText(),
       );
       const reportId = await page
-        .getByLabel("Open immutable report")
-        .inputValue()
+        .getByLabel("Report ID")
+        .innerText()
         .catch(() => "");
       if (reportId) {
         const response = await call(page, "workflow_results_read", {

@@ -24,8 +24,32 @@ import {
   XCircle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+} from "@/components/ui/empty";
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupInput,
+} from "@/components/ui/input-group";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import { requestPrompt } from "../../lib/application-dialogs";
 import { useSession } from "../../lib/session-context";
@@ -59,19 +83,30 @@ type ResultFailure = {
   diagnostics?: unknown;
 };
 
-function resultFailure(error: unknown, preview?: "apply" | "resume"): ResultFailure {
+function resultFailure(
+  error: unknown,
+  preview?: "apply" | "resume",
+): ResultFailure {
   const data =
-    error && typeof error === "object" && "data" in error ? error.data : undefined;
+    error && typeof error === "object" && "data" in error
+      ? error.data
+      : undefined;
   const command =
-    data && typeof data === "object" && "error" in data && data.error
-      && typeof data.error === "object" ? data.error : null;
+    data &&
+    typeof data === "object" &&
+    "error" in data &&
+    data.error &&
+    typeof data.error === "object"
+      ? data.error
+      : null;
   let message = error instanceof Error ? error.message : String(error);
   if (command && "message" in command && typeof command.message === "string") {
     message = command.message;
   }
   if (!preview) return { message, diagnostics: data };
   const action = preview === "apply" ? "Apply" : "Resume";
-  const corruption = command && "code" in command && command.code === "CRAB-E0020";
+  const corruption =
+    command && "code" in command && command.code === "CRAB-E0020";
   return {
     message: `${action} preview refused. Workspace files were not changed.`,
     reason: message,
@@ -338,7 +373,8 @@ export function ResultsWorkspace({ repo }: { repo: OpenRepo }) {
   const shown = report?.report.comparison ?? comparison?.comparison;
   // Lead from scalar comparisons directly into their synchronized curves.
   const charts = [...(report?.charts ?? comparison?.charts ?? [])].sort(
-    (left, right) => Number(Boolean(right.interaction)) - Number(Boolean(left.interaction)),
+    (left, right) =>
+      Number(Boolean(right.interaction)) - Number(Boolean(left.interaction)),
   );
   const columns = useMemo(
     () =>
@@ -489,19 +525,24 @@ export function ResultsWorkspace({ repo }: { repo: OpenRepo }) {
       role="region"
       aria-label="Results workspace"
     >
-      <div className="flex min-h-14 flex-wrap items-center gap-2 border-b border-border px-5 py-3">
-        <BarChart3 size={16} className="text-muted-foreground" aria-hidden="true" />
-        <h2 className="mr-3 text-sm font-semibold">Results</h2>
-        <div className="relative min-w-48 flex-1">
-        <Search size={14} className="pointer-events-none absolute left-2.5 top-2.5 text-muted-foreground" aria-hidden="true" />
-        <Input
-          className="h-9 w-full pl-8 text-xs"
-          aria-label="Search experiments"
-          placeholder="Search runs, parameters, metrics…"
-          value={query.search}
-          onChange={(e) => updateQuery({ search: e.target.value })}
+      <div className="flex min-h-14 flex-wrap items-center gap-2 border-b border-border px-4 py-3 sm:px-6">
+        <BarChart3
+          size={16}
+          className="text-muted-foreground"
+          aria-hidden="true"
         />
-        </div>
+        <h2 className="mr-3 text-sm font-semibold">Results</h2>
+        <InputGroup className="min-w-48 flex-1">
+          <InputGroupInput
+            aria-label="Search experiments"
+            placeholder="Search runs, parameters, metrics…"
+            value={query.search}
+            onChange={(e) => updateQuery({ search: e.target.value })}
+          />
+          <InputGroupAddon className="pl-2.5">
+            <Search size={14} aria-hidden="true" />
+          </InputGroupAddon>
+        </InputGroup>
         <Button
           variant="ghost"
           size="icon-sm"
@@ -516,43 +557,55 @@ export function ResultsWorkspace({ repo }: { repo: OpenRepo }) {
         </Button>
         <Popover>
           <PopoverTrigger asChild>
-            <Button variant="ghost" size="sm"><SlidersHorizontal size={14} /> Columns</Button>
+            <Button variant="ghost" size="sm">
+              <SlidersHorizontal size={14} /> Columns
+            </Button>
           </PopoverTrigger>
-          <PopoverContent align="end" className="max-h-80 w-80 max-w-[calc(100vw-2rem)] overflow-y-auto p-3">
-            <p className="mb-2 text-xs font-medium">Visible columns</p>
-            {page?.columns.map((column) => (
-              <label key={column.key} className="flex cursor-pointer items-center gap-2 rounded px-2 py-2 text-xs hover:bg-accent">
-                <input
-                  type="checkbox"
-                  className="size-3.5 shrink-0 accent-primary"
-                  checked={(query.columns ?? page.display_columns).includes(
-                    column.key,
-                  )}
-                  onChange={(e) => {
-                    const checked = e.target.checked;
-                    setPreferences((p) => {
-                      const current = p.query.columns ?? page.display_columns;
-                      const columns = checked
-                        ? [...current, column.key].slice(0, 32)
-                        : current.filter((key) => key !== column.key);
-                      return {
-                        ...p,
-                        query: { ...p.query, columns, cursor: null },
-                        spec: {
-                          ...p.spec,
-                          columns: columns
-                            .filter((key) => key.startsWith("metric:"))
-                            .map(metricKey),
-                        },
-                        report: "",
-                      };
-                    });
-                  }}
-                />
-                {column.kind} · {column.file}
-                {column.pointer}
-              </label>
-            ))}
+          <PopoverContent
+            align="end"
+            className="max-h-80 w-80 max-w-[calc(100vw-2rem)] overflow-y-auto p-3"
+          >
+            <fieldset>
+              <legend className="mb-2 px-2 text-xs font-medium">
+                Visible columns
+              </legend>
+              {page?.columns.map((column) => (
+                <label
+                  key={column.key}
+                  className="flex cursor-pointer items-center gap-2 rounded px-2 py-2 text-xs hover:bg-accent"
+                >
+                  <Checkbox
+                    checked={(query.columns ?? page.display_columns).includes(
+                      column.key,
+                    )}
+                    onCheckedChange={(value) => {
+                      const checked = value === true;
+                      setPreferences((p) => {
+                        const current = p.query.columns ?? page.display_columns;
+                        const columns = checked
+                          ? [...current, column.key].slice(0, 32)
+                          : current.filter((key) => key !== column.key);
+                        return {
+                          ...p,
+                          query: { ...p.query, columns, cursor: null },
+                          spec: {
+                            ...p.spec,
+                            columns: columns
+                              .filter((key) => key.startsWith("metric:"))
+                              .map(metricKey),
+                          },
+                          report: "",
+                        };
+                      });
+                    }}
+                  />
+                  <span className="min-w-0 break-words">
+                    {column.kind} · {column.file}
+                    {column.pointer}
+                  </span>
+                </label>
+              ))}
+            </fieldset>
           </PopoverContent>
         </Popover>
         <Button
@@ -565,7 +618,9 @@ export function ResultsWorkspace({ repo }: { repo: OpenRepo }) {
             );
             if (!id) return;
             if (!/^[0-9a-f]{64}$/.test(id)) {
-              setError(resultFailure("Report ID must be a 64-character BLAKE3 digest"));
+              setError(
+                resultFailure("Report ID must be a 64-character BLAKE3 digest"),
+              );
               return;
             }
             setBusy(true);
@@ -585,21 +640,30 @@ export function ResultsWorkspace({ repo }: { repo: OpenRepo }) {
           <Download size={14} aria-hidden="true" />
           Retrieve report
         </Button>
-        <select
-          aria-label="Open immutable report"
-          className="h-8 min-w-0 max-w-48 rounded-md border border-input bg-background px-2 text-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-          value={preferences.report}
-          onChange={(e) =>
-            setPreferences((p) => ({ ...p, report: e.target.value }))
+        <Select
+          value={":" + preferences.report}
+          onValueChange={(value) =>
+            setPreferences((p) => ({ ...p, report: value.slice(1) }))
           }
         >
-          <option value="">Working comparison</option>
-          {reports.map((id) => (
-            <option key={id} value={id}>
-              Report {id.slice(0, 12)}
-            </option>
-          ))}
-        </select>
+          <SelectTrigger aria-label="Open immutable report" className="w-48">
+            <SelectValue>
+              {preferences.report
+                ? `Report ${preferences.report.slice(0, 12)}`
+                : "Working comparison"}
+            </SelectValue>
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              <SelectItem value=":">Working comparison</SelectItem>
+              {reports.map((id) => (
+                <SelectItem key={id} value={":" + id}>
+                  Report {id.slice(0, 12)}
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          </SelectContent>
+        </Select>
       </div>
       {error && (
         <div
@@ -669,10 +733,13 @@ export function ResultsWorkspace({ repo }: { repo: OpenRepo }) {
           </Button>
         </div>
       )}
-      <div className="min-h-0 flex-1 overflow-auto">
+      <div className="min-h-0 flex-1 overflow-auto px-4 py-4 sm:px-6 sm:py-6">
         {!(report && !page?.rows.length) && (
           <>
-            <div className="overflow-x-auto" aria-busy={loading}>
+            <div
+              className="overflow-x-auto rounded-md border border-border"
+              aria-busy={loading}
+            >
               <table className="w-full border-collapse text-left text-xs tabular-nums">
                 <thead className="bg-muted/50 text-muted-foreground">
                   <tr>
@@ -716,9 +783,12 @@ export function ResultsWorkspace({ repo }: { repo: OpenRepo }) {
                               : key === "status"
                                 ? "Status"
                                 : label(key)}
-                          {query.sort === key && (query.descending
-                            ? <ArrowDown size={12} aria-hidden="true" />
-                            : <ArrowUp size={12} aria-hidden="true" />)}
+                          {query.sort === key &&
+                            (query.descending ? (
+                              <ArrowDown size={12} aria-hidden="true" />
+                            ) : (
+                              <ArrowUp size={12} aria-hidden="true" />
+                            ))}
                         </Button>
                       </th>
                     ))}
@@ -728,42 +798,73 @@ export function ResultsWorkspace({ repo }: { repo: OpenRepo }) {
                   {page?.rows.map((row) => (
                     <tr
                       key={row.id}
-                      className={cn("border-b border-border/60 transition-colors hover:bg-muted/50", selected.some((run) => run.id === row.id) && "bg-accent/50")}
+                      className={cn(
+                        "border-b border-border/60 transition-colors hover:bg-muted/50",
+                        selected.some((run) => run.id === row.id) &&
+                          "bg-accent/50",
+                      )}
                     >
-                      <td className="p-3">
-                        <input
+                      <td className="w-12 px-4 py-3">
+                        <Checkbox
                           aria-label={`Compare ${row.name ?? row.id}`}
-                          type="checkbox"
-                          className="size-3.5 accent-primary"
                           checked={selected.some((run) => run.id === row.id)}
                           disabled={
                             !selected.some((run) => run.id === row.id) &&
                             selected.length >= 20
                           }
-                          onChange={() =>
+                          onCheckedChange={() =>
                             select({ id: row.id, digest: row.digest })
                           }
                         />
                       </td>
-                      <td className="px-3 py-2">
-                        <span className="font-medium">
+                      <td className="min-w-44 px-3 py-3">
+                        <span
+                          className="block max-w-64 truncate font-medium"
+                          title={row.name ?? row.id}
+                        >
                           {row.name ?? shortId(row.id)}
                         </span>
                         {row.name && (
-                          <span className="ml-2 text-muted-foreground">
+                          <span className="mt-1 block font-mono text-[11px] text-muted-foreground">
                             {shortId(row.id)}
                           </span>
                         )}
                       </td>
                       <td className="whitespace-nowrap px-3">
-                        <span className={cn("inline-flex items-center gap-1.5", row.status === "success" ? "text-success" : row.status === "failed" ? "text-destructive" : "text-muted-foreground")}>
-                        {row.status === "success" ? <CheckCircle2 size={13} aria-hidden="true" /> : row.status === "failed" ? <XCircle size={13} aria-hidden="true" /> : <Circle size={13} aria-hidden="true" />}
-                        {row.status}{row.origin === "experiment_metadata" && " (imported)"}
+                        <span
+                          className={cn(
+                            "inline-flex items-center gap-1.5",
+                            row.status === "success"
+                              ? "text-success"
+                              : row.status === "failed"
+                                ? "text-destructive"
+                                : "text-muted-foreground",
+                          )}
+                        >
+                          {row.status === "success" ? (
+                            <CheckCircle2 size={13} aria-hidden="true" />
+                          ) : row.status === "failed" ? (
+                            <XCircle size={13} aria-hidden="true" />
+                          ) : (
+                            <Circle size={13} aria-hidden="true" />
+                          )}
+                          {row.status}
+                          {row.origin === "experiment_metadata" &&
+                            " (imported)"}
                         </span>
                       </td>
                       <td className="whitespace-nowrap px-3">
-                        <time dateTime={row.started_at} title={row.started_at} className="text-muted-foreground">
-                          {new Date(row.started_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                        <time
+                          dateTime={row.started_at}
+                          title={row.started_at}
+                          className="text-muted-foreground"
+                        >
+                          {new Date(row.started_at).toLocaleString(undefined, {
+                            month: "short",
+                            day: "numeric",
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          })}
                         </time>
                       </td>
                       {columns.map((column) => (
@@ -795,24 +896,28 @@ export function ResultsWorkspace({ repo }: { repo: OpenRepo }) {
                 </tbody>
               </table>
               {!page?.rows.length && (
-                <div className="flex min-h-48 flex-col items-center justify-center gap-3 px-6 py-10 text-xs text-muted-foreground">
-                  <BarChart3 size={24} strokeWidth={1.5} aria-hidden="true" />
-                  <p className="max-w-72 text-center leading-relaxed">
-                  {loading
-                    ? "Loading captured results…"
-                    : error
-                      ? "Results are unavailable. Refresh after resolving the error above."
-                      : report
-                        ? "No local run catalog. The retrieved immutable report is available below."
-                        : query.search
-                          ? "No results match this search."
-                          : "No results yet. Run experiments from Queue, or retrieve a published report."}
-                  </p>
-                </div>
+                <Empty className="min-h-48">
+                  <EmptyHeader>
+                    <EmptyMedia variant="icon">
+                      <BarChart3 aria-hidden="true" />
+                    </EmptyMedia>
+                    <EmptyDescription className="text-xs">
+                      {loading
+                        ? "Loading captured results…"
+                        : error
+                          ? "Results are unavailable. Refresh after resolving the error above."
+                          : report
+                            ? "No local run catalog. The retrieved immutable report is available below."
+                            : query.search
+                              ? "No results match this search."
+                              : "No results yet. Run experiments from Queue, or retrieve a published report."}
+                    </EmptyDescription>
+                  </EmptyHeader>
+                </Empty>
               )}
             </div>
-            <div className="flex items-center justify-between border-b border-border px-4 py-2 text-xs text-muted-foreground">
-                  <span className="tabular-nums">
+            <div className="flex flex-wrap items-center justify-between gap-2 py-3 text-xs text-muted-foreground">
+              <span className="tabular-nums">
                 {page?.total ?? 0} results · {selected.length}/20 selected
               </span>
               <div className="flex gap-2">
@@ -847,43 +952,51 @@ export function ResultsWorkspace({ repo }: { repo: OpenRepo }) {
           </p>
         )}
         {(selected.length > 0 || report) && (
-          <div className="px-5 py-5">
+          <div className="pt-6">
             <div className="flex flex-wrap items-center gap-x-4 gap-y-3">
               <h3 className="mr-auto text-sm font-semibold">
                 {report ? report.report.title : "Comparison"}
               </h3>
               {report && (
-                <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+                <Badge variant="secondary" className="gap-1.5 font-normal">
                   <LockKeyhole size={12} aria-hidden="true" />
                   {report.report.comparison.rows.length} runs · Immutable report
-                </span>
+                </Badge>
               )}
               {!report && (
                 <>
-                  <label className="text-xs">
-                    Baseline{" "}
-                    <select
-                      aria-label="Baseline run"
-                      className="ml-2 h-8 rounded-md border border-input bg-background px-2 font-mono"
-                      value={spec.baseline}
-                      onChange={(e) => updateSpec({ baseline: e.target.value })}
-                    >
-                      {selected.map((run) => (
-                        <option key={run.id} value={run.id}>
-                          {shortId(run.id)}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="text-xs">
-                    <input
-                      type="checkbox"
-                      className="accent-primary"
-                      checked={spec.include_logs}
-                      onChange={(e) =>
-                        updateSpec({ include_logs: e.target.checked })
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="text-muted-foreground">Baseline</span>
+                    <Select
+                      value={":" + spec.baseline}
+                      onValueChange={(value) =>
+                        updateSpec({ baseline: value.slice(1) })
                       }
-                    />{" "}
+                    >
+                      <SelectTrigger aria-label="Baseline run" className="w-44">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectGroup>
+                          {selected.map((run) => (
+                            <SelectItem key={run.id} value={":" + run.id}>
+                              {shown?.rows.find(
+                                (row) =>
+                                  row.run.snapshot.experiment_id === run.id,
+                              )?.run.snapshot.name ?? shortId(run.id)}
+                            </SelectItem>
+                          ))}
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <label className="flex min-h-8 cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+                    <Checkbox
+                      checked={spec.include_logs}
+                      onCheckedChange={(checked) =>
+                        updateSpec({ include_logs: checked === true })
+                      }
+                    />
                     Include logs in report
                   </label>
                   <Button
@@ -925,9 +1038,14 @@ export function ResultsWorkspace({ repo }: { repo: OpenRepo }) {
               )}
             </div>
             {report && (
-              <p title={report.id} className="mt-2 max-w-64 truncate font-mono text-[11px] text-muted-foreground">
+              <div
+                role="group"
+                aria-label="Report ID"
+                title={report.id}
+                className="mt-2 max-w-96 truncate font-mono text-[11px] text-muted-foreground"
+              >
                 {report.id}
-              </p>
+              </div>
             )}
             {shown && (
               <ComparisonTable

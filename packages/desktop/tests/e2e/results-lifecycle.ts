@@ -1,3 +1,4 @@
+import { chooseSelect } from "../helpers/select";
 import { expect, type ElectronApplication, type Page } from "@playwright/test";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -146,7 +147,7 @@ export async function checkResultsLifecycle({
     await expect(workspace).toHaveCount(0);
     if (reload) await page.reload();
     await page.getByRole("tab", { name: "Results", exact: true }).click();
-    await page.getByLabel("Open immutable report").selectOption(reportId);
+    await chooseSelect(page.getByLabel("Open immutable report"), reportId);
     await checkReport(page, reportId);
   };
   try {

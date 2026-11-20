@@ -1,5 +1,6 @@
 {
   "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+  "description": "Precision, recall and accuracy by cohort, with 95% Wilson intervals.",
   "data": {
     "values": "<DVC_METRIC_DATA>"
   },

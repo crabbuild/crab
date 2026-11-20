@@ -126,11 +126,13 @@ export function ResultChart({
   }, [range, axis]);
   return (
     <section
-      className="min-w-0 border-t border-border py-5"
+      className="min-w-0 border-t border-border py-6"
       aria-label={chart.title}
       data-axis-key={axis?.key}
     >
-      <h3 className="mb-3 truncate text-sm font-medium" title={chart.title}>{chart.title}</h3>
+      <h3 className="mb-3 truncate text-sm font-medium" title={chart.title}>
+        {chart.title}
+      </h3>
       {axis?.domain && !error && (
         <AxisControls
           key={axis.key}
@@ -240,8 +242,14 @@ function AxisControls({
       <details className="group basis-full text-[11px] text-muted-foreground">
         <summary className="flex w-fit cursor-pointer items-center gap-1.5 rounded-sm focus-visible:outline focus-visible:outline-ring">
           <Link2 size={12} aria-hidden="true" /> Linked x axis · {axis.label}
-          <span className="font-mono">{domain.lower}–{domain.upper}</span>
-          <ChevronDown size={12} className="transition-transform group-open:rotate-180" aria-hidden="true" />
+          <span className="font-mono">
+            {domain.lower}–{domain.upper}
+          </span>
+          <ChevronDown
+            size={12}
+            className="transition-transform group-open:rotate-180"
+            aria-hidden="true"
+          />
         </summary>
         <p className="mt-1 max-w-prose">
           {immutable

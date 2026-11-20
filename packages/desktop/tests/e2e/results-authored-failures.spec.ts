@@ -1,3 +1,4 @@
+import { chooseSelect } from "../helpers/select";
 import {
   test,
   expect,
@@ -83,7 +84,7 @@ test("native Results preserves real observations when authored plots fail", asyn
       .getByRole("button", { name: "Data Workflows", exact: true })
       .click();
     await page.getByRole("tab", { name: "Results", exact: true }).click();
-    await page.getByLabel("Open immutable report").selectOption(payload.id);
+    await chooseSelect(page.getByLabel("Open immutable report"), payload.id);
     const workspace = page.getByLabel("Results workspace", { exact: true });
     const healthy = workspace.locator('section[aria-label="healthy"]');
     const event = workspace.locator('section[aria-label="event"]');
@@ -97,9 +98,7 @@ test("native Results preserves real observations when authored plots fail", asyn
     await expect(event.locator("svg")).toHaveCount(0);
     await expect(healthy.locator("g.mark-line path")).toHaveCount(1);
     await expect(workspace).toContainText("0.25");
-    await expect(page.getByLabel("Open immutable report")).toHaveValue(
-      payload.id,
-    );
+    await expect(page.getByLabel("Report ID")).toHaveText(payload.id);
     for (const width of [1280, 900]) {
       await page.setViewportSize({ width, height: 1000 });
       await event.scrollIntoViewIfNeeded();
@@ -108,8 +107,8 @@ test("native Results preserves real observations when authored plots fail", asyn
         fullPage: true,
       });
     }
-    await page.getByLabel("Open immutable report").selectOption("");
-    await page.getByLabel("Open immutable report").selectOption(payload.id);
+    await chooseSelect(page.getByLabel("Open immutable report"), "");
+    await chooseSelect(page.getByLabel("Open immutable report"), payload.id);
     await expect(workspace.getByRole("alert")).toHaveCount(2);
     await expect(event.locator("g.mark-line path")).toHaveCount(1);
     await expect(healthy.locator("g.mark-line path")).toHaveCount(1);
@@ -138,7 +137,7 @@ test("native Results preserves real observations when authored plots fail", asyn
       .getByRole("button", { name: "Data Workflows", exact: true })
       .click();
     await page.getByRole("tab", { name: "Results", exact: true }).click();
-    await page.getByLabel("Open immutable report").selectOption(partial.id);
+    await chooseSelect(page.getByLabel("Open immutable report"), partial.id);
     const curve = workspace.locator('section[aria-label="Saved loss"]');
     await expect(curve).toContainText(
       "Plot evidence was not captured for this run.",
@@ -146,9 +145,7 @@ test("native Results preserves real observations when authored plots fail", asyn
     await expect(curve.locator("g.mark-line path")).toHaveCount(1);
     await expect(workspace).toContainText("0.1");
     await expect(workspace).toContainText("0.2");
-    await expect(page.getByLabel("Open immutable report")).toHaveValue(
-      partial.id,
-    );
+    await expect(page.getByLabel("Report ID")).toHaveText(partial.id);
     await expect(workspace.getByRole("alert")).toHaveCount(0);
     for (const width of [1280, 900]) {
       await page.setViewportSize({ width, height: 1000 });
@@ -158,8 +155,8 @@ test("native Results preserves real observations when authored plots fail", asyn
         fullPage: true,
       });
     }
-    await page.getByLabel("Open immutable report").selectOption("");
-    await page.getByLabel("Open immutable report").selectOption(partial.id);
+    await chooseSelect(page.getByLabel("Open immutable report"), "");
+    await chooseSelect(page.getByLabel("Open immutable report"), partial.id);
     await expect(curve.locator("g.mark-line path")).toHaveCount(1);
     await expect(curve).toContainText(
       "Plot evidence was not captured for this run.",
