@@ -4658,6 +4658,16 @@ main {
   width: var(--resize-target-width);
   min-width: var(--resize-target-width);
   margin-inline: calc((1px - var(--resize-target-width)) / 2);
+  pointer-events: none;
+}
+.repo-file-workspace .tree-resizer > .pane-resizer-target {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 100%;
+  height: --spacing(11);
+  transform: translateY(-50%);
+  pointer-events: auto;
 }
 @media (pointer: coarse) {
   .repo-file-workspace .tree-resizer {

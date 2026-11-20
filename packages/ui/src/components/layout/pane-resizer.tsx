@@ -31,7 +31,9 @@ export function PaneResizer({
   valueText,
   onChange,
 }: Props) {
-  const drag = useRef<{ x: number; value: number } | null>(null);
+  const drag = useRef<{ pointerId: number; x: number; value: number } | null>(
+    null,
+  );
   const update = (next: number) => onChange(clamp(next, min, max));
   return (
     <button
@@ -61,12 +63,12 @@ export function PaneResizer({
         if (drag.current || event.button !== 0 || !event.isPrimary) return;
         event.preventDefault();
         // Preserve the grab offset so widening the target cannot make the pane jump.
-        drag.current = { x: event.clientX, value };
+        drag.current = { pointerId: event.pointerId, x: event.clientX, value };
         event.currentTarget.setPointerCapture(event.pointerId);
       }}
       onPointerMove={(event: PointerEvent<HTMLButtonElement>) => {
         if (
-          !drag.current ||
+          drag.current?.pointerId !== event.pointerId ||
           !event.currentTarget.hasPointerCapture(event.pointerId)
         )
           return;
@@ -80,12 +82,19 @@ export function PaneResizer({
         update(drag.current.value + distance);
       }}
       onPointerUp={(event: PointerEvent<HTMLButtonElement>) => {
-        if (event.currentTarget.hasPointerCapture(event.pointerId))
+        if (
+          drag.current?.pointerId === event.pointerId &&
+          event.currentTarget.hasPointerCapture(event.pointerId)
+        )
           event.currentTarget.releasePointerCapture(event.pointerId);
       }}
-      onLostPointerCapture={() => {
-        drag.current = null;
+      onLostPointerCapture={(event: PointerEvent<HTMLButtonElement>) => {
+        if (drag.current?.pointerId === event.pointerId) drag.current = null;
       }}
-    />
+    >
+      {/* The tree limits hits to this target to keep its scrollbar reachable.
+          Events still bubble to the separator, which owns pointer capture. */}
+      <span className="pane-resizer-target" aria-hidden="true" />
+    </button>
   );
 }
