@@ -90,6 +90,7 @@ class ReadScalingRunner(AddCommitPushSmoke):
             "crab/scripts/e2e/run_concurrent_push_smoke.py",
             "crab/scripts/e2e/verify_remote_browse.py",
             "crab/scripts/e2e/qualify_v2_read_service.py",
+            "crab/scripts/e2e/read_service_samples.py",
             "crab/scripts/e2e/test_qualify_v2_read_service.py",
         ))
         hashes = {}

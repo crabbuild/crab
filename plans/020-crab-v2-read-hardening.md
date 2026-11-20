@@ -1054,9 +1054,20 @@ open.
 `crab/scripts/e2e/run_remote_read_scaling_rustfs.py`,
 `test_remote_read_scaling.py`, `verify_remote_browse.py`; create
 `crab/scripts/e2e/qualify_v2_read_service.py` and
-`crab/scripts/e2e/test_qualify_v2_read_service.py`; bounded
+`crab/scripts/e2e/test_qualify_v2_read_service.py`, with exact journal statistics
+in `crab/scripts/e2e/read_service_samples.py`; bounded
 counter/timing additions in remote-Git/server metrics; the existing indexed-read
 ledger. No production read behavior, codecs, limits, or cache policy changes.
+
+Request records stream to the retained journal. After each timed case, a
+temporary SQLite workspace computes exact nearest-rank percentiles with a
+2-MiB suggested page cache, disabled mmap and file-backed temporary sorting.
+The request loop retains no sample list and has no request-count cutoff.
+Large qualifications should place `SQLITE_TMPDIR` on their dedicated workspace
+volume alongside the journal. Summaries retain failures, warm-up/setup counts,
+and the existing minimum 1,000 observations for p99. The original million-sample
+capacity failure remains retained; this changes measurement storage, not load,
+duration, sample selection or engineering thresholds.
 
 1. Record source revision/patch, binary hashes, compiler/profile, fixture
    identities, backend/region, quotas, and report schema. Readiness/capture,

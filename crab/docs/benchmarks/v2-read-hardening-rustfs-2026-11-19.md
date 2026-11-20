@@ -753,3 +753,52 @@ This establishes functional/resource behavior; it does not replace the full
 growth timing matrix or minimum-profile soak. A fresh cold capture is held for
 naturally aged repository-only GC qualification. Same-executable repeatability,
 combined-load gates and current minimum-resource lifecycle proof remain open.
+
+## Repeatability, measurement capacity and aged lifecycle
+
+The fixed-CPU-placement baseline calibration passes all four original cold/warm
+controls after 1,000 prospectively declared pairs per case: 4,000 fresh processes
+and canonical Git checks. The p95 ratios are 1.051/1.018 for object-batch and
+0.995/1.000 for commit, inside the unchanged symmetric 1/1.10–1.10 band.
+RustFS remains at 1 CPU / 3 GiB; readers remain at 1 CPU / 1 GiB without extra
+swap. Provider CPU 0 and reader CPU 1 are fixed. Both CPU placement and sample
+precision changed prospectively; this does not isolate either as the sole cause
+of earlier variance. All earlier failed profiles remain retained.
+
+The following matched HTTP run finishes all 126 short trials with zero request
+errors or Git mismatches. During the candidate ten-minute soak, every load
+client reaches its share of the driver's one-million-record memory guard.
+The incomplete run is retained, including all 1,000,016 soak records. All four
+servers drain and exit zero; both candidate durability proofs pass. Resource
+observers and the streaming meter report no failures and no pending requests.
+This is a measurement-capacity failure, not completed soak acceptance.
+
+The canonical driver now streams records to its journal and computes exact
+order statistics afterward with `read_service_samples.py`. SQLite uses a
+2-MiB suggested page cache, file-backed temporary sorting and disabled mmap.
+It retains every observation, failure and existing p99 rule; no workload,
+duration or numeric gate changes. A Linux replay processes all 1,000,016 records
+under a 128-MiB address-space limit with 33,058,816-byte peak RSS. Every summary
+field equals the previous implementation on a 4,000-record comparison.
+All 28 focused driver/resource/source-closure tests pass. A fresh full matched
+run with source-frozen streaming measurement is pending; old trials are not
+substituted for it. The compiled Rust/UI inputs remain identical to `a5d6015e2c8`.
+
+The current reader also passes 13 lifecycle checks and 40 Git queries across
+mode/unrelated publication, deletion/error drain, recreation and force rewind.
+A cold capture waits until its real RustFS index body is 3,601.12 seconds old,
+then survives canonical repository-only GC. GC actually deletes four other
+derived objects (8,101 bytes). The replacement index body differs, and the old
+cold reader still returns byte-identical blob content, path history and
+last-change attribution before draining and exiting zero. No timestamp override
+or bucket-wide GC is used.
+
+[Current runtime ARM64 CI](https://github.com/crabbuild/crab/actions/runs/44769392808)
+at `1757972eda2` passes shipping-image/process recovery and three-node Kubernetes
+recovery. Its process receipt binds the image digest and verifies 332 Root
+objects by hash/metadata before empty-cache recovery. The subsequent changes
+affect qualification tooling only. Separately, the equal test-instrumented
+Cellar fleet control reports 97/100 published and 93/100 patched successes;
+all ten failures localize to replacement physical completion before restart
+handoff. This narrows the failure stage without establishing sole cause or
+waiving the broader fleet control.

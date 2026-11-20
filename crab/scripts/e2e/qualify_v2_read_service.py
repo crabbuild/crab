@@ -25,6 +25,7 @@ import time
 from urllib.parse import quote, urlencode, urlsplit
 
 from verify_remote_browse import require
+from read_service_samples import percentiles, read_journal, summarize
 
 SCHEMA = 1
 ACTIONS = {"file", "file-preview", "blob", "commits", "blame"}
@@ -348,39 +349,6 @@ def server_timings(value: str) -> dict:
     return result
 
 
-def percentiles(values: list[float]) -> dict:
-    if not values:
-        return {}
-    values = sorted(values)
-    result = {"p50":values[math.ceil(len(values) * .5) - 1],
-              "p95":values[math.ceil(len(values) * .95) - 1]}
-    if len(values) >= 1000:
-        result["p99"] = values[math.ceil(len(values) * .99) - 1]
-    return result
-
-
-def summarize(records: list[dict], elapsed: float) -> dict:
-    measured = [item for item in records if item["phase"] == "measured"]
-    successes = [item for item in measured if item["status"] == 200 and item["error"] is None]
-    return {"attempts":len(measured), "successes":len(successes),
-            "rejected":sum(item["status"] == 429 and item["error"] is None for item in measured),
-            "errors":sum(item["status"] != 200 and item["status"] != 429 or item["error"] is not None
-                         for item in measured),
-            "oracle_mismatches":sum(item["error"] == "GitOracleMismatch" for item in measured),
-            "elapsed_seconds":elapsed, "offered_requests_per_second":len(measured) / elapsed,
-            "successful_requests_per_second":len(successes) / elapsed,
-            "latency_us":percentiles([item["elapsed_us"] for item in measured]),
-            "successful_latency_us":percentiles([item["elapsed_us"] for item in successes]),
-            "ttfb_us":percentiles([item["ttfb_us"] for item in successes]),
-            "server_timing_ms":{name:{"samples":len(values), **percentiles(values)}
-                                for name in ("open", "read", "encode", "total")
-                                if (values := [item["server_timing_ms"][name] for item in successes
-                                               if name in item.get("server_timing_ms", {})])},
-            "warmup_attempts":sum(item["phase"] == "warmup" for item in records),
-            "client_cancellations":sum(item["error"] == "ClientCancelled" for item in measured),
-            "setup_attempts":sum(item["phase"] == "setup" for item in records)}
-
-
 def state_receipt(case: dict, binding: dict) -> dict:
     path = Path(case["state_receipt"])
     receipt = json.loads(path.read_text())
@@ -399,11 +367,10 @@ def state_receipt(case: dict, binding: dict) -> dict:
 
 
 def run_case(case: dict, workloads: dict, urls: list[str], headers: dict,
-             repository: str, oracle: GitOracle, journal) -> tuple[list[dict], float]:
+             repository: str, oracle: GitOracle, journal) -> float:
     route = "/api/repos/" + "/".join(quote(part, safe="") for part in repository.split("/")) + "/"
     queries = {}
     setup = Transport(urls, headers, case["timeout_seconds"])
-    setup_records = []
     try:
         for name in set(case["workloads"]):
             workload = workloads[name]
@@ -428,7 +395,6 @@ def run_case(case: dict, workloads: dict, urls: list[str], headers: dict,
                             record, body = setup.get(0, route + "commits?" + urlencode(params), "commits")
                             record.update(case=case["name"], workload=name, phase="setup")
                             journal.write(json.dumps(record, allow_nan=False) + "\n")
-                            setup_records.append(record)
                             require(record["status"] == 200 and record["error"] is None, "history cursor setup failed")
                             cursor = json.loads(body)["next"]
                             require(cursor is not None, "history cursor setup reached EOF")
@@ -442,8 +408,7 @@ def run_case(case: dict, workloads: dict, urls: list[str], headers: dict,
     lock = threading.Lock()
     started = time.perf_counter()
 
-    def worker(client: int) -> list[dict]:
-        records = []
+    def worker(client: int) -> None:
         transport = Transport(urls, headers, case["timeout_seconds"])
         barrier.wait()
         began = time.perf_counter()
@@ -472,16 +437,14 @@ def run_case(case: dict, workloads: dict, urls: list[str], headers: dict,
                               initial_burst=sequence == 0)
                 with lock:
                     journal.write(json.dumps(record, allow_nan=False) + "\n")
-                records.append(record)
                 sequence += 1
-                require(sequence <= 1_000_000 // case["clients"], "qualification sample capacity reached")
         finally:
             transport.close()
-        return records
 
     with ThreadPoolExecutor(max_workers=case["clients"]) as workers:
-        records = [record for batch in workers.map(worker, range(case["clients"])) for record in batch]
-    return setup_records + records, time.perf_counter() - started - case["warmup_seconds"]
+        for _ in workers.map(worker, range(case["clients"])):
+            pass
+    return time.perf_counter() - started - case["warmup_seconds"]
 
 
 def validate_report(report: dict, profile: dict) -> list[str]:
@@ -641,10 +604,13 @@ def main() -> int:
                 if case["cache"] in {"cold", "restart"}:
                     require(not starts & seen_starts, "cold/restart case reused an already sampled process")
                 seen_starts.update(starts)
-                records, elapsed = run_case(case, workloads, urls, headers, args.repository, oracle, journal)
+                start = journal.tell()
+                elapsed = run_case(case, workloads, urls, headers, args.repository, oracle, journal)
+                journal.flush()
+                summaries = summarize(read_journal(args.output / "requests.jsonl", start, journal.tell()),
+                                      elapsed, args.output)
                 report["cases"].append({"name":case["name"], "cache":case["cache"], "state":state,
-                                        "workloads":{name:summarize([item for item in records if item["workload"] == name], elapsed)
-                                                     for name in set(case["workloads"])}})
+                                        "workloads":summaries})
                 output.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
         report["failures"] = validate_report(report, profile)
         if profile.get("baseline_report"):
