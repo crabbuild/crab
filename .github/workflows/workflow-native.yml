@@ -1,125 +1,83 @@
-name: Alpha Windows terminal closure qualification
-on:
-  workflow_dispatch:
+name: Alpha SDK cache publication diagnosis
+'on':
+  workflow_dispatch: {}
 permissions:
   contents: read
+env:
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUST_MIN_STACK: 8388608
+  SDK_MSRV: 1.97.0
+  SDK_RUSTDOC_NIGHTLY: nightly-2026-06-19
+  RUSTFS_IMAGE: rustfs/rustfs:1.0.0-beta.8-glibc
 jobs:
-  windows:
-    runs-on: windows-2025
-    timeout-minutes: 45
-    defaults:
-      run:
-        shell: bash
-        working-directory: packages/desktop
+  read-performance:
+    name: Trace exact SDK cache admission and warm reads
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      AWS_ACCESS_KEY_ID: crab
+      AWS_SECRET_ACCESS_KEY: crab
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_REGION: us-east-1
+      AWS_EC2_METADATA_DISABLED: true
+      AWS_ENDPOINT_URL: http://127.0.0.1:9000
+      AWS_ENDPOINT_URL_S3: http://127.0.0.1:9000
+      AWS_ALLOW_HTTP: true
+      AWS_VIRTUAL_HOSTED_STYLE_REQUEST: false
+      CRAB_SDK_LARGE_BUCKET: crab-sdk-large
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: 50ed184c0a3d58051a427e7765ca5d78232557db
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: packages/desktop/.nvmrc
-      - name: Install baseline desktop dependencies
-        run: npm ci
-      - name: Compile baseline daemon and prepare actual terminal probe
-        run: |
-          npm run build:electron
-          cat > conpty-close-probe.cjs <<'JS'
-          const fs = require('node:fs');
-          const os = require('node:os');
-          const path = require('node:path');
-          const { DaemonServer } = require(path.resolve('dist-electron/daemon/daemon-server.cjs'));
-          const { NodePtySubprocessHandle } = require(path.resolve('dist-electron/daemon/subprocess-handle.cjs'));
-          const pty = require('node-pty');
-          const { DaemonClient } = require(path.resolve('dist-electron/daemon/daemon-client.cjs'));
-          const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-          const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
-          (async () => {
-            const results = [];
-            for (const mode of ['shell', 'foreground']) {
-              const root = fs.mkdtempSync(path.join(os.tmpdir(), 'crab-conpty-close-proof-'));
-              fs.writeFileSync(path.join(root, 'foreground.cjs'), "console.log('READY:' + process.pid); process.stdin.resume();");
-              const terminals = [];
-              const server = new DaemonServer({ socketPath: path.join(root, 'daemon-v2.sock'), tokenPath: path.join(root, 'daemon-v2.token'), pidPath: path.join(root, 'daemon-v2.pid'), idleTimeoutMs: 0, spawnSubprocess(options) {
-                const terminal = pty.spawn(options.file, options.args ?? [], { cols: options.cols, rows: options.rows, cwd: options.cwd, env: { ...process.env, ...options.env } });
-                const closed = new Promise(resolve => terminal.onExit(resolve));
-                terminals.push({ terminal, closed });
-                return new NodePtySubprocessHandle(terminal);
-              } });
-              let output = '';
-              const client = new DaemonClient({ socketDir: root, daemonEntryPath: '', onSessionData: (_, data) => { output += data; }, onSessionExit() {}, onAgentStateChange() {} });
-              try {
-                await server.start();
-                const session = await client.request('createOrAttach', { sessionId: 'proof', cwd: root, cols: 80, rows: 24, env: {} });
-                const command = mode === 'shell' ? 'echo READY:shell' : `"${process.env.NODE}" foreground.cjs`;
-                await client.request('write', { sessionId: 'proof', data: command + '\r' });
-                const ready = Date.now();
-                while (!output.includes(mode === 'shell' ? 'READY:shell' : 'READY:') || (mode === 'foreground' && !/READY:(\d+)/.test(output))) {
-                  if (Date.now() - ready > 5000) throw new Error('console never became ready');
-                  await delay(25);
-                }
-                const foreground = Number(/READY:(\d+)/.exec(output)?.[1]);
-                client.disconnect();
-                const started = Date.now();
-                await server.shutdown({ killSessions: true });
-                const result = { mode, shutdownMs: Date.now() - started, shellAliveAfterShutdown: alive(session.pid), foregroundAliveAfterShutdown: foreground ? alive(foreground) : null };
-                try { fs.rmSync(root, { recursive: true, force: true }); result.removeAfterShutdown = 'OK'; } catch (error) { result.removeAfterShutdown = error.code; }
-                await Promise.race([Promise.all(terminals.map(entry => entry.closed)), delay(8000).then(() => { throw new Error('ConPTY did not close'); })]);
-                result.closeMs = Date.now() - started;
-                result.shellAliveAfterClose = alive(session.pid);
-                result.foregroundAliveAfterClose = foreground ? alive(foreground) : null;
-                try { fs.rmSync(root, { recursive: true, force: true }); result.removeAfterClose = 'OK'; } catch (error) { result.removeAfterClose = error.code; }
-                results.push(result);
-              } finally {
-                client.disconnect();
-                await server.shutdown({ killSessions: true });
-                await fs.promises.rm(root, { recursive: true, force: true });
-              }
-            }
-            fs.writeFileSync('conpty-close-proof.json', JSON.stringify(results, null, 2));
-            console.log(JSON.stringify(results));
-          })().catch(error => { console.error(error); process.exitCode = 1; });
-          JS
-          cat > conpty-close-driver.cjs <<'JS'
-          const { spawnSync } = require('node:child_process');
-          const result = spawnSync(require('electron'), ['conpty-close-probe.cjs'], {
-            env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', NODE: process.execPath },
-            stdio: 'inherit', timeout: 30000,
-          });
-          if (result.error) throw result.error;
-          process.exitCode = result.status ?? 1;
-          JS
-      - name: Measure baseline terminal ownership
-        run: |
-          node conpty-close-driver.cjs
-          mv conpty-close-proof.json baseline-conpty-close-proof.json
-      - name: Select exact release candidate
-        run: |
-          git fetch origin 2a05cb2b06d1bf4320834598e18b4c76a05acc51
-          git checkout --detach 2a05cb2b06d1bf4320834598e18b4c76a05acc51
-      - name: Install exact candidate desktop dependencies
-        run: npm ci
-      - name: Compile candidate daemon
-        run: npm run build:electron
-      - name: Prove actual candidate process and directory cleanup
-        run: |
-          node conpty-close-driver.cjs
-          node - <<'JS'
-          const fs = require('node:fs'), assert = require('node:assert/strict');
-          for (const result of JSON.parse(fs.readFileSync('conpty-close-proof.json'))) {
-            assert.equal(result.shellAliveAfterShutdown, false);
-            assert.notEqual(result.foregroundAliveAfterShutdown, true);
-            assert.equal(result.removeAfterShutdown, 'OK');
-            assert.equal(result.removeAfterClose, 'OK');
-          }
-          JS
-      - name: Qualify unchanged real terminal and lifecycle scenarios
-        run: npm test -- tests/daemon-shutdown-ownership.spec.ts tests/daemon-subprocess-termination.spec.ts tests/daemon-session.spec.ts tests/daemon-terminal-host.spec.ts tests/daemon-server.spec.ts tests/daemon-control-plane.spec.ts tests/daemon-init-wiring.spec.ts tests/daemon-native-terminal.spec.ts tests/daemon-sessions.spec.ts tests/terminal-session-lifecycle.spec.ts tests/daemon-prepare-upgrade.spec.ts tests/daemon-fd-handoff.spec.ts --maxWorkers 2 --reporter=json --outputFile=terminal-report.json > terminal-unit.log 2>&1
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: alpha2-windows-terminal-closure-proof
-          path: |
-            packages/desktop/baseline-conpty-close-proof.json
-            packages/desktop/conpty-close-proof.json
-            packages/desktop/terminal-report.json
-            packages/desktop/terminal-unit.log
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        ref: 2a05cb2b06d1bf4320834598e18b4c76a05acc51
+    - uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ env.SDK_MSRV }}
+    - run: sudo apt-get update -y && sudo apt-get install -y libfuse3-dev pipx
+    - run: pipx install awscli && echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+    - uses: Swatinem/rust-cache@v2
+    - name: Start RustFS and create fixture inputs
+      run: "docker run -d --name sdk-performance-rustfs -p 9000:9000 \\\n  -e RUSTFS_ACCESS_KEY=crab -e RUSTFS_SECRET_KEY=crab \\\n  \"${RUSTFS_IMAGE}\" server /data\
+        \ --address :9000\nfor _ in $(seq 1 60); do\n  if curl -fsS http://127.0.0.1:9000/health/ready >/dev/null; then break; fi\n  sleep 1\ndone\ncurl -fsS http://127.0.0.1:9000/health/ready\
+        \ >/dev/null\naws --endpoint-url \"$AWS_ENDPOINT_URL\" s3api create-bucket --bucket \"$CRAB_SDK_LARGE_BUCKET\"\nmkdir -p \"$RUNNER_TEMP/sdk-large-inputs\"\
+        \ \"$RUNNER_TEMP/sdk-read-cache\"\npython3 crab/scripts/generate-sdk-fixtures.py \"$RUNNER_TEMP/sdk-large-inputs\"\necho \"CRAB_SDK_LARGE_INPUTS=$RUNNER_TEMP/sdk-large-inputs\"\
+        \ >> \"$GITHUB_ENV\"\n"
+    - name: Publish deterministic 1 GiB fixture
+      run: "cargo \"+${SDK_MSRV}\" test -p crab-sdk --locked --release \\\n  --no-default-features --features remote,files --test remote_blob \\\n  large::publish_large_qualification_repository\
+        \ -- --exact --ignored --nocapture \\\n  | tee \"$RUNNER_TEMP/sdk-large-publish.log\"\nresult=\"$(grep -oE 'commit=[0-9a-f]{40} crab_bytes=[0-9]+ crab_blake3=[0-9a-f]{64}'\
+        \ \\\n  \"$RUNNER_TEMP/sdk-large-publish.log\" | tail -1)\"\ntest -n \"$result\"\ncommit=\"${result#commit=}\"\ncommit=\"${commit%% *}\"\ndigest=\"${result##*crab_blake3=}\"\
+        \ndigest=\"${digest%% *}\"\necho \"SDK_LARGE_COMMIT=$commit\" >> \"$GITHUB_ENV\"\necho \"SDK_LARGE_BLAKE3=$digest\" >> \"$GITHUB_ENV\"\n"
+    - name: Enable warning diagnostics without changing reader or benchmark behavior
+      run: "python3 - <<'PYCODE'\nfrom pathlib import Path\nfor name in (\"core_crab_read.rs\", \"remote_read.rs\"):\n    path = Path(\"crates/crab-sdk/examples\"\
+        ) / name\n    source = path.read_text()\n    position = source.index(\"{\", source.index(\"async fn main()\")) + 1\n    observe = '\\n    // [DEBUG-alpha2-cache]\
+        \ Diagnostic entrypoint only.\\n    tracing_subscriber::fmt().with_max_level(tracing::Level::WARN).with_ansi(false).with_thread_ids(true).with_writer(std::io::stderr).init();\\\
+        n'\n    path.write_text(source[:position] + observe + source[position:])\nPYCODE\n"
+    - name: Build optimized shared-core and SDK readers
+      run: cargo "+${SDK_MSRV}" build -p crab-sdk --locked --release --no-default-features --features remote,files --example core_crab_read --example remote_read
+    - name: Run five cold and warm pairs
+      run: python3 crab/scripts/qualify_sdk.py benchmark-read --output "$RUNNER_TEMP/sdk-read-performance" --cache-root "$RUNNER_TEMP/sdk-read-cache" --core "$CARGO_TARGET_DIR/release/examples/core_crab_read"
+        --sdk "$CARGO_TARGET_DIR/release/examples/remote_read" --upstream "$AWS_ENDPOINT_URL" --backend rustfs --fixture-digest 9fd9c7f85fc053365cb38a217ddab35a1b22ea647a293c96f85c7bde0ef23b2a
+        --bucket "$CRAB_SDK_LARGE_BUCKET" --repository repository --branch main --path crab --commit "$SDK_LARGE_COMMIT" --bytes 1073741824 --blake3 "$SDK_LARGE_BLAKE3"
+        --toolchain "$SDK_MSRV"
+    - name: Capture service log and cleanup
+      if: always()
+      run: 'mkdir -p "$RUNNER_TEMP/sdk-read-performance"
+
+        cp "$RUNNER_TEMP/sdk-large-publish.log" "$RUNNER_TEMP/sdk-read-performance/" 2>/dev/null || true
+
+        docker logs sdk-performance-rustfs > "$RUNNER_TEMP/sdk-read-performance/rustfs.log" 2>&1 || true
+
+        docker rm -f sdk-performance-rustfs >/dev/null 2>&1 || true
+
+        '
+    - name: Upload performance evidence
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: sdk-read-performance-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ runner.temp }}/sdk-read-performance/**
+        if-no-files-found: error
+        retention-days: 30
