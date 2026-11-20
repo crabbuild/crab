@@ -1285,3 +1285,63 @@ and the fixture Python environment were corrected in the external harness;
 production timing/assertions were not relaxed. This is scoped CLI/shared-owner/
 offline-browser evidence, not a new native package, cross-platform, live-cloud
 or whole-plan qualification. The earlier native timeout remains unresolved.
+
+## Native compound visualization qualification
+
+`packages/desktop/tests/e2e/results-complex.spec.ts` runs the public lab in the
+packaged application under **Data Workflows → Results**. Native enqueue admits
+four two-parameter configurations; the visible Queue Start action executes them
+with the bundled CLI. The case binds the captured benchmark witness, objectives
+and baseline, verifies all five chart groups, and drives threshold/cohort/brush,
+forecast-period and curve-range controls. It reopens the same profile, verifies
+four selected runs and the epoch range, saves and publishes a report, then
+retrieves it from a fresh Git clone after removing the workflow and templates.
+The recovered chart still responds to threshold and cohort changes. Successful
+evidence is written only after application and owned daemon cleanup completes.
+
+The native two-column chart grid clipped authored compound views. Results now
+stacks plots at the available width, matching browser/offline layout ownership;
+the shared renderer still preserves authored facet/concatenation geometry and
+allows horizontal scrolling when a view exceeds its container. The native case
+asserts that these four compound examples fit a 1600-pixel viewport. Example
+axis guides inherit the theme, with series colors legible on light and dark
+surfaces. Data transformations and frozen-report semantics are unchanged.
+
+The first complete packaged macOS arm64 run passed in 67.5 seconds, capturing
+14 screenshots, four runs, five charts, 432 brushed observations, 84 test-period
+forecast points and zero page errors. Its immutable report is
+`b72246458cf583858741690fe8801c48674b2747d6039df1e4b85dc05da80f6f`.
+A final-source rerun passes both the complex case (26.7 seconds) and the existing
+Results recovery/failure case (55.9 seconds); all six closes finish below
+350 milliseconds. Its report is
+`4061187a141f08d81b9608bc97aa0ed844bb93be949220e560027240e2f66738`.
+Qualification now requires five native cases and binds the consumed example's
+Python, YAML and template sources. This is real native/owned-RustFS proof,
+not live-cloud or cross-platform qualification.
+
+## Native timeout investigation
+
+The retained historical failure reached 360 seconds with a further worker
+teardown timeout. Its only useful screenshot precedes the first restart; it
+has no operation stack or process sample identifying the blocked boundary.
+New phase records distinguish launch connection, first window, JavaScript exit,
+child exit and stdio closure. They do not change production shutdown policy or
+increase acceptance timeouts.
+
+Thirty real comparison/close reproductions, six complete restart/cold-retrieval
+journeys (three without added phase instrumentation), and twenty minimal
+Electron controls passed. These controls used the earlier packaged application;
+they do not establish the new compound-feature acceptance. Some real closes
+were slow: JavaScript cleanup completed within a fraction of a second, followed
+by a much longer native process wait. Matching Electron 45.2.3 symbols identify
+`BrowserProcessIOThread::ProcessHostCleanUp` → `WaitForExitWithTimeout` in Chromium's
+network-service shutdown. Electron's DEPS pins Chromium 156.0.8078.80; that source
+bounds this wait by build configuration. This explains observed short stalls,
+not the historical six-minute failure.
+
+The complex native acceptance also completes all three closes. There is no
+reproduced six-minute failure, proven root cause, or justified production fix.
+The historical timeout remains open. Do not interpret passing repetitions as a
+fix, introduce force-quit timers, or bypass native owner draining. Evidence stays
+in the external target under `native-timeout-audit/`, `native-timeout-full-audit/`,
+`native-timeout-untraced/` and `native-complex-results/`.

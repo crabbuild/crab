@@ -7,17 +7,12 @@
     "view": {
       "stroke": null
     },
-    "axis": {
-      "gridColor": "#e9edf2",
-      "labelColor": "#596579",
-      "titleColor": "#334155"
-    },
     "range": {
       "category": [
-        "#2563eb",
-        "#ea580c",
-        "#059669",
-        "#9333ea"
+        "#3b82f6",
+        "#d97706",
+        "#0d9488",
+        "#a855f7"
       ]
     },
     "font": "system-ui"
@@ -134,7 +129,7 @@
           },
           "mark": {
             "type": "rule",
-            "color": "#334155",
+            "color": "currentColor",
             "strokeDash": [
               5,
               4

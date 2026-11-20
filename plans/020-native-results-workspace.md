@@ -3022,3 +3022,22 @@ semantics, and byte restoration from numerical reproducibility.
 Future logger/evaluation/optimizer/tracker features consume this Results owner;
 they must not introduce another catalog authority, parser or provider client.
 Automatic retention and semantic evaluation stay separate workstreams.
+
+### Packaged compound Results follow-up
+
+The public four-configuration lab now passes inside the packaged macOS arm64
+application: visible Queue execution, five interactive plot groups, retained
+selection/zoom after restart, report publication and cold retrieval without
+working templates. Fourteen native screenshots capture comparison, compound
+views, changed threshold/cohort/brush, held-out forecasts and recovered report
+interactions. The observed two-column clipping defect is fixed by stacking
+charts at the available width. Theme-dependent guide paint replaces the
+example's light-only axis colors. Native qualification adds the complex case
+and binds its example sources; required existing cases stay enabled.
+
+Timeout diagnosis: 30 comparison/close runs, six complete older-package journeys
+and 20 minimal Electron controls pass. Symbolicated slow closes enter Chromium's
+bounded network-service exit wait after JavaScript cleanup. This does not explain
+the retained six-minute timeout, which remains unresolved. New launch/first-window
+markers improve future evidence without changing product shutdown or acceptance
+time limits. Details and exact scope: `crab/docs/design/native-results.md`.

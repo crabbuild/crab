@@ -942,7 +942,7 @@ export function ResultsWorkspace({ repo }: { repo: OpenRepo }) {
                 }}
               />
             )}
-            <div className="mt-5 grid min-w-0 gap-x-6 lg:grid-cols-2">
+            <div className="mt-5 min-w-0">
               {charts.map((chart) => (
                 <ResultChart
                   key={chart.key}

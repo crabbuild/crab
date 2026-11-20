@@ -36,6 +36,21 @@ class SourceBindingTests(unittest.TestCase):
                         workflow.write_text("jobs: {native: {runs-on: macos-15}}\n")
                         self.assertNotEqual(qualification.source_tree(), before)
 
+    def test_complex_example_changes_invalidate_the_source_binding(self):
+        with tempfile.TemporaryDirectory(dir=os.environ["CARGO_TARGET_DIR"]) as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "--initial-branch=main", str(root)],
+                           check=True, capture_output=True)
+            template = root / "packages/web/public/examples/ml-results-lab/templates/decision.json"
+            template.parent.mkdir(parents=True)
+            template.write_text('{"params": []}\n')
+            subprocess.run(["git", "-C", str(root), "add", "--force", str(template)],
+                           check=True, capture_output=True)
+            with patch.object(qualification, "ROOT", root):
+                before = qualification.source_tree()
+                template.write_text('{"params": [{"name": "threshold"}]}\n')
+                self.assertNotEqual(qualification.source_tree(), before)
+
 
 class PackageBindingTests(unittest.TestCase):
     def test_native_package_binding_uses_the_current_platform_and_architecture(self):

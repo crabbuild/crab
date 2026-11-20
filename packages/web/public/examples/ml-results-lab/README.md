@@ -77,3 +77,12 @@ between-training-run uncertainty. Decision-lab controls explore retained test
 predictions; they do not retrain or change frozen metrics. Confusion matrices fill unobserved class pairs with explicit zero counts;
 all-empty selections show no marks. A captured benchmark manifest contains hashes of both datasets and the evaluator
 source, plus the two held-out split definitions.
+
+## Native acceptance
+
+The packaged desktop qualification includes `results-complex.spec.ts`: execute
+four configurations through the native queue, interact with every plot group,
+restart with the selection and zoom intact, then publish and retrieve a report
+without working workflow/template files. The case captures 14 native screenshots.
+Compound views use the Results content width; wider authored layouts remain
+scrollable. Guide colors inherit the application theme.
