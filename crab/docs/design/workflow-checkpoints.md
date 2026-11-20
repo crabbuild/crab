@@ -32,6 +32,10 @@ latest resumable point is then applied to the new worktree. New records append
 to that forked lineage, retaining the source lineage identity so parent links
 and immutable objects remain continuous across the resume boundary.
 
+Reset stages its decision and updated lineages in a private sibling tree before
+publishing them together. Metadata file replacement rejects directory targets on
+every platform, leaving the original checkpoint state intact when staging fails.
+
 The current implementation includes the validated field, hash participation,
 record contract, lineage checks, authenticated stage control boundary, local
 supervision, selectors, reset/resume handling, and checkpoint object

@@ -2580,6 +2580,10 @@ fn replace_checkpoint_reset_file(temporary: &Path, destination: &Path) -> Result
             uuid::Uuid::now_v7()
         ));
         let had_destination = match fs::symlink_metadata(destination) {
+            // Moving a directory aside would make an invalid file replacement succeed.
+            Ok(metadata) if metadata.is_dir() => {
+                return Err(CrabError::Io(std::io::ErrorKind::IsADirectory.into()));
+            }
             Ok(_) => true,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
             Err(error) => return Err(CrabError::Io(error)),

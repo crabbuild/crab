@@ -20,6 +20,10 @@ pub(crate) fn replace_file(temporary: &Path, destination: &Path) -> Result<()> {
             ))
         })?;
         let exists = match fs::symlink_metadata(destination) {
+            // Moving a directory aside would make an invalid file replacement succeed.
+            Ok(metadata) if metadata.is_dir() => {
+                return Err(WorkflowError::Io(std::io::ErrorKind::IsADirectory.into()));
+            }
             Ok(_) => true,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
             Err(error) => return Err(WorkflowError::Io(error)),
@@ -99,6 +103,35 @@ pub(crate) fn ensure_parent_not_symlink(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_replacement_preserves_directory_destinations_and_pending_bytes() {
+        for populated in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let pending = root.path().join("pending");
+            fs::write(&pending, b"next").unwrap();
+            let destination = root.path().join("destination");
+            fs::create_dir(&destination).unwrap();
+            let retained = destination.join("retained");
+            if populated {
+                fs::write(&retained, b"original").unwrap();
+            }
+            let before = fs::read(&retained).ok();
+
+            let result = replace_file(&pending, &destination);
+
+            assert_eq!(
+                (
+                    result.is_err(),
+                    destination.is_dir(),
+                    fs::read(&retained).ok(),
+                    fs::read(&pending).ok(),
+                ),
+                (true, true, before, Some(b"next".to_vec())),
+                "populated={populated}"
+            );
+        }
+    }
 
     #[test]
     fn canonical_roots_validate_existing_and_missing_parents() {

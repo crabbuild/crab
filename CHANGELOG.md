@@ -48,6 +48,8 @@ macOS automatic update installation requires a future signed release.
   Activity reduces the available workspace height.
 - Opened Results stores on Windows through canonical repository paths while
   preserving parent-directory symlink checks.
+- Preserved checkpoint state when Windows metadata publication encounters a
+  directory where a file is required.
 - Shared the large-file cache across desktop consumers and streamed Git checkout
   content without buffering complete large blobs.
 - Released Git index copy handles before converted-file publication so Windows
@@ -77,6 +79,8 @@ macOS automatic update installation requires a future signed release.
 
 ### Rust SDK
 
+- Reduced the inline size of repository handles so local handles stay compact
+  when Results support is enabled.
 - Retained concurrent decoded-range cache fills through sibling publication
   contention, avoiding unnecessary origin downloads on warm reads.
 - Renamed Cargo features: `write` becomes `publish`, `content` becomes `files`,
