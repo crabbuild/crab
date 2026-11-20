@@ -67,6 +67,27 @@ Recommended order: R0; R1 and R2; R4; R3; R5; R7. R1 and R2 can use independent
 worktrees after R0 freezes their contracts. R3 and R4 share runtime/budget code;
 integrate them sequentially. R6 is not required for accepting the first wave.
 
+### Current read-optimization priorities
+
+1. **Cold dependent pack reads:** reuse up to eight 4-KiB encoded windows across
+   serial delta reads and batches inside one captured pack. Keep captured placement, byte admission, CRC/OID checks
+   and cancellation authoritative. Implemented; current RustFS comparison must
+   report opening plus query requests and bytes, including read-ahead cost.
+2. **Warm history overhead:** reuse the commit batch buffer instead of allocating
+   one vector per cached first-parent commit. Implemented; cursor semantics,
+   verification and per-operation charges stay unchanged.
+3. **Combined-source proof:** verify current binaries through real two-replica
+   HTTP and native Git oracles, then qualify the remaining throughput/latency
+   controls. Failed baseline repeatability and the 34 short HTTP gates remain
+   retained; descriptive timing cannot close R7.
+4. **Independent growth and lifecycle coverage:** finish the declared matrix on
+   the optimized source, including minimum-resource and reader-retention cases.
+   Earlier source-bound successes remain useful but are not relabeled current.
+
+Persistent attribution and new range formats remain conditional R6 decisions.
+The first two priorities change the existing reader without adding storage
+formats, public configuration or a second read path.
+
 ```mermaid
 flowchart LR
     A[Authenticate and authorize] --> B[Capture repository read view]
