@@ -625,6 +625,7 @@ impl RemoteGitReader {
         end: u64,
         budget: &OperationBudget,
         cancellation: &CancellationToken,
+        read_ahead: bool,
     ) -> Result<Bytes> {
         let length = end.checked_sub(start).ok_or(Error::Corrupt {
             stage: CorruptionStage::PackEntry,
@@ -634,7 +635,11 @@ impl RemoteGitReader {
             length,
             budget.remaining(BudgetDimension::FetchedBytes).await,
         )?;
-        let maximum = budget.remaining(BudgetDimension::FetchedBytes).await;
+        let maximum = if read_ahead {
+            budget.remaining(BudgetDimension::FetchedBytes).await
+        } else {
+            length
+        };
         self.read_pack_range_admitted(
             pack_id,
             start,
@@ -2140,10 +2145,20 @@ impl RemoteGitReader {
         budget: &OperationBudget,
         cancellation: &CancellationToken,
     ) -> Result<Bytes> {
+        // The batch planner already chose useful gaps. Reuse cached windows,
+        // but a multi-entry miss should fetch that planned range exactly.
+        let read_ahead = range.entries.len() == 1;
         match &range.source {
             CoalescedRangeSource::Pack(pack_id) => {
-                self.read_pack_range(pack_id, range.start, range.end, budget, cancellation)
-                    .await
+                self.read_pack_range(
+                    pack_id,
+                    range.start,
+                    range.end,
+                    budget,
+                    cancellation,
+                    read_ahead,
+                )
+                .await
             }
             CoalescedRangeSource::Object(path) => {
                 // A batch inside one captured member shares point-read windows.
@@ -2179,7 +2194,7 @@ impl RemoteGitReader {
                                 stage: CorruptionStage::PackEntry,
                             })?;
                     return self
-                        .read_pack_range(&pack_id, start, end, budget, cancellation)
+                        .read_pack_range(&pack_id, start, end, budget, cancellation, read_ahead)
                         .await;
                 }
                 self.read_object_range(path, range.start, range.end, budget, cancellation)
@@ -2563,6 +2578,7 @@ impl RemoteGitReader {
                 end,
                 budget,
                 cancellation,
+                true,
             )
             .await?;
         if bytes.len() as u64 != locator.location.entry_len {
@@ -4701,11 +4717,11 @@ mod tests {
         let budget = OperationBudget::new(crate::OperationLimits::default(), runtime.clone());
         let cancellation = CancellationToken::new();
         let first = reader
-            .read_pack_range(&pack_id, 12, 20, &budget, &cancellation)
+            .read_pack_range(&pack_id, 12, 20, &budget, &cancellation, true)
             .await
             .unwrap();
         let second = reader
-            .read_pack_range(&pack_id, 28, 36, &budget, &cancellation)
+            .read_pack_range(&pack_id, 28, 36, &budget, &cancellation, true)
             .await
             .unwrap();
         runtime.shutdown().await;
@@ -4773,6 +4789,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn coalesced_batches_keep_exact_miss_ranges() {
+        for embedded in [false, true] {
+            let pack_id = MerkleHash::from_hex(&"11".repeat(32)).unwrap();
+            let reader = reader_with_embedded_pack_sources(&[(pack_id, 2, 100, 64)]);
+            let path = reader.pack_source(&pack_id).unwrap().path.clone().unwrap();
+            reader
+                .store
+                .put(&path, Bytes::from(vec![7; 300]))
+                .await
+                .unwrap();
+            let source_offset = if embedded { 100 } else { 0 };
+            let range = CoalescedRange {
+                source: if embedded {
+                    CoalescedRangeSource::Object(path)
+                } else {
+                    CoalescedRangeSource::Pack(pack_id)
+                },
+                start: source_offset + 12,
+                end: source_offset + 36,
+                extra_bytes: 8,
+                entries: [12, 28]
+                    .into_iter()
+                    .map(|offset| CoalescedRangeEntry {
+                        oid: gix_hash::ObjectId::from([offset as u8; 20]),
+                        locator: GitObjectLocator {
+                            ordinal: 0,
+                            pack_id,
+                            location: GitObjectLocation {
+                                pack_offset: offset,
+                                entry_len: 8,
+                                crc32: 0,
+                            },
+                            metadata: Default::default(),
+                        },
+                        source_start: source_offset + offset,
+                    })
+                    .collect(),
+            };
+            let budget =
+                OperationBudget::new(crate::OperationLimits::default(), reader.runtime.clone());
+            reader
+                .read_coalesced_range(&range, &budget, &CancellationToken::new())
+                .await
+                .unwrap();
+            reader.runtime.shutdown().await;
+            assert_eq!(
+                budget.usage().await.amount(BudgetDimension::FetchedBytes),
+                24
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn pack_read_ahead_preserves_tight_and_disabled_cache_admission() {
         for (options, maximum) in [
             (crate::RuntimeOptions::default(), 16),
@@ -4803,6 +4872,7 @@ mod tests {
                         start + 8,
                         &budget,
                         &CancellationToken::new(),
+                        true,
                     )
                     .await
                     .unwrap();
@@ -4825,7 +4895,7 @@ mod tests {
         let (reader, pack_id, _) = stored_pack_reader(runtime.clone(), "repository").await;
         let warm = OperationBudget::new(crate::OperationLimits::default(), runtime.clone());
         reader
-            .read_pack_range(&pack_id, 12, 20, &warm, &CancellationToken::new())
+            .read_pack_range(&pack_id, 12, 20, &warm, &CancellationToken::new(), true)
             .await
             .unwrap();
         let budget = OperationBudget::new(
@@ -4836,16 +4906,16 @@ mod tests {
             runtime.clone(),
         );
         reader
-            .read_pack_range(&pack_id, 12, 20, &budget, &CancellationToken::new())
+            .read_pack_range(&pack_id, 12, 20, &budget, &CancellationToken::new(), true)
             .await
             .unwrap();
         let exhausted = reader
-            .read_pack_range(&pack_id, 28, 36, &budget, &CancellationToken::new())
+            .read_pack_range(&pack_id, 28, 36, &budget, &CancellationToken::new(), true)
             .await;
         let cancellation = CancellationToken::new();
         cancellation.cancel();
         let cancelled = reader
-            .read_pack_range(&pack_id, 12, 20, &warm, &cancellation)
+            .read_pack_range(&pack_id, 12, 20, &warm, &cancellation, true)
             .await;
         let usage = budget.usage().await;
         runtime.shutdown().await;
@@ -4873,11 +4943,11 @@ mod tests {
         let (second, _, _) = stored_pack_reader(runtime.clone(), "second").await;
         let budget = OperationBudget::new(crate::OperationLimits::default(), runtime.clone());
         first
-            .read_pack_range(&pack_id, 12, 20, &budget, &CancellationToken::new())
+            .read_pack_range(&pack_id, 12, 20, &budget, &CancellationToken::new(), true)
             .await
             .unwrap();
         second
-            .read_pack_range(&pack_id, 12, 20, &budget, &CancellationToken::new())
+            .read_pack_range(&pack_id, 12, 20, &budget, &CancellationToken::new(), true)
             .await
             .unwrap();
         runtime.shutdown().await;
@@ -4904,7 +4974,7 @@ mod tests {
         let budget =
             OperationBudget::new(crate::OperationLimits::default(), reader.runtime.clone());
         let bytes = reader
-            .read_pack_range(&pack_id, 12, 20, &budget, &CancellationToken::new())
+            .read_pack_range(&pack_id, 12, 20, &budget, &CancellationToken::new(), true)
             .await
             .unwrap();
         reader.runtime.shutdown().await;
