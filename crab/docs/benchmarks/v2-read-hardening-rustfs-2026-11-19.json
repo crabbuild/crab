@@ -6503,5 +6503,313 @@
     "compiler_events_during_measurement": 89,
     "scope": "Exact same baseline executable in both arms; failed symmetric calibration, not an accepted candidate comparison. Retained unchanged. No threshold or sample-count retry.",
     "next_protocol": "Before new samples, admit and validate every complete pair using independent compiler observations; retain interrupted pairs separately, exactly 100 valid pairs, same binaries, queries, worker count and thresholds."
+  },
+"native_linux_meter_transport": {
+    "status": "fixture_transport_fixed_performance_acceptance_open",
+    "source_parent": "69b2279eaea68fdb44783ff5b836a5a6c38c5302",
+    "source_sha256": "30a864285b5b62a1512e23064dd0e496284c3edabc87f39a4b0ee844100697a9",
+    "test_sha256": "48e7a29aa91c9146577f90d18b51be119930319c799eb16222433d0d0f23047a",
+    "before": {
+      "direct": {
+        "samples": 20,
+        "status": 200,
+        "body_bytes": 303,
+        "median_body_us": 1.9385000000000001,
+        "maximum_body_us": 11.546
+      },
+      "meter": {
+        "samples": 20,
+        "status": 200,
+        "body_bytes": 303,
+        "median_body_us": 41133.261,
+        "maximum_body_us": 42920.306
+      }
+    },
+    "after": {
+      "direct": {
+        "samples": 20,
+        "status": 200,
+        "body_bytes": 303,
+        "median_body_us": 1.7915,
+        "maximum_body_us": 6.041
+      },
+      "meter": {
+        "samples": 20,
+        "status": 200,
+        "body_bytes": 303,
+        "median_body_us": 2.396,
+        "maximum_body_us": 64.082
+      }
+    },
+    "mac_tests": {
+      "passed": 22
+    },
+    "linux_tests": {
+      "passed": 21,
+      "skipped": 1,
+      "skipped_high_descriptor_followup": "passed in a dedicated test process with soft descriptor limit2048; server/load profile limits unchanged"
+    },
+    "old_source_regression": "accepted socketTCP_NODELAYFalse, expectedTrue; old archived source fails the same portable test",
+    "platform_contract": "Python StreamRequestHandler.setup applies TCP_NODELAY when disable_nagle_algorithm is true; assert nonzero enablement because Darwin reports4.",
+    "interrupted_experiment": {
+      "timed_rows": 0,
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "candidate_complete_shutdown_proofs": 2
+    },
+    "scope": "Meter transport correction, not a product latency claim. Earlier Mac bodytransfer34-60us and all prior failures remain unchanged. Corrected native-Linux subset passes; full qualification remains pending.",
+    "raw_sha256": {
+      "before": "5173d6c2e1ab93cca93deb1e339b2b5c8e8d08140e6ea5b31085dc950135e573",
+      "after": "3d8c2060919f8273274c0da9d2d239ae6d3d59b3fb0ebcdd8ff3d907120f09d0",
+      "red": "2f22254785a69ab54e227ebd137a44f0f9ca6542f51ac81971f68fb66804bcc3",
+      "green_mac": "90fe886f2c3abadf886a03e244733331bde88f8afe3ddfb21819b1e9916c7287",
+      "green_linux": "11e8a32f6586e5d05225c8747c0746818fbc066b3b92588f09490a2a4a615b9f",
+      "high_descriptor_linux": "f7c6a8e7eae387189f5ef42da883565b54cafe2a2c04f16a299a687043d1a045"
+    },
+    "corrected_native_subset": {
+      "status": "diagnostic_subset_gates_passed",
+      "acceptance": false,
+      "rounds": 3,
+      "cases": [
+        "small-1",
+        "small-16",
+        "mixed-16"
+      ],
+      "rows": 18,
+      "failures": [],
+      "baseline_measurement_failures": [],
+      "variants": {
+        "baseline": {
+          "small-1": {
+            "preview": {
+              "successes": 7894,
+              "errors": 0,
+              "rejected": 0,
+              "oracle_mismatches": 0,
+              "successful_requests_per_second": 262.910700315486,
+              "successful_latency_us": {
+                "p50": 2537.001,
+                "p95": 8540.108,
+                "p99": 13192.972
+              }
+            }
+          },
+          "small-16": {
+            "preview": {
+              "successes": 24746,
+              "errors": 0,
+              "rejected": 0,
+              "oracle_mismatches": 0,
+              "successful_requests_per_second": 823.2187305902463,
+              "successful_latency_us": {
+                "p50": 16450.003,
+                "p95": 36890.419,
+                "p99": 64949.619
+              }
+            }
+          },
+          "mixed-16": {
+            "preview": {
+              "successes": 3063,
+              "errors": 0,
+              "rejected": 0,
+              "oracle_mismatches": 0,
+              "successful_requests_per_second": 101.80561505233786,
+              "successful_latency_us": {
+                "p50": 27274.439,
+                "p95": 56574.828,
+                "p99": 79378.525
+              }
+            },
+            "history": {
+              "successes": 3064,
+              "errors": 0,
+              "rejected": 0,
+              "oracle_mismatches": 0,
+              "successful_requests_per_second": 101.83885227566542,
+              "successful_latency_us": {
+                "p50": 27234.071,
+                "p95": 56420.18,
+                "p99": 78365.658
+              }
+            },
+            "raw": {
+              "successes": 3066,
+              "errors": 0,
+              "rejected": 0,
+              "oracle_mismatches": 0,
+              "successful_requests_per_second": 101.90532672232055,
+              "successful_latency_us": {
+                "p50": 27497.855,
+                "p95": 56911.406,
+                "p99": 77510.289
+              }
+            },
+            "blame": {
+              "successes": 3071,
+              "errors": 0,
+              "rejected": 0,
+              "oracle_mismatches": 0,
+              "successful_requests_per_second": 102.07151283895838,
+              "successful_latency_us": {
+                "p50": 26785.195,
+                "p95": 58049.456,
+                "p99": 84454.297
+              }
+            },
+            "late-history": {
+              "successes": 3065,
+              "errors": 0,
+              "rejected": 0,
+              "oracle_mismatches": 0,
+              "successful_requests_per_second": 101.87208949899299,
+              "successful_latency_us": {
+                "p50": 29589.421,
+                "p95": 60543.501,
+                "p99": 78864.732
+              }
+            }
+          }
+        },
+        "candidate": {
+          "small-1": {
+            "preview": {
+              "successes": 13086,
+              "errors": 0,
+              "rejected": 0,
+              "oracle_mismatches": 0,
+              "successful_requests_per_second": 435.82433402404246,
+              "successful_latency_us": {
+                "p50": 1756.796,
+                "p95": 4904.592,
+                "p99": 8014.821
+              }
+            }
+          },
+          "small-16": {
+            "preview": {
+              "successes": 23553,
+              "errors": 0,
+              "rejected": 0,
+              "oracle_mismatches": 0,
+              "successful_requests_per_second": 783.1117909397889,
+              "successful_latency_us": {
+                "p50": 17046.165,
+                "p95": 40475.032,
+                "p99": 58598.358
+              }
+            }
+          },
+          "mixed-16": {
+            "preview": {
+              "successes": 3602,
+              "errors": 0,
+              "rejected": 0,
+              "oracle_mismatches": 0,
+              "successful_requests_per_second": 119.75318591369776,
+              "successful_latency_us": {
+                "p50": 23604.345,
+                "p95": 48011.864,
+                "p99": 70537.392
+              }
+            },
+            "history": {
+              "successes": 3594,
+              "errors": 0,
+              "rejected": 5,
+              "oracle_mismatches": 0,
+              "successful_requests_per_second": 119.48721548412819,
+              "successful_latency_us": {
+                "p50": 23491.182,
+                "p95": 48040.865,
+                "p99": 66020.179
+              }
+            },
+            "raw": {
+              "successes": 3593,
+              "errors": 0,
+              "rejected": 5,
+              "oracle_mismatches": 0,
+              "successful_requests_per_second": 119.453969180432,
+              "successful_latency_us": {
+                "p50": 23514.813,
+                "p95": 48380.113,
+                "p99": 69222.778
+              }
+            },
+            "blame": {
+              "successes": 3590,
+              "errors": 0,
+              "rejected": 7,
+              "oracle_mismatches": 0,
+              "successful_requests_per_second": 119.3542302693434,
+              "successful_latency_us": {
+                "p50": 24084.431,
+                "p95": 48230.234,
+                "p99": 76751.28
+              }
+            },
+            "late-history": {
+              "successes": 3598,
+              "errors": 0,
+              "rejected": 4,
+              "oracle_mismatches": 0,
+              "successful_requests_per_second": 119.62020069891297,
+              "successful_latency_us": {
+                "p50": 23636.566,
+                "p95": 47129.286,
+                "p99": 70636.178
+              }
+            }
+          }
+        }
+      },
+      "resource_failures": {
+        "baseline": [],
+        "candidate": []
+      },
+      "exit_codes": {
+        "baseline": {
+          "a": 0,
+          "b": 0
+        },
+        "candidate": {
+          "a": 0,
+          "b": 0
+        }
+      },
+      "candidate_shutdown_proofs": {
+        "a": {
+          "passed": true,
+          "fields": {
+            "complete": "true",
+            "log_quiesced": "true",
+            "local_durability_closed": "true",
+            "pending_application_events": "0",
+            "pending_dispatches": "0",
+            "deadline_elapsed": "false"
+          }
+        },
+        "b": {
+          "passed": true,
+          "fields": {
+            "complete": "true",
+            "log_quiesced": "true",
+            "local_durability_closed": "true",
+            "pending_application_events": "0",
+            "pending_dispatches": "0",
+            "deadline_elapsed": "false"
+          }
+        }
+      },
+      "raw_sha256": "345216d30d243ea15b25b76bca40a286204b1e857f294466bcb73944ff99926d",
+      "summary_sha256": "92c9fa1e2528a835fac9d56d32b584efdafa0b22feaad83f9332b80a94e498ea",
+      "frozen_profile_sha256": "fcc07c70deca0211d1029a84e3082a14ae4d47aed0930ff31304237d96ad7c75",
+      "scope": "API-only diagnostic on the retained binaries/source labels, same 2vCPU/4GiBVM and unchanged per-worker1CPU/1GiB/no-extra-swap limits. NativeLinuxclient/providerproxy with corrected socket policy. No current embedded-UI or fullmatrix qualification claim."
+    }
   }
 }

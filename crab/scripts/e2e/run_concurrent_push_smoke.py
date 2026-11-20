@@ -125,6 +125,9 @@ class RequestCountingProxy:
 
         class Handler(http.server.BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
+            # Headers and small bodies are separate unbuffered writes; Nagle
+            # would add a delayed-ACK pause to every metered read on Linux.
+            disable_nagle_algorithm = True
 
             def setup(self) -> None:
                 super().setup()

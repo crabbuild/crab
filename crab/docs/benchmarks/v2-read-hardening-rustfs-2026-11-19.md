@@ -523,3 +523,25 @@ compiler observations before computing statistics. Interrupted pairs remain
 complete retained trials. The target remains 100 valid pairs with unchanged
 queries, binaries, worker count and gates. Growth and HTTP use the same declared
 validity checks; no valid performance failure or original receipt is waived.
+
+
+### Native Linux provider transport
+
+A native Linux provider-meter probe finds a fixture delay: for the same 303-byte
+RustFS health reply, twenty requests report median body transfer of 41,133 µs
+through the meter versus 1.94 µs directly. Its unbuffered header/body writes
+retain Nagle on the accepted socket. The meter now disables it through Python's
+socket handler; twenty fresh requests report 2.40 µs through the meter versus
+1.79 µs directly. The earlier Mac probe's microsecond body transfers remain a
+separate result; its failed performance receipts are unchanged.
+
+The actual socket regression fails on archived old source. All 22 proxy tests
+pass on Mac; Linux passes 21 with one descriptor-limit skip, then passes that
+case in a separate test process with the required descriptor allowance. Service
+resource limits are unchanged. The affected Linux experiment stops during
+warming, before any timed row; all four workers exit zero and both candidate
+shutdown proofs complete. The corrected three-round API diagnostic passes the original single-client,
+16-client preview and 16-client mixed gates. Preview p95 is 4.91/8.54 ms for
+candidate/R0 at one client and 40.48/36.89 ms at sixteen; mixed preview p95 is
+48.01/56.58 ms. All correctness, resource and shutdown checks pass. The bounded
+subset keeps its original binary labels; full combined qualification is pending.
