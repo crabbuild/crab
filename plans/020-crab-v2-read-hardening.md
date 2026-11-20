@@ -70,30 +70,33 @@ integrate them sequentially. R6 is not required for accepting the first wave.
 
 ### Current read-optimization priorities
 
-1. **Cold dependent pack reads:** reuse up to eight 4-KiB encoded windows across
-   serial delta reads and batches inside one captured pack. Keep captured
-   placement, byte admission, CRC/OID checks and cancellation authoritative.
-   Implemented and verified against local RustFS. The comparison reports
-   opening plus query requests and bytes, including read-ahead cost. Multi-entry
-   misses keep the planned exact range while retaining cached-window hits.
-2. **Warm history overhead:** reuse the commit batch buffer instead of allocating
-   one vector per cached first-parent commit. Implemented; cursor semantics,
-   verification and per-operation charges stay unchanged.
-3. **Remaining cold index work:** the 10,000-commit blame fixture still reports
-   173 decoded index blocks (4,595,000 bytes). Existing captured-reader page
-   caches are already bounded to 8 MiB/256 entries. Trace distinct-page work,
-   lookup batching and cache lifetimes before adding another cache or format.
-4. **Combined-source proof:** verify current binaries through real two-replica
-   HTTP and native Git oracles, then qualify the remaining throughput/latency
-   controls. Failed baseline repeatability and the 34 short HTTP gates remain
-   retained; descriptive timing cannot close R7.
-5. **Independent growth and lifecycle coverage:** finish the declared matrix on
-   the optimized source, including minimum-resource and reader-retention cases.
-   Earlier source-bound successes remain useful but are not relabeled current.
+1. **Metadata-index I/O:** implemented in `a5d6015e2c8`. Adjacent requested cold
+   pages share exact transfers within the existing 8-MiB/256-entry cache and
+   whole-wave admission. At 10,000 commits, object-batch query reads fall
+   45 → 32 and history 115 → 108, with identical bytes and Git results. Warm
+   pages and unselected gaps are excluded; independent page validation remains.
+   Further changes require a measured remaining bottleneck.
+2. **Combined-load gates and repeatability:** four original native A/A controls
+   pass after 4,000 Git-verified fresh processes on the declared CPU-placement
+   profile. HTTP repeatability remains separate: earlier failures and 21 failed
+   gates from the latest complete short matrix are retained. Both full HTTP
+   attempts reach measurement-driver limits; streaming exact statistics now use
+   covering indexes and persist the completed loop receipt before aggregation.
+   A 1,483,163-record replay passes under 128 MiB. Investigate the measured
+   pre-handler delay with controlled provider-capacity and HTTP A/A probes
+   before rerunning all original cases, durations and numeric gates.
+3. **Independent growth and minimum-resource lifecycle:** all 200 original growth
+   timing controls pass across 2,000 fresh processes and 20,000 canonical Git
+   queries, with 1 CPU / 1 GiB / no additional swap per reader. The naturally
+   aged cold-reader GC sequence passes 13 checks and 40 Git queries. Current
+   runtime ARM64 process/three-node recovery CI passes, including 3-GiB stock
+   Git LFS recovery and full Root copy verification. Current minimum-resource
+   mixed HTTP soak acceptance remains pending the complete combined-load run.
 
 Persistent attribution and new range formats remain conditional R6 decisions.
-The first two priorities change the existing reader without adding storage
-formats, public configuration or a second read path.
+Bounded pack-window reuse and warm history-buffer reuse are already implemented.
+These optimizations change the existing reader without adding storage formats,
+public configuration or a second read path.
 
 ```mermaid
 flowchart LR

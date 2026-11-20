@@ -802,3 +802,43 @@ Cellar fleet control reports 97/100 published and 93/100 patched successes;
 all ten failures localize to replacement physical completion before restart
 handoff. This narrows the failure stage without establishing sole cause or
 waiving the broader fleet control.
+
+
+## Independent growth and exact-reporting follow-up
+
+Runtime inputs remain `a5d6015e2c8`. The prospectively fixed 100-pair growth
+confirmation completes 2,000 fresh processes and **20,000 canonical Git checks**.
+All **200 original query p95 controls pass**, using the unchanged 1.10 limit.
+The ten fixtures independently vary refs, pack-member inventory, pending
+frontiers and physical source objects while preserving the declared Git oracle.
+Each reader retains 1 CPU / 1 GiB / no additional swap. Peak cgroup memory is
+12,750,848 bytes before and 20,348,928 after; no OOMs or backend work remain.
+The original reporting script incorrectly expected one cold opening per process;
+the protocol emits ten. A separate reduction retains all 1,000 cold openings
+per fixture/arm descriptively and leaves all 200 query cells unchanged.
+
+The second full HTTP attempt completes all 126 short trials without request
+errors or Git mismatches. It also writes 1,483,163 candidate soak records, then
+exceeds the orchestration deadline while sorting exact statistics. All four
+servers drain and exit zero; candidate durability proofs pass. Because actual
+loop elapsed time was not persisted before reporting, this does **not** establish
+completed soak acceptance. Offline aggregation of all completed short trials
+retains 21 failed original gates. Their delays concentrate before response
+headers; the native A/A pass does not establish HTTP repeatability.
+
+The statistics implementation now creates one partial covering index per metric
+instead of rebuilding a sort for every percentile/workload. Exact replay of all
+1,483,163 records takes 47.46 seconds under a 128-MiB address-space limit, with
+33,366,016-byte peak RSS; all fields match the previous implementation on the
+4,000-record control. The canonical CLI persists elapsed time and journal range
+before aggregation. All 29 focused driver/resource/source-closure tests pass.
+Private orchestration separates request-loop and analysis deadlines and bounds
+provider counters to the request loop. Workloads, numeric gates, duration,
+nearest-rank percentiles, failures and observations remain unchanged.
+
+The current three-node ARM64 CI receipt also verifies stock Git LFS crash and
+restored clones plus range resume for a 3-GiB object. Its full Root copy verifies
+200 objects / 3,221,383,120 bytes by hash and metadata before empty-cache recovery.
+These results complete the recorded growth and aged-reader lifecycle checks;
+combined HTTP performance, repeatability and minimum-resource soak acceptance
+remain open. Controlled provider/HTTP diagnostics are separate from acceptance.
