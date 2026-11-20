@@ -999,6 +999,13 @@ with Git parity, resource/drain/durability proof and zero exits; both ten-minute
 soak comparisons pass. Thirty-four short-case timing/throughput gates remain
 failed and retained with all 76 comparison cells. R7 stays open.
 
+The same occupied-CPU regression is confirmed for cached small blame replies.
+Their typed bound now includes lossy text, message hex, parent IDs and framing,
+and uses the existing single-chunk encoding path. Large replies retain CPU
+admission and the 8-MiB ceiling. Twenty-seven focused checks and strict all-target
+Clippy pass; new source-bound release/live proof remains pending. Earlier
+performance measurements are retained under their actual compiled revision.
+
 ### R0 — Freeze the evidence contract and establish a baseline
 
 **Scope:** `crates/crab-remote/examples/qualify_remote.rs`, its `support/` owners;
