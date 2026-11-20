@@ -46,6 +46,8 @@ macOS automatic update installation requires a future signed release.
   workspace so file actions remain reachable while viewing transfer progress.
 - Kept hydration recovery warnings visible above scrollable controls when
   Activity reduces the available workspace height.
+- Opened Results stores on Windows through canonical repository paths while
+  preserving parent-directory symlink checks.
 - Shared the large-file cache across desktop consumers and streamed Git checkout
   content without buffering complete large blobs.
 - Released Git index copy handles before converted-file publication so Windows

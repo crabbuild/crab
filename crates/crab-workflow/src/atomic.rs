@@ -47,9 +47,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_parent_paths_allow_missing_descendants() {
+    fn canonical_roots_validate_existing_and_missing_parents() {
         let temporary = tempfile::tempdir().unwrap();
         let root = fs::canonicalize(temporary.path()).unwrap();
-        assert!(ensure_parent_not_symlink(&root.join("new/objects")).is_ok());
+        for parent in [root.clone(), root.join("missing").join("nested")] {
+            ensure_parent_not_symlink(&parent.join("entry")).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_roots_still_reject_nested_symlinks() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(temporary.path()).unwrap();
+        let target = root.join("target");
+        fs::create_dir(&target).unwrap();
+        std::os::unix::fs::symlink(&target, root.join("redirect")).unwrap();
+        assert!(matches!(
+            ensure_parent_not_symlink(&root.join("redirect").join("entry")),
+            Err(WorkflowError::YamlInvalid { key, .. }) if key == "destination_parent_symlink"
+        ));
     }
 }

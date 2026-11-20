@@ -267,3 +267,6 @@ recorded values without inventing execution or workspace evidence. The CLI owns
 bounded legacy-file admission; ordinary readers accept only canonical Results.
 `LocalResults::install_if_absent` uses the existing immutable writer to preserve
 current captures. Invalid existing roots are errors, not a repair fallback.
+Parent validation combines Windows volume prefixes with their root before
+inspecting the filesystem, allowing canonical repository paths while retaining
+checks for links below the system ancestors.
