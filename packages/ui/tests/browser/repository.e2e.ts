@@ -2559,7 +2559,10 @@ test("blame and source panes resize with pointer and keyboard controls", async (
     );
     const secondaryMoved = { ...second, x: second.x + 81 };
     await sendTouches("touchMove", [moved, secondaryMoved]);
-    await sendTouches("touchMove", [{ ...moved, x: moved.x + 40 }, secondaryMoved]);
+    await sendTouches("touchMove", [
+      { ...moved, x: moved.x + 40 },
+      secondaryMoved,
+    ]);
     await expect
       .poll(async () => Number(await separator.getAttribute("aria-valuenow")))
       .toBeGreaterThan(Number(ownedValue));
