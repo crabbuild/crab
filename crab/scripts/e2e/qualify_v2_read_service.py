@@ -607,10 +607,16 @@ def main() -> int:
                 start = journal.tell()
                 elapsed = run_case(case, workloads, urls, headers, args.repository, oracle, journal)
                 journal.flush()
+                report["pending_case"] = {"name":case["name"], "elapsed_seconds":elapsed,
+                                          "journal_start":start, "journal_end":journal.tell()}
+                # Preserve the measured loop before potentially expensive
+                # reporting, so analysis failure cannot erase timing evidence.
+                output.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
                 summaries = summarize(read_journal(args.output / "requests.jsonl", start, journal.tell()),
                                       elapsed, args.output)
                 report["cases"].append({"name":case["name"], "cache":case["cache"], "state":state,
                                         "workloads":summaries})
+                report.pop("pending_case")
                 output.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
         report["failures"] = validate_report(report, profile)
         if profile.get("baseline_report"):

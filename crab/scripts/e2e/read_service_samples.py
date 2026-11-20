@@ -64,8 +64,16 @@ def summarize(records, elapsed: float, directory: Path) -> dict:
                     record["ttfb_us"] if success else None,
                     *(timings.get(name) for name in ("open", "read", "encode", "total"))))
             database.commit()
+            indexed = set()
 
             def ordered(workload, column, successes=False):
+                # Repeated percentile sorts would rebuild a large temporary
+                # tree for every rank. One covering index serves all workloads
+                # and ranks without rescanning or retaining their sample lists.
+                if column not in indexed:
+                    database.execute(f"CREATE INDEX samples_{column} ON samples "
+                                     f"(workload, {column}, success) WHERE {column} IS NOT NULL")
+                    indexed.add(column)
                 predicate = f"workload=? AND {column} IS NOT NULL"
                 if successes:
                     predicate += " AND success=1"

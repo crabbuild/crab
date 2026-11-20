@@ -11,9 +11,10 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from urllib.parse import parse_qs, urlsplit
 
-from qualify_v2_read_service import (GitOracle, Transport, compare_baseline, load_headers,
+from qualify_v2_read_service import (GitOracle, Transport, compare_baseline, load_headers, main,
                                      percentiles, read_journal, run_case, server_timings, summarize, validate_profile,
                                      validate_report, wire_workloads, workload_identity)
 
@@ -339,8 +340,7 @@ class ReadServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "failure envelope"):
             validate_profile(profile)
 
-    def test_cli_retains_source_bound_measurements_and_request_failures(self):
-        url = self.serve(status=429)
+    def cli_args(self, url, output):
         self.profile["public_origin"] = "http://localhost:8788/"
         binary = Path(sys.executable).resolve()
         binding = {**self.binding, "server_binary":str(binary), "server_binary_sha256":hashlib.sha256(binary.read_bytes()).hexdigest(),
@@ -351,15 +351,34 @@ class ReadServiceTests(unittest.TestCase):
             "cache_counters":{"fixture":0}}]}))
         profile = self.root / "profile.json"
         profile.write_text(json.dumps(self.profile))
+        return [str(Path(__file__).with_name("qualify_v2_read_service.py")),
+                "--base-url", url, "--repository", "owner/repository", "--revision", self.head,
+                "--text-path", "target.rs", "--profile", str(profile), "--output", str(output)]
+
+    def test_reporting_failure_retains_the_measured_duration_and_journal_range(self):
         output = self.root / "receipts"
-        result = subprocess.run([sys.executable, str(Path(__file__).with_name("qualify_v2_read_service.py")),
-                                 "--base-url", url, "--repository", "owner/repository", "--revision", self.head,
-                                 "--text-path", "target.rs", "--profile", str(profile), "--output", str(output)],
+        args = self.cli_args(self.serve(status=429), output)
+        with mock.patch.object(sys, "argv", args), mock.patch(
+                "qualify_v2_read_service.summarize", side_effect=OSError("fixture reporting failure")):
+            with self.assertRaisesRegex(OSError, "fixture reporting failure"):
+                main()
+        report = json.loads((output / "report.json").read_text())
+        self.assertEqual((report["status"], report["error_kind"]), ("failed", "OSError"))
+        self.assertEqual(report["pending_case"]["name"], "mixed")
+        self.assertGreater(report["pending_case"]["elapsed_seconds"], 0)
+        self.assertEqual(report["pending_case"]["journal_end"], (output / "requests.jsonl").stat().st_size)
+        self.assertTrue(list(read_journal(output / "requests.jsonl")))
+
+    def test_cli_retains_source_bound_measurements_and_request_failures(self):
+        output = self.root / "receipts"
+        args = self.cli_args(self.serve(status=429), output)
+        result = subprocess.run([sys.executable, *args],
                                 capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 1)
         report = json.loads((output / "report.json").read_text())
         self.assertEqual(report["status"], "failed")
-        self.assertEqual(report["binding"]["server_binary_sha256"], binding["server_binary_sha256"])
+        self.assertEqual(report["binding"]["server_binary_sha256"],
+                         hashlib.sha256(Path(sys.executable).resolve().read_bytes()).hexdigest())
         self.assertIn("mixed:failure_fraction", report["failures"])
         self.assertTrue((output / "requests.jsonl").read_text())
         self.assertEqual(set(self.seen_hosts), {"localhost:8788"})

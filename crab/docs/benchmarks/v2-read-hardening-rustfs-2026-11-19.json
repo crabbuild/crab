@@ -13354,5 +13354,871 @@
     },
     "acceptance": false,
     "next": "Full128trial rerun with canonical streaming driver, unchanged cases/thresholds/durations and fixedCPUprofile; then full100pair independentgrowth. NoRust/UI/dependencydiffagainstcompileda5."
+  },
+  "independent_growth_and_indexed_reporting": {
+    "runtime_source_revision": "a5d6015e2c81a6a7cc4770361a1e20bb4193267a",
+    "acceptance": false,
+    "growth": {
+      "acceptance": false,
+      "status": "passed_growth_controls",
+      "queries_checked": 20000,
+      "processes": 2000,
+      "profile_sha256": "d655eb76403c2ca083645f334e6acfd4d0b86496b432078ebebe58744ee6b6b9",
+      "raw_report_sha256": "7952f75846387ed56d752c4ef61acee323e8e792b619852c3f3acdc2535ca0d0",
+      "scope": "Native local RustFS at 100 fixed commits; visible refs, pack-member inventory within one physical source, and pending ref-only frontiers varied separately. Additional physical source cells vary 2/5/17 source objects with identical final Git history, 17 refs and zero frontier transactions; pack members covary and are reported separately. Original debug failures retained. Optimized shipping profile declared before builds. No owned builds/heavy checks during timing. Does not replace full combined-source HTTP/recovery/resource qualification.",
+      "opening_cells": [
+        {
+          "case": "control",
+          "operation": "open",
+          "cache": "cold",
+          "observations_per_phase": 1000,
+          "description": "Ten cold operation-specific snapshot openings per process, all observations retained; descriptive only.",
+          "baseline": {
+            "query_us": {
+              "p50": 4078,
+              "p95": 5806,
+              "p99": 6691
+            },
+            "median_backend_reads": 12.0,
+            "median_backend_read_bytes": 20603.0
+          },
+          "candidate": {
+            "query_us": {
+              "p50": 4100,
+              "p95": 5866,
+              "p99": 6622
+            },
+            "median_backend_reads": 12.0,
+            "median_backend_read_bytes": 20603.0
+          },
+          "p95_ratio": 1.0103341370995522
+        },
+        {
+          "case": "refs-32",
+          "operation": "open",
+          "cache": "cold",
+          "observations_per_phase": 1000,
+          "description": "Ten cold operation-specific snapshot openings per process, all observations retained; descriptive only.",
+          "baseline": {
+            "query_us": {
+              "p50": 12779,
+              "p95": 15302,
+              "p99": 17204
+            },
+            "median_backend_reads": 17.0,
+            "median_backend_read_bytes": 41129.0
+          },
+          "candidate": {
+            "query_us": {
+              "p50": 12608,
+              "p95": 14957,
+              "p99": 16906
+            },
+            "median_backend_reads": 14.0,
+            "median_backend_read_bytes": 41129.0
+          },
+          "p95_ratio": 0.9774539275911646
+        },
+        {
+          "case": "refs-512",
+          "operation": "open",
+          "cache": "cold",
+          "observations_per_phase": 1000,
+          "description": "Ten cold operation-specific snapshot openings per process, all observations retained; descriptive only.",
+          "baseline": {
+            "query_us": {
+              "p50": 142846,
+              "p95": 153776,
+              "p99": 161472
+            },
+            "median_backend_reads": 70.0,
+            "median_backend_read_bytes": 341070.0
+          },
+          "candidate": {
+            "query_us": {
+              "p50": 131831,
+              "p95": 142283,
+              "p99": 147413
+            },
+            "median_backend_reads": 17.0,
+            "median_backend_read_bytes": 341070.0
+          },
+          "p95_ratio": 0.9252614192071584
+        },
+        {
+          "case": "sources-4",
+          "operation": "open",
+          "cache": "cold",
+          "observations_per_phase": 1000,
+          "description": "Ten cold operation-specific snapshot openings per process, all observations retained; descriptive only.",
+          "baseline": {
+            "query_us": {
+              "p50": 4105,
+              "p95": 5880,
+              "p99": 6722
+            },
+            "median_backend_reads": 12.0,
+            "median_backend_read_bytes": 33631.0
+          },
+          "candidate": {
+            "query_us": {
+              "p50": 4096,
+              "p95": 5873,
+              "p99": 6777
+            },
+            "median_backend_reads": 12.0,
+            "median_backend_read_bytes": 33631.0
+          },
+          "p95_ratio": 0.9988095238095238
+        },
+        {
+          "case": "sources-16",
+          "operation": "open",
+          "cache": "cold",
+          "observations_per_phase": 1000,
+          "description": "Ten cold operation-specific snapshot openings per process, all observations retained; descriptive only.",
+          "baseline": {
+            "query_us": {
+              "p50": 4401,
+              "p95": 6225,
+              "p99": 7296
+            },
+            "median_backend_reads": 12.0,
+            "median_backend_read_bytes": 45367.0
+          },
+          "candidate": {
+            "query_us": {
+              "p50": 4401,
+              "p95": 6436,
+              "p99": 8291
+            },
+            "median_backend_reads": 12.0,
+            "median_backend_read_bytes": 45367.0
+          },
+          "p95_ratio": 1.0338955823293172
+        },
+        {
+          "case": "frontier-4",
+          "operation": "open",
+          "cache": "cold",
+          "observations_per_phase": 1000,
+          "description": "Ten cold operation-specific snapshot openings per process, all observations retained; descriptive only.",
+          "baseline": {
+            "query_us": {
+              "p50": 5335,
+              "p95": 7168,
+              "p99": 8515
+            },
+            "median_backend_reads": 16.0,
+            "median_backend_read_bytes": 54466.0
+          },
+          "candidate": {
+            "query_us": {
+              "p50": 5338,
+              "p95": 7260,
+              "p99": 8225
+            },
+            "median_backend_reads": 16.0,
+            "median_backend_read_bytes": 54466.0
+          },
+          "p95_ratio": 1.0128348214285714
+        },
+        {
+          "case": "frontier-16",
+          "operation": "open",
+          "cache": "cold",
+          "observations_per_phase": 1000,
+          "description": "Ten cold operation-specific snapshot openings per process, all observations retained; descriptive only.",
+          "baseline": {
+            "query_us": {
+              "p50": 6640,
+              "p95": 8648,
+              "p99": 10229
+            },
+            "median_backend_reads": 17.0,
+            "median_backend_read_bytes": 153105.0
+          },
+          "candidate": {
+            "query_us": {
+              "p50": 6474,
+              "p95": 8554,
+              "p99": 9774
+            },
+            "median_backend_reads": 17.0,
+            "median_backend_read_bytes": 153105.0
+          },
+          "p95_ratio": 0.9891304347826086
+        },
+        {
+          "case": "physical-1",
+          "operation": "open",
+          "cache": "cold",
+          "observations_per_phase": 1000,
+          "description": "Ten cold operation-specific snapshot openings per process, all observations retained; descriptive only.",
+          "baseline": {
+            "query_us": {
+              "p50": 8931,
+              "p95": 10995,
+              "p99": 12447
+            },
+            "median_backend_reads": 17.0,
+            "median_backend_read_bytes": 37643.0
+          },
+          "candidate": {
+            "query_us": {
+              "p50": 8729,
+              "p95": 10787,
+              "p99": 12114
+            },
+            "median_backend_reads": 16.0,
+            "median_backend_read_bytes": 37643.0
+          },
+          "p95_ratio": 0.9810823101409731
+        },
+        {
+          "case": "physical-4",
+          "operation": "open",
+          "cache": "cold",
+          "observations_per_phase": 1000,
+          "description": "Ten cold operation-specific snapshot openings per process, all observations retained; descriptive only.",
+          "baseline": {
+            "query_us": {
+              "p50": 8698,
+              "p95": 10965,
+              "p99": 12105
+            },
+            "median_backend_reads": 20.0,
+            "median_backend_read_bytes": 41320.0
+          },
+          "candidate": {
+            "query_us": {
+              "p50": 8537,
+              "p95": 11067,
+              "p99": 12550
+            },
+            "median_backend_reads": 19.0,
+            "median_backend_read_bytes": 41320.0
+          },
+          "p95_ratio": 1.0093023255813953
+        },
+        {
+          "case": "physical-16",
+          "operation": "open",
+          "cache": "cold",
+          "observations_per_phase": 1000,
+          "description": "Ten cold operation-specific snapshot openings per process, all observations retained; descriptive only.",
+          "baseline": {
+            "query_us": {
+              "p50": 9003,
+              "p95": 11061,
+              "p99": 12119
+            },
+            "median_backend_reads": 16.0,
+            "median_backend_read_bytes": 51662.0
+          },
+          "candidate": {
+            "query_us": {
+              "p50": 8830,
+              "p95": 10803,
+              "p99": 11829
+            },
+            "median_backend_reads": 15.0,
+            "median_backend_read_bytes": 51662.0
+          },
+          "p95_ratio": 0.9766748033631679
+        }
+      ],
+      "failed_cells": 0,
+      "quota_proofs": {
+        "baseline": {
+          "cpu.max": "100000 100000",
+          "memory.max": "1073741824",
+          "memory.swap.max": "0"
+        },
+        "candidate": {
+          "cpu.max": "100000 100000",
+          "memory.max": "1073741824",
+          "memory.swap.max": "0"
+        }
+      },
+      "final_cgroups": {
+        "baseline": {
+          "memory.peak": "12750848",
+          "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0",
+          "cpu.stat": "usage_usec 155753603\nuser_usec 117944284\nsystem_usec 37809318\ncore_sched.force_idle_usec 0\nnr_periods 8235\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0"
+        },
+        "candidate": {
+          "memory.peak": "20348928",
+          "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0",
+          "cpu.stat": "usage_usec 101327172\nuser_usec 79821513\nsystem_usec 21505659\ncore_sched.force_idle_usec 0\nnr_periods 6317\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0"
+        }
+      },
+      "summary_sha256": "b760d3e11e74a5726e952e2af07db71557eb9e82edded82a16ffead01d8076ce",
+      "reporting_correction": "Frozen driver expected one cold opening per process, but protocol emits ten operation-specific openings. Separate reduction retains all1000openingobservations perfixture/arm. All200frozenquerycells unchanged; failed reporting traceback retained.",
+      "reducer_sha256": "55c938353e84b70df5101bb7874ab6c59e704f4a0dc474153a387acf51721262",
+      "cell_columns": ["case","operation","cache","baseline_p50_us","baseline_p95_us","candidate_p50_us","candidate_p95_us","baseline_reads","candidate_reads","baseline_bytes","candidate_bytes","p95_ratio","gate"],
+      "cells": [
+        ["control","resolve","cold",2173,2593,2190,2533,5.0,5.0,37365.0,41312.0,0.9768607790204397,"passed"],
+        ["control","resolve","warm",32,39,22,32,0.0,0.0,0.0,0.0,0.8205128205128205,"passed"],
+        ["control","commit","cold",1885,2284,1888,2216,5.0,5.0,37365.0,41312.0,0.9702276707530648,"passed"],
+        ["control","commit","warm",29,38,20,28,0.0,0.0,0.0,0.0,0.7368421052631579,"passed"],
+        ["control","tree","cold",19410,22323,4943,5674,54.0,9.0,43176.0,52088.0,0.2541773059176634,"passed"],
+        ["control","tree","warm",108,131,102,125,0.0,0.0,0.0,0.0,0.9541984732824428,"passed"],
+        ["control","blob","cold",18650,22545,4754,5451,55.0,9.0,43319.0,52088.0,0.2417831004657352,"passed"],
+        ["control","blob","warm",43,56,35,43,0.0,0.0,0.0,0.0,0.7678571428571429,"passed"],
+        ["control","object-point","cold",18605,21627,4601,5480,55.0,9.0,43319.0,52088.0,0.2533869699912147,"passed"],
+        ["control","object-point","warm",43,61,34,42,0.0,0.0,0.0,0.0,0.6885245901639344,"passed"],
+        ["control","object-batch","cold",18840,21869,4891,5671,55.0,9.0,45466.0,52088.0,0.2593168411907266,"passed"],
+        ["control","object-batch","warm",191,218,183,203,0.0,0.0,0.0,0.0,0.9311926605504587,"passed"],
+        ["control","history","cold",34341,39943,5013,5790,104.0,11.0,52029.0,53602.0,0.14495656310242094,"passed"],
+        ["control","history","warm",99,140,72,86,0.0,0.0,0.0,0.0,0.6142857142857143,"passed"],
+        ["control","path-history","cold",58705,71098,21193,24567,176.0,50.0,133757.0,147752.0,0.3455371459112774,"passed"],
+        ["control","path-history","warm",1061,1214,931,1029,0.0,0.0,0.0,0.0,0.8476112026359144,"passed"],
+        ["control","attribution","cold",20643,24467,6965,8252,61.0,16.0,62597.0,71509.0,0.3372706093922426,"passed"],
+        ["control","attribution","warm",264,302,253,290,0.0,0.0,0.0,0.0,0.9602649006622517,"passed"],
+        ["control","blame","cold",59055,70279,21617,24856,179.0,52.0,133772.0,154002.0,0.35367606255069084,"passed"],
+        ["control","blame","warm",51,60,42,55,0.0,0.0,0.0,0.0,0.9166666666666666,"passed"],
+        ["refs-32","resolve","cold",2127,2494,2159,2525,5.0,5.0,37365.0,41312.0,1.01242983159583,"passed"],
+        ["refs-32","resolve","warm",32,38,25,35,0.0,0.0,0.0,0.0,0.9210526315789473,"passed"],
+        ["refs-32","commit","cold",1984,2291,1923,2287,5.0,5.0,37365.0,41312.0,0.998254037538193,"passed"],
+        ["refs-32","commit","warm",32,44,21,32,0.0,0.0,0.0,0.0,0.7272727272727273,"passed"],
+        ["refs-32","tree","cold",19772,22390,5029,5793,54.0,9.0,43176.0,52088.0,0.25873157659669493,"passed"],
+        ["refs-32","tree","warm",101,124,101,119,0.0,0.0,0.0,0.0,0.9596774193548387,"passed"],
+        ["refs-32","blob","cold",19246,22126,4879,5511,55.0,9.0,43319.0,52088.0,0.249073488203923,"passed"],
+        ["refs-32","blob","warm",43,54,35,46,0.0,0.0,0.0,0.0,0.8518518518518519,"passed"],
+        ["refs-32","object-point","cold",19409,22271,4851,5454,55.0,9.0,43319.0,52088.0,0.24489246104799964,"passed"],
+        ["refs-32","object-point","warm",45,59,34,42,0.0,0.0,0.0,0.0,0.711864406779661,"passed"],
+        ["refs-32","object-batch","cold",19649,22584,5058,5777,55.0,9.0,45466.0,52088.0,0.2558005667729366,"passed"],
+        ["refs-32","object-batch","warm",185,222,173,193,0.0,0.0,0.0,0.0,0.8693693693693694,"passed"],
+        ["refs-32","history","cold",35075,42451,5114,6285,104.0,11.0,52029.0,53602.0,0.1480530493981296,"passed"],
+        ["refs-32","history","warm",98,125,76,92,0.0,0.0,0.0,0.0,0.736,"passed"],
+        ["refs-32","path-history","cold",59834,71124,21527,24293,176.0,50.0,133757.0,147752.0,0.3415584050390867,"passed"],
+        ["refs-32","path-history","warm",1083,1233,950,1105,0.0,0.0,0.0,0.0,0.8961881589618816,"passed"],
+        ["refs-32","attribution","cold",21294,25420,7130,8142,61.0,16.0,62597.0,71509.0,0.32029897718332023,"passed"],
+        ["refs-32","attribution","warm",266,312,253,285,0.0,0.0,0.0,0.0,0.9134615384615384,"passed"],
+        ["refs-32","blame","cold",60045,71580,21765,24195,179.0,52.0,133772.0,154002.0,0.33801341156747694,"passed"],
+        ["refs-32","blame","warm",53,65,41,51,0.0,0.0,0.0,0.0,0.7846153846153846,"passed"],
+        ["refs-512","resolve","cold",2187,2622,2257,2719,5.0,5.0,37365.0,41312.0,1.0369946605644547,"passed"],
+        ["refs-512","resolve","warm",34,42,24,35,0.0,0.0,0.0,0.0,0.8333333333333334,"passed"],
+        ["refs-512","commit","cold",2093,2453,2128,2535,5.0,5.0,37365.0,41312.0,1.0334284549531185,"passed"],
+        ["refs-512","commit","warm",32,39,24,36,0.0,0.0,0.0,0.0,0.9230769230769231,"passed"],
+        ["refs-512","tree","cold",19217,22498,5224,6025,54.0,9.0,43176.0,52088.0,0.2678015823628767,"passed"],
+        ["refs-512","tree","warm",108,128,92,103,0.0,0.0,0.0,0.0,0.8046875,"passed"],
+        ["refs-512","blob","cold",19117,22354,5164,5822,55.0,9.0,43319.0,52088.0,0.26044555784199697,"passed"],
+        ["refs-512","blob","warm",47,59,38,48,0.0,0.0,0.0,0.0,0.8135593220338984,"passed"],
+        ["refs-512","object-point","cold",19298,22789,5114,5818,55.0,9.0,43319.0,52088.0,0.2552986089780157,"passed"],
+        ["refs-512","object-point","warm",47,60,37,47,0.0,0.0,0.0,0.0,0.7833333333333333,"passed"],
+        ["refs-512","object-batch","cold",19000,22783,5357,6097,55.0,9.0,45466.0,52088.0,0.26761181582759075,"passed"],
+        ["refs-512","object-batch","warm",195,227,182,209,0.0,0.0,0.0,0.0,0.920704845814978,"passed"],
+        ["refs-512","history","cold",34114,40885,5435,6259,104.0,11.0,52029.0,53602.0,0.1530879295585178,"passed"],
+        ["refs-512","history","warm",102,124,80,97,0.0,0.0,0.0,0.0,0.782258064516129,"passed"],
+        ["refs-512","path-history","cold",56678,70855,21412,25850,176.0,50.0,133757.0,147752.0,0.3648295815397643,"passed"],
+        ["refs-512","path-history","warm",1072,1216,939,1100,0.0,0.0,0.0,0.0,0.9046052631578947,"passed"],
+        ["refs-512","attribution","cold",20935,24263,7504,8429,61.0,16.0,62597.0,71509.0,0.34740139306763385,"passed"],
+        ["refs-512","attribution","warm",278,334,266,320,0.0,0.0,0.0,0.0,0.9580838323353293,"passed"],
+        ["refs-512","blame","cold",58836,67936,21540,24791,179.0,52.0,133772.0,154002.0,0.36491698068770606,"passed"],
+        ["refs-512","blame","warm",56,66,45,54,0.0,0.0,0.0,0.0,0.8181818181818182,"passed"],
+        ["sources-4","resolve","cold",2170,2475,2127,2488,5.0,5.0,37701.0,41648.0,1.0052525252525253,"passed"],
+        ["sources-4","resolve","warm",31,39,22,31,0.0,0.0,0.0,0.0,0.7948717948717948,"passed"],
+        ["sources-4","commit","cold",1877,2214,1909,2195,5.0,5.0,37701.0,41648.0,0.9914182475158085,"passed"],
+        ["sources-4","commit","warm",29,37,21,28,0.0,0.0,0.0,0.0,0.7567567567567568,"passed"],
+        ["sources-4","tree","cold",11628,13554,3552,4043,30.0,7.0,41869.0,48269.0,0.29828832816880624,"passed"],
+        ["sources-4","tree","warm",117,139,101,117,0.0,0.0,0.0,0.0,0.841726618705036,"passed"],
+        ["sources-4","blob","cold",11703,13572,3449,3845,31.0,7.0,42012.0,48269.0,0.28330386089006776,"passed"],
+        ["sources-4","blob","warm",41,49,33,40,0.0,0.0,0.0,0.0,0.8163265306122449,"passed"],
+        ["sources-4","object-point","cold",11592,13363,3413,3801,31.0,7.0,42012.0,48269.0,0.284442116291252,"passed"],
+        ["sources-4","object-point","warm",40,50,32,39,0.0,0.0,0.0,0.0,0.78,"passed"],
+        ["sources-4","object-batch","cold",11762,13435,4115,4597,31.0,8.0,44159.0,50559.0,0.34216598436918494,"passed"],
+        ["sources-4","object-batch","warm",191,225,189,231,0.0,0.0,0.0,0.0,1.0266666666666666,"passed"],
+        ["sources-4","history","cold",37561,43154,5276,5992,104.0,11.0,52365.0,120666.0,0.13885155489641748,"passed"],
+        ["sources-4","history","warm",98,111,71,82,0.0,0.0,0.0,0.0,0.7387387387387387,"passed"],
+        ["sources-4","path-history","cold",62836,71797,22103,25485,174.0,54.0,139024.0,159877.0,0.3549591208546318,"passed"],
+        ["sources-4","path-history","warm",1065,1213,928,1009,0.0,0.0,0.0,0.0,0.8318219291014015,"passed"],
+        ["sources-4","attribution","cold",13471,15398,5672,6461,37.0,14.0,61290.0,67690.0,0.4195999480452007,"passed"],
+        ["sources-4","attribution","warm",259,286,246,286,0.0,0.0,0.0,0.0,1.0,"passed"],
+        ["sources-4","blame","cold",64603,75655,22445,26230,179.0,56.0,139039.0,166819.0,0.3467054391646289,"passed"],
+        ["sources-4","blame","warm",53,63,41,51,0.0,0.0,0.0,0.0,0.8095238095238095,"passed"],
+        ["sources-16","resolve","cold",2218,2672,2240,2839,5.0,5.0,39045.0,42992.0,1.0625,"passed"],
+        ["sources-16","resolve","warm",31,39,23,33,0.0,0.0,0.0,0.0,0.8461538461538461,"passed"],
+        ["sources-16","commit","cold",1939,2362,1948,2248,5.0,5.0,39045.0,42992.0,0.951735817104149,"passed"],
+        ["sources-16","commit","warm",28,39,21,30,0.0,0.0,0.0,0.0,0.7692307692307693,"passed"],
+        ["sources-16","tree","cold",5100,6050,2300,2912,12.0,5.0,42010.0,42992.0,0.48132231404958675,"passed"],
+        ["sources-16","tree","warm",117,149,101,115,0.0,0.0,0.0,0.0,0.7718120805369127,"passed"],
+        ["sources-16","blob","cold",5330,6444,2666,3093,13.0,6.0,42153.0,43135.0,0.47998137802607077,"passed"],
+        ["sources-16","blob","warm",40,48,32,45,0.0,0.0,0.0,0.0,0.9375,"passed"],
+        ["sources-16","object-point","cold",5245,6255,2601,3017,13.0,6.0,42153.0,43135.0,0.4823341326938449,"passed"],
+        ["sources-16","object-point","warm",38,48,31,40,0.0,0.0,0.0,0.0,0.8333333333333334,"passed"],
+        ["sources-16","object-batch","cold",5554,6521,3080,3725,13.0,6.0,44300.0,45282.0,0.571231406226039,"passed"],
+        ["sources-16","object-batch","warm",181,214,178,232,0.0,0.0,0.0,0.0,1.0841121495327102,"passed"],
+        ["sources-16","history","cold",40607,48882,6016,7294,104.0,12.0,53709.0,196044.0,0.14921648050407102,"passed"],
+        ["sources-16","history","warm",97,113,77,95,0.0,0.0,0.0,0.0,0.8407079646017699,"passed"],
+        ["sources-16","path-history","cold",53035,65271,22244,26803,138.0,54.0,168518.0,183241.0,0.4106417857854177,"passed"],
+        ["sources-16","path-history","warm",1066,1202,921,1051,0.0,0.0,0.0,0.0,0.8743760399334443,"passed"],
+        ["sources-16","attribution","cold",7149,8725,4525,5814,19.0,12.0,61431.0,62413.0,0.6663610315186247,"passed"],
+        ["sources-16","attribution","warm",262,303,250,291,0.0,0.0,0.0,0.0,0.9603960396039604,"passed"],
+        ["sources-16","blame","cold",58998,72479,25330,30670,155.0,63.0,168533.0,188020.0,0.4231570523875881,"passed"],
+        ["sources-16","blame","warm",53,66,41,52,0.0,0.0,0.0,0.0,0.7878787878787878,"passed"],
+        ["frontier-4","resolve","cold",2023,2457,2057,2552,5.0,5.0,37365.0,41312.0,1.0386650386650387,"passed"],
+        ["frontier-4","resolve","warm",31,40,23,32,0.0,0.0,0.0,0.0,0.8,"passed"],
+        ["frontier-4","commit","cold",1769,2072,1764,2114,5.0,5.0,37365.0,41312.0,1.0202702702702702,"passed"],
+        ["frontier-4","commit","warm",30,37,20,29,0.0,0.0,0.0,0.0,0.7837837837837838,"passed"],
+        ["frontier-4","tree","cold",18038,21577,4716,5394,54.0,9.0,43176.0,52088.0,0.24998841358854335,"passed"],
+        ["frontier-4","tree","warm",107,122,103,116,0.0,0.0,0.0,0.0,0.9508196721311475,"passed"],
+        ["frontier-4","blob","cold",17679,20994,4556,5144,55.0,9.0,43319.0,52088.0,0.2450223873487663,"passed"],
+        ["frontier-4","blob","warm",41,53,34,40,0.0,0.0,0.0,0.0,0.7547169811320755,"passed"],
+        ["frontier-4","object-point","cold",17366,20781,4451,5047,55.0,9.0,43319.0,52088.0,0.24286607959193493,"passed"],
+        ["frontier-4","object-point","warm",40,49,33,42,0.0,0.0,0.0,0.0,0.8571428571428571,"passed"],
+        ["frontier-4","object-batch","cold",17747,21423,4761,5367,55.0,9.0,45466.0,52088.0,0.25052513653549924,"passed"],
+        ["frontier-4","object-batch","warm",186,206,177,210,0.0,0.0,0.0,0.0,1.0194174757281553,"passed"],
+        ["frontier-4","history","cold",31817,38313,4800,5461,104.0,11.0,52029.0,53602.0,0.1425364758698092,"passed"],
+        ["frontier-4","history","warm",92,111,74,88,0.0,0.0,0.0,0.0,0.7927927927927928,"passed"],
+        ["frontier-4","path-history","cold",54857,66226,19928,23212,176.0,50.0,133757.0,147752.0,0.35049678374052484,"passed"],
+        ["frontier-4","path-history","warm",1052,1210,932,1072,0.0,0.0,0.0,0.0,0.8859504132231405,"passed"],
+        ["frontier-4","attribution","cold",19529,22998,6628,7499,61.0,16.0,62597.0,71509.0,0.3260718323332464,"passed"],
+        ["frontier-4","attribution","warm",265,304,251,276,0.0,0.0,0.0,0.0,0.9078947368421053,"passed"],
+        ["frontier-4","blame","cold",55444,67167,20164,23066,179.0,52.0,133772.0,154002.0,0.3434126877782244,"passed"],
+        ["frontier-4","blame","warm",51,59,41,55,0.0,0.0,0.0,0.0,0.9322033898305084,"passed"],
+        ["frontier-16","resolve","cold",1993,2362,2009,2444,5.0,5.0,37365.0,41312.0,1.0347163420829806,"passed"],
+        ["frontier-16","resolve","warm",30,38,24,32,0.0,0.0,0.0,0.0,0.8421052631578947,"passed"],
+        ["frontier-16","commit","cold",1779,2106,1791,2088,5.0,5.0,37365.0,41312.0,0.9914529914529915,"passed"],
+        ["frontier-16","commit","warm",28,34,20,30,0.0,0.0,0.0,0.0,0.8823529411764706,"passed"],
+        ["frontier-16","tree","cold",18103,21906,4670,5393,54.0,9.0,43176.0,52088.0,0.24618825892449558,"passed"],
+        ["frontier-16","tree","warm",98,119,90,105,0.0,0.0,0.0,0.0,0.8823529411764706,"passed"],
+        ["frontier-16","blob","cold",18314,21562,4596,5235,55.0,9.0,43319.0,52088.0,0.24278823856785084,"passed"],
+        ["frontier-16","blob","warm",42,55,33,40,0.0,0.0,0.0,0.0,0.7272727272727273,"passed"],
+        ["frontier-16","object-point","cold",17693,21615,4467,5060,55.0,9.0,43319.0,52088.0,0.2340966921119593,"passed"],
+        ["frontier-16","object-point","warm",41,57,33,39,0.0,0.0,0.0,0.0,0.6842105263157895,"passed"],
+        ["frontier-16","object-batch","cold",18015,22175,4735,5546,55.0,9.0,45466.0,52088.0,0.25010146561443064,"passed"],
+        ["frontier-16","object-batch","warm",186,230,172,197,0.0,0.0,0.0,0.0,0.8565217391304348,"passed"],
+        ["frontier-16","history","cold",32260,39575,4841,5712,104.0,11.0,52029.0,53602.0,0.1443335439039798,"passed"],
+        ["frontier-16","history","warm",95,112,77,94,0.0,0.0,0.0,0.0,0.8392857142857143,"passed"],
+        ["frontier-16","path-history","cold",54761,68184,19743,23542,176.0,50.0,133757.0,147752.0,0.3452716179748915,"passed"],
+        ["frontier-16","path-history","warm",1048,1202,924,1059,0.0,0.0,0.0,0.0,0.8810316139767055,"passed"],
+        ["frontier-16","attribution","cold",19236,23408,6611,7591,61.0,16.0,62597.0,71509.0,0.3242908407382092,"passed"],
+        ["frontier-16","attribution","warm",263,300,246,277,0.0,0.0,0.0,0.0,0.9233333333333333,"passed"],
+        ["frontier-16","blame","cold",55499,68192,20128,23867,179.0,52.0,133772.0,154002.0,0.34999706710464573,"passed"],
+        ["frontier-16","blame","warm",52,65,41,54,0.0,0.0,0.0,0.0,0.8307692307692308,"passed"],
+        ["physical-1","resolve","cold",1948,2282,1986,2304,5.0,5.0,41701.0,45648.0,1.0096406660823838,"passed"],
+        ["physical-1","resolve","warm",32,40,28,35,0.0,0.0,0.0,0.0,0.875,"passed"],
+        ["physical-1","commit","cold",1745,2037,1774,2128,5.0,5.0,41701.0,45648.0,1.0446735395189004,"passed"],
+        ["physical-1","commit","warm",31,37,23,32,0.0,0.0,0.0,0.0,0.8648648648648649,"passed"],
+        ["physical-1","tree","cold",17694,21548,4700,5471,54.0,9.0,47512.0,56424.0,0.2538982736216818,"passed"],
+        ["physical-1","tree","warm",107,123,104,121,0.0,0.0,0.0,0.0,0.983739837398374,"passed"],
+        ["physical-1","blob","cold",17347,20749,4568,5135,55.0,9.0,47655.0,56424.0,0.24748180635211336,"passed"],
+        ["physical-1","blob","warm",42,53,35,48,0.0,0.0,0.0,0.0,0.9056603773584906,"passed"],
+        ["physical-1","object-point","cold",17476,20230,4397,4987,55.0,9.0,47655.0,56424.0,0.24651507661888283,"passed"],
+        ["physical-1","object-point","warm",42,56,35,41,0.0,0.0,0.0,0.0,0.7321428571428571,"passed"],
+        ["physical-1","object-batch","cold",17735,21146,4707,5521,55.0,9.0,49802.0,56424.0,0.2610895677669536,"passed"],
+        ["physical-1","object-batch","warm",185,206,182,214,0.0,0.0,0.0,0.0,1.0388349514563107,"passed"],
+        ["physical-1","history","cold",31078,38051,4771,5601,104.0,11.0,56365.0,57938.0,0.1471971827284434,"passed"],
+        ["physical-1","history","warm",93,107,74,90,0.0,0.0,0.0,0.0,0.8411214953271028,"passed"],
+        ["physical-1","path-history","cold",53713,66669,19682,23175,176.0,50.0,139219.0,153214.0,0.34761283355082573,"passed"],
+        ["physical-1","path-history","warm",1053,1128,934,1076,0.0,0.0,0.0,0.0,0.9539007092198581,"passed"],
+        ["physical-1","attribution","cold",18952,22957,6593,7543,61.0,16.0,68059.0,76971.0,0.3285708062900205,"passed"],
+        ["physical-1","attribution","warm",263,287,251,281,0.0,0.0,0.0,0.0,0.9790940766550522,"passed"],
+        ["physical-1","blame","cold",54025,66482,19896,23450,179.0,52.0,139234.0,159464.0,0.35272705393941217,"passed"],
+        ["physical-1","blame","warm",52,64,41,51,0.0,0.0,0.0,0.0,0.796875,"passed"],
+        ["physical-4","resolve","cold",2002,2308,2038,2338,5.0,5.0,42037.0,45984.0,1.0129982668977469,"passed"],
+        ["physical-4","resolve","warm",33,39,25,34,0.0,0.0,0.0,0.0,0.8717948717948718,"passed"],
+        ["physical-4","commit","cold",1809,2049,1782,2133,5.0,5.0,42037.0,45984.0,1.0409956076134699,"passed"],
+        ["physical-4","commit","warm",31,38,26,32,0.0,0.0,0.0,0.0,0.8421052631578947,"passed"],
+        ["physical-4","tree","cold",18455,21560,4744,5523,54.0,9.0,47848.0,56760.0,0.25616883116883116,"passed"],
+        ["physical-4","tree","warm",105,123,106,125,0.0,0.0,0.0,0.0,1.016260162601626,"passed"],
+        ["physical-4","blob","cold",18252,21296,4604,5155,55.0,9.0,47991.0,56760.0,0.24206423741547708,"passed"],
+        ["physical-4","blob","warm",43,54,36,43,0.0,0.0,0.0,0.0,0.7962962962962963,"passed"],
+        ["physical-4","object-point","cold",18048,21292,4495,5110,55.0,9.0,47991.0,56760.0,0.23999624272027054,"passed"],
+        ["physical-4","object-point","warm",42,53,35,42,0.0,0.0,0.0,0.0,0.7924528301886793,"passed"],
+        ["physical-4","object-batch","cold",18225,21340,4804,5502,55.0,9.0,50138.0,56760.0,0.257825679475164,"passed"],
+        ["physical-4","object-batch","warm",187,219,179,202,0.0,0.0,0.0,0.0,0.9223744292237442,"passed"],
+        ["physical-4","history","cold",32809,39003,4814,5489,104.0,11.0,56701.0,58274.0,0.14073276414634772,"passed"],
+        ["physical-4","history","warm",98,109,77,91,0.0,0.0,0.0,0.0,0.8348623853211009,"passed"],
+        ["physical-4","path-history","cold",55381,64807,19725,23439,176.0,50.0,139555.0,153550.0,0.3616738932522721,"passed"],
+        ["physical-4","path-history","warm",1053,1193,922,1067,0.0,0.0,0.0,0.0,0.8943839061190276,"passed"],
+        ["physical-4","attribution","cold",19878,23195,6631,7645,61.0,16.0,68395.0,77307.0,0.32959689588273333,"passed"],
+        ["physical-4","attribution","warm",265,291,254,275,0.0,0.0,0.0,0.0,0.9450171821305842,"passed"],
+        ["physical-4","blame","cold",55868,67265,20346,23719,179.0,52.0,139570.0,159800.0,0.35262023340518844,"passed"],
+        ["physical-4","blame","warm",53,61,41,51,0.0,0.0,0.0,0.0,0.8360655737704918,"passed"],
+        ["physical-16","resolve","cold",2024,2380,2057,2348,5.0,5.0,43381.0,47328.0,0.9865546218487395,"passed"],
+        ["physical-16","resolve","warm",32,38,23,34,0.0,0.0,0.0,0.0,0.8947368421052632,"passed"],
+        ["physical-16","commit","cold",1839,2174,1827,2085,5.0,5.0,43381.0,47328.0,0.9590616375344986,"passed"],
+        ["physical-16","commit","warm",30,35,21,30,0.0,0.0,0.0,0.0,0.8571428571428571,"passed"],
+        ["physical-16","tree","cold",18534,21115,4796,5344,54.0,9.0,49192.0,58104.0,0.2530902202225906,"passed"],
+        ["physical-16","tree","warm",98,121,103,114,0.0,0.0,0.0,0.0,0.9421487603305785,"passed"],
+        ["physical-16","blob","cold",18357,21021,4656,5446,55.0,9.0,49335.0,58104.0,0.2590742590742591,"passed"],
+        ["physical-16","blob","warm",42,51,35,41,0.0,0.0,0.0,0.0,0.803921568627451,"passed"],
+        ["physical-16","object-point","cold",18245,21411,4590,5170,55.0,9.0,49335.0,58104.0,0.24146466769417588,"passed"],
+        ["physical-16","object-point","warm",42,54,33,43,0.0,0.0,0.0,0.0,0.7962962962962963,"passed"],
+        ["physical-16","object-batch","cold",18712,21898,4883,5458,55.0,9.0,51482.0,58104.0,0.24924650653027675,"passed"],
+        ["physical-16","object-batch","warm",182,202,169,184,0.0,0.0,0.0,0.0,0.9108910891089109,"passed"],
+        ["physical-16","history","cold",33179,40009,4878,5660,104.0,11.0,58045.0,59618.0,0.1414681696618261,"passed"],
+        ["physical-16","history","warm",97,111,74,89,0.0,0.0,0.0,0.0,0.8018018018018018,"passed"],
+        ["physical-16","path-history","cold",56360,67300,20041,23716,176.0,50.0,140899.0,154894.0,0.3523922734026746,"passed"],
+        ["physical-16","path-history","warm",1059,1198,919,1039,0.0,0.0,0.0,0.0,0.8672787979966611,"passed"],
+        ["physical-16","attribution","cold",19745,23465,6743,7594,61.0,16.0,69739.0,78651.0,0.3236309396974217,"passed"],
+        ["physical-16","attribution","warm",261,291,253,286,0.0,0.0,0.0,0.0,0.9828178694158075,"passed"],
+        ["physical-16","blame","cold",56904,67429,20581,23677,179.0,52.0,140914.0,161144.0,0.3511397173323051,"passed"],
+        ["physical-16","blame","warm",52,61,41,51,0.0,0.0,0.0,0.0,0.8360655737704918,"passed"]
+      ]
+    },
+    "indexed_exact_statistics": {
+      "status": "passed",
+      "source_sha256": "01df35d55662ad349d794d27e4b8e04c1306e9f5df861e68082587be7778450e",
+      "old_driver_sha256": "bbb0880895cc170455af3ff4afe43d7dd3ad0131adacaf0fce339e15b52de7ce",
+      "new_driver_sha256": "8254ade762f197325931e306bb35834ee441a96ceb1a804a06db4ea68c6eafd6",
+      "aggregation_sha256": "a5fa329bbaeb23a6ae9ec8cbcb975adb1a6be3e24b80e374d3b7220aa6a2ab64",
+      "prior_summary_fields_exactly_equal_on_4000_samples": true,
+      "address_space_limit_bytes": 134217728,
+      "peak_rss_bytes": 33366016,
+      "samples_including_setup_and_warmup": 1483163,
+      "elapsed_seconds": 47.45670255600271,
+      "scope": "Failed-soak raw journal replay, no request samples discarded. 600 is a comparison denominator only; this replay does not qualify a600secondmeasurement. Exact nearest-rank statistics and all errors preserved. SQL temp workspace deleted.",
+      "summaries": {
+        "preview": {
+          "attempts": 294168,
+          "successes": 294168,
+          "rejected": 0,
+          "errors": 0,
+          "oracle_mismatches": 0,
+          "client_cancellations": 0,
+          "warmup_attempts": 2470,
+          "setup_attempts": 0,
+          "elapsed_seconds": 600,
+          "offered_requests_per_second": 490.28,
+          "successful_requests_per_second": 490.28,
+          "latency_us": {
+            "p50": 5088.507,
+            "p95": 7985.065,
+            "p99": 11347.198
+          },
+          "successful_latency_us": {
+            "p50": 5088.507,
+            "p95": 7985.065,
+            "p99": 11347.198
+          },
+          "ttfb_us": {
+            "p50": 5082.717,
+            "p95": 7978.828,
+            "p99": 11339.944
+          },
+          "server_timing_ms": {
+            "open": {
+              "samples": 294168,
+              "p50": 0.001,
+              "p95": 0.002,
+              "p99": 0.003
+            },
+            "read": {
+              "samples": 294168,
+              "p50": 0.032,
+              "p95": 0.05,
+              "p99": 0.066
+            },
+            "encode": {
+              "samples": 294168,
+              "p50": 0.003,
+              "p95": 0.004,
+              "p99": 0.007
+            },
+            "total": {
+              "samples": 294168,
+              "p50": 0.037,
+              "p95": 0.058,
+              "p99": 0.088
+            }
+          }
+        },
+        "history": {
+          "attempts": 294168,
+          "successes": 294108,
+          "rejected": 60,
+          "errors": 0,
+          "oracle_mismatches": 0,
+          "client_cancellations": 0,
+          "warmup_attempts": 2468,
+          "setup_attempts": 0,
+          "elapsed_seconds": 600,
+          "offered_requests_per_second": 490.28,
+          "successful_requests_per_second": 490.18,
+          "latency_us": {
+            "p50": 5124.81,
+            "p95": 7993.501,
+            "p99": 11340.048
+          },
+          "successful_latency_us": {
+            "p50": 5125.024,
+            "p95": 7993.758,
+            "p99": 11340.048
+          },
+          "ttfb_us": {
+            "p50": 5110.868,
+            "p95": 7978.825,
+            "p99": 11316.708
+          },
+          "server_timing_ms": {
+            "open": {
+              "samples": 294108,
+              "p50": 0.001,
+              "p95": 0.001,
+              "p99": 0.003
+            },
+            "read": {
+              "samples": 294108,
+              "p50": 0.064,
+              "p95": 0.09,
+              "p99": 0.113
+            },
+            "encode": {
+              "samples": 294108,
+              "p50": 0.007,
+              "p95": 0.009,
+              "p99": 0.017
+            },
+            "total": {
+              "samples": 294108,
+              "p50": 0.077,
+              "p95": 0.107,
+              "p99": 0.151
+            }
+          }
+        },
+        "raw": {
+          "attempts": 294169,
+          "successes": 294102,
+          "rejected": 67,
+          "errors": 0,
+          "oracle_mismatches": 0,
+          "client_cancellations": 0,
+          "warmup_attempts": 2465,
+          "setup_attempts": 0,
+          "elapsed_seconds": 600,
+          "offered_requests_per_second": 490.2816666666667,
+          "successful_requests_per_second": 490.17,
+          "latency_us": {
+            "p50": 5078.211,
+            "p95": 7939.031,
+            "p99": 11327.007
+          },
+          "successful_latency_us": {
+            "p50": 5078.455,
+            "p95": 7939.416,
+            "p99": 11327.007
+          },
+          "ttfb_us": {
+            "p50": 5073.267,
+            "p95": 7933.87,
+            "p99": 11320.317
+          },
+          "server_timing_ms": {
+            "open": {
+              "samples": 294102,
+              "p50": 0.001,
+              "p95": 0.002,
+              "p99": 0.003
+            },
+            "read": {
+              "samples": 294102,
+              "p50": 0.026,
+              "p95": 0.042,
+              "p99": 0.057
+            },
+            "encode": {
+              "samples": 294102,
+              "p50": 0.0,
+              "p95": 0.0,
+              "p99": 0.0
+            },
+            "total": {
+              "samples": 294102,
+              "p50": 0.028,
+              "p95": 0.047,
+              "p99": 0.07
+            }
+          }
+        },
+        "blame": {
+          "attempts": 294167,
+          "successes": 294110,
+          "rejected": 57,
+          "errors": 0,
+          "oracle_mismatches": 0,
+          "client_cancellations": 0,
+          "warmup_attempts": 2461,
+          "setup_attempts": 0,
+          "elapsed_seconds": 600,
+          "offered_requests_per_second": 490.2783333333333,
+          "successful_requests_per_second": 490.18333333333334,
+          "latency_us": {
+            "p50": 5116.306,
+            "p95": 8008.242,
+            "p99": 11308.43
+          },
+          "successful_latency_us": {
+            "p50": 5116.507,
+            "p95": 8008.293,
+            "p99": 11308.43
+          },
+          "ttfb_us": {
+            "p50": 5102.822,
+            "p95": 7993.543,
+            "p99": 11294.613
+          },
+          "server_timing_ms": {
+            "open": {
+              "samples": 294110,
+              "p50": 0.001,
+              "p95": 0.001,
+              "p99": 0.003
+            },
+            "read": {
+              "samples": 294110,
+              "p50": 0.02,
+              "p95": 0.034,
+              "p99": 0.047
+            },
+            "encode": {
+              "samples": 294110,
+              "p50": 0.04,
+              "p95": 0.051,
+              "p99": 0.065
+            },
+            "total": {
+              "samples": 294110,
+              "p50": 0.064,
+              "p95": 0.087,
+              "p99": 0.126
+            }
+          }
+        },
+        "late-history": {
+          "attempts": 294169,
+          "successes": 294112,
+          "rejected": 57,
+          "errors": 0,
+          "oracle_mismatches": 0,
+          "client_cancellations": 0,
+          "warmup_attempts": 2458,
+          "setup_attempts": 0,
+          "elapsed_seconds": 600,
+          "offered_requests_per_second": 490.2816666666667,
+          "successful_requests_per_second": 490.18666666666667,
+          "latency_us": {
+            "p50": 5104.5,
+            "p95": 7982.609,
+            "p99": 11383.476
+          },
+          "successful_latency_us": {
+            "p50": 5104.728,
+            "p95": 7983.026,
+            "p99": 11383.476
+          },
+          "ttfb_us": {
+            "p50": 5092.541,
+            "p95": 7968.038,
+            "p99": 11367.451
+          },
+          "server_timing_ms": {
+            "open": {
+              "samples": 294112,
+              "p50": 0.001,
+              "p95": 0.001,
+              "p99": 0.003
+            },
+            "read": {
+              "samples": 294112,
+              "p50": 0.043,
+              "p95": 0.064,
+              "p99": 0.082
+            },
+            "encode": {
+              "samples": 294112,
+              "p50": 0.004,
+              "p95": 0.005,
+              "p99": 0.01
+            },
+            "total": {
+              "samples": 294112,
+              "p50": 0.053,
+              "p95": 0.079,
+              "p99": 0.114
+            }
+          }
+        }
+      },
+      "report_sha256": "6f64be76f15ad3b3c468fbfb6f83daecf242eda84c9470b94c73a646d5a0d203",
+      "focused_tests_passed": 29,
+      "behavior": "One partial covering index per metric preserves exact nearest-rank statistics. Persist actual elapsed/journal range before aggregation; separate private request/statistics worker deadlines. No sample exclusions, numeric gate or workload changes."
+    },
+    "retained_second_http_failure": {
+      "report_sha256": "aee4e515bf39e82e69de2c1df3605f56a2f280c0a35e3c1152ef5439dd2ad136",
+      "status": "failed",
+      "error_kind": "TimeoutExpired",
+      "completed_short_trials": 126,
+      "candidate_soak_journal_records": 1483163,
+      "limitation": "Candidate timed request loop completed but aggregation exceeded orchestration budget before serializing elapsed. No inferred elapsed, completed soak acceptance or baseline soak acceptance.",
+      "candidate_shutdown_proofs": {
+        "a": {
+          "passed": true,
+          "fields": {
+            "complete": "true",
+            "log_quiesced": "true",
+            "local_durability_closed": "true",
+            "pending_application_events": "0",
+            "pending_dispatches": "0",
+            "deadline_elapsed": "false"
+          }
+        },
+        "b": {
+          "passed": true,
+          "fields": {
+            "complete": "true",
+            "log_quiesced": "true",
+            "local_durability_closed": "true",
+            "pending_application_events": "0",
+            "pending_dispatches": "0",
+            "deadline_elapsed": "false"
+          }
+        }
+      },
+      "exit_codes": {
+        "baseline": {
+          "a": 0,
+          "b": 0
+        },
+        "candidate": {
+          "a": 0,
+          "b": 0
+        }
+      }
+    },
+    "short_diagnostic": {
+      "summary_sha256": "0e1660462544a98b6a74a54659aa4a8610af3c24d3da1b6dc03a3286cb0304c2",
+      "acceptance": false,
+      "status": "diagnostic_short_cells",
+      "failed_gates": ["small-16:preview:throughput_regression","distinct-16:history:p95_regression","distinct-16:preview-distinct:p95_regression","distinct-16:raw-distinct:p95_regression","distinct-16:late-history:p95_regression","distinct-16:blame-distinct:p95_regression","small-32:preview:p95_regression","mixed-32:preview:p95_regression","mixed-32:history:p95_regression","mixed-32:raw:p95_regression","mixed-32:blame:p95_regression","mixed-64:preview:p95_regression","mixed-64:preview:throughput_regression","mixed-64:history:p95_regression","mixed-64:history:throughput_regression","mixed-64:raw:p95_regression","mixed-64:raw:throughput_regression","mixed-64:blame:p95_regression","mixed-64:blame:throughput_regression","mixed-64:late-history:p95_regression","mixed-64:late-history:throughput_regression"],
+      "reason": "Complete126shorttrials from preserved reporting-timeout run. Both600ssoaks and fullrunacceptance missing; thresholds/oracles untouched. Offline aggregation only, before any rerun/source tuning."
+    },
+    "current_kubernetes_receipt": {
+      "source_revision": "1757972eda21e6ff143528883232abb9c7e6572d",
+      "image_id": "sha256:5d10f97b2110d318e924a97a9948827a13e18e14731bbdf9d37012c2581c987e",
+      "platform": "linux/arm64",
+      "nodes": ["crab-qualification-worker","crab-qualification-control-plane","crab-qualification-worker2"],
+      "native_pods": 3,
+      "sigkill_exit_code": 137,
+      "large_file": {
+        "bytes": 3221225472,
+        "sha256": "3fcfae43ead6763e06fe8337f50a50d718411b050549302690dd6a68f2326057",
+        "activity_timeout_seconds": 1800,
+        "stock_git_lfs": true,
+        "crash_clone": true,
+        "restored_clone": true,
+        "range_resume": true
+      },
+      "receipt_sha256": "8787181e8996268dfe4c115ad465d161d66b57f9847daa5dc0d237ff52ebbe95",
+      "full_root_copy_objects": 200,
+      "full_root_copy_bytes": 3221383120,
+      "full_root_copy_hash_and_metadata_verified": true,
+      "workflow": "https://github.com/crabbuild/crab/actions/runs/44769392808"
+    },
+    "remaining": "Full source-matched combined HTTP gates/minimum-resource soak and repeatability remain open. All earlier failures retained. Independent growth and naturally aged cold-reader GC checks pass."
   }
 }
