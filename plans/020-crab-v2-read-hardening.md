@@ -23,8 +23,9 @@
 - **Planned at:** `aafb6d256c5e8d3a8e768d31dd887a18f2afd2e4`, 2026-11-17.
 - **Target:** `crab-v2`; revalidate the target before execution.
 - **Delivery status:** IMPLEMENTED; ACCEPTANCE OPEN. R0–R5 are implemented.
-  Current source-bound two-replica Git-read/session smoke and enforced native
-  ARM64 minimum-profile proof pass. The approved Cellar fix now passes a fresh two-replica
+  Current source-bound two-replica Git-read/session smoke and focused native
+  Git/work-counter comparisons pass. Earlier ARM64 minimum-profile proof keeps
+  its actual compiled revision. The approved Cellar fix now passes a fresh two-replica
   cold/aged/local-reload sequence; frozen performance gates remain failed. R7's measured failures and remaining lifecycle cells are recorded,
   not waived. See the
   [combined qualification report](../crab/docs/benchmarks/v2-read-hardening-rustfs-2026-11-19.md).
@@ -70,17 +71,23 @@ integrate them sequentially. R6 is not required for accepting the first wave.
 ### Current read-optimization priorities
 
 1. **Cold dependent pack reads:** reuse up to eight 4-KiB encoded windows across
-   serial delta reads and batches inside one captured pack. Keep captured placement, byte admission, CRC/OID checks
-   and cancellation authoritative. Implemented; current RustFS comparison must
-   report opening plus query requests and bytes, including read-ahead cost.
+   serial delta reads and batches inside one captured pack. Keep captured
+   placement, byte admission, CRC/OID checks and cancellation authoritative.
+   Implemented and verified against local RustFS. The comparison reports
+   opening plus query requests and bytes, including read-ahead cost. Multi-entry
+   misses keep the planned exact range while retaining cached-window hits.
 2. **Warm history overhead:** reuse the commit batch buffer instead of allocating
    one vector per cached first-parent commit. Implemented; cursor semantics,
    verification and per-operation charges stay unchanged.
-3. **Combined-source proof:** verify current binaries through real two-replica
+3. **Remaining cold index work:** the 10,000-commit blame fixture still reports
+   173 decoded index blocks (4,595,000 bytes). Existing captured-reader page
+   caches are already bounded to 8 MiB/256 entries. Trace distinct-page work,
+   lookup batching and cache lifetimes before adding another cache or format.
+4. **Combined-source proof:** verify current binaries through real two-replica
    HTTP and native Git oracles, then qualify the remaining throughput/latency
    controls. Failed baseline repeatability and the 34 short HTTP gates remain
    retained; descriptive timing cannot close R7.
-4. **Independent growth and lifecycle coverage:** finish the declared matrix on
+5. **Independent growth and lifecycle coverage:** finish the declared matrix on
    the optimized source, including minimum-resource and reader-retention cases.
    Earlier source-bound successes remain useful but are not relabeled current.
 

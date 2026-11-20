@@ -1,10 +1,9 @@
 # V2 read hardening: combined local RustFS qualification
 
 **Status: implementation delivered; combined acceptance remains open.**
-The approved Cellar checkpoint fix passes fresh cold/aged/local recovery on two
-replicas; the preserved invalid catalog remains refused. The current native release screen
-retains nine timing controls; the fixed confirmation remains pending. Earlier smoke and
-minimum-profile results below retain their own historical source bindings.
+The latest focused reader optimization and its exact-source proof appear in
+[the cold-pack and warm-history results](#focused-cold-pack-and-warm-history-optimization).
+Earlier smoke, minimum-profile and timing results retain their actual source bindings.
 The frozen engineering gates did not all pass. This report is not a release or
 production-readiness claim. [PR #693](https://github.com/crabbuild/crab/pull/693)
 targets `crab-v2`; [Plan 020](../../../plans/020-crab-v2-read-hardening.md)
@@ -660,3 +659,63 @@ passes object-batch cold/warm controls but fails commit cold/warm repeatability.
 Its ratios are 0.709/0.372 despite similar medians; all original thresholds and
 samples remain. Full combined HTTP proof remains required, and product timing
 acceptance stays open.
+
+## Small-window trial before exact batch ranges
+
+Intermediate code is bound to `69d307b1bd9`. It reuses up to eight 4-KiB encoded pack windows (32 KiB of cached payload total) and the warm first-parent commit batch buffer. Point reads and batches inside one captured member share the pack reader; cross-member source coalescing remains. Existing byte/resident admission, cancellation, CRC/OID checks and visibility ownership remain authoritative.
+
+All 197 shared-reader tests, 23 focused server tests, strict all-target reader Clippy, formatting and both server release builds pass. All 54 current two-replica RustFS HTTP checks pass; both processes drain, emit complete durability proofs and exit zero. The existing CPU-result lifetime regression reproduces in 29/50 pre-fix fresh processes and 0/50 after the fix. Its result tuple retains tracker/admission ownership until abandoned output is destroyed.
+
+The focused native run passes all 360 canonical Git comparisons: 20 alternating before/after pairs for blob, blame and history at each scale. Readers have enforced 1 CPU / 1 GiB / no extra swap; RustFS retains its pinned image and 1 CPU / 3 GiB quota. The before reader already contains R1–R5. The table shows median **cold opening plus query** Store read operations and bytes; opening/query breakdowns and all cold/warm timings remain in JSON.
+
+| Commits | Operation | Reads before → after | Bytes before → after |
+| --- | --- | --- | --- |
+| 100 | blame | 192 → 65 | 171,545 → 191,775 |
+| 100 | blob | 68 → 22 | 81,092 → 89,861 |
+| 100 | history | 25 → 24 | 89,802 → 98,491 |
+| 1,000 | blame | 967 → 195 | 784,878 → 940,959 |
+| 1,000 | blob | 59 → 30 | 245,617 → 253,328 |
+| 1,000 | history | 92 → 91 | 454,974 → 502,573 |
+| 10,000 | blame | 685 → 272 | 4,765,317 → 4,961,992 |
+| 10,000 | blob | 36 → 34 | 327,941 → 339,716 |
+| 10,000 | history | 134 → 133 | 1,768,220 → 1,815,589 |
+
+The initial one-window 64-KiB prototype is rejected and retained in full. On larger blame cases it saved few requests while increasing transferred bytes substantially. A real access trace exposed the embedded-batch bypass and offset alternation; bounded small windows address both. The new batch regression is red before routing through the pack reader and green afterward.
+
+These measurements establish deterministic work and Git parity, not R7 timing acceptance. All descriptive failed controls, the earlier failed same-executable calibrations and 34 failed short HTTP gates remain retained. Current combined-load qualification, independent growth and minimum-resource lifecycle coverage remain priorities; persistent attribution and new range formats remain deferred.
+
+
+## Focused cold-pack and warm-history optimization
+
+Current code is bound to `53433f8c3ef`. It reuses up to eight 4-KiB encoded pack windows (32 KiB of cached payload total) and the warm first-parent commit batch buffer. Point reads and batches inside one captured member share the pack reader. Multi-entry misses fetch their planned range exactly; cache hits and cross-member source coalescing remain. Existing byte/resident admission, cancellation, CRC/OID checks and visibility ownership remain authoritative.
+
+All 198 shared-reader tests, 23 focused server tests, strict all-target reader Clippy, formatting and both server release builds pass. All 54 current two-replica RustFS HTTP checks pass; both processes drain, emit complete durability proofs and exit zero. The existing CPU-result lifetime regression reproduces in 29/50 pre-fix fresh processes and 0/50 after the fix. Its result tuple retains tracker/admission ownership until abandoned output is destroyed.
+
+The focused native run passes all 360 canonical Git comparisons: 20 alternating before/after pairs for blob, blame and history at each scale. Readers have enforced 1 CPU / 1 GiB / no extra swap; RustFS retains its pinned image and 1 CPU / 3 GiB quota. The before reader already contains R1–R5. The table shows median **cold opening plus query** Store read operations and bytes; opening/query breakdowns and all cold/warm timings remain in JSON.
+
+| Commits | Operation | Reads before → after | Bytes before → after |
+| --- | --- | --- | --- |
+| 100 | blame | 192 → 65 | 171,545 → 191,775 |
+| 100 | blob | 68 → 22 | 81,092 → 89,861 |
+| 100 | history | 25 → 24 | 89,802 → 91,375 |
+| 1,000 | blame | 967 → 195 | 784,878 → 940,959 |
+| 1,000 | blob | 59 → 30 | 245,617 → 253,328 |
+| 1,000 | history | 92 → 91 | 454,974 → 456,538 |
+| 10,000 | blame | 685 → 272 | 4,765,317 → 4,961,992 |
+| 10,000 | blob | 36 → 34 | 327,941 → 339,716 |
+| 10,000 | history | 134 → 133 | 1,768,220 → 1,769,788 |
+
+The initial one-window 64-KiB prototype is rejected and retained in full. On larger blame cases it saved few requests while increasing transferred bytes substantially. A real access trace exposed the embedded-batch bypass and offset alternation; bounded small windows address both. The new batch regression is red before routing through the pack reader and green afterward.
+
+These measurements establish deterministic work and Git parity, not R7 timing acceptance. All descriptive failed controls, the earlier failed same-executable calibrations and 34 failed short HTTP gates remain retained. Current combined-load qualification, independent growth and minimum-resource lifecycle coverage remain priorities; persistent attribution and new range formats remain deferred.
+
+
+The final exact-batch policy reduces history read-ahead from roughly 8.7/47.6
+KB of extra cold opening-plus-query bytes to approximately 1.6 KB at the
+100/1,000-commit scales. Five final descriptive comparisons miss their gates:
+100-commit cold/warm history, 1,000-commit cold history, 10,000-commit warm
+history, and the cold 10,000-commit blob target. None is waived. The retained
+failed baseline calibrations prevent treating these ratios as accepted product
+latency. Metadata work remains the next code priority: the 10,000-commit blame
+query reports 173 decoded index blocks (4,595,000 bytes); its readers already
+have bounded page caches, so distinct-page work and lookup batching need tracing.

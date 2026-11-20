@@ -7852,5 +7852,3790 @@
       }
     ],
     "scope": "Exact same baseline executable, original two cases and original symmetric1/1.1..1.1band, no candidate verdict. Object-batch cold/warm pass; commit cold/warm fail despite similar medians. All failed calibration receipts remain retained, and no threshold/sample adjustment follows."
+  },
+  "small_pack_window_pre_exact_batches": {
+    "implementation_revision": "69d307b1bd95744c99ac9bb9527a9e1f7f8547c1",
+    "scope": "Focused reader optimization: unchanged immutable RustFS fixtures, 20 alternating before/after pairs per operation/scale, same compiler/runtime image and 1 CPU/1 GiB/no-swap reader quotas. Before native source is 9019ebb7a8a05469c3c3ff039b352268d72c2b44. Store read calls and bytes include cold opening separately and cold opening plus query totals. Timing ratios are descriptive because retained same-executable calibration failed. No R7 acceptance or original threshold changes.",
+    "builds": {
+      "mac_server": {
+        "status": "built",
+        "source_revision": "69d307b1bd95744c99ac9bb9527a9e1f7f8547c1",
+        "source_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1",
+        "cellar_revision": "590640c7ce49ef3fd391bdae9540ba23081cd74b",
+        "cellar_pr": "https://github.com/crabbuild/cellar/pull/176",
+        "build_profile": "release; incremental=false; cargo build -p crab-server --locked --release --bin crab-server",
+        "started": 1795162352.5298839,
+        "build_exit_code": 0,
+        "server_binary_sha256": "d78fbf409a86eb56e33f9bd15d710add7881a66b4f37435f4939cea3b646eefc",
+        "ended": 1795162714.577014,
+        "receipt_sha256": "eb5521a7ef94febba89f37ae18bf534e4f335ebe009723b562d7e3e56afd0c14"
+      },
+      "linux_server": {
+        "status": "built",
+        "source_revision": "69d307b1bd95744c99ac9bb9527a9e1f7f8547c1",
+        "source_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1",
+        "cellar_revision": "590640c7ce49ef3fd391bdae9540ba23081cd74b",
+        "cellar_pr": "https://github.com/crabbuild/cellar/pull/176",
+        "build_profile": "release; incremental=false; cargo build -p crab-server --locked --release --bin crab-server --target aarch64-unknown-linux-gnu; preinstalled GCC15.2/glibc2.28; native ARM64 execution follows separately",
+        "target_platform": "linux/arm64",
+        "target_triple": "aarch64-unknown-linux-gnu",
+        "started": 1795162137.082168,
+        "build_exit_code": 0,
+        "server_binary_sha256": "92652fe6401dc503b6f46155e57f2b7c8709097d2a961dce4024dfcbf72b9b29",
+        "ended": 1795162522.86868,
+        "receipt_sha256": "3869847a5f78bdb31fd88ce0391f3e8e740ac503922a86f7a2ae4e13b3a710d3"
+      },
+      "linux_native": {
+        "status": "built",
+        "phase": "candidate",
+        "source_revision": "69d307b1bd95744c99ac9bb9527a9e1f7f8547c1",
+        "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1",
+        "native_roots": [
+          "crates/crab-auth",
+          "crates/crab-cache",
+          "crates/crab-cache-store",
+          "crates/crab-coordination",
+          "crates/crab-diff",
+          "crates/crab-git",
+          "crates/crab-lfs",
+          "crates/crab-metadata",
+          "crates/crab-read",
+          "crates/crab-remote",
+          "crates/crab-remote-git",
+          "crates/crab-storage",
+          "crates/crab-types",
+          "crates/crab-write",
+          "crates/crab-xet"
+        ],
+        "original_matched_mac_binding_sha256": "5399a47a23f151fba739bd8fa43a034b312960237f7f4fda94bd7e9586de977c",
+        "source_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "target_triple": "aarch64-unknown-linux-gnu",
+        "build_profile": "release; opt-level=3; lto=false; debug=0; incremental=false; native qualifier with publication feature; preinstalled GCC15.2/glibc2.28",
+        "scope": "Same existing source/query implementation recompiled for enforced native Linux ARM64 CPU/memory qualification; original Mac failures remain retained. No production changes or threshold relaxation.",
+        "started": 1795162523.228549,
+        "qualifier_binary_sha256": "12c1718710ddd5f8776ba2a8d3157fd840948240374cb780d4d924c137f40a9d",
+        "ended": 1795162672.2096598,
+        "receipt_sha256": "b1407ebf9070c2caa1ce5b991e2a247a7abbc034db38973ab878697e7c8a749a"
+      }
+    },
+    "pack_window": {
+      "entry_bytes": 4096,
+      "maximum_entries": 8,
+      "maximum_cached_payload_bytes": 32768,
+      "identity": "RepositoryIdentity + immutable pack ID + aligned logical offset",
+      "admission": "Existing object-cache caps and global resident budget; retained slices own reservations; byte limits and cancellation apply on hits; CRC/OID verification unchanged.",
+      "batch_scope": "Only batches wholly inside one captured pack share point-read windows. Existing physical coalescing across pack members remains."
+    },
+    "focused_checks": {
+      "status": "passed",
+      "started": 1795162088.4110599,
+      "checks": [
+        {
+          "name": "format",
+          "command": [
+            "cargo",
+            "fmt",
+            "--all",
+            "--check"
+          ],
+          "exit_code": 0,
+          "seconds": 7.487529993057251,
+          "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "name": "reader_clippy",
+          "command": [
+            "cargo",
+            "clippy",
+            "-p",
+            "crab-remote-git",
+            "--locked",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings"
+          ],
+          "exit_code": 0,
+          "seconds": 12.365592002868652,
+          "log_sha256": "5bbbdab3dae0dc1b95d717b925f5cac2c58d0b7b6e2ea7268125e2c52afc6a90"
+        },
+        {
+          "name": "server_api",
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "crab-server",
+            "--locked",
+            "--lib",
+            "api::tests"
+          ],
+          "exit_code": 0,
+          "seconds": 238.85831212997437,
+          "log_sha256": "225d1500e8846a65e638f81aa068300201ebf9c7fb5abf980bf6b8b8560bf513"
+        },
+        {
+          "name": "server_response",
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "crab-server",
+            "--locked",
+            "--lib",
+            "api::response_json::tests"
+          ],
+          "exit_code": 0,
+          "seconds": 1.9781732559204102,
+          "log_sha256": "e389a046ad17deb3387c010a5748e2a719252d32b82d287b505331ff47d596a0"
+        }
+      ],
+      "ended": 1795162349.1040692
+    },
+    "reader_lib": {
+      "passed": 197,
+      "failed": 0,
+      "log_sha256": "a28a85e36c3e29394031f31958beca031f0fb2684e281d4f3faffabe8b2cda75"
+    },
+    "embedded_regression": {
+      "before": "2 storage reads; expected 1",
+      "red_log_sha256": "6d8c7e085b44b46308a768d0f80b9bdc2ac47b6a1fc66407a30b1b26357b6d08",
+      "after": "Passes in the 197-test reader suite."
+    },
+    "cpu_handoff": {
+      "before_failures": 29,
+      "after_failures": 0,
+      "fresh_processes_each": 50,
+      "red_report_sha256": "820de0373d9d7c5069e7716af80caab999ae890ebe448261a6be671826cac58d",
+      "green_report_sha256": "454ac36f1a1d235934f943fc33e911c90a8284585b0251ee40186cc9c83f904a",
+      "dependency_contract": "tokio-util 0.7.18 TaskTracker drops its worker token before returning blocking output; ordered output/permit/observation/lifetime ownership keeps abandoned output inside shutdown."
+    },
+    "http": {
+      "checks": 54,
+      "status": "passed",
+      "report_sha256": "9308c60dc017069ad0b626f46e9dde325f10c7a8eb096a61b4aba48481683866",
+      "exit_codes": [
+        0,
+        0
+      ],
+      "shutdown_proofs": [
+        {
+          "replica": "a",
+          "valid": true,
+          "actual_line": "2026-11-20T08:18:48.848014Z  INFO Cellar shutdown proof complete=true log_quiesced=true local_durability_closed=true clean_reload_prepared=true pending_application_events=0 pending_dispatches=0 deadline_elapsed=false"
+        },
+        {
+          "replica": "b",
+          "valid": true,
+          "actual_line": "2026-11-20T08:18:47.015804Z  INFO Cellar shutdown proof complete=true log_quiesced=true local_durability_closed=true clean_reload_prepared=true pending_application_events=0 pending_dispatches=0 deadline_elapsed=false"
+        }
+      ]
+    },
+    "native": {
+      "status": "diagnostic_matrix_measured",
+      "acceptance": false,
+      "pairs_per_group": 20,
+      "processes": 360,
+      "git_queries_checked": 360,
+      "profile_sha256": "d5a338b206781b88c58fd3e95bb346f0da86abd46505983039b3abbb2cee2d6d",
+      "protocol_declaration_sha256": "7ac4e0c4e9f93e05cf5686371963fcfb5d7cafd35f1cd99efbebf73557fb0ea0",
+      "report_sha256": "9675986de281dbe13232d5d6b3143ae0e5090e85b1054f31beaaf37156a296c0",
+      "trials_sha256": "faba64d74cb96cba4af3a1b103f4b49902fe7ae11504216206379f8249f22d58",
+      "native_git_expectations_sha256": "045b4e756c9fada7be8dad41a06c09d721d9c07665327f9f1e341b92e3a4c535",
+      "cells": [
+        {
+          "commits": 100,
+          "operation": "blame",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 111862,
+              "p95": 139843
+            },
+            "median_backend_reads": 179.0,
+            "median_backend_bytes": 133772.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 192.0,
+              "median_backend_bytes": 171545.0,
+              "elapsed_us": {
+                "p50": 122460,
+                "p95": 152991
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 41922,
+              "p95": 51884
+            },
+            "median_backend_reads": 52.0,
+            "median_backend_bytes": 154002.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 65.0,
+              "median_backend_bytes": 191775.0,
+              "elapsed_us": {
+                "p50": 52736,
+                "p95": 63465
+              }
+            }
+          },
+          "target": true,
+          "p95_ratio": 0.3710160680191357,
+          "gate": "passed"
+        },
+        {
+          "commits": 100,
+          "operation": "blame",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 67,
+              "p95": 86
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 192.0,
+              "median_backend_bytes": 171545.0,
+              "elapsed_us": {
+                "p50": 122460,
+                "p95": 152991
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 63,
+              "p95": 79
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 65.0,
+              "median_backend_bytes": 191775.0,
+              "elapsed_us": {
+                "p50": 52736,
+                "p95": 63465
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 0.9186046511627907,
+          "gate": "passed"
+        },
+        {
+          "commits": 100,
+          "operation": "blob",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 37941,
+              "p95": 49003
+            },
+            "median_backend_reads": 55.0,
+            "median_backend_bytes": 43319.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 68.0,
+              "median_backend_bytes": 81092.0,
+              "elapsed_us": {
+                "p50": 47753,
+                "p95": 60813
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 11893,
+              "p95": 14745
+            },
+            "median_backend_reads": 9.0,
+            "median_backend_bytes": 52088.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 22.0,
+              "median_backend_bytes": 89861.0,
+              "elapsed_us": {
+                "p50": 21744,
+                "p95": 26471
+              }
+            }
+          },
+          "target": true,
+          "p95_ratio": 0.3008999449013326,
+          "gate": "passed"
+        },
+        {
+          "commits": 100,
+          "operation": "blob",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 57,
+              "p95": 73
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 68.0,
+              "median_backend_bytes": 81092.0,
+              "elapsed_us": {
+                "p50": 47753,
+                "p95": 60813
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 49,
+              "p95": 60
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 22.0,
+              "median_backend_bytes": 89861.0,
+              "elapsed_us": {
+                "p50": 21744,
+                "p95": 26471
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 0.821917808219178,
+          "gate": "passed"
+        },
+        {
+          "commits": 100,
+          "operation": "history",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 9949,
+              "p95": 11185
+            },
+            "median_backend_reads": 12.0,
+            "median_backend_bytes": 52029.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 25.0,
+              "median_backend_bytes": 89802.0,
+              "elapsed_us": {
+                "p50": 20347,
+                "p95": 23602
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 9526,
+              "p95": 10524
+            },
+            "median_backend_reads": 11.0,
+            "median_backend_bytes": 60718.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 24.0,
+              "median_backend_bytes": 98491.0,
+              "elapsed_us": {
+                "p50": 19682,
+                "p95": 24145
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 0.9409029950827,
+          "gate": "passed"
+        },
+        {
+          "commits": 100,
+          "operation": "history",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 90,
+              "p95": 123
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 25.0,
+              "median_backend_bytes": 89802.0,
+              "elapsed_us": {
+                "p50": 20347,
+                "p95": 23602
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 97,
+              "p95": 134
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 24.0,
+              "median_backend_bytes": 98491.0,
+              "elapsed_us": {
+                "p50": 19682,
+                "p95": 24145
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 1.089430894308943,
+          "gate": "passed"
+        },
+        {
+          "commits": 1000,
+          "operation": "blame",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 790829,
+              "p95": 1064039
+            },
+            "median_backend_reads": 951.0,
+            "median_backend_bytes": 728968.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 967.0,
+              "median_backend_bytes": 784878.0,
+              "elapsed_us": {
+                "p50": 806433,
+                "p95": 1086349
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 158951,
+              "p95": 279815
+            },
+            "median_backend_reads": 179.0,
+            "median_backend_bytes": 885049.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 195.0,
+              "median_backend_bytes": 940959.0,
+              "elapsed_us": {
+                "p50": 173216,
+                "p95": 302746
+              }
+            }
+          },
+          "target": true,
+          "p95_ratio": 0.2629743834577492,
+          "gate": "passed"
+        },
+        {
+          "commits": 1000,
+          "operation": "blame",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 77,
+              "p95": 103
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 967.0,
+              "median_backend_bytes": 784878.0,
+              "elapsed_us": {
+                "p50": 806433,
+                "p95": 1086349
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 70,
+              "p95": 85
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 195.0,
+              "median_backend_bytes": 940959.0,
+              "elapsed_us": {
+                "p50": 173216,
+                "p95": 302746
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 0.8252427184466019,
+          "gate": "passed"
+        },
+        {
+          "commits": 1000,
+          "operation": "blob",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 39738,
+              "p95": 44690
+            },
+            "median_backend_reads": 43.0,
+            "median_backend_bytes": 189707.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 59.0,
+              "median_backend_bytes": 245617.0,
+              "elapsed_us": {
+                "p50": 54113,
+                "p95": 60562
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 16859,
+              "p95": 20126
+            },
+            "median_backend_reads": 14.0,
+            "median_backend_bytes": 197418.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 30.0,
+              "median_backend_bytes": 253328.0,
+              "elapsed_us": {
+                "p50": 31418,
+                "p95": 33662
+              }
+            }
+          },
+          "target": true,
+          "p95_ratio": 0.4503468337435668,
+          "gate": "passed"
+        },
+        {
+          "commits": 1000,
+          "operation": "blob",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 58,
+              "p95": 87
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 59.0,
+              "median_backend_bytes": 245617.0,
+              "elapsed_us": {
+                "p50": 54113,
+                "p95": 60562
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 54,
+              "p95": 65
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 30.0,
+              "median_backend_bytes": 253328.0,
+              "elapsed_us": {
+                "p50": 31418,
+                "p95": 33662
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 0.7471264367816092,
+          "gate": "passed"
+        },
+        {
+          "commits": 1000,
+          "operation": "history",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 94457,
+              "p95": 317707
+            },
+            "median_backend_reads": 76.0,
+            "median_backend_bytes": 399064.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 92.0,
+              "median_backend_bytes": 454974.0,
+              "elapsed_us": {
+                "p50": 110190,
+                "p95": 383914
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 100830,
+              "p95": 456904
+            },
+            "median_backend_reads": 75.0,
+            "median_backend_bytes": 446663.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 91.0,
+              "median_backend_bytes": 502573.0,
+              "elapsed_us": {
+                "p50": 115183,
+                "p95": 487228
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 1.438130101005014,
+          "gate": "failed"
+        },
+        {
+          "commits": 1000,
+          "operation": "history",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 714,
+              "p95": 1702
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 92.0,
+              "median_backend_bytes": 454974.0,
+              "elapsed_us": {
+                "p50": 110190,
+                "p95": 383914
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 697,
+              "p95": 967
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 91.0,
+              "median_backend_bytes": 502573.0,
+              "elapsed_us": {
+                "p50": 115183,
+                "p95": 487228
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 0.5681551116333725,
+          "gate": "passed"
+        },
+        {
+          "commits": 10000,
+          "operation": "blame",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 670452,
+              "p95": 955929
+            },
+            "median_backend_reads": 667.0,
+            "median_backend_bytes": 4708972.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 685.0,
+              "median_backend_bytes": 4765317.0,
+              "elapsed_us": {
+                "p50": 688804,
+                "p95": 973448
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 276537,
+              "p95": 364974
+            },
+            "median_backend_reads": 254.0,
+            "median_backend_bytes": 4905647.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 272.0,
+              "median_backend_bytes": 4961992.0,
+              "elapsed_us": {
+                "p50": 294079,
+                "p95": 381974
+              }
+            }
+          },
+          "target": true,
+          "p95_ratio": 0.3818003219904407,
+          "gate": "passed"
+        },
+        {
+          "commits": 10000,
+          "operation": "blame",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 81,
+              "p95": 102
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 685.0,
+              "median_backend_bytes": 4765317.0,
+              "elapsed_us": {
+                "p50": 688804,
+                "p95": 973448
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 80,
+              "p95": 101
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 272.0,
+              "median_backend_bytes": 4961992.0,
+              "elapsed_us": {
+                "p50": 294079,
+                "p95": 381974
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 0.9901960784313726,
+          "gate": "passed"
+        },
+        {
+          "commits": 10000,
+          "operation": "blob",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 18955,
+              "p95": 22073
+            },
+            "median_backend_reads": 18.0,
+            "median_backend_bytes": 271596.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 36.0,
+              "median_backend_bytes": 327941.0,
+              "elapsed_us": {
+                "p50": 36204,
+                "p95": 39926
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 17497,
+              "p95": 18630
+            },
+            "median_backend_reads": 16.0,
+            "median_backend_bytes": 283371.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 34.0,
+              "median_backend_bytes": 339716.0,
+              "elapsed_us": {
+                "p50": 34240,
+                "p95": 36524
+              }
+            }
+          },
+          "target": true,
+          "p95_ratio": 0.8440175780365152,
+          "gate": "failed"
+        },
+        {
+          "commits": 10000,
+          "operation": "blob",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 57,
+              "p95": 65
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 36.0,
+              "median_backend_bytes": 327941.0,
+              "elapsed_us": {
+                "p50": 36204,
+                "p95": 39926
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 57,
+              "p95": 70
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 34.0,
+              "median_backend_bytes": 339716.0,
+              "elapsed_us": {
+                "p50": 34240,
+                "p95": 36524
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 1.0769230769230769,
+          "gate": "passed"
+        },
+        {
+          "commits": 10000,
+          "operation": "history",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 302779,
+              "p95": 593298
+            },
+            "median_backend_reads": 116.0,
+            "median_backend_bytes": 1711875.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 134.0,
+              "median_backend_bytes": 1768220.0,
+              "elapsed_us": {
+                "p50": 342854,
+                "p95": 664310
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 248690,
+              "p95": 638616
+            },
+            "median_backend_reads": 115.0,
+            "median_backend_bytes": 1759244.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 133.0,
+              "median_backend_bytes": 1815589.0,
+              "elapsed_us": {
+                "p50": 286647,
+                "p95": 700099
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 1.076383200347886,
+          "gate": "passed"
+        },
+        {
+          "commits": 10000,
+          "operation": "history",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 708,
+              "p95": 1798
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 134.0,
+              "median_backend_bytes": 1768220.0,
+              "elapsed_us": {
+                "p50": 342854,
+                "p95": 664310
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 737,
+              "p95": 1647
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 133.0,
+              "median_backend_bytes": 1815589.0,
+              "elapsed_us": {
+                "p50": 286647,
+                "p95": 700099
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 0.9160177975528365,
+          "gate": "passed"
+        }
+      ],
+      "failed_descriptive_gates": [
+        {
+          "commits": 1000,
+          "operation": "history",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 94457,
+              "p95": 317707
+            },
+            "median_backend_reads": 76.0,
+            "median_backend_bytes": 399064.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 92.0,
+              "median_backend_bytes": 454974.0,
+              "elapsed_us": {
+                "p50": 110190,
+                "p95": 383914
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 100830,
+              "p95": 456904
+            },
+            "median_backend_reads": 75.0,
+            "median_backend_bytes": 446663.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 91.0,
+              "median_backend_bytes": 502573.0,
+              "elapsed_us": {
+                "p50": 115183,
+                "p95": 487228
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 1.438130101005014,
+          "gate": "failed"
+        },
+        {
+          "commits": 10000,
+          "operation": "blob",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 18955,
+              "p95": 22073
+            },
+            "median_backend_reads": 18.0,
+            "median_backend_bytes": 271596.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 36.0,
+              "median_backend_bytes": 327941.0,
+              "elapsed_us": {
+                "p50": 36204,
+                "p95": 39926
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 17497,
+              "p95": 18630
+            },
+            "median_backend_reads": 16.0,
+            "median_backend_bytes": 283371.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 34.0,
+              "median_backend_bytes": 339716.0,
+              "elapsed_us": {
+                "p50": 34240,
+                "p95": 36524
+              }
+            }
+          },
+          "target": true,
+          "p95_ratio": 0.8440175780365152,
+          "gate": "failed"
+        }
+      ],
+      "provider_binding": {
+        "container_id": "3e25d8de18dd2f6cf3e91a6c00ef379f8de032b513639d439dd1ae3a495cbad8",
+        "image_id": "sha256:040304b66e029a5cde4bed140b41513e925909839a9b912a40a98340610d1f66",
+        "quota": {
+          "NanoCpus": 1000000000,
+          "Memory": 3221225472,
+          "MemorySwap": 3221225472
+        },
+        "mounts": [
+          {
+            "Type": "bind",
+            "Source": "/mnt/lima-colima-rh8144/crab-rh8144-rustfs-data",
+            "Destination": "/data"
+          }
+        ]
+      },
+      "worker_quotas": {
+        "baseline": {
+          "NanoCpus": 1000000000,
+          "Memory": 1073741824,
+          "MemorySwap": 1073741824,
+          "cpu.max": "100000 100000",
+          "memory.max": "1073741824",
+          "memory.swap.max": "0"
+        },
+        "candidate": {
+          "NanoCpus": 1000000000,
+          "Memory": 1073741824,
+          "MemorySwap": 1073741824,
+          "cpu.max": "100000 100000",
+          "memory.max": "1073741824",
+          "memory.swap.max": "0"
+        }
+      },
+      "final_cgroups": {
+        "baseline": {
+          "memory.peak": "29868032",
+          "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0",
+          "cpu.stat": "usage_usec 11599820\nuser_usec 8250892\nsystem_usec 3348928\ncore_sched.force_idle_usec 0\nnr_periods 787\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0"
+        },
+        "candidate": {
+          "memory.peak": "29925376",
+          "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0",
+          "cpu.stat": "usage_usec 8654010\nuser_usec 5942636\nsystem_usec 2711373\ncore_sched.force_idle_usec 0\nnr_periods 527\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0"
+        }
+      },
+      "containers": {
+        "baseline": {
+          "name": "crab-rh8144-small-window-baseline",
+          "container_id": "be261e2f6209467480b78c63afdf6ddc2ca6544c7cf09e99501acf1bd013f520",
+          "image_id": "sha256:295532caa83861226f0cd7cdbc0e4e650e7dece0868e78219fcbaffd7b51a31b",
+          "exit_code": 0,
+          "oom_killed": false
+        },
+        "candidate": {
+          "name": "crab-rh8144-small-window-candidate",
+          "container_id": "612de0303d11b042789be0f38e034d454c4a5a36e8e9f59f99ff0dc802b9c9ab",
+          "image_id": "sha256:2caed1b108c878684afb99de75bf21f5e6e9ccc03e4cf7eed2ce518303984880",
+          "exit_code": 0,
+          "oom_killed": false
+        }
+      }
+    },
+    "rejected_large_window_prototype": {
+      "revision": "e2f840eadf78b060334d61c936bcb6422b0329e3",
+      "window_bytes": 65536,
+      "entries": 1,
+      "processes": 360,
+      "git_queries_checked": 360,
+      "reason": "Embedded batched pack reads bypassed the window; one large window thrashed between distant offsets. Larger blame cases transferred substantially more bytes with few saved requests. Retained as rejected, not reported as the final optimization.",
+      "report_sha256": "d3575b02308e87ed94837d1168481b7e12efd9479746f3315ed1a0778d0a3bb7",
+      "profile_sha256": "5d6bef5f5a7c0f113e1526c8942002933636a3507dcfbb7cd6a62a87f5c21b5f",
+      "cells": [
+        {
+          "commits": 100,
+          "operation": "blame",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 116212,
+              "p95": 129790
+            },
+            "median_backend_reads": 179.0,
+            "median_backend_bytes": 133772.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 192.0,
+              "median_backend_bytes": 171545.0,
+              "elapsed_us": {
+                "p50": 126955,
+                "p95": 141650
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 63650,
+              "p95": 78105
+            },
+            "median_backend_reads": 89.0,
+            "median_backend_bytes": 156935.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 102.0,
+              "median_backend_bytes": 194708.0,
+              "elapsed_us": {
+                "p50": 75137,
+                "p95": 90152
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 0.6017797981354496,
+          "gate": "passed"
+        },
+        {
+          "commits": 100,
+          "operation": "blame",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 72,
+              "p95": 95
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 192.0,
+              "median_backend_bytes": 171545.0,
+              "elapsed_us": {
+                "p50": 126955,
+                "p95": 141650
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 70,
+              "p95": 89
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 102.0,
+              "median_backend_bytes": 194708.0,
+              "elapsed_us": {
+                "p50": 75137,
+                "p95": 90152
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 0.9368421052631579,
+          "gate": "passed"
+        },
+        {
+          "commits": 100,
+          "operation": "blob",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 38749,
+              "p95": 45553
+            },
+            "median_backend_reads": 55.0,
+            "median_backend_bytes": 43319.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 68.0,
+              "median_backend_bytes": 81092.0,
+              "elapsed_us": {
+                "p50": 49023,
+                "p95": 58705
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 10013,
+              "p95": 10896
+            },
+            "median_backend_reads": 5.0,
+            "median_backend_bytes": 72261.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 110034.0,
+              "elapsed_us": {
+                "p50": 19865,
+                "p95": 22693
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 0.23919390599960486,
+          "gate": "passed"
+        },
+        {
+          "commits": 100,
+          "operation": "blob",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 58,
+              "p95": 73
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 68.0,
+              "median_backend_bytes": 81092.0,
+              "elapsed_us": {
+                "p50": 49023,
+                "p95": 58705
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 46,
+              "p95": 52
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 110034.0,
+              "elapsed_us": {
+                "p50": 19865,
+                "p95": 22693
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 0.7123287671232876,
+          "gate": "passed"
+        },
+        {
+          "commits": 100,
+          "operation": "history",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 10371,
+              "p95": 11949
+            },
+            "median_backend_reads": 12.0,
+            "median_backend_bytes": 52029.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 25.0,
+              "median_backend_bytes": 89802.0,
+              "elapsed_us": {
+                "p50": 20864,
+                "p95": 22082
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 9750,
+              "p95": 12587
+            },
+            "median_backend_reads": 12.0,
+            "median_backend_bytes": 86925.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 25.0,
+              "median_backend_bytes": 124698.0,
+              "elapsed_us": {
+                "p50": 20611,
+                "p95": 25994
+              }
+            }
+          },
+          "target": true,
+          "p95_ratio": 1.053393589421709,
+          "gate": "failed"
+        },
+        {
+          "commits": 100,
+          "operation": "history",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 95,
+              "p95": 134
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 25.0,
+              "median_backend_bytes": 89802.0,
+              "elapsed_us": {
+                "p50": 20864,
+                "p95": 22082
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 95,
+              "p95": 110
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 25.0,
+              "median_backend_bytes": 124698.0,
+              "elapsed_us": {
+                "p50": 20611,
+                "p95": 25994
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 0.8208955223880597,
+          "gate": "passed"
+        },
+        {
+          "commits": 1000,
+          "operation": "blame",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 857919,
+              "p95": 1062924
+            },
+            "median_backend_reads": 951.0,
+            "median_backend_bytes": 728968.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 967.0,
+              "median_backend_bytes": 784878.0,
+              "elapsed_us": {
+                "p50": 873757,
+                "p95": 1089935
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 820311,
+              "p95": 951747
+            },
+            "median_backend_reads": 920.0,
+            "median_backend_bytes": 3314658.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 936.0,
+              "median_backend_bytes": 3370568.0,
+              "elapsed_us": {
+                "p50": 836889,
+                "p95": 974556
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 0.8954045632613432,
+          "gate": "passed"
+        },
+        {
+          "commits": 1000,
+          "operation": "blame",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 90,
+              "p95": 248
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 967.0,
+              "median_backend_bytes": 784878.0,
+              "elapsed_us": {
+                "p50": 873757,
+                "p95": 1089935
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 87,
+              "p95": 133
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 936.0,
+              "median_backend_bytes": 3370568.0,
+              "elapsed_us": {
+                "p50": 836889,
+                "p95": 974556
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 0.5362903225806451,
+          "gate": "passed"
+        },
+        {
+          "commits": 1000,
+          "operation": "blob",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 48369,
+              "p95": 53864
+            },
+            "median_backend_reads": 43.0,
+            "median_backend_bytes": 189707.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 59.0,
+              "median_backend_bytes": 245617.0,
+              "elapsed_us": {
+                "p50": 65946,
+                "p95": 74380
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 16169,
+              "p95": 19719
+            },
+            "median_backend_reads": 12.0,
+            "median_backend_bytes": 316143.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 28.0,
+              "median_backend_bytes": 372053.0,
+              "elapsed_us": {
+                "p50": 31857,
+                "p95": 38601
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 0.3660886677558295,
+          "gate": "passed"
+        },
+        {
+          "commits": 1000,
+          "operation": "blob",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 62,
+              "p95": 104
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 59.0,
+              "median_backend_bytes": 245617.0,
+              "elapsed_us": {
+                "p50": 65946,
+                "p95": 74380
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 59,
+              "p95": 84
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 28.0,
+              "median_backend_bytes": 372053.0,
+              "elapsed_us": {
+                "p50": 31857,
+                "p95": 38601
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 0.8076923076923077,
+          "gate": "passed"
+        },
+        {
+          "commits": 1000,
+          "operation": "history",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 91386,
+              "p95": 98054
+            },
+            "median_backend_reads": 76.0,
+            "median_backend_bytes": 399064.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 92.0,
+              "median_backend_bytes": 454974.0,
+              "elapsed_us": {
+                "p50": 105787,
+                "p95": 114278
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 89667,
+              "p95": 94669
+            },
+            "median_backend_reads": 76.0,
+            "median_backend_bytes": 464451.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 92.0,
+              "median_backend_bytes": 520361.0,
+              "elapsed_us": {
+                "p50": 104922,
+                "p95": 111689
+              }
+            }
+          },
+          "target": true,
+          "p95_ratio": 0.9654782058865523,
+          "gate": "failed"
+        },
+        {
+          "commits": 1000,
+          "operation": "history",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 717,
+              "p95": 828
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 92.0,
+              "median_backend_bytes": 454974.0,
+              "elapsed_us": {
+                "p50": 105787,
+                "p95": 114278
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 668,
+              "p95": 855
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 92.0,
+              "median_backend_bytes": 520361.0,
+              "elapsed_us": {
+                "p50": 104922,
+                "p95": 111689
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 1.0326086956521738,
+          "gate": "passed"
+        },
+        {
+          "commits": 10000,
+          "operation": "blame",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 682868,
+              "p95": 879261
+            },
+            "median_backend_reads": 667.0,
+            "median_backend_bytes": 4708972.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 685.0,
+              "median_backend_bytes": 4765317.0,
+              "elapsed_us": {
+                "p50": 702528,
+                "p95": 895481
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 706279,
+              "p95": 926721
+            },
+            "median_backend_reads": 663.0,
+            "median_backend_bytes": 7452653.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 681.0,
+              "median_backend_bytes": 7508998.0,
+              "elapsed_us": {
+                "p50": 724721,
+                "p95": 959715
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 1.0539771467175276,
+          "gate": "passed"
+        },
+        {
+          "commits": 10000,
+          "operation": "blame",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 92,
+              "p95": 158
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 685.0,
+              "median_backend_bytes": 4765317.0,
+              "elapsed_us": {
+                "p50": 702528,
+                "p95": 895481
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 92,
+              "p95": 178
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 681.0,
+              "median_backend_bytes": 7508998.0,
+              "elapsed_us": {
+                "p50": 724721,
+                "p95": 959715
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 1.1265822784810127,
+          "gate": "failed"
+        },
+        {
+          "commits": 10000,
+          "operation": "blob",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 21112,
+              "p95": 27061
+            },
+            "median_backend_reads": 18.0,
+            "median_backend_bytes": 271596.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 36.0,
+              "median_backend_bytes": 327941.0,
+              "elapsed_us": {
+                "p50": 38439,
+                "p95": 49753
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 16473,
+              "p95": 19549
+            },
+            "median_backend_reads": 14.0,
+            "median_backend_bytes": 399633.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 32.0,
+              "median_backend_bytes": 455978.0,
+              "elapsed_us": {
+                "p50": 35206,
+                "p95": 41558
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 0.7224049369941983,
+          "gate": "passed"
+        },
+        {
+          "commits": 10000,
+          "operation": "blob",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 59,
+              "p95": 75
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 36.0,
+              "median_backend_bytes": 327941.0,
+              "elapsed_us": {
+                "p50": 38439,
+                "p95": 49753
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 57,
+              "p95": 77
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 32.0,
+              "median_backend_bytes": 455978.0,
+              "elapsed_us": {
+                "p50": 35206,
+                "p95": 41558
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 1.0266666666666666,
+          "gate": "passed"
+        },
+        {
+          "commits": 10000,
+          "operation": "history",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 126831,
+              "p95": 143190
+            },
+            "median_backend_reads": 116.0,
+            "median_backend_bytes": 1711875.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 134.0,
+              "median_backend_bytes": 1768220.0,
+              "elapsed_us": {
+                "p50": 143861,
+                "p95": 161437
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 121681,
+              "p95": 143365
+            },
+            "median_backend_reads": 116.0,
+            "median_backend_bytes": 1777263.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 134.0,
+              "median_backend_bytes": 1833608.0,
+              "elapsed_us": {
+                "p50": 142664,
+                "p95": 163766
+              }
+            }
+          },
+          "target": true,
+          "p95_ratio": 1.0012221523849432,
+          "gate": "failed"
+        },
+        {
+          "commits": 10000,
+          "operation": "history",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 750,
+              "p95": 891
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 134.0,
+              "median_backend_bytes": 1768220.0,
+              "elapsed_us": {
+                "p50": 143861,
+                "p95": 161437
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 720,
+              "p95": 793
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 134.0,
+              "median_backend_bytes": 1833608.0,
+              "elapsed_us": {
+                "p50": 142664,
+                "p95": 163766
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 0.8900112233445566,
+          "gate": "passed"
+        }
+      ],
+      "failed_inherited_descriptive_gates": [
+        {
+          "commits": 100,
+          "operation": "history",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 10371,
+              "p95": 11949
+            },
+            "median_backend_reads": 12.0,
+            "median_backend_bytes": 52029.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 25.0,
+              "median_backend_bytes": 89802.0,
+              "elapsed_us": {
+                "p50": 20864,
+                "p95": 22082
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 9750,
+              "p95": 12587
+            },
+            "median_backend_reads": 12.0,
+            "median_backend_bytes": 86925.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 25.0,
+              "median_backend_bytes": 124698.0,
+              "elapsed_us": {
+                "p50": 20611,
+                "p95": 25994
+              }
+            }
+          },
+          "target": true,
+          "p95_ratio": 1.053393589421709,
+          "gate": "failed"
+        },
+        {
+          "commits": 1000,
+          "operation": "history",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 91386,
+              "p95": 98054
+            },
+            "median_backend_reads": 76.0,
+            "median_backend_bytes": 399064.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 92.0,
+              "median_backend_bytes": 454974.0,
+              "elapsed_us": {
+                "p50": 105787,
+                "p95": 114278
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 89667,
+              "p95": 94669
+            },
+            "median_backend_reads": 76.0,
+            "median_backend_bytes": 464451.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 92.0,
+              "median_backend_bytes": 520361.0,
+              "elapsed_us": {
+                "p50": 104922,
+                "p95": 111689
+              }
+            }
+          },
+          "target": true,
+          "p95_ratio": 0.9654782058865523,
+          "gate": "failed"
+        },
+        {
+          "commits": 10000,
+          "operation": "blame",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 92,
+              "p95": 158
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 685.0,
+              "median_backend_bytes": 4765317.0,
+              "elapsed_us": {
+                "p50": 702528,
+                "p95": 895481
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 92,
+              "p95": 178
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 681.0,
+              "median_backend_bytes": 7508998.0,
+              "elapsed_us": {
+                "p50": 724721,
+                "p95": 959715
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 1.1265822784810127,
+          "gate": "failed"
+        },
+        {
+          "commits": 10000,
+          "operation": "history",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 126831,
+              "p95": 143190
+            },
+            "median_backend_reads": 116.0,
+            "median_backend_bytes": 1711875.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 134.0,
+              "median_backend_bytes": 1768220.0,
+              "elapsed_us": {
+                "p50": 143861,
+                "p95": 161437
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 121681,
+              "p95": 143365
+            },
+            "median_backend_reads": 116.0,
+            "median_backend_bytes": 1777263.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 134.0,
+              "median_backend_bytes": 1833608.0,
+              "elapsed_us": {
+                "p50": 142664,
+                "p95": 163766
+              }
+            }
+          },
+          "target": true,
+          "p95_ratio": 1.0012221523849432,
+          "gate": "failed"
+        }
+      ]
+    },
+    "locality_diagnosis": {
+      "trace_report_sha256": "7c137f8ed16f4fb40e6b1d8cafa0b06f565b66e713b479f5ffcf27b132f02082",
+      "window_size_simulation_sha256": "e30d6314c82b298f4e0bbce65b986626860fe526f38100fb095ced6b18ffd6c9",
+      "scope": "Access-pattern diagnosis using the archived pre-window Mac executable; every result checked with native Git. Offline replay selected eight 4-KiB windows before current-source RustFS measurement; replay is not a performance result."
+    },
+    "remaining_priorities": [
+      "Combined-source HTTP throughput/latency and same-executable repeatability; retain all 34 earlier failed short cases.",
+      "Independent repository-growth and minimum-resource lifecycle cells on the optimized source.",
+      "Conditional R6 attribution/range formats remain deferred pending measured need."
+    ]
+  },
+  "small_pack_window_optimization": {
+    "implementation_revision": "53433f8c3ef0695bc94af11367ec7b23885c9e8e",
+    "scope": "Focused reader optimization: unchanged immutable RustFS fixtures, 20 alternating before/after pairs per operation/scale, same compiler/runtime image and 1 CPU/1 GiB/no-swap reader quotas. Before native source is 9019ebb7a8a05469c3c3ff039b352268d72c2b44. Store read calls and bytes include cold opening separately and cold opening plus query totals. Timing ratios are descriptive because retained same-executable calibration failed. No R7 acceptance or original threshold changes.",
+    "builds": {
+      "mac_server": {
+        "status": "built",
+        "source_revision": "53433f8c3ef0695bc94af11367ec7b23885c9e8e",
+        "source_patch_sha256": "d5d28c3402105bd78871c695f0ae5fbb7982a7a8666217acfe8c359c2cf71ff3",
+        "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1",
+        "cellar_revision": "590640c7ce49ef3fd391bdae9540ba23081cd74b",
+        "cellar_pr": "https://github.com/crabbuild/cellar/pull/176",
+        "build_profile": "release; incremental=false; cargo build -p crab-server --locked --release --bin crab-server",
+        "started": 1795163163.283432,
+        "build_exit_code": 0,
+        "server_binary_sha256": "9e337cc9c332b43b1d6201697b9790cac57c9b365a9817d218fcc398ed9e2079",
+        "ended": 1795163618.3940842,
+        "receipt_sha256": "897578460d7777ac6f394599c19115945240d6228955cab32254d3b01e58d75a"
+      },
+      "linux_server": {
+        "status": "built",
+        "source_revision": "53433f8c3ef0695bc94af11367ec7b23885c9e8e",
+        "source_patch_sha256": "d5d28c3402105bd78871c695f0ae5fbb7982a7a8666217acfe8c359c2cf71ff3",
+        "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1",
+        "cellar_revision": "590640c7ce49ef3fd391bdae9540ba23081cd74b",
+        "cellar_pr": "https://github.com/crabbuild/cellar/pull/176",
+        "build_profile": "release; incremental=false; cargo build -p crab-server --locked --release --bin crab-server --target aarch64-unknown-linux-gnu; preinstalled GCC15.2/glibc2.28; native ARM64 execution follows separately",
+        "target_platform": "linux/arm64",
+        "target_triple": "aarch64-unknown-linux-gnu",
+        "started": 1795163163.282838,
+        "build_exit_code": 0,
+        "server_binary_sha256": "e3ef101518eb77d5668e6ea0eadaf2fa17664bf7d562010148b924b05cbe0f8a",
+        "ended": 1795163631.906825,
+        "receipt_sha256": "8779e3e3f63a9f38cf0c275801431ca5591ff05c00c86b3556fdbdda92fa74c2"
+      },
+      "linux_native": {
+        "status": "built",
+        "phase": "candidate",
+        "source_revision": "53433f8c3ef0695bc94af11367ec7b23885c9e8e",
+        "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1",
+        "native_roots": [
+          "crates/crab-auth",
+          "crates/crab-cache",
+          "crates/crab-cache-store",
+          "crates/crab-coordination",
+          "crates/crab-diff",
+          "crates/crab-git",
+          "crates/crab-lfs",
+          "crates/crab-metadata",
+          "crates/crab-read",
+          "crates/crab-remote",
+          "crates/crab-remote-git",
+          "crates/crab-storage",
+          "crates/crab-types",
+          "crates/crab-write",
+          "crates/crab-xet"
+        ],
+        "original_matched_mac_binding_sha256": "5399a47a23f151fba739bd8fa43a034b312960237f7f4fda94bd7e9586de977c",
+        "source_patch_sha256": "d5d28c3402105bd78871c695f0ae5fbb7982a7a8666217acfe8c359c2cf71ff3",
+        "target_triple": "aarch64-unknown-linux-gnu",
+        "build_profile": "release; opt-level=3; lto=false; debug=0; incremental=false; native qualifier with publication feature; preinstalled GCC15.2/glibc2.28",
+        "scope": "Same existing source/query implementation recompiled for enforced native Linux ARM64 CPU/memory qualification; original Mac failures remain retained. No production changes or threshold relaxation.",
+        "started": 1795163632.4669492,
+        "qualifier_binary_sha256": "8245b4e1678b2cf4aeba4b5eca3f7b0c48ef4c7b1834fad754e66d9360575086",
+        "ended": 1795163776.378036,
+        "receipt_sha256": "eb2935c1bcbdbf69ecf96656569371eb72d442f03dc0668430c5c178ab022c38"
+      }
+    },
+    "pack_window": {
+      "entry_bytes": 4096,
+      "maximum_entries": 8,
+      "maximum_cached_payload_bytes": 32768,
+      "identity": "RepositoryIdentity + immutable pack ID + aligned logical offset",
+      "admission": "Existing object-cache caps and global resident budget; retained slices own reservations; byte limits and cancellation apply on hits; CRC/OID verification unchanged.",
+      "batch_scope": "Only batches wholly inside one captured pack share point-read windows. Existing physical coalescing across pack members remains."
+    },
+    "focused_checks": {
+      "status": "passed",
+      "started": 1795163106.119647,
+      "checks": [
+        {
+          "name": "format",
+          "command": [
+            "cargo",
+            "fmt",
+            "--all",
+            "--check"
+          ],
+          "exit_code": 0,
+          "seconds": 7.637764930725098,
+          "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "name": "reader_clippy",
+          "command": [
+            "cargo",
+            "clippy",
+            "-p",
+            "crab-remote-git",
+            "--locked",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings"
+          ],
+          "exit_code": 0,
+          "seconds": 21.03470492362976,
+          "log_sha256": "d455e2608638a0b0f765b181ca13e57952371d01a4be8595662c20e348e9c685"
+        },
+        {
+          "name": "server_api",
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "crab-server",
+            "--locked",
+            "--lib",
+            "api::tests"
+          ],
+          "exit_code": 0,
+          "seconds": 241.12294101715088,
+          "log_sha256": "4c81832d3cd7ae6f53e5b5d60074326835788ceb5cb22b9704d9357f00a09951"
+        },
+        {
+          "name": "server_response",
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "crab-server",
+            "--locked",
+            "--lib",
+            "api::response_json::tests"
+          ],
+          "exit_code": 0,
+          "seconds": 4.715214729309082,
+          "log_sha256": "b06c77ae9143972b5deaa63ba0fb9e1eb8b4168ecae16568cda429c38e76ba5e"
+        }
+      ],
+      "ended": 1795163380.66903
+    },
+    "reader_lib": {
+      "passed": 198,
+      "failed": 0,
+      "log_sha256": "a519db51eedf84e5fae59ca6d82aa7b854d88cd277f99932344d8bb392826358"
+    },
+    "embedded_regression": {
+      "before": "2 storage reads; expected 1",
+      "red_log_sha256": "6d8c7e085b44b46308a768d0f80b9bdc2ac47b6a1fc66407a30b1b26357b6d08",
+      "after": "Passes in the 198-test reader suite."
+    },
+    "cpu_handoff": {
+      "before_failures": 29,
+      "after_failures": 0,
+      "fresh_processes_each": 50,
+      "red_report_sha256": "820de0373d9d7c5069e7716af80caab999ae890ebe448261a6be671826cac58d",
+      "green_report_sha256": "454ac36f1a1d235934f943fc33e911c90a8284585b0251ee40186cc9c83f904a",
+      "dependency_contract": "tokio-util 0.7.18 TaskTracker drops its worker token before returning blocking output; ordered output/permit/observation/lifetime ownership keeps abandoned output inside shutdown."
+    },
+    "http": {
+      "checks": 54,
+      "status": "passed",
+      "report_sha256": "902816b37f227ab56ba422d331425cb526e5b625f8395cc896aa2927ebfd36e9",
+      "exit_codes": [
+        0,
+        0
+      ],
+      "shutdown_proofs": [
+        {
+          "replica": "a",
+          "valid": true,
+          "actual_line": "2026-11-20T08:33:57.867262Z  INFO Cellar shutdown proof complete=true log_quiesced=true local_durability_closed=true clean_reload_prepared=true pending_application_events=0 pending_dispatches=0 deadline_elapsed=false"
+        },
+        {
+          "replica": "b",
+          "valid": true,
+          "actual_line": "2026-11-20T08:33:54.588515Z  INFO Cellar shutdown proof complete=true log_quiesced=true local_durability_closed=true clean_reload_prepared=true pending_application_events=0 pending_dispatches=0 deadline_elapsed=false"
+        }
+      ]
+    },
+    "native": {
+      "status": "diagnostic_matrix_measured",
+      "acceptance": false,
+      "pairs_per_group": 20,
+      "processes": 360,
+      "git_queries_checked": 360,
+      "profile_sha256": "ab8e2304a0460d444baa8fa167d52746800d9c73f517484d5530fddeac2b5513",
+      "protocol_declaration_sha256": "62d01f38a44a603ae051be6b5666e3af506185cc529fb068fce786cead5c5d01",
+      "report_sha256": "90dc6449548193d20d060638e51482c8909b8c4d26bc035e55ff0345ad2a4878",
+      "trials_sha256": "a88a261405df2054b1ec5b347ef70eb8b15602a11f6913f535d182b12eb1eda9",
+      "native_git_expectations_sha256": "045b4e756c9fada7be8dad41a06c09d721d9c07665327f9f1e341b92e3a4c535",
+      "cells": [
+        {
+          "commits": 100,
+          "operation": "blame",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 280476,
+              "p95": 429064
+            },
+            "median_backend_reads": 179.0,
+            "median_backend_bytes": 133772.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 192.0,
+              "median_backend_bytes": 171545.0,
+              "elapsed_us": {
+                "p50": 305922,
+                "p95": 484333
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 91811,
+              "p95": 220790
+            },
+            "median_backend_reads": 52.0,
+            "median_backend_bytes": 154002.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 65.0,
+              "median_backend_bytes": 191775.0,
+              "elapsed_us": {
+                "p50": 110563,
+                "p95": 243276
+              }
+            }
+          },
+          "target": true,
+          "p95_ratio": 0.5145852367012846,
+          "gate": "passed"
+        },
+        {
+          "commits": 100,
+          "operation": "blame",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 128,
+              "p95": 223
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 192.0,
+              "median_backend_bytes": 171545.0,
+              "elapsed_us": {
+                "p50": 305922,
+                "p95": 484333
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 103,
+              "p95": 238
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 65.0,
+              "median_backend_bytes": 191775.0,
+              "elapsed_us": {
+                "p50": 110563,
+                "p95": 243276
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 1.0672645739910314,
+          "gate": "passed"
+        },
+        {
+          "commits": 100,
+          "operation": "blob",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 39994,
+              "p95": 47285
+            },
+            "median_backend_reads": 55.0,
+            "median_backend_bytes": 43319.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 68.0,
+              "median_backend_bytes": 81092.0,
+              "elapsed_us": {
+                "p50": 50942,
+                "p95": 59799
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 13335,
+              "p95": 15549
+            },
+            "median_backend_reads": 9.0,
+            "median_backend_bytes": 52088.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 22.0,
+              "median_backend_bytes": 89861.0,
+              "elapsed_us": {
+                "p50": 23729,
+                "p95": 29502
+              }
+            }
+          },
+          "target": true,
+          "p95_ratio": 0.32883578301787036,
+          "gate": "passed"
+        },
+        {
+          "commits": 100,
+          "operation": "blob",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 58,
+              "p95": 75
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 68.0,
+              "median_backend_bytes": 81092.0,
+              "elapsed_us": {
+                "p50": 50942,
+                "p95": 59799
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 50,
+              "p95": 67
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 22.0,
+              "median_backend_bytes": 89861.0,
+              "elapsed_us": {
+                "p50": 23729,
+                "p95": 29502
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 0.8933333333333333,
+          "gate": "passed"
+        },
+        {
+          "commits": 100,
+          "operation": "history",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 10944,
+              "p95": 12534
+            },
+            "median_backend_reads": 12.0,
+            "median_backend_bytes": 52029.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 25.0,
+              "median_backend_bytes": 89802.0,
+              "elapsed_us": {
+                "p50": 22138,
+                "p95": 37997
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 9996,
+              "p95": 14612
+            },
+            "median_backend_reads": 11.0,
+            "median_backend_bytes": 53602.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 24.0,
+              "median_backend_bytes": 91375.0,
+              "elapsed_us": {
+                "p50": 19865,
+                "p95": 28335
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 1.1657890537737354,
+          "gate": "failed"
+        },
+        {
+          "commits": 100,
+          "operation": "history",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 100,
+              "p95": 134
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 25.0,
+              "median_backend_bytes": 89802.0,
+              "elapsed_us": {
+                "p50": 22138,
+                "p95": 37997
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 95,
+              "p95": 158
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 24.0,
+              "median_backend_bytes": 91375.0,
+              "elapsed_us": {
+                "p50": 19865,
+                "p95": 28335
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 1.1791044776119404,
+          "gate": "failed"
+        },
+        {
+          "commits": 1000,
+          "operation": "blame",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 1969641,
+              "p95": 3146766
+            },
+            "median_backend_reads": 951.0,
+            "median_backend_bytes": 728968.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 967.0,
+              "median_backend_bytes": 784878.0,
+              "elapsed_us": {
+                "p50": 2014052,
+                "p95": 3183699
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 380584,
+              "p95": 660278
+            },
+            "median_backend_reads": 179.0,
+            "median_backend_bytes": 885049.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 195.0,
+              "median_backend_bytes": 940959.0,
+              "elapsed_us": {
+                "p50": 416654,
+                "p95": 699609
+              }
+            }
+          },
+          "target": true,
+          "p95_ratio": 0.20982748637807833,
+          "gate": "passed"
+        },
+        {
+          "commits": 1000,
+          "operation": "blame",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 141,
+              "p95": 614
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 967.0,
+              "median_backend_bytes": 784878.0,
+              "elapsed_us": {
+                "p50": 2014052,
+                "p95": 3183699
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 141,
+              "p95": 227
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 195.0,
+              "median_backend_bytes": 940959.0,
+              "elapsed_us": {
+                "p50": 416654,
+                "p95": 699609
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 0.3697068403908795,
+          "gate": "passed"
+        },
+        {
+          "commits": 1000,
+          "operation": "blob",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 43360,
+              "p95": 52009
+            },
+            "median_backend_reads": 43.0,
+            "median_backend_bytes": 189707.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 59.0,
+              "median_backend_bytes": 245617.0,
+              "elapsed_us": {
+                "p50": 58869,
+                "p95": 69059
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 18668,
+              "p95": 22412
+            },
+            "median_backend_reads": 14.0,
+            "median_backend_bytes": 197418.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 30.0,
+              "median_backend_bytes": 253328.0,
+              "elapsed_us": {
+                "p50": 34747,
+                "p95": 41442
+              }
+            }
+          },
+          "target": true,
+          "p95_ratio": 0.43092541675479246,
+          "gate": "passed"
+        },
+        {
+          "commits": 1000,
+          "operation": "blob",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 65,
+              "p95": 77
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 59.0,
+              "median_backend_bytes": 245617.0,
+              "elapsed_us": {
+                "p50": 58869,
+                "p95": 69059
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 54,
+              "p95": 64
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 30.0,
+              "median_backend_bytes": 253328.0,
+              "elapsed_us": {
+                "p50": 34747,
+                "p95": 41442
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 0.8311688311688312,
+          "gate": "passed"
+        },
+        {
+          "commits": 1000,
+          "operation": "history",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 94428,
+              "p95": 108560
+            },
+            "median_backend_reads": 76.0,
+            "median_backend_bytes": 399064.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 92.0,
+              "median_backend_bytes": 454974.0,
+              "elapsed_us": {
+                "p50": 111390,
+                "p95": 123214
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 93598,
+              "p95": 126599
+            },
+            "median_backend_reads": 75.0,
+            "median_backend_bytes": 400628.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 91.0,
+              "median_backend_bytes": 456538.0,
+              "elapsed_us": {
+                "p50": 110115,
+                "p95": 144412
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 1.1661661753868828,
+          "gate": "failed"
+        },
+        {
+          "commits": 1000,
+          "operation": "history",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 724,
+              "p95": 973
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 92.0,
+              "median_backend_bytes": 454974.0,
+              "elapsed_us": {
+                "p50": 111390,
+                "p95": 123214
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 720,
+              "p95": 783
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 91.0,
+              "median_backend_bytes": 456538.0,
+              "elapsed_us": {
+                "p50": 110115,
+                "p95": 144412
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 0.8047276464542652,
+          "gate": "passed"
+        },
+        {
+          "commits": 10000,
+          "operation": "blame",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 1102486,
+              "p95": 1946994
+            },
+            "median_backend_reads": 667.0,
+            "median_backend_bytes": 4708972.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 685.0,
+              "median_backend_bytes": 4765317.0,
+              "elapsed_us": {
+                "p50": 1132979,
+                "p95": 1995088
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 325464,
+              "p95": 788760
+            },
+            "median_backend_reads": 254.0,
+            "median_backend_bytes": 4905647.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 272.0,
+              "median_backend_bytes": 4961992.0,
+              "elapsed_us": {
+                "p50": 342845,
+                "p95": 822462
+              }
+            }
+          },
+          "target": true,
+          "p95_ratio": 0.4051168108376297,
+          "gate": "passed"
+        },
+        {
+          "commits": 10000,
+          "operation": "blame",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 97,
+              "p95": 270
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 685.0,
+              "median_backend_bytes": 4765317.0,
+              "elapsed_us": {
+                "p50": 1132979,
+                "p95": 1995088
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 90,
+              "p95": 224
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 272.0,
+              "median_backend_bytes": 4961992.0,
+              "elapsed_us": {
+                "p50": 342845,
+                "p95": 822462
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 0.8296296296296296,
+          "gate": "passed"
+        },
+        {
+          "commits": 10000,
+          "operation": "blob",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 31714,
+              "p95": 57510
+            },
+            "median_backend_reads": 18.0,
+            "median_backend_bytes": 271596.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 36.0,
+              "median_backend_bytes": 327941.0,
+              "elapsed_us": {
+                "p50": 53316,
+                "p95": 97160
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 22699,
+              "p95": 46281
+            },
+            "median_backend_reads": 16.0,
+            "median_backend_bytes": 283371.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 34.0,
+              "median_backend_bytes": 339716.0,
+              "elapsed_us": {
+                "p50": 44442,
+                "p95": 83461
+              }
+            }
+          },
+          "target": true,
+          "p95_ratio": 0.8047470005216484,
+          "gate": "failed"
+        },
+        {
+          "commits": 10000,
+          "operation": "blob",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 61,
+              "p95": 132
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 36.0,
+              "median_backend_bytes": 327941.0,
+              "elapsed_us": {
+                "p50": 53316,
+                "p95": 97160
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 59,
+              "p95": 136
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 34.0,
+              "median_backend_bytes": 339716.0,
+              "elapsed_us": {
+                "p50": 44442,
+                "p95": 83461
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 1.0303030303030303,
+          "gate": "passed"
+        },
+        {
+          "commits": 10000,
+          "operation": "history",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 121700,
+              "p95": 131214
+            },
+            "median_backend_reads": 116.0,
+            "median_backend_bytes": 1711875.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 134.0,
+              "median_backend_bytes": 1768220.0,
+              "elapsed_us": {
+                "p50": 138830,
+                "p95": 151901
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 125533,
+              "p95": 135821
+            },
+            "median_backend_reads": 115.0,
+            "median_backend_bytes": 1713443.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 133.0,
+              "median_backend_bytes": 1769788.0,
+              "elapsed_us": {
+                "p50": 143917,
+                "p95": 164773
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 1.0351105827122107,
+          "gate": "passed"
+        },
+        {
+          "commits": 10000,
+          "operation": "history",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 707,
+              "p95": 764
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 134.0,
+              "median_backend_bytes": 1768220.0,
+              "elapsed_us": {
+                "p50": 138830,
+                "p95": 151901
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 741,
+              "p95": 936
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 133.0,
+              "median_backend_bytes": 1769788.0,
+              "elapsed_us": {
+                "p50": 143917,
+                "p95": 164773
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 1.225130890052356,
+          "gate": "failed"
+        }
+      ],
+      "failed_descriptive_gates": [
+        {
+          "commits": 100,
+          "operation": "history",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 10944,
+              "p95": 12534
+            },
+            "median_backend_reads": 12.0,
+            "median_backend_bytes": 52029.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 25.0,
+              "median_backend_bytes": 89802.0,
+              "elapsed_us": {
+                "p50": 22138,
+                "p95": 37997
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 9996,
+              "p95": 14612
+            },
+            "median_backend_reads": 11.0,
+            "median_backend_bytes": 53602.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 24.0,
+              "median_backend_bytes": 91375.0,
+              "elapsed_us": {
+                "p50": 19865,
+                "p95": 28335
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 1.1657890537737354,
+          "gate": "failed"
+        },
+        {
+          "commits": 100,
+          "operation": "history",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 100,
+              "p95": 134
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 25.0,
+              "median_backend_bytes": 89802.0,
+              "elapsed_us": {
+                "p50": 22138,
+                "p95": 37997
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 95,
+              "p95": 158
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 13.0,
+              "median_backend_bytes": 37773.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 24.0,
+              "median_backend_bytes": 91375.0,
+              "elapsed_us": {
+                "p50": 19865,
+                "p95": 28335
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 1.1791044776119404,
+          "gate": "failed"
+        },
+        {
+          "commits": 1000,
+          "operation": "history",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 94428,
+              "p95": 108560
+            },
+            "median_backend_reads": 76.0,
+            "median_backend_bytes": 399064.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 92.0,
+              "median_backend_bytes": 454974.0,
+              "elapsed_us": {
+                "p50": 111390,
+                "p95": 123214
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 93598,
+              "p95": 126599
+            },
+            "median_backend_reads": 75.0,
+            "median_backend_bytes": 400628.0,
+            "cold_open": {
+              "median_backend_reads": 16.0,
+              "median_backend_bytes": 55910.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 91.0,
+              "median_backend_bytes": 456538.0,
+              "elapsed_us": {
+                "p50": 110115,
+                "p95": 144412
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 1.1661661753868828,
+          "gate": "failed"
+        },
+        {
+          "commits": 10000,
+          "operation": "blob",
+          "cache": "cold",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 31714,
+              "p95": 57510
+            },
+            "median_backend_reads": 18.0,
+            "median_backend_bytes": 271596.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 36.0,
+              "median_backend_bytes": 327941.0,
+              "elapsed_us": {
+                "p50": 53316,
+                "p95": 97160
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 22699,
+              "p95": 46281
+            },
+            "median_backend_reads": 16.0,
+            "median_backend_bytes": 283371.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 34.0,
+              "median_backend_bytes": 339716.0,
+              "elapsed_us": {
+                "p50": 44442,
+                "p95": 83461
+              }
+            }
+          },
+          "target": true,
+          "p95_ratio": 0.8047470005216484,
+          "gate": "failed"
+        },
+        {
+          "commits": 10000,
+          "operation": "history",
+          "cache": "warm",
+          "kind": "matrix",
+          "a": {
+            "query_us": {
+              "p50": 707,
+              "p95": 764
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 134.0,
+              "median_backend_bytes": 1768220.0,
+              "elapsed_us": {
+                "p50": 138830,
+                "p95": 151901
+              }
+            }
+          },
+          "b": {
+            "query_us": {
+              "p50": 741,
+              "p95": 936
+            },
+            "median_backend_reads": 0.0,
+            "median_backend_bytes": 0.0,
+            "cold_open": {
+              "median_backend_reads": 18.0,
+              "median_backend_bytes": 56345.0
+            },
+            "cold_open_plus_query": {
+              "median_backend_reads": 133.0,
+              "median_backend_bytes": 1769788.0,
+              "elapsed_us": {
+                "p50": 143917,
+                "p95": 164773
+              }
+            }
+          },
+          "target": false,
+          "p95_ratio": 1.225130890052356,
+          "gate": "failed"
+        }
+      ],
+      "provider_binding": {
+        "container_id": "3e25d8de18dd2f6cf3e91a6c00ef379f8de032b513639d439dd1ae3a495cbad8",
+        "image_id": "sha256:040304b66e029a5cde4bed140b41513e925909839a9b912a40a98340610d1f66",
+        "quota": {
+          "NanoCpus": 1000000000,
+          "Memory": 3221225472,
+          "MemorySwap": 3221225472
+        },
+        "mounts": [
+          {
+            "Type": "bind",
+            "Source": "/mnt/lima-colima-rh8144/crab-rh8144-rustfs-data",
+            "Destination": "/data"
+          }
+        ]
+      },
+      "worker_quotas": {
+        "baseline": {
+          "NanoCpus": 1000000000,
+          "Memory": 1073741824,
+          "MemorySwap": 1073741824,
+          "cpu.max": "100000 100000",
+          "memory.max": "1073741824",
+          "memory.swap.max": "0"
+        },
+        "candidate": {
+          "NanoCpus": 1000000000,
+          "Memory": 1073741824,
+          "MemorySwap": 1073741824,
+          "cpu.max": "100000 100000",
+          "memory.max": "1073741824",
+          "memory.swap.max": "0"
+        }
+      },
+      "final_cgroups": {
+        "baseline": {
+          "memory.peak": "29847552",
+          "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0",
+          "cpu.stat": "usage_usec 17977375\nuser_usec 12858590\nsystem_usec 5118785\ncore_sched.force_idle_usec 0\nnr_periods 1145\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0"
+        },
+        "candidate": {
+          "memory.peak": "29937664",
+          "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0",
+          "cpu.stat": "usage_usec 10951692\nuser_usec 7394096\nsystem_usec 3557596\ncore_sched.force_idle_usec 0\nnr_periods 622\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0"
+        }
+      },
+      "containers": {
+        "baseline": {
+          "name": "crab-rh8144-exact-batch-baseline",
+          "container_id": "a7ddc7e9a28841dedf81b2f61a90f25c265ed53791fce0bf227f264f55f6291e",
+          "image_id": "sha256:6a1fefbbbedb3b00da803d34fc5ace4660cf9cec9f64ecef9b68782d8a28e476",
+          "exit_code": 0,
+          "oom_killed": false
+        },
+        "candidate": {
+          "name": "crab-rh8144-exact-batch-candidate",
+          "container_id": "fd886fec89955339f812b2cc489ff414048b8c927ff8d42c86e98e6fc0037cd7",
+          "image_id": "sha256:7676ef3d12a213ba2e77f95db55ab06f028585594613f11f73b0d175ae0b93b4",
+          "exit_code": 0,
+          "oom_killed": false
+        }
+      }
+    },
+    "remaining_priorities": [
+      "Reduce remaining cold metadata-index work; existing readers already have bounded page caches.",
+      "Combined-source HTTP throughput/latency and same-executable repeatability; retain all 34 earlier failed short cases.",
+      "Independent repository-growth and minimum-resource lifecycle cells on the optimized source.",
+      "Conditional R6 attribution/range formats remain deferred pending measured need."
+    ],
+    "coalesced_miss_regression": {
+      "before_fetched_bytes": 64,
+      "after_fetched_bytes": 24,
+      "red_log_sha256": "9f17f51b311f870a440d9e8b3eaf45b6363408b8ae8bc1f4801ee332df50c586",
+      "scope": "Canonical and embedded pack branches are table-tested; cache hits remain reusable, multi-entry misses are exact."
+    },
+    "prior_trials": "small_pack_window_pre_exact_batches retains both prior prototypes, all measured cells and the access-pattern diagnosis.",
+    "cold_blame_index_work": {
+      "commits": 10000,
+      "samples": 20,
+      "decoded_blocks": {
+        "capsule_admission": {
+          "blocks": 0,
+          "bytes": 0
+        },
+        "capsule_visibility": {
+          "blocks": 0,
+          "bytes": 0
+        },
+        "checkpoint_visibility": {
+          "blocks": 0,
+          "bytes": 0
+        },
+        "checkpoint_visibility_pages": {
+          "blocks": 0,
+          "bytes": 0
+        },
+        "commit_graph": {
+          "blocks": 28,
+          "bytes": 901416
+        },
+        "git_object_index": {
+          "blocks": 77,
+          "bytes": 2396311
+        },
+        "path_state": {
+          "blocks": 68,
+          "bytes": 1297273
+        },
+        "pointer_catalog_pages": {
+          "blocks": 0,
+          "bytes": 0
+        }
+      },
+      "existing_page_cache_contract": {
+        "source": "crates/crab-metadata/src/pages/cache.rs",
+        "source_sha256": "cdc3be551bc4e9e2f6e36d6207c20c2be8601ea6d18b881e2d3166e6896ed7be",
+        "maximum_bytes": 8388608,
+        "maximum_entries": 256
+      },
+      "next_work": "Trace distinct-page work, lookup batching and cache lifetimes within the existing format and cache ownership."
+    }
   }
 }
