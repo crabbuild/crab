@@ -70,6 +70,8 @@ macOS automatic update installation requires a future signed release.
 - Upgraded the embedded Cellar runtime to 0.1.1.
 - Added first-run Docker setup for the repository HTTP server and S3 gateway,
   including generated configuration and client identity.
+- Included shared Results contracts and chart runtime in repository server
+  container builds.
 - Patched Caddy's network dependency across server, Compose, and Cloudflare
   runtime images.
 
