@@ -469,3 +469,30 @@ comparisons also remain pending.
 Sixteen completed request journals now have verified lossless gzip archives.
 Their original byte hashes, compressed hashes and paths remain in the manifest;
 all original reports, thresholds and failed cells remain available.
+
+
+### Current native Linux minimum-resource proof
+
+The current-source ARM64 executable passes 34 local RustFS checks in an enforced
+1-CPU/1-GiB Linux container with no additional swap. Its eight-client mixed soak
+runs 600.152 seconds and completes 190,253 successful requests, with zero errors,
+rejections or Git-oracle mismatches. Late-window RSS ratio is 1.0143 against the
+unchanged 1.10 bound; peak cgroup memory is 342,568,960 bytes, with no OOM.
+Native health is healthy. Admission drains and shutdown exits zero with all six
+required actual durability fields.
+
+This is a local cross-build of `0fa518caf5ed` using preinstalled Rust 1.99.1 and
+the ARM64 GNU toolchain; it is not a CI artifact. The exact ELF hash is
+`07ad4e5be2422497031980255e822c715faa17d70081f7d09159be6b313521aa`.
+Every parent runtime layer and the shipping Docker/entrypoint/Caddy files match
+the retained ARM64 runtime. Inside-image bytes, native execution, platform and
+current OCI source label are verified. The exercised profile runs the direct
+read worker; current Caddy ingress and hosted latency are not inferred from it.
+
+Before confirmation samples begin, the runner bounds progress reporting rather
+than repeatedly serializing the growing full result set. Full completed/failed
+reports retain every row. Fixed 100-pair baseline calibration and confirmation
+keep the original queries and thresholds. Release growth is also fixed at 100
+pairs before its first sample, following the twenty-pair native screen's noisy
+tails. The declared minimum is twenty; no threshold or post-result sample tuning
+is introduced. Earlier results and the original unstarted runner are retained.

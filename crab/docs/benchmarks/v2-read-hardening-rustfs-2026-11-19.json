@@ -5736,5 +5736,676 @@
     "manifest_sha256": "3997f1d41600cecef2e6bba21bd50bfdb08338ab18de5edd25c7011a4e45c748",
     "archives": 16,
     "scope": "Completed journals only; original and gzip hashes, decoded-byte equivalence checked before unlinking raw files; all reports and failures retained."
+  },
+  "current_native_minimum_profile": {
+    "status": "passed",
+    "report_sha256": "c0686d571ca00fe3ab5a07191fc1c470f2399af86cc0da40e16fbe41950d3852",
+    "binding": {
+      "kind": "local-preinstalled-cross-toolchain",
+      "source_revision": "0fa518caf5edf2d767040e1a9bf98e37f17383ad",
+      "source_tree": "f0a1464f73d7c4a113ea8cafe1e33b232817a84b",
+      "image_id": "sha256:308a71ed1676544d14975b2cc434bed6095119ef8ea4803602eeaf990c29220b",
+      "platform": "linux/arm64",
+      "server_binary_sha256": "07ad4e5be2422497031980255e822c715faa17d70081f7d09159be6b313521aa",
+      "build_receipt_sha256": "8a8eac5bce837f1566015ec2f08e662ea004fc293ec93db492b72a517e9d989e",
+      "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1",
+      "runtime_base_image": "sha256:c4e8434b95ba89fb10035d2a631c8ab0fc26d14d2446997ae899c0f9ad33d142",
+      "runtime_layers_unchanged": true,
+      "shipping_deployment_files_unchanged": ["crates/crab-server/deploy/Dockerfile","crates/crab-server/deploy/entrypoint.sh","crates/crab-server/deploy/compose.Caddyfile"],
+      "not_ci_artifact": true
+    },
+    "checks": [
+      {
+        "name": "owned-vm-forwarding-active",
+        "passed": true
+      },
+      {
+        "name": "enforced-docker-cpu-and-memory",
+        "passed": true
+      },
+      {
+        "name": "minimum-profile-public-ready",
+        "passed": true
+      },
+      {
+        "name": "minimum-profile-native-directory-ready",
+        "passed": true
+      },
+      {
+        "name": "startup-authority-sees-cgroup-limits",
+        "passed": true
+      },
+      {
+        "name": "real-oauth-session",
+        "passed": true
+      },
+      {
+        "name": "commits-equals-native-git",
+        "passed": true
+      },
+      {
+        "name": "file-preview-equals-native-git",
+        "passed": true
+      },
+      {
+        "name": "blob-equals-native-git",
+        "passed": true
+      },
+      {
+        "name": "blame-equals-native-git",
+        "passed": true
+      },
+      {
+        "name": "preview-large.rs-equals-native-git",
+        "passed": true
+      },
+      {
+        "name": "preview-large-binary.dat-equals-native-git",
+        "passed": true
+      },
+      {
+        "name": "preview-large-nonutf8.dat-equals-native-git",
+        "passed": true
+      },
+      {
+        "name": "preview-boundary.txt-equals-native-git",
+        "passed": true
+      },
+      {
+        "name": "preview-over-boundary.txt-equals-native-git",
+        "passed": true
+      },
+      {
+        "name": "preview-empty.txt-equals-native-git",
+        "passed": true
+      },
+      {
+        "name": "preview-binary.dat-equals-native-git",
+        "passed": true
+      },
+      {
+        "name": "preview-nonutf8.dat-equals-native-git",
+        "passed": true
+      },
+      {
+        "name": "preview-small.rs-equals-native-git",
+        "passed": true
+      },
+      {
+        "name": "raw-within-upstream-allowance-equals-native-git",
+        "passed": true
+      },
+      {
+        "name": "tagged-file-response-budget-preserved",
+        "passed": true
+      },
+      {
+        "name": "eight-cold-readers-share-one-producer",
+        "passed": true
+      },
+      {
+        "name": "managed-resident-capacity-fits-minimum",
+        "passed": true
+      },
+      {
+        "name": "admitted-work-drained",
+        "passed": true
+      },
+      {
+        "name": "authorized-preview-revalidates",
+        "passed": true
+      },
+      {
+        "name": "ten-minute-minimum-profile-mix-has-exact-git-results",
+        "passed": true
+      },
+      {
+        "name": "minimum-profile-soak-retains-one-percent-failure-envelope",
+        "passed": true
+      },
+      {
+        "name": "minimum-profile-soak-has-enough-resident-samples",
+        "passed": true
+      },
+      {
+        "name": "minimum-profile-soak-resident-ownership-plateaus",
+        "passed": true
+      },
+      {
+        "name": "minimum-profile-soak-admitted-work-drained",
+        "passed": true
+      },
+      {
+        "name": "cgroup-no-oom",
+        "passed": true
+      },
+      {
+        "name": "private-config-native-healthcheck-passes",
+        "passed": true
+      },
+      {
+        "name": "clean-minimum-profile-shutdown",
+        "passed": true
+      },
+      {
+        "name": "complete-minimum-profile-durability-proof",
+        "passed": true
+      }
+    ],
+    "quota": {
+      "memory_bytes": 1073741824,
+      "nano_cpus": 1000000000,
+      "swap_bytes": 1073741824
+    },
+    "capacity_resources": {
+      "memory_bytes": 1073741824,
+      "disk_limit_bytes": 34359738368,
+      "disk_capacity_bytes": 34359738368,
+      "free_disk_bytes": 5906993152,
+      "available_file_descriptors": 524276,
+      "job_credits": 1
+    },
+    "native_directory": {
+      "format": 2,
+      "revision": 0,
+      "state": "ready"
+    },
+    "soak": {
+      "case": {
+        "name": "minimum-mixed-8",
+        "cache": "warm_result",
+        "pattern": "same_key",
+        "clients": 8,
+        "duration_seconds": 600,
+        "warmup_seconds": 5,
+        "timeout_seconds": 90,
+        "workloads": ["file-preview","commits","blob","blame"]
+      },
+      "elapsed_seconds": 600.1523066670052,
+      "workloads": {
+        "file-preview": {
+          "attempts": 47566,
+          "successes": 47566,
+          "rejected": 0,
+          "errors": 0,
+          "oracle_mismatches": 0,
+          "elapsed_seconds": 600.1523066670052,
+          "offered_requests_per_second": 79.25654783226888,
+          "successful_requests_per_second": 79.25654783226888,
+          "latency_us": {
+            "p50": 18623.167,
+            "p95": 63571.542,
+            "p99": 115234.0
+          },
+          "successful_latency_us": {
+            "p50": 18623.167,
+            "p95": 63571.542,
+            "p99": 115234.0
+          },
+          "ttfb_us": {
+            "p50": 18607.583,
+            "p95": 63550.583,
+            "p99": 115136.708
+          },
+          "server_timing_ms": {
+            "open": {
+              "samples": 47566,
+              "p50": 0.002,
+              "p95": 0.008,
+              "p99": 10.472
+            },
+            "read": {
+              "samples": 47566,
+              "p50": 0.083,
+              "p95": 0.443,
+              "p99": 1.198
+            },
+            "encode": {
+              "samples": 47566,
+              "p50": 0.311,
+              "p95": 2.924,
+              "p99": 8.351
+            },
+            "total": {
+              "samples": 47566,
+              "p50": 0.472,
+              "p95": 3.678,
+              "p99": 21.569
+            }
+          },
+          "warmup_attempts": 112,
+          "client_cancellations": 0,
+          "setup_attempts": 0
+        },
+        "commits": {
+          "attempts": 47562,
+          "successes": 47562,
+          "rejected": 0,
+          "errors": 0,
+          "oracle_mismatches": 0,
+          "elapsed_seconds": 600.1523066670052,
+          "offered_requests_per_second": 79.24988285746905,
+          "successful_requests_per_second": 79.24988285746905,
+          "latency_us": {
+            "p50": 19806.084,
+            "p95": 66902.625,
+            "p99": 120838.792
+          },
+          "successful_latency_us": {
+            "p50": 19806.084,
+            "p95": 66902.625,
+            "p99": 120838.792
+          },
+          "ttfb_us": {
+            "p50": 19742.166,
+            "p95": 66860.0,
+            "p99": 120740.167
+          },
+          "server_timing_ms": {
+            "open": {
+              "samples": 47562,
+              "p50": 0.001,
+              "p95": 0.007,
+              "p99": 12.244
+            },
+            "read": {
+              "samples": 47562,
+              "p50": 0.886,
+              "p95": 5.211,
+              "p99": 11.362
+            },
+            "encode": {
+              "samples": 47562,
+              "p50": 0.035,
+              "p95": 0.217,
+              "p99": 0.716
+            },
+            "total": {
+              "samples": 47562,
+              "p50": 1.001,
+              "p95": 6.177,
+              "p99": 23.647
+            }
+          },
+          "warmup_attempts": 112,
+          "client_cancellations": 0,
+          "setup_attempts": 0
+        },
+        "blob": {
+          "attempts": 47562,
+          "successes": 47562,
+          "rejected": 0,
+          "errors": 0,
+          "oracle_mismatches": 0,
+          "elapsed_seconds": 600.1523066670052,
+          "offered_requests_per_second": 79.24988285746905,
+          "successful_requests_per_second": 79.24988285746905,
+          "latency_us": {
+            "p50": 18004.292,
+            "p95": 61227.709,
+            "p99": 113217.167
+          },
+          "successful_latency_us": {
+            "p50": 18004.292,
+            "p95": 61227.709,
+            "p99": 113217.167
+          },
+          "ttfb_us": {
+            "p50": 17987.834,
+            "p95": 61213.875,
+            "p99": 113200.125
+          },
+          "server_timing_ms": {
+            "open": {
+              "samples": 47562,
+              "p50": 0.002,
+              "p95": 0.007,
+              "p99": 10.513
+            },
+            "read": {
+              "samples": 47562,
+              "p50": 0.067,
+              "p95": 0.362,
+              "p99": 1.012
+            },
+            "encode": {
+              "samples": 47562,
+              "p50": 0.0,
+              "p95": 0.0,
+              "p99": 0.0
+            },
+            "total": {
+              "samples": 47562,
+              "p50": 0.075,
+              "p95": 0.485,
+              "p99": 11.871
+            }
+          },
+          "warmup_attempts": 111,
+          "client_cancellations": 0,
+          "setup_attempts": 0
+        },
+        "blame": {
+          "attempts": 47563,
+          "successes": 47563,
+          "rejected": 0,
+          "errors": 0,
+          "oracle_mismatches": 0,
+          "elapsed_seconds": 600.1523066670052,
+          "offered_requests_per_second": 79.251549101169,
+          "successful_requests_per_second": 79.251549101169,
+          "latency_us": {
+            "p50": 18807.333,
+            "p95": 64435.0,
+            "p99": 117437.667
+          },
+          "successful_latency_us": {
+            "p50": 18807.333,
+            "p95": 64435.0,
+            "p99": 117437.667
+          },
+          "ttfb_us": {
+            "p50": 18780.625,
+            "p95": 64408.292,
+            "p99": 117426.083
+          },
+          "server_timing_ms": {
+            "open": {
+              "samples": 47563,
+              "p50": 0.001,
+              "p95": 0.006,
+              "p99": 9.988
+            },
+            "read": {
+              "samples": 47563,
+              "p50": 0.054,
+              "p95": 0.31,
+              "p99": 0.896
+            },
+            "encode": {
+              "samples": 47563,
+              "p50": 0.455,
+              "p95": 3.367,
+              "p99": 9.346
+            },
+            "total": {
+              "samples": 47563,
+              "p50": 0.577,
+              "p95": 4.142,
+              "p99": 21.252
+            }
+          },
+          "warmup_attempts": 109,
+          "client_cancellations": 0,
+          "setup_attempts": 0
+        }
+      },
+      "rss_samples": [
+        {
+          "at": 431659.230202666,
+          "resident_bytes": 114298880
+        },
+        {
+          "at": 431669.408792291,
+          "resident_bytes": 192454656
+        },
+        {
+          "at": 431679.556236208,
+          "resident_bytes": 192581632
+        },
+        {
+          "at": 431689.994826416,
+          "resident_bytes": 193699840
+        },
+        {
+          "at": 431700.518280541,
+          "resident_bytes": 193699840
+        },
+        {
+          "at": 431710.753561583,
+          "resident_bytes": 193867776
+        },
+        {
+          "at": 431721.038301958,
+          "resident_bytes": 194355200
+        },
+        {
+          "at": 431731.518264208,
+          "resident_bytes": 194359296
+        },
+        {
+          "at": 431741.802946125,
+          "resident_bytes": 194359296
+        },
+        {
+          "at": 431752.050804416,
+          "resident_bytes": 197013504
+        },
+        {
+          "at": 431762.425156583,
+          "resident_bytes": 197185536
+        },
+        {
+          "at": 431772.912085416,
+          "resident_bytes": 197185536
+        },
+        {
+          "at": 431783.358678458,
+          "resident_bytes": 197185536
+        },
+        {
+          "at": 431793.59113675,
+          "resident_bytes": 197185536
+        },
+        {
+          "at": 431804.058663125,
+          "resident_bytes": 197185536
+        },
+        {
+          "at": 431814.60674,
+          "resident_bytes": 197185536
+        },
+        {
+          "at": 431825.069363583,
+          "resident_bytes": 197185536
+        },
+        {
+          "at": 431835.780469125,
+          "resident_bytes": 197185536
+        },
+        {
+          "at": 431846.142652875,
+          "resident_bytes": 197189632
+        },
+        {
+          "at": 431856.663502916,
+          "resident_bytes": 197189632
+        },
+        {
+          "at": 431867.087982666,
+          "resident_bytes": 197189632
+        },
+        {
+          "at": 431877.643265416,
+          "resident_bytes": 197189632
+        },
+        {
+          "at": 431888.036287708,
+          "resident_bytes": 197189632
+        },
+        {
+          "at": 431898.310641,
+          "resident_bytes": 197189632
+        },
+        {
+          "at": 431908.678454458,
+          "resident_bytes": 197312512
+        },
+        {
+          "at": 431919.073647291,
+          "resident_bytes": 197488640
+        },
+        {
+          "at": 431929.69960825,
+          "resident_bytes": 197537792
+        },
+        {
+          "at": 431939.994725833,
+          "resident_bytes": 197648384
+        },
+        {
+          "at": 431950.104065416,
+          "resident_bytes": 197652480
+        },
+        {
+          "at": 431960.254458791,
+          "resident_bytes": 197652480
+        },
+        {
+          "at": 431972.493464958,
+          "resident_bytes": 197652480
+        },
+        {
+          "at": 431983.123953875,
+          "resident_bytes": 197652480
+        },
+        {
+          "at": 431994.011140916,
+          "resident_bytes": 197652480
+        },
+        {
+          "at": 432004.589814333,
+          "resident_bytes": 197668864
+        },
+        {
+          "at": 432015.294446541,
+          "resident_bytes": 197668864
+        },
+        {
+          "at": 432025.543715625,
+          "resident_bytes": 197668864
+        },
+        {
+          "at": 432035.626388208,
+          "resident_bytes": 197771264
+        },
+        {
+          "at": 432045.796717666,
+          "resident_bytes": 198012928
+        },
+        {
+          "at": 432056.374393708,
+          "resident_bytes": 198189056
+        },
+        {
+          "at": 432066.769833958,
+          "resident_bytes": 198205440
+        },
+        {
+          "at": 432077.248800041,
+          "resident_bytes": 198205440
+        },
+        {
+          "at": 432087.563759375,
+          "resident_bytes": 198205440
+        },
+        {
+          "at": 432097.786757,
+          "resident_bytes": 198217728
+        },
+        {
+          "at": 432107.907482833,
+          "resident_bytes": 198438912
+        },
+        {
+          "at": 432118.171873125,
+          "resident_bytes": 198885376
+        },
+        {
+          "at": 432128.346133583,
+          "resident_bytes": 198930432
+        },
+        {
+          "at": 432138.531330958,
+          "resident_bytes": 198991872
+        },
+        {
+          "at": 432148.656785958,
+          "resident_bytes": 199045120
+        },
+        {
+          "at": 432158.773982791,
+          "resident_bytes": 199049216
+        },
+        {
+          "at": 432169.147404416,
+          "resident_bytes": 199049216
+        },
+        {
+          "at": 432179.635998541,
+          "resident_bytes": 199049216
+        },
+        {
+          "at": 432189.885037208,
+          "resident_bytes": 201318400
+        },
+        {
+          "at": 432199.9929705,
+          "resident_bytes": 201494528
+        },
+        {
+          "at": 432210.243487291,
+          "resident_bytes": 201719808
+        },
+        {
+          "at": 432220.474543875,
+          "resident_bytes": 203452416
+        },
+        {
+          "at": 432230.930667041,
+          "resident_bytes": 203452416
+        },
+        {
+          "at": 432241.320136416,
+          "resident_bytes": 203452416
+        },
+        {
+          "at": 432251.88965975,
+          "resident_bytes": 204230656
+        },
+        {
+          "at": 432262.53485225,
+          "resident_bytes": 204394496
+        }
+      ],
+      "late_rss_ratio": 1.0143275802550786,
+      "maximum_late_rss_ratio": 1.1
+    },
+    "peak_cgroup_bytes": 342568960,
+    "memory_events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0",
+    "exit_code": 0,
+    "shutdown_fields": {
+      "complete": "true",
+      "log_quiesced": "true",
+      "local_durability_closed": "true",
+      "pending_application_events": "0",
+      "pending_dispatches": "0",
+      "deadline_elapsed": "false"
+    },
+    "health_status": "healthy",
+    "scope": "Current-source local native Linux ARM64 direct read worker, enforced 1 CPU / 1 GiB / no extra swap; locally cross-compiled with Rust 1.99.1 and exact binary binding. Not a CI image, Caddy ingress, matched latency or hosted-S3 claim."
+  },
+  "release_growth_fixed100_declaration": {
+    "declared_at": 1795135827.559472,
+    "pairs_per_case": 100,
+    "fixtures": 10,
+    "expected_processes": 2000,
+    "expected_queries": 20000,
+    "expected_cells": 200,
+    "maximum_control_p95_ratio": 1.1,
+    "orchestrator_sha256": "b097498911711c8ea70d68f81f6a2c3f36444b673d2f3f27492897c0f3ddee21",
+    "original_unstarted_20_pair_script_sha256": "06b062fa289391a84341076930bdea73d4dd4506293b62517ea380c67d1872a9",
+    "reason": "Increase precision before any release growth samples, following the native 20-pair screen; fixed 100, same exact query/Git oracle, no p99 under 1000 and no threshold or sample-count tuning after results. Bounded progress reports avoid repeated full-proof serialization during measurements.",
+    "prerequisite": "Native 100-pair baseline calibration must pass before release growth timing."
   }
 }
