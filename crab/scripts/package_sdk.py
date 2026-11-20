@@ -16,14 +16,6 @@ import time
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[2]
-VERSION = "0.1.0"
-CLOSURE = [
-    "crab-types", "crab-xet", "crab-git", "crab-auth", "crab-storage",
-    "crab-auth-store", "crab-coordination", "crab-cache", "crab-cache-store",
-    "crab-diff", "crab-lfs", "crab-metadata", "crab-remote-git", "crab-read",
-    "crab-write", "crab-remote", "crab-staging", "crab-workflow", "crab-sdk",
-]
-PROFILES = ["minimal", "remote-files", "results", "local", "service"]
 COMPILE_FAIL_PROBES = [
     (
         "minimal-hides-runtime",
@@ -136,10 +128,32 @@ def main() -> None:
     env["CARGO_INCREMENTAL"] = "0"
     env["RUSTC_WRAPPER"] = ""
 
+    metadata = json.loads(run(
+        ["cargo", f"+{args.toolchain}", "metadata", "--locked", "--no-deps",
+         "--all-features", "--format-version", "1"], cwd=ROOT, env=env,
+    ))
+    workspace = {Path(package["manifest_path"]).parent.resolve(): package
+                 for package in metadata["packages"]}
+    pending = [next(package for package in workspace.values() if package["name"] == "crab-sdk")]
+    closure = {}
+    while pending:
+        package = pending.pop()
+        if package["name"] in closure:
+            continue
+        closure[package["name"]] = package["version"]
+        # Cargo removes local paths from tarballs. Include optional runtime/build
+        # edges, while keeping workspace-only test fixtures outside this closure.
+        for dependency in package["dependencies"]:
+            if dependency["kind"] == "dev" or not dependency.get("path"):
+                continue
+            member = workspace.get(Path(dependency["path"]).resolve())
+            if member is not None:
+                pending.append(member)
+
     command = ["cargo", f"+{args.toolchain}", "package", "--locked", "--no-verify"]
     if args.allow_dirty:
         command.append("--allow-dirty")
-    for package in CLOSURE:
+    for package in sorted(closure):
         command.extend(["-p", package])
     started = time.monotonic()
     package_log = run(command, cwd=ROOT, env=env)
@@ -149,8 +163,8 @@ def main() -> None:
     vendor.mkdir()
     packages = []
     patch = ["[patch.crates-io]"]
-    for name in CLOSURE:
-        archive = package_directory / f"{name}-{VERSION}.crate"
+    for name, version in sorted(closure.items()):
+        archive = package_directory / f"{name}-{version}.crate"
         if not archive.is_file():
             raise RuntimeError(f"Cargo did not create {archive}")
         extracted = safe_extract(archive, vendor)
@@ -166,7 +180,8 @@ def main() -> None:
     config.mkdir()
     (config / "config.toml").write_text("\n".join(patch) + "\n")
     profile_results = []
-    for profile in PROFILES:
+    profiles = tomllib.loads((consumer / "Cargo.toml").read_text())["workspace"]["members"]
+    for profile in profiles:
         before = time.monotonic()
         log = run(["cargo", f"+{args.toolchain}", "check", "--manifest-path",
                    str(consumer / profile / "Cargo.toml")], cwd=consumer, env=env)
