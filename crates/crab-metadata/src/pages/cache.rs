@@ -5,6 +5,9 @@ use futures_util::{StreamExt, TryStreamExt};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+#[path = "cache/lookup.rs"]
+mod lookup;
+
 const CACHE_BYTES: usize = 8 * 1024 * 1024;
 const CACHE_PAGES: usize = 256;
 pub(crate) const READ_AHEAD_BYTES: u64 = 64 * 1024;
@@ -215,87 +218,6 @@ impl PageCache {
         Ok(())
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "page lookup binds routing, origin and caller-owned aggregate admission"
-    )]
-    pub(crate) async fn lookup(
-        &self,
-        store: &Store,
-        path: &object_store::path::Path,
-        layer: usize,
-        source: std::ops::Range<u64>,
-        root: &PageRef,
-        kind: Kind,
-        keys: &[Vec<u8>],
-        work: &mut PageWork,
-    ) -> Result<Vec<Option<Vec<u8>>>> {
-        let source_bytes = source
-            .end
-            .checked_sub(source.start)
-            .ok_or_else(|| corruption("invalid page source range"))?;
-        if keys.iter().any(|key| key.len() != kind.key_bytes()) {
-            return Err(corruption("invalid lookup key"));
-        }
-        let mut results = vec![None; keys.len()];
-        if keys.is_empty() {
-            return Ok(results);
-        }
-        let mut pending = vec![(root.clone(), (0..keys.len()).collect::<Vec<_>>())];
-        while !pending.is_empty() {
-            for (reference, _) in &pending {
-                reference.validate(kind, source_bytes)?;
-                self.admit(work, layer, source.start + reference.offset, reference)?;
-            }
-            // Charge the entire wave before starting I/O, including warm pages.
-            let pages = futures_util::stream::iter(std::mem::take(&mut pending))
-                .map(|(reference, positions)| {
-                    let source = source.clone();
-                    async move {
-                        let page = self
-                            .fetch(store, path, layer, source.clone(), &reference, kind)
-                            .await?;
-                        Ok::<_, MetadataError>((page, positions))
-                    }
-                })
-                .buffer_unordered(4)
-                .try_collect::<Vec<_>>()
-                .await?;
-            for (page, positions) in pages {
-                match page.as_ref() {
-                    Page::Leaf(rows) => {
-                        for position in positions {
-                            if let Ok(index) =
-                                rows.binary_search_by(|row| row.0.cmp(&keys[position]))
-                            {
-                                results[position] = Some(rows[index].1.clone());
-                            }
-                        }
-                    }
-                    Page::Branch(children) => {
-                        let mut batches = BTreeMap::<usize, Vec<usize>>::new();
-                        for position in positions {
-                            let index =
-                                children.partition_point(|child| child.last < keys[position]);
-                            if children
-                                .get(index)
-                                .is_some_and(|child| child.first <= keys[position])
-                            {
-                                batches.entry(index).or_default().push(position);
-                            }
-                        }
-                        pending.extend(
-                            batches
-                                .into_iter()
-                                .map(|(index, positions)| (children[index].clone(), positions)),
-                        );
-                    }
-                }
-            }
-        }
-        Ok(results)
-    }
-
     pub(crate) async fn scan(
         &self,
         store: &Store,
@@ -402,6 +324,22 @@ impl PageCache {
             .lock()
             .map_err(|_| MetadataError::Internal("metadata page cache is poisoned".to_owned()))
     }
+    fn cached_page(
+        &self,
+        key: (usize, u64),
+        reference: &PageRef,
+        kind: Kind,
+    ) -> Result<Option<Arc<Page>>> {
+        let cache = self.state()?;
+        let Some((previous_kind, previous, page)) = cache.pages.get(&key) else {
+            return Ok(None);
+        };
+        if *previous_kind != kind || previous != reference {
+            return Err(corruption("cached page routing metadata changed"));
+        }
+        Ok(Some(page.clone()))
+    }
+
     pub(crate) async fn fetch(
         &self,
         store: &Store,
@@ -421,11 +359,8 @@ impl PageCache {
             .checked_add(reference.offset)
             .ok_or_else(|| corruption("page source offset overflows"))?;
         let key = (layer, offset);
-        if let Some((previous_kind, previous, page)) = self.state()?.pages.get(&key) {
-            if *previous_kind != kind || previous != reference {
-                return Err(corruption("cached page routing metadata changed"));
-            }
-            return Ok(page.clone());
+        if let Some(page) = self.cached_page(key, reference, kind)? {
+            return Ok(page);
         }
         // Page-call admission remains with the owning query.
         let bytes = self

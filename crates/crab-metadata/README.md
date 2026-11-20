@@ -467,6 +467,13 @@ format; maintenance may rebuild the unreleased eager browse index into pages.
 Path and graph readers share the authenticated page codec and an 8-MiB/256-page
 cache; each cache belongs to one immutable captured layer directory.
 
+Lookup waves admit all requested pages before origin reads, including cache
+hits. Adjacent cold pages share exact transfers of at most 64 KiB; cached pages
+and unselected gaps are excluded. Each member keeps its own authenticated hash,
+routing metadata and decoded-cache ownership. The transfer bound limits merging,
+not individual page admission. Warm waves avoid cold-read orchestration; existing
+proof-block read-ahead and captured-source boundaries remain unchanged.
+
 `CommitGraphView` supplies the same positional queries to complete maintenance
 graphs and immutable paged readers. Path-state opening binds the paged descriptor's
 verified positional digest; queried records are checked through batched graph reads.
