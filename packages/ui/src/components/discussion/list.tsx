@@ -192,7 +192,7 @@ export function DiscussionListControls({
         <div
           role="group"
           aria-label="Discussion filters"
-          className="flex max-w-full flex-wrap items-center gap-2"
+          className="flex min-w-0 max-w-full flex-wrap items-center gap-2 p-1 -m-1"
         >
           {filterKinds.map((kind) => (
             <DiscussionFilter
