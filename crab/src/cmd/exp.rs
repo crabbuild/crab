@@ -3416,7 +3416,7 @@ async fn push_experiments_to_remote(
 
         let metadata = read_local_metadata(repo_root, id)?;
         let snapshot_dir = workspace_dir_path(repo_root, id);
-        if metadata.status == "success" && !snapshot_dir.is_dir() {
+        if matches!(metadata.status.as_str(), "success" | "saved") && !snapshot_dir.is_dir() {
             return Err(CrabError::Configuration {
                 key: "exp push".to_owned(),
                 origin: format!(
@@ -3531,7 +3531,11 @@ async fn pull_experiment_from_store(
 ) -> Result<()> {
     let metadata = read_remote_metadata(store, prefix, id).await?;
     pull_checkpoint_state(store, prefix, repo_root, id).await?;
-    if metadata.status == "success" {
+    // Saved and successful runs require their Apply snapshot, so a partial
+    // replica must retry the primary. Failed runs restore a snapshot when retained.
+    if matches!(metadata.status.as_str(), "success" | "saved")
+        || remote_object_exists(store, &remote_exp_workspace_manifest_path(prefix, id)).await?
+    {
         restore_workspace_snapshot(store, prefix, repo_root, id).await?;
     }
     let results = crab_workflow::results::RemoteResults::new(
@@ -8949,6 +8953,58 @@ mod tests {
         assert_eq!(
             fs::read_to_string(workspace_dir_path(repo_root, &id).join("result.txt")).unwrap(),
             "from primary\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn exp_pull_uses_primary_when_saved_replica_has_only_metadata() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        let primary = Store::new(std::sync::Arc::new(object_store::memory::InMemory::new()));
+        let replica = Store::new(std::sync::Arc::new(object_store::memory::InMemory::new()));
+        let prefix = "team/experiments";
+        let id = ExperimentId::new_v7();
+        let mut metadata = test_exp_metadata(id, &"a".repeat(40));
+        metadata.status = "saved".to_owned();
+        write_local_metadata(root, &metadata).unwrap();
+        let snapshot = workspace_dir_path(root, &id);
+        fs::create_dir_all(&snapshot).unwrap();
+        fs::write(snapshot.join("result.txt"), b"captured bytes").unwrap();
+        fs::write(
+            workspace_manifest_path(root, &id),
+            serde_json::to_vec(&ExpWorkspaceManifest {
+                deleted: Vec::new(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        push_experiments_to_remote(
+            &primary,
+            prefix,
+            root,
+            &[id],
+            false,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        write_remote_metadata_for_test(&replica, prefix, &metadata).await;
+        remove_experiment_files(root, &id).unwrap();
+
+        let remote = ExperimentRemote {
+            store: replica,
+            prefix: prefix.to_owned(),
+            primary_fallback: Some(ExperimentPrimaryFallback {
+                store: primary,
+                prefix: prefix.to_owned(),
+            }),
+        };
+        pull_experiments_from_remote(&remote, root, &[id], false)
+            .await
+            .unwrap();
+        assert_eq!(
+            fs::read(workspace_dir_path(root, &id).join("result.txt")).unwrap(),
+            b"captured bytes"
         );
     }
 

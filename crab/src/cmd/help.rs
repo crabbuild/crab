@@ -50,6 +50,7 @@ pub const COMMAND_SECTIONS: &[(&str, &[&str])] = &[
             "freeze",
             "unfreeze",
             "exp",
+            "results",
             "queue",
             "workflow",
             "params",
