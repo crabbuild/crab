@@ -1607,6 +1607,7 @@ DELETED_METADATA_REEXPORT_ADAPTER_FORBIDDEN_PATTERNS = {
     "use crab::metadata::file_index_lookup",
 }
 WORKFLOW_MODULE_ALLOWED_NORMAL_PACKAGES = {
+    "base64",
     "blake3",
     "bytes",
     "crab-coordination",
@@ -1628,6 +1629,7 @@ WORKFLOW_MODULE_ALLOWED_NORMAL_PACKAGES = {
     "petgraph",
     "reqwest",
     "rusqlite",
+    "schemars",
     "serde",
     "serde_json",
     "serde_yaml",
@@ -1769,8 +1771,8 @@ PRIVATE_INTERNAL_PACKAGES = {
     "crab-server",
     "crab-s3-gateway",
     "crab-vfs",
-    "crab-workflow",
 }
+# Results packaging includes its Workflow contract and chart owner.
 PUBLISHED_LIBRARY_PACKAGES = {
     "crab-auth",
     "crab-auth-store",
@@ -1788,6 +1790,7 @@ PUBLISHED_LIBRARY_PACKAGES = {
     "crab-staging",
     "crab-storage",
     "crab-types",
+    "crab-workflow",
     "crab-write",
     "crab-xet",
 }
@@ -1858,8 +1861,9 @@ WORKSPACE_DEPENDENCY_POLICY = {
         # Checkpoint cancellation fixtures need storage's test-only fault hooks.
         "dev": {"crab-cache", "crab-cache-store", "crab-storage"},
     },
+    # Results keeps its contract and serialization owner in crab-workflow.
     "crab-sdk": {
-        "normal": {"crab-auth", "crab-auth-store", "crab-cache", "crab-cache-store", "crab-coordination", "crab-git", "crab-lfs", "crab-metadata", "crab-read", "crab-remote", "crab-remote-git", "crab-staging", "crab-storage", "crab-types", "crab-write", "crab-xet"},
+        "normal": {"crab-auth", "crab-auth-store", "crab-cache", "crab-cache-store", "crab-coordination", "crab-git", "crab-lfs", "crab-metadata", "crab-read", "crab-remote", "crab-remote-git", "crab-staging", "crab-storage", "crab-types", "crab-workflow", "crab-write", "crab-xet"},
         "dev": {"crab-git", "crab-xet"},
     },
     "crab-write": {"normal": {"crab-coordination", "crab-types", "crab-git", "crab-metadata", "crab-remote-git", "crab-storage", "crab-xet"}},
@@ -1873,6 +1877,7 @@ WORKSPACE_DEPENDENCY_POLICY = {
             "crab-read",
             "crab-remote-git",
             "crab-storage",
+            "crab-workflow",
             "crab-write",
             "crab-remote",
         },
