@@ -85,6 +85,29 @@ class StorageScopeTests(unittest.TestCase):
 
 
 class WorkspaceDependencyTests(unittest.TestCase):
+    def test_package_dependencies_cannot_require_private_crates_even_when_optional(self):
+        classified = (GATES.PRIVATE_INTERNAL_PACKAGES | GATES.PUBLISHED_LIBRARY_PACKAGES
+                      | set(GATES.SHIPPED_BINARY_PACKAGES))
+        for owner in ("crab-sdk", "crab-read"):
+            for kind in (None, "build", "dev"):
+                for optional in (False, True):
+                    packages = [{
+                        "name": name,
+                        "version": "0.1.0",
+                        "publish": [] if name in GATES.PRIVATE_INTERNAL_PACKAGES else None,
+                        "targets": [{"name": binary, "kind": ["bin"]}
+                                    for binary in GATES.SHIPPED_BINARY_PACKAGES.get(name, ())],
+                        "dependencies": [],
+                    } for name in classified]
+                    package = next(package for package in packages if package["name"] == owner)
+                    package["dependencies"] = [{
+                        "name": "crab-vfs", "kind": kind, "optional": optional,
+                    }]
+                    with self.subTest(owner=owner, kind=kind, optional=optional):
+                        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                            result = GATES.check_package_release_policy({"packages": packages})
+                        self.assertEqual(result, kind == "dev")
+
     def test_cloud_transports_keep_rustls_and_system_certificate_roots(self):
         manifest = (GATES.repo_root() / "Cargo.toml").read_text(encoding="utf-8")
         cases = [("current transports", manifest, True)]

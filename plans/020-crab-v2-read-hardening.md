@@ -51,6 +51,13 @@
   Native replacement removes both Windows file-backup workarounds, preserving
   failed-reset state and shared file-writer cleanup. The existing native
   apply/reset/resume regression remains a required CI gate.
+  At `086adb51468`, Windows SDK/native RustFS and the native reset regression
+  pass; hosted Linux CI also passes all twenty 1-GiB read arms, with zero large
+  warm downloads and peak RSS of 442.9 MiB. The subsequent SDK delivery repair
+  refreshes 41 existing Results API declarations with explicit approval and
+  packages its complete 19-crate closure. Five external consumer profiles and
+  five original negative probes pass locally; the final CI acceptance remains
+  required.
   Metadata batching/page reuse is implemented; all 200 independent-growth
   controls, thirteen lifecycle checks and 27 repeatability timing bands pass.
   A fresh ten-arm follow-up passes all four resource gates, four clean exits,

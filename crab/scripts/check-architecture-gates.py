@@ -1772,8 +1772,9 @@ PRIVATE_INTERNAL_PACKAGES = {
     "crab-server",
     "crab-s3-gateway",
     "crab-vfs",
-    "crab-workflow",
 }
+# Results exposes workflow reader contracts through the SDK, so Cargo must
+# resolve the workflow library from the same package closure as other features.
 PUBLISHED_LIBRARY_PACKAGES = {
     "crab-auth",
     "crab-auth-store",
@@ -1791,6 +1792,7 @@ PUBLISHED_LIBRARY_PACKAGES = {
     "crab-staging",
     "crab-storage",
     "crab-types",
+    "crab-workflow",
     "crab-write",
     "crab-xet",
 }
@@ -2268,6 +2270,11 @@ def check_package_release_policy(metadata: dict) -> bool:
             )
         if package["publish"] == []:
             violations.append(f"{name}: SDK dependency must be publishable")
+        # Cargo resolves optional and build dependencies while packaging, even
+        # when the consumer disables the feature that uses them.
+        for dependency in package["dependencies"]:
+            if dependency_kind(dependency) != "dev" and dependency["name"] in PRIVATE_INTERNAL_PACKAGES:
+                violations.append(f"{name}: package dependency {dependency['name']} is private")
 
     for name, expected_bins in sorted(SHIPPED_BINARY_PACKAGES.items()):
         package = package_by_name(metadata, name)

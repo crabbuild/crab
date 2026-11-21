@@ -127,6 +127,17 @@ per-arm executable hashes agree; the runner metadata limitation above remains
 explicit. Source and timing thresholds are unchanged between these two runs
 except for the documented immutable SDK facade ownership fix.
 
+Hosted Linux/x86 CI independently repeats the twenty-arm SDK RustFS profile at
+`086adb51468`. Every arm returns the exact expected commit, 1-GiB byte count and
+digest. All ten warm arms retain 9 metadata GETs / 12,731 bytes and zero large
+downloads; writes, transport exceptions and unfinished requests remain zero.
+SDK/control wall ratios are 0.956 cold and 0.981 warm, request/byte ratios are
+1.0, and peak RSS is 442.9 MiB. The existing 1.10 and 512-MiB gates are unchanged.
+The [retained CI artifact](https://github.com/crabbuild/crab/actions/runs/44933510799/artifacts/14720402070)
+matches its published SHA-256; the canonical comparator reproduces its report
+exactly, and its merge tree equals the PR source. Local ARM64 and hosted x86
+receipts retain their separate compiler, platform and executable bindings.
+
 The feature-aware capability fixture now includes the existing Results contract.
 Architecture checks admit Results' actual SDK/server composition edges and
 rendering/schema primitives while rejecting reverse product dependencies; all
@@ -163,6 +174,19 @@ part of current-head CI acceptance. Local Rust 1.97 verification passes ten
 materialization checks, four checkpoint-owner checks and the exact CLI
 apply/reset/resume integration, including real child processes and visible
 source-lineage preservation.
+
+Subsequent SDK contract CI finds an API snapshot that omits 41 Results
+declarations already present in `crab-v2`. The approved additive refresh matches
+both CI output and local regeneration with cargo-public-api 0.52.0 and
+nightly-2026-06-19; no SDK declarations are removed or changed. Packaging also
+reproduces an unresolved `crab-workflow` dependency for that existing feature.
+Workflow package metadata and release policy now include it in the SDK closure.
+All 19 tarballs, five external consumer profiles including Results, and five
+original compile-fail probes pass on Rust 1.97. The release guard additionally
+rejects private normal/build dependencies of packageable libraries, including
+optional dependencies; its new regression fails before that check. All 26
+architecture regressions and the complete architecture guard pass. These
+delivery changes do not alter the measured read implementations.
 
 Persistent line-origin indexes and new storage formats remain conditional on
 measured cold-read cost; these results do not justify implementing them yet.
