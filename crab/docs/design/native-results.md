@@ -360,6 +360,8 @@ definition and complete observed/authored domain. Compatible charts share cursor
 and numeric range controls. The shared renderer derives one scalar cursor from
 the owned single-field selection tuple; desktop and offline consumers
 use it without depending on Vega-Lite's rewritten selection-object keys.
+The hidden hit layer groups retained coordinates by x and uses a constant y;
+series retain all sampled data marks while zoom rebuilds one hit region per x.
 ComparisonSpec.axes stores up to 32 finite ranges,
 validated against chart domains when saving. Runtime zoom uses Vega's domainRaw;
 clearing it restores authored zero/nice/bindings. Reports freeze ranges into their
