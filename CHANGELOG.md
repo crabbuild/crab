@@ -22,7 +22,7 @@ macOS automatic update installation requires a future signed release.
   durable child transcripts and full-text output access.
 - Added complex workflow editing and execution, resizable Workflow Studio
   panels, local runs, and restored workflow output.
-- Added a Results workspace for comparing captured workflow runs, metrics,
+- Added a desktop Results workspace for comparing captured workflow runs, metrics,
   curves, and retained evidence, with matching CLI and server access.
 - Added a runnable machine-learning Results example with compound plots and
   exact metric-value round trips.
@@ -76,8 +76,6 @@ macOS automatic update installation requires a future signed release.
 - Upgraded the embedded Cellar runtime to 0.1.2.
 - Added first-run Docker setup for the repository HTTP server and S3 gateway,
   including generated configuration and client identity.
-- Included shared Results contracts and chart runtime in repository server
-  container builds.
 - Patched Caddy's network dependency across server, Compose, and Cloudflare
   runtime images.
 
