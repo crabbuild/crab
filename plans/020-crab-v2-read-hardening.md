@@ -1098,6 +1098,16 @@ still fails four RSS-growth gates over 77 minutes, including both idle candidate
 workers. All original failures remain; the subsequent full comparison does not
 launch. Every duration, observation, percentile and numeric gate is unchanged.
 
+The RSS investigation finds a process-integration gap: Cellar's pressure and
+reclamation controls use jemalloc, while the server executable uses the system
+Rust allocator. The executable now installs the already-locked allocator. A
+2-MiB application-allocation regression fails before the change and passes
+afterward; all twenty CLI tests pass. Linux background-purging support already
+comes from the pinned SDK. Live resource/performance verification of this
+changed executable remains required; the regression alone does not prove the
+hour-scale growth resolved. The dependency checkpoint and numeric gates stay
+unchanged.
+
 1. Record source revision/patch, binary hashes, compiler/profile, fixture
    identities, backend/region, quotas, and report schema. Readiness/capture,
    query, serialization, and client timing must remain separate.

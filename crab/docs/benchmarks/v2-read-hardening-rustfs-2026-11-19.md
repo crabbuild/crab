@@ -1004,3 +1004,20 @@ receipt includes stock Git LFS crash/restored clones and range resume for a
 3-GiB object, plus full Root restoration of 196 objects / 3,221,365,402 bytes
 with SHA-256 and metadata verification. This is runtime recovery proof; HTTP
 performance acceptance remains open.
+
+## Server allocator integration
+
+The pinned SDK's [native embedding contract](https://github.com/crabbuild/cellar/blob/590640c7ce49ef3fd391bdae9540ba23081cd74b/crates/cellar/node/native.rs)
+recommends jemalloc for application pressure accounting. Its allocator statistics
+and reclamation use that heap, while Crab's executable previously retained the
+system Rust allocator. The server entry point now installs the already-locked
+jemalloc 0.6.1 allocator. The lockfile only adds its direct server dependency;
+no dependency version, SDK patch, format or configuration changes.
+
+A live 2-MiB Rust allocation fails to appear in the SDK's allocated-byte
+statistic before the change and is accounted for after it. All twenty server
+CLI tests pass. The Linux feature graph confirms existing statistics and
+background-purging support through the pinned SDK. The earlier read/library,
+runtime CI and HTTP results retain their actual compiled revisions; live
+qualification of the changed executable remains required. The allocator
+contract regression alone does not prove the hour-scale RSS growth resolved.
