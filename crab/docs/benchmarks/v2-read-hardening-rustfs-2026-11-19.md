@@ -1291,3 +1291,22 @@ clock-affected current fixtures remain preserved. New current-only fixtures are
 being copied from the untouched original control through the existing full-root
 backup verification. A fresh run requires clock-health checks and a complete
 new schedule; this partial run contributes no timing acceptance.
+
+
+The restarted VM passes an actual host/guest clock preflight. Two fresh
+current-only Roots each copy and verify 4,102 objects / 2,468,871,784 bytes
+from the inactive original control, including metadata, content properties,
+tags and stable inventories. Neither the control nor clock-affected Roots
+are repaired or upgraded. All 54 HTTP checks pass again on fresh Root E;
+both macOS processes drain, exit zero and pass exact durability checks.
+The actual Linux image performs real OAuth on fresh Roots F and E under
+one CPU / one GiB / no extra swap, with allocator background threads active.
+
+The next prospective schedule adds fatal clock checks before and after
+every pair: guest wall time must lie within the host round-trip bounds
+plus one second, and its monotonic offset must remain within one second
+of the initial offset. Five focused fixture tests cover healthy clocks,
+future wall time, monotonic jumps/reversal and transport failure. The real
+guest probe passes. Failure status is persisted before cleanup, so transport
+loss cannot leave a failed run reporting that it is still active. All original
+workloads, durations, timing bands and resource gates remain unchanged.
