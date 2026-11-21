@@ -43,7 +43,9 @@
   native Windows qualification. SDK cold/warm limit coverage and warm large-file
   cache misses are repaired at `a061c78f386`; local RustFS causal verification
   eliminates three repeated large downloads in both SDK/shared readers.
-  Combined Linux read qualification is recorded in the linked report.
+  Final SDK ownership at `2162882a704` passes the exact pinned SDK/publication
+  lint gate, thirteen all-feature SDK checks and the repeated twenty-arm native
+  Linux RustFS read profile. Combined proof is recorded in the linked report.
   Metadata batching/page reuse is implemented; all 200 independent-growth
   controls, thirteen lifecycle checks and 27 repeatability timing bands pass.
   A fresh ten-arm follow-up passes all four resource gates, four clean exits,

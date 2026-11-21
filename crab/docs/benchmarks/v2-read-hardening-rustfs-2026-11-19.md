@@ -117,6 +117,16 @@ worktree metadata, so its raw source/toolchain fields remain unavailable rather
 than being rewritten. This new proof concerns SDK/shared content readers; it
 does not relabel any earlier failed ordinary-Git profile.
 
+The final SDK owner at `2162882a704` repeats that entire twenty-arm profile and
+passes again. All ten warm arms retain 9 GETs / 12,775 bytes, with zero large
+downloads, writes, failed transfers or unfinished requests. Every result has the
+exact expected commit, byte count and digest. Median SDK/control wall ratios
+are 0.903 cold and 0.601 warm; request/byte ratios remain 1.0. Peak RSS is
+437.8 MiB. The final host compiler/source/tree/binary receipt and all twenty
+per-arm executable hashes agree; the runner metadata limitation above remains
+explicit. Source and timing thresholds are unchanged between these two runs
+except for the documented immutable SDK facade ownership fix.
+
 The feature-aware capability fixture now includes the existing Results contract.
 Architecture checks admit Results' actual SDK/server composition edges and
 rendering/schema primitives while rejecting reverse product dependencies; all
