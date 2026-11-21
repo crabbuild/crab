@@ -150,10 +150,9 @@ impl CountingStore {
     }
 
     async fn wait_for_blocked_pack_get(&self) {
-        let permit = self
-            .pack_get_entered
-            .acquire()
+        let permit = tokio::time::timeout(Duration::from_secs(5), self.pack_get_entered.acquire())
             .await
+            .expect("blocked pack request starts")
             .expect("test semaphore remains open");
         permit.forget();
     }

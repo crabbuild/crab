@@ -19,7 +19,9 @@ the archived ledger to those inputs.
 
 ## Remaining priorities
 
-The runtime remains `bf5cb36e176` with published Cellar 0.1.2. Adjacent-page
+The retained ordinary-Git performance runtime is `bf5cb36e176` with published
+Cellar 0.1.2. Subsequent cache/CI repairs are built at `a061c78f386`, rebased
+onto `6ac899021b1`. Adjacent-page
 batching/page reuse is implemented: the deterministic case drops 14 transfers
 to two at identical bytes. All 72 native timing cells, 200 independent-growth
 controls and thirteen lifecycle checks pass with their source bindings retained.
@@ -53,22 +55,75 @@ resource limits and instrumentation match across the components. This is
 composed numerical and targeted resource proof; it does not relabel the original
 failed 128-trial profile or establish all-platform CI acceptance.
 
-Remaining priorities:
+Remaining priority: verify the current-head CI jobs, including Windows native
+Results/range qualification, after the repairs below. The SDK read-limit and
+warm-cache causes are reproduced and fixed; original failed receipts remain
+retained. Local RustFS verification of the combined cache changes is recorded
+separately from the retained ordinary-Git timing profile.
 
-1. **Resolve SDK read-limit coverage and CI gaps.** The one-request-limit fixture
-   expects rejection but the read succeeds. The SDK wrapper forwards the limits;
-   the changed reader reuses pack data. A focused cold/warm I/O charging proof is
-   needed before choosing a source or test correction. Other SDK, architecture,
-   gateway, browser and Windows jobs also report failures. Source identity alone
-   does not establish their causes. HTTP container, SDK RustFS end-to-end, server
-   Cell recovery and all four Linux/macOS native desktop jobs pass. All sixteen
-   downloaded native Git range reports/results verify successfully, with peak
-   RSS below 166 MiB; Windows native range qualification remains missing.
-2. **Diagnose warm large-file origin I/O.** The SDK CI artifact retains a paired
-   warm origin-byte ratio of 1.9998 versus the shared-core control. Three of five
-   SDK pairs fetch one extra 67,104,756-byte object; all file hashes match and both
-   callers use a 2-GiB cache ceiling. The cause remains unproven. This is a separate
-   SDK content-cache follow-up to the ordinary-Git read wave.
+### SDK limits, warm cache and CI repairs
+
+A 24-byte Git blob fits a single read-ahead request, so a ceiling of one request
+correctly allows it. The negative test now uses fresh, cold, incompressible
+2-MiB Git blobs: a one-request ceiling rejects before the second fetch, and a
+one-byte fetched ceiling rejects before any fetch. The same fully warmed blob
+succeeds under both origin ceilings; logical-object and response-byte ceilings
+still reject on cold and warm reads. Limits and charging behavior are unchanged.
+Both supported focused feature profiles pass: twelve tests with
+`remote,files,results`, ten with `remote`.
+
+A real 1-GiB RustFS reproduction finds three discarded decoded-range fills in
+both the SDK and shared reader. Parent-directory try-lock contention during a
+sibling fill's fsync/rename was incorrectly treated as cache maintenance. Fills
+now wait on their blocking publication worker; maintenance remains nonblocking,
+and the parent guard is released before catalog registration. Private filesystem
+regressions cover serialization and verification lock release on success/error.
+Windows publication already uses its separate handle-based owner.
+
+With only that fix, fresh 2-GiB caches change first-warm traffic in both readers
+from three large GETs / 201,327,043 response bytes to zero large GETs / 12,775
+bytes. Cold, warm and second-warm reads retain the exact expected commit and
+1-GiB Blake3 digest, with no origin writes or transport errors. These macOS
+structural diagnostics do not establish Linux latency acceptance. The combined
+change also joins adjacent/overlapping verified fragments for the same key and
+namespace, preserving complete coverage, bounded allocation, corruption repair
+and no recency update for incomplete results. All 302 cache tests pass before
+the last two fragment cases; all 39 final focused range-cache tests pass.
+Strict cache Clippy passes.
+
+The combined native Linux/ARM64 RustFS comparison passes all twenty arms:
+five AB/BA cold/warm pairs per implementation, fresh private 2-GiB caches, exact
+1-GiB hashes and zero origin writes/transport failures. All ten warm arms issue
+nine metadata GETs / 12,775 bytes and zero large downloads. Median SDK/control
+ratios are 0.656 cold and 0.600 warm for wall time, and exactly 1.0 for requests
+and response bytes; peak RSS is 439.5 MiB. The original 1.10 ratio and 512-MiB
+RSS gates remain unchanged. Executables are cross-compiled on macOS and run
+natively against ext4 caches in the local VM. A separate compiler/source/binary
+hash receipt binds `a061c78f386`; the runner cannot open the host's main Git
+worktree metadata, so its raw source/toolchain fields remain unavailable rather
+than being rewritten. This new proof concerns SDK/shared content readers; it
+does not relabel any earlier failed ordinary-Git profile.
+
+The feature-aware capability fixture now includes the existing Results contract.
+Architecture checks admit Results' actual SDK/server composition edges and
+rendering/schema primitives while rejecting reverse product dependencies; all
+25 checker regressions and the complete architecture guard pass. Windows parent
+validation now checks the rooted canonical path after its drive/UNC prefix;
+local constructor coverage passes, with native Windows proof delegated to CI.
+The reproduced 390-pixel browser failure is repaired by wrapping filter buttons.
+All 21 attribution/filter browser tests, UI type checking and the production
+build pass; desktop/mobile light and mobile dark renders are inspected. No
+threshold, expected-failure inventory, dependency version or limit is relaxed.
+
+The previous general Rust CI log also exposes a shared-blame fixture waiting
+indefinitely for a parent pack fetch after warming the head blob. Read-ahead can
+eliminate that fetch. The late-waiter fixture now uses a small cache and a small
+two-line blob so the head remains warm while the parent read is a deterministic
+gate after semantic work. Its immediate late-waiter rejection, maximum-depth
+check, successful surviving producer and one-producer assertion remain intact.
+Blocked-request waits now fail after five seconds instead of hanging CI. The
+original fixture fails at that boundary; all six final shared-blame integration
+checks and nine shared-budget checks pass.
 
 Persistent line-origin indexes and new storage formats remain conditional on
 measured cold-read cost; these results do not justify implementing them yet.

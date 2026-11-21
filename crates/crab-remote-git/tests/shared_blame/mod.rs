@@ -138,14 +138,19 @@ async fn late_blame_waiters_replay_semantic_work_and_maximum_depth() {
             DeltaKind::Ref,
             false,
             RepositoryOptions::default(),
-            RuntimeOptions::default(),
+            // Retain the warmed small blob without caching a whole pack window;
+            // the cold parent read is the gate after semantic work is recorded.
+            RuntimeOptions {
+                max_object_cache_bytes: 2 * 1024,
+                ..RuntimeOptions::default()
+            },
             metrics.clone(),
         )
         .await;
         let path = if depth {
             GitPath::new(b"dir/nested/deep.txt".to_vec()).unwrap()
         } else {
-            fixture.target_path.clone()
+            GitPath::new(b"run.sh".to_vec()).unwrap()
         };
         let snapshot = prepare_at(&fixture, &path, true).await;
         fixture.backend.block_next_pack_get();

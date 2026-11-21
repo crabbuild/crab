@@ -22,8 +22,8 @@
 - **Category:** performance, correctness, resource ownership, qualification.
 - **Planned at:** `aafb6d256c5e8d3a8e768d31dd887a18f2afd2e4`, 2026-11-17.
 - **Target:** `crab-v2`; revalidate the target before execution.
-- **Target synchronization:** rebased onto `14c847e13fa`, which adopts published
-  Cellar 0.1.2. The retired `590640c7ce49` Git pin is removed. Older runtime
+- **Target synchronization:** rebased onto `6ac899021b1`, including the
+  published Cellar 0.1.2 adoption from `14c847e13fa`. The retired `590640c7ce49` Git pin is removed. Older runtime
   results retain their original SDK/source binding; published-dependency builds
   and live verification are separate. The packaged SDK's 1,085 code files match
   the approved source, with matching feature definitions. Clean production builds,
@@ -39,9 +39,11 @@
   checks pass. Failed performance profiles remain retained; the composed
   comparison and fresh soak proof are recorded separately. See the
   [combined qualification report](../crab/docs/benchmarks/v2-read-hardening-rustfs-2026-11-19.md).
-- **Remaining priorities:** resolve SDK read-limit coverage and current-head CI
-  failures before claiming integrated acceptance. A separate SDK content-cache
-  follow-up must diagnose warm large-file origin-byte amplification near 2.0×.
+- **Remaining priorities:** complete current-head CI acceptance, including
+  native Windows qualification. SDK cold/warm limit coverage and warm large-file
+  cache misses are repaired at `a061c78f386`; local RustFS causal verification
+  eliminates three repeated large downloads in both SDK/shared readers.
+  Combined Linux read qualification is recorded in the linked report.
   Metadata batching/page reuse is implemented; all 200 independent-growth
   controls, thirteen lifecycle checks and 27 repeatability timing bands pass.
   A fresh ten-arm follow-up passes all four resource gates, four clean exits,
