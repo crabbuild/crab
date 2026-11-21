@@ -5,9 +5,109 @@ use axum::{
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
-use crab_remote_git::{Blob, BlobMetadata, Commit, CommitSummary, PageCursor, TreeEntry};
+use crab_remote_git::{
+    Blob, BudgetDimension, Commit, CommitSummary, OperationContext, PageCursor, RemoteGitSnapshot,
+    TreeEntry,
+};
 use serde_json::{Value, json};
+use uuid::Uuid;
 pub(super) const MAX_INLINE_TEXT_BYTES: usize = 1024 * 1024;
+#[cfg(test)]
+use crab_remote_git::GitPath;
+
+#[derive(serde::Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub(super) enum FilePreviewState {
+    Inline { text: String },
+    OmittedSize,
+    Binary,
+    UnsupportedEncoding,
+}
+
+#[derive(serde::Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub(super) struct FilePreview {
+    oid: String,
+    size: u64,
+    mode: String,
+    classification: String,
+    commit: String,
+    generation: u64,
+    preview: FilePreviewState,
+}
+
+impl FilePreview {
+    pub(super) fn maximum_encoded_bytes(&self) -> usize {
+        let text = match &self.preview {
+            FilePreviewState::Inline { text } => text.len(),
+            FilePreviewState::OmittedSize
+            | FilePreviewState::Binary
+            | FilePreviewState::UnsupportedEncoding => 0,
+        };
+        let strings = [&self.oid, &self.mode, &self.classification, &self.commit];
+        let bytes = strings
+            .into_iter()
+            .fold(text, |bytes, value| bytes.saturating_add(value.len()));
+        // JSON escapes expand one input byte by at most six bytes. The fixed
+        // field names, enum tags, punctuation and two u64s fit within 256 bytes.
+        bytes.saturating_mul(6).saturating_add(256)
+    }
+}
+
+#[cfg(test)]
+pub(super) async fn file_preview(
+    snapshot: &RemoteGitSnapshot,
+    path: &GitPath,
+    operation: &OperationContext,
+) -> crab_remote_git::Result<FilePreview> {
+    let metadata = snapshot.blob_metadata(path, operation).await?;
+    file_preview_metadata(snapshot, metadata, operation).await
+}
+
+pub(super) async fn file_preview_metadata(
+    snapshot: &RemoteGitSnapshot,
+    metadata: crab_remote_git::BlobMetadata,
+    operation: &OperationContext,
+) -> crab_remote_git::Result<FilePreview> {
+    let mut value = FilePreview {
+        oid: metadata.oid.to_string(),
+        size: metadata.git_size,
+        mode: format!("{:06o}", metadata.mode.raw()),
+        classification: format!("{:?}", metadata.classification),
+        commit: snapshot.commit_oid().to_string(),
+        generation: snapshot.generation(),
+        preview: FilePreviewState::OmittedSize,
+    };
+    let metadata_bytes = std::mem::size_of::<FilePreview>()
+        + value.oid.len()
+        + value.mode.len()
+        + value.classification.len()
+        + value.commit.len();
+    operation
+        .charge(BudgetDimension::ResponseBytes, metadata_bytes as u64)
+        .await?;
+    if metadata.git_size > MAX_INLINE_TEXT_BYTES as u64 {
+        return Ok(value);
+    }
+    // Metadata proved the path's visibility and inspected pointer-sized bytes.
+    // Read only the bounded Git representation, charging returned fields rather
+    // than an omitted body; read_blob's full-body response fee does not apply.
+    let object = operation.read_object(metadata.oid).await?;
+    value.preview = if object.data.contains(&0) {
+        FilePreviewState::Binary
+    } else if let Ok(text) = std::str::from_utf8(&object.data) {
+        operation
+            .charge(BudgetDimension::ResponseBytes, text.len() as u64)
+            .await?;
+        FilePreviewState::Inline {
+            text: text.to_owned(),
+        }
+    } else {
+        FilePreviewState::UnsupportedEncoding
+    };
+    Ok(value)
+}
 
 pub(super) fn blob_response(blob: Blob, range: Option<&HeaderValue>) -> Response {
     let total = blob.bytes.len();
@@ -62,7 +162,7 @@ pub(super) fn blob_response(blob: Blob, range: Option<&HeaderValue>) -> Response
     response
 }
 
-fn parse_byte_range(value: &str, total: usize) -> Result<(usize, usize), ()> {
+pub(super) fn parse_byte_range(value: &str, total: usize) -> Result<(usize, usize), ()> {
     let range = value.strip_prefix("bytes=").ok_or(())?;
     if total == 0 || range.contains(',') {
         return Err(());
@@ -100,15 +200,7 @@ pub(super) fn content_json(blob: &Blob) -> Value {
         std::str::from_utf8(&blob.bytes).ok()
     };
     let text = decoded.filter(|_| blob.bytes.len() <= MAX_INLINE_TEXT_BYTES);
-    file_json(&blob.metadata, text, decoded.is_some() && text.is_none())
-}
-
-pub(super) fn file_json(
-    metadata: &BlobMetadata,
-    text: Option<&str>,
-    text_truncated: bool,
-) -> Value {
-    json!({"oid":metadata.oid.to_string(),"size":metadata.git_size,"mode":format!("{:06o}",metadata.mode.raw()),"classification":format!("{:?}",metadata.classification),"text":text,"text_truncated":text_truncated})
+    json!({"oid":blob.metadata.oid.to_string(),"size":blob.bytes.len(),"mode":format!("{:06o}",blob.metadata.mode.raw()),"classification":format!("{:?}",blob.metadata.classification),"text":text,"text_truncated":decoded.is_some() && text.is_none()})
 }
 
 pub(super) fn image_content_type(bytes: &[u8]) -> Option<&'static str> {
@@ -184,24 +276,55 @@ pub(crate) fn display_path(bytes: &[u8]) -> String {
         .join("/")
 }
 
-pub(super) fn encode_cursor(key: &[u8; 32], cursor: PageCursor) -> String {
+pub(super) fn encode_cursor(key: &[u8; 32], repository: Uuid, cursor: PageCursor) -> String {
     format!(
-        "{}.{}",
+        "v2.{}.{}.{}",
+        repository.simple(),
         encode_hex(cursor.as_bytes()),
-        blake3::keyed_hash(key, cursor.as_bytes()).to_hex()
+        cursor_signature(key, repository, cursor.as_bytes()).to_hex()
     )
+}
+
+fn cursor_signature(key: &[u8; 32], repository: Uuid, payload: &[u8]) -> blake3::Hash {
+    let mut hasher = blake3::Hasher::new_keyed(key);
+    hasher.update(b"crab-server.page-cursor.v2\0");
+    hasher.update(repository.as_bytes());
+    hasher.update(payload);
+    hasher.finalize()
 }
 
 pub(super) fn decode_cursor(
     key: &[u8; 32],
+    repository: Uuid,
     value: &str,
 ) -> std::result::Result<PageCursor, ApiError> {
-    let (payload, signature) = value
-        .split_once('.')
-        .ok_or(ApiError::Input("Invalid cursor"))?;
+    let (payload, signature, repository_bound) = if let Some(value) = value.strip_prefix("v2.") {
+        let (scope, value) = value
+            .split_once('.')
+            .ok_or(ApiError::Input("Invalid cursor"))?;
+        if scope != repository.simple().to_string() {
+            return Err(ApiError::Input("Cursor belongs to another repository"));
+        }
+        let (payload, signature) = value
+            .split_once('.')
+            .ok_or(ApiError::Input("Invalid cursor"))?;
+        (payload, signature, true)
+    } else {
+        // Alpha.1 exposed this signed envelope without UUID binding. Retain its
+        // reader for those issued tokens; all new tokens use the scoped format.
+        let (payload, signature) = value
+            .split_once('.')
+            .ok_or(ApiError::Input("Invalid cursor"))?;
+        (payload, signature, false)
+    };
     let bytes = decode_hex(payload)?;
     let signature = decode_hex(signature)?;
-    if blake3::keyed_hash(key, &bytes) != *signature.as_slice() {
+    let expected = if repository_bound {
+        cursor_signature(key, repository, &bytes)
+    } else {
+        blake3::keyed_hash(key, &bytes)
+    };
+    if expected != *signature.as_slice() {
         return Err(ApiError::Input("Invalid cursor signature"));
     }
     Ok(PageCursor::from_bytes(bytes)?)
@@ -224,4 +347,33 @@ pub(super) fn decode_hex(value: &str) -> std::result::Result<Vec<u8>, ApiError> 
                 .map_err(|_| ApiError::Input("Invalid hex bytes"))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_encoding_bound_covers_escaped_text_and_metadata() {
+        for preview in [
+            FilePreviewState::OmittedSize,
+            FilePreviewState::Binary,
+            FilePreviewState::UnsupportedEncoding,
+            FilePreviewState::Inline {
+                text: "\u{1}\"\n\\é🐚".repeat(20_000),
+            },
+        ] {
+            let value = FilePreview {
+                oid: "\"\\\u{1}".repeat(20),
+                size: u64::MAX,
+                mode: "\"\\\u{1}".repeat(20),
+                classification: "\"\\\u{1}".repeat(20),
+                commit: "\"\\\u{1}".repeat(20),
+                generation: u64::MAX,
+                preview,
+            };
+            let bytes = serde_json::to_vec(&value).unwrap();
+            assert!(bytes.len() <= value.maximum_encoded_bytes());
+        }
+    }
 }

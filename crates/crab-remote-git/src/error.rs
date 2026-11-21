@@ -473,6 +473,32 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl Error {
+    pub(crate) fn from_shared(source: std::sync::Arc<Self>) -> Self {
+        match std::sync::Arc::try_unwrap(source) {
+            Ok(error) => error,
+            Err(source) => match source.as_ref() {
+                Self::LimitExceeded {
+                    limit,
+                    actual,
+                    maximum,
+                } => Self::LimitExceeded {
+                    limit,
+                    actual: *actual,
+                    maximum: *maximum,
+                },
+                Self::Cancelled => Self::Cancelled,
+                Self::Timeout { operation } => Self::Timeout { operation },
+                Self::BlameUnsupported { reason } => Self::BlameUnsupported { reason: *reason },
+                Self::PathNotFound => Self::PathNotFound,
+                Self::Corrupt { stage } => Self::Corrupt { stage: *stage },
+                Self::SharedRead { source } => Self::from_shared(source.clone()),
+                // Non-cloneable dependency failures keep their original source
+                // alive for every waiter rather than losing it to a string.
+                _ => Self::SharedRead { source },
+            },
+        }
+    }
+
     pub(crate) fn after_interruption(self, timed_out: bool) -> Self {
         if let Self::CloseAfterFailure { operation, close } = self {
             return Self::CloseAfterFailure {

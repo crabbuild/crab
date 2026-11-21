@@ -19,7 +19,7 @@ from run_concurrent_push_smoke import RequestCountingProxy
 from verify_remote_browse import verify
 
 WORKLOADS = ("resolve", "commit", "tree", "blob", "object-point", "object-batch",
-             "history", "path-history", "attribution", "blame")
+             "history", "history-pages", "path-history", "attribution", "blame")
 
 
 def fixture_import(commits: int, changes: int = 20) -> bytes:
@@ -80,14 +80,18 @@ class ReadScalingRunner(AddCommitPushSmoke):
             "crates/crab-metadata/", "crates/crab-read/", "crates/crab-remote/",
             "crates/crab-remote-git/", "crates/crab-storage/", "crates/crab-write/",
         )
-        tracked = subprocess.check_output(["git", "ls-files", "--", *source_prefixes],
+        tracked = subprocess.check_output(["git", "ls-files", "--cached", "--others", "--exclude-standard", "--", *source_prefixes],
                                           cwd=REPO_ROOT, text=True).splitlines()
-        inputs = [name for name in tracked if name.endswith((".rs", "/Cargo.toml"))]
+        inputs = [name for name in tracked if name.endswith((".rs", "/Cargo.toml"))
+                  and (REPO_ROOT / name).is_file()]
         inputs.extend((
             "Cargo.lock", "Cargo.toml",
             "crab/scripts/e2e/run_remote_read_scaling_rustfs.py",
             "crab/scripts/e2e/run_concurrent_push_smoke.py",
             "crab/scripts/e2e/verify_remote_browse.py",
+            "crab/scripts/e2e/qualify_v2_read_service.py",
+            "crab/scripts/e2e/read_service_samples.py",
+            "crab/scripts/e2e/test_qualify_v2_read_service.py",
         ))
         hashes = {}
         for relative in inputs:

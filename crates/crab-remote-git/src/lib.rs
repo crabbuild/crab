@@ -13,6 +13,7 @@ mod path_state;
 mod reader;
 mod refs;
 mod repository;
+mod resident;
 mod revision;
 mod runtime;
 mod snapshot;
@@ -50,9 +51,10 @@ pub use reader::{
 pub use refs::{HeadReference, RepositoryRef, RepositoryRefs};
 pub use repository::RemoteGitRepository;
 pub use repository::{ObjectLimits, OperationLimits, RepositoryIdentity, RepositoryOptions};
+pub use resident::ReadReservation;
 pub use revision::{ResolvedRevision, Revision};
 pub use runtime::{RemoteGitRuntime, RuntimeOptions, RuntimeSnapshot};
-pub use snapshot::{ArchiveReader, RemoteGitSnapshot};
+pub use snapshot::{ArchiveReader, RemoteGitSnapshot, SharedBlame};
 pub use traversal::{
     ArchiveEntry, ArchiveStream, Blame, BlameRange, ChangeKind, Comparison, Diff,
     DiffClassification, DiffHunk, DirectoryMetadata, HistoryTraversal, Page, PageCursor,

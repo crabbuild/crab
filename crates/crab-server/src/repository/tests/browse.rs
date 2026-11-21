@@ -3,7 +3,7 @@ use crab_metadata::capsule_protocol::{BrowseIndexes, load_browse_indexes};
 use crab_remote_git::OperationKind;
 
 #[tokio::test]
-async fn large_file_metadata_does_not_materialize_the_blob() {
+async fn metadata_preview_does_not_materialize_the_blob() {
     let mut server = fixture_without_cells().await;
     Arc::get_mut(&mut server).unwrap().options = RepositoryOptions::new(
         crab_remote_git::ObjectLimits {
@@ -30,7 +30,7 @@ async fn large_file_metadata_does_not_materialize_the_blob() {
     let response = router(Arc::clone(&server))
         .oneshot(
             Request::builder()
-                .uri("/api/repos/team/repo/file?rev=main&path=asset")
+                .uri("/api/repos/team/repo/file-preview?rev=main&path=asset")
                 .header("host", "localhost:8788")
                 .body(Body::empty())
                 .unwrap(),
@@ -44,17 +44,11 @@ async fn large_file_metadata_does_not_materialize_the_blob() {
     let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     close(&server).await;
     assert_eq!(
-        (
-            status,
-            value["size"].clone(),
-            value["text"].clone(),
-            value["text_truncated"].clone()
-        ),
+        (status, value["size"].clone(), value["preview"].clone()),
         (
             StatusCode::OK,
             serde_json::json!(body.len()),
-            serde_json::Value::Null,
-            serde_json::json!(true)
+            serde_json::json!({"state":"omitted_size"})
         )
     );
 }

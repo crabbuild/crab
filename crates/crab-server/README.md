@@ -11,6 +11,11 @@ authentication key derivation remain unchanged by the crate rename.
 Read [the native runtime contract and outstanding release gates](CELLAR.md)
 before deployment. Historical runtime receipts do not qualify this implementation.
 
+The server executable uses jemalloc so Cellar's allocator pressure accounting
+and page reclamation observe the application's Rust heap. The SDK's Linux
+allocator feature enables background purging. Applications embedding the library
+must install that allocator at their own executable entry point.
+
 ## Browse indexing
 
 Capsule browse indexing is background work, independent of native Git receive.
@@ -24,6 +29,8 @@ Browse readers retain verified immutable data while revalidating the root,
 transaction-consistent refs, and derived index hashes every two seconds. Ref or
 index changes open a new reader. Attribution uses that reader's captured source
 identity instead of opening the capsule payloads again for the same request.
+Conditional preview/blob requests probe that authority immediately before using
+validators, including within the ordinary two-second browse freshness window.
 
 Cold browse opens load complete control metadata; Git pack bodies stay in their
 authenticated object-store sources and objects use verified bounded range reads.
@@ -32,6 +39,12 @@ Repository pages select their metadata with `/api/repos?owner=OWNER&name=NAME`
 so unrelated repository Cell reads do not block browsing. The unfiltered catalog
 still supplies the repository list and loads Git access scopes when that
 selector is opened.
+
+Membership reads check the catalog's current provider ETag/version and size on
+every request. An unchanged identity reuses one validated decoded document per
+configured root; a changed identity requires the bounded body read and complete
+validation. Missing catalogs and provider errors never retain a previous grant.
+Catalog mutations retain their exact conditional-write token.
 
 Unchanged browse and background probes share the root/ref/index change probe.
 Immutable descriptors are verified on identity changes and at the existing
@@ -86,6 +99,64 @@ OIDC logout tokens. The exact API, catalog, and identity contracts are in
 [Team sign-in](REFERENCE.md#team-sign-in).
 
 ## Browser navigation
+
+`GET /api/repos/{owner}/{name}/file-preview` is the first-party inspection route.
+It returns pinned identity, Git representation size/mode/classification, and an
+explicit preview state. Above 1 MiB it returns `omitted_size` using bounded object
+metadata without reconstructing the full blob or guessing its encoding. Smaller
+representations are verified before returning inline UTF-8, binary or unsupported
+encoding state. Pointer previews contain their Git bytes, and symlinks are not
+followed. Raw/asset reads keep their existing limits. Released `/file` and Diff
+keep their inspected-text/truncation contract.
+
+Metadata retains the tagged reader's full encoded-entry CRC verification. It
+can therefore download complete compressed entries, and delta descriptors require
+their existing bounded validation. Size omission avoids reconstructed blob bytes
+and their response charge; it does not promise zero payload I/O.
+
+Preview and raw `/blob` responses opt into `Cache-Control: private, no-cache`.
+Quoted strong ETags identify each representation separately. Preview identity
+includes its policy, mode/classification, commit and generation; raw identity
+identifies exact Git bytes. Both use identity coding, without content negotiation
+or compression. `If-None-Match` supports weak comparison, lists and `*` after
+current authorization and visible-path resolution. `If-Range` requires an exact
+strong ETag; other values return the complete verified body. Unsatisfiable raw
+ranges reject against authenticated size before reconstruction. Cold packed-Git
+ranges still require a complete verified object. Other responses retain their
+existing cache policy, normally `no-store`; browser Fetch owns revalidation and
+retained response bodies.
+
+Unconditional full Git downloads use their existing single verified-body read;
+they do not issue an extra metadata CRC fetch. `Server-Timing` separates capture
+(`open`), query (`read`), encoding including CPU admission (`encode`), and handler
+total. The HTTP qualifier retains these independently from headers, first body
+byte and completed client latency. Its observer records provider operations,
+process RSS, managed bytes and work drain. RSS plateau qualification requires
+at least 600 seconds; shorter functional checks retain peaks without claiming
+steady-state proof.
+
+Browse admission remains 16 requests, with at most 12 bulk reads/followers.
+Refs, tree/name search and bounded previews retain four slots under bulk load.
+Excess work fails immediately with the existing busy response. Response frames
+retain admission until their last transport owner releases them. Shared blame
+uses one producer with independent waiter budgets; serialization retains its
+managed result and byte admission, rendering one range at a time.
+Preview and blame JSON use bounded 64-KiB output chunks under the unchanged
+8-MiB response limit. Typed previews and blame replies reserve an escaping-aware
+output bound, rounded to chunks, including blame's lossy text and message hex.
+Replies bounded to one chunk encode on the request task, so bulk CPU work cannot
+delay their serialization; larger replies retain CPU
+admission. Each transport-held chunk retains the complete output reservation
+until its last owner.
+
+CPU admission follows measured process job credits, capped at 16. Disposable Git
+cache byte caps scale to at most one eighth of effective process memory, up to
+their existing defaults; the shared reader adds 128 MiB transient capacity.
+The 1 GiB minimum therefore admits at most 256 MiB of managed Git allocations
+with one CPU job when one job credit is available. This excludes Cellar,
+provider/TLS internals and other process overhead; it is not a whole-process RSS
+guarantee. Private metrics expose admission by class, active CPU/origin/blame
+work, managed resident capacity and cache-map occupancy separately.
 
 Repository pages use GitHub-style paths. **Code**, **Issues**, **Pull requests**,
 **Activity**, and **Settings** appear in that order; commit history lives under Code.
@@ -557,8 +628,11 @@ The internal owners are:
 | `cells/repository/{checks,settings,releases,labels,statuses,projection}/` | Feature commands, local persistence/validation, and tests |
 
 Authentication always uses shared durable state, including in-memory object-store
-test fixtures; there is no separate process-local authentication mode. Repository
-construction initializes private cache and maintenance state. Settings
+test fixtures; there is no separate process-local authentication mode. A cached
+session supplies only its marker location, allowing the session record and marker
+to be reread concurrently. The current record selects and validates the marker;
+missing or expired state still denies browser and derived Git credentials.
+Repository construction initializes private cache and maintenance state. Settings
 policy stays in `repository/settings.rs`; repository reads do not forward HTTP
 settings operations. HTTP mutation families share one request identity policy in
 `app.rs`; projection retains its own non-HTTP error contract.

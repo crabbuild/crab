@@ -82,6 +82,30 @@ class ReadScalingTests(unittest.TestCase):
                                 capture_output=True)
         self.assertNotEqual(result.returncode, 0)
 
+    def test_deep_history_pages_match_native_git_and_reject_missing_or_shifted_pages(self):
+        repo = self.source("source", 1001)
+        commits = self.git(repo, "rev-list", "--first-parent", "HEAD").decode().splitlines()
+        records = []
+        for depth in (1, 10):
+            name = f"history-page-{depth}"
+            records.extend({"kind":"measurement", "operation":operation, "cache":cache,
+                            "outcome":"ok", "active_backend_operations":0}
+                           for operation, cache in (("open", "cold"), (name, "cold"),
+                                                    (name, "warm"), ("open", "warm")))
+            start = (depth - 1) * 100
+            records.append({"kind":"result", "operation":name, "path":list(b"target.txt"),
+                            "value":{"page":depth, "page_size":100, "commits":commits[start:start + 100],
+                                     "has_more":len(commits) > start + 100}})
+        records.append({"kind":"complete", "schema":1, "selection":"history-pages"})
+        self.assertEqual(verify(repo, self.write_evidence(records), "HEAD")["queries_checked"], 2)
+        with self.subTest("missing page"):
+            with self.assertRaisesRegex(ValueError, "missing query evidence"):
+                verify(repo, self.write_evidence(records[:-2] + records[-1:]), "HEAD")
+        records[-2]["value"]["commits"][0] = commits[0]
+        with self.subTest("wrong continuation"):
+            with self.assertRaisesRegex(ValueError, "resumed history differs"):
+                verify(repo, self.write_evidence(records), "HEAD")
+
 
 if __name__ == "__main__":
     unittest.main()

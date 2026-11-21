@@ -154,7 +154,19 @@ struct Flow {
 struct AuthState {
     store: Store,
     prefix: String,
+    pending_checks: Arc<Mutex<HashMap<Key, futures_util::future::WeakShared<SessionCheck>>>>,
 }
+
+// Shared verification must not publish a mutable cache entry. A newer check
+// can revoke a cached session while an earlier batch still has waiting callers.
+struct VerifiedSession {
+    identity: Identity,
+    groups: Vec<String>,
+    csrf: String,
+    expires_at: u64,
+}
+
+type SessionCheck = futures_util::future::BoxFuture<'static, Option<Arc<VerifiedSession>>>;
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -224,6 +236,7 @@ impl Authentication {
         let state = AuthState {
             store: root.store.clone(),
             prefix: root.path(".crab/http-server/v1/auth").to_string(),
+            pending_checks: Arc::default(),
         };
         let secret = config
             .client_secret_file

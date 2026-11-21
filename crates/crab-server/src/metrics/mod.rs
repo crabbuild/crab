@@ -14,9 +14,11 @@ use http_body::{Body as _, Frame, SizeHint};
 use metrics::{Counter, Gauge, Histogram, Key, KeyName, Label, Level, Metadata, Recorder, Unit};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 
+mod git;
+
 const METHOD_COUNT: usize = 6;
 const OUTCOME_COUNT: usize = 7;
-const ADMISSION_COUNT: usize = 4;
+const ADMISSION_COUNT: usize = 5;
 const TRANSFER_REJECTION_COUNT: usize = 2;
 const PROJECTION_PROBE_RESULT_COUNT: usize = 3;
 const PROJECTION_PHASE_COUNT: usize = 1;
@@ -30,8 +32,13 @@ const DURATION_BUCKETS_SECONDS: [f64; 16] = [
 const METHOD_LABELS: [&str; METHOD_COUNT] = ["get", "head", "put", "post", "delete", "other"];
 const OUTCOME_LABELS: [&str; OUTCOME_COUNT] =
     ["1xx", "2xx", "3xx", "4xx", "5xx", "other", "cancelled"];
-pub(crate) const ADMISSION_LABELS: [&str; ADMISSION_COUNT] =
-    ["read", "git_transfer", "application", "maintenance"];
+pub(crate) const ADMISSION_LABELS: [&str; ADMISSION_COUNT] = [
+    "read",
+    "git_transfer",
+    "application",
+    "maintenance",
+    "bulk_read",
+];
 const TRANSFER_REJECTION_LABELS: [&str; TRANSFER_REJECTION_COUNT] = ["capacity", "coordination"];
 
 const PROJECTION_PROBE_RESULT_LABELS: [&str; PROJECTION_PROBE_RESULT_COUNT] =
@@ -53,6 +60,7 @@ pub(crate) struct Metrics {
 
 struct MetricsInner {
     handle: PrometheusHandle,
+    git: git::GitReadMetrics,
     methods: [MethodMetrics; METHOD_COUNT],
     admission: [AdmissionMetrics; ADMISSION_COUNT],
     repositories: Gauge,
@@ -77,6 +85,7 @@ struct MetricsInner {
 struct MethodMetrics {
     requests: [Counter; OUTCOME_COUNT],
     in_flight: Gauge,
+    active_sized_response_bytes: Gauge,
     duration: Histogram,
     body_errors: Counter,
     body_aborts: Counter,
@@ -108,6 +117,7 @@ impl Metrics {
         Ok(Self {
             inner: Arc::new(MetricsInner {
                 handle: recorder.handle(),
+                git: git::GitReadMetrics::new(&recorder),
                 methods,
                 admission,
                 repositories: recorder.register_gauge(
@@ -214,6 +224,7 @@ impl Metrics {
             started: Instant::now(),
             outcome_recorded: false,
             finished: false,
+            body_bytes: 0,
         }
     }
 
@@ -349,6 +360,13 @@ impl MethodMetrics {
                 &key("crab_server_in_flight_requests", &[("method", method)]),
                 &METADATA,
             ),
+            active_sized_response_bytes: recorder.register_gauge(
+                &key(
+                    "crab_server_active_sized_response_bytes",
+                    &[("method", method)],
+                ),
+                &METADATA,
+            ),
             duration: recorder.register_histogram(
                 &key(
                     "crab_server_request_duration_seconds",
@@ -398,6 +416,7 @@ pub(crate) struct RequestObservation {
     started: Instant,
     outcome_recorded: bool,
     finished: bool,
+    body_bytes: u64,
 }
 
 impl RequestObservation {
@@ -430,6 +449,10 @@ impl RequestObservation {
         self.metrics.inner.methods[self.method]
             .in_flight
             .decrement(1);
+        self.metrics.inner.methods[self.method]
+            .active_sized_response_bytes
+            .decrement(self.body_bytes as f64);
+        self.body_bytes = 0;
         self.finished = true;
     }
 }
@@ -455,6 +478,13 @@ impl ObservedBody {
             observation.finish();
             None
         } else {
+            // Keep the initial exact body size through completion or drop.
+            // This is a body-lifetime estimate, excluding unknown streams and
+            // additional transport buffers rather than asserting process RSS.
+            observation.body_bytes = inner.size_hint().exact().unwrap_or(0);
+            observation.metrics.inner.methods[observation.method]
+                .active_sized_response_bytes
+                .increment(observation.body_bytes as f64);
             Some(observation)
         };
         Self { inner, observation }
@@ -524,6 +554,11 @@ fn describe_metrics(recorder: &impl Recorder) {
         recorder,
         "crab_server_in_flight_requests",
         "Public requests whose handler or response body is still active.",
+    );
+    describe_gauge(
+        recorder,
+        "crab_server_active_sized_response_bytes",
+        "Initial exact sizes of unfinished response bodies; excludes unknown streams and transport buffers, not an RSS estimate.",
     );
     recorder.describe_histogram(
         KeyName::from_const_str("crab_server_request_duration_seconds"),

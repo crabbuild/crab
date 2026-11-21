@@ -5,6 +5,15 @@ use std::cmp::Ordering;
 use crate::reader::GitObject;
 use crate::{CorruptionStage, Error, GitPath, Result};
 
+pub(crate) type SharedCommit = std::sync::Arc<crate::resident::Retained<Commit>>;
+pub(crate) type SharedTree = std::sync::Arc<crate::resident::Retained<Vec<RawTreeEntry>>>;
+
+impl std::borrow::Borrow<Commit> for SharedCommit {
+    fn borrow(&self) -> &Commit {
+        &self.value
+    }
+}
+
 /// Exact supported Git tree-entry modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum EntryMode {

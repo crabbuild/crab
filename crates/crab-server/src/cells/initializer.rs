@@ -1,4 +1,4 @@
-use cellar::sdk::{NodeOutcome, ShutdownMode};
+use cellar::sdk::ShutdownMode;
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
@@ -75,22 +75,10 @@ pub(crate) async fn initialize_repository(config: &Config, repository: Uuid) -> 
             return Err(super::Error::sdk(error).into());
         }
     };
-    let NodeOutcome::Stopped(report) = stopped else {
-        let _retained = local.keep();
-        return Err(Error::Config(
-            "repository initialization lost its Cellar node",
-        ));
-    };
-    if !report.ingress_drained
-        || !report.application_work_drained
-        || !report.cells_drained
-        || report.drain_timed_out
-    {
+    if let Err(error) = super::runtime::finish_shutdown(stopped) {
         // A failed drain may leave recovery evidence in this directory.
         let _retained = local.keep();
-        return Err(Error::Config(
-            "repository initialization did not complete its Cellar drain",
-        ));
+        return Err(error.into());
     }
     initialized?;
     wait_for_initializer_lease(config, &node_name).await?;

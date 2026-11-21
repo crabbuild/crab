@@ -72,6 +72,7 @@ BAD_PUSH_STATUSES = {"internal", "unpack-failed", "missing-object", "malformed-o
 PROXY_STREAM_CHUNK_BYTES = 4 * 1024 * 1024
 PROXY_BUFFER_LIMIT_BYTES = 8 * 1024 * 1024
 PROXY_REQUEST_BUFFER_LIMIT_BYTES = 64 * 1024 * 1024
+PROXY_UPSTREAM_REUSE_SECONDS = 1.0
 
 
 class SmokeError(RuntimeError):
@@ -124,6 +125,9 @@ class RequestCountingProxy:
 
         class Handler(http.server.BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
+            # Headers and small bodies are separate unbuffered writes; Nagle
+            # would add a delayed-ACK pause to every metered read on Linux.
+            disable_nagle_algorithm = True
 
             def setup(self) -> None:
                 super().setup()
@@ -138,6 +142,7 @@ class RequestCountingProxy:
                 self.upstream_connection = connection_class(
                     proxy.upstream.hostname, proxy.upstream.port, timeout=60
                 )
+                self.upstream_used_at = 0.0
 
             def finish(self) -> None:
                 try:
@@ -205,6 +210,11 @@ class RequestCountingProxy:
                         return
                     remaining = 0 if body is not None else length
                     try:
+                        # RustFS's five-second header deadline can race an EOF
+                        # readiness probe. Bound quiet reuse without retrying an
+                        # ambiguous upstream write or churning busy connections.
+                        if time.monotonic() - self.upstream_used_at >= PROXY_UPSTREAM_REUSE_SECONDS:
+                            connection.close()
                         # Prior responses are fully drained. Readability while
                         # idle means EOF or unexpected data, not a reusable link;
                         # reconnect before forwarding rather than inventing a retry.
@@ -215,6 +225,7 @@ class RequestCountingProxy:
                                 readiness.register(connection.sock, selectors.EVENT_READ)
                                 if readiness.select(timeout=0):
                                     connection.close()
+                        self.upstream_used_at = time.monotonic()
                         if body is not None:
                             connection.request(
                                 self.command,

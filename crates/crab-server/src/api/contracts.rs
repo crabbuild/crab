@@ -19,6 +19,8 @@ fn typescript() -> String {
         SessionMode::decl(&config),
         SessionResponse::decl(&config),
         BranchProtection::decl(&config),
+        super::representation::FilePreviewState::decl(&config),
+        super::representation::FilePreview::decl(&config),
         RepositoryAccess::decl(&config),
         RepositoryMember::decl(&config),
         RepositoryGroup::decl(&config),

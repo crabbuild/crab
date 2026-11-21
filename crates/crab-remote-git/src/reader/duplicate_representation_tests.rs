@@ -112,6 +112,7 @@ pub(crate) async fn fixture(
             .insert_pack_index(
                 crate::runtime::PackIndexCacheKey::new(&identity, pack_id),
                 Arc::new(PackIndex {
+                    _reservation: None,
                     object_ids: rows.iter().map(|row| row.0).collect(),
                     pack_offsets: rows.iter().map(|row| row.1).collect(),
                     crc32: rows.iter().map(|row| row.3).collect(),

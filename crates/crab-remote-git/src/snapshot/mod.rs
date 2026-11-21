@@ -1,3 +1,8 @@
+mod blame;
+mod history;
+pub use blame::SharedBlame;
+
+use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::mem;
@@ -62,99 +67,6 @@ impl RemoteGitSnapshot {
     pub async fn commit(&self, operation: &OperationContext) -> Result<Commit> {
         self.ensure_operation(operation)?;
         operation.read_commit(self.commit_oid).await
-    }
-
-    /// Return one deterministic bounded page of commits reachable from this snapshot.
-    ///
-    /// Continuations bind the immutable start commit and traversal policy. A
-    /// continuation may rewalk a bounded prefix after cache loss and therefore
-    /// requires no server-side history database.
-    pub async fn history(
-        &self,
-        traversal: HistoryTraversal,
-        page: &PageRequest,
-        operation: &OperationContext,
-    ) -> Result<Page<Commit>> {
-        self.ensure_operation(operation)?;
-        let skip = match page.after() {
-            Some(cursor) => {
-                let decoded = cursor.decode_history()?;
-                if decoded.start != self.commit_oid || decoded.mode != traversal {
-                    return Err(Error::InvalidCursor {
-                        reason: CursorError::ContextMismatch,
-                    });
-                }
-                decoded.skip
-            }
-            None => 0,
-        };
-        let mut pending = vec![self.commit_oid];
-        let mut visited = HashSet::new();
-        let mut traversed = 0u64;
-        let mut items = Vec::new();
-        while let Some(oid) = pending.pop() {
-            operation.ensure_active()?;
-            if visited.contains(&oid) {
-                continue;
-            }
-            if traversed >= skip && items.len() == page.limit() {
-                pending.push(oid);
-                break;
-            }
-            visited.insert(oid);
-            operation.charge(BudgetDimension::HistoryCommits, 1).await?;
-            let commit = operation.read_commit(oid).await?;
-            match traversal {
-                HistoryTraversal::FirstParent => {
-                    if let Some(parent) = commit.parents.first() {
-                        pending.push(*parent);
-                    }
-                }
-                HistoryTraversal::AllParents => {
-                    queue_all_parents(
-                        &mut pending,
-                        &commit,
-                        self.commit_graph.as_deref(),
-                        operation,
-                    )
-                    .await?;
-                }
-            }
-            if traversed >= skip {
-                operation
-                    .charge(
-                        BudgetDimension::ResponseBytes,
-                        commit_response_bytes(&commit),
-                    )
-                    .await?;
-                items.try_reserve(1).map_err(|source| Error::Allocation {
-                    requested: mem::size_of::<Commit>(),
-                    source,
-                })?;
-                items.push(commit);
-            }
-            traversed = traversed.checked_add(1).ok_or(Error::LimitExceeded {
-                limit: "history commits",
-                actual: u64::MAX,
-                maximum: u64::MAX,
-            })?;
-        }
-        while pending.last().is_some_and(|oid| visited.contains(oid)) {
-            pending.pop();
-        }
-        let next = if pending.is_empty() {
-            None
-        } else {
-            let next_skip = skip
-                .checked_add(items.len() as u64)
-                .ok_or(Error::LimitExceeded {
-                    limit: "history commits",
-                    actual: u64::MAX,
-                    maximum: u64::MAX,
-                })?;
-            Some(PageCursor::history(self.commit_oid, traversal, next_skip))
-        };
-        Ok(Page { items, next })
     }
 
     /// Return commits reachable from this snapshot and not from the base snapshot.
@@ -721,252 +633,6 @@ impl RemoteGitSnapshot {
                 bytes: bytes::Bytes::from(bytes),
             }],
         })
-    }
-
-    /// Attribute every line in one ordinary UTF-8 file through first parents.
-    ///
-    /// The result is complete or fails with a resource limit. Rename following,
-    /// merge-parent attribution, binary blobs, and pointer materialization are
-    /// intentionally outside this bounded object-store reader operation.
-    pub async fn blame(&self, path: &GitPath, operation: &OperationContext) -> Result<Blame> {
-        self.ensure_operation(operation)?;
-        operation.ensure_active()?;
-        if let Some(cached) = operation.cached_blame(self.commit_oid, path).await {
-            operation.charge_cached(cached.usage).await?;
-            return Ok(cached.value.as_ref().clone());
-        }
-        let budget_before = operation.budget_usage().await;
-        let head_blob = read_blame_blob(self, path, operation).await?;
-        let path_index = self.repository.path_state(operation).await?;
-        let head_oid = match &path_index {
-            Some(index) => index
-                .last_change(self.commit_oid, path, operation)
-                .await?
-                .ok_or(Error::Corrupt {
-                    stage: CorruptionStage::PathState,
-                })?,
-            None => self.commit_oid,
-        };
-        let head_commit = if path_index.is_some() {
-            path_history_commit(head_oid, operation).await?
-        } else {
-            operation.read_commit(head_oid).await?
-        };
-        if path_index.is_some() {
-            let entry =
-                entries_at_trees(std::slice::from_ref(&head_commit), path, operation).await?;
-            if entry[0].as_ref().map(|entry| entry.oid) != Some(head_blob.metadata.oid) {
-                return Err(Error::Corrupt {
-                    stage: CorruptionStage::PathState,
-                });
-            }
-        }
-        let mut current_oid = head_blob.metadata.oid;
-        let mut current_bytes = head_blob.bytes;
-        let current_line_count = line_count(&current_bytes, operation.cancellation())?;
-        operation
-            .charge(BudgetDimension::BlameLines, current_line_count as u64)
-            .await?;
-        let mut current_lines =
-            line_ranges(&current_bytes, current_line_count, operation.cancellation())?;
-
-        let mut origins = Vec::new();
-        origins
-            .try_reserve_exact(current_lines.len())
-            .map_err(|source| Error::Allocation {
-                requested: current_lines
-                    .len()
-                    .saturating_mul(mem::size_of::<ObjectId>()),
-                source,
-            })?;
-        origins.resize(current_lines.len(), head_commit.oid);
-        let mut tracked = Vec::new();
-        tracked
-            .try_reserve_exact(current_lines.len())
-            .map_err(|source| Error::Allocation {
-                requested: current_lines
-                    .len()
-                    .saturating_mul(mem::size_of::<Option<usize>>()),
-                source,
-            })?;
-        tracked.extend((0..current_lines.len()).map(Some));
-        let mut commits = HashMap::new();
-        commits.insert(head_commit.oid, head_commit.clone());
-        let mut current_commit = head_commit;
-        let mut visited = HashSet::new();
-        visited.insert(current_commit.oid);
-
-        'history: while let Some(parent_oid) = current_commit.parents.first().copied() {
-            let parent_commits = match &path_index {
-                Some(index) => {
-                    let Some(changed) = index.last_change(parent_oid, path, operation).await?
-                    else {
-                        break;
-                    };
-                    let commits = vec![path_history_commit(changed, operation).await?];
-                    if let Some(graph) = self.commit_graph.as_deref()
-                        && !graph.parents_match(&commits, operation).await?
-                    {
-                        return Err(Error::Corrupt {
-                            stage: CorruptionStage::PathState,
-                        });
-                    }
-                    commits
-                }
-                None => {
-                    blame_parent_commits(parent_oid, self.commit_graph.as_deref(), operation)
-                        .await?
-                }
-            };
-            for parent_commit in &parent_commits {
-                if !visited.insert(parent_commit.oid) {
-                    return Err(Error::Corrupt {
-                        stage: CorruptionStage::Commit,
-                    });
-                }
-            }
-            let parent_entries = entries_at_trees(&parent_commits, path, operation).await?;
-            for (parent_commit, parent_entry) in parent_commits.into_iter().zip(parent_entries) {
-                let Some(parent_entry) = parent_entry.filter(|entry| entry.kind == EntryKind::Blob)
-                else {
-                    break 'history;
-                };
-                if parent_entry.oid == current_oid {
-                    let mut attributed = false;
-                    for final_line in tracked.iter().flatten() {
-                        origins[*final_line] = parent_commit.oid;
-                        attributed = true;
-                    }
-                    if attributed {
-                        commits.insert(parent_commit.oid, parent_commit.clone());
-                    }
-                    if !origins.contains(&current_commit.oid) {
-                        commits.remove(&current_commit.oid);
-                    }
-                    current_commit = parent_commit;
-                    continue;
-                }
-                let Some(parent_blob) =
-                    optional_blame_blob_for_entry(parent_entry, operation).await?
-                else {
-                    break 'history;
-                };
-                let mut attributed = false;
-                let parent_bytes = parent_blob.bytes;
-                let parent_line_count = line_count(&parent_bytes, operation.cancellation())?;
-                let parent_lines =
-                    line_ranges(&parent_bytes, parent_line_count, operation.cancellation())?;
-                let (equal_prefix, equal_suffix) = matching_ends(
-                    &parent_bytes,
-                    &parent_lines,
-                    &current_bytes,
-                    &current_lines,
-                    operation.cancellation(),
-                )?;
-                let comparison_cells = comparison_cells(
-                    parent_line_count - equal_prefix - equal_suffix,
-                    current_lines.len() - equal_prefix - equal_suffix,
-                )?;
-                operation
-                    .charge(BudgetDimension::BlameComparisons, comparison_cells)
-                    .await?;
-                // Both blobs and the comparison budget are validated before a
-                // cache hit. Reusing line mappings cannot authorize an object or
-                // bypass a stricter operation limit.
-                let matches = match operation
-                    .cached_blame_comparison(parent_blob.metadata.oid, current_oid)
-                    .await
-                {
-                    Some(matches) => matches,
-                    None => {
-                        let matches = Arc::new(
-                            git_line_matches(
-                                operation.runtime(),
-                                parent_bytes.clone(),
-                                parent_line_count,
-                                current_bytes.clone(),
-                                current_lines.len(),
-                                operation.cancellation().clone(),
-                            )
-                            .await?,
-                        );
-                        operation.ensure_active()?;
-                        operation
-                            .insert_blame_comparison(
-                                parent_blob.metadata.oid,
-                                current_oid,
-                                matches.clone(),
-                            )
-                            .await;
-                        matches
-                    }
-                };
-                operation.ensure_active()?;
-                let mut parent_tracked = Vec::new();
-                parent_tracked
-                    .try_reserve_exact(parent_lines.len())
-                    .map_err(|source| Error::Allocation {
-                        requested: parent_lines
-                            .len()
-                            .saturating_mul(mem::size_of::<Option<usize>>()),
-                        source,
-                    })?;
-                parent_tracked.resize(parent_lines.len(), None);
-                for &(parent_line, current_line) in matches.iter() {
-                    if let Some(final_line) = tracked[current_line] {
-                        origins[final_line] = parent_commit.oid;
-                        parent_tracked[parent_line] = Some(final_line);
-                        attributed = true;
-                    }
-                }
-                if attributed {
-                    commits.insert(parent_commit.oid, parent_commit.clone());
-                }
-                // Keep metadata only for commits that still own a final line.
-                if !origins.contains(&current_commit.oid) {
-                    commits.remove(&current_commit.oid);
-                }
-                if parent_tracked.iter().all(Option::is_none) {
-                    break 'history;
-                }
-                current_commit = parent_commit;
-                current_oid = parent_blob.metadata.oid;
-                current_bytes = parent_bytes;
-                current_lines = parent_lines;
-                tracked = parent_tracked;
-            }
-        }
-
-        let ranges = blame_ranges(path, &origins, &commits, operation.cancellation())?;
-        let response_bytes = ranges
-            .iter()
-            .fold(path.as_bytes().len() as u64, |total, range| {
-                total
-                    .saturating_add(commit_response_bytes(&range.commit))
-                    .saturating_add(range.source_path.as_bytes().len() as u64)
-                    .saturating_add(mem::size_of::<BlameRange>() as u64)
-            });
-        operation
-            .charge(BudgetDimension::ResponseBytes, response_bytes)
-            .await?;
-        let blame = Arc::new(Blame {
-            commit: self.commit_oid,
-            path: path.clone(),
-            ranges,
-        });
-        let depth = u64::try_from(path.components().count()).map_err(|_| Error::LimitExceeded {
-            limit: "traversal depth",
-            actual: u64::MAX,
-            maximum: u64::MAX,
-        })?;
-        let usage = operation
-            .budget_usage()
-            .await
-            .semantic_delta(budget_before, depth);
-        operation
-            .insert_blame(self.commit_oid, path.clone(), Arc::clone(&blame), usage)
-            .await;
-        Ok(blame.as_ref().clone())
     }
 
     /// Traverse the snapshot into bounded archive entries without a checkout.
@@ -1728,10 +1394,27 @@ async fn git_line_matches(
     current: bytes::Bytes,
     current_line_count: usize,
     cancellation: tokio_util::sync::CancellationToken,
-) -> Result<Vec<(usize, usize)>> {
+) -> Result<crate::runtime::LineMatches> {
+    let input_memory = runtime
+        .reserve_bytes(
+            parent_line_count
+                .saturating_add(current_line_count)
+                .saturating_mul(128),
+        )
+        .await?;
+    let output_memory = runtime
+        .reserve_bytes(
+            parent_line_count
+                .min(current_line_count)
+                .saturating_mul(mem::size_of::<(usize, usize)>())
+                .saturating_add(mem::size_of::<Vec<(usize, usize)>>()),
+        )
+        .await?;
+    let token = cancellation.clone();
     runtime
-        .spawn_blocking(move || {
-            check_cpu_cancellation(&cancellation)?;
+        .run_cpu(&cancellation, move || {
+            let _input_memory = input_memory;
+            check_cpu_cancellation(&token)?;
             let supported_lines = i32::MAX as usize - 1;
             if parent_line_count > supported_lines || current_line_count > supported_lines {
                 return Err(Error::LimitExceeded {
@@ -1750,7 +1433,7 @@ async fn git_line_matches(
             // postprocessing to place ambiguous repeated-line changes.
             let mut diff = gix_imara_diff::Diff::compute(gix_imara_diff::Algorithm::Myers, &input);
             diff.postprocess_lines(&input);
-            check_cpu_cancellation(&cancellation)?;
+            check_cpu_cancellation(&token)?;
             let mut matches = Vec::new();
             matches
                 .try_reserve_exact(input.before.len().min(input.after.len()))
@@ -1806,45 +1489,75 @@ async fn git_line_matches(
                 });
             }
             matches.extend((0..unchanged).map(|line| (parent_line + line, current_line + line)));
-            Ok(matches)
+            check_cpu_cancellation(&token)?;
+            Ok(Arc::new(crate::resident::Retained::new(
+                matches,
+                output_memory,
+            )))
         })
         .await
-        .map_err(|source| Error::DecodeTask { source })?
 }
 
-fn blame_ranges(
+async fn blame_ranges(
     path: &GitPath,
     origins: &[ObjectId],
-    commits: &HashMap<ObjectId, Commit>,
-    cancellation: &tokio_util::sync::CancellationToken,
-) -> Result<Vec<BlameRange>> {
-    let mut ranges = Vec::new();
-    let mut start = 0;
-    while start < origins.len() {
-        if start % CPU_CANCELLATION_INTERVAL == 0 {
-            check_cpu_cancellation(cancellation)?;
-        }
-        let oid = origins[start];
-        let mut end = start + 1;
-        while origins.get(end) == Some(&oid) {
-            end += 1;
-        }
-        let commit = commits.get(&oid).ok_or(Error::InternalInvariant {
+    commits: &HashMap<ObjectId, crate::objects::SharedCommit>,
+    operation: &OperationContext,
+) -> Result<(Vec<BlameRange>, crate::resident::ReadReservation)> {
+    let mut count = 0usize;
+    let mut header_slots = 0usize;
+    let mut response_bytes = path.as_bytes().len() as u64;
+    for group in origins.chunk_by(|left, right| left == right) {
+        operation.ensure_active()?;
+        let commit = commits.get(&group[0]).ok_or(Error::InternalInvariant {
             invariant: "blame origin commit metadata is absent",
         })?;
-        ranges.try_reserve(1).map_err(|source| Error::Allocation {
-            requested: mem::size_of::<BlameRange>(),
+        count += 1;
+        header_slots = header_slots.saturating_add(
+            commit
+                .signature_headers
+                .len()
+                .saturating_mul(mem::size_of::<crate::SignatureHeader>()),
+        );
+        response_bytes = response_bytes
+            .saturating_add(commit_response_bytes(commit))
+            .saturating_add(path.as_bytes().len() as u64)
+            .saturating_add(mem::size_of::<BlameRange>() as u64);
+    }
+    operation
+        .charge(BudgetDimension::ResponseBytes, response_bytes)
+        .await?;
+    let requested = usize::try_from(response_bytes)
+        .map_err(|_| Error::LimitExceeded {
+            limit: "resident read bytes",
+            actual: response_bytes,
+            maximum: usize::MAX as u64,
+        })?
+        .saturating_add(mem::size_of::<Blame>())
+        .saturating_add(header_slots);
+    let reservation = operation.runtime().reserve_bytes(requested).await?;
+    let mut ranges = Vec::new();
+    ranges
+        .try_reserve_exact(count)
+        .map_err(|source| Error::Allocation {
+            requested: count.saturating_mul(mem::size_of::<BlameRange>()),
             source,
         })?;
+    let mut start = 1;
+    for group in origins.chunk_by(|left, right| left == right) {
+        operation.ensure_active()?;
+        let commit = commits.get(&group[0]).ok_or(Error::InternalInvariant {
+            invariant: "blame origin commit metadata is absent",
+        })?;
         ranges.push(BlameRange {
-            start: start as u64 + 1,
-            lines: (end - start) as u64,
-            commit: commit.clone(),
+            start,
+            lines: group.len() as u64,
+            commit: commit.value.clone(),
             source_path: path.clone(),
         });
-        start = end;
+        start += group.len() as u64;
     }
-    Ok(ranges)
+    Ok((ranges, reservation))
 }
 
 async fn path_change(
@@ -1884,7 +1597,7 @@ async fn blame_parent_commits(
     start: ObjectId,
     commit_graph: Option<&CommitGraphIndex>,
     operation: &OperationContext,
-) -> Result<Vec<Commit>> {
+) -> Result<Vec<crate::objects::SharedCommit>> {
     // This wave reduces repeated range setup without spanning enough unrelated
     // pack data to turn coalescing into repository-sized over-fetch.
     const GRAPH_PREFETCH: usize = 2 * 1_024;
@@ -1896,7 +1609,10 @@ async fn blame_parent_commits(
             .await?
         && !oids.is_empty()
     {
-        let commits = path_history_commits(&oids, operation).await?;
+        operation
+            .charge(BudgetDimension::HistoryCommits, oids.len() as u64)
+            .await?;
+        let commits = operation.read_commits_shared(&oids).await?;
         let valid = commit_graph.parents_match(&commits, operation).await?
             && commits
                 .windows(2)
@@ -1918,15 +1634,16 @@ async fn blame_parent_commits(
         && let Some(current_oid) = oid
     {
         operation.ensure_active()?;
-        let commit = path_history_commit(current_oid, operation).await?;
+        operation.charge(BudgetDimension::HistoryCommits, 1).await?;
+        let commit = operation.read_commit_shared(current_oid).await?;
         oid = commit.parents.first().copied();
         commits.push(commit);
     }
     Ok(commits)
 }
 
-async fn entries_at_trees(
-    commits: &[Commit],
+async fn entries_at_trees<C: Borrow<Commit>>(
+    commits: &[C],
     path: &GitPath,
     operation: &OperationContext,
 ) -> Result<Vec<Option<TreeEntry>>> {
@@ -1934,6 +1651,7 @@ async fn entries_at_trees(
         return Ok(commits
             .iter()
             .map(|commit| {
+                let commit = commit.borrow();
                 Some(TreeEntry {
                     path: GitPath::root(),
                     oid: commit.tree,
@@ -1947,7 +1665,7 @@ async fn entries_at_trees(
 
     let mut trees = commits
         .iter()
-        .map(|commit| Some(commit.tree))
+        .map(|commit| Some(commit.borrow().tree))
         .collect::<Vec<_>>();
     let mut result = vec![None; commits.len()];
     let mut parent = GitPath::root();
@@ -2270,15 +1988,14 @@ fn compare_trees<'a>(
         // private vectors so unchanged subtrees and listing order stay intact.
         let (base, head) = operation
             .runtime()
-            .spawn_blocking(move || {
+            .run_cpu(operation.cancellation(), move || {
                 check_cpu_cancellation(&cancellation)?;
                 base.sort_unstable_by(|left, right| left.path.cmp(&right.path));
                 head.sort_unstable_by(|left, right| left.path.cmp(&right.path));
                 check_cpu_cancellation(&cancellation)?;
                 Ok::<_, Error>((base, head))
             })
-            .await
-            .map_err(|source| Error::DecodeTask { source })??;
+            .await?;
         operation.ensure_active()?;
         let child_depth = next_depth(depth)?;
         let mut base_position = 0;
@@ -2513,7 +2230,8 @@ mod tests {
         assert_eq!(
             git_line_matches(&runtime, parent, 3, current, 3, cancellation)
                 .await
-                .expect("line matches"),
+                .expect("line matches")
+                .value,
             vec![(0, 0), (2, 2)]
         );
         runtime.shutdown().await;
@@ -2533,7 +2251,7 @@ mod tests {
         )
         .await
         .expect("line matches");
-        assert_eq!(matches, vec![(0, 0), (1, 1)]);
+        assert_eq!(matches.value, vec![(0, 0), (1, 1)]);
         runtime.shutdown().await;
     }
 }

@@ -946,6 +946,10 @@ root rather than pod memory.
 
 Session cookies use `HttpOnly` and `SameSite=Lax`. HTTPS deployments also use `Secure` and the `__Host-` prefix. OIDC sessions expire at the earlier of ID-token expiry or eight hours; GitHub sessions expire after eight hours. The server does not retain refresh tokens or GitHub access tokens.
 
+Concurrent session checks may share a batch whose durable reads begin after
+every participant joins. Requests arriving after dispatch start fresh checks.
+The bounded pending registry releases unfinished work when its last caller leaves.
+
 Restarting or replacing a replica preserves sessions and current-format Git
 tokens. Git-token format 2 requires the immutable repository UUID. Older tokens
 are rejected and must be revoked/reissued; there is no name-only reader or
@@ -2443,11 +2447,13 @@ and a resident-cell limit derived from process memory and file descriptors.
 is not a throughput or production-scale qualification.
 
 Browser blob reads allow up to 256 MiB per Git object and raw/inline-asset
-response; JSON responses retain their separate 8 MiB cap. File-info requests
-read blob metadata first. Above the 1 MiB inline-text threshold they return the
-size, identity and classification without decoding the full body, with
-`text: null` and `text_truncated: true`. Raw/range requests still verify the Git object
-before returning bytes; this is not an unbounded server-side streaming reader.
+response; JSON responses retain their separate 8 MiB cap. The `file-preview`
+endpoint reads metadata first and returns `preview.state: omitted_size` above
+1 MiB without guessing text encoding. The first-party viewer uses this endpoint.
+The tagged `file` endpoint retains full inspection within its operation budget:
+`text_truncated` is true only for inspected UTF-8 omitted because of size.
+Raw/range requests still verify the Git object before returning bytes; this is
+not an unbounded server-side streaming reader.
 CSV/TSV workbenches above their 50 MiB normalization budget keep HTTP scans;
 whole-file browser parsers retain their independent 50 MiB limit.
 

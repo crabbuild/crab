@@ -29,10 +29,13 @@ mod write;
 mod contracts;
 
 mod query;
+mod read_admission;
 mod representation;
+mod response_json;
+mod revalidation;
 pub(crate) use query::comparison_blobs;
 use query::execute;
-use representation::{asset_response, blob_response, decode_cursor, decode_hex};
+use representation::{asset_response, decode_cursor, decode_hex};
 pub(crate) use representation::{display_path, encode_hex};
 
 use std::sync::Arc;
@@ -41,7 +44,7 @@ use std::time::Instant;
 use axum::{
     Extension, Json,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
 use crab_remote_git::{Blob, CorruptionStage, Error, GitPath, PageRequest, RevisionError};
@@ -65,6 +68,8 @@ pub(crate) enum Action {
     Blob,
     Asset,
     File,
+    #[serde(rename = "file-preview")]
+    FilePreview,
     Changes,
     Diff,
     Blame,
@@ -125,73 +130,75 @@ impl IntoResponse for ApiError {
         }
         let (status, code, message) = match &self {
             Self::Input(message) => (StatusCode::BAD_REQUEST, "invalid_request", *message),
-            Self::Remote(error) | Self::Service(crate::Error::Remote(error)) => match error {
-                Error::EmptyRepository => (
-                    StatusCode::NOT_FOUND,
-                    "empty_repository",
-                    "This repository has no commits yet",
-                ),
-                Error::PathNotFound
-                | Error::SnapshotUnavailable
-                | Error::Revision {
-                    reason: RevisionError::NotFound | RevisionError::NotReachable,
-                } => (
-                    StatusCode::NOT_FOUND,
-                    "not_found",
-                    "The requested path or revision is not available",
-                ),
-                Error::InvalidCursor { .. } => (
-                    StatusCode::CONFLICT,
-                    "stale_cursor",
-                    "This page has changed. Reload the first page to continue",
-                ),
-                Error::InvalidPath { .. }
-                | Error::InvalidLimit { .. }
-                | Error::Revision { .. }
-                | Error::EntryNotBlob { .. }
-                | Error::PathComponentNotTree { .. } => (
-                    StatusCode::BAD_REQUEST,
-                    "invalid_request",
-                    "Invalid path, revision, or entry kind",
-                ),
-                Error::BlameUnsupported { .. } => (
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    "blame_unsupported",
-                    "Blame requires an ordinary UTF-8 text file",
-                ),
-                Error::LimitExceeded { .. } => (
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    "read_limit",
-                    "This request exceeds the repository read budget",
-                ),
-                Error::Timeout { .. } => (
-                    StatusCode::GATEWAY_TIMEOUT,
-                    "timeout",
-                    "The repository read timed out. Try a smaller request",
-                ),
-                Error::Cancelled => (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "cancelled",
-                    "The read was cancelled",
-                ),
-                Error::RepositoryIndexing { .. } | Error::PathStateIndexing { .. } => (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "indexing",
-                    "Repository metadata is still being indexed. Retry shortly",
-                ),
-                Error::Corrupt {
-                    stage: CorruptionStage::PathState,
-                } => (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "path_state_corrupt",
-                    "Repository attribution metadata is being rebuilt. Retry shortly",
-                ),
-                _ => (
-                    StatusCode::BAD_GATEWAY,
-                    "remote_read",
-                    "Repository data could not be read. Check storage and repository health",
-                ),
-            },
+            Self::Remote(error) | Self::Service(crate::Error::Remote(error)) => {
+                match revalidation::shared_cause(error) {
+                    Error::EmptyRepository => (
+                        StatusCode::NOT_FOUND,
+                        "empty_repository",
+                        "This repository has no commits yet",
+                    ),
+                    Error::PathNotFound
+                    | Error::SnapshotUnavailable
+                    | Error::Revision {
+                        reason: RevisionError::NotFound | RevisionError::NotReachable,
+                    } => (
+                        StatusCode::NOT_FOUND,
+                        "not_found",
+                        "The requested path or revision is not available",
+                    ),
+                    Error::InvalidCursor { .. } => (
+                        StatusCode::CONFLICT,
+                        "stale_cursor",
+                        "This page has changed. Reload the first page to continue",
+                    ),
+                    Error::InvalidPath { .. }
+                    | Error::InvalidLimit { .. }
+                    | Error::Revision { .. }
+                    | Error::EntryNotBlob { .. }
+                    | Error::PathComponentNotTree { .. } => (
+                        StatusCode::BAD_REQUEST,
+                        "invalid_request",
+                        "Invalid path, revision, or entry kind",
+                    ),
+                    Error::BlameUnsupported { .. } => (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "blame_unsupported",
+                        "Blame requires an ordinary UTF-8 text file",
+                    ),
+                    Error::LimitExceeded { .. } => (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "read_limit",
+                        "This request exceeds the repository read budget",
+                    ),
+                    Error::Timeout { .. } => (
+                        StatusCode::GATEWAY_TIMEOUT,
+                        "timeout",
+                        "The repository read timed out. Try a smaller request",
+                    ),
+                    Error::Cancelled => (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "cancelled",
+                        "The read was cancelled",
+                    ),
+                    Error::RepositoryIndexing { .. } | Error::PathStateIndexing { .. } => (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "indexing",
+                        "Repository metadata is still being indexed. Retry shortly",
+                    ),
+                    Error::Corrupt {
+                        stage: CorruptionStage::PathState,
+                    } => (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "path_state_corrupt",
+                        "Repository attribution metadata is being rebuilt. Retry shortly",
+                    ),
+                    _ => (
+                        StatusCode::BAD_GATEWAY,
+                        "remote_read",
+                        "Repository data could not be read. Check storage and repository health",
+                    ),
+                }
+            }
             Self::Service(crate::Error::BrowseIndexes(_)) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "path_state_corrupt",
@@ -218,8 +225,9 @@ impl IntoResponse for ApiError {
 
 enum Payload {
     Json(Value),
-    Blob(Blob),
     Asset(Blob),
+    Blame(crab_remote_git::SharedBlame, u64),
+    Response(Response, std::time::Duration),
 }
 
 pub(crate) async fn read(
@@ -243,7 +251,7 @@ pub(crate) async fn read(
         )
             .into_response();
     };
-    let Ok(_permit) = server.admission.try_acquire() else {
+    let Ok(admission) = read_admission::acquire(&server, action) else {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             [("retry-after", "1")],
@@ -254,6 +262,8 @@ pub(crate) async fn read(
     let cancellation = server.cancellation.child_token();
     let _cancel_on_drop = cancellation.clone().drop_guard();
     let mut open_ms = 0.0;
+    let mut read_ms = 0.0;
+    let mut encode_ms = 0.0;
     let mut generation = None;
     let result = async {
         let limit = params.limit.unwrap_or(100);
@@ -272,7 +282,7 @@ pub(crate) async fn read(
         let cursor = params
             .cursor
             .as_deref()
-            .map(|value| decode_cursor(&server.cursor_key, value))
+            .map(|value| decode_cursor(&server.cursor_key, entry.id, value))
             .transpose()?;
         let page = PageRequest::new(limit, cursor)?;
         let search_query = if matches!(action, Action::Search) {
@@ -292,7 +302,14 @@ pub(crate) async fn read(
             None
         };
         let timer = Instant::now();
-        let opened = entry.open(&server, &cancellation).await;
+        let conditional = matches!(action, Action::Blob | Action::FilePreview)
+            && (headers.contains_key(axum::http::header::IF_NONE_MATCH)
+                || headers.contains_key(axum::http::header::IF_RANGE));
+        let opened = if conditional {
+            entry.revalidate(&server, &cancellation).await
+        } else {
+            entry.open(&server, &cancellation).await
+        };
         open_ms = timer.elapsed().as_secs_f64() * 1000.0;
         let opened = opened?;
         let repository = &opened.git;
@@ -351,6 +368,7 @@ pub(crate) async fn read(
         } else {
             None
         };
+        let timer = Instant::now();
         let payload = execute(
             &server,
             repository,
@@ -362,23 +380,40 @@ pub(crate) async fn read(
             search_query,
             &cancellation,
             projection_source.as_deref(),
+            &headers,
         )
-        .await?;
-        match payload {
+        .await;
+        read_ms = timer.elapsed().as_secs_f64() * 1000.0;
+        let payload = payload?;
+        let encoding = Instant::now();
+        let bytes = match payload {
             Payload::Json(value) => {
-                let bytes = serde_json::to_vec(&value)?;
-                if bytes.len() > 8 * 1024 * 1024 {
-                    return Err(ApiError::Remote(Error::LimitExceeded {
-                        limit: "HTTP response bytes",
-                        actual: bytes.len() as u64,
-                        maximum: 8 * 1024 * 1024,
-                    }));
-                }
-                Ok(([("content-type", "application/json")], bytes).into_response())
+                let bytes = serde_json::to_vec(&value);
+                encode_ms = encoding.elapsed().as_secs_f64() * 1000.0;
+                bytes?
             }
-            Payload::Blob(blob) => Ok(blob_response(blob, headers.get(header::RANGE))),
-            Payload::Asset(blob) => Ok(asset_response(blob)),
+            Payload::Asset(blob) => return Ok(asset_response(blob)),
+            Payload::Response(response, elapsed) => {
+                encode_ms = elapsed.as_secs_f64() * 1000.0;
+                read_ms = (read_ms - encode_ms).max(0.0);
+                return Ok(response);
+            }
+            Payload::Blame(blame, generation) => {
+                let bytes =
+                    response_json::blame(&server.runtime, &cancellation, blame, generation).await;
+                encode_ms = encoding.elapsed().as_secs_f64() * 1000.0;
+                let bytes = bytes?;
+                return Ok(([("content-type", "application/json")], bytes).into_response());
+            }
+        };
+        if bytes.len() > 8 * 1024 * 1024 {
+            return Err(ApiError::Remote(Error::LimitExceeded {
+                limit: "HTTP response bytes",
+                actual: bytes.len() as u64,
+                maximum: 8 * 1024 * 1024,
+            }));
         }
+        Ok(([("content-type", "application/json")], bytes).into_response())
     }
     .await;
     if matches!(
@@ -399,14 +434,14 @@ pub(crate) async fn read(
         Ok(value) => value,
         Err(error) => error.into_response(),
     };
+    let response = read_admission::retain(response, admission);
     let total = started.elapsed().as_secs_f64() * 1000.0;
     (
         [
             (
                 "server-timing",
                 format!(
-                    "open;dur={open_ms:.3}, read;dur={:.3}, total;dur={total:.3}",
-                    total - open_ms
+                    "open;dur={open_ms:.3}, read;dur={read_ms:.3}, encode;dur={encode_ms:.3}, total;dur={total:.3}"
                 ),
             ),
             (

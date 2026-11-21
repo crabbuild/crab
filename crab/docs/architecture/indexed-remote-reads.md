@@ -92,6 +92,122 @@ Git object content hashes, page order/continuation, first-parent history and eve
 blame line. Tree attribution is compared with native Git path history. Verification
 remains enabled under `python -O`.
 
+### Read-hardening measurements
+
+The [combined Plan 020 RustFS report](../benchmarks/v2-read-hardening-rustfs-2026-11-19.md)
+records the implemented seek history, metadata preview, shared blame, resident/
+CPU ownership and authorized HTTP revalidation changes. The final native matrix
+passes 1,440 Git query checks; combined HTTP proof passes 43 checks and an enforced
+1-CPU/1-GiB functional run passes 25. Frozen latency/throughput gates and broader
+lifecycle qualification remain open. This does not close the initiative's later
+delivery gates or establish hosted-provider latency.
+
+The `history-pages` qualifier selection measures first-parent pages 1, 10 and
+100 with a fixed 100-commit page size, where those pages exist. It prepares the
+actual opaque continuations in a separate runtime, records that work as
+`prepare-history-pages/setup`, and shuts that runtime down. Each selected page
+then gets its own fresh runtime and independently reported cold/warm opening and
+query measurements. The native Git verifier checks every applicable page,
+ordering, continuation, coordinates, and complete cold/warm evidence. A missing
+deep page cannot make the remaining page pass as the complete workload.
+
+The runtime metrics sink now distinguishes full cache-hit checksum bytes/time
+from uncached attribution computations. `MetricKind::BlameProducer` with no
+duration starts one lifetime; the matching duration observation finishes it,
+including when its future is dropped. A finished attribution future is not
+proof that backend/session cleanup has drained. `CacheVerification` counts the
+actual examined bytes, including corrupt objects, without removing checksums.
+The server's existing private management metrics include:
+
+- `crab_git_cache_verification_bytes_total` and
+  `crab_git_cache_verification_seconds`.
+- `crab_git_blame_producers_total`, `crab_git_active_blame_producers`, and
+  `crab_git_blame_producer_seconds`.
+- `crab_server_active_sized_response_bytes` retains each unfinished body's
+  initial exact size until completion/drop. Unknown-length streams, extra
+  serializer/transport buffers, and process RSS are outside this estimate.
+- `crab_git_cache_bytes` with fixed object, pack-index, parsed, blame and negative
+  classes. These are cache-map estimates, excluding caller-held values, active
+  buffers, serializer allocations and other process memory.
+
+`crab/scripts/e2e/qualify_v2_read_service.py --help` describes the HTTP driver's
+CLI. It uses native Git from an explicitly supplied read-only fixture to verify
+file/preview bodies, raw blob hashes, first-parent history and every blame line.
+Each offered client has one bounded synchronous connection per replica; excess
+server responses are recorded rather than retried away. Raw bodies are hashed
+as streams. JSON responses are capped at 8 MiB. The driver retains a request
+journal and summaries for offered attempts, successful throughput, all failures/429s, TTFB and
+completed-request latency; p99 requires at least 1,000 successful observations.
+TTFB here means the first response body byte after headers; header receipt time
+is separately journaled. Offered rate is the closed-loop attempt count divided
+by measured duration. It fails rather than silently truncating a case at its
+one-million-sample cap.
+
+The version-1 profile requires:
+
+- `source_repository`, `build_receipt`, `provider`, `region`, and a declared
+  `resources` object containing positive `cpu`, `memory_bytes`, `disk_bytes`.
+  Optional `public_origin` preserves the configured public Host while connecting
+  directly to each declared replica. This avoids a proxy obscuring disconnects;
+  it is included in the frozen workload identity. Plain HTTP still requires a
+  loopback fixture for both the origin and replica URLs.
+- `workloads`: named records with an `action` (`file`, `file-preview`, `blob`,
+  `commits`, `blame`), a server-cost `class` (`interactive` or `bulk`), and
+  fixture `paths`. History records optionally set `page_size` and `page_depth`.
+  The named preview migration can predeclare `baseline_action: "file"` with
+  `action: "file-preview"`. `--phase baseline` and `--phase candidate` select
+  those two routes explicitly; both remain in the frozen workload identity.
+  Other workloads use the same action in both trials. No endpoint retry is used.
+- `cases`: named records specifying `clients` (1–64), `duration_seconds`,
+  `warmup_seconds`, `timeout_seconds`, selected `workloads`, a `pattern`
+  (`same_key` or `distinct`), `cache`, and a `state_receipt` file.
+  A mixed case can name its small-read-only `reference_case` to enforce the
+  frozen interactive-latency ratio on matching interactive workloads.
+  Optional `cancel_after_seconds` closes each request's socket after headers
+  are sent. These probes retain `ClientCancelled` failures and cancellation
+  counts; they cannot pass a normal successful-throughput gate. Qualification
+  must separately prove that the server's corresponding work drains.
+- `thresholds`: `minimum_successes` (at least 20),
+  `maximum_failure_fraction`, `target_p95_ratio`,
+  `maximum_control_regression_ratio`, `maximum_interactive_ratio`.
+- `targets`: specific `{case, workload}` bottleneck cells. An optional
+  `baseline_report` enables matched-profile p95 and control-throughput checks.
+  Changing workloads, case schedules, resources, provider or thresholds changes
+  the frozen workload hash and rejects comparison with the old baseline.
+  Comparisons also require the same fixture commit and compiler. A measured
+  baseline can fail the interactive-latency target it is intended to expose;
+  that failure remains in its receipt. It does not waive candidate targets or
+  permit incomplete, incorrect or excessively rejected baseline measurements.
+
+The build receipt names `server_binary`, its `server_binary_sha256`,
+`source_revision`, `source_patch_sha256`, `compiler`, `build_profile`, and the
+source-file/hash map `source_inputs`. The owned build/deployment environment
+produces this receipt and its source manifest; the driver checks the actual
+binary hash and retains the receipt, rather than substituting its own checkout
+revision as the server's build provenance. It does not attest a remote process.
+
+Each state receipt binds its `cache` state to `replicas` containing unique
+`process_start_identity`, matching `server_binary_sha256`, and `cache_counters`.
+The orchestrator establishes and samples those actual processes. Cold/restart
+cases cannot reuse previously sampled starts. Cache labels describe the case's
+initial state, not every later request. Cold cases forbid a warm-up. For cold
+deep history, prepare the cursor before starting the measured process and supply
+a workload `cursor_receipt` containing `repository`, `commit`, `page_size`,
+`page_depth`, and `cursor`. It must continue under the shared signing-key
+contract. Ordinary warm cursor preparation is journaled as separate setup work.
+
+Authentication comes only from an owner-private regular JSON headers file
+(`Authorization`/`Cookie`); its values never enter reports, arguments or response
+logs. Omission is allowed only on loopback fixtures. Hosted endpoints require
+HTTPS. Process restart, replica routing, provider faults and resource sampling
+remain owned by the qualification environment; there is no cache-reset API.
+
+The driver's `measured` status is a measurement gate, not whole-product
+qualification. The full matrix, independent cold-run count, mixed-load duration,
+resource plateau, deliberate cancellation, authority faults and hosted-provider
+receipts in Plan 020 remain required. Driver/native-Git HTTP fixtures do not
+substitute for exercising the actual Crab server and store.
+
 ## Reproducible qualification
 
 Use the existing per-checkout target on the mounted workspace volume; set it on

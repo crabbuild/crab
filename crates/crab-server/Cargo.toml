@@ -50,6 +50,7 @@ serde_json = { workspace = true }
 sha2 = "0.10"
 sysinfo = "0.38.4"
 thiserror = { workspace = true }
+tikv-jemallocator = { version = "0.6", features = ["stats"] }
 time = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-rustls = "0.26"

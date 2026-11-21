@@ -79,6 +79,17 @@ Import wire records directly from `@/lib/contracts`; keep browser state and
 presentation helpers with their feature. `lib/api.ts` owns transport and the
 remaining browse records, not a second copy of the common identity/access types.
 
+File inspection uses the generated `FilePreview` contract from `/file-preview`.
+Its states distinguish inline text, size omission, binary content and unsupported
+text encoding. Files over the 1 MiB inline limit show a neutral size notice;
+metadata inspection does not reconstruct the file to determine its encoding.
+The Git reader still fetches encoded pack entries for CRC verification; metadata
+inspection does not imply a prefix-only storage read.
+Symbols, copying and editing require actual inline text. Explicit preview tools
+and downloads retain their own reads and limits. The tagged `/file` endpoint and
+Diff's embedded-content shape remain separate contracts; the UI never retries
+the old endpoint after a preview request fails.
+
 Build the UI once, then use this checkout's external Cargo directory to check or
 regenerate the contract:
 

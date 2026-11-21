@@ -8,6 +8,7 @@ use crab_metadata::capsule_protocol::CapsuleGitPack;
 
 pub(crate) struct GitHistory {
     pub(crate) oids: Vec<String>,
+    pub(crate) object_ids: Vec<String>,
     pub(crate) pack: CapsuleGitPack,
 }
 
@@ -38,15 +39,19 @@ pub(crate) fn history(commit_count: usize) -> GitHistory {
 }
 
 pub(crate) fn history_with_blob(body: &[u8]) -> GitHistory {
+    history_with_entries(&[("asset", 0o100644, body)])
+}
+
+pub(crate) fn history_with_entries(entries: &[(&str, u32, &[u8])]) -> GitHistory {
     let workspace = tempfile::tempdir().unwrap();
     let git_dir = workspace.path().join("repository.git");
     initialize(&git_dir);
-    let blob = output(&git_dir, &["hash-object", "-w", "--stdin"], body);
-    let tree = output(
-        &git_dir,
-        &["mktree"],
-        format!("100644 blob {blob}\tasset\n").as_bytes(),
-    );
+    let mut tree = String::new();
+    for (name, mode, body) in entries {
+        let blob = output(&git_dir, &["hash-object", "-w", "--stdin"], body);
+        tree.push_str(&format!("{mode:06o} blob {blob}\t{name}\n"));
+    }
+    let tree = output(&git_dir, &["mktree"], tree.as_bytes());
     let commit = output(&git_dir, &["commit-tree", &tree, "-m", "asset"], b"");
     finish(workspace, git_dir, vec![commit])
 }
@@ -275,7 +280,11 @@ fn finish(
         object_count,
     )
     .unwrap();
-    GitHistory { oids, pack }
+    GitHistory {
+        oids,
+        object_ids: object_ids.iter().map(ToString::to_string).collect(),
+        pack,
+    }
 }
 
 fn output(git_dir: &Path, arguments: &[&str], input: &[u8]) -> String {

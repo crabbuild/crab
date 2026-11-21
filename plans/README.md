@@ -515,3 +515,26 @@ transport; duplicate plot parsers/React runtimes; mandatory tracker/server;
 and report GC claims based only on test workflow walkers. Metadata mutability,
 temporary cleanup, native session replacement and production GC ownership are
 explicit delivery constraints in Plan 020.
+## Crab v2 repository read hardening
+
+Generated with the `improve` planning workflow on 2026-11-17 at
+`aafb6d256c5e8d3a8e768d31dd887a18f2afd2e4`.
+
+| Plan                                 | Title                                          | Priority | Effort | Depends on                                                     | Status                                                                                                           |
+| ------------------------------------ | ---------------------------------------------- | -------- | ------ | -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| [020](020-crab-v2-read-hardening.md) | Harden attribution, history, and content reads | P1       | L      | Current read contracts; applicable Plan 017 resource ownership | IMPLEMENTED; ACCEPTANCE OPEN (combined RustFS and minimum-profile functional proof pass; performance gates fail) |
+
+Plan 020 provides a source-bound design and execution packets for measurements,
+first-parent history continuation, metadata-first previews, independent shared
+blame budgets, fair admission, bounded verification CPU, conditional HTTP reads,
+and integrated qualification. Its new preview state and cursor design preserve
+named tagged contracts rather than changing their meaning silently. Persistent
+attribution and new cold-range representations remain evidence-gated design work.
+The [combined local RustFS report](../crab/docs/benchmarks/v2-read-hardening-rustfs-2026-11-19.md)
+retains the successful oracles, failed engineering gates and remaining lifecycle
+proof. Implementation status does not imply that the acceptance checklist passes.
+
+Execute R0 first, then the packet dependency graph in Plan 020. The existing
+indexed-read ledger, Plans 017/018, and large-repository track retain their wider
+delivery gates. Source changes and local fixtures do not establish hosted-provider
+latency, total resident-memory bounds, or whole-product readiness.

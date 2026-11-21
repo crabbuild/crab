@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
 
 use crab_metadata::split_commit_graph::{
@@ -149,12 +150,15 @@ impl CommitGraphIndex {
             .await?[0])
     }
 
-    pub(crate) async fn parents_match(
+    pub(crate) async fn parents_match<C: Borrow<crate::Commit>>(
         &self,
-        commits: &[crate::Commit],
+        commits: &[C],
         operation: &OperationContext,
     ) -> Result<bool> {
-        let oids = commits.iter().map(|commit| commit.oid).collect::<Vec<_>>();
+        let oids = commits
+            .iter()
+            .map(|commit| commit.borrow().oid)
+            .collect::<Vec<_>>();
         let ordinals = self.ordinals(&oids, operation).await?;
         if ordinals.iter().any(Option::is_none) {
             return Ok(false);
@@ -172,6 +176,7 @@ impl CommitGraphIndex {
             .zip(parents)
             .collect::<HashMap<_, _>>();
         Ok(records.iter().zip(commits).all(|(record, commit)| {
+            let commit = commit.borrow();
             record.as_ref().is_some_and(|record| {
                 record.parents.len() == commit.parents.len()
                     && record

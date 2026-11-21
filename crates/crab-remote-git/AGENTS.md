@@ -11,7 +11,7 @@ Owns bounded filesystem-free Git reads from caller-validated captured metadata, 
 
 1. `crates/crab-remote-git/src/lib.rs` — supported public API.
 2. `crates/crab-remote-git/src/repository.rs` — `RemoteGitRepository::from_snapshot / RepositoryIdentity`: identity and immutable capture binding.
-3. `crates/crab-remote-git/src/snapshot.rs` — `RemoteGitSnapshot`: pinned commit/tree operations.
+3. `crates/crab-remote-git/src/snapshot/mod.rs` — `RemoteGitSnapshot`: pinned commit/tree operations.
 4. `crates/crab-remote-git/src/tree_listing.rs` — bounded prefix/continuation blob pages in canonical Git path order.
 5. `crates/crab-remote-git/src/operation.rs` — `OperationContext::finish`: budgets, cancellation, and explicit finish.
 6. `crates/crab-remote-git/src/reader.rs` — `RemoteGitReader::read_with_session`: object lookup and verified decoding.

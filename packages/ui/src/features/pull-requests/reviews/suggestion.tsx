@@ -1,4 +1,5 @@
-import { endpoint, request, type Content, type Repository } from "@/lib/api";
+import { endpoint, request, type Repository } from "@/lib/api";
+import type { FilePreview } from "@/lib/contracts";
 import { Failure } from "@/components/discussion/failure";
 import { Button } from "@/components/ui/button";
 import { changeContent } from "@/features/repository/files/editor";
@@ -27,22 +28,21 @@ export function SuggestionAction({
     setPending(true);
     setError(undefined);
     try {
-      const file = await request<Content>(
-        endpoint(repo, "file", {
+      const file = await request<FilePreview>(
+        endpoint(repo, "file-preview", {
           rev: pull.head_oid,
           path_hex: thread.path_hex,
         }),
         new AbortController().signal,
       );
       if (
-        file.data.text === null ||
-        file.data.text_truncated ||
+        file.data.preview.state !== "inline" ||
         file.data.classification !== "OrdinaryGit" ||
         file.data.size > 900 * 1024
       )
         throw new Error("The file is not an editable UTF-8 text file");
       const content = replaceSelectedLines(
-        file.data.text,
+        file.data.preview.text,
         thread.start_line,
         thread.end_line,
         thread.suggested_text,

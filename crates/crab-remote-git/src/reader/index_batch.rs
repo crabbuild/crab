@@ -203,14 +203,23 @@ impl RemoteGitReader {
                         &cancellation,
                     )
                     .await?;
-                    let permit = runtime.decode_permit(&cancellation).await?;
+                    let mut reservations = Vec::with_capacity(window.members.len());
+                    for (entry, _) in &window.members {
+                        reservations.push(
+                            runtime
+                                .reserve_bytes(pack_index_allocation(*entry)?)
+                                .await?,
+                        );
+                    }
+                    let token = cancellation.clone();
                     let indexes = runtime
-                        .spawn_blocking(move || {
+                        .run_cpu(&cancellation, move || {
                             window
                                 .members
                                 .into_iter()
-                                .map(|(entry, range)| {
-                                    check_cancelled(&cancellation)?;
+                                .zip(reservations)
+                                .map(|((entry, range), memory)| {
+                                    check_cancelled(&token)?;
                                     let index =
                                         copy_lazy_sidecar(&bytes, window.range.start, &range)?;
                                     let parsed = parse_pack_index(
@@ -218,16 +227,15 @@ impl RemoteGitReader {
                                         entry,
                                         index,
                                         None,
-                                        &cancellation,
+                                        &token,
+                                        memory,
                                     )?;
                                     Ok((entry.pack_id, Arc::new(parsed)))
                                 })
                                 .collect::<Result<PackIndexes>>()
                         })
-                        .await
-                        .map_err(|source| Error::DecodeTask { source })?;
-                    drop(permit);
-                    indexes
+                        .await?;
+                    Ok(indexes)
                 },
             )
             .await

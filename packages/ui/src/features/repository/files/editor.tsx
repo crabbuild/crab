@@ -30,9 +30,9 @@ import {
   navigate,
   parentHex,
   useRequest,
-  type Content,
   type Repository,
 } from "@/lib/api";
+import type { FilePreview } from "@/lib/contracts";
 import { Result } from "@/components/request/result";
 
 type BaseProps = {
@@ -460,13 +460,14 @@ export function EditFile({
   theme,
   codeThemes,
 }: TextEditorProps & { pathHex: string }) {
-  const state = useRequest<Content>(
-    endpoint(repo, "file", { rev: expectedHead, path_hex: pathHex }),
+  const state = useRequest<FilePreview>(
+    endpoint(repo, "file-preview", { rev: expectedHead, path_hex: pathHex }),
   );
   return (
     <Result state={state}>
       {(content) =>
-        content.text === null || content.classification !== "OrdinaryGit" ? (
+        content.preview.state !== "inline" ||
+        content.classification !== "OrdinaryGit" ? (
           <div className="notice error" role="alert">
             This file cannot be edited in the browser. Download it and use Git
             to make this change.
@@ -481,7 +482,8 @@ export function EditFile({
             csrf={csrf}
             theme={theme}
             codeThemes={codeThemes}
-            original={content}
+            expectedBlob={content.oid}
+            initialContent={content.preview.text}
           />
         )
       }
@@ -495,11 +497,16 @@ function EditFileForm({
   expectedHead,
   pathHex,
   csrf,
-  original,
+  expectedBlob,
+  initialContent,
   theme,
   codeThemes,
-}: TextEditorProps & { pathHex: string; original: Content }) {
-  const [content, setContent] = useState(original.text ?? "");
+}: TextEditorProps & {
+  pathHex: string;
+  expectedBlob: string;
+  initialContent: string;
+}) {
+  const [content, setContent] = useState(initialContent);
   const [message, setMessage] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
@@ -515,7 +522,7 @@ function EditFileForm({
         branch,
         expected_head: expectedHead,
         new_branch: proposedBranch(target),
-        expected_blob: original.oid,
+        expected_blob: expectedBlob,
         path_hex: pathHex,
         content,
         message: message.trim(),
@@ -588,8 +595,8 @@ export function DeleteFile({
   pathHex,
   csrf,
 }: BaseProps & { pathHex: string }) {
-  const state = useRequest<Content>(
-    endpoint(repo, "file", { rev: expectedHead, path_hex: pathHex }),
+  const state = useRequest<FilePreview>(
+    endpoint(repo, "file-preview", { rev: expectedHead, path_hex: pathHex }),
   );
   return (
     <Result state={state}>

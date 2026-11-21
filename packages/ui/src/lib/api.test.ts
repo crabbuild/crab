@@ -48,7 +48,10 @@ it("shows the server error rather than pretending failed data loaded", async () 
     ),
   );
   await expect(
-    request("/api/repos/team/repo.name/file", new AbortController().signal),
+    request(
+      "/api/repos/team/repo.name/file-preview",
+      new AbortController().signal,
+    ),
   ).rejects.toThrow("Read budget exceeded");
 });
 

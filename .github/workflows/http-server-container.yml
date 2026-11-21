@@ -34,6 +34,7 @@ on:
       - "crab/**"
       - "crates/**"
       - "packages/ui/**"
+      - "packages/workflow-results/**"
   workflow_dispatch:
     inputs:
       large_file_bytes:

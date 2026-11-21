@@ -323,14 +323,35 @@ impl Repository {
         server: &Server,
         cancellation: &CancellationToken,
     ) -> Result<BrowseRepository> {
+        self.open_cached(server, cancellation, true).await
+    }
+
+    pub(crate) async fn revalidate(
+        &self,
+        server: &Server,
+        cancellation: &CancellationToken,
+    ) -> Result<BrowseRepository> {
+        // A 304 reuses browser-held bytes as a current response. The browse
+        // freshness window cannot authorize that decision after a ref/epoch
+        // change; unchanged captures still reuse their verified reader.
+        self.open_cached(server, cancellation, false).await
+    }
+
+    async fn open_cached(
+        &self,
+        server: &Server,
+        cancellation: &CancellationToken,
+        reuse_recent: bool,
+    ) -> Result<BrowseRepository> {
         let mut pinned = tokio::select! {
             _ = cancellation.cancelled() => return Err(crab_remote_git::Error::Cancelled.into()),
             pinned = self.pinned.lock() => pinned,
         };
         if let Some(cached) = pinned.as_mut() {
-            if cached
-                .checked
-                .is_some_and(|checked| checked.elapsed() < BROWSE_PROBE_INTERVAL)
+            if reuse_recent
+                && cached
+                    .checked
+                    .is_some_and(|checked| checked.elapsed() < BROWSE_PROBE_INTERVAL)
             {
                 return Ok(cached.opened.clone());
             }

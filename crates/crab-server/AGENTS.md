@@ -192,7 +192,7 @@ and session migration paths are supported.
 | Task | Start here | Also inspect |
 | --- | --- | --- |
 | HTTP receive | `crates/crab-server/src/git/receive/mod.rs` | `crates/crab-write/src/journal.rs` |
-| Content reads | `crates/crab-server/src/api/contents.rs` | `crates/crab-remote-git/src/snapshot.rs` |
+| Content reads | `crates/crab-server/src/api/contents.rs` | `crates/crab-remote-git/src/snapshot/mod.rs` |
 | Auth or routing | `crates/crab-server/src/server/http/mod.rs` | `crates/crab-server/src/server/http/boundary.rs`, `src/auth/mod.rs` |
 | Read readiness | `crates/crab-server/src/repository/mod.rs` | `src/server/background.rs`, `src/repository/maintenance.rs`, `crates/crab-write/src/generation.rs` |
 | Management and capacity | `crates/crab-server/src/server/management/mod.rs` | `src/server/capacity.rs`, `src/metrics/mod.rs` |
@@ -214,7 +214,7 @@ No declared Cargo features. Both library and auto-discovered main binary exist. 
 
 ## Verification
 
-Tests live under their owner: `api/tests.rs`, `auth/tests/`,
+Tests live under their owner: `api/tests/`, `auth/tests/`,
 `api/<feature>/tests.rs` (larger suites such as membership use `tests/mod.rs`), `auth/<feature>/tests.rs`, `catalog/tests.rs`,
 `cells/repository/<feature>/tests.rs`, `cells/directory/tests.rs`,
 `cells/directory/profiles/tests.rs`, `git/receive/tests/`, `git/lfs/tests.rs`,

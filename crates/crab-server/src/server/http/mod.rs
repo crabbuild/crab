@@ -318,7 +318,7 @@ mod tests {
                 ),
             );
             server.runtime = Arc::clone(&runtime);
-            server.admission = Semaphore::new(1);
+            server.admission = Arc::new(Semaphore::new(1));
             server.app_admission = Semaphore::new(1);
             server.maintenance_admission = Arc::new(Semaphore::new(1));
             server

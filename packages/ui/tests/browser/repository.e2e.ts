@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import type { FilePreview } from "@/lib/contracts";
 import { tableFromArrays, tableToIPC } from "apache-arrow";
 import { strToU8, zipSync } from "fflate";
 import { parquetWriteBuffer } from "hyparquet-writer";
@@ -115,27 +116,46 @@ async function routePreviewFiles(
       text: string | null;
       bytes: Uint8Array;
       size?: number;
-      textTruncated?: boolean;
     }
   >,
 ) {
-  await page.route("**/api/repos/team/project/file?*", async (route) => {
-    const path = new URL(route.request().url()).searchParams.get("path_hex");
-    const file = Object.entries(files).find(
-      ([name]) => pathHex(name) === path,
-    )?.[1];
-    if (!file) return route.fallback();
-    return route.fulfill({
-      json: {
-        oid,
-        size: file.size ?? file.bytes.byteLength,
-        mode: "100644",
-        classification: "OrdinaryGit",
-        text: file.text,
-        text_truncated: file.textTruncated ?? false,
-      },
-    });
-  });
+  await page.route(
+    "**/api/repos/team/project/file-preview?*",
+    async (route) => {
+      const path = new URL(route.request().url()).searchParams.get("path_hex");
+      const file = Object.entries(files).find(
+        ([name]) => pathHex(name) === path,
+      )?.[1];
+      if (!file) return route.fallback();
+      const size = file.size ?? file.bytes.byteLength;
+      let preview: FilePreview["preview"];
+      if (size > 1024 * 1024) preview = { state: "omitted_size" };
+      else if (file.bytes.includes(0)) preview = { state: "binary" };
+      else {
+        try {
+          preview = {
+            state: "inline",
+            text: new TextDecoder("utf-8", { fatal: true }).decode(file.bytes),
+          };
+        } catch {
+          preview = { state: "unsupported_encoding" };
+        }
+      }
+      if (preview.state === "inline" && file.text !== null)
+        expect(preview.text).toBe(file.text);
+      return route.fulfill({
+        json: {
+          oid,
+          size,
+          mode: "100644",
+          classification: "OrdinaryGit",
+          preview,
+          commit: oid,
+          generation: 1,
+        } satisfies FilePreview,
+      });
+    },
+  );
   await page.route("**/api/repos/team/project/blob?*", async (route) => {
     const path = new URL(route.request().url()).searchParams.get("path_hex");
     const file = Object.entries(files).find(
@@ -553,7 +573,7 @@ test.beforeEach(async ({ page }) => {
           directory_oid: oid,
         },
       });
-    if (url.pathname.endsWith("/file")) {
+    if (url.pathname.endsWith("/file-preview")) {
       const requestedPath = url.searchParams.get("path_hex");
       const additionalSymbolSource = Object.entries(
         additionalSymbolSources,
@@ -575,9 +595,10 @@ test.beforeEach(async ({ page }) => {
           size: text.length,
           mode: "100644",
           classification: "OrdinaryGit",
-          text,
-          text_truncated: false,
-        },
+          preview: { state: "inline", text },
+          commit: oid,
+          generation: 1,
+        } satisfies FilePreview,
       });
     }
     if (url.pathname.endsWith("/blame"))
@@ -1285,6 +1306,95 @@ test("Markdown files switch between source and a repository-aware preview", asyn
   );
   await page.getByRole("button", { name: "Code", exact: true }).click();
   await expect(preview).toHaveCount(0);
+});
+
+test("oversized source requires explicit byte inspection", async ({
+  page,
+}, info) => {
+  const bytes = new Uint8Array(2 * 1024 * 1024).fill(65);
+  await routePreviewFiles(page, { "huge.rs": { text: null, bytes } });
+  let rawRequests = 0;
+  let completedRawRequests = 0;
+  const abortedRawRequests: string[] = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname.endsWith("/blob")) rawRequests += 1;
+  });
+  page.on("requestfinished", (request) => {
+    if (new URL(request.url()).pathname.endsWith("/blob"))
+      completedRawRequests += 1;
+  });
+  page.on("requestfailed", (request) => {
+    if (new URL(request.url()).pathname.endsWith("/blob"))
+      abortedRawRequests.push(
+        request.failure()?.errorText ?? "unknown failure",
+      );
+  });
+  await page.goto("/team/project/blob/main/huge.rs");
+  await expect(page.locator(".file-panel .notice")).toContainText(
+    "Preview omitted because of file size",
+  );
+  await expect(
+    page.getByRole("button", { name: "Info", exact: true }),
+  ).toHaveAttribute("aria-pressed", "true");
+  for (const name of ["Copy file contents", "Edit this file", "Blame"]) {
+    await expect(page.getByRole("button", { name, exact: true })).toHaveCount(
+      0,
+    );
+  }
+  await expect(page.locator(".file-source-code")).toHaveCount(0);
+  for (const theme of ["light", "dark"] as const) {
+    await selectTheme(page, theme);
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      expect(
+        await page.evaluate(() => document.documentElement.scrollWidth),
+      ).toBeLessThanOrEqual(width);
+      await expectNoAccessibilityViolations(page);
+      await page.screenshot({
+        path: info.outputPath(`omitted-preview-${theme}-${width}.png`),
+      });
+    }
+  }
+  expect(rawRequests).toBe(0);
+  const preview = page.getByRole("button", { name: "Preview", exact: true });
+  await preview.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".generic-file-preview")).toContainText(
+    "Text sample",
+  );
+  // Vite's root StrictMode exercises setup/cleanup twice. Count the completed
+  // read separately and prove that any discarded setup cancels its request.
+  await expect.poll(() => completedRawRequests).toBe(1);
+  for (const failure of abortedRawRequests)
+    expect(failure).toContain("ERR_ABORTED");
+  expect(rawRequests).toBe(1 + abortedRawRequests.length);
+});
+
+test("empty, binary and unsupported text previews remain distinct", async ({
+  page,
+}) => {
+  await routePreviewFiles(page, {
+    "empty.rs": { text: "", bytes: new Uint8Array() },
+    "binary.rs": { text: null, bytes: new Uint8Array([0, 65]) },
+    "non-utf8.rs": { text: null, bytes: new Uint8Array([255, 65]) },
+  });
+  await page.goto("/team/project/blob/main/empty.rs");
+  await expect(page.locator(".file-metadata")).toContainText("0 lines");
+  await expect(
+    page.getByRole("button", { name: "Copy file contents", exact: true }),
+  ).toBeVisible();
+  for (const [name, title] of [
+    ["binary.rs", "Binary file"],
+    ["non-utf8.rs", "Unsupported text encoding"],
+  ]) {
+    await page.goto(`/team/project/blob/main/${name}`);
+    await expect(page.locator(".file-metadata")).toContainText(title);
+    await page.getByRole("button", { name: "Info", exact: true }).click();
+    await expect(page.locator(".file-panel .notice")).toContainText(title);
+    await expect(
+      page.getByRole("button", { name: "Copy file contents", exact: true }),
+    ).toHaveCount(0);
+  }
 });
 
 test("code palette persists and follows light and dark appearance", async ({
@@ -2173,7 +2283,6 @@ test("delimited workbenches preserve encoded text and align their headers", asyn
     "encoded.tsv": { text: null, bytes: utf16 },
     "large.csv": {
       text: null,
-      textTruncated: true,
       bytes: strToU8("name,value\nlarge,1\n"),
       size: 5 * 1024 * 1024 * 1024,
     },
@@ -2271,7 +2380,6 @@ test("format-aware previews explore data, office files, media, and databases loc
     "metrics.csv": {
       text: null,
       bytes: strToU8(csv),
-      textTruncated: true,
     },
     "diagram.svg": { text: svg, bytes: strToU8(svg) },
     "report.xlsx": { text: null, bytes: workbook },

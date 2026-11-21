@@ -5,6 +5,8 @@ use sha2::Digest as _;
 
 use super::*;
 
+mod read;
+
 fn catalog() -> CatalogStore {
     let store = crab_storage::Store::new(Arc::new(InMemory::new()));
     CatalogStore::new(StorageRoot::memory(store, "repositories"))

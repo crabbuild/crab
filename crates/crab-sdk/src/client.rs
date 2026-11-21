@@ -777,6 +777,10 @@ impl Snapshot {
     }
 
     /// Traverse a bounded commit-history page under an explicit parent policy.
+    ///
+    /// First-parent continuations resume without replaying preceding pages.
+    /// Cursors stay opaque and bound to the captured repository, generation,
+    /// and commit; page size may change between requests.
     pub fn history(
         &self,
         traversal: HistoryTraversal,

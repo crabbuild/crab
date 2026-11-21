@@ -4,6 +4,8 @@ use openidconnect::{ClientId, core::CoreProviderMetadata};
 use serde_json::json;
 use url::Url;
 
+mod session_reads;
+
 #[tokio::test]
 async fn expired_sessions_are_rejected_and_https_cookies_cannot_be_shadowed() {
     let auth = shared_auth(Store::new(Arc::new(object_store::memory::InMemory::new())));
@@ -84,11 +86,137 @@ fn shared_auth(store: Store) -> Authentication {
         state: AuthState {
             store,
             prefix: "root/.crab/http-server/v1/auth".into(),
+            pending_checks: Arc::default(),
         },
         cursor_key: [7; 32],
         admission: Semaphore::new(1),
         logout_admission: Semaphore::new(1),
     }
+}
+
+fn active_session(session_key: Key) -> Arc<Session> {
+    Arc::new(Session {
+        identity: Identity {
+            issuer: "https://id.example".into(),
+            subject: "alice".into(),
+            name: "Alice".into(),
+        },
+        groups: Vec::new(),
+        csrf: "csrf".into(),
+        expires_at: now_epoch().unwrap() + 600,
+        session_key,
+        revoked: AtomicBool::new(false),
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cached_session_validation_reads_both_durable_records_concurrently() {
+    struct Gate {
+        entered: Semaphore,
+        release: Semaphore,
+        cancellation: tokio_util::sync::CancellationToken,
+    }
+
+    #[async_trait::async_trait]
+    impl crab_storage::ReadAdmission for Gate {
+        fn cancellation(&self) -> &tokio_util::sync::CancellationToken {
+            &self.cancellation
+        }
+
+        async fn request(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            self.entered.add_permits(1);
+            self.release.acquire().await?.forget();
+            Ok(())
+        }
+
+        async fn bytes(&self, _: u64) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            Ok(())
+        }
+    }
+
+    let mut auth = shared_auth(Store::new(Arc::new(object_store::memory::InMemory::new())));
+    let session = active_session(key("parallel"));
+    auth.store_session(session.clone()).await.unwrap();
+    auth.load_session(session.session_key).await.unwrap();
+    let gate = Arc::new(Gate {
+        entered: Semaphore::new(0),
+        release: Semaphore::new(0),
+        cancellation: tokio_util::sync::CancellationToken::new(),
+    });
+    auth.state.store = auth.state.store.clone().with_read_admission(gate.clone());
+    let auth = Arc::new(auth);
+    let pending = tokio::spawn(async move { auth.load_session(session.session_key).await });
+    tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire_many(2))
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    gate.release.add_permits(2);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), pending)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn cached_session_never_bypasses_missing_or_expired_durable_state() {
+    for (kind, expired) in [
+        ("sessions", false),
+        ("marker", false),
+        ("sessions", true),
+        ("marker", true),
+    ] {
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let auth = shared_auth(store.clone());
+        let session = active_session(key("fresh-durable-state"));
+        auth.store_session(session.clone()).await.unwrap();
+        auth.load_session(session.session_key).await.unwrap();
+        let path = if kind == "sessions" {
+            auth.state.path(kind, &session.session_key)
+        } else {
+            auth.state.identity_session_path(
+                &session.identity.issuer,
+                &session.identity.subject,
+                &session.session_key,
+            )
+        };
+        if expired {
+            let (body, _) = store.get_with_etag_bounded(&path, 64 * 1024).await.unwrap();
+            let mut value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            value["expires_at"] = json!(0);
+            store
+                .put_overwrite(&path, Bytes::from(serde_json::to_vec(&value).unwrap()))
+                .await
+                .unwrap();
+        } else {
+            store.delete(&path).await.unwrap();
+        }
+        assert!(
+            auth.load_session(session.session_key).await.is_none(),
+            "{kind}, expired={expired}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn stale_cached_identity_cannot_replace_the_current_marker_location() {
+    let auth = shared_auth(Store::new(Arc::new(object_store::memory::InMemory::new())));
+    let session = active_session(key("current-marker"));
+    auth.store_session(session.clone()).await.unwrap();
+    let mut stale = active_session(session.session_key);
+    Arc::get_mut(&mut stale).unwrap().identity.subject = "outdated".into();
+    auth.sessions
+        .lock()
+        .await
+        .insert(session.session_key, stale.clone());
+    let current = auth.load_session(session.session_key).await.unwrap();
+    assert_eq!(
+        (current.identity.subject.as_str(), stale.active()),
+        ("alice", false)
+    );
 }
 
 #[tokio::test]
