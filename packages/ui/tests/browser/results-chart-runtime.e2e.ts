@@ -272,7 +272,11 @@ test("DVC templates render all selected fields with typed anchors and literal co
   }[] = JSON.parse(
     readFileSync(path.join(evidence!, "chart-authored-hover.json"), "utf8"),
   );
-  expect(authored.map(({ name }) => name)).toEqual(["tooltip", "configured"]);
+  expect(authored.map(({ name }) => name)).toEqual([
+    "tooltip",
+    "configured",
+    "selected",
+  ]);
   for (const fixture of authored) {
     await page.evaluate(async ({ name, spec, interaction }) => {
       const section = document.createElement("section");
@@ -288,6 +292,24 @@ test("DVC templates render all selected fields with typed anchors and literal co
       });
     }, fixture);
     const chart = page.getByRole("region", { name: `${fixture.name} hover` });
+    if (fixture.name === "selected") {
+      const points = chart.locator("g.mark-symbol.role-mark path");
+      await expect(points).toHaveCount(4);
+      await points.first().hover();
+      await expect
+        .poll(() =>
+          page.evaluate(() =>
+            window.resultsChartProbe.views
+              .at(-1)!
+              .result.view.signal("selected"),
+          ),
+        )
+        .toMatchObject({ rev: ["Run A"] });
+      await expect(
+        chart.locator('g.mark-line path[opacity="0.2"]'),
+      ).toHaveCount(1);
+      continue;
+    }
     const targets = chart.locator('g[class*="_voronoi"] path');
     await expect(targets).toHaveCount(4);
     await targets.first().hover();

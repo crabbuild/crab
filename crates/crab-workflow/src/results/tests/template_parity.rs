@@ -66,9 +66,9 @@ fn templates_keep_each_selected_y_field_separate_in_every_run() {
 }
 
 #[test]
-fn authored_tooltips_keep_complete_hover_data() {
+fn authored_interactions_keep_complete_hover_data() {
     let mut evidence = Vec::new();
-    for name in ["tooltip", "configured"] {
+    for name in ["tooltip", "configured", "selected"] {
         let mut spec = json!({
             "$schema":"https://vega.github.io/schema/vega-lite/v5.json",
             "width":280,"height":160,
@@ -90,8 +90,14 @@ fn authored_tooltips_keep_complete_hover_data() {
                 {"field":"score","type":"quantitative"},
                 {"field":"rev","type":"nominal"}
             ]);
-        } else {
+        } else if name == "configured" {
             spec["config"] = json!({"mark":{"tooltip":{"content":"data"}}});
+        } else {
+            spec["params"] = json!([{"name":"selected","select":{
+                "type":"point","fields":["rev"],"on":"pointerover","clear":"pointerout"
+            }}]);
+            spec["encoding"]["opacity"] =
+                json!({"condition":{"param":"selected","value":1},"value":0.2});
         }
         let bounds = BTreeMap::from([(
             "step".into(),
@@ -100,9 +106,9 @@ fn authored_tooltips_keep_complete_hover_data() {
                 upper: 1.0,
             },
         )]);
-        let interaction = super::super::interactions::augment(&mut spec, &bounds, &BTreeSet::new())
-            .unwrap()
-            .unwrap();
+        let interaction =
+            super::super::interactions::augment(&mut spec, &bounds, &BTreeSet::new()).unwrap();
+        assert!(name == "selected" || interaction.is_some());
         evidence.push(json!({"name":name,"spec":spec,"interaction":interaction}));
     }
     if let Some(output) = std::env::var_os("CRAB_RESULTS_EVIDENCE") {

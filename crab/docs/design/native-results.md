@@ -369,8 +369,9 @@ validated against chart domains when saving. Runtime zoom uses Vega's domainRaw;
 clearing it restores authored zero/nice/bindings. Reports freeze ranges into their
 chart parameters. Report inspection keeps overrides only in memory; Reset
 restores frozen ranges. Transformed, compound and categorical custom axes do not
-acquire unproven numeric zoom semantics. Authored template parameters survive;
-conflicts with owned interaction names fail visibly.
+acquire unproven numeric zoom semantics. Authored selections retain their unit
+view and interaction signals without injected layers. Other template parameters
+survive; conflicts with owned interaction names fail visibly.
 
 Report transport/export retains metric/plot/image/template/workflow bodies and
 optional logs. Inputs, model outputs and checkpoints remain immutable links with

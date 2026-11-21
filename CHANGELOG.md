@@ -26,6 +26,8 @@ macOS automatic update installation requires a future signed release.
   curves, and retained evidence, with matching CLI and server access.
 - Added a runnable machine-learning Results example with compound plots and
   exact metric-value round trips.
+- Improved Results cursor and zoom responsiveness, preserving custom tooltips
+  and plot selections.
 - Kept editor controls responsive during language-server version discovery and
   cancelled pending probes during shutdown.
 - Simplified workspace, repository, Explorer, Search, and Git navigation;
