@@ -87,7 +87,7 @@ describe("CodexAppServerAdapter — Process Death Mid-Turn", () => {
     adapter.onExit((code) => { exitCode = code; });
 
     // Spawn the adapter
-    await adapter.spawn("Fix the bug in main.ts", "/tmp/test-project");
+    const startup = adapter.spawn("Fix the bug in main.ts", "/tmp/test-project");
 
     // --- Complete the initialization handshake ---
 
@@ -129,6 +129,7 @@ describe("CodexAppServerAdapter — Process Death Mid-Turn", () => {
       id: turnStartRequest!.id,
       result: { turn: { id: "turn_death" } },
     });
+    await startup;
 
     // 4. Server sends turn/started notification (sets activeTurnId)
     serverWrite(stdout, {
@@ -186,7 +187,7 @@ describe("CodexAppServerAdapter — Process Death Mid-Turn", () => {
     adapter.onExit((code) => { exitCode = code; });
 
     // Spawn the adapter
-    await adapter.spawn("Hello", "/tmp/test-project");
+    const startup = adapter.spawn("Hello", "/tmp/test-project");
 
     // Complete initialization handshake
     let frames = await waitForFrames(stdin);
@@ -215,6 +216,7 @@ describe("CodexAppServerAdapter — Process Death Mid-Turn", () => {
       id: turnStartRequest!.id,
       result: { turn: { id: "turn_idle" } },
     });
+    await startup;
 
     // Send turn/started then turn/completed (turn finishes normally)
     serverWrite(stdout, {

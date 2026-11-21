@@ -183,88 +183,86 @@ export function DiscussionListControls({
         )}
       </div>
       <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center gap-2">
-        <div className="min-w-0 max-w-full overflow-x-auto p-1 -m-1">
-          <ButtonGroup aria-label="Discussion filters">
-            {filterKinds.map((kind) => (
-              <DiscussionFilter
-                key={kind}
-                kind={kind}
-                repo={repo}
-                query={discussionQuery(url, view)}
-                onSelect={(q) => change({ q })}
-              />
-            ))}
-            <DropdownMenu
-              modal={false}
-              open={sortOpen}
-              onOpenChange={setSortOpen}
-            >
-              <DropdownMenuTrigger asChild>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  aria-label="Sort discussions"
-                >
-                  Sort <ChevronDownIcon data-icon="inline-end" />
-                </Button>
-              </DropdownMenuTrigger>
-              {/* Closing scopes must unmount before a rapid reopen during refresh. */}
-              {sortOpen && (
-                <DropdownMenuContent align="end" className="w-48" tabIndex={0}>
-                  <DropdownMenuGroup>
-                    <DropdownMenuLabel>Sort by</DropdownMenuLabel>
-                    <DropdownMenuRadioGroup
-                      value={filters.sort}
-                      onValueChange={(sort) => change({ sort })}
-                    >
-                      {sorts.map(([value, label]) => (
-                        <DropdownMenuRadioItem key={value} value={value}>
-                          {label}
-                        </DropdownMenuRadioItem>
-                      ))}
-                    </DropdownMenuRadioGroup>
-                    <DropdownMenuSub>
-                      <DropdownMenuSubTrigger>
-                        Reactions
-                        {reactionSelected && <CheckIcon aria-hidden="true" />}
-                      </DropdownMenuSubTrigger>
-                      <DropdownMenuPortal>
-                        <DropdownMenuSubContent className="w-48">
-                          <DropdownMenuRadioGroup
-                            value={filters.sort}
-                            onValueChange={(sort) => change({ sort })}
-                          >
-                            {reactionSorts.map(([value, label]) => (
-                              <DropdownMenuRadioItem key={value} value={value}>
-                                {label}
-                              </DropdownMenuRadioItem>
-                            ))}
-                          </DropdownMenuRadioGroup>
-                        </DropdownMenuSubContent>
-                      </DropdownMenuPortal>
-                    </DropdownMenuSub>
-                  </DropdownMenuGroup>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuLabel>Order</DropdownMenuLabel>
+        <div
+          role="group"
+          aria-label="Discussion filters"
+          className="flex min-w-0 max-w-full flex-wrap gap-2 p-1 -m-1"
+        >
+          {filterKinds.map((kind) => (
+            <DiscussionFilter
+              key={kind}
+              kind={kind}
+              repo={repo}
+              query={discussionQuery(url, view)}
+              onSelect={(q) => change({ q })}
+            />
+          ))}
+          <DropdownMenu
+            modal={false}
+            open={sortOpen}
+            onOpenChange={setSortOpen}
+          >
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" size="sm" aria-label="Sort discussions">
+                Sort <ChevronDownIcon data-icon="inline-end" />
+              </Button>
+            </DropdownMenuTrigger>
+            {/* Closing scopes must unmount before a rapid reopen during refresh. */}
+            {sortOpen && (
+              <DropdownMenuContent align="end" className="w-48" tabIndex={0}>
+                <DropdownMenuGroup>
+                  <DropdownMenuLabel>Sort by</DropdownMenuLabel>
                   <DropdownMenuRadioGroup
-                    value={filters.direction}
-                    onValueChange={(direction) => change({ direction })}
+                    value={filters.sort}
+                    onValueChange={(sort) => change({ sort })}
                   >
-                    <DropdownMenuRadioItem value="desc">
-                      {filters.sort === "created" || filters.sort === "updated"
-                        ? "Newest first"
-                        : "Highest first"}
-                    </DropdownMenuRadioItem>
-                    <DropdownMenuRadioItem value="asc">
-                      {filters.sort === "created" || filters.sort === "updated"
-                        ? "Oldest first"
-                        : "Lowest first"}
-                    </DropdownMenuRadioItem>
+                    {sorts.map(([value, label]) => (
+                      <DropdownMenuRadioItem key={value} value={value}>
+                        {label}
+                      </DropdownMenuRadioItem>
+                    ))}
                   </DropdownMenuRadioGroup>
-                </DropdownMenuContent>
-              )}
-            </DropdownMenu>
-          </ButtonGroup>
+                  <DropdownMenuSub>
+                    <DropdownMenuSubTrigger>
+                      Reactions
+                      {reactionSelected && <CheckIcon aria-hidden="true" />}
+                    </DropdownMenuSubTrigger>
+                    <DropdownMenuPortal>
+                      <DropdownMenuSubContent className="w-48">
+                        <DropdownMenuRadioGroup
+                          value={filters.sort}
+                          onValueChange={(sort) => change({ sort })}
+                        >
+                          {reactionSorts.map(([value, label]) => (
+                            <DropdownMenuRadioItem key={value} value={value}>
+                              {label}
+                            </DropdownMenuRadioItem>
+                          ))}
+                        </DropdownMenuRadioGroup>
+                      </DropdownMenuSubContent>
+                    </DropdownMenuPortal>
+                  </DropdownMenuSub>
+                </DropdownMenuGroup>
+                <DropdownMenuSeparator />
+                <DropdownMenuLabel>Order</DropdownMenuLabel>
+                <DropdownMenuRadioGroup
+                  value={filters.direction}
+                  onValueChange={(direction) => change({ direction })}
+                >
+                  <DropdownMenuRadioItem value="desc">
+                    {filters.sort === "created" || filters.sort === "updated"
+                      ? "Newest first"
+                      : "Highest first"}
+                  </DropdownMenuRadioItem>
+                  <DropdownMenuRadioItem value="asc">
+                    {filters.sort === "created" || filters.sort === "updated"
+                      ? "Oldest first"
+                      : "Lowest first"}
+                  </DropdownMenuRadioItem>
+                </DropdownMenuRadioGroup>
+              </DropdownMenuContent>
+            )}
+          </DropdownMenu>
         </div>
         {view === "pulls" && (
           <DiscussionFilter

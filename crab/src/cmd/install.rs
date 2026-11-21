@@ -71,6 +71,7 @@ pub fn run_install(args: &InstallArgs) -> Result<()> {
 /// Install the git drivers, optionally scoped to `root`.
 pub fn run_install_in(root: &Path, args: &InstallArgs) -> Result<()> {
     let bin = crab_binary_path();
+    let quoted_bin = gix_quote::single(bin.as_bytes().into()).to_string();
     let flag = args.scope.git_flag();
 
     // Check if already installed (unless --force). Older installs only
@@ -103,7 +104,7 @@ pub fn run_install_in(root: &Path, args: &InstallArgs) -> Result<()> {
             continue;
         }
 
-        let value = value_template.replace("{bin}", &bin);
+        let value = value_template.replace("{bin}", &quoted_bin);
         set_git_config(root, flag, key, &value)?;
         changed = true;
     }
@@ -113,7 +114,7 @@ pub fn run_install_in(root: &Path, args: &InstallArgs) -> Result<()> {
             continue;
         }
 
-        let value = value_template.replace("{bin}", &bin);
+        let value = value_template.replace("{bin}", &quoted_bin);
         set_git_config(root, flag, key, &value)?;
         changed = true;
     }

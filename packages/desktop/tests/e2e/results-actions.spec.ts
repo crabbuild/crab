@@ -520,7 +520,8 @@ console.log('acknowledged iteration', iteration);
     const captureSaved = async (name: string, width: number, subject = page.getByRole("button", { name: "Apply", exact: true })) => {
       await page.setViewportSize({ width, height: 1000 });
       const toasts = page.getByRole("button", { name: "Close toast", exact: true });
-      while (await toasts.count()) await toasts.first().click();
+      await page.mouse.move(0, 0);
+      await expect(toasts).toHaveCount(0, { timeout: 30_000 });
       await subject.scrollIntoViewIfNeeded();
       await page.screenshot({
         path: path.join(process.env.CRAB_RESULTS_EVIDENCE ?? root, name),

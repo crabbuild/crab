@@ -41,6 +41,7 @@ test("real terminal components recover processes and nested layouts across owner
   const records = () => existsSync(proof) ? readFileSync(proof, "utf8").trim().split("\n").map(line => JSON.parse(line)) : [];
   try {
     let page = await app.firstWindow();
+    await page.waitForURL(url => url.pathname === "/tests/fixtures/terminal-recovery/index.html");
     await expect(page.locator(".xterm-helper-textarea:visible")).toHaveCount(1);
     await expectRenderedFont(page);
     const quote = (value: string) => process.platform === "win32" ? `"${value}"` : `'${value.replace(/'/g, "'\\''")}'`;
@@ -87,15 +88,25 @@ test("real terminal components recover processes and nested layouts across owner
     writeFileSync(entry, `require(${JSON.stringify(path.join(desktop, "dist-electron/daemon/daemon-main.cjs"))});`);
     app = await launch(["--daemon-entry", entry]);
     page = await app.firstWindow();
+    await page.waitForURL(url => url.pathname === "/tests/fixtures/terminal-recovery/index.html");
     await expect(page.locator(".xterm-helper-textarea:visible")).toHaveCount(3);
     await expect(page.getByRole("separator").first()).toHaveAttribute("aria-valuenow", "30");
     await page.locator(".xterm-helper-textarea:visible").first().focus();
     await page.keyboard.type("after-application-upgrade");
     await page.keyboard.press("Enter");
     await expect.poll(() => records().find(value => value.input === "after-application-upgrade")?.pid).toBe(pid);
+    // Native admission is asynchronous; the old textarea can remain focused
+    // until the new tab exists. Observe that transition before sending input.
+    const previousInput = await page.locator(".xterm-helper-textarea:focus").elementHandle();
+    if (!previousInput) throw new Error("Restored terminal input is not focused");
+    const tabs = page.locator("[data-tab-id]:visible");
+    const previousTabs = await tabs.count();
     await page.getByRole("button", { name: "New terminal", exact: true }).click();
     const newProof = path.join(root, "new-daemon.jsonl");
-    await expect(page.locator(".xterm-helper-textarea:focus")).toHaveCount(1);
+    await expect(tabs).toHaveCount(previousTabs + 1);
+    await expect.poll(() => previousInput.evaluate(node => node !== document.activeElement)).toBe(true);
+    await previousInput.dispose();
+    await expect(page.locator(".xterm-helper-textarea:focus:visible")).toHaveCount(1);
     await page.keyboard.type([process.execPath, path.join(desktop, "tests/fixtures/terminal-recovery/agent.cjs"), newProof].map(quote).join(" "));
     await page.keyboard.press("Enter");
     await expect.poll(() => existsSync(newProof) && readFileSync(newProof, "utf8").includes('"input":"ready"')).toBe(true);

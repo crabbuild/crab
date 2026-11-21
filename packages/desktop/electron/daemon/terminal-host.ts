@@ -102,7 +102,8 @@ export class TerminalHost {
   private maxSessions: number;
   private maxTombstones: number;
   private onSessionExitCallback?: (sessionId: string, exitCode: number) => void;
-  private disposed = false;
+  private disposal?: Promise<void>;
+  private pendingDisposals = new Set<Promise<void>>();
 
   constructor(opts: TerminalHostOptions) {
     this.spawnSubprocess = opts.spawnSubprocess;
@@ -312,12 +313,7 @@ export class TerminalHost {
       subprocess: handle,
       shellReadySupported: false,
       agentMeta: adopted.meta.agentMeta,
-      onExit: (sessionId, exitCode) => {
-        if (this.sessions.get(sessionId) === session) {
-          this.sessions.delete(sessionId);
-        }
-        this.onSessionExitCallback?.(sessionId, exitCode);
-      },
+      onExit: (_sessionId, exitCode) => this.handleSessionExit(session, exitCode),
     });
 
     // Insert directly — bypass capacity gate since these sessions already existed
@@ -415,15 +411,16 @@ export class TerminalHost {
    * Dispose all sessions — forceKill + dispose subprocess on each.
    * Called during daemon graceful shutdown.
    */
-  dispose(): void {
-    if (this.disposed) return;
-    this.disposed = true;
+  dispose(): Promise<void> {
+    if (this.disposal) return this.disposal;
 
     for (const session of this.sessions.values()) {
       session.forceKillAndDisposeSubprocess();
     }
     this.sessions.clear();
     this.tombstones.clear();
+    this.disposal = Promise.all(this.pendingDisposals).then(() => {});
+    return this.disposal;
   }
 
   /**
@@ -432,6 +429,11 @@ export class TerminalHost {
   get sessionCount(): number {
     this.pruneExitedSessions();
     return this.sessions.size;
+  }
+
+  /** Whether retired terminals still own asynchronous resource cleanup. */
+  get hasPendingDisposals(): boolean {
+    return this.pendingDisposals.size > 0;
   }
 
   /**
@@ -508,12 +510,7 @@ export class TerminalHost {
       subprocess,
       shellReadySupported,
       agentMeta: opts.agentMeta,
-      onExit: (sessionId, exitCode) => {
-        if (this.sessions.get(sessionId) === session) {
-          this.sessions.delete(sessionId);
-        }
-        this.onSessionExitCallback?.(sessionId, exitCode);
-      },
+      onExit: (_sessionId, exitCode) => this.handleSessionExit(session, exitCode),
     });
 
     this.sessions.set(opts.sessionId, session);
@@ -528,6 +525,17 @@ export class TerminalHost {
       pid: session.pid,
       shellState: session.shellState,
     };
+  }
+
+  private handleSessionExit(session: Session, exitCode: number): void {
+    // Logical exit can precede ConPTY or inherited-fd closure. Retain that
+    // ownership even after the session is removed or replaced.
+    const disposal = session.subprocessDisposal;
+    this.pendingDisposals.add(disposal);
+    // Failed cleanup stays owned so shutdown propagates the failure.
+    void disposal.then(() => this.pendingDisposals.delete(disposal), () => {});
+    if (this.sessions.get(session.sessionId) === session) this.sessions.delete(session.sessionId);
+    this.onSessionExitCallback?.(session.sessionId, exitCode);
   }
 
   private getSessionOrThrow(sessionId: string): Session {

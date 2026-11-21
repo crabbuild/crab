@@ -81,6 +81,7 @@ export class Session {
   private killTimer: ReturnType<typeof setTimeout> | null = null;
   private shellReadyTimer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
+  private disposal: Promise<void> = Promise.resolve();
   private onExitCallback?: (sessionId: string, exitCode: number) => void;
 
   constructor(opts: SessionOptions) {
@@ -163,6 +164,11 @@ export class Session {
    */
   get fd(): number {
     return this.subprocess.fd;
+  }
+
+  /** Complete the subprocess disposal requested by natural or forced exit. */
+  get subprocessDisposal(): Promise<void> {
+    return this.disposal;
   }
 
   // -------------------------------------------------------------------------
@@ -386,7 +392,7 @@ export class Session {
     if (this.disposed) return;
 
     // Path 1: Natural exit — dispose subprocess directly
-    this.subprocess.dispose();
+    this.teardownSubprocess();
     this.clearTimers();
     this.finalizeExit(exitCode);
   }
@@ -414,7 +420,7 @@ export class Session {
    * neutralizes future kill() calls).
    */
   private teardownSubprocess(): void {
-    this.subprocess.dispose();
+    this.disposal = Promise.resolve(this.subprocess.dispose());
   }
 
   /**

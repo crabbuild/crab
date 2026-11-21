@@ -93,21 +93,9 @@ pub fn run_lfs_install_in(root: &Path, options: LfsInstallOptions) -> Result<()>
 
     let flag = config_scope_flag(options);
 
-    for &(key, value_template) in LFS_TRANSFER_CONFIG_KEYS {
-        let value = value_template.replace("{bin}", &bin);
-
-        // Idempotent: skip if the key already has the correct value.
+    for (key, value) in lfs_config(&bin, options.skip_smudge) {
         if config_matches(root, flag, key, &value) {
             tracing::debug!(key, value, "LFS config already set, skipping");
-            continue;
-        }
-
-        set_git_config(root, flag, key, &value)?;
-    }
-
-    for (key, value) in lfs_filter_config(&bin, options.skip_smudge) {
-        if config_matches(root, flag, key, &value) {
-            tracing::debug!(key, value, "LFS filter config already set, skipping");
             continue;
         }
         set_git_config(root, flag, key, &value)?;
@@ -146,20 +134,10 @@ fn config_scope_flag(options: LfsInstallOptions) -> &'static str {
 fn print_manual_instructions(bin: &str, skip_smudge: bool) {
     println!("Run the following commands to install LFS configuration:");
     println!();
-    println!("  git config --local lfs.customtransfer.crab.path \"{bin}\"");
-    println!("  git config --local lfs.customtransfer.crab.args lfs-transfer-agent");
-    println!("  git config --local lfs.customtransfer.crab.concurrent true");
-    println!("  git config --local lfs.customtransfer.crab.direction both");
-    println!("  git config --local lfs.standalonetransferagent crab");
-    println!("  git config --local filter.lfs.clean \"{bin} lfs clean -- %f\"");
-    if skip_smudge {
-        println!("  git config --local filter.lfs.smudge \"{bin} lfs smudge --skip -- %f\"");
-        println!("  git config --local filter.lfs.process \"{bin} lfs filter-process --skip\"");
-    } else {
-        println!("  git config --local filter.lfs.smudge \"{bin} lfs smudge -- %f\"");
-        println!("  git config --local filter.lfs.process \"{bin} lfs filter-process\"");
+    for (key, value) in lfs_config(bin, skip_smudge) {
+        let argument = gix_quote::single(value.as_bytes().into());
+        println!("  git config --local {key} {argument}");
     }
-    println!("  git config --local filter.lfs.required true");
     println!();
     println!("Install the following as pre-push in the directory printed by:");
     println!("  git rev-parse --git-path hooks");
@@ -484,7 +462,18 @@ fn set_git_config(root: &Path, flag: &str, key: &str, value: &str) -> Result<()>
     Ok(())
 }
 
+// Git LFS quotes its agent filename itself; Git filter values are shell programs.
+// Share these values so install, update and manual instructions keep that boundary.
+pub(super) fn lfs_config(bin: &str, skip_smudge: bool) -> Vec<(&'static str, String)> {
+    LFS_TRANSFER_CONFIG_KEYS
+        .iter()
+        .map(|(key, value)| (*key, value.replace("{bin}", bin)))
+        .chain(lfs_filter_config(bin, skip_smudge))
+        .collect()
+}
+
 fn lfs_filter_config(bin: &str, skip_smudge: bool) -> Vec<(&'static str, String)> {
+    let bin = gix_quote::single(bin.as_bytes().into());
     let (smudge, process) = if skip_smudge {
         (
             format!("{bin} lfs smudge --skip -- %f"),
@@ -559,6 +548,42 @@ mod tests {
             local: true,
             skip_smudge,
             ..LfsInstallOptions::default()
+        }
+    }
+
+    #[test]
+    fn configured_filters_launch_the_exact_executable_through_git() {
+        let dir = temp_git_repo();
+        let executable = dir.path().join("filter with 'quotes'.sh");
+        fs::write(&executable, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        for (skip, expected) in [
+            (false, "lfs\nfilter-process\n"),
+            (true, "lfs\nfilter-process\n--skip\n"),
+        ] {
+            let values = lfs_filter_config(executable.to_str().unwrap(), skip);
+            let (_, command) = values
+                .iter()
+                .find(|(key, _)| *key == "filter.lfs.process")
+                .unwrap();
+            // Git uses its POSIX shell for filter commands, including on Windows.
+            // A shell alias exercises that same parser without faking argv splitting.
+            let alias = format!("alias.crab-filter-proof=!{command}");
+            let output = Command::new("git")
+                .args(["-c", &alias, "crab-filter-proof"])
+                .current_dir(dir.path())
+                .output()
+                .unwrap();
+            assert_eq!(
+                (output.status.success(), output.stdout),
+                (true, expected.as_bytes().to_vec()),
+                "{}",
+                String::from_utf8_lossy(&output.stderr),
+            );
         }
     }
 

@@ -486,6 +486,7 @@ mod platform {
     use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
     use std::path::{Component, Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
 
     use fs4::fs_std::FileExt;
 
@@ -783,6 +784,26 @@ mod platform {
             Ok(MutationGuard(&self.file))
         }
 
+        fn publication(&self) -> Result<MutationGuard<'_>> {
+            // Fills in the same directory share this short namespace lock.
+            // Use the catalog admission's two-second bound; ordinary
+            // writer contention must not discard otherwise cacheable ranges.
+            let timeout = Duration::from_secs(2);
+            let started = Instant::now();
+            loop {
+                match self.mutation() {
+                    Err(CacheError::Io(error))
+                        if error.kind() == io::ErrorKind::WouldBlock
+                            && started.elapsed() < timeout =>
+                    {
+                        let remaining = timeout.saturating_sub(started.elapsed());
+                        std::thread::sleep(Duration::from_millis(1).min(remaining));
+                    }
+                    result => return result,
+                }
+            }
+        }
+
         fn remove_payload(&self, name: &CString, dry_run: bool) -> Result<u64> {
             self.remove_payload_if(name, dry_run, &mut |_| Ok(true))?
                 .ok_or_else(|| io::Error::other("unconditional cache removal was skipped").into())
@@ -1027,7 +1048,7 @@ mod platform {
         }
 
         pub(super) fn sync_identity(&self) -> Result<()> {
-            let _mutation = self.directory.mutation()?;
+            let _mutation = self.directory.publication()?;
             self.check_name()?;
             // Persist the empty inode and name before SQL records their identity.
             // Later payload writes must not outlive that creation metadata.
@@ -1086,7 +1107,7 @@ mod platform {
 
             #[cfg(target_os = "macos")]
             {
-                let _destination_mutation = self.directory.mutation()?;
+                let _destination_mutation = self.directory.publication()?;
                 self.check_name()?;
                 self.directory.remove(&self.temporary)?;
                 let clone_path = self
@@ -1141,7 +1162,7 @@ mod platform {
         #[cfg(all(feature = "remote-client", feature = "local-cache"))]
         pub(super) fn into_unlinked_file(mut self) -> Result<File> {
             let file = self.file.try_clone()?;
-            let _mutation = self.directory.mutation()?;
+            let _mutation = self.directory.publication()?;
             self.check_name()?;
             self.directory.remove(&self.temporary)?;
             // No pathname may outlive this unpublished stream. Closing its
@@ -1151,7 +1172,7 @@ mod platform {
         }
 
         pub(super) fn commit(mut self) -> Result<()> {
-            let _mutation = self.directory.mutation()?;
+            let _mutation = self.directory.publication()?;
             self.check_name()?;
             self.file.sync_all()?;
             // SAFETY: both single-component names are relative to the same

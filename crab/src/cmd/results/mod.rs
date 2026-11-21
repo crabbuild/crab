@@ -50,7 +50,7 @@ pub(crate) fn begin_capture(
     .map_err(Into::into)
 }
 
-use crate::core::output::emit_json;
+use crate::core::output::{emit_json, emit_text};
 use clap::{Parser, Subcommand};
 use crab_workflow::results::{
     ComparisonSpec, RemoteResults, Report, RunQuery, charts, compare, query,
@@ -221,11 +221,9 @@ pub async fn exec(args: ResultsArgs) -> Result<()> {
     if args.json {
         emit_json("workflow.results", "1.0", &value)?;
     } else {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&value)
-                .map_err(crab_workflow::WorkflowError::ResultsJson)?
-        );
+        let text = serde_json::to_string_pretty(&value)
+            .map_err(crab_workflow::WorkflowError::ResultsJson)?;
+        emit_text(&text);
     }
     Ok(())
 }

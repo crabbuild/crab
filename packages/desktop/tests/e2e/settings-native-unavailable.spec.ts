@@ -50,7 +50,7 @@ for (const fault of ["missing agent", "missing CLI", "denied execution"] as cons
     if (keyboard) await page.keyboard.press(process.platform === "darwin" ? "Meta+," : "Control+,");
     else {
       await page.getByRole("button", { name: "More actions", exact: true }).click();
-      await page.getByRole("button", { name: "Settings", exact: true }).click();
+      await page.getByRole("menuitem", { name: "Settings", exact: true }).click();
     }
     await page.getByRole("button", { name: "Storage & Cache", exact: true }).click();
     return page.getByRole("region", { name: "Storage connections", exact: true });

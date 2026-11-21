@@ -20,6 +20,10 @@ pub(crate) fn replace_file(temporary: &Path, destination: &Path) -> Result<()> {
             ))
         })?;
         let exists = match fs::symlink_metadata(destination) {
+            // Moving a directory aside would make an invalid file replacement succeed.
+            Ok(metadata) if metadata.is_dir() => {
+                return Err(WorkflowError::Io(std::io::ErrorKind::IsADirectory.into()));
+            }
             Ok(_) => true,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
             Err(error) => return Err(WorkflowError::Io(error)),
@@ -72,6 +76,12 @@ pub(crate) fn ensure_parent_not_symlink(path: &Path) -> Result<()> {
             normal_components += 1;
         }
         current.push(component.as_os_str());
+        // Canonical Windows drive prefixes are not directories. Append the
+        // root before inspecting them, or bare verbatim-prefix queries fail
+        // before any repository parent can be checked.
+        if matches!(component, Component::Prefix(_)) {
+            continue;
+        }
         match fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 if allow_system_ancestor_link && normal_components == 1 {
@@ -88,4 +98,61 @@ pub(crate) fn ensure_parent_not_symlink(path: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_replacement_preserves_directory_destinations_and_pending_bytes() {
+        for populated in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let pending = root.path().join("pending");
+            fs::write(&pending, b"next").unwrap();
+            let destination = root.path().join("destination");
+            fs::create_dir(&destination).unwrap();
+            let retained = destination.join("retained");
+            if populated {
+                fs::write(&retained, b"original").unwrap();
+            }
+            let before = fs::read(&retained).ok();
+
+            let result = replace_file(&pending, &destination);
+
+            assert_eq!(
+                (
+                    result.is_err(),
+                    destination.is_dir(),
+                    fs::read(&retained).ok(),
+                    fs::read(&pending).ok(),
+                ),
+                (true, true, before, Some(b"next".to_vec())),
+                "populated={populated}"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_roots_validate_existing_and_missing_parents() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(temporary.path()).unwrap();
+        for parent in [root.clone(), root.join("missing").join("nested")] {
+            ensure_parent_not_symlink(&parent.join("entry")).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_roots_still_reject_nested_symlinks() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(temporary.path()).unwrap();
+        let target = root.join("target");
+        fs::create_dir(&target).unwrap();
+        std::os::unix::fs::symlink(&target, root.join("redirect")).unwrap();
+        assert!(matches!(
+            ensure_parent_not_symlink(&root.join("redirect").join("entry")),
+            Err(WorkflowError::YamlInvalid { key, .. }) if key == "destination_parent_symlink"
+        ));
+    }
 }

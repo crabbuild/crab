@@ -97,91 +97,95 @@ export function HydratePage({ repo }: { repo: OpenRepo }) {
     entries.length === 0 && tracked.patterns.length === 0 && !tracked.loading && !loadingStatus && !statusError;
 
   return (
-    <div className="flex h-full flex-col">
-      <div className="space-y-3 border-b border-border bg-background p-4">
-        {summary && (
-          <div className="rounded border border-border bg-background p-3 text-xs text-muted-foreground">
-            <span className="text-foreground">{summary.hydrated.toLocaleString()}</span> hydrated ·{" "}
-            <span className="text-foreground">{summary.pointer.toLocaleString()}</span> pointer-only ·{" "}
-            <span className="text-warning">{summary.partial}</span> partial ·{" "}
-            <span className="text-destructive">{summary.missing}</span> missing
-          </div>
-        )}
-
-        {noTrackedFilesYet ? (
-          <div className="rounded border border-border bg-background p-4 text-xs text-muted-foreground">
-            <p className="mb-1 text-foreground">No Crab or Git LFS files in this repository yet.</p>
-            <p>
-              Track large files via the <strong className="text-foreground">Track &amp; Stage</strong>{" "}
-              tab or by running <code className="kbd">crab track '*.bin'</code>. They'll show up
-              here once tracked.
-            </p>
-          </div>
-        ) : (
-          <>
-            <HydrateScopePicker
-              scope={scope}
-              onChange={setScope}
-              entries={entries}
-              trackedPatterns={tracked.patterns}
-              profiles={tracked.profiles}
-            />
-
-            <HydrateScopePreview
-              hydrate={resolvedHydrate}
-              dehydrate={resolvedDehydrate}
-            />
-
-            <div className="flex flex-wrap items-center gap-2">
-              <Button variant="default"
-                type="button"
-                className="text-xs"
-                disabled={busy || !canHydrate || resolvedHydrate.matched.length === 0}
-                onClick={() => requestRun("hydrate")}
-                title={
-                  resolvedHydrate.matched.length === 0
-                    ? "Nothing in scope needs hydrating"
-                    : `Hydrate ${resolvedHydrate.matched.length} file${resolvedHydrate.matched.length === 1 ? "" : "s"}`
-                }
-              >
-                <Download size={12} />
-                Hydrate {formatActionLabel(resolvedHydrate.matched.length, resolvedHydrate.bytes)}
-              </Button>
-              <Button variant="outline"
-                type="button"
-                className="text-xs"
-                disabled={busy || !canDehydrate || resolvedDehydrate.matched.length === 0}
-                onClick={() => requestRun("dehydrate")}
-                title={
-                  resolvedDehydrate.matched.length === 0
-                    ? "Nothing in scope is currently hydrated"
-                    : `Dehydrate ${resolvedDehydrate.matched.length} file${resolvedDehydrate.matched.length === 1 ? "" : "s"}`
-                }
-              >
-                <Upload size={12} />
-                Dehydrate {formatActionLabel(resolvedDehydrate.matched.length, resolvedDehydrate.bytes)}
-              </Button>
+    <div className="flex min-h-0 flex-1 flex-col">
+      {(error || statusError) && (
+        <div role="alert" tabIndex={0} className="mx-4 mt-4 max-h-[40%] shrink-0 overflow-auto break-words rounded border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">
+          {error || statusError}
+        </div>
+      )}
+      {/* Keep recovery instructions outside the scrolling controls when Activity
+          reduces the workspace height; reserve space for progress output too. */}
+      <div className="flex min-h-0 flex-1 flex-col">
+        <div className="min-h-0 max-h-[70%] overflow-auto space-y-3 border-b border-border bg-background p-4">
+          {summary && (
+            <div className="rounded border border-border bg-background p-3 text-xs text-muted-foreground">
+              <span className="text-foreground">{summary.hydrated.toLocaleString()}</span> hydrated ·{" "}
+              <span className="text-foreground">{summary.pointer.toLocaleString()}</span> pointer-only ·{" "}
+              <span className="text-warning">{summary.partial}</span> partial ·{" "}
+              <span className="text-destructive">{summary.missing}</span> missing
             </div>
-          </>
-        )}
+          )}
 
-        {(error || statusError) && (
-          <div role="alert" className="rounded border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">
-            {error || statusError}
-          </div>
-        )}
-      </div>
-
-      <div className="min-h-0 flex-1 overflow-auto bg-background p-3 font-mono text-[12px]">
-        {lines.length === 0 ? (
-          <div className="text-muted-foreground">Progress will stream here once the job starts.</div>
-        ) : (
-          lines.map((l, i) => (
-            <div key={i} className={l.stream === "stderr" ? "text-warning" : ""}>
-              {l.line}
+          {noTrackedFilesYet ? (
+            <div className="rounded border border-border bg-background p-4 text-xs text-muted-foreground">
+              <p className="mb-1 text-foreground">No Crab or Git LFS files in this repository yet.</p>
+              <p>
+                Track large files via the <strong className="text-foreground">Track &amp; Stage</strong>{" "}
+                tab or by running <code className="kbd">crab track '*.bin'</code>. They'll show up
+                here once tracked.
+              </p>
             </div>
-          ))
-        )}
+          ) : (
+            <>
+              <HydrateScopePicker
+                scope={scope}
+                onChange={setScope}
+                entries={entries}
+                trackedPatterns={tracked.patterns}
+                profiles={tracked.profiles}
+              />
+
+              <HydrateScopePreview
+                hydrate={resolvedHydrate}
+                dehydrate={resolvedDehydrate}
+              />
+
+              <div className="flex flex-wrap items-center gap-2">
+                <Button variant="default"
+                  type="button"
+                  className="text-xs"
+                  disabled={busy || !canHydrate || resolvedHydrate.matched.length === 0}
+                  onClick={() => requestRun("hydrate")}
+                  title={
+                    resolvedHydrate.matched.length === 0
+                      ? "Nothing in scope needs hydrating"
+                      : `Hydrate ${resolvedHydrate.matched.length} file${resolvedHydrate.matched.length === 1 ? "" : "s"}`
+                  }
+                >
+                  <Download size={12} />
+                  Hydrate {formatActionLabel(resolvedHydrate.matched.length, resolvedHydrate.bytes)}
+                </Button>
+                <Button variant="outline"
+                  type="button"
+                  className="text-xs"
+                  disabled={busy || !canDehydrate || resolvedDehydrate.matched.length === 0}
+                  onClick={() => requestRun("dehydrate")}
+                  title={
+                    resolvedDehydrate.matched.length === 0
+                      ? "Nothing in scope is currently hydrated"
+                      : `Dehydrate ${resolvedDehydrate.matched.length} file${resolvedDehydrate.matched.length === 1 ? "" : "s"}`
+                  }
+                >
+                  <Upload size={12} />
+                  Dehydrate {formatActionLabel(resolvedDehydrate.matched.length, resolvedDehydrate.bytes)}
+                </Button>
+              </div>
+            </>
+          )}
+
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-auto bg-background p-3 font-mono text-[12px]">
+          {lines.length === 0 ? (
+            <div className="text-muted-foreground">Progress will stream here once the job starts.</div>
+          ) : (
+            lines.map((l, i) => (
+              <div key={i} className={l.stream === "stderr" ? "text-warning" : ""}>
+                {l.line}
+              </div>
+            ))
+          )}
+        </div>
       </div>
 
       <ConfirmHydrateDialog

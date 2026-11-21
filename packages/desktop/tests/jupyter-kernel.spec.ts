@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { JupyterKernel } from "../electron/jupyter-kernel";
 import type { KernelOutput } from "../electron/jupyter-types";
 
@@ -75,6 +76,37 @@ describe.runIf(python)("reference Jupyter runtime ownership", () => {
     await expect(kernel.start()).rejects.toThrow(/No such kernel/);
     await kernel.shutdown();
     expect((await fs.readdir(root)).filter(name => name.startsWith("crab-kernel-"))).toEqual([]);
+  }, 45_000);
+
+  it.each(["startup", "restart"])("identifies the executable when %s fails without an OS filename", async phase => {
+    const executable = path.join(root, "unavailable-kernel");
+    const result = execFileSync(python!, ["-B", "-c", `
+import asyncio, importlib.util, json, sys
+from unittest.mock import patch
+spec = importlib.util.spec_from_file_location("crab_jupyter", sys.argv[1])
+runtime = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(runtime)
+async def check():
+    kernel = runtime.LocalKernel("python3", sys.argv[2], sys.argv[2])
+    if sys.argv[3] == "restart":
+        await kernel.launch()
+        await kernel.ready()
+    kernel.manager.kernel_spec.argv[0] = sys.argv[4]
+    missing = FileNotFoundError(2, "The system cannot find the file specified")
+    try:
+        # Windows CreateProcess omits the executable from FileNotFoundError.
+        # Inject that dependency error after real Jupyter launch preparation.
+        with patch("jupyter_client.launcher.Popen", side_effect=missing):
+            await kernel.launch(restart=sys.argv[3] == "restart")
+    except Exception as error:
+        print(json.dumps({"message": str(error), "causeRetained": error.__cause__ is missing}))
+    finally:
+        await kernel.close()
+asyncio.run(check())
+`, path.resolve(__dirname, "../electron/jupyter-runtime.py"), root, phase, executable], { encoding: "utf8", timeout: 30_000 });
+    const failure = JSON.parse(result) as { message: string; causeRetained: boolean };
+    expect(failure.message).toContain(executable);
+    expect(failure.causeRetained).toBe(true);
   }, 45_000);
 
   it("routes background output after execution is idle to its original request", async () => {

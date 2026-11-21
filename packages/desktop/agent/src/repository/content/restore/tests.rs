@@ -101,7 +101,10 @@ async fn converted_restoration_refreshes_status_and_preserves_staging() {
             ),
             git(root, &["ls-files", "--stage", "-z"]),
         ),
-        (expected, Vec::new(), staged)
+        (expected, Vec::new(), staged),
+        "index stat: {}; published metadata: {:?}",
+        String::from_utf8_lossy(&git(root, &["ls-files", "--debug", "--", NAME])),
+        std::fs::metadata(root.join(NAME)).unwrap(),
     );
     repo.close().await.unwrap();
 }

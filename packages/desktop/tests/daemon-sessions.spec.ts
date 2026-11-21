@@ -6,7 +6,7 @@ import { DaemonSessions, daemonDirectory, prepareDaemonHistory } from "../electr
 import { DaemonClient } from "../electron/daemon/daemon-client";
 import { DaemonServer } from "../electron/daemon/daemon-server";
 import { createNodePtySpawner } from "../electron/daemon/subprocess-handle";
-import type { CreateOrAttachResult } from "../electron/daemon/protocol";
+import type { CreateOrAttachResult, SessionInfo } from "../electron/daemon/protocol";
 
 it.each(["root", "runtime"])("preserves a %s owner's real terminal and routes new sessions after its runtime disappears", async location => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "crab-daemon-owners-"));
@@ -51,6 +51,9 @@ it.each(["root", "runtime"])("preserves a %s owner's real terminal and routes ne
     await client.request("createOrAttach", { ...payload, sessionId: "ending" });
     await client.request("write", { sessionId: "ending", data: "exit\r" });
     await vi.waitFor(() => expect(() => process.kill(ending.pid!, 0)).toThrowError(expect.objectContaining({ code: "ESRCH" })));
+    // ConPTY drains output for one second after process exit before onExit.
+    // The poll must allow that drain; the overall lifecycle deadline still applies.
+    await vi.waitFor(async () => expect((await client.request<SessionInfo[]>("listSessions")).some(session => session.sessionId === "ending" && session.isAlive)).toBe(false), { timeout: 5000 });
     expect(await client.request("createOrAttach", { ...payload, sessionId: "ending" })).toMatchObject({ isNew: true });
     expect(client.ownsCurrentSession("ending")).toBe(true);
     const command = process.platform === "win32" ? "echo owner-%COMPUTERNAME%\r" : "printf 'owner-%s\\n' ready\r";

@@ -99,6 +99,19 @@ pub fn emit_json<T: Serialize>(
     Ok(())
 }
 
+/// Write one human-readable presentation while holding stdout through flush.
+///
+/// Callers finish formatting before acquiring stdout. Write failures follow
+/// [`emit_json`], so closing a command's output pipe cannot trigger a panic.
+pub(crate) fn emit_text(text: &str) {
+    let stdout = std::io::stdout();
+    let lock = stdout.lock();
+    let mut writer = std::io::BufWriter::new(lock);
+    let _ = writer.write_all(text.as_bytes());
+    let _ = writer.write_all(b"\n");
+    let _ = writer.flush();
+}
+
 /// Write an error envelope to stdout and flush.
 ///
 /// Timestamp errors return before writing bytes. Callers reporting an existing

@@ -192,7 +192,7 @@ def prepare(target: Path, crab: Path, rustfs: Path):
             env = sdk_fixture.fixture_environment(directory, directory, endpoint, bucket, Path(git), crab, target)
             env["PATH"] = str(crab.parent) + os.pathsep + env["PATH"]
             env["CRAB_BIN"] = str(crab)
-            log = cleanup.enter_context((directory / "commands.log").open("w"))
+            log = cleanup.enter_context((directory / "commands.log").open("w", encoding="utf-8"))
 
             def run(arguments, cwd=directory, environment=env):
                 result = subprocess.run([str(value) for value in arguments], cwd=cwd, env=environment, capture_output=True, timeout=120)
@@ -267,6 +267,8 @@ def prepare(target: Path, crab: Path, rustfs: Path):
             cold_payloads.append({"marker": cold_marker, "sha256": hashlib.sha256(cold).hexdigest(), "size": len(cold)})
             clone = directory / "local"
             run([crab, "clone", str(source), str(clone), "--lazy"])
+            for key, value in (("user.name", "Desktop test"), ("user.email", "test@example.invalid"), ("commit.gpgsign", "false")):
+                run([git, "config", key, value], clone)
             if any((clone / filename).stat().st_size >= 1024 for filename in ("weights.safetensors", "lfs.safetensors", "cold.safetensors")):
                 raise RuntimeError("Lazy fixture unexpectedly materialized its pointers")
             repositories.append(str(clone))

@@ -429,21 +429,34 @@ pub fn resolve_crab_bin() -> std::path::PathBuf {
 }
 
 #[cfg(test)]
+pub(crate) fn test_exit_status(code: u8) -> ExitStatus {
+    // Unix stores an exit code in wait-status bits; Windows stores the code directly.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        ExitStatus::from_raw(i32::from(code) << 8)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::ExitStatusExt;
+        ExitStatus::from_raw(u32::from(code))
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::ffi::OsStr;
 
-    #[cfg(unix)]
     #[test]
     fn structured_failures_preserve_semantic_error_details_instead_of_tracing_logs() {
-        use std::os::unix::process::ExitStatusExt;
         let error = serde_json::json!({
             "code": "CRAB-E0020", "message": "captured output differs", "retryable": false,
             "details": { "path": "model.bin" }, "source_chain": [{ "message": "verified cause" }],
         });
         for status in [0, 4] {
             let output = Output {
-                status: ExitStatus::from_raw(status << 8),
+                status: test_exit_status(status),
                 stdout: serde_json::to_vec(&serde_json::json!({ "error": error })).unwrap(),
                 stderr: b"structured tracing diagnostics".to_vec(),
             };
@@ -463,13 +476,11 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn failed_processes_without_error_envelopes_preserve_diagnostics_and_never_return_data() {
-        use std::os::unix::process::ExitStatusExt;
         for stdout in [Vec::new(), br#"{"data":{"partial":true}}"#.to_vec()] {
             let output = Output {
-                status: ExitStatus::from_raw(2 << 8),
+                status: test_exit_status(2),
                 stdout,
                 stderr: b"startup failed".to_vec(),
             };

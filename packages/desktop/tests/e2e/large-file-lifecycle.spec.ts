@@ -94,7 +94,7 @@ test("whole-file restoration protects literal selections, staging and pending ed
     await expect(page.getByText("Index vs HEAD", { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "Discard entire file change", exact: true })).toBeDisabled();
     for (const file of files) writeFileSync(path.join(source, file), dirty);
-    await page.getByRole("radiogroup", { name: "View mode", exact: true }).locator("..").getByRole("button", { name: "Refresh", exact: true }).click();
+    await page.getByLabel("View mode", { exact: true }).and(page.locator(":visible")).locator("..").getByRole("button", { name: "Refresh", exact: true }).click();
     for (const file of files.slice(0, 2)) await row(file).click({ modifiers: [process.platform === "darwin" ? "Meta" : "Control"] });
     await page.getByRole("button", { name: "Discard selected files", exact: true }).click();
     await answerConfirmation(page, /^Restore /);
@@ -162,11 +162,11 @@ test("whole-file restoration protects literal selections, staging and pending ed
     await page.locator('[role="treeitem"][data-item-path="note.md"]').click();
     const editor = page.locator(".monaco-editor .view-lines");
     await expect(editor).toContainText("INDEX_NOTE");
-    chmodSync(source, 0o500);
+    chmodSync(path.join(source, "note.md"), 0o444);
     await editor.click(); await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A");
     await page.keyboard.insertText("PENDING_EDITOR_DRAFT"); await page.keyboard.press(process.platform === "darwin" ? "Meta+S" : "Control+S");
     await expect(page.getByRole("button", { name: "Retry saving", exact: true })).toBeVisible();
-    chmodSync(source, 0o700);
+    chmodSync(path.join(source, "note.md"), 0o644);
     writeFileSync(path.join(source, "note.md"), "EXTERNAL_DISK_EDIT\n");
     await changes();
     await discard("note.md");
@@ -183,7 +183,7 @@ test("whole-file restoration protects literal selections, staging and pending ed
     await expect(editor).toContainText("INDEX_NOTE");
     expect(git(["ls-files", "--stage", "-z"])).toEqual(index);
     await page.screenshot({ path: test.info().outputPath("whole-file-restore-editor.png") });
-  } finally { chmodSync(source, 0o700); await application.close(); rmSync(root, { recursive: true, force: true }); }
+  } finally { chmodSync(path.join(source, "note.md"), 0o644); await application.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
 test("Crab and LFS UI lifecycle preserves bytes and staging across edits, rename and removal", async () => {
@@ -333,7 +333,8 @@ test("Crab and LFS UI lifecycle preserves bytes and staging across edits, rename
     await activity();
     await expect(page.getByText("Waiting for native admission…", { exact: true })).toBeInViewport();
     await new Promise<void>((resolve, reject) => {
-      const second = spawn(executablePath, [`--user-data-dir=${profile}`], { env: appEnv, stdio: "ignore" });
+      const args = [...(process.platform === "linux" ? ["--no-sandbox"] : []), `--user-data-dir=${profile}`];
+      const second = spawn(executablePath, args, { env: appEnv, stdio: "ignore" });
       const deadline = setTimeout(() => { second.kill("SIGKILL"); reject(new Error("Second profile owner did not exit")); }, 10_000);
       second.once("error", error => { clearTimeout(deadline); reject(error); });
       second.once("exit", code => { clearTimeout(deadline); if (code === 0) resolve(); else reject(new Error(`Second profile owner exited ${code}`)); });
@@ -354,8 +355,9 @@ test("Crab and LFS UI lifecycle preserves bytes and staging across edits, rename
     expect(interrupted.job_id).not.toBe(admitted.job_id);
     // Kill only this owned main process after its real SQLite intent commits.
     // No native writer was sent; startup must retain unknown, never auto-replay.
+    const mainPid = await application.evaluate(() => process.pid);
     const exited = application.waitForEvent("close");
-    application.process().kill("SIGKILL");
+    process.kill(mainPid, "SIGKILL");
     await exited;
     application = await electron.launch({ executablePath, args: [`--user-data-dir=${profile}`], env: { ...appEnv, CRAB_CACHE_DIR: path.join(root, "cold-clone-cache") } });
     page = await application.firstWindow();
@@ -432,7 +434,7 @@ test("Crab and LFS UI lifecycle preserves bytes and staging across edits, rename
     }
     const stagedIndexBeforeRestore = git(source, ["ls-files", "--stage", "-z"]);
     for (const file of files) writeFileSync(path.join(source, file), content);
-    await page.getByRole("radiogroup", { name: "View mode", exact: true }).locator("..").getByRole("button", { name: "Refresh", exact: true }).click();
+    await page.getByLabel("View mode", { exact: true }).and(page.locator(":visible")).locator("..").getByRole("button", { name: "Refresh", exact: true }).click();
     await page.getByText(files[0], { exact: true }).and(page.locator(":visible")).first().click({ button: "right" });
     await page.getByRole("menuitem", { name: "Discard Changes", exact: true }).click();
     await answerConfirmation(page, /^Restore /);

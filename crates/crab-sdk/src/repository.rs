@@ -48,7 +48,9 @@ pub struct Repository {
 
 #[derive(Clone)]
 enum RepositoryBackend {
-    Remote(crate::client::RemoteRepository),
+    // Retain ownership of the captured generation without inflating every
+    // local handle with the remote handle's storage metadata.
+    Remote(Box<crate::client::RemoteRepository>),
     #[cfg(feature = "local")]
     Local(crate::LocalRepository),
 }
@@ -56,7 +58,7 @@ enum RepositoryBackend {
 impl Repository {
     pub(crate) fn from_remote(owner: crate::client::RemoteRepository) -> Self {
         Self {
-            backend: RepositoryBackend::Remote(owner),
+            backend: RepositoryBackend::Remote(Box::new(owner)),
         }
     }
 
