@@ -1164,3 +1164,33 @@ the compiled native qualifier. Only the server allocator dependency edge differs
 in the lockfile; it is outside that qualifier's graph. The native 72-cell and
 200-growth proofs therefore retain source coverage. The new server batching
 continues to require its separate HTTP timing/resource qualification.
+
+
+## Corrected session source: sustained resources pass, timing remains open
+
+The `8bf89f37aba` same-executable check completes all 360 trials and twenty
+fixed pairs across nine original cases. All four original RSS plateaus, resource
+envelopes, OOM and drain checks pass over 81 minutes. Peak process RSS is
+148.4 MiB under each worker's one-CPU / one-GiB / no-extra-swap limit. All four
+processes exit zero; both active replicas pass exact six-field durability.
+
+All 10,320,137 measured Git-verified successes have zero errors. Every phase
+retains 12,455,701 records, 12,400,428 successful Git checks and zero mismatches.
+Twenty of 27 timing bands fail: identical code appears both faster and slower
+across cases, with p95 ratios from 0.6871 to 1.2489. The full original-R0/current
+comparison remains blocked. No failed gate or request sample is discarded.
+
+Recorded client use is about half a core under load; relay use is about
+0.77–0.91 core in those cases. Foreign compilation often increases in slower
+arms. This is a correlation, not proof of a sole cause. The host has eight
+performance and four efficiency cores; the owned VM has ten vCPUs. A read-only
+policy check finds neither owned Lima process Darwin-background limited.
+No scheduling policy is changed.
+
+The next prospective check reuses the existing quiet-pair protocol: fifteen
+compiler-free seconds before a pair and independent continuous observation
+through both arms. It keeps twenty valid pairs per original case, at most two
+raw attempts per valid pair, all 27 timing bands and all four resource checks.
+Every interrupted pair remains retained and verified; any request error or Git
+mismatch fails independently of environment classification. All earlier
+failures remain available. The new protocol is prepared, not yet launched.

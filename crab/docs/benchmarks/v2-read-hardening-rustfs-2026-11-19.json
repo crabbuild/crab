@@ -16167,5 +16167,121 @@
       "server_not_in_native_graph": true,
       "scope": "Native72andgrowth200 sourceequivalenceonly; serverallocator/sessionchangesnotexercisedbythese nativebinaries"
     }
+  },
+  "immutable_session_source_sustained_http_calibration": {
+    "status": "failed_identical_code_repeatability_resources_passed",
+    "runtime_source": "8bf89f37abac60cd341b9816c25b269ac5d6189e",
+    "acceptance": false,
+    "trials": 360,
+    "fixed_pairs": 20,
+    "original_cases": 9,
+    "timing_cells": 27,
+    "failed_timing_cells": 20,
+    "measured_successes": 10320137,
+    "measured_errors": 0,
+    "all_phase_checks": {
+      "records": 12455701,
+      "git_verified_successes": 12400428,
+      "oracle_mismatches": 0
+    },
+    "raw_report_sha256": "eb46d2d8994f28e7c4499a9b6a44ab3fc0f16fc7dda05befc0e40d74f815a4b8",
+    "summary_sha256": "05e2958377f88bc662239117ee5a8b28d8add4c20162e17990ce8be79badb1fc",
+    "profile_sha256": "cfb0cefe3bd2a294a4b3434cc4024723d9110660c82e9cc6c4f30afd4cc6a153",
+    "scope": "Same8bfexecutable/activeRootprocesspair underbothlabels; allfourresidentnodescurrent acrossindependentRoots. Original27symmetricbands/allfourRSS/envelope/drain/durability/exits. CanonicalsingleCPUrelay,4CPUprovider,eachproduct1CPU1GiBnoswap,VM10CPU8GiB. Allpreviousfailuresretained.",
+    "resources": {
+      "baseline": {
+        "duration_seconds": 4860.870112542063,
+        "peak_rss_bytes": [
+          120860672,
+          143994880
+        ],
+        "rss_plateau": "passed",
+        "failures": [],
+        "admitted_work_drained": true
+      },
+      "candidate": {
+        "duration_seconds": 4859.046261457959,
+        "peak_rss_bytes": [
+          155635712,
+          113541120
+        ],
+        "rss_plateau": "passed",
+        "failures": [],
+        "admitted_work_drained": true
+      }
+    },
+    "exit_codes": {
+      "baseline": {
+        "a": 0,
+        "b": 0
+      },
+      "candidate": {
+        "a": 0,
+        "b": 0
+      }
+    },
+    "candidate_shutdown_proofs": {
+      "a": {
+        "passed": true,
+        "fields": {
+          "complete": "true",
+          "log_quiesced": "true",
+          "local_durability_closed": "true",
+          "pending_application_events": "0",
+          "pending_dispatches": "0",
+          "deadline_elapsed": "false"
+        }
+      },
+      "b": {
+        "passed": true,
+        "fields": {
+          "complete": "true",
+          "log_quiesced": "true",
+          "local_durability_closed": "true",
+          "pending_application_events": "0",
+          "pending_dispatches": "0",
+          "deadline_elapsed": "false"
+        }
+      }
+    },
+    "timing_columns": [
+      "case",
+      "workload",
+      "p95_ratio",
+      "throughput_ratio",
+      "gate"
+    ],
+    "timing_rows": [
+      ["small-1","preview",0.9840328234393749,1.0079419430229988,"passed"],
+      ["distinct-8","preview-distinct",1.2489023572885267,0.9361635671867738,"failed"],
+      ["distinct-8","history",1.2461059821884457,0.9361707403891049,"failed"],
+      ["distinct-8","raw-distinct",1.2208368341677909,0.9361730040748154,"failed"],
+      ["distinct-8","blame-distinct",1.248322469476216,0.9362677587038022,"failed"],
+      ["distinct-8","late-history",1.245992527366105,0.936235100395668,"failed"],
+      ["small-16","preview",0.6870737339169574,1.1068170154716281,"failed"],
+      ["mixed-16","preview",1.2146156532021422,0.9795742740719375,"failed"],
+      ["mixed-16","history",1.2121802010874758,0.979622724777612,"failed"],
+      ["mixed-16","raw",1.2227211984894202,0.9795703724571345,"failed"],
+      ["mixed-16","blame",1.2309167231567348,0.9795322203255168,"failed"],
+      ["mixed-16","late-history",1.2129522910092911,0.9796753908850265,"failed"],
+      ["distinct-16","preview-distinct",0.7895673432450775,1.0917597785502189,"failed"],
+      ["distinct-16","history",0.7805352314662575,1.0917502582035985,"failed"],
+      ["distinct-16","raw-distinct",0.7766872164728605,1.0916589452231562,"failed"],
+      ["distinct-16","blame-distinct",0.7766360654321018,1.0916223022735585,"failed"],
+      ["distinct-16","late-history",0.7803768966028231,1.0917955394481595,"failed"],
+      ["small-32","preview",1.0638286877747147,0.9590800973858781,"passed"],
+      ["expensive-32","blame",0.7959153599125682,1.0873536807666568,"failed"],
+      ["expensive-32","late-history",0.7925006129775043,1.0871369772031187,"failed"],
+      ["expensive-32","raw",0.7952274262773936,1.0872183329201894,"failed"],
+      ["small-64","preview",1.1538935995354285,0.9406488152154522,"failed"],
+      ["mixed-64","preview",1.0265244407161398,0.9881743863084108,"passed"],
+      ["mixed-64","history",1.0321411665232652,0.9882643124040449,"passed"],
+      ["mixed-64","raw",1.0226901761662406,0.9875616591965007,"passed"],
+      ["mixed-64","blame",1.0224702460620025,0.9881498183780936,"passed"],
+      ["mixed-64","late-history",1.0210229239946595,0.9880322162592721,"passed"]
+    ],
+    "measurement_diagnosis": "Identicalcode p95 ratios0.6871–1.2489; severalcasesfaster and othersslower undersecondlabel. Clientabout0.4–0.55core inloadedcases;relayabout0.77–0.91core. IndependentlyrecordedforeignRustcompilation oftenhigherinslowerarms; correlationisnotsolecauseproof. Mac12physicalcores includes8performance/4efficiencycores. OwnedVMnotDarwinbackground-limited; noschedulingpolicychanged.",
+    "full_original_source_comparison": "not launched: strictsame-executablegatefailed; guardedhandoffrecordsblocked_by_retained_aa_result",
+    "next_prospective_protocol": "Reuseexisting fifteenquietseconds admission andcontinuouscompiler-observer throughbotharms. Exactly20validpairs9cases, max2rawattemptspervalidpair; retainallinterruptedtrials andverifyallerrors/Gitresults. Originaltiming/resourcegates unchanged. Preparednotlaunched."
   }
 }
