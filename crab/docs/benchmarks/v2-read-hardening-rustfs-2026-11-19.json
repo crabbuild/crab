@@ -15966,5 +15966,23 @@
     "strict_release_all_target_clippy_passed": true,
     "clippy_log_sha256": "dddb1b31f97c24136a98e20076698f5cd351e5796fc63650fb734e22dbc4aa69",
     "test_profile": "Existing release dependencies; only crab-server test crate opt-level0/codegen256; actual production binary uses normal release opt-level3."
+  },
+  "immutable_session_verification_payloads": {
+    "status": "unit_verified_immutable_session_snapshots",
+    "base_revision": "900102a48c5bd3341693d12fc089400f39f28791",
+    "scope": "Shared verification payload must contain only immutable verified fields. Runtime Session revocation flags/cache ownership are constructed per lookup using existing semantics. No session cleanup policy or durable layout changes. Production builds/live proof remain pending.",
+    "race_red_log_sha256": "361b1578d5d386b96ae22d265f03abb3cdfa19c8f198ee42a12747e4fb8f7fdb",
+    "green_auth_log_sha256": "95869f03d7f54d9546e888986ce0f9926ef746f62a3e9156bfc31adbdbd63353",
+    "focused_auth_tests_passed": 41,
+    "existing_ignored_browser_fixture": 1,
+    "old_deterministic_pair_read_admissions": 4,
+    "current_pair_read_admissions": 2,
+    "sources": {
+      "crates/crab-server/src/auth/mod.rs": "e87eda8a9895d0b533db61ad0b67af19f3f4b6c66d31e10e8a37131b8d28ed4f",
+      "crates/crab-server/src/auth/state.rs": "e02cc073c9ade388d8b61c59499d62dff792ea357fd061dc5e2071afa40ab972",
+      "crates/crab-server/src/auth/tests/session_reads.rs": "042c895b7476c8ff0105d34bc8cd4d2592e2829f963ba91b88179981fc894f40"
+    },
+    "strict_all_target_release_clippy_passed": true,
+    "clippy_log_sha256": "55738b1928319e7efac88a5397641c39bd6495646c16088958f7c05954cd4727"
   }
 }

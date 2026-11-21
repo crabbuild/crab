@@ -1,6 +1,6 @@
 use super::{
     AuthError, AuthState, Authentication, Flow, IdentitySessionMarker, Key, STATE_CAS_ATTEMPTS,
-    Session, StoredFlow, StoredSession, hex_key, now_epoch,
+    Session, StoredFlow, StoredSession, VerifiedSession, hex_key, now_epoch,
 };
 use bytes::Bytes;
 use crab_storage::StorageError;
@@ -138,7 +138,15 @@ impl Authentication {
             )
         });
         let read = state.session_check(session_key, cached_marker_path).await;
-        let session = read.await?;
+        let checked = read.await?;
+        let session = Arc::new(Session {
+            identity: checked.identity.clone(),
+            groups: checked.groups.clone(),
+            csrf: checked.csrf.clone(),
+            expires_at: checked.expires_at,
+            session_key,
+            revoked: AtomicBool::new(false),
+        });
         if session.active() {
             let mut sessions = self.sessions.lock().await;
             sessions.retain(|_, session| session.active());
@@ -327,7 +335,7 @@ impl AuthState {
         &self,
         session_key: Key,
         cached_marker_path: Option<ObjectPath>,
-    ) -> Option<Arc<Session>> {
+    ) -> Option<Arc<VerifiedSession>> {
         let session_path = self.path("sessions", &session_key);
         let record = self.store.get_with_etag_bounded(&session_path, 64 * 1024);
         let marker = async {
@@ -360,13 +368,11 @@ impl AuthState {
         {
             return None;
         }
-        Some(Arc::new(Session {
+        Some(Arc::new(VerifiedSession {
             identity: record.identity,
             groups: super::oidc::groups(record.groups).ok()?,
             csrf: record.csrf,
             expires_at: record.expires_at,
-            session_key,
-            revoked: AtomicBool::new(false),
         }))
     }
 
