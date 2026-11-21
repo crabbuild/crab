@@ -1123,8 +1123,11 @@ consistent benefit under ongoing host activity; the simpler canonical relay is
 retained. Queued session-check batching reduces a deterministic pair from four
 storage reads to two while closing enrollment before either fresh read starts.
 The old-source regression fails; all 41 focused authentication tests and
-strict release all-target Clippy pass. Production builds and live RustFS proof
-for this source remain required before the next combined-source comparison.
+strict release all-target Clippy pass. Corrected immutable verification payloads
+also pass both production builds, all 54 real two-replica RustFS checks, exact
+shutdown durability proofs and minimum-resource Linux OAuth/allocator probes.
+Actual provider work and full combined-source timing/resource acceptance remain
+required.
 
 1. Record source revision/patch, binary hashes, compiler/profile, fixture
    identities, backend/region, quotas, and report schema. Readiness/capture,
