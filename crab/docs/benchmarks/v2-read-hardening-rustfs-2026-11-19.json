@@ -15984,5 +15984,71 @@
     },
     "strict_all_target_release_clippy_passed": true,
     "clippy_log_sha256": "55738b1928319e7efac88a5397641c39bd6495646c16088958f7c05954cd4727"
+  },
+  "queued_session_source_live_verification": {
+    "status": "passed_source_functional_proof",
+    "runtime_source": "8bf89f37abac60cd341b9816c25b269ac5d6189e",
+    "scope": "Corrected immutable queued-verification payloads; default production opt-level3 builds, actual network/side effects on local RustFS. Combined performance and sustained new-source resource acceptance remain pending.",
+    "production_builds": {
+      "mac": {
+        "binary_sha256": "5680a6dc8dc3bafd5cba6eeef13858c1c6cccf120ce85e1e0cf19a3121344473",
+        "source_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1"
+      },
+      "linux": {
+        "binary_sha256": "307cc1c59138c50ca1c3793434a37ed0eee54255807a12ff8b7eaa6ac8e647bc",
+        "source_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1"
+      }
+    },
+    "actual_two_replica_smoke": {
+      "checks": 54,
+      "report_sha256": "f507d644541e1f786a7cc9a464f384d9b55fbc8ed7a9ba38e8b9a3f847fe56a5",
+      "exit_codes": [
+        0,
+        0
+      ],
+      "exact_durability_receipt_sha256": "b8189ad219be7aa856b9f6838f4051aa47df97f9d3b196f926f3e9798cbecef5",
+      "resource_failures": [],
+      "rss_plateau": "insufficient_duration"
+    },
+    "linux_source_probe": {
+      "report_sha256": "6b2e6975014809ac54891a245bf19340c5fc8cdeb7136768537630089455b834",
+      "background_thread_counts": {
+        "baseline": 1,
+        "candidate": 1
+      },
+      "real_oauth_both_roots": true,
+      "each_process_limits": "1CPU/1GiB/no extra swap",
+      "phases": {
+        "baseline": {
+          "image_id": "sha256:ce37ede1ba2098ba6cd0b325beed34d007e720aad1c936033e9b7ad1c5358e23",
+          "exit_code": 0,
+          "real_authenticated_session": true
+        },
+        "candidate": {
+          "image_id": "sha256:ce37ede1ba2098ba6cd0b325beed34d007e720aad1c936033e9b7ad1c5358e23",
+          "exit_code": 0,
+          "real_authenticated_session": true
+        }
+      }
+    },
+    "matched_images": {
+      "baseline": {
+        "image_id": "sha256:a03787cbf673a13ccfb9097083491dfb141f2c52028065b0fa377d9df7a8aae7",
+        "server_binary_sha256": "4b5349e90885a359204cd68d89c30659134d6255b006e16ab21248bc2928e80c",
+        "server_source": "aafb6d256c5e8d3a8e768d31dd887a18f2afd2e4",
+        "runtime_parent_image": "sha256:c4e8434b95ba89fb10035d2a631c8ab0fc26d14d2446997ae899c0f9ad33d142"
+      },
+      "candidate": {
+        "image_id": "sha256:ce37ede1ba2098ba6cd0b325beed34d007e720aad1c936033e9b7ad1c5358e23",
+        "server_binary_sha256": "307cc1c59138c50ca1c3793434a37ed0eee54255807a12ff8b7eaa6ac8e647bc",
+        "server_source": "8bf89f37abac60cd341b9816c25b269ac5d6189e",
+        "runtime_parent_image": "sha256:c4e8434b95ba89fb10035d2a631c8ab0fc26d14d2446997ae899c0f9ad33d142"
+      }
+    },
+    "original_r0_binary_native_parent_receipt_fields_unchanged": true,
+    "wire_work_pilot": "in_progress",
+    "combined_performance_acceptance": false
   }
 }

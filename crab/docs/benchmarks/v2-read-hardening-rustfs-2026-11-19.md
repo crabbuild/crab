@@ -1124,3 +1124,16 @@ fields from per-lookup runtime revocation flags. All 41 authentication tests and
 strict release all-target Clippy pass with the corrected ownership. Existing
 cleanup policy is preserved. Production builds/live checks for this corrected
 source are recorded separately.
+
+
+The corrected runtime `8bf89f37aba` passes both clean macOS/Linux ARM64
+production builds and all 54 real two-replica RustFS smoke checks. Git parity,
+bounded previews, cross-replica cursors, cancellation, real Chromium revalidation,
+catalog denial before 304 and logout remain correct. Both processes drain and
+exit zero; the exact six-field durability proof passes on both. The short smoke
+does not establish an RSS plateau. Linux probes run the actual new image with
+one CPU / one GiB / no extra swap, perform real OAuth on both independent Roots
+and confirm allocator background threads. The R0 image is repackaged with the
+same frozen binaries and runtime parent; source, binary and receipt fields match
+the preceding R0 packaging. The new I/O pilot and full timing/resource acceptance
+remain separate.
