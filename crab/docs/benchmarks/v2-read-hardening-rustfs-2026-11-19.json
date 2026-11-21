@@ -16357,4 +16357,92 @@
     "published_source_live_checks": "pendingnewcleanproductionbuilds",
     "performance_acceptance": false
   }
+,
+  "published_sdk_production_and_rustfs_verification": {
+    "status": "passed_published_sdk_production_builds_and_local_rustfs_functional_checks",
+    "runtime_source": "bf5cb36e1762f10b07873c5a2da0eb1031a24c61",
+    "sdk": "published cellar-main =0.1.2",
+    "sdk_vcs_revision": "db71523cbd22ad5c71d09dce97029b07d90abcef",
+    "normal_release_builds": {
+      "macos_arm64": {
+        "binary_sha256": "62983b1d23d92714bfa029a99a32aefebc37521efca8724c1ff593f85d9da69e",
+        "receipt_sha256": "6ea0e4b170ba48f1f723f17450e125aa4ff1131584a008b650d7234ffde0e856"
+      },
+      "linux_arm64": {
+        "binary_sha256": "70447fa35a8dd310b3911d7ba7f38ee97c4d85afba82c49a94f1724c656d02da",
+        "receipt_sha256": "8597a5a79ea18a71208f119c2131733405b4cb8a1a6b7d78535be97ddad06d09"
+      }
+    },
+    "linux_production_bytes_before_and_after_test_isolation_equal": true,
+    "focused_tests_passed": 68,
+    "existing_ignored_checks": {
+      "manual_browser_fixture": 1,
+      "rustfs_peer_handoff_initially_ignored_then_run_explicitly": 1
+    },
+    "real_rustfs_three_node_fleet_handoff": {
+      "status": "passed_real_rustfs_three_node_fleet_handoff",
+      "started": 1795243521.3335612,
+      "source": "bf5cb36e1762f10b07873c5a2da0eb1031a24c61",
+      "scope": "ExistingignoredrealRustFSthree-nodemutualTLSFleetdurabilityhandofftest; freshdedicatedbucket; allrepository/directory/organizationreceipt/replayassertions unchanged. Functionalonly, no timingclaim.",
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "crab-server",
+        "--locked",
+        "--release",
+        "--config",
+        "profile.release.package.crab-server.opt-level=0",
+        "--config",
+        "profile.release.package.crab-server.codegen-units=256",
+        "--lib",
+        "server::peer_e2e_tests::rustfs_cellar_routes_over_mutual_tls_and_recovers_after_handoff",
+        "--",
+        "--exact",
+        "--ignored",
+        "--nocapture"
+      ],
+      "exit_code": 0,
+      "log_sha256": "a23e7c736247f3fd00609dbd91f2091cc72218df8902b907b721f7e55be28388",
+      "ended": 1795243531.7603788,
+      "report_sha256": "5f175441efe103072897c587105f7ff6e93190f5dae805edaf27e2bac74947d7"
+    },
+    "http_smoke": {
+      "checks_passed": 54,
+      "exit_codes": [
+        0,
+        0
+      ],
+      "admitted_work_drained": true,
+      "exact_durability_fields_per_replica": 6,
+      "report_sha256": "895fcffd43e14e1c56f3b29624f1e18d2ced94767fe23e71e25137a735e41684",
+      "functional_proof_sha256": "ef9552715492d398161ed4ebed0e1773ef38e7ff2038a1d323c4da1bedd9248a",
+      "exact_durability_sha256": "daace9fd66021c0d34e1ec990c025352c128a8bc9dc195ec7386da43ce327343",
+      "first_setup_failed_before_checks": true,
+      "first_setup_retained_sha256": "b20a79d0cea362dadc4cab097dec1264f775303d2a5b5484ce19cb9649727ce7",
+      "retry": "Samebinary/origins/ports/54assertions afterexplicitallfourlistenersavailablepreflight; initialAddrInUse retained. Causenotproven."
+    },
+    "linux_minimum_resource_probes": {
+      "cpu_per_worker": 1,
+      "memory_bytes_per_worker": 1073741824,
+      "extra_swap_bytes": 0,
+      "roots": "CurrentD+C, bothactualcurrentimage; originalR0Buntouched",
+      "real_oauth_both": true,
+      "allocator_background_threads_per_worker": 1,
+      "report_sha256": "b1259386757628ba15cda9224c440121ee5fc9f5a83e3e548a2de0f928aa4d5c"
+    },
+    "independent_root_copy": {
+      "objects": 6347,
+      "bytes": 3981779491,
+      "all_source_destination_sha_metadata_content_properties_tags_verified": true,
+      "inventories_stable_before_after": true,
+      "report_sha256": "845b45d23f3ef8777a5f994fbfbfbeaa450731943947717fb3a39fcec2028edb",
+      "initial_copy_final_source_list_timeout_retained_sha256": "a2a1d5d1b58e0a787d9426731b113b5ef6330820d2c93928285c669696bd9904",
+      "scope": "Current-onlyinactiveAARootD copiedfromownedC intofreshbucket, verifiedwith4CPUprovider. OriginalBneverwritten; notadifferentuserauthorityisolationproof."
+    },
+    "quiet_calibration_preparation_sha256": "20f82dc7dcd61ae90e56dd4ef2363d6166bc09918a27c1e24319b7deaf16691e",
+    "quiet_calibration_status": "prepared_not_launched",
+    "performance_acceptance": false,
+    "remaining": "CurrentpublishedSDKquietA/A thenalloriginalR0/currentHTTPgates/two600secondsoaks; previous20/27identicalcodetimingfailures retained. NoRSSplateauclaimfromshortfunctionalchecks."
+  }
 }

@@ -26,7 +26,10 @@
   Cellar 0.1.2. The retired `590640c7ce49` Git pin is removed. Older runtime
   results retain their original SDK/source binding; published-dependency builds
   and live verification are separate. The packaged SDK's 1,085 code files match
-  the approved source, with matching feature definitions.
+  the approved source, with matching feature definitions. Clean production builds,
+  54 two-replica RustFS checks, minimum-profile Linux OAuth and an explicit
+  real RustFS three-node Fleet handoff now pass at `bf5cb36e176`. Sustained
+  published-SDK timing acceptance remains open.
 - **Delivery status:** IMPLEMENTED; ACCEPTANCE OPEN. R0–R5 are implemented.
   Current source-bound two-replica Git-read/session smoke and focused native
   Git/work-counter comparisons pass. Earlier ARM64 minimum-profile proof keeps
