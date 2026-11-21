@@ -120,6 +120,14 @@ pub(super) fn augment(
             "plot parameter conflicts with a reserved Results interaction name",
         ));
     }
+    // Authored selections own their unit view. Repeating them across generated
+    // layers duplicates Vega-Lite signals and prevents the chart from rendering.
+    if parameters
+        .iter()
+        .any(|parameter| parameter.get("select").is_some())
+    {
+        return Ok(None);
+    }
     parameters.push(json!({"name":"crab_shared_x", "value":null}));
     if let Some(range) = domain {
         parameters.push(json!({"name":"crab_domain", "value":null}));
