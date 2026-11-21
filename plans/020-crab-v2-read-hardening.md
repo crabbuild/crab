@@ -1111,11 +1111,14 @@ unchanged.
 Both source-bound release builds at `598679bf533`, strict server Clippy and all
 54 real two-replica RustFS smoke checks pass. Linux probes confirm active
 allocator background threads and real OAuth under one CPU / one GiB / no extra
-swap. The next 360-trial current-binary calibration uses the fixed allocator
-on all four resident workers, retains all original timing/RSS gates, and
-captures process memory outside request timers. Original R0 artifacts remain
-unchanged for the subsequent full comparison; resource/performance acceptance
-remains open.
+swap. The 360-trial current-binary calibration completes with the fixed allocator
+on all four resident workers. All original RSS/resource gates, drain checks,
+shutdown proofs and process exits pass. Thirteen of twenty-seven identical-code
+timing controls fail; all 11,820,423 measured successes have zero errors. The
+full source comparison correctly remains gated. Original R0 artifacts, earlier
+failures and every numeric threshold remain unchanged. Earlier measurements
+put the single-threaded provider relay near one CPU; a parallel measurement
+relay is under capacity verification before the next repeatability run.
 
 1. Record source revision/patch, binary hashes, compiler/profile, fixture
    identities, backend/region, quotas, and report schema. Readiness/capture,

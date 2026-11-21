@@ -635,9 +635,14 @@ image evidence. Current-source image/recovery CI and combined performance
 acceptance remain open.
 
 The verified relay is `crab/scripts/e2e/native_provider_meter.mjs`. It requires
-Node 22 and an existing output directory. It accepts only a local HTTP upstream;
-its service file supplies `meter_url` and `provider_url` for the qualification
-observer. It streams without caching, retrying, or fault injection. The Python
+Node 22 and an existing output directory. Two data workers share one local
+endpoint through Node's [round-robin cluster contract](https://nodejs.org/download/release/v22.23.2/docs/api/cluster.html#how-it-works).
+Allocate two data-worker CPUs and allow control-process CPU headroom; record
+placement using `worker_pids` from the service file. It accepts only a local HTTP
+upstream; its service file supplies `meter_url` and `provider_url` for the
+qualification observer. Counter snapshots sum every worker; lost workers fail
+the run without publishing partial final totals. Final `peak_rss_bytes` is the
+sum of process peaks, a conservative bound on concurrent relay RSS. It streams without caching, retrying, or fault injection. The Python
 fault fixture remains the owner of corruption/authorization fault tests.
 
 ```json
@@ -1035,3 +1040,40 @@ under both labels. Read-only process memory diagnostics are captured before
 and after all request timers. This qualifies the changed executable; actual
 R0 source, images and baseline receipts remain unchanged for the subsequent
 full original source comparison. Resource/performance acceptance stays open.
+
+[Current allocator-source CI](https://github.com/crabbuild/crab/actions/runs/44843993752)
+passes both image/process qualification and three-node native recovery. Its
+digest-verified artifact binds PR head `bdb1935ebc1` to merge revision
+`27929b171ee`: stock Git LFS crash/restored clones and range resume pass for
+3 GiB, and full Root restoration verifies 199 objects / 3,221,416,611 bytes
+by SHA-256 and metadata. This extends recovery proof to the allocator change;
+the local long-run resource and performance gates remain separate.
+
+
+## Current allocator: memory gates pass, timing repeatability fails
+
+The prospective `598679bf533` calibration completes all 360 trials: twenty fixed
+pairs for nine original cases. All four current processes pass the original
+RSS plateau, resource-envelope, OOM and drain checks. Both active replicas pass
+complete durability proof; all four processes exit zero. The run verifies
+11,820,423 measured successes, with zero errors; all phases retain 14,242,852
+records and 14,191,446 successful Git comparisons with zero mismatches.
+
+Overall calibration fails thirteen of twenty-seven timing cells: all five
+workloads in mixed-16 and mixed-64, plus three expensive-32 workloads. The labels
+execute the same binary, process pair and workloads. The full source comparison
+does not launch. Neither these failures nor the previous failed profiles are
+discarded; resource success does not qualify product latency.
+
+The native fixed-100 and independent-growth results retain current source
+coverage: all 553 non-lock compiled inputs across fifteen local crates are
+identical. The only changed lock record adds the server allocator edge;
+`crab-server` is absent from the native reader's normal/build/dev dependency
+graph. These native results do not exercise the separately composed server
+allocator.
+
+The two-worker relay passes three focused tests, including canonical accounting,
+wire headers/bodies through both workers, snapshot/final equality, and worker-loss
+cleanup. Sixteen live RustFS checks again match every canonical counter across
+21 signed SDK attempts. Parallel capacity and HTTP repeatability remain under
+verification; this instrumentation change makes no product-latency claim.

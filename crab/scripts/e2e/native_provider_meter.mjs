@@ -1,5 +1,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
+import cluster from 'node:cluster';
+import { once } from 'node:events';
 import { pathToFileURL } from 'node:url';
 
 function operation(method, parsed, headers) {
@@ -69,7 +71,7 @@ export class Counter {
   }
 }
 
-async function serve(config) {
+async function serveWorker(config) {
   const counter = new Counter(config.key_prefix);
   const upstream = new URL(config.upstream);
   if (upstream.protocol !== 'http:' || upstream.hostname !== '127.0.0.1') throw Error('Qualification upstream must be local HTTP');
@@ -124,24 +126,117 @@ async function serve(config) {
     outgoing.on('close', () => { if (!recorded && !outgoing.writableFinished) request.destroy(Object.assign(Error('Client closed'), { code: 'client_closed' })); });
     incoming.pipe(request);
   });
-  const control = http.createServer((request, response) => {
-    if (request.url !== '/provider') { response.writeHead(404); response.end(); return; }
-    const body = JSON.stringify(counter.value);
-    response.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) });
-    response.end(body);
+  const snapshot = () => ({ counter: counter.value, active_requests_at_shutdown: active,
+    peak_rss_bytes: process.resourceUsage().maxRSS * 1024, pid: process.pid });
+  let stop;
+  const stopping = new Promise(resolve => { stop = resolve; });
+  process.on('message', message => {
+    if (message.kind === 'snapshot') process.send({ id: message.id, value: snapshot() });
+    if (message.kind === 'stop') stop(message.id);
   });
+  process.once('SIGTERM', () => stop(null));
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  await new Promise(resolve => control.listen(0, '127.0.0.1', resolve));
-  const service = { status: 'running', pid: process.pid, meter_url: 'http://127.0.0.1:' + server.address().port, provider_url: 'http://127.0.0.1:' + control.address().port + '/provider', node: process.version, upstream: config.upstream, scope: 'Streaming measurement relay only; no fault injection, caching or retry. Bounded stream buffers and aggregate counters; no credentials or paths in observations.' };
-  fs.writeFileSync(config.services, JSON.stringify(service, null, 2) + '\n');
-  console.log('Native measurement relay ready');
-  await new Promise(resolve => process.once('SIGTERM', resolve));
-  await Promise.all([new Promise(resolve => server.close(resolve)), new Promise(resolve => control.close(resolve))]);
+  const id = await stopping;
+  await new Promise(resolve => server.close(resolve));
   agent.destroy();
-  fs.writeFileSync(config.final, JSON.stringify({ ...counter.value, active_requests_at_shutdown: active, peak_rss_bytes: process.resourceUsage().maxRSS * 1024 }, null, 2) + '\n');
-  service.status = 'stopped';
-  fs.writeFileSync(config.services, JSON.stringify(service, null, 2) + '\n');
+  await new Promise((resolve, reject) => process.send({ id, value: snapshot() }, error => error ? reject(error) : resolve()));
+  process.disconnect();
   if (active !== 0) process.exitCode = 1;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await serve(JSON.parse(fs.readFileSync(process.argv[2], 'utf8')));
+function sumCounters(counters) {
+  const total = Object.create(null);
+  for (const counter of counters) {
+    for (const [key, value] of Object.entries(counter)) {
+      total[key] = typeof value === 'number' ? (total[key] || 0) + value
+        : sumCounters([total[key] || {}, value]);
+    }
+  }
+  return total;
+}
+
+async function serve(config) {
+  // Two workers share one endpoint identity. A single JavaScript thread must
+  // not serialize both replicas' provider traffic during throughput tests.
+  cluster.schedulingPolicy = cluster.SCHED_RR;
+  const workers = [cluster.fork(), cluster.fork()];
+  const exits = workers.map(worker => once(worker, 'exit'));
+  let stop, failed = false, closing = false, sequence = 0;
+  const stopping = new Promise(resolve => { stop = resolve; });
+  for (const worker of workers) worker.once('exit', () => { if (!closing) failed = true; stop(); });
+  process.once('SIGTERM', stop);
+  const query = (worker, kind) => new Promise((resolve, reject) => {
+    const id = ++sequence;
+    const finish = (error, value) => {
+      clearTimeout(timer);
+      worker.off('message', receive);
+      worker.off('exit', exited);
+      error ? reject(error) : resolve(value);
+    };
+    const receive = message => { if (message.id === id) finish(null, message.value); };
+    const exited = () => finish(Error('Measurement worker exited'));
+    const timer = setTimeout(() => finish(Error('Measurement worker deadline')), kind === 'stop' ? 65000 : 10000);
+    worker.on('message', receive);
+    worker.once('exit', exited);
+    worker.send({ id, kind }, error => { if (error) finish(error); });
+  });
+  let control, service;
+  try {
+    const listening = await Promise.race([
+      Promise.all(workers.map(worker => once(worker, 'listening'))),
+      Promise.race(exits).then(() => { throw Error('Measurement worker failed to start'); }),
+    ]);
+    const port = listening[0][0].port;
+    if (listening.some(([address]) => address.port !== port)) throw Error('Measurement endpoints differ');
+    control = http.createServer(async (request, response) => {
+      if (request.url !== '/provider') { response.writeHead(404); response.end(); return; }
+      try {
+        const values = await Promise.all(workers.map(worker => query(worker, 'snapshot')));
+        const body = JSON.stringify(sumCounters(values.map(value => value.counter)));
+        response.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) });
+        response.end(body);
+      } catch {
+        failed = true;
+        response.writeHead(503);
+        response.end();
+        stop();
+      }
+    });
+    await new Promise(resolve => control.listen(0, '127.0.0.1', resolve));
+    service = { status: 'running', pid: process.pid, worker_pids: workers.map(worker => worker.process.pid),
+      meter_url: 'http://127.0.0.1:' + port, provider_url: 'http://127.0.0.1:' + control.address().port + '/provider',
+      node: process.version, upstream: config.upstream,
+      scope: 'Two streaming measurement workers; no fault injection, caching or retry. Bounded stream buffers and aggregate counters; no credentials or paths in observations.' };
+    fs.writeFileSync(config.services, JSON.stringify(service, null, 2) + '\n');
+    console.log('Native measurement relay ready');
+    await stopping;
+  } finally {
+    closing = true;
+    if (control) await new Promise(resolve => control.close(resolve));
+    // Missing worker totals invalidate the run; never publish partial counters.
+    const values = await Promise.allSettled(workers.map(worker => query(worker, 'stop')));
+    for (let index = 0; index < workers.length; index++) {
+      if (values[index].status === 'rejected' && !workers[index].isDead()) workers[index].kill('SIGKILL');
+    }
+    const codes = await Promise.all(exits);
+    const complete = values.every(value => value.status === 'fulfilled');
+    if (complete) {
+      const snapshots = values.map(value => value.value);
+      fs.writeFileSync(config.final, JSON.stringify({ ...sumCounters(snapshots.map(value => value.counter)),
+        active_requests_at_shutdown: snapshots.reduce((sum, value) => sum + value.active_requests_at_shutdown, 0),
+        peak_rss_bytes: process.resourceUsage().maxRSS * 1024 + snapshots.reduce((sum, value) => sum + value.peak_rss_bytes, 0),
+        workers: snapshots }, null, 2) + '\n');
+    }
+    failed ||= !complete || codes.some(([code]) => code !== 0);
+    if (service) {
+      service.status = failed ? 'failed' : 'stopped';
+      fs.writeFileSync(config.services, JSON.stringify(service, null, 2) + '\n');
+    }
+    if (failed) process.exitCode = 1;
+  }
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const config = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+  await (cluster.isPrimary ? serve(config) : serveWorker(config));
+}
