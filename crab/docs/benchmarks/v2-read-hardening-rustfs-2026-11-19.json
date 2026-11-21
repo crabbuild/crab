@@ -16048,7 +16048,124 @@
       }
     },
     "original_r0_binary_native_parent_receipt_fields_unchanged": true,
-    "wire_work_pilot": "in_progress",
+    "wire_work_pilot": "completed_measured_io_only",
     "combined_performance_acceptance": false
+  },
+  "queued_session_live_io_pilot": {
+    "status": "measured_isolated_fresh_state_io",
+    "acceptance": false,
+    "runtime_source": "8bf89f37abac60cd341b9816c25b269ac5d6189e",
+    "scope": "Actual5986prebatch versus8bfimmutablequeuedchecks; originalmixed16/small32workloads,threefixedAB/BArounds,twelvetrials. Canonicalrelay; providerbackgroundtrafficincluded. Workreductiononly; unchangedlatency/resourcegatesremainrequired.",
+    "raw_report_sha256": "86c4fb6ae76fe794dfe6436c91692d1136299fb2da551c294d650d99ac0d98d5",
+    "summary_sha256": "a70df4c8567be9199913ad6c8e7a8adc75e8246a15c2100e2cc734c45f67b284",
+    "profile_sha256": "a121f224f35e872fb0013c294c0a55dcd2f8ff1fb57fd92ebf9fb7e4ea4fea7f",
+    "all_phase_checks": {
+      "records": 629758,
+      "git_verified_successes": 628553,
+      "oracle_mismatches": 0
+    },
+    "cells": [
+      {
+        "phase": "baseline",
+        "case": "mixed-16",
+        "http_attempts_all_phases": 156267,
+        "provider_gets": 313972,
+        "provider_heads": 156327,
+        "gets_per_http_attempt": 2.0092021988007707,
+        "heads_per_http_attempt": 1.000383958225345,
+        "cpu_cores_used": {
+          "meter": 0.9557388749215397,
+          "provider": 2.7170790388377064
+        }
+      },
+      {
+        "phase": "baseline",
+        "case": "small-32",
+        "http_attempts_all_phases": 154095,
+        "provider_gets": 309277,
+        "provider_heads": 154162,
+        "gets_per_http_attempt": 2.00705409000941,
+        "heads_per_http_attempt": 1.0004347967163114,
+        "cpu_cores_used": {
+          "meter": 0.9814799785012503,
+          "provider": 2.679841281483384
+        }
+      },
+      {
+        "phase": "candidate",
+        "case": "mixed-16",
+        "http_attempts_all_phases": 159969,
+        "provider_gets": 306717,
+        "provider_heads": 160035,
+        "gets_per_http_attempt": 1.9173527370928118,
+        "heads_per_http_attempt": 1.0004125799373629,
+        "cpu_cores_used": {
+          "meter": 0.9487421043285628,
+          "provider": 2.718733396193369
+        }
+      },
+      {
+        "phase": "candidate",
+        "case": "small-32",
+        "http_attempts_all_phases": 159427,
+        "provider_gets": 292615,
+        "provider_heads": 159488,
+        "gets_per_http_attempt": 1.8354168365458798,
+        "heads_per_http_attempt": 1.0003826202588018,
+        "cpu_cores_used": {
+          "meter": 0.9731174543200714,
+          "provider": 2.713289605636074
+        }
+      }
+    ],
+    "process_exit_codes": {
+      "baseline": {
+        "a": 0,
+        "b": 0
+      },
+      "candidate": {
+        "a": 0,
+        "b": 0
+      }
+    },
+    "resource_failures": {
+      "baseline": [],
+      "candidate": []
+    },
+    "candidate_shutdown_proofs": {
+      "a": {
+        "passed": true,
+        "fields": {
+          "complete": "true",
+          "log_quiesced": "true",
+          "local_durability_closed": "true",
+          "pending_application_events": "0",
+          "pending_dispatches": "0",
+          "deadline_elapsed": "false"
+        }
+      },
+      "b": {
+        "passed": true,
+        "fields": {
+          "complete": "true",
+          "log_quiesced": "true",
+          "local_durability_closed": "true",
+          "pending_application_events": "0",
+          "pending_dispatches": "0",
+          "deadline_elapsed": "false"
+        }
+      }
+    },
+    "per_process_limits": "1CPU/1GiB/no extra swap; fourresident workers; independentRoots",
+    "provider_limits": "4CPU0,5,6,7/3GiB;VM10CPU8GiB;canonicalmeter1CPU4/256MiB;client3",
+    "subsequent_same_executable_check": "fixed360trials20pairs9cases27unchangedsymmetricbands/all4originalresourcegates; in progress",
+    "full_source_comparison": "required after same-executable check passes; original22cases128trialsand600secondsEACHunchanged",
+    "native_source_closure": {
+      "receipt_sha256": "84c88562a3a3bd0a9dc67c3e37cbabd1b8c7487923adf76a7b30d1df935d0637",
+      "unchanged_nonlock_inputs": 553,
+      "local_dependency_crates": 15,
+      "server_not_in_native_graph": true,
+      "scope": "Native72andgrowth200 sourceequivalenceonly; serverallocator/sessionchangesnotexercisedbythese nativebinaries"
+    }
   }
 }

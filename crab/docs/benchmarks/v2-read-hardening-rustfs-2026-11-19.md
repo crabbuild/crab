@@ -1137,3 +1137,30 @@ and confirm allocator background threads. The R0 image is repackaged with the
 same frozen binaries and runtime parent; source, binary and receipt fields match
 the preceding R0 packaging. The new I/O pilot and full timing/resource acceptance
 remain separate.
+
+
+## Fresh-session I/O pilot on the corrected runtime
+
+Twelve fixed AB/BA trials compare the actual pre-batching allocator executable
+with `8bf89f37aba` using the original mixed-16 and small-32 workloads. All
+629,758 request records remain retained; 628,553 successful Git comparisons
+have zero mismatches. Every journal passes hash/decompression verification.
+All four resource checks and exits pass, with complete active-replica durability.
+
+Provider GETs per HTTP attempt fall from 2.0092 to 1.9174 under mixed load
+(4.6%) and from 2.0071 to 1.8354 at 32 clients (8.6%). These counters include
+background provider traffic. HEADs remain about one per attempt. This measures
+actual storage-work reduction from opportunistic batching; no latency gate is
+accepted from this pilot. All earlier failures remain retained.
+
+The new same-executable calibration runs twenty fixed pairs across nine original
+cases: 360 trials, all 27 symmetric timing bands, all four resident workers'
+original RSS/resource checks, drain, durability and clean exits. Each product
+worker keeps one CPU / one GiB / no extra swap. The full original R0/current
+comparison with both 600-second soaks remains gated on that result.
+
+All 553 non-lock native-reader inputs across fifteen local crates still match
+the compiled native qualifier. Only the server allocator dependency edge differs
+in the lockfile; it is outside that qualifier's graph. The native 72-cell and
+200-growth proofs therefore retain source coverage. The new server batching
+continues to require its separate HTTP timing/resource qualification.

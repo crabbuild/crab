@@ -76,29 +76,31 @@ integrate them sequentially. R6 is not required for accepting the first wave.
    45 → 32 and history 115 → 108, with identical bytes and Git results. Warm
    pages and unselected gaps are excluded; independent page validation remains.
    Further changes require a measured remaining bottleneck.
-2. **Combined-load gates and repeatability:** four original native A/A controls
-   pass after 4,000 Git-verified fresh processes. A fixed 20-pair HTTP baseline
-   control fails five mixed-load p95 gates on the one-CPU provider; all results
-   remain retained. A 36-trial 1/2/1 provider-CPU reversal measures backend
-   saturation. The prospectively declared two-provider-CPU profile passes all
-   six HTTP A/A workload cells after 80 trials, with unchanged per-replica
-   1-CPU/1-GiB limits and symmetric 10% gates. The complete original 128-trial
-   comparison and both actual 600-second soaks finish with zero measured errors
-   and zero Git mismatches. The named late-history target improves p95 by 32.8%,
-   but 15 short-case latency gates remain failed. Full native scaling passes all
-   72 original cells after 1,200 fresh processes and 7,200 Git checks. A separate
-   polling on/off/on control is running to test measurement overhead. Exact
-   indexed statistics, early loop receipts and native journals preserve all
-   observations without changing percentiles, workload duration or numeric gates.
+2. **Combined-load gates and repeatability:** full native scaling passes all
+   72 original cells after 1,200 fresh processes and 7,200 Git checks. The prior
+   complete 128-trial HTTP comparison improves the named late-history p95 by
+   32.8%, but retains 15 short-case latency failures. The allocator correction
+   passes all four sustained resource checks; thirteen of twenty-seven
+   identical-code timing controls still fail. A parallel provider relay shows
+   no consistent benefit and is removed. Queued session verification now
+   reduces actual RustFS GETs per HTTP attempt by 4.6% under mixed load and 8.6%
+   at 32 clients across twelve fixed trials, with zero Git mismatches. This
+   isolates storage-work reduction; latency acceptance remains open. A new
+   360-trial same-executable check retains all 27 symmetric timing bands and
+   all four resource checks. The full original R0/current comparison, including
+   both 600-second soaks, follows only after that check passes. Exact journals,
+   percentiles, workloads and numeric thresholds remain unchanged.
 3. **Independent growth and minimum-resource lifecycle:** all 200 original growth
    timing controls pass across 2,000 fresh processes and 20,000 canonical Git
    queries, with 1 CPU / 1 GiB / no additional swap per reader. The naturally
    aged cold-reader GC sequence passes 13 checks and 40 Git queries. Current
-   runtime ARM64 process/three-node recovery CI passes, including 3-GiB stock
-   Git LFS recovery and full Root copy verification. The complete current HTTP
-   run passes its minimum-resource checks: no OOMs, bounded RSS, drained admitted
-   work, four clean exits and both candidate durability proofs. Performance
-   acceptance remains open because the 15 short-case latency gates fail.
+   allocator runtime's ARM64 process/three-node recovery CI passes, including
+   3-GiB stock Git LFS recovery and full Root copy verification. The corrected
+   session source passes all 54 two-replica RustFS smoke checks and actual
+   minimum-resource Linux OAuth/allocator probes. All 553 non-lock native-reader
+   inputs remain identical after these server-only changes. Sustained current
+   HTTP resource/timing acceptance and current-source broad CI remain separate
+   from the earlier passing native and recovery proofs.
 
 Persistent attribution and new range formats remain conditional R6 decisions.
 Bounded pack-window reuse and warm history-buffer reuse are already implemented.
@@ -1126,8 +1128,13 @@ The old-source regression fails; all 41 focused authentication tests and
 strict release all-target Clippy pass. Corrected immutable verification payloads
 also pass both production builds, all 54 real two-replica RustFS checks, exact
 shutdown durability proofs and minimum-resource Linux OAuth/allocator probes.
-Actual provider work and full combined-source timing/resource acceptance remain
-required.
+Twelve fixed source-comparison trials verify 629,758 request records and
+628,553 successful Git comparisons with zero mismatches. Actual provider GETs
+per HTTP attempt fall 2.0092 → 1.9174 under mixed load and 2.0071 → 1.8354 at
+32 clients; provider counters include background traffic. All four resource
+checks, exits and both active durability proofs pass. The new fixed 360-trial
+same-executable calibration and full combined-source timing/resource acceptance
+remain separate requirements.
 
 1. Record source revision/patch, binary hashes, compiler/profile, fixture
    identities, backend/region, quotas, and report schema. Readiness/capture,
