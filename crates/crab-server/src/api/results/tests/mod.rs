@@ -5,8 +5,6 @@ use futures_util::FutureExt;
 use reqwest::Method;
 use serde_json::Value;
 
-mod browser;
-
 fn address(request: &ResultsRead) -> String {
     let query = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("request", &serde_json::to_string(request).unwrap())

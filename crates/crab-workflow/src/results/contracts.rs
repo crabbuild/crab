@@ -56,12 +56,11 @@ fn declarations() -> String {
     }
     source
 }
-fn paths() -> [PathBuf; 3] {
+fn paths() -> [PathBuf; 2] {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     [
         root.join("packages/workflow-results/contracts.ts"),
         root.join("packages/desktop/src/lib/results-contracts.ts"),
-        root.join("packages/ui/src/lib/results-contracts.ts"),
     ]
 }
 fn client_export() -> &'static str {

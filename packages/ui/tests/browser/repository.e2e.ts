@@ -800,7 +800,6 @@ test("GitHub paths retain file context, pin permalinks, and restore browser hist
     "Code",
     "Issues",
     "Pull requests",
-    "Results",
     "Projects",
     "Activity",
     "Settings",
@@ -810,7 +809,7 @@ test("GitHub paths retain file context, pin permalinks, and restore browser hist
   ).toHaveAttribute("href", "/team/project/pulls");
   await expect(
     navigation.getByRole("link", { name: "Results", exact: true }),
-  ).toHaveAttribute("href", "/team/project/results");
+  ).toHaveCount(0);
   await expect(
     navigation.getByRole("link", { name: "Projects", exact: true }),
   ).toHaveAttribute("href", "/team/project/projects");
@@ -867,6 +866,8 @@ test("GitHub paths retain file context, pin permalinks, and restore browser hist
 });
 
 for (const path of [
+  "/team/project/results",
+  "/team/project/results?report=frozen-report",
   `/team/project?rev=main&path=${pathHex("README.md")}&kind=Blob#L3`,
   "/team/project?view=releases&release=2",
   "/team/project/releases/2",
