@@ -213,6 +213,8 @@ describe("GitHub repository addresses", () => {
 
   it.each([
     "/team/repo.name/unknown",
+    "/team/repo.name/results",
+    "/team/repo.name/results?report=frozen-report",
     "/team/repo.name/blob/main",
     "/team/repo.name/blob/main/a%XX",
     "/team/repo.name/pull/1/unknown",

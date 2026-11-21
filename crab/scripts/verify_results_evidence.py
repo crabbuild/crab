@@ -20,7 +20,8 @@ CORE = {
 DESKTOP = {"desktop_compound_visualization", "desktop_resource_envelope", "desktop_partial_template_evidence", "desktop_authored_plot_failures", "desktop_storage_disconnect", "desktop_inflight_session_close", "desktop_metadata_migration", "desktop_saved_template", "desktop_structured_cli_errors", "desktop_saved_observation", "desktop_workspace_integrity", "desktop_queue_compare", "desktop_restart", "desktop_cold_retrieval", "desktop_failure_state", "native_session_scope", "offline_html", "desktop_apply", "desktop_reproduce", "desktop_checkpoint_resume", "desktop_artifact_promotion_cas", "desktop_queue_reply_ordering", "desktop_metadata_focus", "offline_foreground_paint", "desktop_matrix_counts", "desktop_corrupt_evidence", "desktop_missing_evidence", "desktop_closed_session", "desktop_partial_comparison", "desktop_failure_layout", "desktop_cross_file_failure", "desktop_bare_remote"}
 FAULTS = {"failed_capture", "interrupted_capture", "interrupted_transfers", "gc_writer_release"}
 HTTP = {"http_read_timeout_recovery", "http_real_storage", "http_current_repository_grants"}
-BROWSER = {"browser_server_resource_envelope", "browser_partial_template_evidence", "browser_authored_plot_failures", "browser_read_timeout_recovery", "browser_storage_disconnect", "browser_imported_provenance", "browser_comparison", "browser_lifecycle", "browser_table_bounds", "browser_high_contrast", "browser_chart_initialization", "browser_linked_cursor_budget", "browser_real_http_storage", "browser_render_only_report_publication", "browser_revoked_session_grant", "browser_cross_repository_evidence", "browser_reproduction_lineage", "browser_metadata_focus", "browser_theme_transitions", "browser_maximum_overlay_budget", "browser_missing_plot_gaps", "browser_authored_plot_semantics", "browser_builtin_run_isolation", "browser_dvc_template_parity", "browser_large_matrix_counts", "browser_failure_layout", "browser_chart_availability"}
+# Desktop exports still require browser-rendered offline report proof.
+BROWSER = {"browser_authored_plot_semantics", "browser_builtin_run_isolation", "browser_dvc_template_parity", "browser_large_matrix_counts", "browser_maximum_overlay_budget", "browser_missing_plot_gaps"}
 
 
 def verify_resources(report, processes):
@@ -80,7 +81,7 @@ def verify(evidence, binding, desktop=False, http=False, browser=False):
     if http:
         expected_counts.update(http=2)
     if browser:
-        expected_counts.update(browser=7, browser_http=1)
+        expected_counts.update(browser=4)
     if any(counts.get(name, 0) != count for name, count in expected_counts.items()):
         raise ValueError("Results evidence has missing, skipped, or zero relevant tests")
     digests = evidence.get("binaries", {})
@@ -96,8 +97,6 @@ def verify(evidence, binding, desktop=False, http=False, browser=False):
         raise ValueError("Results resource qualification is malformed")
     if desktop:
         verify_resources(resources.get("desktop"), {"main", "agent"})
-    if browser:
-        verify_resources(resources.get("http"), {"server"})
 
 
 def main():
@@ -115,7 +114,7 @@ def main():
     parser.add_argument("--application", type=Path)
     parser.add_argument("--desktop", action="store_true")
     parser.add_argument("--http", action="store_true")
-    parser.add_argument("--browser", action="store_true")
+    parser.add_argument("--browser", action="store_true", help="Require offline HTML report rendering proof")
     args = parser.parse_args()
     binaries = {}
     for name in ("cli", "packaged_cli", "agent", "application"):

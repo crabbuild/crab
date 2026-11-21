@@ -373,20 +373,15 @@ def main():
                         proof["tests"]["desktop"] = 5
                         proof["resources"]["desktop"] = json.loads((output / "native-resource-envelope.json").read_text())
                     if browser:
-                        browser_case = "api::results::tests::browser::browser_publishes_real_run_reports_and_rechecks_revoked_access"
-                        run_test(env, output, "browser-http.log", ["cargo", "test", "-p", "crab-server", "--locked", "--lib",
-                            browser_case, "--", "--ignored", "--exact"], browser_case)
-                        proof["tests"]["browser_http"] = 1
-                        proof["resources"]["http"] = json.loads((output / "http-resource-envelope.json").read_text())
                         env["PLAYWRIGHT_JSON_OUTPUT_FILE"] = str(output / "browser.json")
                         with (output / "browser.log").open("w") as stream:
-                            subprocess.run(["node",str(ROOT / "packages/ui/node_modules/@playwright/test/cli.js"),"test","tests/browser/results.e2e.ts","tests/browser/results-chart-runtime.e2e.ts","tests/browser/results-authored-failures.e2e.ts","--workers=1","--reporter=list,json"],
+                            subprocess.run(["node",str(ROOT / "packages/ui/node_modules/@playwright/test/cli.js"),"test","tests/browser/results-chart-runtime.e2e.ts","--workers=1","--reporter=list,json"],
                                 cwd=ROOT / "packages/ui",env=env,stdout=stream,stderr=stream,timeout=180,check=True)
                         tests = list(specs(json.loads((output / "browser.json").read_text())))
-                        if len(tests) != 7 or any(test["tests"][0]["results"][0]["status"] != "passed" for test in tests):
-                            raise RuntimeError("Browser Results tests were missing, skipped, or failed")
+                        if len(tests) != 4 or any(test["tests"][0]["results"][0]["status"] != "passed" for test in tests):
+                            raise RuntimeError("Offline Results report tests were missing, skipped, or failed")
                         proof["checks"].update(dict.fromkeys(verifier.BROWSER,True))
-                        proof["tests"]["browser"] = 7
+                        proof["tests"]["browser"] = 4
 
                 finally:
                     server.terminate()

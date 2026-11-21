@@ -8,8 +8,6 @@ RUN npm ci --prefix packages/ui
 COPY packages/ui/index.html packages/ui/tsconfig.json packages/ui/vite.config.ts packages/ui/
 COPY packages/web/crab.optimized.svg packages/web/crab.optimized.svg
 COPY packages/ui/src/ packages/ui/src/
-COPY packages/workflow-results/ packages/workflow-results/
-COPY crates/crab-workflow/assets/ crates/crab-workflow/assets/
 RUN npm run build --prefix packages/ui
 
 FROM rust:1.97-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97 AS builder

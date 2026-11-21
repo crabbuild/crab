@@ -20,19 +20,17 @@ class ResultsEvidenceTests(unittest.TestCase):
         self.proof = {"schema": 1, "passed": True, "source_sha": "a"*40,
                       "source_tree": "b"*64, "runtime_sha256": "c"*64,
                       "checks": dict.fromkeys(MODULE.CORE | MODULE.FAULTS | MODULE.DESKTOP | MODULE.HTTP | MODULE.BROWSER, True),
-                      "tests": {"core": 1, "checkpoint": 1, "inputs": 5, "settings": 1, "workspace": 8, "migration": 3, "restore": 2, "charts":12, "templates":9, "authored_plots":2, "partial_templates":1, "matrices":5, "matrix_cli":1, "faults": 2, "transfers": 1, "transport": 1, "sdk":1, "discovery":1, "agent": 1, "agent_errors": 3, "desktop": 5, "http": 2, "browser":7, "browser_http":1},
+                      "tests": {"core": 1, "checkpoint": 1, "inputs": 5, "settings": 1, "workspace": 8, "migration": 3, "restore": 2, "charts":12, "templates":9, "authored_plots":2, "partial_templates":1, "matrices":5, "matrix_cli":1, "faults": 2, "transfers": 1, "transport": 1, "sdk":1, "discovery":1, "agent": 1, "agent_errors": 3, "desktop": 5, "http": 2, "browser":4},
                       "binaries": dict.fromkeys(["cli", "packaged_cli", "agent", "application"], "d"*64),
                       "provider": "native-rustfs-s3", "platform": "Darwin-arm64",
                       "workflow_run": "qualification", "workflow_attempt": "1"}
-        self.proof["resources"] = {}
-        for name, owners in [("desktop", ["main", "agent"]), ("http", ["server"])]:
-            self.proof["resources"][name] = {
-                "schema": 1, "report": "e" * 64, "cycles": 20, "warmup_cycles": 5,
-                "samples": [{"cycle": index, "heap_bytes": 10000,
-                             "fd_counts": dict.fromkeys(owners, 12),
-                             "readers": {"active": 0, "peak": 2, "started": 10 + index, "finished": 10 + index}}
-                            for index in range(21)],
-            }
+        self.proof["resources"] = {"desktop": {
+            "schema": 1, "report": "e" * 64, "cycles": 20, "warmup_cycles": 5,
+            "samples": [{"cycle": index, "heap_bytes": 10000,
+                         "fd_counts": {"main": 12, "agent": 12},
+                         "readers": {"active": 0, "peak": 2, "started": 10 + index, "finished": 10 + index}}
+                        for index in range(21)],
+        }}
         self.proof["resources"]["desktop"]["after_cancellation"] = {
             "active": 0, "peak": 2, "started": 40, "finished": 40,
         }
@@ -60,17 +58,13 @@ class ResultsEvidenceTests(unittest.TestCase):
             lambda p: p.pop("resources"),
             lambda p: p.update(resources=[]),
             lambda p: p["checks"].pop("desktop_resource_envelope"),
-            lambda p: p["checks"].pop("browser_server_resource_envelope"),
             lambda p: p["resources"]["desktop"]["samples"].pop(),
             lambda p: p["resources"]["desktop"].pop("after_cancellation"),
             lambda p: p["resources"]["desktop"]["after_cancellation"].update(active=1),
-            lambda p: p["resources"]["http"]["samples"][20]["readers"].update(active=1),
-            lambda p: p["resources"]["http"]["samples"][20]["readers"].update(finished=29),
-            lambda p: p["resources"]["http"]["samples"][1]["readers"].update(started=10, finished=10),
             lambda p: p["resources"]["desktop"]["samples"][20]["fd_counts"].update(agent=21),
             lambda p: p["resources"]["desktop"]["samples"][20]["fd_counts"].pop("agent"),
-            lambda p: p["resources"]["http"]["samples"][20].update(heap_bytes=10001 + 16 * 1024 * 1024),
-            lambda p: p["resources"]["http"]["samples"][0]["fd_counts"].update(server=True),
+            lambda p: p["resources"]["desktop"]["samples"][20].update(heap_bytes=10001 + 16 * 1024 * 1024),
+            lambda p: p["resources"]["desktop"]["samples"][0]["fd_counts"].update(main=True),
         ]
         for mutation in mutations:
             with self.subTest(mutation=mutation):
@@ -120,20 +114,16 @@ class ResultsEvidenceTests(unittest.TestCase):
 
     def test_rejects_missing_false_stale_and_zero_test_evidence(self):
         mutations = [lambda p:p["checks"].pop("partial_template_evidence"),
-                     lambda p:p["checks"].pop("browser_partial_template_evidence"),
                      lambda p:p["checks"].pop("desktop_partial_template_evidence"),
                      lambda p:p["tests"].update(partial_templates=0),
                      lambda p:p["tests"].update(authored_plots=1),
                      lambda p:p["checks"].pop("desktop_authored_plot_failures"),
                      lambda p:p["tests"].update(desktop=3),
                      lambda p:p["checks"].pop("authored_plot_capture"),
-                     lambda p:p["checks"].pop("browser_authored_plot_failures"),
                      lambda p:p["tests"].update(authored_plots=0),
                      lambda p:p["tests"].update(browser=6),
                      lambda p:p["checks"].pop("http_read_timeout_recovery"),
-                     lambda p:p["checks"].pop("browser_read_timeout_recovery"),
                      lambda p:p["tests"].update(http=1),
-                     lambda p:p["checks"].pop("browser_storage_disconnect"),
                      lambda p:p["checks"].pop("desktop_storage_disconnect"),
                      lambda p:p["checks"].pop("desktop_inflight_session_close"),
                      lambda p:p["tests"].update(migration=2),
@@ -141,7 +131,6 @@ class ResultsEvidenceTests(unittest.TestCase):
                      lambda p:p["checks"].pop("migration_source_validation"),
                      lambda p:p["checks"].pop("migration_preserves_capture_roots"),
                      lambda p:p["checks"].pop("desktop_metadata_migration"),
-                     lambda p:p["checks"].pop("browser_imported_provenance"),
                      lambda p:p["checks"].pop("cold_remote_retrieval"),
                      lambda p:p["tests"].update(workspace=7),
                      lambda p:p["checks"].pop("private_template_boundary"),
@@ -169,9 +158,7 @@ class ResultsEvidenceTests(unittest.TestCase):
                      lambda p:p["checks"].pop("desktop_reproduce"),
                      lambda p:p["checks"].pop("desktop_queue_reply_ordering"),
                      lambda p:p["checks"].pop("desktop_metadata_focus"),
-                     lambda p:p["checks"].pop("browser_metadata_focus"),
                      lambda p:p["checks"].pop("offline_foreground_paint"),
-                     lambda p:p["checks"].pop("browser_theme_transitions"),
                      lambda p:p["checks"].pop("chart_response_bounds"),
                      lambda p:p["checks"].pop("browser_maximum_overlay_budget"),
                      lambda p:p["checks"].pop("browser_missing_plot_gaps"),
@@ -184,7 +171,6 @@ class ResultsEvidenceTests(unittest.TestCase):
                      lambda p:p["tests"].update(charts=8),
                      lambda p:p["tests"].update(charts=9),
                      lambda p:p["tests"].update(browser=2),
-                     lambda p:p["tests"].update(browser=4),
                      lambda p:p["tests"].update(browser=5),
                      lambda p:p["tests"].update(matrices=4),
                      lambda p:p["tests"].update(matrix_cli=0),
@@ -198,8 +184,6 @@ class ResultsEvidenceTests(unittest.TestCase):
                      lambda p:p["checks"].pop("desktop_failure_layout"),
                      lambda p:p["checks"].pop("desktop_cross_file_failure"),
                      lambda p:p["checks"].pop("desktop_bare_remote"),
-                     lambda p:p["checks"].pop("browser_failure_layout"),
-                     lambda p:p["checks"].pop("browser_chart_availability"),
                      lambda p:p["checks"].pop("partial_chart_evidence"),
                      lambda p:p["checks"].pop("results_read_admission"),
                      lambda p:p["tests"].update(sdk=0),
@@ -230,8 +214,6 @@ class ResultsEvidenceTests(unittest.TestCase):
                      lambda p:p["checks"].pop("interrupted_capture"),
                      lambda p:p["tests"].update(http=0),
                      lambda p:p["tests"].update(browser=0),
-                     lambda p:p["tests"].update(browser_http=0),
-                     lambda p:p["checks"].pop("browser_revoked_session_grant"),
                      lambda p:p["binaries"].update(cli="e"*64),
                      lambda p:p["binaries"].update(application="e"*64),
                      lambda p:p.update(platform="Linux-x86_64"),

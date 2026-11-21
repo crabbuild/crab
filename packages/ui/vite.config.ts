@@ -4,7 +4,6 @@ import tailwindcss from "@tailwindcss/vite";
 export default defineConfig({
   plugins: [tailwindcss()],
   resolve: {
-    dedupe: ["vega", "vega-lite", "vega-interpreter"],
     alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) },
   },
   // Worker entry points are outside Vite's initial dependency scan. Pre-bundle
@@ -13,15 +12,6 @@ export default defineConfig({
   // Preserve the browser Host and Origin: authenticated development uses Vite
   // as Crab's canonical public origin, including the OIDC callback.
   server: {
-    fs: {
-      allow: [
-        fileURLToPath(new URL(".", import.meta.url)),
-        fileURLToPath(new URL("../workflow-results", import.meta.url)),
-        fileURLToPath(
-          new URL("../../crates/crab-workflow/assets", import.meta.url),
-        ),
-      ],
-    },
     proxy: {
       "/api": { target: "http://127.0.0.1:8788", changeOrigin: false },
       "/auth": { target: "http://127.0.0.1:8788", changeOrigin: false },

@@ -4,7 +4,9 @@ Results are workflow evidence, independent of queue bookkeeping. The workflow
 crate owns result schema, validation, scalar identity, comparison semantics,
 plot interpretation and storage. CLI, desktop and the optional repository
 server compose those owners with their existing authorization and execution
-boundaries. Desktop use does not require a server or external tracker.
+boundaries. The Results workspace is desktop-only; the Git web UI has no Results
+tab or route. Immutable HTML exports retain their standalone browser renderer.
+Desktop use does not require a server or external tracker.
 
 ## Identity and lifetime
 
@@ -78,7 +80,7 @@ explicit unavailable identity; a same-name built-in cannot replace their semanti
 Captured scalar values remain available when the chart cannot be rendered.
 The shared capture owner's `capture_issues` name the declared template and failed
 constraint, then direct the user to correct it before saving a new observation
-with `crab exp save` or running another experiment. Native and browser RunDetails
+with `crab exp save` or running another experiment. Desktop RunDetails
 render that same message. The selectable unavailable-template attachment retains
 the complete original technical diagnostic in `reason`. Shared `NotCaptured`
 chart guidance also requires a new save/run: refreshing cannot repair evidence
@@ -183,8 +185,8 @@ metadata-only Results. The tagged experiment commands' existing no-digest owned
 workspace path remains separate and unchanged. Publishing recorded observations
 and inspecting immutable reports do not add execution evidence. Shared visible
 guidance leads with the absent capture and the need to run or save a new
-experiment in working/immutable and local/browser contexts; contextual report
-and local-worktree restrictions follow. Browser button tooltips give that same
+experiment in working/immutable and local/remote contexts; contextual report
+and local-worktree restrictions follow. Desktop button tooltips give that same
 per-action reason priority. Cold report retrieval retains imported origin and
 scalars independently of the source metadata and entire prior local Results cache.
 
@@ -199,10 +201,9 @@ imported provenance remains visible. Status icons supplement text, and compact
 zoom controls retain explicit accessible names. Column selection uses the shared
 portalled popover, so it remains usable inside the scrolling workspace.
 
-Read lifetimes use native repository/session IDs or the browser repository
-address within its issuer/subject lifecycle. Display metadata and capability
+Read lifetimes use native repository/session IDs. Display metadata and capability
 refreshes preserve the comparison's controls and keyboard focus; an actual scope
-change still cancels and revalidates reads. Permissions and CSRF remain live.
+change still cancels and revalidates reads. Capabilities remain live.
 Queue fetches apply only their latest request's rows/loading, so an older mount
 reply cannot hide a newly enqueued experiment. Effect cleanup invalidates prior
 queue reads.
@@ -211,7 +212,7 @@ Default SVG guide paint inherits the current viewer foreground, independently
 of result reads. Light/dark transitions repaint titles, ticks, axes and legend
 labels without rebuilding focused controls or changing saved ranges. Authored
 guide configuration overrides these weak defaults; ordinary theme changes keep
-authored data-series colors. The same renderer source supplies native, browser and bundled offline
+authored data-series colors. The same renderer source supplies desktop and bundled offline
 views.
 
 Absolute delta is candidate minus baseline. Relative delta divides by the
@@ -239,7 +240,7 @@ probe took 2.3s to initialize and 790ms to zoom; sharing the display budget keep
 adding runs from multiplying rendering and nearest-point hit-region cost.
 Sampling preserves endpoints, extrema, original row ordinals and both sides of
 missing intervals. Missing/null values remain gaps; literal category text stays
-text. `ChartReduction` distinguishes `sampled` from `counted`; native, browser and
+text. `ChartReduction` distinguishes `sampled` from `counted`; desktop and
 offline views use that shared contract for their notices. Sampled curves disclose
 displayed versus retained point counts and keep source bytes. Summary metrics
 always use captured values, not plotted samples.
@@ -277,7 +278,7 @@ used. Vega logs these failures even when `runAsync` resolves, so the shared
 renderer observes its error logger without throwing from event dispatch. It
 finalizes the failed view, disconnects its resize observer and clears partial
 paint before rejecting the initial render or notifying the existing caller.
-Native, browser, immutable HTML and workspace metrics HTML show a plot-local
+Desktop, immutable HTML and workspace metrics HTML show a plot-local
 alert. Runtime failures direct the user to inspect the template and source data;
 existing syntax diagnostics retain their dependency wording.
 
@@ -357,7 +358,7 @@ faceted layout does not move its controls out of view.
 Simple retained line charts expose a coordinate identity over the authored x
 definition and complete observed/authored domain. Compatible charts share cursor
 and numeric range controls. The shared renderer derives one scalar cursor from
-the owned single-field selection tuple; desktop, browser and offline consumers
+the owned single-field selection tuple; desktop and offline consumers
 use it without depending on Vega-Lite's rewritten selection-object keys.
 ComparisonSpec.axes stores up to 32 finite ranges,
 validated against chart domains when saving. Runtime zoom uses Vega's domainRaw;
@@ -372,8 +373,7 @@ optional logs. Inputs, model outputs and checkpoints remain immutable links with
 explicit preview/download guidance, even if their bytes exist in a local cache.
 Publishing a report still refuses content excluded by output push/remote policy.
 HTTP publication uses the same retained-body policy; missing linked model/input
-payloads do not prevent publication. Repository Results deep links are served by
-the embedded app, including direct report URLs and reloads.
+payloads do not prevent publication.
 
 Working UI selections are validated repository-scoped SessionManager preferences.
 Saved comparisons are reports recoverable from object storage. Session identities,
@@ -384,8 +384,7 @@ reports in this workspace; Publish report stays disabled without that capability
 
 Desktop Results lives inside Data Workflows, beside Editor, Status, and Queue.
 Its tab remains reachable when workflow YAML is absent or invalid; Results has
-no separate sidebar or activity-bar entry. The optional repository browser
-retains its repository Results route.
+no separate sidebar or activity-bar entry.
 
 Retrieved reports lead with their title, run count and comparison when the local
 catalog is empty. Comparison tables retain the run column during keyboard or
@@ -397,7 +396,7 @@ Categorical curve overlays use distinct dash patterns as well as color. Forced
 colors use live system colors for chart labels and axes; dashed series and their
 legend symbols remain distinguishable in monochrome.
 
-Both clients and CLI HTML use bundled compatible Vega assets. Rendering uses the
+Desktop and CLI HTML use bundled compatible Vega assets. Rendering uses the
 expression interpreter and a restricted resource loader instead of weakening
 host CSP or fetching datasets/scripts from a CDN. Dependencies, asset generation
 and installed-CLI offline behavior must be verified before acceptance.
@@ -407,7 +406,7 @@ names. UUIDv7 time prefixes cannot identify neighboring runs, and duplicate name
 must not make Download or Preview ownership ambiguous.
 Report identities and frozen manifest text wrap within narrow viewports; tables
 and authored compound/faceted charts retain their own internal scrolling.
-Both clients let operation-error text shrink and wrap long words while
+The desktop workspace lets operation-error text shrink and wrap long words while
 **Refresh view** keeps its control width. Evidence-preview failures retain the
 selected report and its frozen comparison; working-comparison plot notices remain
 separate from the operation-error banner. Refresh view refreshes Results reads.
