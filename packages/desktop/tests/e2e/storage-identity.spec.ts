@@ -610,6 +610,8 @@ test("saved local storage identity survives a cold app restart without ambient c
     recordErrors(application);
     page = await application.firstWindow();
     const handle = await call(page, "open_local", { repo_id: "after-restart", path: fixture.repositories[0] });
+    // Shell owns the event below; wait for its startup listener before injection.
+    await expect(page.getByRole("button", { name: "SSH Connections", exact: true })).toBeVisible({ timeout: 30_000 });
     await page.evaluate(({ handle, source }) => window.dispatchEvent(new CustomEvent("crab:repo-opened", { detail: { handle, path: source } })), { handle, source: fixture.repositories[0] });
     await page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Files", exact: true }).click();
     await page.locator('[role="treeitem"][data-item-path="cold.safetensors"]').click();
