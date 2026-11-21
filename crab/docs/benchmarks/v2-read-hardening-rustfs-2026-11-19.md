@@ -1229,3 +1229,39 @@ assertion is unchanged: the System-allocator control observes zero bytes and
 fails; all twenty normal parallel CLI tests then pass. Strict release all-target
 Clippy passes. Production allocator wiring, APIs, dependencies and configuration
 are unchanged; new clean production build receipts follow separately.
+
+
+## Published SDK production and local RustFS verification
+
+Clean production macOS/Linux ARM64 builds at `bf5cb36e176` pass with published
+Cellar 0.1.2. The Linux binary is byte-identical before and after the test-only
+allocator-probe isolation. All 68 focused checks pass. The initial focused
+selection skips the existing manual browser and explicit RustFS peer fixtures;
+the latter is then run explicitly against a fresh dedicated RustFS bucket. Its
+three-node Fleet-durability test passes mutual TLS, repository/directory/
+organization reads, owner handoff and command replay with the published SDK.
+
+The actual new Linux image passes real OAuth on current Roots D and C with
+one CPU / one GiB / no extra swap per worker and active allocator background
+threads. All 54 real macOS two-replica HTTP checks pass, with both processes
+drained, zero exits and exact six-field durability proofs. The first smoke
+attempt fails on an occupied listener before any checks; its report is retained.
+The retry preserves the binary, canonical origins, ports and all assertions,
+after checking that all four listeners are available. The transient cause is
+unproven. The short smoke establishes no sustained RSS plateau.
+
+Root D uses a separate task-owned bucket so that the current SDK never opens
+the frozen R0 Root. All 6,347 copied objects / 3,981,779,491 bytes match source
+and destination SHA-256, metadata, content properties and tags. Inventories
+remain stable before and after verification. The initial copy's final source
+listing times out; that failure remains retained. Independent complete
+verification succeeds with four backend CPUs and restores the original backend
+limit afterward. This proves a physical fixture copy, not different-user
+authority isolation.
+
+The published-SDK quiet calibration is prepared separately, with compiler-free
+pair admission and continuous observation declared before sampling. It keeps
+twenty valid pairs per original case, all 27 symmetric bands and all four
+resource gates. Every interrupted pair and every request error remains retained.
+All twenty earlier failed identical-code timing bands remain failed. The full
+original-R0/current comparison and both 600-second soaks remain gated.
