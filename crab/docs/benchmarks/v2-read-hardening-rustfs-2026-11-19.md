@@ -1264,3 +1264,30 @@ twenty valid pairs per original case, all 27 symmetric bands and all four
 resource gates. Every interrupted pair and every request error remains retained.
 All twenty earlier failed identical-code timing bands remain failed. The full
 original-R0/current comparison and both 600-second soaks remain gated.
+
+
+## Published SDK quiet run interrupted by VM clock failure
+
+The prospective compiler-observed run reaches 216 accepted trials and 226
+completed raw trials, retaining five compiler-interrupted pairs. Those completed
+trials have zero measured request errors and Git mismatches. During the next
+arm, both guest clocks jump approximately 95 years: guest UTC reaches January
+2122, and its request-loop elapsed time becomes 3,002,503,040.55 seconds. That
+incomplete arm retains 4,751 records: 4,750 successes and one request error,
+with zero Git mismatches. Its exact raw journal and hash are preserved.
+
+All four application containers exit one without OOM. Docker remains active in
+the guest, but its host socket forwarding disappears; cleanup also fails before
+the original reports can flush their final status. Separate diagnostic receipts
+record the failed attempt rather than accepting those stale running statuses.
+The gated full comparison never starts. No trial is relabeled as a passing
+latency or resource result, and earlier failed gates remain retained.
+
+The observed clock jump and failed synchronization match the reported symptoms
+of [Lima issue 5665](https://github.com/lima-vm/lima/issues/5665); this does not
+establish the underlying hardware cause. Restarting only the owned test VM
+restores its clock and Docker transport while retaining its data volume. The
+clock-affected current fixtures remain preserved. New current-only fixtures are
+being copied from the untouched original control through the existing full-root
+backup verification. A fresh run requires clock-health checks and a complete
+new schedule; this partial run contributes no timing acceptance.

@@ -101,6 +101,10 @@ integrate them sequentially. R6 is not required for accepting the first wave.
    uses the existing fifteen-quiet-seconds pair protocol with independent
    compiler monitoring; interrupted pairs and every error remain retained.
    Exact journals, percentiles, workloads and numeric thresholds stay unchanged.
+   The published-SDK attempt reaches 216 accepted trials before the test VM
+   jumps to year 2122; an incomplete arm has one request error. The failed run
+   is retained and the full comparison never starts. The owned VM is restarted;
+   clock health and fresh, verified fixtures precede the next complete run.
 3. **Independent growth and minimum-resource lifecycle:** all 200 original growth
    timing controls pass across 2,000 fresh processes and 20,000 canonical Git
    queries, with 1 CPU / 1 GiB / no additional swap per reader. The naturally
