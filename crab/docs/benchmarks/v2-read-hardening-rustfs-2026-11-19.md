@@ -71,6 +71,19 @@ succeeds under both origin ceilings; logical-object and response-byte ceilings
 still reject on cold and warm reads. Limits and charging behavior are unchanged.
 Both supported focused feature profiles pass: twelve tests with
 `remote,files,results`, ten with `remote`.
+The CI-pinned Rust 1.97 compiler also exposes a 528-byte remote versus 80-byte
+local repository variant. The facade now shares the immutable remote generation
+through an `Arc`; cloning no longer copies its store configuration. Borrowed
+interfaces and local-mode ownership remain unchanged. All thirteen focused
+all-feature tests pass on Rust 1.97, including operation and close behavior after
+cloning the facade and dropping the original. The exact pinned CI lint gate passes for `crab-sdk`, `crab-remote` and
+`crab-lfs`, with all targets and features and warnings denied. The Results
+fixture borrows its single run instead of cloning it; its captured-storage and
+operation-limit regression also passes, with all assertions unchanged. An extra Rust 1.99 all-feature lint run reports
+three generated `async_trait` attributes in unchanged managed-auth code, matching
+[Clippy's upstream false-positive report](https://github.com/rust-lang/rust-clippy/issues/17529).
+The pinned CI compiler does not report those warnings; no suppression or
+dependency change is added.
 
 A real 1-GiB RustFS reproduction finds three discarded decoded-range fills in
 both the SDK and shared reader. Parent-directory try-lock contention during a

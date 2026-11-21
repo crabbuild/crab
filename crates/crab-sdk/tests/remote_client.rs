@@ -58,7 +58,9 @@ async fn public_client_opens_empty_repository_and_closes_admission_for_all_handl
         repository.local().err().unwrap().kind(),
         ErrorKind::UnsupportedCapability
     );
-    let remote = repository.remote().unwrap();
+    let cloned = repository.clone();
+    drop(repository);
+    let remote = cloned.remote().unwrap();
     let mut expected_capabilities = vec![crab_sdk::remote::Capability::ReadGit];
     #[cfg(feature = "results")]
     expected_capabilities.push(crab_sdk::remote::Capability::ReadResults);
