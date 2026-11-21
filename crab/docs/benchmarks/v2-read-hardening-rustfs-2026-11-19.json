@@ -15507,5 +15507,53 @@
     ],
     "upstream_contract": "https://github.com/crabbuild/cellar/blob/590640c7ce49ef3fd391bdae9540ba23081cd74b/crates/cellar/node/native.rs",
     "upstream_allocator_stats": "https://github.com/crabbuild/cellar/blob/590640c7ce49ef3fd391bdae9540ba23081cd74b/crates/cellar/platform/memory.rs"
+  },
+  "server_allocator_live_source_verification": {
+    "status": "functional_verified_resource_qualification_pending",
+    "combined_acceptance": false,
+    "builds": {
+      "macos-arm64": {
+        "source_revision": "598679bf5339f973aaa6d02f4a1720e7724bba43",
+        "source_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "server_binary_sha256": "6b3e3a34862e8f2670524b5b57e9b68df555d9274d5270c073c87ccab6f28c59",
+        "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1",
+        "receipt_sha256": "47ff88e3c85eaebf68f40cb52bbcb1335e714285b73268b101cb54e1fc4c1a78"
+      },
+      "linux-arm64": {
+        "source_revision": "598679bf5339f973aaa6d02f4a1720e7724bba43",
+        "source_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "server_binary_sha256": "e73b2ffa8cd7033d5bfbb0c9388e8196658a82a94fc44163c988180d3a6ca37b",
+        "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1",
+        "receipt_sha256": "310ebc5c2065c20080bfc747e1fc20d38772c88c7236c5862016b5e6e3ab57b5"
+      }
+    },
+    "macos_functional_smoke": {
+      "checks_passed": 54,
+      "report_sha256": "3d4dc700813b47c9b3faccc41fd04eac3fb19e8d83e9394f74b523932251e24c",
+      "exits": [
+        0,
+        0
+      ],
+      "actual_durability_proofs_passed": true,
+      "resource_failures": [],
+      "rss_plateau": "insufficient_duration"
+    },
+    "linux_actual_allocator": {
+      "report_sha256": "50838c96794c3e5737283f61015727d57e861fa6b03c9d2a4988e8df7910f062",
+      "background_thread_counts": {
+        "baseline": 1,
+        "candidate": 1
+      },
+      "real_oauth_both_independent_roots": true,
+      "exit_codes": {
+        "baseline": 0,
+        "candidate": 0
+      },
+      "enforced_each": "1CPU/1GiB/no extra swap"
+    },
+    "strict_server_clippy_passed": true,
+    "clippy_log_sha256": "7c21ae3ef8331e21cf9bd645c0722f1be614035ef9ccc9332562115c064f2d35",
+    "current_image_id": "sha256:a7e3ca05e6dc9b6a02dfe398536d37aaf92f4803b3a2a47ee057a09c220d000c",
+    "next_qualification": "Prospective current-binary20pair/ninecase/360trial calibration: allfourresident workers currentcode, active currentRoot pair bothlabels. Othercurrentpair idle on independentRoot. Allfour original RSS/resource and27timing gates active; subsequent fulloriginalR0/current comparison stillrequired. Earlier R0timing27pass/fourRSSfailure retained."
   }
 }

@@ -1021,3 +1021,17 @@ background-purging support through the pinned SDK. The earlier read/library,
 runtime CI and HTTP results retain their actual compiled revisions; live
 qualification of the changed executable remains required. The allocator
 contract regression alone does not prove the hour-scale RSS growth resolved.
+
+Clean source `598679bf533` builds for macOS ARM64 and Linux ARM64. Strict server
+Clippy passes. The new executable passes all 54 real two-replica RustFS smoke
+checks, with zero exits and complete actual durability proofs. Two Linux
+one-CPU / one-GiB probes perform real OAuth against independent fixture Roots
+and confirm a running jemalloc background-purging thread in each process.
+
+The next fixed 20-pair calibration keeps all nine cases / 360 trials and every
+original timing and RSS gate. All four resident workers now use the current
+allocator binary across two independent Roots, with one pair actively loaded
+under both labels. Read-only process memory diagnostics are captured before
+and after all request timers. This qualifies the changed executable; actual
+R0 source, images and baseline receipts remain unchanged for the subsequent
+full original source comparison. Resource/performance acceptance stays open.

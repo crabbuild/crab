@@ -1108,6 +1108,15 @@ changed executable remains required; the regression alone does not prove the
 hour-scale growth resolved. The dependency checkpoint and numeric gates stay
 unchanged.
 
+Both source-bound release builds at `598679bf533`, strict server Clippy and all
+54 real two-replica RustFS smoke checks pass. Linux probes confirm active
+allocator background threads and real OAuth under one CPU / one GiB / no extra
+swap. The next 360-trial current-binary calibration uses the fixed allocator
+on all four resident workers, retains all original timing/RSS gates, and
+captures process memory outside request timers. Original R0 artifacts remain
+unchanged for the subsequent full comparison; resource/performance acceptance
+remains open.
+
 1. Record source revision/patch, binary hashes, compiler/profile, fixture
    identities, backend/region, quotas, and report schema. Readiness/capture,
    query, serialization, and client timing must remain separate.
