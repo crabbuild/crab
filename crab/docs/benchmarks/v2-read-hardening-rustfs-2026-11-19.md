@@ -148,6 +148,22 @@ Blocked-request waits now fail after five seconds instead of hanging CI. The
 original fixture fails at that boundary; all six final shared-blame integration
 checks and nine shared-budget checks pass.
 
+Windows workflow CI additionally reproduces a checkpoint reset that succeeds
+over a directory named `reset.json`, violating the failed-reset preservation
+contract. The Windows file-backup workaround moves that directory aside before
+publication. Both the CLI decision writer and the seven shared workflow file
+writers now use native file replacement; callers retain their temporary-file
+cleanup. [Rust 1.97's Windows implementation](https://github.com/rust-lang/rust/blob/1.97.0/library/std/src/sys/fs/windows.rs#L1248-L1311)
+already requests replacement and preserves the file-versus-directory boundary.
+The separate checkpoint directory transaction retains its rollback protocol.
+The materialization regression covers directory contents and sidecar cleanup;
+the existing checkpoint apply/reset/resume integration keeps its original
+failed-reset and source-lineage assertions. Native Windows verification remains
+part of current-head CI acceptance. Local Rust 1.97 verification passes ten
+materialization checks, four checkpoint-owner checks and the exact CLI
+apply/reset/resume integration, including real child processes and visible
+source-lineage preservation.
+
 Persistent line-origin indexes and new storage formats remain conditional on
 measured cold-read cost; these results do not justify implementing them yet.
 
