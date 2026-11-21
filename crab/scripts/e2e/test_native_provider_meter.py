@@ -4,6 +4,7 @@ import email.message
 import json
 from pathlib import Path
 import subprocess
+import tempfile
 import unittest
 
 from run_concurrent_push_smoke import RequestCountingProxy
@@ -51,6 +52,83 @@ process.stdout.write(JSON.stringify(value.value));
         observed = subprocess.run(["node", "--input-type=module", "--eval", program, script],
                                   input=json.dumps(cases), text=True, capture_output=True, check=True)
         self.assertEqual(json.loads(observed.stdout), expected.snapshot(include_paths=False))
+
+    def test_streaming_meter_preserves_wire_headers_and_bodies(self):
+        script = Path(__file__).with_name("native_provider_meter.mjs").resolve()
+        program = """
+import http from 'node:http';
+import fs from 'node:fs';
+import {spawn} from 'node:child_process';
+import {once} from 'node:events';
+import {setTimeout} from 'node:timers/promises';
+const directory = process.argv[2];
+let received;
+const upstream = http.createServer(async (request, response) => {
+  const chunks = [];
+  for await (const chunk of request) chunks.push(chunk);
+  received = {path:request.url, body:Buffer.concat(chunks).toString(),
+    constructor:request.headers.constructor,
+    proxyConnection:request.headers['proxy-connection'] ?? null};
+  response.writeHead(200, {'set-cookie':['first=1', 'second=2'],
+    'proxy-connection':'close', 'constructor':'response-data'});
+  response.end('response body');
+});
+await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve));
+const config = {upstream:'http://127.0.0.1:' + upstream.address().port,
+  key_prefix:'bucket/task', services:directory+'/services.json', final:directory+'/final.json'};
+fs.writeFileSync(directory+'/config.json', JSON.stringify(config));
+const child = spawn(process.execPath, [process.argv[1], directory+'/config.json'], {stdio:'ignore'});
+const stopped = once(child, 'exit');
+try {
+  const deadline = Date.now() + 10000;
+  while (!fs.existsSync(config.services)) {
+    if (Date.now() >= deadline || child.exitCode !== null) throw Error('Meter did not start');
+    await setTimeout(10);
+  }
+  const {meter_url} = JSON.parse(fs.readFileSync(config.services));
+  const forwarded = await new Promise((resolve, reject) => {
+    const request = http.request(meter_url+'/bucket/task/encoded%20name', {
+      method:'PUT', headers:{'content-length':'12', 'constructor':'request-data',
+        'proxy-connection':'close'}, agent:false}, async response => {
+      try {
+        const chunks = [];
+        for await (const chunk of response) chunks.push(chunk);
+        resolve({status:response.statusCode, body:Buffer.concat(chunks).toString(),
+          cookies:response.headers['set-cookie'], constructor:response.headers.constructor,
+          proxyConnection:response.headers['proxy-connection'] ?? null});
+      } catch (error) { reject(error); }
+    });
+    request.on('error', reject);
+    request.setTimeout(10000, () => request.destroy(Error('Wire test deadline')));
+    request.end('request body');
+  });
+  child.kill('SIGTERM');
+  const [exitCode] = await stopped;
+  const final = JSON.parse(fs.readFileSync(config.final));
+  process.stdout.write(JSON.stringify({received, forwarded, exitCode,
+    requests:final.requests, requestBytes:final.request_body_bytes,
+    responseBytes:final.response_body_bytes, active:final.active_requests_at_shutdown}));
+} finally {
+  if (child.exitCode === null && child.signalCode === null) {
+    child.kill('SIGTERM');
+    const timer = globalThis.setTimeout(() => child.kill('SIGKILL'), 10000);
+    await stopped;
+    globalThis.clearTimeout(timer);
+  }
+  upstream.closeAllConnections();
+  await new Promise(resolve => upstream.close(resolve));
+}
+"""
+        with tempfile.TemporaryDirectory(prefix="native-meter-wire-") as directory:
+            observed = subprocess.run(
+                ["node", "--input-type=module", "--eval", program, str(script), directory],
+                text=True, capture_output=True, check=True, timeout=40)
+        self.assertEqual(json.loads(observed.stdout), {
+            "received": {"path":"/bucket/task/encoded%20name", "body":"request body",
+                         "constructor":"request-data", "proxyConnection":None},
+            "forwarded": {"status":200, "body":"response body", "cookies":["first=1", "second=2"],
+                          "constructor":"response-data", "proxyConnection":None},
+            "exitCode":0, "requests":1, "requestBytes":12, "responseBytes":13, "active":0})
 
 
 if __name__ == "__main__":

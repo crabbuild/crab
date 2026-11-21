@@ -1,8 +1,8 @@
 # V2 read hardening: combined local RustFS qualification
 
 **Status: implementation delivered; combined acceptance remains open.**
-The latest focused reader optimization and its exact-source proof appear in
-[the cold-pack and warm-history results](#focused-cold-pack-and-warm-history-optimization).
+The latest complete HTTP comparison appears in
+[the complete metadata-batching matrix](#complete-metadata-batching-http-matrix).
 Earlier smoke, minimum-profile and timing results retain their actual source bindings.
 The frozen engineering gates did not all pass. This report is not a release or
 production-readiness claim. [PR #693](https://github.com/crabbuild/crab/pull/693)
@@ -877,3 +877,130 @@ unchanged. VM caches retaining deleted shared-file handles and unused ext4
 blocks are reclaimed only between phases; real fixture warming precedes timing.
 The full original 128-trial comparison and two ten-minute soaks are running;
 72-cell native confirmation follows sequentially. R7 acceptance remains open.
+
+## Complete metadata-batching HTTP matrix
+
+The original 22-case, 128-trial comparison now completes, including actual
+600.008-second candidate and 600.013-second baseline mixed soaks. This uses
+the declared two-CPU RustFS backend and unchanged 1-CPU / 1-GiB / no additional
+swap limits per Crab replica. Every one of 7,965,261 journal records is retained;
+7,949,590 successful warm-up/measured responses pass the Git oracle, with zero
+oracle mismatches across all phases. No measured request errors occur.
+
+Capacity rejections remain explicit: baseline records 5,475 and candidate 7,648
+across their complete measured matrices. All per-cell rejection/failure gates
+pass. These counts are excluded from successful throughput. The candidate soak
+completes 2,325,835 successful requests; successful throughput improves about
+13.3% across its five workloads. Preview p95 falls 6.998 → 6.621 ms. The named
+single-client late-history target passes: p95 falls 9.761 → 6.557 ms, a 32.8%
+reduction.
+
+**Fifteen original latency gates remain failed.** Fourteen are baseline-relative
+short-case controls; one is the distinct-16 interactive/reference ratio. All
+original failures, thresholds and observations remain. The same candidate's
+small-32 trial throughput spans 1,005–3,783 requests/sec across the three rounds;
+provider GET p95 bins span 6–32 ms. Handler p95 stays below a millisecond in these
+controls. This identifies a measurement/outer-request investigation boundary;
+it does not establish a sole cause or waive a regression.
+
+Resource checks pass on both variants. Candidate peak process RSS is
+232,927,232 / 214,024,192 bytes; the whole-profile RSS plateau gate passes, no
+OOM occurs, admitted work drains, all four workers exit zero and both candidate
+six-field durability proofs pass. The provider meter exits zero with no pending
+requests. These are local minimum-resource checks, not hosted latency claims.
+
+Completed journals are archived only after exact statistics, with decompression
+verifying every original byte/hash before removal of each raw copy. Unused guest
+blocks are trimmed in recorded gaps outside request timers. A later idle restart
+retains the exact RustFS container/image/data/quotas and releases archived-file
+handles; native scaling starts only after the original disk guard passes again.
+The fixed 100-pair, 72-cell native confirmation is running. A separate 36-trial
+baseline polling on/off/on diagnostic is queued afterward. Neither pending
+result is offered as acceptance.
+
+## Complete native scaling confirmation
+
+The fixed 100-pair native comparison completes all **1,200 fresh processes /
+7,200 canonical Git checks**. All **72 original timing cells pass**: nine
+targeted cold-history cells meet the unchanged 0.80 p95 ratio, and all 63
+controls remain within 1.10. The largest control ratio is 1.0134. This compares
+R0 with the combined current reader; incremental metadata-batching work savings
+remain the separate 45 → 32 / 115 → 108 read-count comparison above.
+
+At 10,000 commits, cold page-100 history p95 falls 5,709,019 → 26,816 µs;
+page 10 falls 636,200 → 28,545 µs and page 1 falls 90,278 → 27,836 µs.
+Every original observation and query remains. Canonical Git expectations are
+memoized outside query timers; every result still executes its full verifier,
+and every fresh process checks the real fixture HEAD.
+
+Each native reader retains 1 CPU / 1 GiB / no additional swap. RustFS is restored
+to its one-CPU native profile, separate from the HTTP two-CPU backend profile.
+Peak cgroup memory is 63,053,824 bytes baseline and 161,648,640 candidate. Both
+report zero OOMs and zero CPU throttling; query work drains and both containers
+exit zero. An independent post-run inspection binds those exits to container
+identity, image and quotas. Native confirmation takes 1,910.89 wall seconds,
+including fixture preparation, Git verification and process launch outside the
+query timers. The complete matrix and source hashes are appended to the JSON
+ledger. HTTP acceptance remains open with its 15 retained short-case failures;
+the independent polling diagnostic follows separately.
+
+## HTTP measurement capacity and repeatability follow-up
+
+The fixed 36-trial baseline resource-polling on/off/on control completes with
+1,651,416 Git-verified successes and no mismatches. Disabling polling does not
+explain the large latency swings. A separate 36-trial RustFS CPU 2/4/2 reversal
+retains 1,745,805 Git-verified successes with no mismatches. Small-file
+32-client median trial p95 is 12.709 → 8.992 → 12.588 ms and throughput is
+4,136 → 4,496 → 4,002 requests/sec. Native counters show the provider using
+1.915 → 2.734 → 1.904 CPU cores, with the relay near one CPU. All workers
+exit zero, resource checks and candidate durability proofs pass. These
+diagnostics justify prospective backend headroom; they do not waive the 15
+original failures or establish product performance acceptance.
+
+The streaming meter now parses each request URL once, avoids per-request
+counter tuples and copies transport headers without allocating entry tuples.
+Its canonical counter parity still passes all 828 cases. Sixteen real RustFS
+checks cover 21 signed SDK attempts, including range, conditional failure,
+copy, listing and multipart completion/abort, with identical Python reference
+counters and verified bodies. The fixed 20-pair capacity diagnostic retains
+800,000 measured and 4,000 warm-up signed GET/HEAD observations. Each GET
+checks SHA-256 and each HEAD checks length; two independent one-CPU clients
+avoid the previous single-client ceiling. Median relay throughput increases
+9,997 → 10,300 requests/sec, p95 falls 22.317 → 20.551 ms, and CPU per attempt
+falls 97.418 → 93.635 µs. Both relays drain and exit zero. These are provider
+relay measurements, separate from product HTTP latency.
+
+Four real HTTP trials verify the next journal pipeline end to end. All
+107,348 records survive lossless gzip roundtrip; 106,859 successful replies
+pass their canonical Git verifier, with zero mismatches. Recomputing every
+summary from decompressed records gives the same result. Reusing an output
+path fails without overwriting evidence or sending provider requests. Request
+timing and the canonical request/statistics functions stay unchanged; native
+raw journals are compressed only after timing and exact statistics. This
+reduces evidence storage and avoids copying full raw journals through virtiofs.
+The fixed 20-pair same-baseline check completes all nine original cases: all
+seven previously failing case families plus the two earlier controls. Its
+360 trials retain 12,991,532 measured successful responses and zero errors.
+All-phase verification covers 15,658,813 records / 15,623,897 Git-verified
+successes with no mismatches. All 27 timing repeatability controls pass:
+p95 ratios 0.9824–1.0188 and throughput ratios 0.9947–1.0068 stay inside the
+unchanged symmetric 10% band.
+
+**Overall calibration remains failed.** Both loaded baseline workers and both
+idle candidate workers fail the original RSS-growth gate over 77 minutes.
+Three workers have their largest increase just after one hour; the fourth
+increases in later steps. Their other memory envelopes pass, no OOM occurs,
+read work drains, all four exit zero and both candidate durability proofs pass.
+Candidate tracked read caches remain about 4 MiB while its idle RSS rises to
+260 / 241 MB. The original strict reducer stops before summarization; a
+separate diagnostic reducer retains every sample, all four resource failures
+and the failed overall status while reporting timing results. The subsequent
+full comparison does not launch. No resource or timing gate is waived.
+
+[Current runtime CI](https://github.com/crabbuild/crab/actions/runs/44806904154)
+passes image/process qualification and three-node recovery for PR merge
+revision `a2a006d6ccf` over head `96dfa0078e3`. Its downloaded, digest-verified
+receipt includes stock Git LFS crash/restored clones and range resume for a
+3-GiB object, plus full Root restoration of 196 objects / 3,221,365,402 bytes
+with SHA-256 and metadata verification. This is runtime recovery proof; HTTP
+performance acceptance remains open.
