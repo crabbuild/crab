@@ -345,22 +345,31 @@ mod tests {
             None,
         )
         .unwrap();
+        let started = Arc::new(Notify::new());
+        let worker_started = started.clone();
         let options = OperationOptions::default()
-            .with_timeout(std::time::Duration::from_millis(10))
+            .with_timeout(std::time::Duration::from_secs(30))
             .unwrap();
-        let result = operations
-            .run_mutation(options, |cancel| async move {
-                cancel.cancelled().await;
-                Ok(crate::MutationOutcome::Committed {
-                    receipt: crate::CommitReceipt {
-                        recovery: token,
-                        transaction_id: "b".repeat(64),
-                    },
-                    readiness: crate::Readiness::Pending,
-                })
+        let mut request = Box::pin(operations.run_mutation(options, |cancel| async move {
+            worker_started.notify_one();
+            cancel.cancelled().await;
+            Ok(crate::MutationOutcome::Committed {
+                receipt: crate::CommitReceipt {
+                    recovery: token,
+                    transaction_id: "b".repeat(64),
+                },
+                readiness: crate::Readiness::Pending,
             })
-            .await
-            .unwrap();
+        }));
+        tokio::select! {
+            result = &mut request => panic!("worker unexpectedly returned: {result:?}"),
+            started = tokio::time::timeout(std::time::Duration::from_secs(2), started.notified()) => started.unwrap(),
+        }
+        // Advance only after admission; scheduler delay must not turn this
+        // in-flight deadline check into an admission rejection.
+        tokio::time::pause();
+        tokio::time::advance(std::time::Duration::from_secs(31)).await;
+        let result = request.await.unwrap();
         assert!(matches!(
             result,
             crate::MutationOutcome::Committed {
