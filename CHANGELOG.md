@@ -71,7 +71,7 @@ macOS automatic update installation requires a future signed release.
   remote-helper asynchronous worker overhead.
 - Added large LFS and Xet file admission to the repository server and expanded
   native crash, restore, and Kubernetes recovery qualification.
-- Upgraded the embedded Cellar runtime to 0.1.1.
+- Upgraded the embedded Cellar runtime to 0.1.2.
 - Added first-run Docker setup for the repository HTTP server and S3 gateway,
   including generated configuration and client identity.
 - Included shared Results contracts and chart runtime in repository server
