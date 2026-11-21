@@ -946,6 +946,10 @@ root rather than pod memory.
 
 Session cookies use `HttpOnly` and `SameSite=Lax`. HTTPS deployments also use `Secure` and the `__Host-` prefix. OIDC sessions expire at the earlier of ID-token expiry or eight hours; GitHub sessions expire after eight hours. The server does not retain refresh tokens or GitHub access tokens.
 
+Concurrent session checks may share a batch whose durable reads begin after
+every participant joins. Requests arriving after dispatch start fresh checks.
+The bounded pending registry releases unfinished work when its last caller leaves.
+
 Restarting or replacing a replica preserves sessions and current-format Git
 tokens. Git-token format 2 requires the immutable repository UUID. Older tokens
 are rejected and must be revoked/reissued; there is no name-only reader or

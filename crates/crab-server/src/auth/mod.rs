@@ -154,7 +154,10 @@ struct Flow {
 struct AuthState {
     store: Store,
     prefix: String,
+    pending_checks: Arc<Mutex<HashMap<Key, futures_util::future::WeakShared<SessionCheck>>>>,
 }
+
+type SessionCheck = futures_util::future::BoxFuture<'static, Option<Arc<Session>>>;
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -224,6 +227,7 @@ impl Authentication {
         let state = AuthState {
             store: root.store.clone(),
             prefix: root.path(".crab/http-server/v1/auth").to_string(),
+            pending_checks: Arc::default(),
         };
         let secret = config
             .client_secret_file

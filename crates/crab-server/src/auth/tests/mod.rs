@@ -4,6 +4,8 @@ use openidconnect::{ClientId, core::CoreProviderMetadata};
 use serde_json::json;
 use url::Url;
 
+mod session_reads;
+
 #[tokio::test]
 async fn expired_sessions_are_rejected_and_https_cookies_cannot_be_shadowed() {
     let auth = shared_auth(Store::new(Arc::new(object_store::memory::InMemory::new())));
@@ -84,6 +86,7 @@ fn shared_auth(store: Store) -> Authentication {
         state: AuthState {
             store,
             prefix: "root/.crab/http-server/v1/auth".into(),
+            pending_checks: Arc::default(),
         },
         cursor_key: [7; 32],
         admission: Semaphore::new(1),

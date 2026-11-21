@@ -1117,8 +1117,14 @@ shutdown proofs and process exits pass. Thirteen of twenty-seven identical-code
 timing controls fail; all 11,820,423 measured successes have zero errors. The
 full source comparison correctly remains gated. Original R0 artifacts, earlier
 failures and every numeric threshold remain unchanged. Earlier measurements
-put the single-threaded provider relay near one CPU; a parallel measurement
-relay is under capacity verification before the next repeatability run.
+put the single-threaded provider relay near one CPU. A parallel-relay experiment
+completes eighteen provider trials and 162 HTTP trials, but establishes no
+consistent benefit under ongoing host activity; the simpler canonical relay is
+retained. Queued session-check batching reduces a deterministic pair from four
+storage reads to two while closing enrollment before either fresh read starts.
+The old-source regression fails; all forty focused authentication tests and
+strict release all-target Clippy pass. Production builds and live RustFS proof
+for this source remain required before the next combined-source comparison.
 
 1. Record source revision/patch, binary hashes, compiler/profile, fixture
    identities, backend/region, quotas, and report schema. Readiness/capture,
