@@ -9,14 +9,13 @@ production-readiness claim. [PR #693](https://github.com/crabbuild/crab/pull/693
 targets `crab-v2`; [Plan 020](../../../plans/020-crab-v2-read-hardening.md)
 retains the packet contracts and outstanding acceptance checklist.
 
-The [machine-readable evidence](v2-read-hardening-rustfs-2026-11-19.json)
-contains the complete 72-cell native comparison, every HTTP workload/load cell,
-thresholds, failures, provider counts, resource observations and build hashes.
-Column declarations preserve units without repeating field names in every row.
-Raw private configuration, authentication headers and request bodies are excluded.
-Original journals, source archives and failed receipts remain in the task-owned
-`read-hardening-8144` qualification directory on the mounted Workspace volume;
-their SHA-256 hashes bind the portable report to those inputs.
+Detailed machine-readable results are retained in the task-owned qualification
+archive on the mounted Workspace volume and are excluded from this PR. The
+archive contains every native and HTTP timing cell, provider/resource counts,
+build hashes and failed profile. Raw private configuration, authentication
+headers and request bodies remain excluded from the report. Original journals,
+source archives and failed receipts remain preserved; their SHA-256 hashes bind
+the archived ledger to those inputs.
 
 ## Source and environment
 
@@ -169,7 +168,7 @@ The preceding `03ecadc5e33` matched release run completed all 22 cases and both
 600-second soaks with zero Git mismatches/non-rejection request errors. It still
 failed 30 p95, 18 throughput and one interactive gate, plus one observed upstream
 disconnect. Both RSS plateaus and replica exits passed. Its complete per-cell
-results are retained alongside the older comparison in the JSON companion.
+results are retained alongside the older comparison in the archived JSON ledger.
 
 The newer catalog also developed the Directory restore gap: epoch 4 contains
 transactions 1 and 3 without 2. An isolated copy retaining its original format,
@@ -219,7 +218,7 @@ roughly 30–50 microseconds. These diagnostics do not replace the frozen gates.
 The [current-source container/Kubernetes run](https://github.com/crabbuild/crab/actions/runs/44526683530)
 also passes both jobs, including abrupt restart, large LFS and complete-root
 restore on three Kubernetes nodes. The source, image and artifact bindings are
-retained in the JSON report. Those shorter recoveries do not cover the reproduced
+retained in the archived JSON ledger. Those shorter recoveries do not cover the reproduced
 read-only idle/checkpoint/clean-reload sequence.
 
 
@@ -304,7 +303,7 @@ Cold denotes runtime/cache state, without claiming a cold network/provider.
 
 All correctness/drain checks pass; 36 of 140 timing cells fail the unchanged
 1.1 p95 control gate. Complete cells and source/fixture/binary hashes are in the
-JSON companion. Setup errors and the first correlated frontier fixtures remain
+archived JSON ledger. Setup errors and the first correlated frontier fixtures remain
 retained and were excluded before timing began. Distinct physical-source object
 growth and wider history sizes remain unqualified. This native proof does not
 clear HTTP recovery, the minimum-profile soak or the combined acceptance gate.
@@ -565,7 +564,7 @@ The red queue regression and all prior timing failures remain retained.
 The `8b806338bd6` macOS and native ARM64 Linux release builds complete. The
 current embedded UI and server pass all 54 two-replica RustFS checks, with exact
 Git parity, real browser/session behavior, full drain and zero exits. Build, ELF,
-image and smoke hashes are in `small_preview_integrated_followup` in the JSON.
+image and smoke hashes are in `small_preview_integrated_followup` in the archived JSON ledger.
 
 The prospectively declared six-vCPU/eight-GiB test VM retains the same RustFS
 image/data and per-worker 1 CPU / 1 GiB limits. Four hundred fresh baseline-only
@@ -940,7 +939,7 @@ report zero OOMs and zero CPU throttling; query work drains and both containers
 exit zero. An independent post-run inspection binds those exits to container
 identity, image and quotas. Native confirmation takes 1,910.89 wall seconds,
 including fixture preparation, Git verification and process launch outside the
-query timers. The complete matrix and source hashes are appended to the JSON
+query timers. The complete matrix and source hashes are appended to the archived JSON ledger
 ledger. HTTP acceptance remains open with its 15 retained short-case failures;
 the independent polling diagnostic follows separately.
 
