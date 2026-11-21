@@ -783,6 +783,14 @@ mod platform {
             Ok(MutationGuard(&self.file))
         }
 
+        fn publication(&self) -> Result<MutationGuard<'_>> {
+            // Completed fills run on blocking workers. Serialize sibling writes
+            // through their fsync/rename instead of discarding valid cache data.
+            // Maintenance keeps nonblocking mutation admission.
+            FileExt::lock_exclusive(&self.file)?;
+            Ok(MutationGuard(&self.file))
+        }
+
         fn remove_payload(&self, name: &CString, dry_run: bool) -> Result<u64> {
             self.remove_payload_if(name, dry_run, &mut |_| Ok(true))?
                 .ok_or_else(|| io::Error::other("unconditional cache removal was skipped").into())
@@ -1027,7 +1035,7 @@ mod platform {
         }
 
         pub(super) fn sync_identity(&self) -> Result<()> {
-            let _mutation = self.directory.mutation()?;
+            let _mutation = self.directory.publication()?;
             self.check_name()?;
             // Persist the empty inode and name before SQL records their identity.
             // Later payload writes must not outlive that creation metadata.
@@ -1086,7 +1094,7 @@ mod platform {
 
             #[cfg(target_os = "macos")]
             {
-                let _destination_mutation = self.directory.mutation()?;
+                let _destination_mutation = self.directory.publication()?;
                 self.check_name()?;
                 self.directory.remove(&self.temporary)?;
                 let clone_path = self
@@ -1141,7 +1149,7 @@ mod platform {
         #[cfg(all(feature = "remote-client", feature = "local-cache"))]
         pub(super) fn into_unlinked_file(mut self) -> Result<File> {
             let file = self.file.try_clone()?;
-            let _mutation = self.directory.mutation()?;
+            let _mutation = self.directory.publication()?;
             self.check_name()?;
             self.directory.remove(&self.temporary)?;
             // No pathname may outlive this unpublished stream. Closing its
@@ -1151,7 +1159,7 @@ mod platform {
         }
 
         pub(super) fn commit(mut self) -> Result<()> {
-            let _mutation = self.directory.mutation()?;
+            let _mutation = self.directory.publication()?;
             self.check_name()?;
             self.file.sync_all()?;
             // SAFETY: both single-component names are relative to the same
@@ -1248,6 +1256,45 @@ mod platform {
             }
         }
         use std::io::{Read as _, Write as _};
+
+        #[test]
+        fn sibling_publications_wait_for_the_parent_namespace() {
+            use std::sync::{Arc, Barrier, mpsc};
+            use std::time::Duration;
+
+            for sync_identity in [false, true] {
+                let temporary = tempfile::tempdir().unwrap();
+                let root = temporary.path().join("cache");
+                let destination = root.join("entry");
+                let pending = TemporaryFile::new(&root, &destination).unwrap();
+                pending.file().write_all(b"cached bytes").unwrap();
+                let directory = File::open(&root).unwrap();
+                FileExt::lock_exclusive(&directory).unwrap();
+                let barrier = Arc::new(Barrier::new(2));
+                let started = Arc::clone(&barrier);
+                let (send, receive) = mpsc::channel();
+                let worker = std::thread::spawn(move || {
+                    started.wait();
+                    let result = if sync_identity {
+                        pending.sync_identity().and_then(|()| pending.commit())
+                    } else {
+                        pending.commit()
+                    };
+                    send.send(result).unwrap();
+                });
+                barrier.wait();
+                let early = receive.recv_timeout(Duration::from_millis(100));
+                FileExt::unlock(&directory).unwrap();
+                let waited = early.is_err();
+                let result =
+                    early.unwrap_or_else(|_| receive.recv_timeout(Duration::from_secs(2)).unwrap());
+                worker.join().unwrap();
+                assert_eq!(
+                    (waited, result.is_ok(), std::fs::read(&destination).ok()),
+                    (true, true, Some(b"cached bytes".to_vec()))
+                );
+            }
+        }
 
         #[test]
         fn operations_from_one_pinned_root_have_independent_namespace_locks() {
@@ -1384,21 +1431,32 @@ mod platform {
 
         #[test]
         fn verification_excludes_publication_and_releases_both_locks() {
-            let tmp = tempfile::tempdir().unwrap();
-            let root = tmp.path().join("cache");
-            let relative = Path::new("chunks/entry");
-            let path = root.join(relative);
-            let mut original = TemporaryFile::new(&root, &path).unwrap();
-            original.file.write_all(b"original").unwrap();
-            original.commit().unwrap();
-            let pinned = Directory::root(&root, false).unwrap();
+            use std::sync::{Arc, Barrier, mpsc};
+            use std::time::Duration;
+
             for fail in [false, true] {
+                let tmp = tempfile::tempdir().unwrap();
+                let root = tmp.path().join("cache");
+                let relative = Path::new("chunks/entry");
+                let path = root.join(relative);
+                let original = TemporaryFile::new(&root, &path).unwrap();
+                original.file().write_all(b"original").unwrap();
+                original.commit().unwrap();
+                let replacement = TemporaryFile::new(&root, &path).unwrap();
+                let barrier = Arc::new(Barrier::new(2));
+                let started = Arc::clone(&barrier);
+                let (send, receive) = mpsc::channel();
+                let worker = std::thread::spawn(move || {
+                    started.wait();
+                    send.send(replacement.commit()).unwrap();
+                });
+                let pinned = Directory::root(&root, false).unwrap();
                 let result = pinned.remove_relative_if(relative, false, &mut |file| {
                     let mut data = Vec::new();
                     file.read_to_end(&mut data).unwrap();
                     assert_eq!(data, b"original");
-                    let replacement = TemporaryFile::new(&root, &path).unwrap();
-                    assert!(matches!(replacement.commit(), Err(CacheError::Io(error)) if error.kind() == io::ErrorKind::WouldBlock));
+                    barrier.wait();
+                    assert!(receive.recv_timeout(Duration::from_millis(100)).is_err());
                     assert!(matches!(open_read(&root, &path), Err(CacheError::Io(error)) if error.kind() == io::ErrorKind::WouldBlock));
                     if fail { Err(CacheError::Cancelled) } else { Ok(false) }
                 });
@@ -1407,11 +1465,14 @@ mod platform {
                 } else {
                     assert_eq!(result.unwrap(), None);
                 }
-                assert_eq!(std::fs::read(&path).unwrap(), b"original");
+                receive
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap()
+                    .unwrap();
+                worker.join().unwrap();
+                assert_eq!(std::fs::read(&path).unwrap(), b"");
                 drop(open_read(&root, &path).unwrap());
             }
-            TemporaryFile::new(&root, &path).unwrap().commit().unwrap();
-            assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
         }
 
         #[test]
@@ -1448,14 +1509,9 @@ mod platform {
             if let Some(root) = std::env::var_os(FIXTURE_ROOT) {
                 let root = PathBuf::from(root);
                 let path = root.join("chunks/entry");
-                for result in [
-                    remove_file(&root, &path).map(|_| ()),
-                    TemporaryFile::new(&root, &path).unwrap().commit(),
-                ] {
-                    assert!(
-                        matches!(result, Err(CacheError::Io(error)) if error.kind() == io::ErrorKind::WouldBlock)
-                    );
-                }
+                assert!(
+                    matches!(remove_file(&root, &path), Err(CacheError::Io(error)) if error.kind() == io::ErrorKind::WouldBlock)
+                );
                 return;
             }
             let temp = tempfile::tempdir().unwrap();

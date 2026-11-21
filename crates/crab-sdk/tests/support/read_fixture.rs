@@ -25,6 +25,10 @@ pub struct ReadFixture {
 
 impl ReadFixture {
     pub async fn new() -> Self {
+        Self::with_original(Bytes::from_static(b"first committed bytes\0\xff\n")).await
+    }
+
+    pub async fn with_original(original: Bytes) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("source");
         let storage = directory.path().join("storage");
@@ -38,7 +42,6 @@ impl ReadFixture {
         };
         #[cfg(not(unix))]
         let filename = std::ffi::OsString::from("file.bin");
-        let original = Bytes::from_static(b"first committed bytes\0\xff\n");
         let updated = Bytes::from(
             (0..192 * 1024)
                 .map(|n| (n ^ (n >> 8)) as u8)

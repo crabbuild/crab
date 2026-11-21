@@ -72,6 +72,11 @@ pub(crate) fn ensure_parent_not_symlink(path: &Path) -> Result<()> {
             normal_components += 1;
         }
         current.push(component.as_os_str());
+        // Windows places the root separator after the drive/UNC prefix.
+        // A bare verbatim drive prefix addresses a volume and fails metadata lookup.
+        if matches!(component, Component::Prefix(_)) {
+            continue;
+        }
         match fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 if allow_system_ancestor_link && normal_components == 1 {
@@ -88,4 +93,16 @@ pub(crate) fn ensure_parent_not_symlink(path: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_parent_paths_allow_missing_descendants() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(temporary.path()).unwrap();
+        assert!(ensure_parent_not_symlink(&root.join("new/objects")).is_ok());
+    }
 }

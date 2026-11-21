@@ -72,6 +72,9 @@ read descriptors and concurrent publishers are skipped using nonblocking locks.
 Reports count actual removals (or eligible files in a dry run) and separately
 count retained, busy, and unsafe entries. It does not create missing roots.
 Unix parent-directory locks coordinate payload publication and deletion.
+Completed fills wait for sibling publication on a blocking worker through fsync
+and rename; maintenance keeps nonblocking admission. A concurrent fill must not
+be discarded merely because another fill is publishing in the same directory.
 Object/range prune and verify, clean, targeted eviction, and read-side corrupt
 entry removal now share catalog row retirement. A healthy catalog's immediate
 writer transaction excludes lease/reservation changes through deletion and
@@ -155,6 +158,13 @@ xorb-range keys are not decoded-content hashes. Busy entries are not checked
 or reported as valid. Dropping an async scan cancels its blocking worker via a
 child token. This does not qualify catalog reservation protection, database
 ownership, complete physical accounting, or bounded-time LRU reconciliation.
+
+Reads may join adjacent or overlapping verified entries for the same key and
+namespace. The complete result, including offsets, must fit the caller ceiling
+and 256 MiB range bound. A gap discards all partial bytes; it cannot mix cached
+pieces with origin data. Recency changes only after complete coverage, using the
+same retained descriptors that supplied those bytes. Enumeration stays bounded
+at 4,096 entries, and corrupt fragments retain descriptor-bound repair.
 
 Decoded-range handles are canonicalized by cache directory within one process.
 Every live handle for that directory must use the same catalog owner and caller ceiling; a conflicting

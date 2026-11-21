@@ -122,6 +122,39 @@ class WorkspaceDependencyTests(unittest.TestCase):
                     result = GATES.check_workspace_dependency_policy({"packages": packages})
                 self.assertEqual(result, expected)
 
+    def test_results_composition_does_not_admit_product_dependencies(self):
+        for owner, dependency, expected in (
+            ("crab-sdk", "crab-workflow", True),
+            ("crab-server", "crab-workflow", True),
+            ("crab-sdk", "crab-server", False),
+            ("crab-workflow", "crab-sdk", False),
+        ):
+            with self.subTest(owner=owner, dependency=dependency):
+                packages = [
+                    {"name": name, "dependencies": []}
+                    for name in GATES.WORKSPACE_DEPENDENCY_POLICY
+                ]
+                package = next(package for package in packages if package["name"] == owner)
+                package["dependencies"] = [{"name": dependency, "kind": None}]
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    result = GATES.check_workspace_dependency_policy({"packages": packages})
+                self.assertEqual(result, expected)
+
+    def test_results_primitives_do_not_admit_workflow_transport_policy(self):
+        required = ("crab-types", "serde", "serde_json", "serde_yaml", "thiserror")
+        for dependency, expected in (("base64", True), ("schemars", True), ("crab-sdk", False)):
+            metadata = {"packages": [{
+                "name": "crab-workflow",
+                "dependencies": [
+                    {"name": name, "kind": None, "optional": name == "schemars"}
+                    for name in (*required, dependency)
+                ],
+            }]}
+            with self.subTest(dependency=dependency), tempfile.TemporaryDirectory() as directory:
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    result = GATES.check_workflow_module_scope(Path(directory), metadata)
+                self.assertEqual(result, expected)
+
     def test_sqlite_policy_requires_the_published_cellar_linkage(self):
         manifest = (GATES.repo_root() / "Cargo.toml").read_text(encoding="utf-8")
         entry = next(line for line in manifest.splitlines() if line.startswith("rusqlite = "))

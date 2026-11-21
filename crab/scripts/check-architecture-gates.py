@@ -1607,6 +1607,9 @@ DELETED_METADATA_REEXPORT_ADAPTER_FORBIDDEN_PATTERNS = {
     "use crab::metadata::file_index_lookup",
 }
 WORKFLOW_MODULE_ALLOWED_NORMAL_PACKAGES = {
+    # Results rendering and opt-in schema derive stay with their contract owner.
+    "base64",
+    "schemars",
     "blake3",
     "bytes",
     "crab-coordination",
@@ -1859,7 +1862,7 @@ WORKSPACE_DEPENDENCY_POLICY = {
         "dev": {"crab-cache", "crab-cache-store", "crab-storage"},
     },
     "crab-sdk": {
-        "normal": {"crab-auth", "crab-auth-store", "crab-cache", "crab-cache-store", "crab-coordination", "crab-git", "crab-lfs", "crab-metadata", "crab-read", "crab-remote", "crab-remote-git", "crab-staging", "crab-storage", "crab-types", "crab-write", "crab-xet"},
+        "normal": {"crab-auth", "crab-auth-store", "crab-cache", "crab-cache-store", "crab-coordination", "crab-git", "crab-lfs", "crab-metadata", "crab-read", "crab-remote", "crab-remote-git", "crab-staging", "crab-storage", "crab-types", "crab-workflow", "crab-write", "crab-xet"},
         "dev": {"crab-git", "crab-xet"},
     },
     "crab-write": {"normal": {"crab-coordination", "crab-types", "crab-git", "crab-metadata", "crab-remote-git", "crab-storage", "crab-xet"}},
@@ -1873,6 +1876,7 @@ WORKSPACE_DEPENDENCY_POLICY = {
             "crab-read",
             "crab-remote-git",
             "crab-storage",
+            "crab-workflow",
             "crab-write",
             "crab-remote",
         },
