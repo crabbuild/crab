@@ -21,14 +21,13 @@ env:
 
 jobs:
   changes:
-    name: Determine affected surfaces
+    name: Workflow and change checks
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
       web: ${{ steps.filter.outputs.web }}
       docs: ${{ steps.filter.outputs.docs }}
-      repo_docs: ${{ steps.filter.outputs.repo_docs }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -100,23 +99,37 @@ jobs:
           assert_classification 'packages/web/app/page.tsx' 'false true false false'
           assert_classification 'packages/ui/src/App.tsx' 'true false false false'
           assert_classification $'crab/docs/design/layout.md\ncrab/src/main.rs' 'true false false true'
+          assert_classification $'packages/web/content/docs/index.mdx\npackages/web/app/page.tsx' 'false true true false'
           assert_classification 'README.md' 'true false false false'
 
           read -r rust web docs repo_docs < <(classify_files "${files}")
           printf 'rust=%s\nweb=%s\ndocs=%s\nrepo_docs=%s\n' \
             "${rust}" "${web}" "${docs}" "${repo_docs}" >> "${GITHUB_OUTPUT}"
 
-  actionlint:
-    name: Workflow syntax
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    needs: changes
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
       - name: Lint GitHub Actions workflows
         run: GOTOOLCHAIN=local go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.11
+
+      - name: Check repository documentation
+        if: steps.filter.outputs.repo_docs == 'true'
+        shell: bash
+        env:
+          EVENT_BEFORE: ${{ github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          base="${BASE_SHA:-${EVENT_BEFORE:-}}"
+          if [[ -z "${base}" || "${base}" =~ ^0+$ ]]; then
+            base="$(git rev-parse "${HEAD_SHA}^" 2>/dev/null || true)"
+          fi
+          if [[ -z "${base}" ]]; then
+            echo "Unable to determine documentation diff base" >&2
+            exit 1
+          fi
+          git diff --check "${base}" "${HEAD_SHA}" -- crab/docs/
+          while IFS= read -r -d '' file; do
+            python3 -m json.tool "${file}" >/dev/null
+          done < <(find crab/docs -type f -name '*.json' -print0)
 
   rust:
     name: Rust quality and tests
@@ -124,7 +137,7 @@ jobs:
     # Cold workspace compilation and the serialized reconstruction corpus need
     # time for the complete suite and cache upload; retain every test.
     timeout-minutes: 150
-    needs: [changes, actionlint]
+    needs: changes
     if: needs.changes.outputs.rust == 'true'
     env:
       # Workspace test linking exhausted runner disk. Retain file/line
@@ -141,11 +154,16 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
           cache-on-failure: true
+          # PR-scoped build caches evict the base caches other PRs can restore.
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/crab-v2' }}
 
       - name: Set up repository frontend toolchain
         uses: actions/setup-node@v4
@@ -165,9 +183,6 @@ jobs:
         run: |
           cargo clippy -p crab-server --all-targets --locked -- -D warnings
           cargo test -p crab-server --example qualify_http_load --locked
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
 
       - name: Run Clippy
         run: >-
@@ -221,7 +236,7 @@ jobs:
     name: Repository browser interactions (${{ matrix.shard }}/2)
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: [changes, actionlint]
+    needs: changes
     if: needs.changes.outputs.rust == 'true'
     strategy:
       fail-fast: false
@@ -250,11 +265,11 @@ jobs:
           include-hidden-files: true
 
   web:
-    name: Web quality and tests
+    name: Web and documentation
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    needs: [changes, actionlint]
-    if: needs.changes.outputs.web == 'true'
+    needs: changes
+    if: needs.changes.outputs.web == 'true' || needs.changes.outputs.docs == 'true'
     defaults:
       run:
         working-directory: packages/web
@@ -273,12 +288,15 @@ jobs:
         run: npm ci
 
       - name: Typecheck
+        if: needs.changes.outputs.web == 'true'
         run: npm run typecheck
 
       - name: Lint
+        if: needs.changes.outputs.web == 'true'
         run: npm run lint
 
       - name: Test
+        if: needs.changes.outputs.web == 'true'
         run: npm run test
 
       - name: Build
@@ -287,95 +305,23 @@ jobs:
       - name: Check documentation links
         run: npm run check:links
 
-  docs:
-    name: Documentation quality
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    needs: [changes, actionlint]
-    if: needs.changes.outputs.docs == 'true'
-    defaults:
-      run:
-        working-directory: packages/web
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: packages/web/package-lock.json
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build documentation
-        run: npm run build
-
-      - name: Check documentation links
-        run: npm run check:links
-
-  repo-docs:
-    name: Repository documentation
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    needs: [changes, actionlint]
-    if: needs.changes.outputs.repo_docs == 'true'
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Check documentation diff
-        shell: bash
-        env:
-          EVENT_BEFORE: ${{ github.event.before }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          base="${BASE_SHA:-${EVENT_BEFORE:-}}"
-          if [[ -z "${base}" || "${base}" =~ ^0+$ ]]; then
-            base="$(git rev-parse "${HEAD_SHA}^" 2>/dev/null || true)"
-          fi
-          if [[ -z "${base}" ]]; then
-            echo "Unable to determine documentation diff base" >&2
-            exit 1
-          fi
-          git diff --check "${base}" "${HEAD_SHA}" -- crab/docs/
-
-      - name: Validate JSON evidence
-        shell: bash
-        run: |
-          set -euo pipefail
-          while IFS= read -r -d '' file; do
-            python3 -m json.tool "${file}" >/dev/null
-          done < <(find crab/docs -type f -name '*.json' -print0)
-
   status:
     name: Required CI status
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [changes, actionlint, rust, repository-ui, web, docs, repo-docs]
+    needs: [changes, rust, repository-ui, web]
     if: always()
     steps:
       - name: Fail when a selected gate failed
         if: >-
           needs.changes.result != 'success' ||
-          needs.actionlint.result != 'success' ||
           (needs.rust.result != 'success' && needs.rust.result != 'skipped') ||
           (needs.repository-ui.result != 'success' && needs.repository-ui.result != 'skipped') ||
-          (needs.web.result != 'success' && needs.web.result != 'skipped') ||
-          (needs.docs.result != 'success' && needs.docs.result != 'skipped') ||
-          (needs.repo-docs.result != 'success' && needs.repo-docs.result != 'skipped')
+          (needs.web.result != 'success' && needs.web.result != 'skipped')
         run: exit 1
 
       - name: Report selected gates
         run: |
           echo "Rust gate: ${{ needs.rust.result }}"
           echo "Repository browser gate: ${{ needs.repository-ui.result }}"
-          echo "Web gate: ${{ needs.web.result }}"
-          echo "Docs gate: ${{ needs.docs.result }}"
-          echo "Repository docs gate: ${{ needs.repo-docs.result }}"
+          echo "Web and docs gate: ${{ needs.web.result }}"

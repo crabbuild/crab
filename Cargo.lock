@@ -1896,9 +1896,9 @@ dependencies = [
 
 [[package]]
 name = "cellar-egress"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44224734ee1f3d2a491696758f2dba419b1e2ff900f0a1ece7331e10f38204f1"
+checksum = "583d892a35b26069b25336b38b75433f9dffae43e04f15a3ce19bba8af8ec903"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -1912,15 +1912,15 @@ dependencies = [
 
 [[package]]
 name = "cellar-logic"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a524614ad2b8dc7ac32634404d76542c677e55a4b4990a6b0789b63e6046aa50"
+checksum = "ac1a323d7fb80a9b0aefd0a6ddcce4a20a7716d58634484c7b3cb10326a90983"
 
 [[package]]
 name = "cellar-ltx"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c546773933c1fe14e0124bb42c89ec93606da4670a4efbd4fb94976cba3a67d"
+checksum = "aeac8b25eeae391e536d9a1ed3db53b1e289ca6a1ccba0f4db127c3489f9d84d"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1943,9 +1943,9 @@ dependencies = [
 
 [[package]]
 name = "cellar-main"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "05483282571eb1827d3a46e0adf66bd9d417b56144ce2f733f49621642db4100"
+checksum = "013a9409a02d0a0965081f1ea681495292682ea4a0e7331f724910736659e531"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2019,9 +2019,9 @@ dependencies = [
 
 [[package]]
 name = "cellar-native"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a617d536fe48276a3469771d1e83aaa0df2dbf3bcc72c29350ac278f2c267c33"
+checksum = "6decc3c9a85c8cf416394e93c31dd3dfd81ec3edbeb12c49cc432410d54dbb9a"
 dependencies = [
  "aes",
  "aes-gcm",

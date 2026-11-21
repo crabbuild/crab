@@ -1,8 +1,8 @@
 # Deployment profiles
 
-The server embeds Cellar 0.1.1. Native process smoke and peer handoff have been
-verified locally; provider, fault, restore, scale, and upgrade qualification are
-required before release. See [the runtime contract](../CELLAR.md).
+The server embeds Cellar 0.1.2. Provider, fault, restore, scale, and upgrade
+qualification remain required before release. See [the runtime contract](../CELLAR.md)
+for version-specific verification.
 
 `crab-server` has one provider-neutral runtime contract, a one-command local stack, and checked-in deployment profiles for three cloud storage providers:
 

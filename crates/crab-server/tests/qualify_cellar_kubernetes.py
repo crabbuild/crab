@@ -262,7 +262,7 @@ peer_ca = "/run/secrets/crab/peer/ca.crt"
             current = deploy()
             pod = current[0]["metadata"]["name"]
             runtime = json.loads(output(server(pod, "cells", "runtime")))
-            assert runtime["version"] == "0.1.1"
+            assert runtime["version"] == "0.1.2"
             cmd(server(pod, "cells", "initialize-directory"))
             origin = forward("pod/" + pod, 8788)
             repository_id = request(origin, "/api/repos")["repositories"][0]["id"]

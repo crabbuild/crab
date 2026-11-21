@@ -1,6 +1,6 @@
 # Deploy Crab for a team on Kubernetes
 
-> Native Cellar 0.1.1 profiles are under qualification. Protected provider/fault
+> Native Cellar 0.1.2 profiles are under qualification. Protected provider/fault
 > evidence and published image/chart releases remain pending. See
 > [the migration guide](../../../CELLAR.md).
 
