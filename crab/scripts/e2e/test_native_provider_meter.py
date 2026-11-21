@@ -11,6 +11,42 @@ from run_concurrent_push_smoke import RequestCountingProxy
 
 
 class NativeProviderMeterTests(unittest.TestCase):
+    def test_worker_loss_never_publishes_partial_totals(self):
+        script = Path(__file__).with_name("native_provider_meter.mjs").resolve()
+        program = """
+import fs from 'node:fs';
+import {spawn} from 'node:child_process';
+import {once} from 'node:events';
+import {setTimeout} from 'node:timers/promises';
+import assert from 'node:assert/strict';
+const directory = process.argv[2];
+const config = {upstream:'http://127.0.0.1:1', key_prefix:'bucket/task',
+  services:directory+'/services.json', final:directory+'/final.json'};
+fs.writeFileSync(directory+'/config.json', JSON.stringify(config));
+const child = spawn(process.execPath, [process.argv[1], directory+'/config.json'], {stdio:'ignore'});
+const stopped = once(child, 'exit');
+const deadline = globalThis.setTimeout(() => child.kill('SIGKILL'), 15000);
+try {
+  while (!fs.existsSync(config.services)) {
+    assert.equal(child.exitCode, null);
+    await setTimeout(10);
+  }
+  const service = JSON.parse(fs.readFileSync(config.services));
+  process.kill(service.worker_pids[0], 'SIGKILL');
+  const [code] = await stopped;
+  assert.equal(code, 1);
+  assert.equal(fs.existsSync(config.final), false);
+  assert.equal(JSON.parse(fs.readFileSync(config.services)).status, 'failed');
+  for (const pid of service.worker_pids) assert.throws(() => process.kill(pid, 0), {code:'ESRCH'});
+} finally {
+  globalThis.clearTimeout(deadline);
+  if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+}
+"""
+        with tempfile.TemporaryDirectory(prefix="native-meter-worker-loss-") as directory:
+            subprocess.run(["node", "--input-type=module", "--eval", program, str(script), directory],
+                           text=True, capture_output=True, check=True, timeout=20)
+
     def test_native_meter_preserves_canonical_attempt_accounting(self):
         prefix = "bucket/task"
         expected = RequestCountingProxy("http://127.0.0.1:1", prefix)
@@ -61,6 +97,7 @@ import fs from 'node:fs';
 import {spawn} from 'node:child_process';
 import {once} from 'node:events';
 import {setTimeout} from 'node:timers/promises';
+import {deepStrictEqual} from 'node:assert';
 const directory = process.argv[2];
 let received;
 const upstream = http.createServer(async (request, response) => {
@@ -85,8 +122,9 @@ try {
     if (Date.now() >= deadline || child.exitCode !== null) throw Error('Meter did not start');
     await setTimeout(10);
   }
-  const {meter_url} = JSON.parse(fs.readFileSync(config.services));
-  const forwarded = await new Promise((resolve, reject) => {
+  const {meter_url, provider_url, worker_pids} = JSON.parse(fs.readFileSync(config.services));
+  let forwarded;
+  for (let index = 0; index < 8; index++) forwarded = await new Promise((resolve, reject) => {
     const request = http.request(meter_url+'/bucket/task/encoded%20name', {
       method:'PUT', headers:{'content-length':'12', 'constructor':'request-data',
         'proxy-connection':'close'}, agent:false}, async response => {
@@ -102,9 +140,14 @@ try {
     request.setTimeout(10000, () => request.destroy(Error('Wire test deadline')));
     request.end('request body');
   });
+  const snapshot = await (await fetch(provider_url)).json();
   child.kill('SIGTERM');
   const [exitCode] = await stopped;
   const final = JSON.parse(fs.readFileSync(config.final));
+  deepStrictEqual(snapshot, Object.fromEntries(Object.keys(snapshot).map(key => [key, final[key]])));
+  if (worker_pids.length !== 2 || final.workers.some(value => value.counter.requests === 0)) {
+    throw Error('Both workers must contribute to the canonical totals');
+  }
   process.stdout.write(JSON.stringify({received, forwarded, exitCode,
     requests:final.requests, requestBytes:final.request_body_bytes,
     responseBytes:final.response_body_bytes, active:final.active_requests_at_shutdown}));
@@ -128,7 +171,7 @@ try {
                          "constructor":"request-data", "proxyConnection":None},
             "forwarded": {"status":200, "body":"response body", "cookies":["first=1", "second=2"],
                           "constructor":"response-data", "proxyConnection":None},
-            "exitCode":0, "requests":1, "requestBytes":12, "responseBytes":13, "active":0})
+        "exitCode":0, "requests":8, "requestBytes":96, "responseBytes":104, "active":0})
 
 
 if __name__ == "__main__":

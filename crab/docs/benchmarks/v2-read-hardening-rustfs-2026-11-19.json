@@ -15555,5 +15555,331 @@
     "clippy_log_sha256": "7c21ae3ef8331e21cf9bd645c0722f1be614035ef9ccc9332562115c064f2d35",
     "current_image_id": "sha256:a7e3ca05e6dc9b6a02dfe398536d37aaf92f4803b3a2a47ee057a09c220d000c",
     "next_qualification": "Prospective current-binary20pair/ninecase/360trial calibration: allfourresident workers currentcode, active currentRoot pair bothlabels. Othercurrentpair idle on independentRoot. Allfour original RSS/resource and27timing gates active; subsequent fulloriginalR0/current comparison stillrequired. Earlier R0timing27pass/fourRSSfailure retained."
+  },
+  "allocator_source_native_recovery_ci": {
+    "status": "passed",
+    "scope": "Current allocator source runtime/recovery CI; performance/resource calibration remains separate and pending.",
+    "head_revision": "bdb1935ebc1623966483581213554153ab52f791",
+    "merge_revision": "27929b171eecef4b448691344738aca66422f8c9",
+    "runtime_source": "598679bf5339f973aaa6d02f4a1720e7724bba43",
+    "workflow_run": 44843993752,
+    "kubernetes_artifact_id": 14683194069,
+    "artifact_sha256": "f21af806c3d67f246ec03ee2887e523baf428f9f8f6903ad2bfaefd03ea666ad",
+    "verified_receipt": {
+      "source_revision": "27929b171eecef4b448691344738aca66422f8c9",
+      "image_id": "sha256:35578b8bf768a42a8b4c7afdc9d92020c651fbb41c68f128f2b4f4b54166578a",
+      "platform": "linux/amd64",
+      "native_pods": 3,
+      "sigkill_exit_code": 137,
+      "submission_replay": true,
+      "empty_cache_restore": true,
+      "git_refs_verified": true,
+      "large_file": {
+        "bytes": 3221225472,
+        "sha256": "3fcfae43ead6763e06fe8337f50a50d718411b050549302690dd6a68f2326057",
+        "activity_timeout_seconds": 1800,
+        "stock_git_lfs": true,
+        "crash_clone": true,
+        "restored_clone": true,
+        "range_resume": true
+      },
+      "root_copy": {
+        "objects": 199,
+        "bytes": 3221416611,
+        "sha256_and_metadata_verified": true,
+        "elapsed_seconds": 52.089563104000035
+      }
+    }
+  },
+  "current_allocator_http_repeatability": {
+    "status": "failed_http_calibration",
+    "combined_acceptance": false,
+    "runtime_source": "598679bf5339f973aaa6d02f4a1720e7724bba43",
+    "scope": "Prospective identical-current-binary A/A; all four resident workers use allocator fix, one current two-replica Root pair serves both labels. Earlier R0 failures retained. Full original-R0/current source comparison remains gated.",
+    "artifact_root": "/Volumes/Workspace/CrabData/read-hardening-8144/linux-http-allocator-calibration-20",
+    "report_sha256": "763c00acb7dfacb7ad9bdf5d045cc1cb0ec0834141cbeac3dc94608af693f4c8",
+    "profile_sha256": "9a4e89e5d3ff2a418d811c404d85a00c13ef04a48932607b4b7ad57bca55978a",
+    "summary_sha256": "6a2599e19ec85d7900cabbc83be024301ce3c710c467e0c58f80f7fd7e536325",
+    "trials": 360,
+    "fixed_pairs_per_case": 20,
+    "cases": 9,
+    "timing_cells": 27,
+    "failed_timing_cells": 13,
+    "measured_successes": 11820423,
+    "all_phase_checks": {
+      "records": 14242852,
+      "git_verified_successes": 14191446,
+      "oracle_mismatches": 0
+    },
+    "resources": {
+      "baseline": {
+        "failures": [],
+        "peak_rss_bytes": [
+          145448960,
+          99606528
+        ],
+        "rss_plateau": "passed",
+        "admitted_work_drained": true
+      },
+      "candidate": {
+        "failures": [],
+        "peak_rss_bytes": [
+          138293248,
+          140771328
+        ],
+        "rss_plateau": "passed",
+        "admitted_work_drained": true
+      }
+    },
+    "exit_codes": {
+      "baseline": {
+        "a": 0,
+        "b": 0
+      },
+      "candidate": {
+        "a": 0,
+        "b": 0
+      }
+    },
+    "candidate_shutdown_proofs_passed": true,
+    "full_source_comparison_launched": false,
+    "cells": [
+      {
+        "case": "small-1",
+        "workload": "preview",
+        "p95_ratio": 1.070283014388385,
+        "throughput_ratio": 1.0473879620910702,
+        "gate": "passed"
+      },
+      {
+        "case": "distinct-8",
+        "workload": "preview-distinct",
+        "p95_ratio": 1.0273809698962968,
+        "throughput_ratio": 0.9644602662996014,
+        "gate": "passed"
+      },
+      {
+        "case": "distinct-8",
+        "workload": "history",
+        "p95_ratio": 1.0323206408247494,
+        "throughput_ratio": 0.9644368091132725,
+        "gate": "passed"
+      },
+      {
+        "case": "distinct-8",
+        "workload": "raw-distinct",
+        "p95_ratio": 1.0280109862779168,
+        "throughput_ratio": 0.964467903773994,
+        "gate": "passed"
+      },
+      {
+        "case": "distinct-8",
+        "workload": "blame-distinct",
+        "p95_ratio": 1.0233223844800923,
+        "throughput_ratio": 0.9644479866091995,
+        "gate": "passed"
+      },
+      {
+        "case": "distinct-8",
+        "workload": "late-history",
+        "p95_ratio": 1.0411948176311279,
+        "throughput_ratio": 0.9643798007013782,
+        "gate": "passed"
+      },
+      {
+        "case": "small-16",
+        "workload": "preview",
+        "p95_ratio": 1.0505692110662443,
+        "throughput_ratio": 0.9819896158334885,
+        "gate": "passed"
+      },
+      {
+        "case": "mixed-16",
+        "workload": "preview",
+        "p95_ratio": 1.332678790460302,
+        "throughput_ratio": 0.9026768549109836,
+        "gate": "failed"
+      },
+      {
+        "case": "mixed-16",
+        "workload": "history",
+        "p95_ratio": 1.3213200246243182,
+        "throughput_ratio": 0.9024726530437901,
+        "gate": "failed"
+      },
+      {
+        "case": "mixed-16",
+        "workload": "raw",
+        "p95_ratio": 1.326906210564518,
+        "throughput_ratio": 0.9023772579425515,
+        "gate": "failed"
+      },
+      {
+        "case": "mixed-16",
+        "workload": "blame",
+        "p95_ratio": 1.3370487840485517,
+        "throughput_ratio": 0.9024274515170497,
+        "gate": "failed"
+      },
+      {
+        "case": "mixed-16",
+        "workload": "late-history",
+        "p95_ratio": 1.3311932157766377,
+        "throughput_ratio": 0.9026295971509979,
+        "gate": "failed"
+      },
+      {
+        "case": "distinct-16",
+        "workload": "preview-distinct",
+        "p95_ratio": 0.9935139840250604,
+        "throughput_ratio": 1.042362702726538,
+        "gate": "passed"
+      },
+      {
+        "case": "distinct-16",
+        "workload": "history",
+        "p95_ratio": 0.9909941317741034,
+        "throughput_ratio": 1.0424040028565058,
+        "gate": "passed"
+      },
+      {
+        "case": "distinct-16",
+        "workload": "raw-distinct",
+        "p95_ratio": 0.9943586587486337,
+        "throughput_ratio": 1.0423295284802554,
+        "gate": "passed"
+      },
+      {
+        "case": "distinct-16",
+        "workload": "blame-distinct",
+        "p95_ratio": 0.9869709987588433,
+        "throughput_ratio": 1.042478538208604,
+        "gate": "passed"
+      },
+      {
+        "case": "distinct-16",
+        "workload": "late-history",
+        "p95_ratio": 0.9963455025864314,
+        "throughput_ratio": 1.0423554432156203,
+        "gate": "passed"
+      },
+      {
+        "case": "small-32",
+        "workload": "preview",
+        "p95_ratio": 1.0870452616270279,
+        "throughput_ratio": 0.9629669227364033,
+        "gate": "passed"
+      },
+      {
+        "case": "expensive-32",
+        "workload": "blame",
+        "p95_ratio": 1.2960304994143323,
+        "throughput_ratio": 0.933732659831178,
+        "gate": "failed"
+      },
+      {
+        "case": "expensive-32",
+        "workload": "late-history",
+        "p95_ratio": 1.2873307259746056,
+        "throughput_ratio": 0.9334972002507753,
+        "gate": "failed"
+      },
+      {
+        "case": "expensive-32",
+        "workload": "raw",
+        "p95_ratio": 1.2984384821878407,
+        "throughput_ratio": 0.9335422953768024,
+        "gate": "failed"
+      },
+      {
+        "case": "small-64",
+        "workload": "preview",
+        "p95_ratio": 0.9681340459924154,
+        "throughput_ratio": 0.9751154994501717,
+        "gate": "passed"
+      },
+      {
+        "case": "mixed-64",
+        "workload": "preview",
+        "p95_ratio": 1.2565813577655054,
+        "throughput_ratio": 0.9270104348480969,
+        "gate": "failed"
+      },
+      {
+        "case": "mixed-64",
+        "workload": "history",
+        "p95_ratio": 1.2447268245926333,
+        "throughput_ratio": 0.9272840884651997,
+        "gate": "failed"
+      },
+      {
+        "case": "mixed-64",
+        "workload": "raw",
+        "p95_ratio": 1.2545986459045375,
+        "throughput_ratio": 0.9271478586054793,
+        "gate": "failed"
+      },
+      {
+        "case": "mixed-64",
+        "workload": "blame",
+        "p95_ratio": 1.2558770957337526,
+        "throughput_ratio": 0.9277274757946133,
+        "gate": "failed"
+      },
+      {
+        "case": "mixed-64",
+        "workload": "late-history",
+        "p95_ratio": 1.2605394852566916,
+        "throughput_ratio": 0.9269428634283275,
+        "gate": "failed"
+      }
+    ],
+    "native_source_closure": {
+      "status": "passed_unchanged_native_compiled_source",
+      "scope": "Native fixed100 and independent-growth reader input closure remains source-equivalent after process allocator fix. The allocator and added lock edge belong only to the separately composed crab-server executable. No claim that old native binaries exercise the server allocator.",
+      "current_revision": "bdb1935ebc1623966483581213554153ab52f791",
+      "native_compiled_revision": "a5d6015e2c81a6a7cc4770361a1e20bb4193267a",
+      "native_build_receipt_sha256": "88ec8d8ed8dc24b60966f773a511fa92c7899b3051f0581bd6eb78436caee3fc",
+      "checked_inputs": 554,
+      "unchanged_inputs": 553,
+      "local_dependency_roots": [
+        "crates/crab-auth",
+        "crates/crab-cache",
+        "crates/crab-cache-store",
+        "crates/crab-coordination",
+        "crates/crab-diff",
+        "crates/crab-git",
+        "crates/crab-lfs",
+        "crates/crab-metadata",
+        "crates/crab-read",
+        "crates/crab-remote",
+        "crates/crab-remote-git",
+        "crates/crab-storage",
+        "crates/crab-types",
+        "crates/crab-write",
+        "crates/crab-xet"
+      ],
+      "changed_input": "Cargo.lock",
+      "only_changed_lock_package": "crab-server0.1.0: existing tikv-jemallocator dependency edge added; all package versions/sources/checksums unchanged",
+      "server_reachable_from_native_normal_build_dev_graph": false,
+      "dependency_tree_sha256": "c09ffac3b9885667b0e9e397383eab11dcdf408035d396c85f95cd8fe24becf8"
+    }
+  },
+  "parallel_provider_relay_contract": {
+    "status": "passed_wire_accounting_not_timing_acceptance",
+    "source_sha256": "09c8b348b4a6f443f9b04ca49a49153d9d8841b82c77ab50db3259c9023b0bf4",
+    "workers": 2,
+    "logical_endpoints": 1,
+    "focused_tests": 3,
+    "offline_counter_cases": 828,
+    "wire_test_requests": 8,
+    "live_checks": 16,
+    "actual_signed_sdk_attempts": 21,
+    "canonical_live_counters_equal": true,
+    "worker_loss_exits_nonzero_without_partial_totals": true,
+    "all_owned_workers_reaped": true,
+    "live_report_sha256": "fab7d27a4349bd013fb535ef8e8b98f576cbf35fbae2f19e2a7569d0c9e06762",
+    "capacity_and_http_repeatability": "pending",
+    "numeric_gates_changed": false
   }
 }
