@@ -86,10 +86,13 @@ integrate them sequentially. R6 is not required for accepting the first wave.
    reduces actual RustFS GETs per HTTP attempt by 4.6% under mixed load and 8.6%
    at 32 clients across twelve fixed trials, with zero Git mismatches. This
    isolates storage-work reduction; latency acceptance remains open. A new
-   360-trial same-executable check retains all 27 symmetric timing bands and
-   all four resource checks. The full original R0/current comparison, including
-   both 600-second soaks, follows only after that check passes. Exact journals,
-   percentiles, workloads and numeric thresholds remain unchanged.
+   360-trial same-executable check completes with all four resource checks
+   passed, but 20 of 27 timing bands failed in both directions. All 10,320,137
+   measured Git comparisons pass. The full original R0/current comparison,
+   including both 600-second soaks, remains gated. The next prospective check
+   uses the existing fifteen-quiet-seconds pair protocol with independent
+   compiler monitoring; interrupted pairs and every error remain retained.
+   Exact journals, percentiles, workloads and numeric thresholds stay unchanged.
 3. **Independent growth and minimum-resource lifecycle:** all 200 original growth
    timing controls pass across 2,000 fresh processes and 20,000 canonical Git
    queries, with 1 CPU / 1 GiB / no additional swap per reader. The naturally
@@ -97,9 +100,11 @@ integrate them sequentially. R6 is not required for accepting the first wave.
    allocator runtime's ARM64 process/three-node recovery CI passes, including
    3-GiB stock Git LFS recovery and full Root copy verification. The corrected
    session source passes all 54 two-replica RustFS smoke checks and actual
-   minimum-resource Linux OAuth/allocator probes. All 553 non-lock native-reader
+   minimum-resource Linux OAuth/allocator probes. Its 81-minute HTTP check also
+   passes all four RSS/resource gates, drain, clean exits and both active
+   durability proofs; peak process RSS is 148.4 MiB. All 553 non-lock native-reader
    inputs remain identical after these server-only changes. Sustained current
-   HTTP resource/timing acceptance and current-source broad CI remain separate
+   HTTP timing acceptance and current-source broad CI remain separate
    from the earlier passing native and recovery proofs.
 
 Persistent attribution and new range formats remain conditional R6 decisions.
@@ -1133,8 +1138,13 @@ Twelve fixed source-comparison trials verify 629,758 request records and
 per HTTP attempt fall 2.0092 → 1.9174 under mixed load and 2.0071 → 1.8354 at
 32 clients; provider counters include background traffic. All four resource
 checks, exits and both active durability proofs pass. The new fixed 360-trial
-same-executable calibration and full combined-source timing/resource acceptance
-remain separate requirements.
+same-executable calibration completes all 360 trials with all four resource
+checks passed, four clean exits and complete active-replica durability. Its
+10,320,137 measured successes have zero errors; all 12,455,701 phase records
+retain 12,400,428 successful Git checks with zero mismatches. Twenty of the
+27 identical-code timing bands fail in both directions. All failures remain;
+the full source comparison does not start. A prospective run reuses the existing
+quiet-pair admission protocol without changing the timing or resource gates.
 
 1. Record source revision/patch, binary hashes, compiler/profile, fixture
    identities, backend/region, quotas, and report schema. Readiness/capture,
