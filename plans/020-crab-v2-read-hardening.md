@@ -1122,7 +1122,7 @@ completes eighteen provider trials and 162 HTTP trials, but establishes no
 consistent benefit under ongoing host activity; the simpler canonical relay is
 retained. Queued session-check batching reduces a deterministic pair from four
 storage reads to two while closing enrollment before either fresh read starts.
-The old-source regression fails; all forty focused authentication tests and
+The old-source regression fails; all 41 focused authentication tests and
 strict release all-target Clippy pass. Production builds and live RustFS proof
 for this source remain required before the next combined-source comparison.
 

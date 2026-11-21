@@ -1115,3 +1115,12 @@ all-target server Clippy and formatting pass. Unit checks use cached release
 dependencies and an unoptimized test crate; production binaries use the normal
 optimized release profile. Production builds, live RustFS verification and
 combined timing acceptance for this source remain pending.
+
+A further regression exposes shared mutable runtime-session state: after one
+caller publishes a result, a newer verification can revoke that cached value
+while another participant waits. The delayed participant must preserve newer
+durable state. This regression fails before separating immutable verified
+fields from per-lookup runtime revocation flags. All 41 authentication tests and
+strict release all-target Clippy pass with the corrected ownership. Existing
+cleanup policy is preserved. Production builds/live checks for this corrected
+source are recorded separately.

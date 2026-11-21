@@ -181,3 +181,41 @@ async fn the_registry_does_not_retain_an_abandoned_verification() {
         );
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_revoked_shared_result_cannot_delete_newer_session_state() {
+    let Fixture {
+        auth,
+        session,
+        store,
+        reads,
+        ..
+    } = fixture(1).await;
+    auth.sessions.lock().await.clear();
+    let mut first = Box::pin(auth.load_session(session.session_key));
+    let mut late = Box::pin(auth.load_session(session.session_key));
+    assert!(futures_util::poll!(first.as_mut()).is_pending());
+    assert!(futures_util::poll!(late.as_mut()).is_pending());
+    reads.release.add_permits(1);
+    let initial = first.await.unwrap();
+    let path = auth.state.path("sessions", &session.session_key);
+    let (body, _) = store.get_with_etag_bounded(&path, 64 * 1024).await.unwrap();
+    let mut current: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    current["csrf"] = serde_json::json!("replacement");
+    store
+        .put_overwrite(
+            &path,
+            bytes::Bytes::from(serde_json::to_vec(&current).unwrap()),
+        )
+        .await
+        .unwrap();
+    let refreshed = auth.load_session(session.session_key).await.unwrap();
+    assert!(!initial.active() && refreshed.active());
+    let _ = late.await;
+    assert_eq!(
+        auth.load_session(session.session_key)
+            .await
+            .map(|session| session.csrf.clone()),
+        Some("replacement".to_owned())
+    );
+}

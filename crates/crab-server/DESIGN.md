@@ -220,8 +220,10 @@ creation response.
 
 Queued checks for one session can share verification before its storage reads
 start. Enrollment closes under the same lock before reading the durable parent
-and identity marker; later arrivals start fresh checks. A bounded weak registry
-lets the last departing caller cancel unfinished work. Batch size is opportunistic.
+and identity marker; later arrivals start fresh checks. Shared results contain
+immutable verified fields; runtime session revocation flags keep their existing
+per-lookup/cache ownership. A bounded weak registry lets the last departing
+caller cancel unfinished work. Batch size is opportunistic.
 
 Logout deletes the durable parent session. Subsequent browser and Git-token
 requests therefore fail on every replica even when token objects remain for

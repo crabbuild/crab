@@ -157,7 +157,16 @@ struct AuthState {
     pending_checks: Arc<Mutex<HashMap<Key, futures_util::future::WeakShared<SessionCheck>>>>,
 }
 
-type SessionCheck = futures_util::future::BoxFuture<'static, Option<Arc<Session>>>;
+// Shared verification must not publish a mutable cache entry. A newer check
+// can revoke a cached session while an earlier batch still has waiting callers.
+struct VerifiedSession {
+    identity: Identity,
+    groups: Vec<String>,
+    csrf: String,
+    expires_at: u64,
+}
+
+type SessionCheck = futures_util::future::BoxFuture<'static, Option<Arc<VerifiedSession>>>;
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
