@@ -462,7 +462,7 @@ supply its supposedly corrupted header; its original assertions remain.
 Strict combined-feature all-target Clippy also passes. Native-platform coverage
 and the failed 1,024-file push rerun remain required.
 
-The native Cellar 0.1.1 dependency pins rusqlite 0.40.2, which links bundled
+The native Cellar 0.1.2 dependency pins rusqlite 0.40.2, which links bundled
 SQLite 3.53.2 through libsqlite3-sys 0.38.2. The workspace disables rusqlite's
 default features and explicitly retains statement caching and checked unsigned
 integer conversions. Inspection propagates the fallible progress-handler setup

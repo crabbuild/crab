@@ -624,7 +624,7 @@ with open(run / "commands.log", "w") as log:
             env=env,
         )
         runtime = json.loads(status)
-        assert runtime["runtime"] == "cellar" and runtime["version"] == "0.1.1"
+        assert runtime["runtime"] == "cellar" and runtime["version"] == "0.1.2"
         selected_runtime = json.loads(subprocess.check_output(
             server_command("cells", "runtime"), text=True, env=env
         ))

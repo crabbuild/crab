@@ -1,6 +1,6 @@
 # Native Cellar runtime
 
-`crab-server` embeds the published [`cellar-main = 0.1.1`](https://github.com/crabbuild/cellar/releases/tag/v0.1.1)
+`crab-server` embeds the published [`cellar-main = 0.1.2`](https://github.com/crabbuild/cellar/releases/tag/v0.1.2)
 SDK, imported as `cellar`. Product HTTP authorization, Git publication,
 repository policy, and the catalog remain Crab responsibilities. The workspace
 matches Cellar's exact `rusqlite = 0.40.2` dependency, disables its default
@@ -12,8 +12,10 @@ The linked libsqlite3-sys 0.38.2 bundles SQLite 3.53.2, which includes the upstr
 write/checkpoint connections. This removes the old SQLite dependency blocker;
 provider, fault, resource and cross-platform qualification gates remain. The
 upgrade uses published crates without dependency patches or vendored changes.
+Cellar 0.1.2 serializes reload capture with checkpoint work so reload retains
+only the database position already uploaded to object storage.
 Update and drain all peers together; mixed Cellar runtime versions and rollback
-against state written by 0.1.1 are not qualified.
+against state written by 0.1.2 are not qualified.
 
 ## Execution and persistence
 
@@ -81,7 +83,7 @@ capture proved `Hydrator::step` dereferenced a null `sqlite3_vfs_find` result af
 the registration was removed. Stored-state preparation cannot repair that live
 lifetime race. Foreground VFS reads retain their own reader/hydration references;
 paged handoff keeps the complete L0 chain and epoch GC pins that chain while the
-fill is disabled. The 0.1.1 hydrator still looks up the VFS inside its page loop.
+fill is disabled. The 0.1.2 hydrator still looks up the VFS inside its page loop.
 Re-enable background hydration only after an SDK lifetime fix is released and
 the ten-repository process qualification passes with it.
 
@@ -331,10 +333,10 @@ the catalog ready.
 
 Cellar objects live below `storage.url/.crab/cellar/`. Crab's Azure URL shape is
 `az://ACCOUNT/CONTAINER/PREFIX`; the adapter passes the account separately to
-Cellar. S3 endpoint precedence follows `crab-storage`. Cellar 0.1.1 requires
+Cellar. S3 endpoint precedence follows `crab-storage`. Cellar 0.1.2 requires
 path-style S3 for explicit endpoints and virtual-hosted S3 otherwise; contradictory
 addressing settings fail configuration. Azure authentication remains subject to
-Cellar 0.1.1's supported credential families and public-cloud restrictions.
+Cellar 0.1.2's supported credential families and public-cloud restrictions.
 
 Label choices read the existing canonical SQL catalog and validate its records;
 they do not introduce a second label store or a new index format. Native query
@@ -594,7 +596,7 @@ Supported `cells` commands are `capacity --json [--live]`, `metrics`,
 `status --owner OWNER --name NAME`, `runtime`, `initialize-directory`, and
 `rebuild-search --owner OWNER --name NAME`. Repository create/adopt and
 storage probing remain available. Reads use the authoritative Cell owner. `local_disk_limit_bytes` bounds the
-Crab staging envelope; Cellar 0.1.1 has no injected shared disk budget. Place its
+Crab staging envelope; Cellar 0.1.2 has no injected shared disk budget. Place its
 cache on a filesystem with an appropriate quota. Physical free-space checks
 still guard staging admission. Staging reserves 20% of available disk
 (at least 1 GiB) for filesystem and native cache headroom and requires space for
@@ -654,6 +656,12 @@ stored fields. Unindexed sessions are rejected and must sign in again.
 Revocation visits only the identity index; it never scans old session records.
 
 ## Verification
+
+The 0.1.2 upgrade passes five native mutation/receipt/restart tests, two
+private-mTLS routing/handoff tests and 13 CLI tests on macOS. The server binary
+builds and `cells runtime` reports 0.1.2. The embedded UI build and Rustfmt also
+pass. Native provider/process, Kubernetes, fault, resource and cross-platform
+qualification remain CI release gates for the upgraded runtime.
 
 The 0.1.1 upgrade passed focused macOS verification on 2026-11-07: five native
 receipt/restart tests, two mTLS routing/handoff tests, 104 cache hint/private-VFS/
