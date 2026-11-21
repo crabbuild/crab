@@ -96,13 +96,32 @@ unfinished context. Keep the Tokio runtime alive until cleanup finishes.
 
 ### Caches and aggregate budgets
 
-Object storage is the correctness authority. Runtime memory is disposable and
-bounded. Exact locators avoid pack scans, range reads avoid complete pack
+Object storage is the correctness authority. Runtime cache maps are disposable
+and bounded; their byte caps exclude caller-held results and active buffers.
+Exact locators avoid pack scans, range reads avoid complete pack
 downloads, immutable reads are single-flight, and object, parsed-object,
 negative, blame-result, and pack-index caches are byte bounded. There are no
 mutable-manifest or duplicate inventory caches in this runtime. Cached blame results remain subject to the current operation's
 logical, traversal, history, blame, and response limits; a warm result cannot
 bypass a stricter caller budget.
+
+The separate resident owner admits buffer capacity, parsed indexes/commits/trees,
+managed blame/comparison results and CPU working sets before allocation. Its cap
+is existing cache byte caps plus twice the default maximum object size; the
+default is 417 MiB. Returned managed results and bound `Bytes` retain charges
+through their final owner, including after LRU eviction. Disposable caches are
+evicted on admission pressure; remaining active ownership yields an immediate
+typed limit error. Caller-owned DTO copies and dependency/process overhead remain
+outside this envelope. Measure RSS separately instead of equating it to either
+the resident counter or cache-map estimates.
+
+`shared_blame` owns a complete semantic flight, with a separate producer context
+and locator. Keys include snapshot/path/semantics and all immutable object limits.
+All fourteen dimensions replay to late waiters; exhausted waiters detach without
+constraining survivors or imposing the first waiter's/default limits. Maximum
+depth never sums across joins. There are at most 256 live leases and distinct
+retained budget ledgers per flight. Departed ledgers remain until retirement so
+the same operation cannot double-pay work when it rejoins.
 
 Immediate directory pages seek their exact pinned cursor in Git order and
 materialize only the selected children. Entry admission counts returned children
@@ -114,6 +133,17 @@ missed before a previous producer finished must reuse its verified result.
 Index-size producers publish their cache entry before retiring the shared task.
 Object checksum/size checks and operation budgets still apply to late cache hits;
 parsed indexes are reused only within the caller's source-byte limit.
+
+Every retained-object hit still verifies its checksum. Hashes of at least
+64 KiB, Myers comparisons, packed decoding and index parsing use the runtime's
+same bounded CPU admission and tracked blocking work. The actual worker owns
+its permit and input buffers until it exits, even if the awaiting caller drops.
+Cancellation stops pending admission; runtime shutdown drains admitted workers.
+The job count bounds concurrent work, not total RSS or caller-retained memory.
+
+Point-read delta traversal uses an explicit bounded stack rather than recursively
+polling child futures. Physical base selection, alternate-representation search,
+depth limits, each encoded CRC and every reconstructed Git hash remain checked.
 
 Batch scheduling is lazy and its concurrency is the minimum of origin,
 blocking-decode, object-flight, logical-object, storage-request, fetched-byte,
@@ -231,16 +261,38 @@ worker; listing and prefix seeking retain canonical Git order. History,
 diff, blame, archive, storage, inflation, and response work have independent
 aggregate limits.
 
-History remains authoritative over verified raw commit objects. When the
-released manifest names a version-1 split commit graph, open bounds the complete graph
-to 128 MiB, verifies every descriptor and layer Blake3 identity, validates
-stable ordinals, parent closure, corrected generations, and the exact manifest
-generation/pack/digest tuple. A snapshot uses it only while each positional
-parent list exactly matches the corresponding raw commit; missing or corrupt
-acceleration falls back to raw parent order and can never hide a reachable
-commit. First-parent path cursors carry the next verified raw parent, so later
-pages do not replay newer commits. A matching complete graph groups bounded raw
-commit and tree reads for range coalescing without becoming the history authority.
+History remains authoritative over verified raw commit objects. New first-parent
+history continuations carry the next verified raw parent, so resumed pages do
+page-sized work without replaying newer commits. Page size may change between
+requests. Version-1 history cursors from `v2.0.0-alpha.1` retain their offset
+meaning, prefix traversal, and work charges. All-parent and ahead-history
+continuations retain their existing traversal and codec.
+
+Authenticate imported cursors before using a resume OID: the public byte decoder
+checks syntax only. The HTTP server issues UUID-bound signed envelopes; the SDK
+retains private identity/generation/commit wrappers. A copied opaque cursor cannot
+select an arbitrary new snapshot or mode at these boundaries. The released HTTP
+envelope reader remains available for previously issued tokens. Replicas and
+restarts use the existing shared authentication state-key file; rotation rejects
+old signatures. Unconfigured loopback instances retain process-local keys.
+
+When a matching graph is available, first-parent history groups bounded raw
+commit reads and verifies every positional parent list and adjacent first parent.
+Missing or inconsistent selected graph records fail explicitly. Without the
+optional graph, raw first-parent reads still resume directly. Speculation obeys
+page, object, and remaining response limits. Parsed commit batching retains the
+same source-size checks as point reads; raw object cache hits still verify their
+checksums. Verified parsed commits continue through their raw parents without
+selecting graph records again; those hits still charge logical objects, history
+commits and response bytes. First-parent path cursors also carry the next
+verified raw parent.
+The existing path/all-parent graph paths retain their raw-parent fallback when
+acceleration is absent or inconsistent; this continuation change does not alter
+their ordering or fallback policy.
+
+The released version-1 manifest graph still bounds the complete graph to 128 MiB
+and verifies descriptor/layer Blake3 identities, stable ordinals, parent closure,
+corrected generations, and the exact generation/pack/digest tuple at open.
 
 Capsule browse graph version 3 uses descriptor and dependency-page reads instead
 of loading the complete graph. Its captured ref roots authorize exact ancestor-set
@@ -376,6 +428,12 @@ Git blobs, Crab pointers, and Git LFS pointers but never materializes pointer
 targets. Logical Crab content belongs to `crab-read`; verified LFS content
 belongs to `crab-lfs`. Service composition decides whether those representations
 are enabled.
+
+Metadata and small pointer reads reuse the same identity/generation-scoped
+object cache and verify its complete Git hash before returning. Metadata can
+report a cached object's size above the caller's decoded-body limit without
+reconstruction; pointer-body reads retain their existing size ceiling. A cold
+metadata miss still verifies the selected encoded entries and delta sizes.
 
 An unborn default branch does not imply an empty repository: `RepositoryRefs.head`
 is `None` and `unborn_head` carries the symbolic branch name even when tags or other

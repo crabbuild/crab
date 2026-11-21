@@ -83,6 +83,13 @@ where
         self.entries.len()
     }
 
+    pub(crate) fn clear(&mut self) -> usize {
+        let evicted = self.entries.len();
+        self.entries = HashMap::new();
+        self.resident_bytes = 0;
+        evicted
+    }
+
     pub(crate) fn resident_bytes(&self) -> usize {
         self.resident_bytes
     }

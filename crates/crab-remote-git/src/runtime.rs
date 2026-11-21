@@ -20,8 +20,11 @@ use crate::reader::{GitObject, PackIndex, PackedEntry};
 use crate::{
     AnnotatedTag, Blame, CacheOutcome, Commit, Error, GeneratedPack, GeneratedPackCacheKey,
     GitPath, MetricKind, MetricObservation, NoopMetrics, RemoteGitMetrics, RepositoryIdentity,
-    RepositoryOptions, Result,
+    RepositoryOptions, Result, SharedBlame,
 };
+
+pub(crate) const PACK_WINDOW_BYTES: u64 = 4 * 1024;
+const PACK_WINDOWS: usize = 8;
 
 /// Process-wide bounds for remote Git caches and execution admission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +90,18 @@ pub struct RuntimeSnapshot {
     pub active_pack_index_flights: usize,
     /// Distinct generated response packs currently executing.
     pub active_generated_pack_flights: usize,
+    /// Distinct complete attribution computations currently executing.
+    pub active_blame_flights: usize,
+    /// Callers currently attached to complete attribution computations.
+    pub active_blame_waiters: usize,
+    /// Admitted buffer/result capacity, including owners outside cache maps.
+    pub resident_bytes: usize,
+    /// Maximum admitted buffer/result capacity for this runtime.
+    pub resident_capacity_bytes: usize,
+    /// Admitted blocking CPU jobs, retained until their actual worker exits.
+    pub active_cpu_jobs: usize,
+    /// Admitted object-store operations currently in progress.
+    pub active_origin_operations: usize,
 }
 
 impl Default for RuntimeOptions {
@@ -149,13 +164,14 @@ pub(crate) struct PackIndexCacheKey {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-enum BlameCacheKey {
+pub(crate) enum BlameCacheKey {
     Attribution {
         identity: RepositoryIdentity,
         generation: u64,
         commit: ObjectId,
         path: GitPath,
         semantics: u32,
+        object_limits: crate::ObjectLimits,
     },
     Comparison {
         identity: RepositoryIdentity,
@@ -166,12 +182,12 @@ enum BlameCacheKey {
 }
 
 // Increment when first-parent attribution or Myers line-slider semantics change.
-const BLAME_SEMANTICS: u32 = 1;
+pub(crate) const BLAME_SEMANTICS: u32 = 1;
 
 #[derive(Clone)]
 enum BlameCacheValue {
     Attribution(CachedBlame),
-    Comparison(Arc<Vec<(usize, usize)>>),
+    Comparison(LineMatches),
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -235,13 +251,15 @@ impl ObjectCacheKey {
     }
 }
 
+pub(crate) type LineMatches = Arc<crate::resident::Retained<Vec<(usize, usize)>>>;
+
 type SharedGeneratedPackResult = std::result::Result<Arc<GeneratedPack>, Arc<Error>>;
 type GeneratedPackFlight = watch::Receiver<Option<SharedGeneratedPackResult>>;
 
 #[derive(Clone)]
 enum ParsedObject {
     Commit {
-        value: Arc<Commit>,
+        value: crate::objects::SharedCommit,
         source_bytes: u64,
     },
     Tag {
@@ -249,14 +267,14 @@ enum ParsedObject {
         source_bytes: u64,
     },
     Tree {
-        value: Arc<Vec<RawTreeEntry>>,
+        value: crate::objects::SharedTree,
         source_bytes: u64,
     },
 }
 
 #[derive(Clone)]
 pub(crate) struct CachedBlame {
-    pub(crate) value: Arc<Blame>,
+    pub(crate) value: SharedBlame,
     pub(crate) usage: BudgetUsage,
 }
 
@@ -274,6 +292,7 @@ pub struct RemoteGitRuntime {
     pack_index_flight_admission: Arc<Semaphore>,
     generated_pack_flight_admission: Arc<Semaphore>,
     object_cache: Mutex<BoundedLru<ObjectCacheKey, Arc<GitObject>>>,
+    pack_windows: Mutex<BoundedLru<(PackIndexCacheKey, u64), bytes::Bytes>>,
     pack_index_cache: Mutex<BoundedLru<PackIndexCacheKey, Arc<PackIndex>>>,
     parsed_cache: Mutex<BoundedLru<ObjectCacheKey, ParsedObject>>,
     blame_cache: Mutex<BoundedLru<BlameCacheKey, BlameCacheValue>>,
@@ -286,9 +305,64 @@ pub struct RemoteGitRuntime {
     negative_cache: Mutex<BoundedLru<ObjectCacheKey, Instant>>,
     tasks: TaskTracker,
     shutdown: CancellationToken,
+    pub(crate) resident: Arc<crate::resident::ResidentBudget>,
+    blame_flights: Arc<ReadFlights<BlameCacheKey, SharedBlame>>,
+    blame_flight_admission: Arc<Semaphore>,
 }
 
 impl RemoteGitRuntime {
+    /// Reserve payload capacity before allocating a retained read buffer.
+    ///
+    /// Evicts disposable cached owners on pressure, then rejects immediately if
+    /// active owners still exhaust the runtime envelope; no output wait queue is created.
+    pub async fn reserve_bytes(&self, bytes: usize) -> Result<crate::resident::ReadReservation> {
+        match self.resident.reserve(bytes) {
+            Ok(reservation) => return Ok(reservation),
+            Err(error) if !self.resident.fits(bytes) => return Err(error),
+            Err(_) => {}
+        }
+        // Disposable cached owners must not strand capacity needed for a new
+        // allocation. Active caller/worker owners survive eviction and remain
+        // charged; reject immediately if they still exhaust the envelope.
+        let mut evicted = self.object_cache.lock().await.clear();
+        evicted += self.pack_windows.lock().await.clear();
+        evicted += self.pack_index_cache.lock().await.clear();
+        evicted += self.parsed_cache.lock().await.clear();
+        evicted += self.blame_cache.lock().await.clear();
+        if evicted > 0 {
+            self.metrics.record(MetricObservation {
+                kind: MetricKind::Cache,
+                value: evicted as u64,
+                duration: None,
+                outcome: None,
+                cache: Some(CacheOutcome::Eviction),
+            });
+        }
+        self.resident.reserve(bytes)
+    }
+
+    pub(crate) async fn read_blame_singleflight<F, Fut>(
+        self: &Arc<Self>,
+        key: BlameCacheKey,
+        operation: &crate::OperationContext,
+        work: F,
+    ) -> Result<SharedBlame>
+    where
+        F: FnOnce(CancellationToken, Arc<crate::budget::SharedBudget>) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<SharedBlame>> + Send + 'static,
+    {
+        self.blame_flights
+            .run(
+                self,
+                key,
+                operation.cancellation(),
+                operation.budget(),
+                &self.blame_flight_admission,
+                work,
+            )
+            .await
+    }
+
     /// Apply this runtime's request, byte and cancellation admission to metadata capture.
     pub fn read_admission(
         self: &Arc<Self>,
@@ -311,6 +385,20 @@ impl RemoteGitRuntime {
     }
 
     fn from_validated(options: RuntimeOptions, metrics: Arc<dyn RemoteGitMetrics>) -> Self {
+        let cached = [
+            options.max_object_cache_bytes,
+            options.max_pack_index_cache_bytes,
+            options.max_parsed_cache_bytes,
+            options.max_blame_cache_bytes,
+            options.max_negative_cache_bytes,
+        ]
+        .into_iter()
+        .fold(0usize, usize::saturating_add);
+        let transient = usize::try_from(crate::ObjectLimits::default().max_object_bytes)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(2);
+        let resident =
+            crate::resident::ResidentBudget::new(cached.saturating_add(transient), metrics.clone());
         Self {
             options,
             metrics,
@@ -324,6 +412,12 @@ impl RemoteGitRuntime {
             object_cache: Mutex::new(BoundedLru::new(
                 options.max_object_cache_entries,
                 options.max_object_cache_bytes,
+            )),
+            pack_windows: Mutex::new(BoundedLru::new(
+                options.max_object_cache_entries.min(PACK_WINDOWS),
+                options
+                    .max_object_cache_bytes
+                    .min(PACK_WINDOWS * PACK_WINDOW_BYTES as usize),
             )),
             pack_index_cache: Mutex::new(BoundedLru::new(
                 options.max_pack_index_cache_entries,
@@ -352,6 +446,9 @@ impl RemoteGitRuntime {
             )),
             tasks: TaskTracker::new(),
             shutdown: CancellationToken::new(),
+            resident,
+            blame_flights: ReadFlights::new(),
+            blame_flight_admission: Arc::new(Semaphore::new(options.max_decode_concurrency)),
         }
     }
 
@@ -398,6 +495,13 @@ impl RemoteGitRuntime {
                 .saturating_add(self.pack_index_flights.len().await)
                 .saturating_add(self.pack_index_batch_flights.len().await),
             active_generated_pack_flights: self.generated_pack_flights.lock().await.len(),
+            active_blame_flights: self.blame_flights.len().await,
+            active_blame_waiters: self.blame_flights.waiters().await,
+            resident_bytes: self.resident.used(),
+            resident_capacity_bytes: self.resident.maximum(),
+            active_cpu_jobs: self.options.max_decode_concurrency - self.decode.available_permits(),
+            active_origin_operations: self.options.max_origin_concurrency
+                - self.origin.available_permits(),
         }
     }
 
@@ -439,6 +543,42 @@ impl RemoteGitRuntime {
         self.tasks.spawn_blocking(task)
     }
 
+    /// Run bounded CPU work, retaining admission until the actual worker exits.
+    ///
+    /// Jobs must cooperate with cancellation for prompt interruption. Dropping
+    /// the waiter never detaches the worker from runtime shutdown or capacity.
+    pub async fn run_cpu<F, T>(&self, cancellation: &CancellationToken, task: F) -> Result<T>
+    where
+        F: FnOnce() -> Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let lifetime = self.tasks.token();
+        let permit = self.decode_permit(cancellation).await?;
+        let cancellation = cancellation.clone();
+        let observation =
+            crate::metrics::WorkObservation::new(self.metrics.clone(), MetricKind::CpuJob, 1);
+        let (result, permit, observation, lifetime) = self
+            .spawn_blocking(move || {
+                let result = if cancellation.is_cancelled() {
+                    Err(Error::Cancelled)
+                } else {
+                    let result = task();
+                    if cancellation.is_cancelled() && result.is_ok() {
+                        Err(Error::Cancelled)
+                    } else {
+                        result
+                    }
+                };
+                // A detached JoinHandle may retain its output after the worker
+                // exits. Drop output before admission and tracker ownership.
+                (result, permit, observation, lifetime)
+            })
+            .await
+            .map_err(|source| Error::DecodeTask { source })?;
+        drop((permit, observation, lifetime));
+        result
+    }
+
     pub(crate) fn origin_admission(&self) -> Arc<Semaphore> {
         Arc::clone(&self.origin)
     }
@@ -460,6 +600,7 @@ impl RemoteGitRuntime {
     ) -> Result<OwnedSemaphorePermit> {
         tokio::select! {
             biased;
+            () = self.shutdown.cancelled() => Err(Error::Cancelled),
             () = cancellation.cancelled() => Err(Error::Cancelled),
             permit = Arc::clone(&self.decode).acquire_owned() => permit.map_err(|_| Error::Cancelled),
         }
@@ -491,6 +632,42 @@ impl RemoteGitRuntime {
         self.object_cache.lock().await.remove(key);
     }
 
+    pub(crate) async fn cached_pack_window(
+        &self,
+        identity: &RepositoryIdentity,
+        pack_id: MerkleHash,
+        start: u64,
+        end: u64,
+    ) -> Option<bytes::Bytes> {
+        let offset = start / PACK_WINDOW_BYTES * PACK_WINDOW_BYTES;
+        let key = (PackIndexCacheKey::new(identity, pack_id), offset);
+        let bytes = self.pack_windows.lock().await.get(&key)?;
+        let start = usize::try_from(start.checked_sub(offset)?).ok()?;
+        let end = usize::try_from(end.checked_sub(offset)?).ok()?;
+        bytes.get(start..end)?;
+        Some(bytes.slice(start..end))
+    }
+
+    pub(crate) async fn cache_pack_window(
+        &self,
+        identity: &RepositoryIdentity,
+        pack_id: MerkleHash,
+        offset: u64,
+        bytes: bytes::Bytes,
+    ) {
+        // Delta walks alternate between nearby bases and distant selected
+        // entries. Small bounded windows retain both without large overreads.
+        let key = (PackIndexCacheKey::new(identity, pack_id), offset);
+        let length = bytes.len();
+        self.pack_windows.lock().await.insert(key, bytes, length);
+    }
+
+    pub(crate) async fn discard_pack_windows(&self) {
+        // All windows are disposable. Clear them together so no cached bytes
+        // from a corrupt pack survive a later independent retry.
+        self.pack_windows.lock().await.clear();
+    }
+
     pub(crate) async fn exact_miss_is_cached(&self, key: &ObjectCacheKey) -> bool {
         let now = Instant::now();
         let mut cache = self.negative_cache.lock().await;
@@ -508,7 +685,7 @@ impl RemoteGitRuntime {
         &self,
         key: &ObjectCacheKey,
         max_source_bytes: u64,
-    ) -> Option<Arc<Commit>> {
+    ) -> Option<crate::objects::SharedCommit> {
         match self.parsed_cache.lock().await.get(key) {
             Some(ParsedObject::Commit {
                 value,
@@ -518,21 +695,8 @@ impl RemoteGitRuntime {
         }
     }
 
-    pub(crate) async fn cached_blame(
-        &self,
-        identity: &RepositoryIdentity,
-        generation: u64,
-        commit: ObjectId,
-        path: &GitPath,
-    ) -> Option<CachedBlame> {
-        let key = BlameCacheKey::Attribution {
-            identity: identity.clone(),
-            generation,
-            commit,
-            path: path.clone(),
-            semantics: BLAME_SEMANTICS,
-        };
-        let value = match self.blame_cache.lock().await.get(&key) {
+    pub(crate) async fn cached_blame(&self, key: &BlameCacheKey) -> Option<CachedBlame> {
+        let value = match self.blame_cache.lock().await.get(key) {
             Some(BlameCacheValue::Attribution(value)) => Some(value),
             _ => None,
         };
@@ -552,22 +716,13 @@ impl RemoteGitRuntime {
 
     pub(crate) async fn insert_blame(
         &self,
-        identity: RepositoryIdentity,
-        generation: u64,
-        commit: ObjectId,
-        path: GitPath,
-        value: Arc<Blame>,
+        key: BlameCacheKey,
+        value: SharedBlame,
         usage: BudgetUsage,
     ) {
         let bytes = blame_bytes(&value);
         let evicted = self.blame_cache.lock().await.insert(
-            BlameCacheKey::Attribution {
-                identity,
-                generation,
-                commit,
-                path,
-                semantics: BLAME_SEMANTICS,
-            },
+            key,
             BlameCacheValue::Attribution(CachedBlame { value, usage }),
             bytes,
         );
@@ -587,7 +742,7 @@ impl RemoteGitRuntime {
         identity: &RepositoryIdentity,
         parent: ObjectId,
         current: ObjectId,
-    ) -> Option<Arc<Vec<(usize, usize)>>> {
+    ) -> Option<LineMatches> {
         let key = BlameCacheKey::Comparison {
             identity: identity.clone(),
             parent,
@@ -607,7 +762,7 @@ impl RemoteGitRuntime {
         identity: RepositoryIdentity,
         parent: ObjectId,
         current: ObjectId,
-        matches: Arc<Vec<(usize, usize)>>,
+        matches: LineMatches,
     ) {
         let bytes = std::mem::size_of_val(matches.as_ref()).saturating_add(
             matches
@@ -629,7 +784,7 @@ impl RemoteGitRuntime {
     pub(crate) async fn insert_commit(
         &self,
         key: ObjectCacheKey,
-        commit: Arc<Commit>,
+        commit: crate::objects::SharedCommit,
         source_bytes: u64,
     ) {
         let bytes = commit_bytes(&commit);
@@ -678,7 +833,7 @@ impl RemoteGitRuntime {
         &self,
         key: &ObjectCacheKey,
         max_source_bytes: u64,
-    ) -> Option<Arc<Vec<RawTreeEntry>>> {
+    ) -> Option<crate::objects::SharedTree> {
         match self.parsed_cache.lock().await.get(key) {
             Some(ParsedObject::Tree {
                 value,
@@ -691,7 +846,7 @@ impl RemoteGitRuntime {
     pub(crate) async fn insert_tree(
         &self,
         key: ObjectCacheKey,
-        tree: Arc<Vec<RawTreeEntry>>,
+        tree: crate::objects::SharedTree,
         source_bytes: u64,
     ) {
         let bytes = tree_bytes(&tree);
@@ -1053,7 +1208,7 @@ fn commit_bytes(commit: &Commit) -> usize {
         )
 }
 
-fn blame_bytes(blame: &Blame) -> usize {
+pub(crate) fn blame_bytes(blame: &Blame) -> usize {
     std::mem::size_of::<Blame>()
         .saturating_add(blame.path.as_bytes().len())
         .saturating_add(
@@ -1152,7 +1307,10 @@ mod tests {
         let other = RepositoryIdentity::new("memory", "other", 1).unwrap();
         let parent = ObjectId::empty_blob(gix_hash::Kind::Sha1);
         let current = ObjectId::empty_tree(gix_hash::Kind::Sha1);
-        let matches = Arc::new(vec![(0, 1)]);
+        let matches = Arc::new(crate::resident::Retained::new(
+            vec![(0, 1)],
+            runtime.resident.reserve(128).unwrap(),
+        ));
         runtime
             .insert_blame_comparison(identity.clone(), parent, current, matches.clone())
             .await;
@@ -1176,6 +1334,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn evicted_results_remain_charged_until_their_last_owner_exits() {
+        let runtime = RemoteGitRuntime {
+            resident: crate::resident::ResidentBudget::new(4096, Arc::new(NoopMetrics)),
+            ..RemoteGitRuntime::default()
+        };
+        let identity = RepositoryIdentity::new("memory", "repo", 1).unwrap();
+        let parent = ObjectId::empty_blob(gix_hash::Kind::Sha1);
+        let current = ObjectId::empty_tree(gix_hash::Kind::Sha1);
+        let retained = Arc::new(crate::resident::Retained::new(
+            vec![(0, 0)],
+            runtime.resident.reserve(1024).unwrap(),
+        ));
+        runtime
+            .insert_blame_comparison(identity.clone(), parent, current, retained.clone())
+            .await;
+        assert!(matches!(
+            runtime.reserve_bytes(3000).await,
+            Err(Error::LimitExceeded {
+                limit: "resident read bytes",
+                ..
+            })
+        ));
+        assert!(
+            runtime
+                .cached_blame_comparison(&identity, parent, current)
+                .await
+                .is_none()
+        );
+        assert_eq!(runtime.resident.used(), 1152);
+        drop(retained);
+        let bytes = runtime
+            .reserve_bytes(3000)
+            .await
+            .unwrap()
+            .bind(Bytes::from(vec![0; 3000]))
+            .unwrap();
+        let clone = bytes.clone();
+        drop(bytes);
+        assert_eq!(runtime.resident.used(), 3128);
+        drop(clone);
+        assert_eq!(runtime.resident.used(), 0);
+    }
+
+    #[tokio::test]
     async fn blame_results_and_comparisons_share_one_capacity() {
         let runtime = Arc::new(
             RemoteGitRuntime::new(
@@ -1192,23 +1394,39 @@ mod tests {
         let current = ObjectId::empty_tree(gix_hash::Kind::Sha1);
         let path = GitPath::new(Bytes::from_static(b"file")).unwrap();
         runtime
-            .insert_blame_comparison(identity.clone(), parent, current, Arc::new(vec![(0, 0)]))
+            .insert_blame_comparison(
+                identity.clone(),
+                parent,
+                current,
+                Arc::new(crate::resident::Retained::new(
+                    vec![(0, 0)],
+                    runtime.resident.reserve(128).unwrap(),
+                )),
+            )
             .await;
+        let key = BlameCacheKey::Attribution {
+            identity: identity.clone(),
+            generation: 1,
+            commit: current,
+            path: path.clone(),
+            semantics: BLAME_SEMANTICS,
+            object_limits: crate::ObjectLimits::default(),
+        };
         let usage =
             crate::budget::OperationBudget::new(crate::OperationLimits::default(), runtime.clone())
                 .usage()
                 .await;
         runtime
             .insert_blame(
-                identity.clone(),
-                1,
-                current,
-                path.clone(),
-                Arc::new(Blame {
-                    commit: current,
-                    path: path.clone(),
-                    ranges: Vec::new(),
-                }),
+                key.clone(),
+                SharedBlame::new(
+                    Blame {
+                        commit: current,
+                        path: path.clone(),
+                        ranges: Vec::new(),
+                    },
+                    runtime.resident.reserve(1024).unwrap(),
+                ),
                 usage,
             )
             .await;
@@ -1220,14 +1438,17 @@ mod tests {
         );
         assert_eq!(runtime.snapshot().await.blame_entries, 1);
         runtime
-            .insert_blame_comparison(identity.clone(), parent, current, Arc::new(vec![(0, 0)]))
+            .insert_blame_comparison(
+                identity.clone(),
+                parent,
+                current,
+                Arc::new(crate::resident::Retained::new(
+                    vec![(0, 0)],
+                    runtime.resident.reserve(128).unwrap(),
+                )),
+            )
             .await;
-        assert!(
-            runtime
-                .cached_blame(&identity, 1, current, &path)
-                .await
-                .is_none()
-        );
+        assert!(runtime.cached_blame(&key).await.is_none());
         assert_eq!(runtime.snapshot().await.blame_entries, 1);
     }
 
@@ -1304,7 +1525,14 @@ mod tests {
         let oid = ObjectId::empty_tree(gix_hash::Kind::Sha1);
         let key = ObjectCacheKey::new(&identity, 1, oid);
         runtime
-            .insert_tree(key.clone(), Arc::new(Vec::new()), 10)
+            .insert_tree(
+                key.clone(),
+                Arc::new(crate::resident::Retained::new(
+                    Vec::new(),
+                    runtime.resident.reserve(128).unwrap(),
+                )),
+                10,
+            )
             .await;
 
         assert!(runtime.cached_tree(&key, 9).await.is_none());
@@ -1331,6 +1559,7 @@ mod tests {
                 .insert_pack_index(
                     key.clone(),
                     Arc::new(PackIndex {
+                        _reservation: None,
                         object_ids: Vec::new(),
                         pack_offsets: Vec::new(),
                         crc32: Vec::new(),
@@ -1349,6 +1578,7 @@ mod tests {
             .insert_pack_index(
                 keys[2].clone(),
                 Arc::new(PackIndex {
+                    _reservation: None,
                     object_ids: Vec::new(),
                     pack_offsets: Vec::new(),
                     crc32: Vec::new(),
@@ -1467,6 +1697,7 @@ mod tests {
         let identity = RepositoryIdentity::new("provider", "repository", 1).unwrap();
         let key = PackIndexCacheKey::new(&identity, crab_xet::hash::compute_data_hash(b"index"));
         let index = Arc::new(PackIndex {
+            _reservation: None,
             object_ids: Vec::new(),
             pack_offsets: Vec::new(),
             crc32: Vec::new(),

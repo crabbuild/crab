@@ -6,7 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use crab_remote_git::{
-    RemoteGitRepository, RemoteGitRuntime, RepositoryIdentity, RepositoryOptions,
+    MetricKind, MetricObservation, RemoteGitMetrics, RemoteGitRepository, RemoteGitRuntime,
+    RepositoryIdentity, RepositoryOptions,
 };
 use crab_storage::{
     StorageObservation, StorageObserver, StorageOperation, StorageOutcome, Store, StoreLayout,
@@ -26,6 +27,8 @@ pub struct Measurements {
     written_bytes: AtomicU64,
     active: AtomicU64,
     comparison_work: [AtomicU64; 2],
+    cache_verification: [AtomicU64; 2],
+    blame_producers: AtomicU64,
     decoded_blocks: [AtomicU64; 8],
     decoded_bytes: [AtomicU64; 8],
 }
@@ -37,6 +40,8 @@ struct Snapshot {
     read_bytes: u64,
     written_bytes: u64,
     comparison_work: [u64; 2],
+    cache_verification: [u64; 2],
+    blame_producers: u64,
     decoded_blocks: [u64; 8],
     decoded_bytes: [u64; 8],
 }
@@ -117,6 +122,26 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for DecodeLayer {
     }
 }
 
+impl RemoteGitMetrics for Measurements {
+    fn record(&self, observation: MetricObservation) {
+        match observation.kind {
+            MetricKind::CacheVerification => {
+                self.cache_verification[0].fetch_add(observation.value, Ordering::Relaxed);
+                self.cache_verification[1].fetch_add(
+                    observation
+                        .duration
+                        .map_or(0, |duration| duration.as_micros() as u64),
+                    Ordering::Relaxed,
+                );
+            }
+            MetricKind::BlameProducer if observation.duration.is_none() => {
+                self.blame_producers.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+}
+
 impl Measurements {
     pub fn install(self: &Arc<Self>) -> Result<()> {
         tracing_subscriber::registry()
@@ -140,6 +165,11 @@ impl Measurements {
                 .comparison_work
                 .each_ref()
                 .map(|counter| counter.load(Ordering::Relaxed)),
+            cache_verification: self
+                .cache_verification
+                .each_ref()
+                .map(|counter| counter.load(Ordering::Relaxed)),
+            blame_producers: self.blame_producers.load(Ordering::Relaxed),
             decoded_blocks: self
                 .decoded_blocks
                 .each_ref()
@@ -213,6 +243,11 @@ impl Measurements {
                 "backend_read_bytes": after.read_bytes.saturating_sub(before.read_bytes),
                 "backend_written_bytes": after.written_bytes.saturating_sub(before.written_bytes),
                 "active_backend_operations": self.active.load(Ordering::Relaxed),
+                "cache_verification": {
+                    "bytes": after.cache_verification[0].saturating_sub(before.cache_verification[0]),
+                    "elapsed_us": after.cache_verification[1].saturating_sub(before.cache_verification[1]),
+                },
+                "blame_producers_started": after.blame_producers.saturating_sub(before.blame_producers),
                 "decoded_index_blocks": decoded,
                 "blame_comparisons": {
                     "misses": after.comparison_work[0].saturating_sub(before.comparison_work[0]),
@@ -272,6 +307,37 @@ mod tests {
     use object_store::ObjectStoreExt;
     use object_store::memory::InMemory;
     use object_store::path::Path;
+
+    #[test]
+    fn checksum_bytes_and_producer_starts_do_not_count_completion_twice() {
+        let counters = Measurements::default();
+        for (kind, value, duration) in [
+            (
+                MetricKind::CacheVerification,
+                53,
+                Some(std::time::Duration::from_micros(59)),
+            ),
+            (MetricKind::BlameProducer, 1, None),
+            (
+                MetricKind::BlameProducer,
+                1,
+                Some(std::time::Duration::from_micros(61)),
+            ),
+        ] {
+            counters.record(MetricObservation {
+                kind,
+                value,
+                duration,
+                outcome: None,
+                cache: None,
+            });
+        }
+        let snapshot = counters.snapshot();
+        assert_eq!(
+            (snapshot.cache_verification, snapshot.blame_producers),
+            ([53, 59], 1)
+        );
+    }
 
     #[test]
     fn decoder_counts_ignore_unrelated_events() {

@@ -1,4 +1,5 @@
 import { emptyPullRollup } from "../fixtures";
+import type { FilePreview } from "@/lib/contracts";
 import { conversationPage } from "../conversation";
 import type { DiscussionAuthor } from "@/components/discussion/author";
 import { expect, type Locator, type Page } from "@playwright/test";
@@ -324,7 +325,7 @@ export async function mockPullRequest(
           },
         },
       });
-    if (path === "/api/repos/team/project/file") {
+    if (path === "/api/repos/team/project/file-preview") {
       expect(url.searchParams.get("rev")).toBe(lifecycle.head);
       expect(url.searchParams.get("path_hex")).toBe(pathHex);
       return route.fulfill({
@@ -333,9 +334,10 @@ export async function mockPullRequest(
           size: 12,
           mode: "100644",
           classification: "OrdinaryGit",
-          text: "New content\n",
-          text_truncated: false,
-        },
+          preview: { state: "inline", text: "New content\n" },
+          commit: lifecycle.head,
+          generation: 1,
+        } satisfies FilePreview,
       });
     }
     if (

@@ -1,4 +1,8 @@
+mod read;
+
 use std::collections::HashSet;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 use bytes::Bytes;
 use crab_storage::{ETag, StorageError};
@@ -111,11 +115,6 @@ pub struct MembershipAuditEvent {
     pub occurred_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct CatalogSchema {
-    schema_version: u32,
 }
 
 impl Default for CatalogDocument {
@@ -274,15 +273,27 @@ impl CatalogRecord {
 }
 
 #[derive(Clone)]
+struct CachedCatalog {
+    document: Arc<CatalogDocument>,
+    etag: ETag,
+    size: u64,
+}
+
+#[derive(Clone)]
 pub struct CatalogStore {
     root: StorageRoot,
     path: object_store::path::Path,
+    latest: Arc<RwLock<Option<CachedCatalog>>>,
 }
 
 impl CatalogStore {
     pub(crate) fn new(root: StorageRoot) -> Self {
         let path = root.path(CATALOG_RELATIVE_PATH);
-        Self { root, path }
+        Self {
+            root,
+            path,
+            latest: Arc::new(RwLock::new(None)),
+        }
     }
 
     /// Open the catalog configured for this server deployment.
@@ -293,47 +304,6 @@ impl CatalogStore {
 
     pub(crate) fn root(&self) -> &StorageRoot {
         &self.root
-    }
-
-    pub async fn load(&self) -> Result<(CatalogDocument, Option<ETag>), CatalogError> {
-        let (body, etag) = match self
-            .root
-            .store
-            .get_with_etag_bounded(&self.path, MAX_CATALOG_BYTES)
-            .await
-        {
-            Ok(value) => value,
-            Err(StorageError::NotFound { .. }) => return Ok((CatalogDocument::default(), None)),
-            Err(error) => return Err(error.into()),
-        };
-        let schema: CatalogSchema = serde_json::from_slice(&body)?;
-        if schema.schema_version != SCHEMA_VERSION {
-            return Err(CatalogError::Invalid("unsupported catalog schema"));
-        }
-        let document: CatalogDocument = serde_json::from_slice(&body)?;
-        document.validate(&self.root)?;
-        Ok((document, Some(etag)))
-    }
-
-    pub async fn membership(
-        &self,
-        owner: &str,
-        name: &str,
-    ) -> Result<MembershipSnapshot, CatalogError> {
-        let (document, _) = self.load().await?;
-        let record = document
-            .repositories
-            .iter()
-            .find(|record| {
-                record.owner.eq_ignore_ascii_case(owner) && record.name.eq_ignore_ascii_case(name)
-            })
-            .ok_or(CatalogError::NotFound)?;
-        Ok(MembershipSnapshot {
-            repository_id: record.id,
-            revision: document.version,
-            members: record.members.clone(),
-            groups: record.groups.clone(),
-        })
     }
 
     pub async fn create_repository(

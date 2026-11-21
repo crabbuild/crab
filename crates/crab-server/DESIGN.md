@@ -218,6 +218,13 @@ creation response.
 | Git token | Never beyond its browser session | Any replica resolves token then durable parent session |
 | Cursor signature key | Operator rotated | Every replica reads the same mounted 32-byte-or-longer secret |
 
+Queued checks for one session can share verification before its storage reads
+start. Enrollment closes under the same lock before reading the durable parent
+and identity marker; later arrivals start fresh checks. Shared results contain
+immutable verified fields; runtime session revocation flags keep their existing
+per-lookup/cache ownership. A bounded weak registry lets the last departing
+caller cancel unfinished work. Batch size is opportunistic.
+
 Logout deletes the durable parent session. Subsequent browser and Git-token
 requests therefore fail on every replica even when token objects remain for
 bounded lifecycle collection. A hashed `(issuer, subject)` reverse index points

@@ -21,9 +21,9 @@ CLOSURE = [
     "crab-types", "crab-xet", "crab-git", "crab-auth", "crab-storage",
     "crab-auth-store", "crab-coordination", "crab-cache", "crab-cache-store",
     "crab-diff", "crab-lfs", "crab-metadata", "crab-remote-git", "crab-read",
-    "crab-write", "crab-remote", "crab-staging", "crab-sdk",
+    "crab-write", "crab-remote", "crab-staging", "crab-workflow", "crab-sdk",
 ]
-PROFILES = ["minimal", "remote-files", "local", "service"]
+PROFILES = ["minimal", "remote-files", "results", "local", "service"]
 COMPILE_FAIL_PROBES = [
     (
         "minimal-hides-runtime",

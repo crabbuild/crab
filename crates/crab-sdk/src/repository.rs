@@ -48,7 +48,8 @@ pub struct Repository {
 
 #[derive(Clone)]
 enum RepositoryBackend {
-    Remote(crate::client::RemoteRepository),
+    // Generations are immutable; facade clones share captured store state.
+    Remote(std::sync::Arc<crate::client::RemoteRepository>),
     #[cfg(feature = "local")]
     Local(crate::LocalRepository),
 }
@@ -56,7 +57,7 @@ enum RepositoryBackend {
 impl Repository {
     pub(crate) fn from_remote(owner: crate::client::RemoteRepository) -> Self {
         Self {
-            backend: RepositoryBackend::Remote(owner),
+            backend: RepositoryBackend::Remote(std::sync::Arc::new(owner)),
         }
     }
 

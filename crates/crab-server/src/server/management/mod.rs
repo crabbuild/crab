@@ -1,8 +1,8 @@
 //! Private management routes, health checks, and runtime metrics.
 
 use super::{
-    APP_ADMISSION_CAPACITY, GIT_ADMISSION_CAPACITY, MAINTENANCE_ADMISSION_CAPACITY,
-    READ_ADMISSION_CAPACITY, Server,
+    APP_ADMISSION_CAPACITY, BULK_READ_CAPACITY, GIT_ADMISSION_CAPACITY,
+    MAINTENANCE_ADMISSION_CAPACITY, READ_ADMISSION_CAPACITY, Server,
 };
 use crate::Result;
 use axum::{
@@ -134,6 +134,9 @@ async fn integrity_status(State(server): State<Arc<Server>>) -> Response {
 }
 
 async fn render_metrics(State(server): State<Arc<Server>>) -> Response {
+    server
+        .metrics
+        .update_git_cache_occupancy(server.runtime.snapshot().await);
     let mut body = server.metrics.render(crate::metrics::RuntimeSnapshot {
         repositories: server.repositories.len(),
         catalog_healthy: server.catalog_healthy.load(Ordering::Acquire),
@@ -144,12 +147,14 @@ async fn render_metrics(State(server): State<Arc<Server>>) -> Response {
             server.transfer_admission.available_permits(),
             server.app_admission.available_permits(),
             server.maintenance_admission.available_permits(),
+            server.bulk_reads.available_permits(),
         ],
         admission_capacity: [
             READ_ADMISSION_CAPACITY,
             GIT_ADMISSION_CAPACITY,
             APP_ADMISSION_CAPACITY,
             MAINTENANCE_ADMISSION_CAPACITY,
+            BULK_READ_CAPACITY,
         ],
     });
     if let Some(services) = &server.cell_services {

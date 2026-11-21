@@ -91,6 +91,10 @@ Use `crab-workflow` for parsing, planning, hashing, and state contracts. The
 product command owns user-facing repository discovery and chooses when to
 invoke the executor, scheduler, or status renderer.
 
+The SDK's optional `results` feature re-exports workflow result contracts and
+readers. This library is part of the SDK's package closure; external consumers
+verify those exports against the packaged crates without workspace paths.
+
 For `crab run --json` and `--jsonl`, stdout contains only structured results
 and events. Child stdout and stderr stream to the CLI's stderr; stage log files,
 stderr failure tails, and declared stdout capture are preserved independently.

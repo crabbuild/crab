@@ -69,8 +69,9 @@ async fn read_only_open_never_repairs() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn snapshot_reads_obey_operation_limits() {
-    let fixture = support::read_fixture::ReadFixture::new().await;
-    let client = &fixture.client;
+    // A tiny pack fits one read-ahead window and legitimately uses one request.
+    // The negative I/O cases need a cold entry that exceeds that window.
+    let original = large_git_bytes();
     for limits in [
         crab_sdk::operation::ReadLimits {
             max_storage_requests: 1,
@@ -81,21 +82,93 @@ async fn snapshot_reads_obey_operation_limits() {
             ..Default::default()
         },
     ] {
+        let fixture = support::read_fixture::ReadFixture::with_original(original.clone()).await;
         let options = crab_sdk::operation::Options::default()
             .with_limits(limits)
             .unwrap()
             .with_timeout(std::time::Duration::from_secs(1))
             .unwrap();
-        let error = fixture
+        let result = fixture
             .snapshot
             .read_blob(fixture.path.clone())
             .with_options(crab_sdk::operation::ReadOptions::default().with_operation(options))
-            .await
-            .err()
-            .unwrap();
-        assert_eq!(error.kind(), crab_sdk::ErrorKind::LimitExceeded);
+            .await;
+        fixture.client.close().await.unwrap();
+        assert_eq!(
+            result.unwrap_err().kind(),
+            crab_sdk::ErrorKind::LimitExceeded
+        );
     }
-    client.close().await.unwrap();
+}
+
+fn large_git_bytes() -> bytes::Bytes {
+    (0..65_536_u64)
+        .flat_map(|index| *blake3::hash(&index.to_le_bytes()).as_bytes())
+        .collect::<Vec<_>>()
+        .into()
+}
+
+#[tokio::test]
+async fn warm_snapshot_reads_fit_tight_origin_io_limits() {
+    let fixture = support::read_fixture::ReadFixture::with_original(large_git_bytes()).await;
+    fixture
+        .snapshot
+        .read_blob(fixture.path.clone())
+        .await
+        .unwrap();
+    let options = crab_sdk::operation::ReadOptions::default()
+        .with_limits(crab_sdk::operation::ReadLimits {
+            max_storage_requests: 1,
+            max_fetched_bytes: 1,
+            ..Default::default()
+        })
+        .unwrap();
+    let result = fixture
+        .snapshot
+        .read_blob(fixture.path.clone())
+        .with_options(options)
+        .await;
+    fixture.client.close().await.unwrap();
+    assert_eq!(result.unwrap(), fixture.original);
+}
+
+#[tokio::test]
+async fn snapshot_semantic_limits_cover_cold_and_warm_reads() {
+    for warm in [false, true] {
+        for limits in [
+            crab_sdk::operation::ReadLimits {
+                max_logical_objects: 1,
+                ..Default::default()
+            },
+            crab_sdk::operation::ReadLimits {
+                max_response_bytes: 1,
+                ..Default::default()
+            },
+        ] {
+            let fixture = support::read_fixture::ReadFixture::new().await;
+            if warm {
+                fixture
+                    .snapshot
+                    .read_blob(fixture.path.clone())
+                    .await
+                    .unwrap();
+            }
+            let result = fixture
+                .snapshot
+                .read_blob(fixture.path.clone())
+                .with_options(
+                    crab_sdk::operation::ReadOptions::default()
+                        .with_limits(limits)
+                        .unwrap(),
+                )
+                .await;
+            fixture.client.close().await.unwrap();
+            assert_eq!(
+                result.unwrap_err().kind(),
+                crab_sdk::ErrorKind::LimitExceeded
+            );
+        }
+    }
 }
 
 #[tokio::test]

@@ -14,6 +14,12 @@ export type Session = { authenticated: boolean, mode: SessionMode, user: Session
 export type BranchProtection = { branch: string, required_approvals: number, required_checks: Array<string>, };
 
 // prettier-ignore
+export type FilePreviewState = { "state": "inline", text: string, } | { "state": "omitted_size" } | { "state": "binary" } | { "state": "unsupported_encoding" };
+
+// prettier-ignore
+export type FilePreview = { oid: string, size: number, mode: string, classification: string, commit: string, generation: number, preview: FilePreviewState, };
+
+// prettier-ignore
 export type RepositoryAccess = "read" | "triage" | "write" | "admin";
 
 // prettier-ignore

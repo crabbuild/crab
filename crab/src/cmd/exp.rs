@@ -2553,51 +2553,13 @@ fn write_checkpoint_reset_decision(
         let _ = fs::remove_file(&temporary);
         return Err(CrabError::Io(error));
     }
-    if let Err(error) = replace_checkpoint_reset_file(&temporary, &path) {
+    // Native replacement rejects a directory leaf without moving it aside;
+    // a failed decision write must leave the original checkpoint state intact.
+    if let Err(error) = fs::rename(&temporary, &path) {
         let _ = fs::remove_file(&temporary);
-        return Err(error);
+        return Err(CrabError::Io(error));
     }
     Ok(())
-}
-
-fn replace_checkpoint_reset_file(temporary: &Path, destination: &Path) -> Result<()> {
-    #[cfg(not(windows))]
-    {
-        fs::rename(temporary, destination).map_err(CrabError::Io)
-    }
-
-    #[cfg(windows)]
-    {
-        let parent = destination
-            .parent()
-            .ok_or_else(|| CrabError::Configuration {
-                key: "exp reset".to_owned(),
-                origin: format!("reset path has no parent: {}", destination.display()),
-            })?;
-        let backup = parent.join(format!(
-            ".reset.json.backup-{}-{}",
-            std::process::id(),
-            uuid::Uuid::now_v7()
-        ));
-        let had_destination = match fs::symlink_metadata(destination) {
-            Ok(_) => true,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-            Err(error) => return Err(CrabError::Io(error)),
-        };
-        if had_destination {
-            fs::rename(destination, &backup).map_err(CrabError::Io)?;
-        }
-        if let Err(error) = fs::rename(temporary, destination) {
-            if had_destination {
-                let _ = fs::rename(&backup, destination);
-            }
-            return Err(CrabError::Io(error));
-        }
-        if had_destination && let Err(error) = fs::remove_file(&backup) {
-            tracing::warn!(path = %backup.display(), error = %error, "checkpoint reset backup cleanup deferred");
-        }
-        Ok(())
-    }
 }
 
 fn apply_experiment_snapshot_to(

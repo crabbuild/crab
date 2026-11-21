@@ -1607,6 +1607,9 @@ DELETED_METADATA_REEXPORT_ADAPTER_FORBIDDEN_PATTERNS = {
     "use crab::metadata::file_index_lookup",
 }
 WORKFLOW_MODULE_ALLOWED_NORMAL_PACKAGES = {
+    # Results rendering and opt-in schema derive stay with their contract owner.
+    "base64",
+    "schemars",
     "blake3",
     "bytes",
     "crab-coordination",
@@ -1769,8 +1772,9 @@ PRIVATE_INTERNAL_PACKAGES = {
     "crab-server",
     "crab-s3-gateway",
     "crab-vfs",
-    "crab-workflow",
 }
+# Results exposes workflow reader contracts through the SDK, so Cargo must
+# resolve the workflow library from the same package closure as other features.
 PUBLISHED_LIBRARY_PACKAGES = {
     "crab-auth",
     "crab-auth-store",
@@ -1788,6 +1792,7 @@ PUBLISHED_LIBRARY_PACKAGES = {
     "crab-staging",
     "crab-storage",
     "crab-types",
+    "crab-workflow",
     "crab-write",
     "crab-xet",
 }
@@ -1859,7 +1864,7 @@ WORKSPACE_DEPENDENCY_POLICY = {
         "dev": {"crab-cache", "crab-cache-store", "crab-storage"},
     },
     "crab-sdk": {
-        "normal": {"crab-auth", "crab-auth-store", "crab-cache", "crab-cache-store", "crab-coordination", "crab-git", "crab-lfs", "crab-metadata", "crab-read", "crab-remote", "crab-remote-git", "crab-staging", "crab-storage", "crab-types", "crab-write", "crab-xet"},
+        "normal": {"crab-auth", "crab-auth-store", "crab-cache", "crab-cache-store", "crab-coordination", "crab-git", "crab-lfs", "crab-metadata", "crab-read", "crab-remote", "crab-remote-git", "crab-staging", "crab-storage", "crab-types", "crab-workflow", "crab-write", "crab-xet"},
         "dev": {"crab-git", "crab-xet"},
     },
     "crab-write": {"normal": {"crab-coordination", "crab-types", "crab-git", "crab-metadata", "crab-remote-git", "crab-storage", "crab-xet"}},
@@ -1873,6 +1878,7 @@ WORKSPACE_DEPENDENCY_POLICY = {
             "crab-read",
             "crab-remote-git",
             "crab-storage",
+            "crab-workflow",
             "crab-write",
             "crab-remote",
         },
@@ -2264,6 +2270,11 @@ def check_package_release_policy(metadata: dict) -> bool:
             )
         if package["publish"] == []:
             violations.append(f"{name}: SDK dependency must be publishable")
+        # Cargo resolves optional and build dependencies while packaging, even
+        # when the consumer disables the feature that uses them.
+        for dependency in package["dependencies"]:
+            if dependency_kind(dependency) != "dev" and dependency["name"] in PRIVATE_INTERNAL_PACKAGES:
+                violations.append(f"{name}: package dependency {dependency['name']} is private")
 
     for name, expected_bins in sorted(SHIPPED_BINARY_PACKAGES.items()):
         package = package_by_name(metadata, name)

@@ -80,7 +80,9 @@ pub fn write_atomic_from_reader(
         #[cfg(not(unix))]
         let _ = mode;
         drop(file);
-        crate::atomic::replace_file(&tmp, path)
+        // Native file replacement also rejects directory leaves on Windows.
+        // Moving the destination aside first could discard a declared directory.
+        fs::rename(&tmp, path).map_err(CrabError::Io)
     })();
     if result.is_err() {
         // Preserve the original read/write failure; cleanup cannot publish a
@@ -318,6 +320,26 @@ mod tests {
         let run_id = Uuid::now_v7();
         write_atomic(&path, b"fresh", run_id, 0o644).unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"fresh");
+    }
+
+    #[test]
+    fn file_publication_rejects_directories_and_preserves_their_contents() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("output");
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("keep"), b"original").unwrap();
+        let run_id = Uuid::now_v7();
+
+        let result = write_atomic(&path, b"replacement", run_id, 0o644);
+
+        assert_eq!(
+            (
+                matches!(result, Err(CrabError::Io(_))),
+                fs::read(path.join("keep")).unwrap(),
+                sidecar_path(&path, run_id).exists(),
+            ),
+            (true, b"original".to_vec(), false),
+        );
     }
 
     #[test]

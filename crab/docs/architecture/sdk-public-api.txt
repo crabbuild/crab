@@ -326,6 +326,7 @@ pub crab_sdk::remote::ArchiveEvent::Entry::size: core::option::Option<u64>
 pub crab_sdk::remote::Capability::CreateCommits
 pub crab_sdk::remote::Capability::ReadContent
 pub crab_sdk::remote::Capability::ReadGit
+pub crab_sdk::remote::Capability::ReadResults
 pub crab_sdk::remote::Capability::UpdateRefs
 #[non_exhaustive] pub enum crab_sdk::remote::ContentKind
 pub crab_sdk::remote::ContentKind::Crab
@@ -414,6 +415,7 @@ pub fn crab_sdk::remote::Remote<'a>::prepare_ref_update(&self, crab_sdk::remote:
 pub fn crab_sdk::remote::Remote<'a>::reconcile(&self, crab_sdk::remote::write::RecoveryToken) -> crab_sdk::operation::Request<'a, crab_sdk::remote::write::MutationOutcome, crab_sdk::operation::Options>
 pub fn crab_sdk::remote::Remote<'a>::refresh(&self) -> crab_sdk::operation::Request<'a, crab_sdk::Repository, crab_sdk::operation::Options>
 pub fn crab_sdk::remote::Remote<'a>::refs(&self) -> crab_sdk::operation::Request<'a, crab_sdk::remote::References, crab_sdk::operation::Options>
+pub fn crab_sdk::remote::Remote<'a>::results(&self) -> crab_sdk::results::Results<'a>
 pub fn crab_sdk::remote::Remote<'a>::snapshot(&self, crab_sdk::Revision) -> crab_sdk::operation::Request<'a, crab_sdk::remote::Snapshot, crab_sdk::operation::Options>
 pub struct crab_sdk::remote::Signature
 pub crab_sdk::remote::Signature::email: bytes::bytes::Bytes
@@ -440,6 +442,45 @@ pub struct crab_sdk::remote::TreeEntry
 pub crab_sdk::remote::TreeEntry::id: crab_sdk::ObjectId
 pub crab_sdk::remote::TreeEntry::mode: crab_sdk::remote::EntryMode
 pub crab_sdk::remote::TreeEntry::path: crab_sdk::GitPath
+pub mod crab_sdk::results
+pub use crab_sdk::results::Attachment
+pub use crab_sdk::results::AttachmentKind
+pub use crab_sdk::results::Availability
+pub use crab_sdk::results::AxisRange
+pub use crab_sdk::results::Chart
+pub use crab_sdk::results::ChartImage
+pub use crab_sdk::results::ChartInteraction
+pub use crab_sdk::results::ChartReduction
+pub use crab_sdk::results::Column
+pub use crab_sdk::results::Comparison
+pub use crab_sdk::results::ComparisonCell
+pub use crab_sdk::results::ComparisonRow
+pub use crab_sdk::results::ComparisonSpec
+pub use crab_sdk::results::ComparisonView
+pub use crab_sdk::results::DatasetIdentity
+pub use crab_sdk::results::Datum
+pub use crab_sdk::results::Direction
+pub use crab_sdk::results::EvidenceView
+pub use crab_sdk::results::InputWitness
+pub use crab_sdk::results::OutputWitness
+pub use crab_sdk::results::Report
+pub use crab_sdk::results::ReportView
+pub use crab_sdk::results::ReproductionSpec
+pub use crab_sdk::results::ResultOrigin
+pub use crab_sdk::results::ResultSnapshot
+pub use crab_sdk::results::ResultsRead
+pub use crab_sdk::results::ResultsResponse
+pub use crab_sdk::results::RunPage
+pub use crab_sdk::results::RunQuery
+pub use crab_sdk::results::RunSelection
+pub use crab_sdk::results::RunSummary
+pub use crab_sdk::results::RuntimeWitness
+pub use crab_sdk::results::SealedResult
+pub use crab_sdk::results::StageResult
+pub struct crab_sdk::results::Results<'a>
+impl<'a> crab_sdk::results::Results<'a>
+pub fn crab_sdk::results::Results<'a>::blob(&self, alloc::string::String) -> crab_sdk::operation::Request<'a, alloc::vec::Vec<u8>, crab_sdk::operation::Options>
+pub fn crab_sdk::results::Results<'a>::read(&self, crab_workflow::results::reader::ResultsRead) -> crab_sdk::operation::Request<'a, crab_workflow::results::reader::ResultsResponse, crab_sdk::operation::Options>
 pub mod crab_sdk::storage
 pub struct crab_sdk::storage::AzureOptions
 impl crab_sdk::storage::AzureOptions

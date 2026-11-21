@@ -317,7 +317,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
     temporary.write_all(bytes)?;
     temporary.as_file().sync_all()?;
-    crate::atomic::replace_file(temporary.path(), path)?;
+    fs::rename(temporary.path(), path)?;
     sync_parent(parent)
 }
 

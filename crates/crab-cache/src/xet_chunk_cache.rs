@@ -53,7 +53,7 @@ impl CrabRangeCache {
         item: (u32, u32, u64, u32),
         key: &Key,
         requested: &ChunkRange,
-    ) -> std::result::Result<CacheRange, ChunkCacheError> {
+    ) -> std::result::Result<(CacheRange, crate::catalog::PayloadRead), ChunkCacheError> {
         let (item_start, item_end, expected_len, _) = item;
         if item_start >= item_end
             || requested.start < item_start
@@ -81,9 +81,7 @@ impl CrabRangeCache {
                 }
                 Ok(hit)
             });
-        let (hit, entry) = entry.finish(result).await?;
-        entry.touch().await;
-        Ok(hit)
+        entry.finish(result).await
     }
 
     async fn read_open_entry(
@@ -190,26 +188,67 @@ impl ChunkCache for CrabRangeCache {
                 return Ok(None);
             }
         };
-        for name in entries {
-            let Some((start, end, len, crc)) = decode_range_item_name(&name) else {
-                continue;
+        let limit = self
+            .capacity
+            .unwrap_or(MAX_DECODED_RANGE_BYTES)
+            .min(MAX_DECODED_RANGE_BYTES);
+        let header_len = 4 + 4 * (u64::from(range.end) - u64::from(range.start) + 1);
+        if header_len >= limit {
+            return Ok(None);
+        }
+        let mut candidates = entries
+            .into_iter()
+            .filter_map(|name| {
+                let item = decode_range_item_name(&name)?;
+                (item.0 < range.end && item.1 > range.start).then_some((name, item))
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_unstable_by_key(|(_, item)| std::cmp::Reverse(item.1));
+        let mut hit = CacheRange {
+            data: Vec::new(),
+            offsets: vec![0],
+            range: *range,
+        };
+        let mut reads = Vec::new();
+        let mut cursor = range.start;
+        while cursor < range.end {
+            let Some(index) = candidates
+                .iter()
+                .position(|(_, item)| item.0 <= cursor && item.1 > cursor)
+            else {
+                return Ok(None);
             };
-            if start > range.start || end < range.end {
-                continue;
-            }
+            let (name, item) = candidates.remove(index);
             let path = key_directory.join(name);
-            match self
-                .read_entry(&path, (start, end, len, crc), key, range)
-                .await
-            {
-                Ok(hit) => return Ok(Some(hit)),
+            let selected = ChunkRange::new(cursor, item.1.min(range.end));
+            match self.read_entry(&path, item, key, &selected).await {
+                Ok((part, read)) => {
+                    if cursor == range.start && selected.end == range.end {
+                        read.touch().await;
+                        return Ok(Some(part));
+                    }
+                    if header_len + hit.data.len() as u64 + part.data.len() as u64 > limit {
+                        return Ok(None);
+                    }
+                    let base = hit.data.len() as u32;
+                    hit.offsets
+                        .extend(part.offsets.into_iter().skip(1).map(|offset| base + offset));
+                    hit.data.extend(part.data);
+                    reads.push(read);
+                    cursor = selected.end;
+                }
                 Err(error) => {
                     warn!(family = "decoded-range", operation = "read", path = %path.display(),
                         recovery = "use-origin", %error, "local cache read failed");
                 }
             }
         }
-        Ok(None)
+        // A gap discards the entire partial result; only complete, verified
+        // coverage earns recency. Retained descriptors bind each touch to its read.
+        for read in reads {
+            read.touch().await;
+        }
+        Ok(Some(hit))
     }
 
     async fn put(
@@ -1062,6 +1101,151 @@ mod tests {
             .unwrap();
         assert_eq!(contained.data, b"defghi");
         assert_eq!(contained.offsets, vec![0, 4, 6]);
+    }
+
+    #[tokio::test]
+    async fn cached_fragments_cover_a_larger_range_after_reopen() {
+        for (start, bytes, offsets) in [
+            (1, b"CdefGH".as_slice(), vec![0, 1, 4, 6]),
+            (2, b"defGH".as_slice(), vec![0, 3, 5]),
+        ] {
+            let temporary = tempfile::tempdir().unwrap();
+            let directory = temporary.path().join("cache/chunks");
+            let handle = open_cache(&directory, 64 * 1024).unwrap();
+            let key = test_key();
+            handle
+                .cache
+                .put(&key, &ChunkRange::new(0, 2), &[0, 2, 3], b"abC")
+                .await
+                .unwrap();
+            handle
+                .cache
+                .put(&key, &ChunkRange::new(start, 4), &offsets, bytes)
+                .await
+                .unwrap();
+            drop(handle);
+
+            let reopened = open_cache(&directory, 64 * 1024).unwrap();
+            let actual = reopened
+                .cache
+                .get(&key, &ChunkRange::new(0, 4))
+                .await
+                .unwrap();
+            assert_eq!(
+                actual.map(|hit| (hit.data, hit.offsets)),
+                Some((b"abCdefGH".to_vec(), vec![0, 2, 3, 6, 8]))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fragment_gaps_return_no_partial_data_or_recency_updates() {
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = temporary.path().join("cache/chunks");
+        let handle = open_cache(&directory, 64 * 1024).unwrap();
+        let key = test_key();
+        for start in [0, 2] {
+            handle
+                .cache
+                .put(&key, &ChunkRange::new(start, start + 1), &[0, 1], b"x")
+                .await
+                .unwrap();
+        }
+        let root = PinnedRoot::open(&directory).unwrap();
+        let files = collect_xet_chunk_cache_entries(&root, &CancellationToken::new()).unwrap();
+        let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(60);
+        for file in &files {
+            fs::File::options()
+                .read(true)
+                .write(true)
+                .open(directory.join(&file.path))
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+        }
+        assert!(
+            handle
+                .cache
+                .get(&key, &ChunkRange::new(0, 3))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(files.iter().all(|file| {
+            fs::metadata(directory.join(&file.path))
+                .unwrap()
+                .modified()
+                .unwrap()
+                == old
+        }));
+    }
+
+    #[tokio::test]
+    async fn corrupt_fragment_does_not_hide_other_complete_coverage() {
+        let temporary = tempfile::tempdir().unwrap();
+        let cache = CrabRangeCache {
+            root: temporary.path().join("cache/chunks"),
+            capacity: Some(64 * 1024),
+            catalog: crate::CacheCatalog::new(temporary.path().join("cache"), None),
+        };
+        let key = test_key();
+        for (end, bytes, offsets) in [
+            (2, b"abC".as_slice(), vec![0, 2, 3]),
+            (3, b"abCdef".as_slice(), vec![0, 2, 3, 6]),
+        ] {
+            cache
+                .put(&key, &ChunkRange::new(0, end), &offsets, bytes)
+                .await
+                .unwrap();
+        }
+        cache
+            .put(&key, &ChunkRange::new(2, 4), &[0, 3, 5], b"defGH")
+            .await
+            .unwrap();
+        let corrupt = fs::read_dir(cache.key_directory(&key))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| decode_range_item_name(path.file_name().unwrap()).unwrap().1 == 3)
+            .unwrap();
+        fs::write(&corrupt, b"corrupt").unwrap();
+        let hit = cache
+            .get(&key, &ChunkRange::new(0, 4))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (hit.data, hit.offsets, corrupt.exists()),
+            (b"abCdefGH".to_vec(), vec![0, 2, 3, 6, 8], false)
+        );
+    }
+
+    #[tokio::test]
+    async fn fragment_assembly_respects_the_callers_allocation_ceiling() {
+        let temporary = tempfile::tempdir().unwrap();
+        let cache = CrabRangeCache {
+            root: temporary.path().join("cache/chunks"),
+            capacity: Some(25),
+            catalog: crate::CacheCatalog::new(temporary.path().join("cache"), None),
+        };
+        let key = test_key();
+        for start in [0, 2] {
+            cache
+                .put(
+                    &key,
+                    &ChunkRange::new(start, start + 2),
+                    &[0, 3, 6],
+                    b"abcdef",
+                )
+                .await
+                .unwrap();
+        }
+        assert!(
+            cache
+                .get(&key, &ChunkRange::new(0, 4))
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

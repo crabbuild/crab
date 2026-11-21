@@ -26,6 +26,7 @@ pub(crate) mod storage;
 pub(crate) const MAX_RELEASE_ASSET_BYTES: u64 = 512 * 1024 * 1024;
 pub(crate) const MAX_BLOB_BYTES: u64 = 256 * 1024 * 1024;
 const READ_ADMISSION_CAPACITY: usize = 16;
+const BULK_READ_CAPACITY: usize = 12;
 const GIT_ADMISSION_CAPACITY: usize = 4;
 const APP_ADMISSION_CAPACITY: usize = 8;
 const MAINTENANCE_ADMISSION_CAPACITY: usize = 2;
@@ -41,7 +42,8 @@ pub(crate) struct Server {
     pub(crate) shutdown_mode: tokio::sync::watch::Sender<cellar::sdk::ShutdownMode>,
     pub(crate) options: RepositoryOptions,
     pub(crate) cursor_key: [u8; 32],
-    pub(crate) admission: Semaphore,
+    pub(crate) admission: Arc<Semaphore>,
+    pub(crate) bulk_reads: Arc<Semaphore>,
     pub(crate) transfer_admission: TransferAdmission,
     pub(crate) local_staging: crate::local_disk::LocalStaging,
     pub(crate) app_admission: Semaphore,
@@ -63,16 +65,19 @@ impl Server {
         repositories: RepositorySet,
         transfer_admission: TransferAdmission,
     ) -> Self {
+        let metrics = crate::metrics::Metrics::new().unwrap();
+        let runtime = RemoteGitRuntime::new(Default::default(), Arc::new(metrics.clone())).unwrap();
         Self {
             repositories,
-            runtime: Arc::new(RemoteGitRuntime::default()),
+            runtime: Arc::new(runtime),
             cells: None,
             cell_services: None,
             cell_test_runtime: None,
             shutdown_mode: tokio::sync::watch::channel(cellar::sdk::ShutdownMode::Preserve).0,
             options: RepositoryOptions::default(),
             cursor_key: [0; 32],
-            admission: Semaphore::new(READ_ADMISSION_CAPACITY),
+            admission: Arc::new(Semaphore::new(READ_ADMISSION_CAPACITY)),
+            bulk_reads: Arc::new(Semaphore::new(BULK_READ_CAPACITY)),
             transfer_admission,
             local_staging: crate::local_disk::LocalStaging::for_test(),
             app_admission: Semaphore::new(APP_ADMISSION_CAPACITY),
@@ -85,7 +90,7 @@ impl Server {
             catalog_healthy: AtomicBool::new(false),
             node_healthy: AtomicBool::new(false),
             cell_capacity: capacity::for_test(),
-            metrics: crate::metrics::Metrics::new().unwrap(),
+            metrics,
         }
     }
 
@@ -235,6 +240,10 @@ pub async fn serve(config: Config) -> Result<()> {
         },
     )?;
     let metrics = crate::metrics::Metrics::new()?;
+    let runtime = Arc::new(RemoteGitRuntime::new(
+        capacity.read_runtime(),
+        Arc::new(metrics.clone()),
+    )?);
     let tls = crate::peer::tls::LoadedPeerTls::load(&config.cells)?;
     // Cellar Preserve identifies a logical node by its stable peer address.
     // A fleet may share a TLS certificate; that certificate cannot name a node.
@@ -273,7 +282,6 @@ pub async fn serve(config: Config) -> Result<()> {
         }
     };
     let mut node = started.node;
-    let runtime = Arc::new(RemoteGitRuntime::default());
     let cancellation = CancellationToken::new();
     let server = Arc::new(Server {
         repositories: repositories.into(),
@@ -288,7 +296,8 @@ pub async fn serve(config: Config) -> Result<()> {
             .as_ref()
             .map(Authentication::cursor_key)
             .unwrap_or_else(rand::random),
-        admission: Semaphore::new(READ_ADMISSION_CAPACITY),
+        admission: Arc::new(Semaphore::new(READ_ADMISSION_CAPACITY)),
+        bulk_reads: Arc::new(Semaphore::new(BULK_READ_CAPACITY)),
         transfer_admission: storage::transfer_admission(&catalog),
         local_staging,
         app_admission: Semaphore::new(APP_ADMISSION_CAPACITY),
@@ -412,18 +421,8 @@ pub async fn serve(config: Config) -> Result<()> {
                 .await
                 .map_err(crate::cells::Error::sdk)
                 .map_err(crate::Error::Cell)
-                .and_then(|outcome| match outcome {
-                    cellar::sdk::NodeOutcome::Stopped(report)
-                        if report.ingress_drained
-                            && report.application_work_drained
-                            && report.cells_drained
-                            && !report.drain_timed_out =>
-                    {
-                        Ok(())
-                    }
-                    _ => Err(crate::Error::Config(
-                        "Cellar did not complete a graceful shutdown",
-                    )),
+                .and_then(|outcome| {
+                    crate::cells::runtime::finish_shutdown(outcome).map_err(crate::Error::Cell)
                 })
         };
         runtime.shutdown().await;

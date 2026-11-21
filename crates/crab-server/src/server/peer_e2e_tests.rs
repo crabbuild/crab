@@ -91,10 +91,7 @@ impl Host {
         let NodeOutcome::Stopped(report) = self.cells.node.shutdown(mode).await.unwrap() else {
             panic!("node was fenced");
         };
-        assert!(
-            report.cells_drained && report.application_work_drained && !report.drain_timed_out,
-            "{report:?}"
-        );
+        crate::cells::runtime::finish_shutdown(NodeOutcome::Stopped(report)).unwrap();
         self.stop.cancel();
         self.management.await.unwrap().unwrap();
         self.work.close();

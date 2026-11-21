@@ -88,9 +88,9 @@ pub fn save_source_descriptor(path: &Path, descriptor: &SourceDescriptor) -> Res
         let _ = fs::remove_file(&temporary);
         return Err(WorkflowError::Io(error));
     }
-    if let Err(error) = crate::atomic::replace_file(&temporary, path) {
+    if let Err(error) = fs::rename(&temporary, path) {
         let _ = fs::remove_file(&temporary);
-        return Err(error);
+        return Err(WorkflowError::Io(error));
     }
     Ok(())
 }
