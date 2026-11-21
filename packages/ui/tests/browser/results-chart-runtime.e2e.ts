@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import type { View } from "vega";
@@ -265,6 +265,41 @@ test("DVC templates render all selected fields with typed anchors and literal co
     path: path.join(evidence!, "browser/chart-template-parity-narrow.png"),
     fullPage: true,
   });
+  const authored: {
+    name: string;
+    spec: unknown;
+    interaction: Parameters<typeof render>[2]["interaction"];
+  }[] = JSON.parse(
+    readFileSync(path.join(evidence!, "chart-authored-hover.json"), "utf8"),
+  );
+  expect(authored.map(({ name }) => name)).toEqual(["tooltip", "configured"]);
+  for (const fixture of authored) {
+    await page.evaluate(async ({ name, spec, interaction }) => {
+      const section = document.createElement("section");
+      section.setAttribute("aria-label", `${name} hover`);
+      section.style.maxWidth = "320px";
+      const host = section.appendChild(document.createElement("div"));
+      document.body.appendChild(section);
+      await window.vegaEmbed(host, spec, {
+        interaction,
+        onError(error) {
+          throw error;
+        },
+      });
+    }, fixture);
+    const chart = page.getByRole("region", { name: `${fixture.name} hover` });
+    const targets = chart.locator('g[class*="_voronoi"] path');
+    await expect(targets).toHaveCount(4);
+    await targets.first().hover();
+    await expect(chart.locator(".crab-results-chart")).toHaveAttribute(
+      "title",
+      /score: 91/,
+    );
+    await expect(chart.locator(".crab-results-chart")).toHaveAttribute(
+      "title",
+      /rev: Run A/,
+    );
+  }
   writeFileSync(
     path.join(evidence!, "browser/chart-template-parity.json"),
     JSON.stringify({ counts, attempted, errors }, null, 2),

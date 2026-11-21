@@ -137,17 +137,29 @@ pub(super) fn augment(
         }
         _ => return Err(invalid("invalid line mark")),
     };
-    // Linked cursors select x coordinates, not individual series. One hidden
-    // target per x avoids rebuilding duplicate Voronoi cells on every zoom.
-    let mut transforms = vec![json!({"aggregate":[],"groupby":[reference]})];
+    // Authored channels and configuration can use complete sample metadata.
+    // Only simple encodings can replace two-dimensional hits with one per x.
+    let scalar_cursor = spec.get("config").is_none()
+        && spec["encoding"].as_object().is_some_and(|channels| {
+            channels
+                .keys()
+                .all(|channel| matches!(channel.as_str(), "x" | "y" | "color" | "strokeDash"))
+        });
+    let mut transforms = Vec::new();
+    if scalar_cursor {
+        transforms.push(json!({"aggregate":[],"groupby":[reference]}));
+    }
     if domain.is_some() {
         let field = serde_json::to_string(&field).map_err(crate::WorkflowError::ResultsJson)?;
         transforms.push(json!({"filter":format!("!isValid(crab_domain) || (datum[{field}] >= crab_domain[0] && datum[{field}] <= crab_domain[1])")}));
     }
-    let point = json!({"mark":{"type":"point","opacity":0,"aria":false,"clip":true},
-        "encoding":{"y":{"value":0},"color":{"value":"transparent"},"strokeDash":{"value":[]}},
+    let mut point = json!({"mark":{"type":"point","opacity":0,"aria":false,"clip":true},
         "transform":transforms,
         "params":[{"name":"crab_hover","select":{"type":"point","fields":[field],"nearest":true,"on":"pointerover","clear":"pointerout"}}]});
+    if scalar_cursor {
+        point["encoding"] =
+            json!({"y":{"value":0},"color":{"value":"transparent"},"strokeDash":{"value":[]}});
+    }
     // Independent rule data must contain the inherited x field. Vega-Lite's
     // quantitative validation otherwise discards its empty datum before encoding.
     spec["layer"] = json!([
