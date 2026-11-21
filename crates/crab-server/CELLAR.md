@@ -582,6 +582,11 @@ at its ordinary 80% and hard 95% memory watermarks. There is no idle eviction
 timer: repeatedly releasing an otherwise affordable repository would force cold
 replica restoration and snapshot publication on its next use.
 
+The executable installs jemalloc as its Rust allocator, matching the SDK's
+allocator statistics and reclamation controls. Its existing Linux dependency
+feature enables background purging. Embedders own the same process-level
+allocator choice; configuring pressure limits alone does not install it.
+
 ## Operator changes
 
 Existing GC-fence schema 1/2 requires the explicit

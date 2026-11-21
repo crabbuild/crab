@@ -15485,5 +15485,27 @@
         "passed"
       ]
     ]
+  },
+  "server_allocator_contract": {
+    "status": "allocator_contract_verified_live_qualification_pending",
+    "combined_acceptance": false,
+    "scope": "Server process now installs the existing locked jemalloc allocator, matching Cellar pressure/statistics/reclamation. No new dependency version, SDK patch, storage format or configuration. This test does not establish that the prior long-run RSS growth is resolved.",
+    "cellar_revision": "590640c7ce49ef3fd391bdae9540ba23081cd74b",
+    "allocator_version": "0.6.1",
+    "main_source_sha256": "18ea68fdc0eee022f8046b46826dff56eb78c1d2de72011efac9de5b2721ad0d",
+    "lock_change": "Only crab-server dependencies gains tikv-jemallocator; every package version/source/checksum and all other package records unchanged.",
+    "regression": "Live2MiBRustallocation must increase the pinned SDK allocated-bytes statistic by at least its length. Fails with previous System allocator; passes with installed global jemalloc.",
+    "before_regression_log_sha256": "2a38033570977d45ac94f9881263ac3b280c47aa3eb40235b90c473bdc58fff4",
+    "after_regression_log_sha256": "065605ab886d2002f575cfc3eb24e9e6696abdc8c81abc5a2eba625f0bfa118b",
+    "cli_tests_passed": 20,
+    "cli_test_log_sha256": "64f9029bdd58e81d78568fa264e368569b23ac376f62204cd22727353409e97b",
+    "linux_feature_contract_sha256": "723ac86046c0943bee8e11255642eac589110fe28ffe1790b0beb18bf28ddee1",
+    "linux_features": [
+      "stats",
+      "background_threads",
+      "background_threads_runtime_support"
+    ],
+    "upstream_contract": "https://github.com/crabbuild/cellar/blob/590640c7ce49ef3fd391bdae9540ba23081cd74b/crates/cellar/node/native.rs",
+    "upstream_allocator_stats": "https://github.com/crabbuild/cellar/blob/590640c7ce49ef3fd391bdae9540ba23081cd74b/crates/cellar/platform/memory.rs"
   }
 }

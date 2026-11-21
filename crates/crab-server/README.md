@@ -11,6 +11,11 @@ authentication key derivation remain unchanged by the crate rename.
 Read [the native runtime contract and outstanding release gates](CELLAR.md)
 before deployment. Historical runtime receipts do not qualify this implementation.
 
+The server executable uses jemalloc so Cellar's allocator pressure accounting
+and page reclamation observe the application's Rust heap. The SDK's Linux
+allocator feature enables background purging. Applications embedding the library
+must install that allocator at their own executable entry point.
+
 ## Browse indexing
 
 Capsule browse indexing is background work, independent of native Git receive.
