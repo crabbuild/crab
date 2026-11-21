@@ -14455,5 +14455,1035 @@
     },
     "qualification_status": "Currentoriginal128trial/22case/3round/2x600secondsoakcomparisonrunning, unchangednumericgates.72cellnative100pairconfirmationqueuedsequentially; R7acceptanceopen.",
     "evidence_storage": "Completedpriorjournalsarelosslesslygziparchivedwithoriginalbyte/newline/SHA256roundtripverification; report/profilefilesunchanged. CleanVMcache/targetedunusedblocktrimonlybetweenphases; realwarmingbeforetiming. Noobservationsorfailedgatesdeleted."
+  },
+  "complete_metadata_batching_http_matrix": {
+    "status": "complete_original_matrix_with_15_failed_gates",
+    "acceptance": false,
+    "artifact_root": "linux-metadata-headroom-http-matrix",
+    "raw_report_sha256": "972376a1f4a7c3e360144ef017781f0b5f078b1b12012c076c536edd9c0664d9",
+    "summary_sha256": "88fd5140a713cb0d2cdf6fe5bb7fdeca5e36ce858162d3c1fe7ece6c88505db1",
+    "frozen_profile_sha256": "e718d2ce9720ebf74984d9293dda6d506f18660ecf228c47d16c9ce5182c3cfb",
+    "summary_driver_sha256": "dc03bc322f7a97763641814e8d761b7c5e900a10d17c16e8c5932c33b6c21a92",
+    "source_build": "ba6c06009dd6c53b1775243c8ed10a7e35cf6e67; server and native read closure byte-identical to a5d6015e2c8",
+    "binary_equivalence_sha256": "485fa4e59ed3510abb666aa1bc7b140338e4cb711cd728b34b2039e5fe0ffad4",
+    "protocol": {
+      "cases": 22,
+      "short_trial_rounds": 3,
+      "trials": 128,
+      "provider_cpu": 2,
+      "provider_affinity": "0,5",
+      "replica_cpu": 1,
+      "replica_memory_bytes": 1073741824,
+      "replica_extra_swap_bytes": 0,
+      "thresholds": {
+        "minimum_successes": 20,
+        "maximum_failure_fraction": 0.01,
+        "target_p95_ratio": 0.8,
+        "maximum_control_regression_ratio": 1.1,
+        "maximum_interactive_ratio": 2
+      },
+      "selection": "All original trials and observations retained; no percentile, duration or numeric-gate relaxation."
+    },
+    "all_phase_checks": {
+      "records": 7965261,
+      "git_verified_successes": 7949590,
+      "oracle_mismatches": 0
+    },
+    "measured_counts": {
+      "baseline": {
+        "attempts": 3445156,
+        "successes": 3439681,
+        "rejected": 5475,
+        "errors": 0,
+        "oracle_mismatches": 0
+      },
+      "candidate": {
+        "attempts": 3902351,
+        "successes": 3894703,
+        "rejected": 7648,
+        "errors": 0,
+        "oracle_mismatches": 0
+      }
+    },
+    "failed_original_gates": [
+      "distinct-16:interactive_latency",
+      "small-1:preview:p95_regression",
+      "distinct-8:raw-distinct:p95_regression",
+      "distinct-8:blame-distinct:p95_regression",
+      "distinct-8:preview-distinct:p95_regression",
+      "distinct-8:history:p95_regression",
+      "mixed-16:preview:p95_regression",
+      "mixed-16:history:p95_regression",
+      "mixed-16:raw:p95_regression",
+      "mixed-16:blame:p95_regression",
+      "mixed-16:late-history:p95_regression",
+      "distinct-16:preview-distinct:p95_regression",
+      "small-32:preview:p95_regression",
+      "expensive-32:blame:p95_regression",
+      "small-64:preview:p95_regression"
+    ],
+    "target_expensive_1_late_history": {
+      "baseline": {
+        "attempts": 2838,
+        "successes": 2838,
+        "rejected": 0,
+        "errors": 0,
+        "successful_rps": 94.52404391895821,
+        "successful_latency_us": {
+          "p50": 2803.7,
+          "p95": 9761.335,
+          "p99": 20841.897
+        }
+      },
+      "candidate": {
+        "attempts": 4449,
+        "successes": 4449,
+        "rejected": 0,
+        "errors": 0,
+        "successful_rps": 148.23888487795847,
+        "successful_latency_us": {
+          "p50": 1490.751,
+          "p95": 6556.811,
+          "p99": 15425.501
+        }
+      }
+    },
+    "soak": {
+      "baseline": {
+        "actual_elapsed_seconds": 600.0127160659977,
+        "journal_sha256": "0a4d0892fab70ebacda8e63c472a8d0ea0bf10b53e19f32d0bca521d10b32a7c",
+        "workloads": {
+          "preview": {
+            "attempts": 410486,
+            "successes": 410486,
+            "rejected": 0,
+            "errors": 0,
+            "successful_rps": 684.1288342876538,
+            "successful_latency_us": {
+              "p50": 4085.117,
+              "p95": 6997.901,
+              "p99": 9664.485
+            }
+          },
+          "history": {
+            "attempts": 410488,
+            "successes": 410488,
+            "rejected": 0,
+            "errors": 0,
+            "successful_rps": 684.1321675503439,
+            "successful_latency_us": {
+              "p50": 4121.826,
+              "p95": 6988.765,
+              "p99": 9617.108
+            }
+          },
+          "raw": {
+            "attempts": 410489,
+            "successes": 410489,
+            "rejected": 0,
+            "errors": 0,
+            "successful_rps": 684.1338341816888,
+            "successful_latency_us": {
+              "p50": 4070.526,
+              "p95": 6942.041,
+              "p99": 9594.165
+            }
+          },
+          "blame": {
+            "attempts": 410487,
+            "successes": 410487,
+            "rejected": 0,
+            "errors": 0,
+            "successful_rps": 684.1305009189988,
+            "successful_latency_us": {
+              "p50": 4125.68,
+              "p95": 7001.273,
+              "p99": 9627.063
+            }
+          },
+          "late-history": {
+            "attempts": 410489,
+            "successes": 410489,
+            "rejected": 0,
+            "errors": 0,
+            "successful_rps": 684.1338341816888,
+            "successful_latency_us": {
+              "p50": 5156.957,
+              "p95": 8177.991,
+              "p99": 10905.733
+            }
+          }
+        }
+      },
+      "candidate": {
+        "actual_elapsed_seconds": 600.0077524640001,
+        "journal_sha256": "a8fd98875e410b2fb5237fecc9a09cfecb3ae8694b9685258e6ecbbb49a460cc",
+        "workloads": {
+          "preview": {
+            "attempts": 465237,
+            "successes": 465237,
+            "rejected": 0,
+            "errors": 0,
+            "successful_rps": 775.3849814264088,
+            "successful_latency_us": {
+              "p50": 3709.848,
+              "p95": 6621.495,
+              "p99": 9440.69
+            }
+          },
+          "history": {
+            "attempts": 465237,
+            "successes": 465150,
+            "rejected": 87,
+            "errors": 0,
+            "successful_rps": 775.2399832998967,
+            "successful_latency_us": {
+              "p50": 3765.25,
+              "p95": 6686.28,
+              "p99": 9538.039
+            }
+          },
+          "raw": {
+            "attempts": 465239,
+            "successes": 465147,
+            "rejected": 92,
+            "errors": 0,
+            "successful_rps": 775.2349833644997,
+            "successful_latency_us": {
+              "p50": 3708.536,
+              "p95": 6639.504,
+              "p99": 9484.245
+            }
+          },
+          "blame": {
+            "attempts": 465238,
+            "successes": 465153,
+            "rejected": 85,
+            "errors": 0,
+            "successful_rps": 775.2449832352937,
+            "successful_latency_us": {
+              "p50": 3747.236,
+              "p95": 6669.476,
+              "p99": 9408.781
+            }
+          },
+          "late-history": {
+            "attempts": 465237,
+            "successes": 465148,
+            "rejected": 89,
+            "errors": 0,
+            "successful_rps": 775.2366500096321,
+            "successful_latency_us": {
+              "p50": 3747.831,
+              "p95": 6658.62,
+              "p99": 9482.782
+            }
+          }
+        }
+      }
+    },
+    "resources": {
+      "baseline": {
+        "failures": [],
+        "whole_profile_rss_plateau_gate": "passed",
+        "peak_process_rss_bytes": [
+          246882304,
+          162500608
+        ],
+        "admitted_work_drained": null,
+        "cgroups": [
+          {
+            "memory.peak": "386224128",
+            "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0",
+            "cpu.stat": "usage_usec 710261824\nuser_usec 619355180\nsystem_usec 90906643\ncore_sched.force_idle_usec 0\nnr_periods 29602\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0"
+          },
+          {
+            "memory.peak": "123662336",
+            "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0",
+            "cpu.stat": "usage_usec 684811906\nuser_usec 601048971\nsystem_usec 83762934\ncore_sched.force_idle_usec 0\nnr_periods 25955\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0"
+          }
+        ]
+      },
+      "candidate": {
+        "failures": [],
+        "whole_profile_rss_plateau_gate": "passed",
+        "peak_process_rss_bytes": [
+          232927232,
+          214024192
+        ],
+        "admitted_work_drained": true,
+        "cgroups": [
+          {
+            "memory.peak": "395997184",
+            "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0",
+            "cpu.stat": "usage_usec 579070857\nuser_usec 481511028\nsystem_usec 97559829\ncore_sched.force_idle_usec 0\nnr_periods 29395\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0"
+          },
+          {
+            "memory.peak": "208637952",
+            "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0",
+            "cpu.stat": "usage_usec 570633212\nuser_usec 480333823\nsystem_usec 90299389\ncore_sched.force_idle_usec 0\nnr_periods 25548\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0"
+          }
+        ]
+      }
+    },
+    "exit_codes": {
+      "baseline": {
+        "a": 0,
+        "b": 0
+      },
+      "candidate": {
+        "a": 0,
+        "b": 0
+      }
+    },
+    "candidate_shutdown_proofs": {
+      "a": {
+        "passed": true,
+        "fields": {
+          "complete": "true",
+          "log_quiesced": "true",
+          "local_durability_closed": "true",
+          "pending_application_events": "0",
+          "pending_dispatches": "0",
+          "deadline_elapsed": "false"
+        }
+      },
+      "b": {
+        "passed": true,
+        "fields": {
+          "complete": "true",
+          "log_quiesced": "true",
+          "local_durability_closed": "true",
+          "pending_application_events": "0",
+          "pending_dispatches": "0",
+          "deadline_elapsed": "false"
+        }
+      }
+    },
+    "lossless_journal_archive_sha256": "d9fb40a387d02b038b803170768f6f3be7d476ac43ffac279d762e22b3ac8e22",
+    "post_request_storage_maintenance": {
+      "between_soaks_receipt_sha256": "e75a300068eebc5f8d7823727dfad0e54a8c9faa44291722c2f374588123a5de",
+      "after_all_128_loops_receipt_sha256": "685f975f0544ee514596e7f7f6e2333f8e0434b0a86c5dff495eced056e07026",
+      "scope": "Only unused VM ext4 blocks trimmed in verified gaps outside request timers. No allocated data removed, no query observations changed. Later archival/cache cleanup/quiet exact-fixture restart occurred after full report/statistics/shutdown."
+    },
+    "interpretation": "Named late-history target and both actual ten-minute soak comparisons pass original timing/control gates; 15 short-case latency gates remain failed. Zero measured request errors/Git mismatches is distinct from recorded capacity rejections. Query handlers are generally sub-millisecond; the failure owner is not assigned without independent causal proof."
+  },
+  "complete_native_fixed100_matrix": {
+    "status": "passed_native_matrix",
+    "combined_acceptance": false,
+    "scope": "Combined R0 versus current reader, including continuation, bounded caches/CPU, pack-window/history reuse and metadata-wave batching. Every original native cell, all100fixedpairs retained. This does not isolate the incremental effect of metadata batching. HTTP15short-case failures remain open.",
+    "artifact_root": "linux-metadata-headroom-native-100",
+    "raw_report_sha256": "0a541da38291c89db837edfd596c39b194677d075dc178e1b17e44b12dc482f2",
+    "frozen_profile_sha256": "792e882ec8e81af814210f2ecdb7450de2f31c1fc8888fecb3e752bc1529bd9b",
+    "driver_sha256": "9d61ecd5b42fa3af974557a394141b545afd45aea870bf226322861dfab87b8e",
+    "canonical_oracle_sha256": "d26eb6335d3ee16806ca97f451d219d31f84f931d7e6e1584c076ecbe450559e",
+    "immutable_oracle_sha256": "e2ba8be54475f65168caa19972d3a888320d718b761b68357bf742ad8e99cc61",
+    "binary_equivalence_sha256": "485fa4e59ed3510abb666aa1bc7b140338e4cb711cd728b34b2039e5fe0ffad4",
+    "repeatability_report_sha256": "e126a386dacbb21719753213f92244df50278cadbd9996a1fe7c0913b082472a",
+    "source_runtime": "a5d6015e2c8 native read closure; byte-identical after rebase/build at ba6c06009dd6c53b1775243c8ed10a7e35cf6e67",
+    "processes": 1200,
+    "git_queries_checked": 7200,
+    "cells_passed": 72,
+    "target_cells_passed": 9,
+    "control_cells_passed": 63,
+    "pairs_per_cell": 100,
+    "elapsed_wall_seconds": 1910.8907101154327,
+    "thresholds": {
+      "maximum_control_p95_ratio": 1.1,
+      "target_p95_ratio": 0.8
+    },
+    "quota_proofs": {
+      "baseline": {
+        "NanoCpus": 1000000000,
+        "Memory": 1073741824,
+        "MemorySwap": 1073741824,
+        "CpusetCpus": "1",
+        "cpu.max": "100000 100000",
+        "memory.max": "1073741824",
+        "memory.swap.max": "0"
+      },
+      "candidate": {
+        "NanoCpus": 1000000000,
+        "Memory": 1073741824,
+        "MemorySwap": 1073741824,
+        "CpusetCpus": "1",
+        "cpu.max": "100000 100000",
+        "memory.max": "1073741824",
+        "memory.swap.max": "0"
+      }
+    },
+    "provider": "Pinned RustFS,1CPU0/3GiB; reader1CPU1/1GiB/no extra swap. Separate from HTTP2CPUbackend profile.",
+    "resources": {
+      "baseline": {
+        "memory.peak": "63053824",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0",
+        "cpu.stat": "usage_usec 383138755\nuser_usec 285562727\nsystem_usec 97576028\ncore_sched.force_idle_usec 0\nnr_periods 16988\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0"
+      },
+      "candidate": {
+        "memory.peak": "161648640",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0",
+        "cpu.stat": "usage_usec 81580623\nuser_usec 63463727\nsystem_usec 18116895\ncore_sched.force_idle_usec 0\nnr_periods 2820\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0"
+      }
+    },
+    "independent_cleanup_sha256": "b09e4ed5229ea618466f0da3a4f55bc77cd6827e6f651d5147e894609f0aad9d",
+    "container_exit_codes": {
+      "baseline": 0,
+      "candidate": 0
+    },
+    "cell_columns": [
+      "commits",
+      "operation",
+      "cache",
+      "target",
+      "baseline_p95_us",
+      "candidate_p95_us",
+      "p95_ratio",
+      "baseline_reads_median",
+      "candidate_reads_median",
+      "baseline_bytes_median",
+      "candidate_bytes_median",
+      "gate"
+    ],
+    "cells": [
+      [100,"attribution","cold",false,22225,7374,0.3317885264341957,61.0,16.0,62597.0,71509.0,"passed"],
+      [100,"attribution","warm",false,287,278,0.9686411149825784,0.0,0.0,0.0,0.0,"passed"],
+      [100,"blame","cold",false,63831,22517,0.35275963090034623,179.0,52.0,133772.0,154002.0,"passed"],
+      [100,"blame","warm",false,60,53,0.8833333333333333,0.0,0.0,0.0,0.0,"passed"],
+      [100,"blob","cold",false,20441,4917,0.24054596154786947,55.0,9.0,43319.0,52088.0,"passed"],
+      [100,"blob","warm",false,49,41,0.8367346938775511,0.0,0.0,0.0,0.0,"passed"],
+      [100,"commit","cold",false,1983,2008,1.0126071608673726,5.0,5.0,37365.0,41312.0,"passed"],
+      [100,"commit","warm",false,36,31,0.8611111111111112,0.0,0.0,0.0,0.0,"passed"],
+      [100,"history","cold",true,37332,5459,0.1462284367298832,104.0,11.0,52029.0,53602.0,"passed"],
+      [100,"history","warm",false,104,84,0.8076923076923077,0.0,0.0,0.0,0.0,"passed"],
+      [100,"history-page-1","cold",true,37243,6070,0.1629836479338399,104.0,11.0,52029.0,53602.0,"passed"],
+      [100,"history-page-1","warm",false,121,92,0.7603305785123967,0.0,0.0,0.0,0.0,"passed"],
+      [100,"object-batch","cold",false,20050,5332,0.2659351620947631,55.0,9.0,45466.0,52088.0,"passed"],
+      [100,"object-batch","warm",false,211,208,0.985781990521327,0.0,0.0,0.0,0.0,"passed"],
+      [100,"object-point","cold",false,20316,4661,0.22942508367788936,55.0,9.0,43319.0,52088.0,"passed"],
+      [100,"object-point","warm",false,51,39,0.7647058823529411,0.0,0.0,0.0,0.0,"passed"],
+      [100,"path-history","cold",false,63723,22202,0.3484142303406933,176.0,50.0,133757.0,147752.0,"passed"],
+      [100,"path-history","warm",false,1180,989,0.838135593220339,0.0,0.0,0.0,0.0,"passed"],
+      [100,"resolve","cold",false,2274,2236,0.9832893579595426,5.0,5.0,37365.0,41312.0,"passed"],
+      [100,"resolve","warm",false,40,35,0.875,0.0,0.0,0.0,0.0,"passed"],
+      [100,"tree","cold",false,20289,5134,0.25304352111981865,54.0,9.0,43176.0,52088.0,"passed"],
+      [100,"tree","warm",false,124,116,0.9354838709677419,0.0,0.0,0.0,0.0,"passed"],
+      [1000,"attribution","cold",false,24578,11469,0.46663682968508424,50.0,22.0,273687.0,281541.0,"passed"],
+      [1000,"attribution","warm",false,298,280,0.9395973154362416,0.0,0.0,0.0,0.0,"passed"],
+      [1000,"blame","cold",false,459109,95573,0.20817060872254736,951.0,179.0,728968.0,885049.0,"passed"],
+      [1000,"blame","warm",false,70,62,0.8857142857142857,0.0,0.0,0.0,0.0,"passed"],
+      [1000,"blob","cold",false,22615,8083,0.35741764315719654,43.0,14.0,189707.0,197418.0,"passed"],
+      [1000,"blob","warm",false,52,44,0.8461538461538461,0.0,0.0,0.0,0.0,"passed"],
+      [1000,"commit","cold",false,3479,3444,0.9899396378269618,7.0,7.0,66534.0,70481.0,"passed"],
+      [1000,"commit","warm",false,40,34,0.85,0.0,0.0,0.0,0.0,"passed"],
+      [1000,"history","cold",true,507745,50705,0.09986312026706319,1010.0,74.0,333664.0,400628.0,"passed"],
+      [1000,"history","warm",false,787,634,0.8055908513341804,0.0,0.0,0.0,0.0,"passed"],
+      [1000,"history-page-1","cold",true,55207,9959,0.18039379064249098,109.0,16.0,167183.0,201449.0,"passed"],
+      [1000,"history-page-1","warm",false,114,83,0.7280701754385965,0.0,0.0,0.0,0.0,"passed"],
+      [1000,"history-page-10","cold",true,501228,10398,0.020745050156814864,1010.0,18.0,333664.0,236679.0,"passed"],
+      [1000,"history-page-10","warm",false,565,85,0.1504424778761062,0.0,0.0,0.0,0.0,"passed"],
+      [1000,"object-batch","cold",false,22375,8256,0.3689832402234637,43.0,14.0,191854.0,197418.0,"passed"],
+      [1000,"object-batch","warm",false,216,195,0.9027777777777778,0.0,0.0,0.0,0.0,"passed"],
+      [1000,"object-point","cold",false,22865,7897,0.3453750273343538,43.0,14.0,189707.0,197418.0,"passed"],
+      [1000,"object-point","warm",false,52,43,0.8269230769230769,0.0,0.0,0.0,0.0,"passed"],
+      [1000,"path-history","cold",false,460188,106961,0.23242892035429,930.0,194.0,728954.0,867797.0,"passed"],
+      [1000,"path-history","warm",false,1341,1091,0.8135719612229679,0.0,0.0,0.0,0.0,"passed"],
+      [1000,"resolve","cold",false,3805,3856,1.0134034165571617,7.0,7.0,66534.0,70481.0,"passed"],
+      [1000,"resolve","warm",false,39,27,0.6923076923076923,0.0,0.0,0.0,0.0,"passed"],
+      [1000,"tree","cold",false,23049,8396,0.364267430257278,42.0,14.0,189564.0,197418.0,"passed"],
+      [1000,"tree","warm",false,137,111,0.8102189781021898,0.0,0.0,0.0,0.0,"passed"],
+      [10000,"attribution","cold",false,15913,14848,0.933073587632753,26.0,24.0,377618.0,385440.0,"passed"],
+      [10000,"attribution","warm",false,333,290,0.8708708708708709,0.0,0.0,0.0,0.0,"passed"],
+      [10000,"blame","cold",false,403360,175155,0.43423988496628324,667.0,254.0,4708972.0,4905647.0,"passed"],
+      [10000,"blame","warm",false,78,57,0.7307692307692307,0.0,0.0,0.0,0.0,"passed"],
+      [10000,"blob","cold",false,11786,10422,0.884269472255218,18.0,16.0,271596.0,283371.0,"passed"],
+      [10000,"blob","warm",false,52,47,0.9038461538461539,0.0,0.0,0.0,0.0,"passed"],
+      [10000,"commit","cold",false,4287,4290,1.000699790062981,7.0,7.0,72285.0,76233.0,"passed"],
+      [10000,"commit","warm",false,41,34,0.8292682926829268,0.0,0.0,0.0,0.0,"passed"],
+      [10000,"history","cold",true,608995,76706,0.12595505710227506,1041.0,108.0,1366389.0,1713443.0,"passed"],
+      [10000,"history","warm",false,798,656,0.8220551378446115,0.0,0.0,0.0,0.0,"passed"],
+      [10000,"history-page-1","cold",true,90278,27836,0.30833647178714635,138.0,47.0,1133922.0,1415572.0,"passed"],
+      [10000,"history-page-1","warm",false,129,90,0.6976744186046512,0.0,0.0,0.0,0.0,"passed"],
+      [10000,"history-page-10","cold",true,636200,28545,0.04486796604841245,1041.0,50.0,1366389.0,1451386.0,"passed"],
+      [10000,"history-page-10","warm",false,587,92,0.1567291311754685,0.0,0.0,0.0,0.0,"passed"],
+      [10000,"history-page-100","cold",true,5709019,26816,0.004697129226579908,10055.0,47.0,3166706.0,1385330.0,"passed"],
+      [10000,"history-page-100","warm",false,5916,91,0.015382014874915483,0.0,0.0,0.0,0.0,"passed"],
+      [10000,"object-batch","cold",false,24306,17990,0.7401464658931951,47.0,32.0,1222439.0,1230261.0,"passed"],
+      [10000,"object-batch","warm",false,225,227,1.008888888888889,0.0,0.0,0.0,0.0,"passed"],
+      [10000,"object-point","cold",false,11542,10478,0.9078149367527292,18.0,16.0,271596.0,283371.0,"passed"],
+      [10000,"object-point","warm",false,53,45,0.8490566037735849,0.0,0.0,0.0,0.0,"passed"],
+      [10000,"path-history","cold",false,430306,179635,0.417458738665043,696.0,258.0,4691860.0,4831274.0,"passed"],
+      [10000,"path-history","warm",false,1487,1252,0.8419636852723604,0.0,0.0,0.0,0.0,"passed"],
+      [10000,"resolve","cold",false,4595,4599,1.0008705114254624,7.0,7.0,72285.0,76233.0,"passed"],
+      [10000,"resolve","warm",false,42,29,0.6904761904761905,0.0,0.0,0.0,0.0,"passed"],
+      [10000,"tree","cold",false,10376,9459,0.9116229760986893,16.0,14.0,238721.0,246543.0,"passed"],
+      [10000,"tree","warm",false,133,122,0.9172932330827067,0.0,0.0,0.0,0.0,"passed"]
+    ]
+  },
+  "provider_relay_allocation_diagnostic": {
+    "status": "measured_diagnostic",
+    "acceptance": false,
+    "report_sha256": "3c86c7635a27d8632d74d6c5776994445d8dbe5cff2b66848b01594a98532c62",
+    "measured_pairs": 20,
+    "measured_attempts": 800000,
+    "warmup_attempts": 4000,
+    "cells": {
+      "baseline": {
+        "combined_successful_rps": 9996.715713006155,
+        "relay_cpu_us_per_attempt": 97.41832500000001,
+        "p95_us": 22317.1905
+      },
+      "candidate": {
+        "combined_successful_rps": 10300.1546320752,
+        "relay_cpu_us_per_attempt": 93.634825,
+        "p95_us": 20551.162
+      }
+    },
+    "rps_ratio": 1.0303538609859895,
+    "p95_ratio": 0.9208668985462126,
+    "cpu_per_attempt_ratio": 0.9611623377839846,
+    "cleanup": {
+      "baseline": {
+        "exit_code": 0,
+        "active_requests_at_shutdown": 0,
+        "peak_rss_bytes": 84422656
+      },
+      "candidate": {
+        "exit_code": 0,
+        "active_requests_at_shutdown": 0,
+        "peak_rss_bytes": 85303296
+      }
+    },
+    "scope": "Provider relay capacity only. Trial medians across20fixedpairs, all512BGETSHA/HEADlength and aggregate meter counters verified. Each2independent1CPUclients prevents former singleclientceiling. Relay1CPU256MiB/backend4CPU3GiB. No productHTTP acceptance.",
+    "artifact_root": "relay-allocation-capacity-quoted-ssh",
+    "summary_sha256": "e800eea394a75a09e4c8fca8ef0e29eed3369bb3db036aa6ac977d2b8641e01a",
+    "source_sha256": {
+      "baseline": "b520107ee13c4477d686d6d821fd57532d43a974318c69afaca344accd4e7811",
+      "candidate": "a427d799c6232768173fd257440697e608d761bcf8a627defab46a4b94f114bf"
+    },
+    "client_sha256": "c294926beb4616b539b692f6d006ae12c5585093f6ca484679fe27578055a010",
+    "profile": {
+      "provider_cpus": 4,
+      "provider_cpuset": "0,5,6,7",
+      "provider_memory_bytes": 3221225472,
+      "relay_cpus": 1,
+      "relay_cpuset": "4",
+      "relay_memory_bytes": 268435456,
+      "clients": 2,
+      "client_cpus_each": 1,
+      "client_cpusets": [
+        "1",
+        "2"
+      ],
+      "concurrency_each": 64,
+      "requests_each": 10000,
+      "pairs": 20,
+      "vm_cpus": 8,
+      "vm_memory_gib": 8
+    },
+    "measured_pairs_before_observation": 20,
+    "all_observations_retained": true,
+    "old_setup_failure_retained": {
+      "artifact_root": "relay-allocation-capacity",
+      "status": "failed_before_any_trial",
+      "raw_report_sha256": "19cc1a6bc7fb04c3733d658b3f71dbca31f595eddb39d690d3cae188e8ff1863",
+      "failure": "SSH remote shell split the Python -c argument; corrected quoting in a new diagnostic directory before any measurement."
+    },
+    "canonical_live_wire_validation": {
+      "status": "passed",
+      "checks": 16,
+      "sdk_attempts": 21,
+      "canonical_all_counters_equal": true,
+      "raw_report_sha256": "73f4c1625d2b1a450f97304b7207f6243286318cdc9e10fbd2a13c9875de0407"
+    }
+  },
+  "compressed_journal_live_parity": {
+    "status": "passed_compressed_worker_functional_proof",
+    "acceptance": false,
+    "scope": "Four real HTTP trials through RustFS, identical canonical request/statistics functions, exact gzip/raw roundtrip and recomputed full summary parity; stopped-worker input reuse must fail without overwrite or provider traffic. Not performance acceptance.",
+    "report_sha256": "e45ec0e6a8b7d2d4fe1984e070b6e06592a4f19e9c549df88587a946dd95c3a4",
+    "profile_sha256": "416b73c18b3f6cdc9257cbc15ea5a0c39b4772ceaf6fe6f71417b972cd77ac3a",
+    "driver_sha256": "dbc27c02101b79630eda1de33021dc2ad258a02903c560056226c8ed4ac2ca45",
+    "reuse_fault": {
+      "exit_nonzero": true,
+      "existing_output_unchanged": true,
+      "existing_gzip_unchanged": true,
+      "no_provider_requests": true
+    },
+    "all_phase_records": 107348,
+    "all_phase_git_verified_successes": 106859,
+    "all_phase_oracle_mismatches": 0,
+    "artifact_root": "linux-http-optimized-functional",
+    "functional_proof_sha256": "72a39fa6be61ef097f8dd918e55f47cea17837da5c98c187dc6ecee48e0ba10e",
+    "request_worker_sha256": "6936abc70b69fd3c9b52177074a638b6a7b47041339b6d5a050fcea2bdfb048e",
+    "canonical_driver_sha256": "88288e8ad415455c029bc4534e31361643284937644b62dede79b18f83d0fa76",
+    "canonical_statistics_sha256": "a5fa329bbaeb23a6ae9ec8cbcb975adb1a6be3e24b80e374d3b7220aa6a2ab64",
+    "records_retained": true,
+    "canonical_full_summary_equal": true,
+    "aggregation_address_space_limit_bytes": 268435456
+  },
+  "current_native_recovery_ci": {
+    "status": "passed",
+    "acceptance": "Runtime recovery only, not HTTP performance gates.",
+    "workflow_run": 44806904154,
+    "head_revision": "96dfa0078e377dfb8ede2ecf386322c11305c0cd",
+    "merge_revision": "a2a006d6ccfc9f4e365430b411a4665b961ab003",
+    "kubernetes_artifact_id": 14673410500,
+    "artifact_sha256": "527a4974a81884ff25e45e335979a8c9e6769cec883862c509a5ed0556510fd7",
+    "image_id": "sha256:a2937114f85b04b683307b6e0da73a09c49d54370e1a52dce6133b7c3e33bdc7",
+    "platform": "linux/amd64",
+    "nodes": 3,
+    "sigkill_exit_code": 137,
+    "large_file_bytes": 3221225472,
+    "stock_git_lfs_crash_and_restored_clones": true,
+    "range_resume": true,
+    "root_copy_objects": 196,
+    "root_copy_bytes": 3221365402,
+    "root_sha256_and_metadata_verified": true
+  },
+  "expanded_http_repeatability_and_resource_failure": {
+    "status": "failed_resource_gates",
+    "combined_acceptance": false,
+    "timing_repeatability_passed": true,
+    "scope": "Expanded HTTP repeatability only; full source comparison and600secondsoaks remain required. All original and diagnostic failures retained.",
+    "artifact_root": "linux-http-optimized-calibration-20",
+    "raw_report_sha256": "6426cff4eb137a35b97d83753a83cc1ccec24fe72a83905d238206a85cbedbe7",
+    "frozen_profile_sha256": "71d2ee07a46d5dc7e01a8388bf6764e41f4073259fe6b57b49660acf1126c99c",
+    "diagnostic_summary_sha256": "0492a19596273445c37ba743aa8b3d5b85052e2bebcf7627e0ccd5699e79ef5a",
+    "pairs_per_case": 20,
+    "cases": 9,
+    "trials": 360,
+    "timing_cells_passed": 27,
+    "measured_successes": 12991532,
+    "measured_errors": 0,
+    "all_phase_checks": {
+      "records": 15658813,
+      "git_verified_successes": 15623897,
+      "oracle_mismatches": 0
+    },
+    "p95_ratio_range": [
+      0.9823949865060566,
+      1.018718322264443
+    ],
+    "throughput_ratio_range": [
+      0.9947348160398559,
+      1.006789604232143
+    ],
+    "resource_failures": {
+      "baseline": [
+        "replica-0:rss_growth",
+        "replica-1:rss_growth"
+      ],
+      "candidate": [
+        "replica-0:rss_growth",
+        "replica-1:rss_growth"
+      ]
+    },
+    "rss_trajectory": {
+      "baseline": [
+        {
+          "quintile_medians": [
+            182194176,
+            186302464,
+            186384384,
+            186392576,
+            288358400
+          ],
+          "late_ratio": 1.5470487408253857,
+          "first": 169107456,
+          "last": 288358400
+        },
+        {
+          "quintile_medians": [
+            192520192,
+            193097728,
+            193744896,
+            194490368,
+            228737024
+          ],
+          "late_ratio": 1.176084072194259,
+          "first": 179384320,
+          "last": 277884928
+        }
+      ],
+      "candidate": [
+        {
+          "quintile_medians": [
+            187478016,
+            188735488,
+            189722624,
+            192401408,
+            258957312
+          ],
+          "late_ratio": 1.3459221254763374,
+          "first": 184545280,
+          "last": 260476928
+        },
+        {
+          "quintile_medians": [
+            174682112,
+            200269824,
+            200278016,
+            175190016,
+            237383680
+          ],
+          "late_ratio": 1.3550068971966986,
+          "first": 183078912,
+          "last": 240816128
+        }
+      ]
+    },
+    "container_exit_codes": {
+      "baseline": {
+        "a": 0,
+        "b": 0
+      },
+      "candidate": {
+        "a": 0,
+        "b": 0
+      }
+    },
+    "candidate_shutdown_proofs": {
+      "a": {
+        "passed": true,
+        "fields": {
+          "complete": "true",
+          "log_quiesced": "true",
+          "local_durability_closed": "true",
+          "pending_application_events": "0",
+          "pending_dispatches": "0",
+          "deadline_elapsed": "false"
+        }
+      },
+      "b": {
+        "passed": true,
+        "fields": {
+          "complete": "true",
+          "log_quiesced": "true",
+          "local_durability_closed": "true",
+          "pending_application_events": "0",
+          "pending_dispatches": "0",
+          "deadline_elapsed": "false"
+        }
+      }
+    },
+    "meter_exit_code": 0,
+    "meter_active_requests_at_shutdown": 0,
+    "full_comparison_launched": false,
+    "semantic_preflight": {
+      "tests_passed": 23,
+      "format": true,
+      "earlier_evidence_fields_preserved": 41,
+      "report_sha256": "7842ac1904e8f5c1b56fd0e304a9cc0655e112771d1860abf1075b9d518a743c"
+    },
+    "cell_columns": [
+      "case",
+      "workload",
+      "a_p95_us",
+      "b_p95_us",
+      "p95_ratio",
+      "a_rps",
+      "b_rps",
+      "throughput_ratio",
+      "timing_gate"
+    ],
+    "cells": [
+      [
+        "small-1",
+        "preview",
+        2424.296,
+        2443.338,
+        1.007854651412204,
+        491.95640238638083,
+        491.142953766361,
+        0.9983465026248791,
+        "passed"
+      ],
+      [
+        "distinct-8",
+        "preview-distinct",
+        3188.834,
+        3141.546,
+        0.9851707552039397,
+        575.6599766261572,
+        579.2505956558696,
+        1.0062373956424004,
+        "passed"
+      ],
+      [
+        "distinct-8",
+        "history",
+        3220.541,
+        3184.332,
+        0.9887568579316331,
+        575.6649747158342,
+        579.2505956558696,
+        1.00622865919853,
+        "passed"
+      ],
+      [
+        "distinct-8",
+        "raw-distinct",
+        3166.088,
+        3128.335,
+        0.9880758210131872,
+        575.6749708951879,
+        579.2405992696539,
+        1.006193822130084,
+        "passed"
+      ],
+      [
+        "distinct-8",
+        "blame-distinct",
+        3175.539,
+        3136.662,
+        0.9877573539484162,
+        575.7299498816338,
+        579.270588428301,
+        1.0061498251869563,
+        "passed"
+      ],
+      [
+        "distinct-8",
+        "late-history",
+        4372.329,
+        4303.372,
+        0.9842287714396608,
+        575.6949632538955,
+        579.2505956558696,
+        1.0061762437209407,
+        "passed"
+      ],
+      [
+        "small-16",
+        "preview",
+        4962.329,
+        4967.912,
+        1.0011250765517563,
+        4252.581237967785,
+        4248.515673838871,
+        0.9990439773160322,
+        "passed"
+      ],
+      [
+        "mixed-16",
+        "preview",
+        4996.549,
+        5024.793,
+        1.0056527014945715,
+        808.7327335642732,
+        806.309506809366,
+        0.9970036741999703,
+        "passed"
+      ],
+      [
+        "mixed-16",
+        "history",
+        5049.451,
+        5089.007,
+        1.0078337229136394,
+        808.8576644717295,
+        806.2695321182672,
+        0.9968002623117225,
+        "passed"
+      ],
+      [
+        "mixed-16",
+        "raw",
+        4985.493,
+        5029.509,
+        1.008828815926529,
+        808.7727114546592,
+        806.3394878276902,
+        0.996991461763599,
+        "passed"
+      ],
+      [
+        "mixed-16",
+        "blame",
+        5050.954,
+        5079.985,
+        1.0057476270819334,
+        808.787703163554,
+        806.3844593551763,
+        0.9970285851293517,
+        "passed"
+      ],
+      [
+        "mixed-16",
+        "late-history",
+        6622.134,
+        6682.497,
+        1.009115339556705,
+        808.6577750197994,
+        806.2945163002039,
+        0.9970775539510053,
+        "passed"
+      ],
+      [
+        "distinct-16",
+        "preview-distinct",
+        4930.394,
+        4910.152,
+        0.9958944457582902,
+        815.9538514865204,
+        820.5906434080076,
+        1.0056826644215722,
+        "passed"
+      ],
+      [
+        "distinct-16",
+        "history",
+        4990.165,
+        4971.327,
+        0.9962249745248906,
+        815.8738986328102,
+        820.5656583077919,
+        1.0057505941578029,
+        "passed"
+      ],
+      [
+        "distinct-16",
+        "raw-distinct",
+        4924.396,
+        4911.415,
+        0.9973639406741457,
+        815.8489133660257,
+        820.570655327835,
+        1.0057875200719804,
+        "passed"
+      ],
+      [
+        "distinct-16",
+        "blame-distinct",
+        4931.119,
+        4910.328,
+        0.995783715623168,
+        815.8489133660257,
+        820.7255629491731,
+        1.0059773929991858,
+        "passed"
+      ],
+      [
+        "distinct-16",
+        "late-history",
+        6557.954,
+        6529.095,
+        0.9955993896876985,
+        815.9138750596653,
+        820.6256225483098,
+        1.0057748098575967,
+        "passed"
+      ],
+      [
+        "small-32",
+        "preview",
+        9525.014,
+        9357.326,
+        0.9823949865060566,
+        4407.178914801835,
+        4437.101915413585,
+        1.006789604232143,
+        "passed"
+      ],
+      [
+        "expensive-32",
+        "blame",
+        8955.961,
+        9004.909,
+        1.005465410132983,
+        1470.0704688338344,
+        1462.3310635271746,
+        0.994735350807503,
+        "passed"
+      ],
+      [
+        "expensive-32",
+        "late-history",
+        12880.695,
+        13121.8,
+        1.018718322264443,
+        1469.9056403292425,
+        1462.580799001313,
+        0.995016794869711,
+        "passed"
+      ],
+      [
+        "expensive-32",
+        "raw",
+        8918.309,
+        8976.02,
+        1.006471069795855,
+        1469.9206247387508,
+        1462.1812222426913,
+        0.9947348160398559,
+        "passed"
+      ],
+      [
+        "small-64",
+        "preview",
+        23393.788,
+        23481.621,
+        1.0037545437275912,
+        3961.477664430747,
+        3944.2448828389242,
+        0.995649910702122,
+        "passed"
+      ],
+      [
+        "mixed-64",
+        "preview",
+        23129.65,
+        23344.1,
+        1.009271649160277,
+        784.363444136379,
+        781.5453946870273,
+        0.9964072147033133,
+        "passed"
+      ],
+      [
+        "mixed-64",
+        "history",
+        23164.83,
+        23311.934,
+        1.0063503164063798,
+        784.2237045223694,
+        781.6651641108987,
+        0.9967374865147324,
+        "passed"
+      ],
+      [
+        "mixed-64",
+        "raw",
+        23102.539,
+        23220.881,
+        1.0051224672751338,
+        784.6129791613961,
+        782.1192898430775,
+        0.9968217587720969,
+        "passed"
+      ],
+      [
+        "mixed-64",
+        "blame",
+        23143.507,
+        23294.894,
+        1.0065412299008962,
+        784.7527187754057,
+        781.540404294366,
+        0.9959065901854377,
+        "passed"
+      ],
+      [
+        "mixed-64",
+        "late-history",
+        24667.294,
+        24873.917,
+        1.0083763950760063,
+        784.5031837503885,
+        782.0843570944484,
+        0.9969167408035532,
+        "passed"
+      ]
+    ]
   }
 }

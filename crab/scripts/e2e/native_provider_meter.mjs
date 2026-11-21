@@ -2,36 +2,43 @@ import http from 'node:http';
 import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
-export function operation(method, path, headers) {
-  const query = new URL(path, 'http://meter').searchParams;
+function operation(method, parsed, headers) {
   if (method === 'HEAD') return 'head';
-  if (method === 'GET') return query.has('list-type') || query.has('versions') ? 'list' : 'get';
+  const query = parsed.search === '' ? null : parsed.searchParams;
+  if (method === 'GET') return query?.has('list-type') || query?.has('versions') ? 'list' : 'get';
   if (method === 'PUT') {
     if ('x-amz-copy-source' in headers) return 'copy';
-    return query.has('partNumber') ? 'multipart_part' : 'put';
+    return query?.has('partNumber') ? 'multipart_part' : 'put';
   }
   if (method === 'POST') {
-    if (query.has('uploads')) return 'multipart_create';
-    if (query.has('uploadId')) return 'multipart_complete';
-    return query.has('delete') ? 'delete_batch' : 'post';
+    if (query?.has('uploads')) return 'multipart_create';
+    if (query?.has('uploadId')) return 'multipart_complete';
+    return query?.has('delete') ? 'delete_batch' : 'post';
   }
-  if (method === 'DELETE') return query.has('uploadId') ? 'multipart_abort' : 'delete';
+  if (method === 'DELETE') return query?.has('uploadId') ? 'multipart_abort' : 'delete';
   return method.toLowerCase();
 }
 
-export function requestKey(path, op) {
-  const parsed = new URL(path, 'http://meter');
+function requestKey(parsed, op) {
   const key = decodeURIComponent(parsed.pathname).replace(/^\/+/, '');
-  const prefix = parsed.searchParams.get('prefix');
+  const prefix = op === 'list' ? parsed.searchParams.get('prefix') : null;
   return op === 'list' && prefix ? key.replace(/\/+$/, '') + '/' + prefix.replace(/^\/+/, '') : key;
 }
 
-export function category(key) {
+const NESTED_CATEGORIES = new Set(['git_object_catalog_db', 'v2', 'git-visibility', 'locks', 'manifests', 'metadata', 'ref-journal', 'refs']);
+
+function category(key) {
+  const separator = key.indexOf('/');
+  const first = separator < 0 ? key : key.slice(0, separator);
+  if (!NESTED_CATEGORIES.has(first)) return first || 'repository-root';
   const parts = key.split('/');
-  if (parts.length > 2 && parts[0] === 'metadata' && ['pack', 'shard'].includes(parts[1])) return parts.slice(0, 3).join('/');
-  if (parts.length > 2 && parts[0] === 'locks' && parts[1] === 'internal') return parts.slice(0, 3).join('/');
-  if (parts.length > 1 && ['git_object_catalog_db', 'v2', 'git-visibility', 'locks', 'manifests', 'metadata', 'ref-journal', 'refs'].includes(parts[0])) return parts.slice(0, 2).join('/');
-  return parts[0] || 'repository-root';
+  if (parts.length > 2 && first === 'metadata' && ['pack', 'shard'].includes(parts[1])) return parts.slice(0, 3).join('/');
+  if (parts.length > 2 && first === 'locks' && parts[1] === 'internal') return parts.slice(0, 3).join('/');
+  return parts.slice(0, 2).join('/');
+}
+
+function increment(counter, name, amount = 1) {
+  counter[name] = (counter[name] || 0) + amount;
 }
 
 export class Counter {
@@ -41,17 +48,24 @@ export class Counter {
     for (const field of ['methods', 'operations', 'categories', 'classes', 'class_request_body_bytes', 'class_response_body_bytes', 'statuses', 'proxy_errors', 'latency_ms_histogram']) this.value[field] = Object.create(null);
   }
   record(method, path, headers, requestBytes, responseBytes, status, elapsedMs, error) {
-    const op = operation(method, path, headers);
-    const key = requestKey(path, op);
+    const parsed = new URL(path, 'http://meter');
+    const op = operation(method, parsed, headers);
+    const key = requestKey(parsed, op);
     const group = key.startsWith(this.prefix) ? category(key.slice(this.prefix.length)) : 'outside-repository';
     const requestClass = group + ':' + op;
     this.value.requests++;
     this.value.request_body_bytes += requestBytes;
     this.value.response_body_bytes += responseBytes;
-    for (const [field, name, count] of [['methods', method, 1], ['operations', op, 1], ['categories', group, 1], ['classes', requestClass, 1], ['class_request_body_bytes', requestClass, requestBytes], ['class_response_body_bytes', requestClass, responseBytes], ['statuses', Math.floor(status / 100) + 'xx', 1]]) this.value[field][name] = (this.value[field][name] || 0) + count;
-    if (error) this.value.proxy_errors[error] = (this.value.proxy_errors[error] || 0) + 1;
+    increment(this.value.methods, method);
+    increment(this.value.operations, op);
+    increment(this.value.categories, group);
+    increment(this.value.classes, requestClass);
+    increment(this.value.class_request_body_bytes, requestClass, requestBytes);
+    increment(this.value.class_response_body_bytes, requestClass, responseBytes);
+    increment(this.value.statuses, Math.floor(status / 100) + 'xx');
+    if (error) increment(this.value.proxy_errors, error);
     const bins = this.value.latency_ms_histogram[op] ||= Object.create(null);
-    bins[elapsedMs] = (bins[elapsedMs] || 0) + 1;
+    increment(bins, elapsedMs);
   }
 }
 
@@ -63,7 +77,15 @@ async function serve(config) {
   // before RustFS's five-second header deadline; there is no automatic retry.
   const agent = new http.Agent({ keepAlive: true, maxSockets: Infinity, maxFreeSockets: 256, timeout: 1000 });
   const hop = new Set(['connection', 'proxy-connection', 'keep-alive', 'transfer-encoding', 'te', 'trailer', 'upgrade']);
-  const transportHeaders = headers => Object.fromEntries(Object.entries(headers).filter(([name]) => !hop.has(name)));
+  const transportHeaders = headers => {
+    // Keep header names as data and preserve duplicate-header arrays while
+    // avoiding per-header entry tuples on every provider request.
+    const forwarded = Object.create(null);
+    for (const name of Object.keys(headers)) {
+      if (!hop.has(name)) forwarded[name] = headers[name];
+    }
+    return forwarded;
+  };
   let active = 0;
   const server = http.createServer({ keepAliveTimeout: 65000, headersTimeout: 70000, requestTimeout: 0 }, (incoming, outgoing) => {
     incoming.socket.setNoDelay(true);

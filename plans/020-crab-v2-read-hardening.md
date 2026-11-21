@@ -82,8 +82,12 @@ integrate them sequentially. R6 is not required for accepting the first wave.
    remain retained. A 36-trial 1/2/1 provider-CPU reversal measures backend
    saturation. The prospectively declared two-provider-CPU profile passes all
    six HTTP A/A workload cells after 80 trials, with unchanged per-replica
-   1-CPU/1-GiB limits and symmetric 10% gates. The original 128-trial comparison
-   and two 600-second soaks are running; full native scaling follows. Exact
+   1-CPU/1-GiB limits and symmetric 10% gates. The complete original 128-trial
+   comparison and both actual 600-second soaks finish with zero measured errors
+   and zero Git mismatches. The named late-history target improves p95 by 32.8%,
+   but 15 short-case latency gates remain failed. Full native scaling passes all
+   72 original cells after 1,200 fresh processes and 7,200 Git checks. A separate
+   polling on/off/on control is running to test measurement overhead. Exact
    indexed statistics, early loop receipts and native journals preserve all
    observations without changing percentiles, workload duration or numeric gates.
 3. **Independent growth and minimum-resource lifecycle:** all 200 original growth
@@ -91,8 +95,10 @@ integrate them sequentially. R6 is not required for accepting the first wave.
    queries, with 1 CPU / 1 GiB / no additional swap per reader. The naturally
    aged cold-reader GC sequence passes 13 checks and 40 Git queries. Current
    runtime ARM64 process/three-node recovery CI passes, including 3-GiB stock
-   Git LFS recovery and full Root copy verification. Current minimum-resource
-   mixed HTTP soak acceptance remains pending the complete combined-load run.
+   Git LFS recovery and full Root copy verification. The complete current HTTP
+   run passes its minimum-resource checks: no OOMs, bounded RSS, drained admitted
+   work, four clean exits and both candidate durability proofs. Performance
+   acceptance remains open because the 15 short-case latency gates fail.
 
 Persistent attribution and new range formats remain conditional R6 decisions.
 Bounded pack-window reuse and warm history-buffer reuse are already implemented.
@@ -1073,6 +1079,25 @@ and the existing minimum 1,000 observations for p99. The original million-sample
 capacity failure remains retained; this changes measurement storage, not load,
 duration, sample selection or engineering thresholds.
 
+The HTTP follow-up retains all 15 original short-case failures. Fixed polling
+on/off/on controls do not explain the drift; a separate RustFS CPU 2/4/2
+reversal establishes backend saturation. Prospective verification uses four
+provider CPUs while each Crab replica remains at one CPU / one GiB / no extra
+swap. Reduced meter allocations preserve canonical accounting on 828 cases
+and 21 signed live RustFS attempts; 20 fixed capacity pairs verify all 804,000
+GET/HEAD observations, with median throughput +3.0% and CPU/attempt −3.9%.
+These are measurement-tool results, not product performance acceptance.
+
+Lossless journal compression after the request timer and exact statistics
+passes four real HTTP trials: 107,348 records, identical recomputed summaries,
+zero Git mismatches, and no-overwrite/no-provider-traffic proof on output reuse.
+The same-baseline repeatability profile completes 20 pairs across all seven
+previously failing case families and the two earlier controls, 360 trials total.
+All 27 timing controls pass, with p95 ratios 0.9824–1.0188. Overall calibration
+still fails four RSS-growth gates over 77 minutes, including both idle candidate
+workers. All original failures remain; the subsequent full comparison does not
+launch. Every duration, observation, percentile and numeric gate is unchanged.
+
 1. Record source revision/patch, binary hashes, compiler/profile, fixture
    identities, backend/region, quotas, and report schema. Readiness/capture,
    query, serialization, and client timing must remain separate.
@@ -1520,12 +1545,14 @@ Current metadata optimization: `a5d6015e2c8` batches adjacent cold pages within
 an admitted lookup wave, preserving the existing bounded cache and per-page
 verification. At 10,000 commits, object-batch query reads fall 45 → 32 with the
 same 1,230,261 bytes; history falls 115 → 108 with identical bytes. All 400
-focused Git oracles, 311 focused Rust tests, 54 current two-replica HTTP checks
-and 200 independent-growth functional Git queries pass. No timing gate is
-waived. Remaining work: same-executable repeatability and combined-load gates,
-the full independent-growth matrix, current minimum-profile soak, and naturally
-aged cold-reader retention across repository-only GC. Source-bound details live
-in the qualification report's metadata lookup-wave section and JSON receipt.
+focused Git oracles, 311 focused Rust tests and 54 current two-replica HTTP checks
+pass. All 200 independent-growth timing controls pass across 20,000 Git queries;
+aged cold-reader retention across real repository-only GC also passes. The full
+128-trial HTTP comparison completes both ten-minute soaks with zero measured
+errors/Git mismatches and passing resource/shutdown checks. No timing gate is
+waived: 15 short-case HTTP latency gates remain failed. All 72 original native
+timing cells pass with 100 fixed pairs per cell. Source-bound details live in the qualification report and JSON
+receipt.
 
 R0 tooling and thresholds must evolve together with cursor/representation/schema
 changes. New query shapes need native oracles before timing acceptance. Any new
