@@ -287,7 +287,8 @@ def main():
                         "literal_backslash_coordinates_keep_linked_numeric_domains",
                     ]
                     template_prefix = "results::tests::template_parity::"
-                    (output / "chart-template-parity.html").unlink(missing_ok=True)
+                    for name in ("chart-template-parity.html", "chart-authored-hover.json"):
+                        (output / name).unlink(missing_ok=True)
                     run_test(env, output, "template-parity.log", ["cargo", "test", "-p", "crab-workflow", "--locked", "--lib",
                         template_prefix, "--", "--nocapture"], template_prefix + template_cases[0])
                     template_log = (output / "template-parity.log").read_text()
