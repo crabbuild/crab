@@ -1,8 +1,8 @@
 # V2 read hardening: combined local RustFS qualification
 
-**Status: implementation delivered; combined acceptance remains open.**
-The latest complete HTTP comparison appears in
-[the complete metadata-batching matrix](#complete-metadata-batching-http-matrix).
+**Status: implementation delivered; integration acceptance remains open.**
+The current qualification state appears in
+[remaining priorities](#remaining-priorities).
 Earlier smoke, minimum-profile and timing results retain their actual source bindings.
 The frozen engineering gates did not all pass. This report is not a release or
 production-readiness claim. [PR #693](https://github.com/crabbuild/crab/pull/693)
@@ -16,6 +16,62 @@ build hashes and failed profile. Raw private configuration, authentication
 headers and request bodies remain excluded from the report. Original journals,
 source archives and failed receipts remain preserved; their SHA-256 hashes bind
 the archived ledger to those inputs.
+
+## Remaining priorities
+
+The runtime remains `bf5cb36e176` with published Cellar 0.1.2. Adjacent-page
+batching/page reuse is implemented: the deterministic case drops 14 transfers
+to two at identical bytes. All 72 native timing cells, 200 independent-growth
+controls and thirteen lifecycle checks pass with their source bindings retained.
+
+Fresh identical-binary calibration passes all 27 timing bands across 360
+accepted / 376 raw trials. All four workers pass sustained resource gates, exit
+zero and preserve active durability; all 377 clock checks pass. Peak RSS is
+168.2 MiB over 143 minutes under one CPU / one GiB / no extra swap per worker.
+
+The subsequent original-R0/current full profile remains failed: it retains 126
+accepted short arms and 134 raw arms, with compiler-overlapped reference soaks
+and two reference RSS-growth failures. Current workers pass all resource gates;
+all four exit zero, current durability checks pass and all 135 clock checks pass.
+The diagnostic verifies all raw journals: 15,423,584 records, 15,406,758 successful
+Git comparisons, zero request errors and zero Git mismatches. Its numerical
+comparison has no failures; that does not qualify the failed full profile.
+
+A fresh AB/BA follow-up independently admits each whole arm. All ten arms pass
+without retries, including two 600-second soaks per variant and six short
+controls. All four RSS/resource gates pass over 48 minutes; reference peaks are
+227.6/160.7 MiB and current peaks are 93.8/76.2 MiB. All four workers exit zero,
+both current durability proofs pass and all 21 clock checks pass. Every fresh
+journal is hash-verified: 10,381,575 records, 10,380,840 successful Git comparisons,
+zero request errors and zero Git mismatches.
+
+The composed comparison includes **all 126 valid original short arms plus all
+ten fresh arms**: 136 arms, 22 cases, 14,317,090 measured successful Git comparisons.
+Extra small-read controls remain included; no valid short sample is omitted.
+The original canonical numerical gates all pass. Source, workloads, thresholds,
+resource limits and instrumentation match across the components. This is
+composed numerical and targeted resource proof; it does not relabel the original
+failed 128-trial profile or establish all-platform CI acceptance.
+
+Remaining priorities:
+
+1. **Resolve SDK read-limit coverage and CI gaps.** The one-request-limit fixture
+   expects rejection but the read succeeds. The SDK wrapper forwards the limits;
+   the changed reader reuses pack data. A focused cold/warm I/O charging proof is
+   needed before choosing a source or test correction. Other SDK, architecture,
+   gateway, browser and Windows jobs also report failures. Source identity alone
+   does not establish their causes. HTTP container, SDK RustFS end-to-end, server
+   Cell recovery and all four Linux/macOS native desktop jobs pass. All sixteen
+   downloaded native Git range reports/results verify successfully, with peak
+   RSS below 166 MiB; Windows native range qualification remains missing.
+2. **Diagnose warm large-file origin I/O.** The SDK CI artifact retains a paired
+   warm origin-byte ratio of 1.9998 versus the shared-core control. Three of five
+   SDK pairs fetch one extra 67,104,756-byte object; all file hashes match and both
+   callers use a 2-GiB cache ceiling. The cause remains unproven. This is a separate
+   SDK content-cache follow-up to the ordinary-Git read wave.
+
+Persistent line-origin indexes and new storage formats remain conditional on
+measured cold-read cost; these results do not justify implementing them yet.
 
 ## Source and environment
 

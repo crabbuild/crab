@@ -28,15 +28,29 @@
   and live verification are separate. The packaged SDK's 1,085 code files match
   the approved source, with matching feature definitions. Clean production builds,
   54 two-replica RustFS checks, minimum-profile Linux OAuth and an explicit
-  real RustFS three-node Fleet handoff now pass at `bf5cb36e176`. Sustained
-  published-SDK timing acceptance remains open.
+  real RustFS three-node Fleet handoff now pass at `bf5cb36e176`. Published-SDK
+  repeatability and composed numerical/targeted resource gates also pass;
+  integrated acceptance remains open for CI gaps.
 - **Delivery status:** IMPLEMENTED; ACCEPTANCE OPEN. R0–R5 are implemented.
   Current source-bound two-replica Git-read/session smoke and focused native
   Git/work-counter comparisons pass. Earlier ARM64 minimum-profile proof keeps
   its actual compiled revision. The approved Cellar fix now passes a fresh two-replica
-  cold/aged/local-reload sequence; frozen performance gates remain failed. R7's measured failures and remaining lifecycle cells are recorded,
-  not waived. See the
+  cold/aged/local-reload sequence. Independent-growth and lifecycle component
+  checks pass. Failed performance profiles remain retained; the composed
+  comparison and fresh soak proof are recorded separately. See the
   [combined qualification report](../crab/docs/benchmarks/v2-read-hardening-rustfs-2026-11-19.md).
+- **Remaining priorities:** resolve SDK read-limit coverage and current-head CI
+  failures before claiming integrated acceptance. A separate SDK content-cache
+  follow-up must diagnose warm large-file origin-byte amplification near 2.0×.
+  Metadata batching/page reuse is implemented; all 200 independent-growth
+  controls, thirteen lifecycle checks and 27 repeatability timing bands pass.
+  A fresh ten-arm follow-up passes all four resource gates, four clean exits,
+  active durability proofs and 21 clock checks, including two 600-second soaks
+  per variant. Composing all 126 valid original short arms with all ten fresh
+  arms passes the original 22-case numerical gates over 14,317,090 measured
+  successful Git comparisons. This does not relabel the original failed full
+  profile; its compiler overlaps and reference RSS failures remain retained.
+  Raw benchmark JSON stays outside the PR.
 - **Depends on:** existing read/authority contracts and the applicable resource
   ownership work in `plans/017-local-cache-read-hardening.md`.
 
@@ -1612,12 +1626,15 @@ verification. At 10,000 commits, object-batch query reads fall 45 → 32 with th
 same 1,230,261 bytes; history falls 115 → 108 with identical bytes. All 400
 focused Git oracles, 311 focused Rust tests and 54 current two-replica HTTP checks
 pass. All 200 independent-growth timing controls pass across 20,000 Git queries;
-aged cold-reader retention across real repository-only GC also passes. The full
+aged cold-reader retention across real repository-only GC also passes. An earlier
 128-trial HTTP comparison completes both ten-minute soaks with zero measured
 errors/Git mismatches and passing resource/shutdown checks. No timing gate is
 waived: 15 short-case HTTP latency gates remain failed. All 72 original native
-timing cells pass with 100 fixed pairs per cell. Source-bound details live in the qualification report and JSON
-receipt.
+timing cells pass with 100 fixed pairs per cell. At `bf5cb36e176`, fresh
+repeatability and targeted resource gates pass, as does the composed 136-arm
+numerical comparison described in the status above. Original failed full
+profiles remain unchanged. Source-bound details live in the qualification report
+and archived ledger.
 
 R0 tooling and thresholds must evolve together with cursor/representation/schema
 changes. New query shapes need native oracles before timing acceptance. Any new
