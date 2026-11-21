@@ -16283,5 +16283,34 @@
     "measurement_diagnosis": "Identicalcode p95 ratios0.6871–1.2489; severalcasesfaster and othersslower undersecondlabel. Clientabout0.4–0.55core inloadedcases;relayabout0.77–0.91core. IndependentlyrecordedforeignRustcompilation oftenhigherinslowerarms; correlationisnotsolecauseproof. Mac12physicalcores includes8performance/4efficiencycores. OwnedVMnotDarwinbackground-limited; noschedulingpolicychanged.",
     "full_original_source_comparison": "not launched: strictsame-executablegatefailed; guardedhandoffrecordsblocked_by_retained_aa_result",
     "next_prospective_protocol": "Reuseexisting fifteenquietseconds admission andcontinuouscompiler-observer throughbotharms. Exactly20validpairs9cases, max2rawattemptspervalidpair; retainallinterruptedtrials andverifyallerrors/Gitresults. Originaltiming/resourcegates unchanged. Preparednotlaunched."
+  },
+  "published_sdk_target_synchronization": {
+    "status": "rebased_build_and_live_verification_pending",
+    "base_revision": "14c847e13fa84ad9435cf482f00814e4a8a16c90",
+    "integrated_source_revision": "4eb343ede60c07fef6cf00dafa3ff30327703cd0",
+    "cellar_dependency": "published cellar-main =0.1.2; noGitpin/patch/vendoroverride",
+    "published_vcs_revision": "db71523cbd22ad5c71d09dce97029b07d90abcef",
+    "previous_qualified_source": "590640c7ce49ef3fd391bdae9540ba23081cd74b",
+    "packaged_code_files_byte_identical": 1085,
+    "scope": "All packagedRust/SQL/C/header/proto/WAT sourcecheckedagainstregistryarchivechecksumsandimmutableapprovedGit source across8packages. Five0.1.2 feature/libdefinitionsmatch. CrateserverruntimechangesfromrebaseonlyupstreamCLI/managementSDKversionstrings; readimplementationsunchanged. Compiled/liveproofremainsseparate.",
+    "sdk_source_proof_sha256": "7b7a280bae02011ac5b7d946cad3602c67ac8ce3324e28661708537cdad58e8f",
+    "sdk_raft_source_proof_sha256": "606c7be7c8d63c8cc44bd0d41f02dcf7a2d6362b0a71de08de22821dabb403c4",
+    "native_source_closure": {
+      "status": "passed_native_source_equivalence_after_published_sdk_sync",
+      "current_revision": "4eb343ede60c07fef6cf00dafa3ff30327703cd0",
+      "native_compiled_revision": "a5d6015e2c81a6a7cc4770361a1e20bb4193267a",
+      "checked_inputs": 554,
+      "byte_identical_nonlock_inputs": 551,
+      "source_equivalent_root_manifest": true,
+      "documentation_only_change": "crates/crab-cache/REFERENCE.md onlyCellarversionreference0.1.1→0.1.2; notincludedbycompiledRust",
+      "only_manifest_difference": "unusedCellarworkspacedependency590Git→published0.1.2; absentnative normal/build/dev graph",
+      "only_lock_differences": "Eight unreachableCellarpackageidentities/sourceversions andexistingserverallocator edge; allotherrecords identical",
+      "native_dependency_tree_sha256": "0d2bb08a8104df76f136ed052892bb7bbdce625c8a37e21ecefeb1bbc50e1438",
+      "server_and_cellar_absent_from_native_graph": true,
+      "scope": "Native72/Growth200/lifecyclecomponentcoverage; notnewserverSDKruntimeproof"
+    },
+    "lockfile_review": "Allregistryversions/sources/checksums matchtarget14c; onlyexistingserver tikv-jemallocator edge added.",
+    "previous_81minute_proof_binding": "runtime8bf/approved590; retainall20failedtimingbands andall4passedresourcegates; notrelabeledasnewreleasebinary.",
+    "performance_acceptance": false
   }
 }

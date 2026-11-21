@@ -1194,3 +1194,21 @@ raw attempts per valid pair, all 27 timing bands and all four resource checks.
 Every interrupted pair remains retained and verified; any request error or Git
 mismatch fails independently of environment classification. All earlier
 failures remain available. The new protocol is prepared, not yet launched.
+
+
+## Published SDK target synchronization
+
+The branch rebases onto `crab-v2` `14c847e13fa`, adopting published Cellar 0.1.2
+and removing the retired Git pin. Registry archive checksums are verified. All
+1,085 packaged Rust/SQL/C/header/proto/WAT files across eight SDK crates match
+the approved `590640c7ce49` source; the five 0.1.2 feature/lib definitions match.
+The rebase preserves the read implementations and updates two upstream runtime
+version strings. Published-dependency production builds and live checks remain
+separate; older results keep their actual compiled source and dependency.
+
+Native coverage retains explicit source equivalence: 551 non-lock inputs are
+byte-identical, the root manifest changes only the unreachable Cellar dependency,
+and one reference document changes only its SDK version. All other dependency
+records match; Cellar and the server remain absent from the native normal/build/
+dev graph. This preserves native/growth/lifecycle component evidence without
+claiming those binaries exercise the newly packaged server SDK.

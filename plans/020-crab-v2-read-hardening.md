@@ -22,6 +22,11 @@
 - **Category:** performance, correctness, resource ownership, qualification.
 - **Planned at:** `aafb6d256c5e8d3a8e768d31dd887a18f2afd2e4`, 2026-11-17.
 - **Target:** `crab-v2`; revalidate the target before execution.
+- **Target synchronization:** rebased onto `14c847e13fa`, which adopts published
+  Cellar 0.1.2. The retired `590640c7ce49` Git pin is removed. Older runtime
+  results retain their original SDK/source binding; published-dependency builds
+  and live verification are separate. The packaged SDK's 1,085 code files match
+  the approved source, with matching feature definitions.
 - **Delivery status:** IMPLEMENTED; ACCEPTANCE OPEN. R0–R5 are implemented.
   Current source-bound two-replica Git-read/session smoke and focused native
   Git/work-counter comparisons pass. Earlier ARM64 minimum-profile proof keeps
@@ -102,8 +107,11 @@ integrate them sequentially. R6 is not required for accepting the first wave.
    session source passes all 54 two-replica RustFS smoke checks and actual
    minimum-resource Linux OAuth/allocator probes. Its 81-minute HTTP check also
    passes all four RSS/resource gates, drain, clean exits and both active
-   durability proofs; peak process RSS is 148.4 MiB. All 553 non-lock native-reader
-   inputs remain identical after these server-only changes. Sustained current
+   durability proofs; peak process RSS is 148.4 MiB. Those results use runtime
+   `8bf89f37aba` and the approved source pin. After the published-SDK target sync,
+   551 native inputs remain byte-identical; the other two changes are an unused
+   workspace dependency entry and a documentation version reference. Cellar and
+   the server remain absent from the native dependency graph. Current
    HTTP timing acceptance and current-source broad CI remain separate
    from the earlier passing native and recovery proofs.
 
