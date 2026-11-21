@@ -790,7 +790,7 @@ Cold denotes runtime/cache state, without claiming a cold network/provider.
 
 All correctness/drain checks pass; 36 of 140 timing cells fail the unchanged
 1.1 p95 control gate. Complete cells and source/fixture/binary hashes are in the
-JSON companion. Setup errors and the first correlated frontier fixtures remain
+archived JSON ledger (excluded from the PR). Setup errors and the first correlated frontier fixtures remain
 retained and were excluded before timing began. Distinct physical-source object
 growth and wider history sizes remain unqualified. This native proof does not
 clear HTTP recovery, the minimum-profile soak or the combined acceptance gate.
