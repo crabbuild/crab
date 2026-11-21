@@ -16312,5 +16312,49 @@
     "lockfile_review": "Allregistryversions/sources/checksums matchtarget14c; onlyexistingserver tikv-jemallocator edge added.",
     "previous_81minute_proof_binding": "runtime8bf/approved590; retainall20failedtimingbands andall4passedresourcegates; notrelabeledasnewreleasebinary.",
     "performance_acceptance": false
+  },
+  "published_sdk_allocator_probe_isolation": {
+    "status": "passed_focused_contracts_and_isolated_allocator_regression",
+    "cellar": "published0.1.2",
+    "focused_tests": {
+      "auth": {
+        "passed": 41,
+        "failed": 0,
+        "ignored": 1
+      },
+      "native-cell": {
+        "passed": 5,
+        "failed": 0,
+        "ignored": 0
+      },
+      "private-peer": {
+        "passed": 2,
+        "failed": 0,
+        "ignored": 1
+      }
+    },
+    "cli_tests_passed": 20,
+    "existing_manual_browser_fixture_ignored": 1,
+    "initial_parallel_probe_failure": "SDKobserved2025256bytesvs2097152whileotherCLItestsfreedprocessheap; originalfailedlogretained",
+    "initial_failure_log_sha256": "8fb8875b1fbecab2adc714845df7927867484e4af627f3a32605dd3a4f0d367e",
+    "dependency_contract": "SDKadvancesjemallocepochandreadsstats::allocated; processwidecountercanchangeinotherthreads. Testusesitsownexact-filteredchildprocess+completionreceipt. Original2MiBdeltaassertionunchanged. No productAPI/config/dependency changes.",
+    "red_system_allocator": {
+      "exit_code": 101,
+      "observed_bytes": 0,
+      "log_sha256": "fe4daf8bd5b0b7cc47b14ef71d2051c6e56d1e0386b1a114c32bb50def9fd4ec"
+    },
+    "green_parallel_cli": {
+      "exit_code": 0,
+      "tests": 20,
+      "log_sha256": "46ad51465d41987064c378a2f13c8438a9633b90980f1a6512612fb7645a3a60"
+    },
+    "strict_release_all_target_clippy": {
+      "exit_code": 0,
+      "log_sha256": "3deaa03f8ebf243332c3e79d389bc83b59c721cf798a71aa07cb476a16420621"
+    },
+    "report_sha256": "70a2cc6b433ad8a4dcc9c0c458990e42a4f173dfb078d0de5b0b3beae875e822",
+    "production_main_before_cfg_test_byte_identical": true,
+    "published_source_live_checks": "pendingnewcleanproductionbuilds",
+    "performance_acceptance": false
   }
 }

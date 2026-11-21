@@ -1212,3 +1212,20 @@ and one reference document changes only its SDK version. All other dependency
 records match; Cellar and the server remain absent from the native normal/build/
 dev graph. This preserves native/growth/lifecycle component evidence without
 claiming those binaries exercise the newly packaged server SDK.
+
+
+## Published SDK focused checks and allocator measurement isolation
+
+All 41 authentication checks, five native Cell checks and two private-peer
+checks pass with the published SDK; the existing manual browser fixture remains
+ignored. The parallel CLI suite exposes contention in the allocator regression:
+process-wide allocated bytes grow by 2,025,256 while a 2,097,152-byte vector
+is live, because other CLI fixtures can free their own memory between snapshots.
+The original failed log remains retained.
+
+The probe now runs in its own exact-filtered child process. A completion receipt
+prevents an empty test selection from passing. Its original full 2-MiB delta
+assertion is unchanged: the System-allocator control observes zero bytes and
+fails; all twenty normal parallel CLI tests then pass. Strict release all-target
+Clippy passes. Production allocator wiring, APIs, dependencies and configuration
+are unchanged; new clean production build receipts follow separately.
