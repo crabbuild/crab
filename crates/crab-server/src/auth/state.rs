@@ -4,7 +4,7 @@ use super::{
 };
 use bytes::Bytes;
 use crab_storage::StorageError;
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt, future::Shared};
 use object_store::path::Path as ObjectPath;
 use openidconnect::{Nonce, PkceCodeVerifier};
 use std::sync::Arc;
@@ -137,48 +137,8 @@ impl Authentication {
                 &session_key,
             )
         });
-        let session_path = state.path("sessions", &session_key);
-        let record = state.store.get_with_etag_bounded(&session_path, 64 * 1024);
-        let marker = async {
-            let path = cached_marker_path.as_ref()?;
-            state.store.get_with_etag_bounded(path, 8 * 1024).await.ok()
-        };
-        // The cache supplies only an address: both durable records stay fresh.
-        // A changed identity must select its current marker before any grant,
-        // rather than turning a stale cached locator into authority.
-        let (record, marker) = tokio::join!(record, marker);
-        let record: StoredSession = serde_json::from_slice(&record.ok()?.0).ok()?;
-        let marker_path = state.identity_session_path(
-            &record.identity.issuer,
-            &record.identity.subject,
-            &session_key,
-        );
-        let (body, _) = if cached_marker_path.as_ref() == Some(&marker_path) {
-            marker?
-        } else {
-            state
-                .store
-                .get_with_etag_bounded(&marker_path, 8 * 1024)
-                .await
-                .ok()?
-        };
-        let marker: IdentitySessionMarker = serde_json::from_slice(&body).ok()?;
-        if marker.schema_version != 1
-            || marker.session_key != session_key
-            || marker.issuer != record.identity.issuer
-            || marker.subject != record.identity.subject
-            || marker.expires_at != record.expires_at
-        {
-            return None;
-        }
-        let session = Arc::new(Session {
-            identity: record.identity,
-            groups: super::oidc::groups(record.groups).ok()?,
-            csrf: record.csrf,
-            expires_at: record.expires_at,
-            session_key,
-            revoked: AtomicBool::new(false),
-        });
+        let read = state.session_check(session_key, cached_marker_path).await;
+        let session = read.await?;
         if session.active() {
             let mut sessions = self.sessions.lock().await;
             sessions.retain(|_, session| session.active());
@@ -330,6 +290,86 @@ impl Authentication {
 }
 
 impl AuthState {
+    async fn session_check(
+        &self,
+        session_key: Key,
+        cached_marker_path: Option<ObjectPath>,
+    ) -> Shared<super::SessionCheck> {
+        let mut pending = self.pending_checks.lock().await;
+        if let Some(read) = pending.get(&session_key).and_then(|read| read.upgrade()) {
+            return read;
+        }
+        if pending.len() >= 4096 {
+            pending.retain(|_, read| read.upgrade().is_some());
+        }
+        // At capacity the same fresh check runs without retaining another key.
+        let registered = pending.len() < 4096;
+        let state = self.clone();
+        let read = async move {
+            tokio::task::yield_now().await;
+            // Enrollment ends before either provider read starts. Later arrivals
+            // must observe fresh durable state, including completed revocations.
+            if registered {
+                state.pending_checks.lock().await.remove(&session_key);
+            }
+            state.verify_session(session_key, cached_marker_path).await
+        }
+        .boxed()
+        .shared();
+        // Weak entries cannot retain a producer after its last caller leaves.
+        if registered && let Some(weak) = read.downgrade() {
+            pending.insert(session_key, weak);
+        }
+        read
+    }
+
+    async fn verify_session(
+        &self,
+        session_key: Key,
+        cached_marker_path: Option<ObjectPath>,
+    ) -> Option<Arc<Session>> {
+        let session_path = self.path("sessions", &session_key);
+        let record = self.store.get_with_etag_bounded(&session_path, 64 * 1024);
+        let marker = async {
+            let path = cached_marker_path.as_ref()?;
+            self.store.get_with_etag_bounded(path, 8 * 1024).await.ok()
+        };
+        // The cached identity supplies only an address. A changed identity must
+        // select its current marker before any grant, even within a shared read.
+        let (record, marker) = tokio::join!(record, marker);
+        let record: StoredSession = serde_json::from_slice(&record.ok()?.0).ok()?;
+        let marker_path = self.identity_session_path(
+            &record.identity.issuer,
+            &record.identity.subject,
+            &session_key,
+        );
+        let (body, _) = if cached_marker_path.as_ref() == Some(&marker_path) {
+            marker?
+        } else {
+            self.store
+                .get_with_etag_bounded(&marker_path, 8 * 1024)
+                .await
+                .ok()?
+        };
+        let marker: IdentitySessionMarker = serde_json::from_slice(&body).ok()?;
+        if marker.schema_version != 1
+            || marker.session_key != session_key
+            || marker.issuer != record.identity.issuer
+            || marker.subject != record.identity.subject
+            || marker.expires_at != record.expires_at
+        {
+            return None;
+        }
+        Some(Arc::new(Session {
+            identity: record.identity,
+            groups: super::oidc::groups(record.groups).ok()?,
+            csrf: record.csrf,
+            expires_at: record.expires_at,
+            session_key,
+            revoked: AtomicBool::new(false),
+        }))
+    }
+
     pub(super) async fn cleanup_marker(
         &self,
         marker: &IdentitySessionMarker,

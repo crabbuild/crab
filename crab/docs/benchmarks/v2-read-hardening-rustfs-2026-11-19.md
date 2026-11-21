@@ -635,14 +635,9 @@ image evidence. Current-source image/recovery CI and combined performance
 acceptance remain open.
 
 The verified relay is `crab/scripts/e2e/native_provider_meter.mjs`. It requires
-Node 22 and an existing output directory. Two data workers share one local
-endpoint through Node's [round-robin cluster contract](https://nodejs.org/download/release/v22.23.2/docs/api/cluster.html#how-it-works).
-Allocate two data-worker CPUs and allow control-process CPU headroom; record
-placement using `worker_pids` from the service file. It accepts only a local HTTP
-upstream; its service file supplies `meter_url` and `provider_url` for the
-qualification observer. Counter snapshots sum every worker; lost workers fail
-the run without publishing partial final totals. Final `peak_rss_bytes` is the
-sum of process peaks, a conservative bound on concurrent relay RSS. It streams without caching, retrying, or fault injection. The Python
+Node 22 and an existing output directory. It accepts only a local HTTP upstream;
+its service file supplies `meter_url` and `provider_url` for the qualification
+observer. It streams without caching, retrying, or fault injection. The Python
 fault fixture remains the owner of corruption/authorization fault tests.
 
 ```json
@@ -1077,3 +1072,46 @@ wire headers/bodies through both workers, snapshot/final equality, and worker-lo
 cleanup. Sixteen live RustFS checks again match every canonical counter across
 21 signed SDK attempts. Parallel capacity and HTTP repeatability remain under
 verification; this instrumentation change makes no product-latency claim.
+
+
+## Parallel relay experiment: inconclusive, canonical relay retained
+
+The two-worker prototype completes eighteen fixed provider-capacity trials,
+verifying all 360,000 measured attempts and 8,000 warm-up attempts. A subsequent
+expanded HTTP diagnostic completes 162 fixed trials across all nine original
+case families and shared/split/shared worker CPU placement. All 5,056,921 records
+remain retained, with 5,033,666 successful Git comparisons and zero mismatches.
+All four product resource checks, exits and both active durability proofs pass.
+
+Unrelated host activity persists. Splitting relay workers uses more CPU, but
+neither throughput nor latency improves consistently; the final shared control
+also slows. This does not establish a causal relay improvement or qualify
+product performance. The frozen profile's explicit nine-case schedule runs
+162 trials; its incorrect textual 54-trial count is retained with a separate
+clarification. Every actual trial is included in the diagnostic summary.
+
+The canonical single-worker relay is restored. Its accounting remains verified;
+the parallel prototype's source, signed-request checks, startup failures and
+app-interrupted warm-up remain archived. The queued-session-check optimization
+is undergoing focused verification separately. Every original performance gate
+and failed profile remains unchanged.
+
+
+## Queued session verification reduces duplicate fresh reads
+
+The server batches checks for the same session only while they are queued.
+The producer removes its entry under the enrollment lock before issuing either
+durable read. Later requests start fresh checks. A weak registry holds at most
+4,096 pending keys; the last departing caller releases unfinished work. The
+existing record bounds, marker/identity checks, expiry and per-request membership
+revalidation remain authoritative. Batch size is opportunistic.
+
+A deterministic queued-pair regression fails on the preceding implementation:
+two lookups perform four storage read admissions. The new implementation uses
+two. All forty focused authentication tests pass, including late-arrival
+revocation, peer cancellation and storage release before/after dispatch. The
+existing manual browser identity fixture remains ignored. Strict release
+all-target server Clippy and formatting pass. Unit checks use cached release
+dependencies and an unoptimized test crate; production binaries use the normal
+optimized release profile. Production builds, live RustFS verification and
+combined timing acceptance for this source remain pending.

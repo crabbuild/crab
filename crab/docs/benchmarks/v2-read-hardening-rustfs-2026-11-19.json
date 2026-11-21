@@ -15881,5 +15881,90 @@
     "live_report_sha256": "fab7d27a4349bd013fb535ef8e8b98f576cbf35fbae2f19e2a7569d0c9e06762",
     "capacity_and_http_repeatability": "pending",
     "numeric_gates_changed": false
+  },
+  "parallel_relay_capacity_and_http_outcome": {
+    "status": "inconclusive_parallel_relay_reverted",
+    "acceptance": false,
+    "canonical_meter_sha256": "a427d799c6232768173fd257440697e608d761bcf8a627defab46a4b94f114bf",
+    "prototype_meter_sha256": "09c8b348b4a6f443f9b04ca49a49153d9d8841b82c77ab50db3259c9023b0bf4",
+    "capacity_measured_attempts": 360000,
+    "capacity_warmup_attempts": 8000,
+    "capacity_report_sha256": "798b3fc3ff93a7a812be2eb78ca818c21494dc542f289b2ef9d82a3aed574e6c",
+    "capacity_summary_sha256": "01c9c2d5e30938548601f9dd11df20e320f6d2fddca1a3e9b3af05d3d5b9f222",
+    "capacity_stages": [
+      {
+        "stage": 0,
+        "split": false,
+        "trials": 6,
+        "median_successful_rps": 8993.849913110545,
+        "median_p95_us": 24661.0825,
+        "median_relay_cpu_cores": 0.9595750410996309
+      },
+      {
+        "stage": 1,
+        "split": true,
+        "trials": 6,
+        "median_successful_rps": 8866.824791741416,
+        "median_p95_us": 21717.512499999997,
+        "median_relay_cpu_cores": 1.427159070028377
+      },
+      {
+        "stage": 2,
+        "split": false,
+        "trials": 6,
+        "median_successful_rps": 6236.162743368393,
+        "median_p95_us": 32896.001,
+        "median_relay_cpu_cores": 0.847355059733405
+      }
+    ],
+    "http_trials": 162,
+    "http_cases": 9,
+    "http_summary_sha256": "56e6efaaabf6c22802440acb4ef88f8cc158fe4e59a01d142bc9eb2d82049a02",
+    "http_all_phase_checks": {
+      "records": 5056921,
+      "git_verified_successes": 5033666,
+      "oracle_mismatches": 0
+    },
+    "resource_failures": {
+      "baseline": [],
+      "candidate": []
+    },
+    "exit_codes": {
+      "baseline": {
+        "a": 0,
+        "b": 0
+      },
+      "candidate": {
+        "a": 0,
+        "b": 0
+      }
+    },
+    "actual_durability_proofs_passed": true,
+    "declaration_clarification_sha256": "0b9636c911dd3112f8f6a1646b4fd119f7ce6648261ad34f040aa2142972850e",
+    "scope": "No consistent gain established under observed unrelated host load. Simpler canonical relay restored; all prototype source/attempts/proofs/failures retained. No numeric gate or original baseline changed."
+  },
+  "queued_session_check_batching": {
+    "status": "unit_verified_production_live_pending",
+    "scope": "Two deterministically queued session checks share a fresh verification before provider reads start. Later arrivals start new checks; completed/in-flight authority results are not reused. Opportunistic batch size, no TTL/config/wire/storage/dependency change. Actual production builds/live proof and combined timing acceptance remain required.",
+    "prototype_base_revision": "7d2300cd0a1ea7a5080b9f98da4ba0d34845750c",
+    "production_sources": {
+      "crates/crab-server/src/auth/mod.rs": "dc1d1d134edd2c143530ab0a71428d2590d3aad9ef8f319502015e4eb194a7e7",
+      "crates/crab-server/src/auth/state.rs": "aad1fc5c131ea56e920019f3d5d2b04cf12015f4d546d10676e47030f9887032"
+    },
+    "focused_report_sha256": "289e08fbbbe724fc25ad92ca0919ee2f730f31614ff7667bb2ff1814cbb5e0fc",
+    "old_source_red": true,
+    "old_source_storage_read_admissions": 4,
+    "queued_lookups": 2,
+    "new_storage_read_admissions": 2,
+    "auth_tests_passed": 40,
+    "existing_ignored_fixture": "auth::http::tests::browser_identity_fixture: manual browser qualification identity provider, never production",
+    "green_log_sha256": "f6e9315946b83e519529ce0cd1e82da631efab28f2297f0442f7a71c5ddbf534",
+    "late_arrival_revocation_checked": true,
+    "cancelled_peer_preserves_verification": true,
+    "last_caller_releases_storage_before_and_after_dispatch": true,
+    "pending_registry_maximum_keys": 4096,
+    "strict_release_all_target_clippy_passed": true,
+    "clippy_log_sha256": "dddb1b31f97c24136a98e20076698f5cd351e5796fc63650fb734e22dbc4aa69",
+    "test_profile": "Existing release dependencies; only crab-server test crate opt-level0/codegen256; actual production binary uses normal release opt-level3."
   }
 }
