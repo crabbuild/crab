@@ -30,3 +30,23 @@ each subsystem, and how the components fit together.
 | [LFS Compatibility Layer](lfs-compatibility.md) | Dual pointer system, transfer agent, batch resolver, lock manager |
 | [Error Model & Observability](error-observability.md) | Error taxonomy, exit codes, tracing, metrics, error catalog |
 | [Configuration System](configuration-system.md) | Four-layer config resolution, TOML schema, engine feature flags |
+
+## Pull request CI
+
+`.github/workflows/rust.yml` uses one preflight job for change classification,
+workflow syntax, repository documentation whitespace, and JSON evidence checks.
+Rust, browser, and web checks follow that job directly. `Required CI status`
+remains the final gate and rejects failed or cancelled checks, including preflight.
+
+Web source and content changes share one dependency installation, production
+build, and link check. Source changes also run TypeScript, ESLint, and Vitest;
+content-only changes retain their build and link checks. The full Rust workspace
+suite, both browser shards, and specialist feature and OS matrices remain gated
+by their existing selection rules.
+
+Architecture and native workflow jobs cache the external target directories
+used by Cargo. Static auth-helper and release-archive packaging checks share
+the architecture guardrail job. Cache mappings use paths relative to the workspace,
+as required by `Swatinem/rust-cache`. These jobs and the main Rust job restore caches on PRs
+but save them only on `main` and `crab-v2`, so per-PR entries do not evict the
+base-branch artifacts that other PRs can reuse. Cold builds still run every check.

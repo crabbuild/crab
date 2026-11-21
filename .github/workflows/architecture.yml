@@ -95,6 +95,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Each hosted job owns its runner; cache the same external target Cargo uses.
+  CARGO_TARGET_DIR: ${{ github.workspace }}/../crab-architecture-target
 
 jobs:
   architecture:
@@ -105,6 +107,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Run auth helper packaging check
+        working-directory: crab
+        run: make auth-helper-packaging-check
+
+      - name: Run release archive contents check
+        working-directory: crab
+        run: make release-archive-contents-check
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -140,6 +150,12 @@ jobs:
 
       - name: Install Linux system dependencies
         run: sudo apt-get update -y && sudo apt-get install -y libfuse3-dev
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> ../crab-architecture-target"
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/crab-v2' }}
 
       - name: Run split-crate interface checks
         id: crate_interfaces
@@ -196,9 +212,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Configure external Rust build directory
-        run: echo "CARGO_TARGET_DIR=${RUNNER_TEMP}/crab-cellar-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
-
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -227,6 +240,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: cell-runtime-rustfs
+          workspaces: ". -> ../crab-architecture-target"
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/crab-v2' }}
 
       - name: Verify multi-GiB deduplicated Xet content
         run: >-
@@ -309,6 +324,12 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> ../crab-architecture-target"
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/crab-v2' }}
+
       - name: Install Linux system dependencies
         run: sudo apt-get update -y && sudo apt-get install -y libfuse3-dev
 
@@ -338,19 +359,6 @@ jobs:
            steps.final_integration.outcome != 'success')
         run: exit 1
 
-  auth-helper-packaging:
-    name: Auth helper packaging check
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Run auth helper packaging check
-        working-directory: crab
-        run: make auth-helper-packaging-check
-
   auth-python-tests:
     name: Auth Python service tests
     runs-on: ubuntu-latest
@@ -372,16 +380,3 @@ jobs:
       - name: Run auth service tests
         working-directory: crab/deploy/auth-service
         run: python -m pytest tests/ -q
-
-  release-archive-contents:
-    name: Release archive contents check
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Run release archive contents check
-        working-directory: crab
-        run: make release-archive-contents-check

@@ -16,6 +16,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: ${{ github.workspace }}/../crab-workflow-native-target
 
 jobs:
   native:
@@ -34,11 +35,16 @@ jobs:
       - name: Set isolated Cargo target directory
         shell: bash
         # Evidence fixtures run before Cargo creates the target directory.
-        run: |
-          mkdir -p "$RUNNER_TEMP/crab-workflow-native-target"
-          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crab-workflow-native-target" >> "$GITHUB_ENV"
+        run: mkdir -p "$CARGO_TARGET_DIR"
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache native Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: workflow-native-${{ matrix.os }}
+          workspaces: ". -> ../crab-workflow-native-target"
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/crab-v2' }}
 
       - uses: actions/setup-python@v5
         with:
