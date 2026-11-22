@@ -104,7 +104,7 @@ def write_product_viewer_proof(client_path: Path, key_sha256: str | None = None,
     json_file(client_path.parent / filename, proof)
 
 
-def write_git_measurements(inputs: Path, registration: dict, platform: str, sdk_native: dict | None = None,
+def write_git_measurements(inputs: Path, registration: dict, platform: str, native_target: dict | None = None,
                            hydration: dict | None = None, service: dict | None = None) -> None:
     provider = CDN.PROVIDER_FOR_EDGE[registration["scope"].split("/", 1)[0]]
     sdk = CDN.is_direct_sdk_git_scope(registration["scope"])
@@ -138,7 +138,7 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, sdk_
                         "cache_root_sha256": hashlib.sha256(f"{location}/{index}/{arm}/cache".encode()).hexdigest(),
                         "public_export_sha256": "" if arm == "origin" else registration.get("publication_sha256", ""),
                         "origin_sha256": "7" * 64, "prefix_sha256": "8" * 64,
-                    },
+                    } | (native_target or {}),
                     "publication_oid": oid, "expected_sha256": blob, "observed_sha256": blob,
                     "publication_sha256": publication_digest,
                     "expected_bytes": CDN.GIT_PAYLOAD_SIZE, "observed_bytes": CDN.GIT_PAYLOAD_SIZE,
@@ -202,7 +202,6 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, sdk_
                     client["reader"] = reader
                 elif sdk:
                     client["reader"].pop("cache_root_sha256")
-                    client["reader"].update(sdk_native or {})
                     client = {key: value for key, value in client.items() if key in CDN.SDK_GIT_READ_FIELDS} | {
                         "schema": "crab.cdn-sdk-git-read/v1", "commit": oid, "sha256": blob,
                         "git_blob_oid_sha256": hashlib.sha256(f"{blob}/git".encode()).hexdigest(),
@@ -335,14 +334,14 @@ class CdnQualificationTests(unittest.TestCase):
                 continue
             else:
                 self.trace(check, observations.get(check, [edge_hit]))
-        if CDN.requires_cli_workload(self.scope):
-            write_git_measurements(self.directory / CDN.GIT_BENCHMARK_DIR, self.registration, platform)
-            self.record_git_product()
-        elif sdk:
-            self.record_sdk_product()
+        if CDN.requires_cli_workload(self.scope) or sdk:
             cleanup = json.loads((self.directory / "traces/cleanup.json").read_bytes())
             native = {"origin_sha256": cleanup["targets"]["native"]["origin_sha256"], "prefix_sha256": cleanup["prefix_sha256"]}
-            write_git_measurements(self.directory / CDN.GIT_BENCHMARK_DIR, self.registration, platform, sdk_native=native)
+            write_git_measurements(self.directory / CDN.GIT_BENCHMARK_DIR, self.registration, platform, native_target=native)
+            if sdk:
+                self.record_sdk_product()
+            else:
+                self.record_git_product()
         elif hydration:
             self.record_sdk_hydration()
         elif service:
@@ -1226,6 +1225,21 @@ class CdnQualificationTests(unittest.TestCase):
         self.configure("s3", "private", "direct")
         self.report["performance"]["near"]["pairs"][0]["warm_edge"]["elapsed_ms"] += 1
         self.rejected("CLI performance summary differs from the retained measurements")
+
+    def test_cli_benchmark_pair_must_use_the_independently_observed_native_target(self) -> None:
+        self.configure("s3", "private", "direct")
+        pair = self.directory / CDN.GIT_BENCHMARK_DIR / "near/0001"
+        clients = {path: json.loads(path.read_bytes()) for path in (pair / arm / "client.json" for arm in CDN.ARMS)}
+        for field in ("origin_sha256", "prefix_sha256"):
+            with self.subTest(field=field):
+                for path, client in clients.items():
+                    reader = client["reader"] | {field: "0" * 64}
+                    digest = json_file(path, client | {"reader": reader})
+                    for filename in ("measurement.json", CDN.VIEWER_REQUEST_FILES["s3"]):
+                        evidence = path.with_name(filename)
+                        if evidence.exists():
+                            json_file(evidence, json.loads(evidence.read_bytes()) | {"client_report_sha256": digest})
+                self.rejected("changed the independently observed native target")
 
     def test_rejects_a_positive_product_summary_that_differs_from_the_fetch(self) -> None:
         self.configure("s3", "private", "direct")

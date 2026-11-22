@@ -598,6 +598,8 @@ and edge payload through redacted observations.
   `crab/scripts/e2e/collect_cdn_git_performance.py` binds each timed fetch to its
   measured provider and runner metrics, checks ordered same-publication pairs
   across two preregistered regions, and applies the release budgets. Assembly
+  and release verification match each direct CLI benchmark arm to the
+  independently observed native origin and repository prefix. Assembly
   retains the direct CLI Git, capsule and LFS measurement inputs. The release
   gate recomputes each summary and checks the complete platform matrix.
   CloudFront, Cloud CDN and Front Door measurements match timed fetches to

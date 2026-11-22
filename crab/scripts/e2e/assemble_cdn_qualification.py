@@ -175,50 +175,47 @@ def assemble_bundle(
                     trace = read_trace(trace_path, check)
                 (destination / "traces" / filename).write_bytes(trace)
                 checks[check] = {"passed": True, "trace_sha256": hashlib.sha256(trace).hexdigest()}
-            sdk_native = None
+            native_target = None
             product_request_ids = None
-            if cli_workload:
-                registered_read = {key: registration.get(key) for key in ("candidate", "viewer_binding_sha256")}
-                rollback = read_trace(destination / "traces/rollback.json", "rollback")
-                product = collect_git_product_action(inputs / row / GIT_PRODUCT_DIR, measured | registered_read,
-                                                     rollback, retain=destination / GIT_PRODUCT_DIR,
-                                                     public_export_sha256=registration.get("publication_sha256", ""))
-                measured["product_action"] = product | {"fixture_cleanup_verified": True}
-            elif sdk_workload:
+            if cli_workload or sdk_workload or sdk_hydration or service:
                 cleanup = decode(read_trace(destination / "traces/cleanup.json", "cleanup"))
                 cleanup_at = verify_cleanup_trace(cleanup, measured, edge, access)
                 origin = cleanup["targets"]["native"]["origin_sha256"]
-                sdk_native = {"origin_sha256": origin, "prefix_sha256": cleanup["prefix_sha256"]}
                 rollback = read_trace(destination / "traces/rollback.json", "rollback")
+            if cli_workload or sdk_workload:
+                native_target = {"origin_sha256": origin, "prefix_sha256": cleanup["prefix_sha256"]}
+            if cli_workload:
+                registered_read = {key: registration.get(key) for key in ("candidate", "viewer_binding_sha256")}
+                product = collect_git_product_action(
+                    inputs / row / GIT_PRODUCT_DIR, measured | registered_read, rollback,
+                    retain=destination / GIT_PRODUCT_DIR, cleanup_at=cleanup_at, native_origin_sha256=origin,
+                    public_export_sha256=registration.get("publication_sha256", ""),
+                )
+                measured["product_action"] = product | {"fixture_cleanup_verified": True}
+            elif sdk_workload:
                 measured["product_action"], product_request_ids = collect_sdk_product_action(
                     inputs / row / GIT_PRODUCT_DIR, measured, spec, rollback,
                     cleanup_at=cleanup_at, native_origin_sha256=origin,
                     retain=destination / GIT_PRODUCT_DIR,
                 )
             elif sdk_hydration:
-                cleanup = decode(read_trace(destination / "traces/cleanup.json", "cleanup"))
-                cleanup_at = verify_cleanup_trace(cleanup, measured, edge, access)
                 placement = decode(read_trace(destination / "traces" / f"{SCOPED_VIEW_CHECK}.json",
                                               SCOPED_VIEW_CHECK))["placement"]
-                rollback = read_trace(destination / "traces/rollback.json", "rollback")
                 measured["product_action"], measured["performance"] = collect_sdk_hydration_evidence(
                     inputs / row, measured, spec, rollback, placement=placement,
-                    cleanup_at=cleanup_at, native_origin_sha256=cleanup["targets"]["native"]["origin_sha256"],
+                    cleanup_at=cleanup_at, native_origin_sha256=origin,
                     retain=destination,
                 )
             elif service:
-                cleanup = decode(read_trace(destination / "traces/cleanup.json", "cleanup"))
-                cleanup_at = verify_cleanup_trace(cleanup, measured, edge, access)
-                rollback = read_trace(destination / "traces/rollback.json", "rollback")
                 measured["product_action"] = collect_service_product_action(
                     inputs / row / SERVICE_PRODUCT_DIR, measured, spec, rollback,
-                    cleanup_at=cleanup_at, native_origin_sha256=cleanup["targets"]["native"]["origin_sha256"],
+                    cleanup_at=cleanup_at, native_origin_sha256=origin,
                     retain=destination / SERVICE_PRODUCT_DIR,
                 )
             if cli_workload or sdk_workload or service:
                 measured["performance"] = collect_git_performance(
                     inputs / row / GIT_BENCHMARK_DIR, registration, platform, run_id, attempt,
-                    retain=destination / GIT_BENCHMARK_DIR, sdk_native=sdk_native,
+                    retain=destination / GIT_BENCHMARK_DIR, native_target=native_target,
                     service_row=destination if service else None, product_request_ids=product_request_ids,
                 )
             report = measured | {

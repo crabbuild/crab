@@ -1292,6 +1292,8 @@ before warm edge and warm local. The origin control can run at any point in
 the pair. Start the next pair after the previous pair finishes. The LFS timer
 starts after Git fetches and verifies the pointer, so the recorded interval
 measures LFS payload delivery and its native metadata reads.
+Assembly and release verification match the native origin and repository
+prefix of every CLI arm to the independently verified product fixture.
 
 For public benchmarks, stage the immutable objects for every benchmark pair
 before sealing the current export approval. Use that same approved export

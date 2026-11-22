@@ -2163,7 +2163,7 @@ def derive_service_public_transition(inputs: Path, row: dict[str, Any], spec: di
 
 def collect_git_performance(
     inputs: Path, registration: dict[str, Any], platform: str, run_id: str, attempt: str,
-    *, retain: Path | None = None, sdk_native: dict[str, str] | None = None,
+    *, retain: Path | None = None, native_target: dict[str, str] | None = None,
     verify_hydration: Callable[[bytes, str], dict[str, Any]] | None = None,
     service_row: Path | None = None, product_request_ids: set[str] | None = None,
 ) -> dict[str, Any]:
@@ -2275,8 +2275,6 @@ def collect_git_performance(
                 elif sdk:
                     client = verify_sdk_git_read(client_raw, provenance, spec, GIT_MODES[arm])
                     reader = client["reader"]
-                    require(sdk_native is None or all(reader[key] == sdk_native[key] for key in CLI_NATIVE_FIELDS),
-                            f"{label} changed the approved SDK native target")
                     if arm == "warm_edge":
                         primer_digest = digest
                     if arm == "warm_local":
@@ -2325,6 +2323,9 @@ def collect_git_performance(
                     cache_roots.add(cache_root)
                     payload = (client["publication_oid"], client["expected_sha256"])
                     receipt = client["publication_sha256"]
+                if native_target is not None:
+                    require(all(reader[key] == native_target[key] for key in CLI_NATIVE_FIELDS),
+                            f"{label} changed the independently observed native target")
                 fixtures.add((*payload, receipt, reader["origin_sha256"], reader["prefix_sha256"]))
                 windows[arm] = (client["started_at_unix_ms"], client["finished_at_unix_ms"])
                 viewer_log = None
@@ -2442,8 +2443,12 @@ def verify_cdn_report(
     checks, cleanup_at, native_origin_sha256, rollback = verify_check_evidence(
         row, edge, access, profile, directory, registration=registration,
     )
+    if cli_workload or sdk_git:
+        native_target = {"origin_sha256": native_origin_sha256,
+                         "prefix_sha256": hashlib.sha256(f"{row['fixture_prefix']}/".encode()).hexdigest()}
     if cli_workload:
-        measured = collect_git_performance(directory / GIT_BENCHMARK_DIR, registration, platform, run_id, run_attempt)
+        measured = collect_git_performance(directory / GIT_BENCHMARK_DIR, registration, platform, run_id, run_attempt,
+                                          native_target=native_target)
         require(measured == row["performance"], "CLI performance summary differs from the retained measurements")
         require(rollback is not None, "direct CLI qualification requires a product rollback fetch")
         registered_read = {key: registration[key] for key in ("candidate", "viewer_binding_sha256")}
@@ -2458,10 +2463,8 @@ def verify_cdn_report(
         product, request_ids = collect_sdk_product_action(directory / GIT_PRODUCT_DIR, row, registration, rollback,
                                                           cleanup_at=cleanup_at, native_origin_sha256=native_origin_sha256)
         require(row["product_action"] == product, "product action differs from the retained SDK snapshot evidence")
-        sdk_native = {"origin_sha256": native_origin_sha256,
-                      "prefix_sha256": hashlib.sha256(f"{row['fixture_prefix']}/".encode()).hexdigest()}
         measured = collect_git_performance(directory / GIT_BENCHMARK_DIR, registration, platform, run_id, run_attempt,
-                                          sdk_native=sdk_native, product_request_ids=request_ids)
+                                          native_target=native_target, product_request_ids=request_ids)
         require(measured == row["performance"], "SDK performance summary differs from the retained measurements")
     if sdk_hydration:
         require(rollback is not None, "direct SDK hydration requires its native rollback")
