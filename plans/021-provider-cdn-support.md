@@ -586,7 +586,9 @@ and edge payload through redacted observations.
   the gateway's fixed deployment cost at the expected traffic volume. Use
   provider hit evidence and the same commit, repo and workload in every comparison.
   The direct CLI Git, capsule and LFS workloads include native-origin and
-  warm-local controls for the same publication receipt. The origin arm
+  warm-local controls for the same publication receipt. Each pair retains
+  the writer's exact receipt. Verification checks the candidate, commit,
+  payload, and ref visibility before the first measurement. The origin arm
   verifies the binding is disabled.
   Each timed arm confirms its isolated local cache root, and qualification
   rejects a configured shared cache. Public edge and warm-local arms pin the

@@ -1279,6 +1279,7 @@ the exact `near` and `distant` client region labels. Set them before approving
 the registration digest.
 
 ```text
+near/0001/publication.json
 near/0001/origin/client.json
 near/0001/origin/measurement.json
 near/0001/cold_edge/...
@@ -1287,8 +1288,12 @@ near/0001/warm_local/...
 distant/0001/...
 ```
 
-Use the same publication receipt for all four arms in a pair. Measure cold edge
-before warm edge and warm local. The origin control can run at any point in
+Retain the receipt written by `run_cdn_git_workload.py publish` as
+`publication.json` at the root of the pair. Use that exact file as
+`--receipt` for all four arms. Verification checks the registered writer
+build, committed tip, payload digest, and ref visibility before the first
+timed read. Measure cold edge before warm edge and warm local.
+The origin control can run at any point in
 the pair. Start the next pair after the previous pair finishes. The LFS timer
 starts after Git fetches and verifies the pointer, so the recorded interval
 measures LFS payload delivery and its native metadata reads.
@@ -1452,6 +1457,7 @@ cloudfront/private/cli/git/direct/linux-x86_64/git-product/publication.json
 cloudfront/private/cli/git/direct/linux-x86_64/git-product/fetch.json
 cloudfront/private/cli/git/direct/linux-x86_64/git-product/viewer-requests.json
 cloudfront/private/cli/git/direct/linux-x86_64/git-product/retirement.json
+cloudfront/private/cli/git/direct/linux-x86_64/git-benchmarks/near/0001/publication.json
 cloudfront/private/cli/git/direct/linux-x86_64/git-benchmarks/near/0001/origin/client.json
 cloudfront/private/cli/git/direct/linux-x86_64/git-benchmarks/near/0001/origin/measurement.json
 ```
@@ -1539,6 +1545,7 @@ s3/report.json
 cloudfront/private/cli/git/direct/linux-x86_64/cdn-report.json
 cloudfront/private/cli/git/direct/linux-x86_64/traces/<check>.json
 cloudfront/private/cli/git/direct/linux-x86_64/git-product/<phase>.json
+cloudfront/private/cli/git/direct/linux-x86_64/git-benchmarks/<location>/<pair>/publication.json
 cloudfront/private/cli/git/direct/linux-x86_64/git-benchmarks/<location>/<pair>/<arm>/client.json
 cloudfront/private/cli/git/direct/linux-x86_64/git-benchmarks/<location>/<pair>/<arm>/measurement.json
 ```

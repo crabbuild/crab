@@ -2173,8 +2173,9 @@ def collect_git_performance(
     require(hydration == (verify_hydration is not None), "SDK hydration benchmarks require verified publication and placement")
     sdk = is_direct_sdk_git_scope(scope)
     service = is_direct_service_scope(scope)
+    cli_workload = requires_cli_workload(scope)
     require(service == (service_row is not None), "service benchmarks require the retained lifecycle row")
-    require(sdk or hydration or service or (requires_cli_workload(scope) and spec["workload"] == cli_action_name(scope)),
+    require(sdk or hydration or service or (cli_workload and spec["workload"] == cli_action_name(scope)),
             "benchmark must register a supported direct CLI, SDK or service workload")
     if sdk:
         require(inputs.is_dir(), "direct SDK Git requires retained regional SDK benchmark records")
@@ -2186,7 +2187,7 @@ def collect_git_performance(
     provider = PROVIDER_FOR_EDGE[scope.split("/", 1)[0]]
     provenance = {key: spec[key] for key in ("source_sha", "scope", "configuration_sha256")}
     provenance |= {"workflow_run_id": run_id, "workflow_run_attempt": attempt, "platform": platform}
-    if not (sdk or hydration or service):
+    if cli_workload:
         provenance["candidate"] = spec["candidate"]
     service_anchor = None
     service_instances = set()
@@ -2245,6 +2246,7 @@ def collect_git_performance(
         pairs = []
         previous_end = 0
         for index in range(1, spec["samples"] + 1):
+            pair_path = Path(location) / f"{index:04d}"
             pair = {}
             fixtures = set()
             windows = {}
@@ -2252,7 +2254,7 @@ def collect_git_performance(
             primer_cache = None
             service_primer = None
             for arm in ARMS:
-                slot = Path(location) / f"{index:04d}" / arm
+                slot = pair_path / arm
                 label = f"{location} {index} {arm}"
                 client_raw = read_git_record(inputs / slot / "client.json", limit=GIT_FETCH_RECORD_LIMIT)
                 digest = hashlib.sha256(client_raw).hexdigest()
@@ -2383,6 +2385,18 @@ def collect_git_performance(
             if provider == "s3":
                 require(windows["cold_edge"][1] // 1000 < windows["warm_edge"][0] // 1000,
                         f"{location} {index} CloudFront edge arms must use disjoint S3 log seconds")
+            if cli_workload:
+                publication_path = pair_path / "publication.json"
+                raw = read_git_record(inputs / publication_path)
+                publication = validate_git_publication(raw, provenance)
+                oid, payload_sha256, receipt, _, _ = next(iter(fixtures))
+                require(publication["published"] and publication["candidate"] == spec["candidate"]
+                        and receipt == hashlib.sha256(raw).hexdigest()
+                        and (oid, payload_sha256) == (publication["oid"], publication["sha256"])
+                        and publication["visible_at_unix_ms"] <= intervals[0][0],
+                        f"{location} {index} must verify the retained CLI publication after the ref became visible")
+                if retain is not None:
+                    (retain / publication_path).write_bytes(raw)
             previous_end = intervals[-1][1]
             pairs.append(pair)
         performance[location] = {"region": region, "pairs": pairs}

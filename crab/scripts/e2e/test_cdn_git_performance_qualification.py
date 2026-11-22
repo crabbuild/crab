@@ -87,6 +87,36 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "fetched different published fixtures"):
             self.collect()
 
+    def test_cli_pair_requires_its_native_publication_receipt(self) -> None:
+        publication = self.root / "near/0001/publication.json"
+        publication.unlink()
+        with self.assertRaisesRegex(FileNotFoundError, "publication.json"):
+            self.collect()
+
+    def test_cli_pair_binds_the_exact_publication_receipt_bytes(self) -> None:
+        path = self.root / "near/0001/publication.json"
+        path.write_bytes(path.read_bytes() + b"\n")
+        with self.assertRaisesRegex(ValueError, "must verify the retained CLI publication"):
+            self.collect()
+
+    def test_cli_pair_checks_the_retained_publication_even_when_all_arms_agree(self) -> None:
+        path = self.root / "near/0001/publication.json"
+        publication = json.loads(path.read_bytes())
+        origin = json.loads((path.parent / "origin/client.json").read_bytes())
+        for change in (
+            {"oid": "f" * 40},
+            {"sha256": "f" * 64},
+            {"published": False, "visible_at_unix_ms": None},
+            {"visible_at_unix_ms": origin["started_at_unix_ms"] + 1},
+            {"candidate": publication["candidate"] | {"binary_sha256": "f" * 64}},
+        ):
+            with self.subTest(change=change):
+                digest = fixture.json_file(path, publication | change)
+                for arm in fixture.CDN.ARMS:
+                    self.amend_client(f"near/0001/{arm}", publication_sha256=digest)
+                with self.assertRaisesRegex(ValueError, "must verify the retained CLI publication"):
+                    self.collect()
+
     def test_rejects_a_client_measurement_from_a_different_release_platform(self) -> None:
         self.amend_client("near/0001/origin", platform="linux-aarch64")
         with self.assertRaisesRegex(ValueError, "mismatched Git fetch provenance"):

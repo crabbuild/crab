@@ -370,6 +370,9 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
         self.assertEqual(self.assemble(digest), 1)
         row = self.output / self.row
         retained = row / fixture.CDN.GIT_BENCHMARK_DIR / sample
+        publication = Path(sample).parent / "publication.json"
+        self.assertEqual((row / fixture.CDN.GIT_BENCHMARK_DIR / publication).read_bytes(),
+                         (measurements / publication).read_bytes())
         self.assertEqual({path.name for path in retained.iterdir()}, {"client.json", "measurement.json"})
         for file in retained.iterdir():
             self.assertEqual(file.read_bytes(), (measurements / sample / file.name).read_bytes())

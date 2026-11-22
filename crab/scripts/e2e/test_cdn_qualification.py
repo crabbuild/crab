@@ -108,16 +108,29 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, nati
                            hydration: dict | None = None, service: dict | None = None) -> None:
     provider = CDN.PROVIDER_FOR_EDGE[registration["scope"].split("/", 1)[0]]
     sdk = CDN.is_direct_sdk_git_scope(registration["scope"])
+    cli = CDN.requires_cli_workload(registration["scope"])
     action = CDN.cli_action_name(registration["scope"])
     for ordinal, (location, region) in enumerate(registration["regions"].items()):
         for index in range(1, registration["samples"] + 1):
             oid = hashlib.sha1(f"{location}/{index}".encode()).hexdigest()
             blob = hashlib.sha256(oid.encode()).hexdigest()
+            pair = inputs / location / f"{index:04d}"
+            pair.mkdir(parents=True, exist_ok=True)
+            start = 1_000_000 * (ordinal + 1) + index * 10_000
             publication_digest = hashlib.sha256(f"{location}/{index}/receipt".encode()).hexdigest()
+            if cli:
+                publication_digest = json_file(pair / "publication.json", {
+                    "schema": "crab.cdn-git-publication/v1", "oid": oid, "sha256": blob, "published": True,
+                    "ref": f"refs/heads/crab-cdn-qualification-123-2-{oid[:12]}",
+                    "visible_at_unix_ms": start - 1, "candidate": registration["candidate"],
+                    "source_sha": registration["source_sha"], "scope": registration["scope"],
+                    "configuration_sha256": registration["configuration_sha256"],
+                    "workflow_run_id": "123", "workflow_run_attempt": "2",
+                })
             for sequence, (arm, metrics) in enumerate(sample(provider).items()):
-                directory = inputs / location / f"{index:04d}" / arm
-                directory.mkdir(parents=True, exist_ok=True)
-                started = 1_000_000 * (ordinal + 1) + index * 10_000 + sequence * 1_000
+                directory = pair / arm
+                directory.mkdir(exist_ok=True)
+                started = start + sequence * 1_000
                 if hydration is not None:
                     started += 100_000
                 if service is not None:
