@@ -1,3 +1,4 @@
+import { RepositoryWatch } from "./watch";
 import { PaneResizer } from "@/components/layout/pane-resizer";
 import { useWorkspaceHeight } from "@/components/layout/use-workspace-height";
 import { Link } from "@/components/navigation/link";
@@ -434,6 +435,7 @@ export function RepositoryPage({
             </Link>
           ))}
         </nav>
+        {identity && <RepositoryWatch key={repo.id} repo={repo} csrf={csrf} />}
         {view !== "code-search" && (
           <Button asChild variant="outline" size="sm" className="shrink-0">
             <Link

@@ -1848,7 +1848,8 @@ owner label does not acquire ownership.
 | Milestone search choices | `GET /api/repos/{owner}/{name}/discussion-search/milestones` |
 | Markdown suggestions | `GET /api/repos/{owner}/{name}/discussion-search/{mentions,team-mentions,references}` |
 | Team mention settings | `GET/PUT /api/repos/{owner}/{name}/mention-settings` |
-| Account mention inbox | `GET /api/notifications`, `GET /api/notifications/unread`, `PUT /api/notifications/{id}/read` |
+| Account notification inbox | `GET /api/notifications`, `GET /api/notifications/unread`, `PUT /api/notifications/{id}/read` |
+| Repository notification preference | `GET /api/repos/{owner}/{name}/subscription`, `PUT /api/repos/{owner}/{name}/subscription` |
 | Stable discussion links | `GET /api/discussion-references/{repository_id}/{kind}/{number}` |
 | Discussion attachments | `POST /api/repos/{owner}/{name}/discussion-attachments`, `GET /api/discussion-attachments/{repository_id}/{id}` |
 | Labels | `GET/POST /api/repos/{owner}/{name}/labels`, `PATCH/DELETE /api/repos/{owner}/{name}/labels/{number}` |
@@ -2561,12 +2562,31 @@ notification. Creation, individual edits, and bulk edits use the same rule.
 Unchanged assignees, removals, and self-assignment leave the inbox unchanged.
 
 `GET /api/notifications` accepts `repository` (repository UUID), `unread`
-(default false), `reason` (`assigned`, `review_requested`, `mention`, or
-`team_mention`), `limit` (1–50, default 20), and the `before` cursor from `next`.
+(default false), `reason` (`assigned`, `review_requested`, `mention`,
+`team_mention`, or `subscribed`), `limit` (1–50, default 20), and the `before`
+cursor from `next`.
 `PUT /api/notifications/{id}/read` accepts `{"created_at_ms":<timestamp in ms>}`
 and optional `read:false` to mark an entry unread. The CSRF-protected write
 sets private read state and can be retried after a lost response. The inbox
 rechecks repository access before presenting titles, links or unread status.
+
+Open **Watch** in a repository to choose direct notifications, new issue
+activity, new pull request activity, both kinds, or mute. Watching adds
+`subscribed` notices for activity after the preference takes effect and
+excludes your own activity. Other direct notifications continue in the
+three watch modes. Muting skips notifications processed while muted and
+hides existing repository notices from the inbox and unread indicator until
+you change the preference.
+
+`GET /api/repos/{owner}/{name}/subscription` returns the signed-in reader's
+current mode and version, defaulting to `{"mode":"direct","version":0}`.
+Send the same shape with `PUT` and the captured version to change the mode.
+The allowed modes are `direct`, `issues`, `pull_requests`,
+`issues_and_pull_requests`, and `muted`. A successful retry of the same mode
+returns the current preference. A stale request for a different mode returns
+409. Both endpoints require current repository access. The private preference
+can be changed on an archived repository. Release, thread-level, and email
+subscriptions remain open.
 
 ### Link related work
 
@@ -3276,7 +3296,7 @@ namespace and immutable asset bodies in backups. Restoring visible records
 without counters, claims, request ledgers,
 control and immutable roots loses numbering, ownership and retry guarantees.
 
-Discussion deletion, moderation, edit history, repository watching, broad activity feeds, and
+Discussion deletion, moderation, edit history, thread subscriptions, broad activity feeds, and
 email delivery remain unimplemented. Native backup restore, cross-provider
 export, and complete product-root restore qualification remain pending.
 
@@ -3581,7 +3601,7 @@ The server is complete only when a real account can perform the workflow and obs
 | GitHub-quality design | Themes, responsive layouts, accessible controls, navigation, and loading/error behavior across workflows | In progress |
 | Team identity and authorization | OIDC, sessions, membership, permissions, isolation, revocation, CSRF, and administration | In progress; browser and CLI membership replacement are audited, and back-channel logout revokes delivered exact-identity sessions |
 | Git hosting | Authenticated fetch and push, exact branch/tag lifecycle, protection, publication, and independent-client proof | In progress; additional crash phases and coexistence qualification remain |
-| Collaboration | Durable issues, pulls, comments, reviews, labels, assignees, merge, checks, activity, and notifications | In progress; moderation, edit history, repository watching, and external notification delivery remain |
+| Collaboration | Durable issues, pulls, comments, reviews, labels, assignees, merge, checks, activity, and notifications | In progress; moderation, edit history, thread and release subscriptions, and external notification delivery remain |
 | Repository management | CLI create/adopt/list, archive, settings, search, import, and audited administration | In progress; browser creation/import and audit history remain |
 | Production operation | Durable concurrency, restart and crash recovery, backup restore, observability, upgrades, and operator guidance | Native process restart and owner handoff tested; native metrics and shutdown wiring implemented. Backup restore, crash matrices, upgrades, and provider qualification remain |
 | Quality gates | API, UI, accessibility, realistic repositories, security, package smoke, and measured performance | In progress |

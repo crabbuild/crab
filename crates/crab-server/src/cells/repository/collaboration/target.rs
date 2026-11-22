@@ -31,7 +31,7 @@ impl Target {
         }
     }
 
-    pub(super) fn subject(self) -> Subject {
+    pub(crate) fn subject(self) -> Subject {
         match self {
             Self::Issue { number } | Self::IssueComment { issue: number, .. } => Subject {
                 kind: SubjectKind::Issue,

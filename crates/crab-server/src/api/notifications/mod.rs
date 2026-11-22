@@ -22,19 +22,25 @@ use crate::{
             Entry, List, ListInput, MarkRead, MarkReadInput, Position, Reason,
         },
         repository::{
-            collaboration::{SubjectKind, Target},
+            collaboration::{SubjectKind, Target, watches::Mode},
             search::index::references::{FindReferences, ReferenceInput},
         },
     },
-    repository::Repository,
+    repository::{Repository, access::actor_id},
     server::Server,
 };
+
+mod subscriptions;
 
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
         .route("/api/notifications", get(list))
         .route("/api/notifications/unread", get(unread))
         .route("/api/notifications/{id}/read", put(mark_read))
+        .route(
+            "/api/repos/{owner}/{name}/subscription",
+            get(subscriptions::get).put(subscriptions::set),
+        )
         .layer(DefaultBodyLimit::max(1024))
         .route_layer(middleware::from_fn_with_state(server, app::admit))
 }
@@ -110,7 +116,16 @@ async fn list(
             return Err(Error::NotFound);
         }
     }
-    let entries = entries(&server, &principal, before).await?;
+    let (entries, actor) = tokio::try_join!(
+        entries(&server, &principal, before),
+        actor_id(&server, app::account(&principal)?),
+    )?;
+    let Some(actor) = actor else {
+        return Ok(Json(Page {
+            items: Vec::new(),
+            next: None,
+        }));
+    };
     // Read one account's bounded history and authorize by repository, rather
     // than scanning private repositories or checking the same grant per item.
     let mut groups = HashMap::<Uuid, Vec<(usize, Entry)>>::new();
@@ -129,7 +144,7 @@ async fn list(
             .push((order, entry));
     }
     let batches: Vec<Vec<(usize, Item)>> = stream::iter(groups)
-        .map(|(id, entries)| repository_items(&server, &principal, id, entries))
+        .map(|(id, entries)| repository_items(&server, &principal, actor, id, entries))
         .buffer_unordered(8)
         .try_collect()
         .await?;
@@ -173,8 +188,14 @@ async fn unread(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
 ) -> Result<Json<Unread>> {
-    let repositories: HashSet<_> = entries(&server, &principal, None)
-        .await?
+    let (entries, actor) = tokio::try_join!(
+        entries(&server, &principal, None),
+        actor_id(&server, app::account(&principal)?),
+    )?;
+    let Some(actor) = actor else {
+        return Ok(Json(Unread { unread: false }));
+    };
+    let repositories: HashSet<_> = entries
         .into_iter()
         .filter(|entry| !entry.read)
         .map(|entry| entry.notice.repository)
@@ -183,7 +204,7 @@ async fn unread(
         .filter_map(|id| std::future::ready(server.repositories.by_id(id)))
         .map(|repo| {
             let (server, principal) = (&server, &principal);
-            async move { may_read(server, principal, &repo).await }
+            async move { may_notify(server, principal, &repo, actor).await }
         })
         .buffer_unordered(8);
     while let Some(current) = accessible.try_next().await? {
@@ -204,16 +225,27 @@ async fn may_read(server: &Server, principal: &Principal, repo: &Repository) -> 
     }
 }
 
+async fn may_notify(
+    server: &Server,
+    principal: &Principal,
+    repo: &Repository,
+    actor: Uuid,
+) -> Result<bool> {
+    Ok(may_read(server, principal, repo).await?
+        && subscriptions::read(server, repo, actor).await?.mode != Mode::Muted)
+}
+
 async fn repository_items(
     server: &Server,
     principal: &Principal,
+    actor: Uuid,
     id: Uuid,
     entries: Vec<(usize, Entry)>,
 ) -> Result<Vec<(usize, Item)>> {
     let Some(repo) = server.repositories.by_id(id) else {
         return Ok(Vec::new());
     };
-    if !may_read(server, principal, &repo).await? {
+    if !may_notify(server, principal, &repo, actor).await? {
         return Ok(Vec::new());
     }
     let cell = app::repository_cell(server, &repo)?;
@@ -269,7 +301,7 @@ async fn repository_items(
     }
     // Title reads await a different Cell. Recheck the current grant once
     // per repository before presenting its whole batch.
-    if !may_read(server, principal, &repo).await? {
+    if !may_notify(server, principal, &repo, actor).await? {
         return Ok(Vec::new());
     }
     Ok(items)
@@ -357,6 +389,9 @@ async fn mark_read(
 
 #[cfg(test)]
 mod delivery_tests;
+
+#[cfg(test)]
+mod watch_tests;
 
 #[cfg(test)]
 mod tests {

@@ -25,6 +25,11 @@ function titleOf(repo: Pick<Address, "owner" | "name">) {
 }
 
 const reasons = {
+  subscribed: {
+    label: "Watched updates",
+    message: "updated a watched discussion",
+    icon: BellIcon,
+  },
   assigned: {
     label: "Assignments",
     message: "assigned you",
@@ -61,6 +66,10 @@ type Notice = {
 };
 
 const INBOX_CHANGED = "crab-inbox-changed";
+
+export function refreshNotificationBadge() {
+  window.dispatchEvent(new Event(INBOX_CHANGED));
+}
 
 export function NotificationLink({ current }: { current: boolean }) {
   const { data, error, retry } = useRequest<{ unread: boolean }>(
@@ -354,7 +363,7 @@ function NotificationRow({
           );
           if (result !== undefined) {
             onMarked(!read);
-            window.dispatchEvent(new Event(INBOX_CHANGED));
+            refreshNotificationBadge();
           }
         }}
       >

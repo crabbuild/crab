@@ -23,6 +23,7 @@ use crate::{
         repository::collaboration::{
             mention_settings::{self, Settings},
             mentions::{Acknowledge, Event, EventKey, Mention, Pending},
+            watches,
         },
     },
     repository::Repository,
@@ -213,12 +214,39 @@ async fn deliver(
     scope: &DeliveryScope,
     settings: &Settings,
     event: &Event,
-) -> Result<()> {
+) -> Result<Option<Uuid>> {
     let sender_key = IdentityKey {
         issuer: event.actor.issuer.clone(),
         subject: event.actor.subject.clone(),
     };
-    let mut recipients = if !event.assignees.is_empty() {
+    let mut next = None;
+    let mut recipients = if let Some(watch) = event.watch {
+        let (page, sender) = tokio::try_join!(
+            async {
+                app::query_output(
+                    client
+                        .query::<watches::ListWatchers>(
+                            Address::Repository(repo.id),
+                            None,
+                            watches::Query {
+                                kind: event.target.subject().kind,
+                                activity: event.version,
+                                before: watch.before,
+                            },
+                        )
+                        .await,
+                )
+            },
+            account_ids(client, std::slice::from_ref(&sender_key)),
+        )?;
+        next = page.next;
+        let sender = sender.into_iter().next().flatten();
+        page.recipients
+            .into_iter()
+            .filter(|id| Some(*id) != sender)
+            .map(|id| (id, Reason::Subscribed))
+            .collect()
+    } else if !event.assignees.is_empty() {
         let sender = account_ids(client, std::slice::from_ref(&sender_key))
             .await?
             .into_iter()
@@ -260,10 +288,10 @@ async fn deliver(
     };
     recipients.retain(|actor, _| scope.group_access || scope.direct.contains(actor));
     if recipients.is_empty() {
-        return Ok(());
+        return Ok(next);
     }
     let Some(fresh) = current_grants(server, repo).await? else {
-        return Ok(());
+        return Ok(next);
     };
     if fresh.revision != scope.revision {
         // Expansion depends on whether there are group grants. Recompute after
@@ -281,6 +309,22 @@ async fn deliver(
     // lost acknowledgement leaves this source event queued for another pass.
     let recipients: Vec<_> = recipients.into_iter().collect();
     for batch in recipients.chunks(MAX_RECIPIENTS) {
+        let unmuted: BTreeSet<_> = app::query_output(
+            client
+                .query::<watches::Unmuted>(
+                    Address::Repository(repo.id),
+                    None,
+                    batch.iter().map(|(actor, _)| *actor).collect(),
+                )
+                .await,
+        )?
+        .into_iter()
+        .collect();
+        let batch: Vec<_> = batch
+            .iter()
+            .filter(|(actor, _)| unmuted.contains(actor))
+            .copied()
+            .collect();
         let candidates: Vec<_> = batch
             .iter()
             .filter_map(|(actor, _)| (!scope.direct.contains(actor)).then_some(*actor))
@@ -334,7 +378,7 @@ async fn deliver(
                 .await,
         )?;
     }
-    Ok(())
+    Ok(next)
 }
 
 pub(crate) async fn drain_repository(server: &Server, repo: &Repository) -> Result<()> {
@@ -382,11 +426,13 @@ pub(crate) async fn drain_repository(server: &Server, repo: &Repository) -> Resu
             .await,
     )?;
     for event in events {
-        if let Some(scope) = &roster
+        let next = if let Some(scope) = &roster
             && (!scope.direct.is_empty() || scope.group_access)
         {
-            deliver(server, repo, &cell.client, scope, &settings, &event).await?;
-        }
+            deliver(server, repo, &cell.client, scope, &settings, &event).await?
+        } else {
+            None
+        };
         app::command_output(
             cell.client
                 .command::<Acknowledge>(
@@ -395,6 +441,8 @@ pub(crate) async fn drain_repository(server: &Server, repo: &Repository) -> Resu
                     EventKey {
                         id: event.id,
                         created_at_ms: event.created_at_ms,
+                        watch: event.watch,
+                        next,
                     },
                 )
                 .await,

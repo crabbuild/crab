@@ -14,6 +14,7 @@ use crate::cells::{
 use super::{
     Target,
     mention_settings::{self, Settings},
+    watches,
 };
 
 const OUTBOX: &str = "collaboration/v1/mentions/outbox/";
@@ -42,6 +43,14 @@ pub(crate) struct Event {
     pub reviewers: Vec<IdentityKey>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assignees: Vec<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watch: Option<Watch>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Watch {
+    pub before: Option<Uuid>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -49,6 +58,10 @@ pub(crate) struct Event {
 pub(crate) struct EventKey {
     pub id: Uuid,
     pub created_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watch: Option<Watch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<Uuid>,
 }
 
 fn key(id: Uuid, created_at_ms: u64) -> String {
@@ -88,7 +101,23 @@ impl Mutation for Acknowledge {
     type Output = ();
 
     fn execute(context: &mut Transaction<'_>, input: EventKey) -> Result<MutationResult<()>> {
-        context.delete_document(&key(input.id, input.created_at_ms))?;
+        let key = key(input.id, input.created_at_ms);
+        if let Some(expected) = input.watch {
+            let Some(mut event) = context.document::<Event>(&key)? else {
+                return Ok(MutationResult::Success(()));
+            };
+            if event.watch != Some(expected) {
+                return Ok(MutationResult::Success(()));
+            }
+            if let Some(next) = input.next {
+                // Another worker may have replayed this page. Advance only
+                // from the cursor used to select its recipients.
+                event.watch = Some(Watch { before: Some(next) });
+                context.put_document(&key, &event)?;
+                return Ok(MutationResult::Success(()));
+            }
+        }
+        context.delete_document(&key)?;
         Ok(MutationResult::Success(()))
     }
 }
@@ -128,6 +157,7 @@ pub(in crate::cells::repository) fn record(
         current: current.into_iter().collect(),
         reviewers: Vec::new(),
         assignees: Vec::new(),
+        watch: None,
     };
     context.put_document(&key(event.id, event.created_at_ms), &event)
 }
@@ -161,6 +191,7 @@ pub(in crate::cells::repository) fn review_requested(
             current: Vec::new(),
             reviewers: reviewers.to_vec(),
             assignees: Vec::new(),
+            watch: None,
         };
         context.put_document(&key(event.id, event.created_at_ms), &event)?;
     }
@@ -199,6 +230,26 @@ pub(in crate::cells::repository) fn assigned(
         current: Vec::new(),
         reviewers: Vec::new(),
         assignees,
+        watch: None,
+    };
+    context.put_document(&key(event.id, event.created_at_ms), &event)
+}
+
+pub(super) fn watched(context: &Transaction<'_>, source: &super::activity::Event) -> Result<()> {
+    if !watches::active(context)? {
+        return Ok(());
+    }
+    let event = Event {
+        id: Uuid::now_v7(),
+        target: source.target,
+        version: source.number,
+        actor: source.actor.clone(),
+        created_at_ms: source.created_at,
+        previous: Vec::new(),
+        current: Vec::new(),
+        reviewers: Vec::new(),
+        assignees: Vec::new(),
+        watch: Some(Watch::default()),
     };
     context.put_document(&key(event.id, event.created_at_ms), &event)
 }

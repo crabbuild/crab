@@ -231,6 +231,17 @@ fn events(subject: Option<Subject>) -> String {
     )
 }
 
+pub(super) fn latest(context: &Transaction<'_>) -> crate::cells::Result<u64> {
+    let number = context
+        .document::<u64>(SEQUENCE)?
+        .map(|number| {
+            validate_number(number)?;
+            Ok::<_, crate::cells::Error>(number)
+        })
+        .transpose()?;
+    Ok(number.unwrap_or_default())
+}
+
 pub(in crate::cells::repository) fn append(
     context: &Transaction<'_>,
     target: Target,
@@ -246,15 +257,7 @@ pub(in crate::cells::repository) fn append(
     let summary = subject
         .summary(context)?
         .ok_or(crate::cells::Error::Invalid("activity subject is missing"))?;
-    let number = context
-        .document::<u64>(SEQUENCE)?
-        .map(|number| {
-            validate_number(number)?;
-            Ok::<_, crate::cells::Error>(number)
-        })
-        .transpose()?
-        .unwrap_or(0);
-    let number = super::next_version(number)?;
+    let number = super::next_version(latest(context)?)?;
     let event = Event {
         number,
         target,
@@ -278,6 +281,7 @@ pub(in crate::cells::repository) fn append(
         context.put_document(&format!("{}{number:016x}", events(Some(related))), &true)?;
     }
     super::conversation::project_event(context, &event)?;
+    super::mentions::watched(context, &event)?;
     Ok(event)
 }
 

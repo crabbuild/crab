@@ -66,6 +66,7 @@ pub(crate) enum Reason {
     TeamMention,
     ReviewRequested,
     Assigned,
+    Subscribed,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]

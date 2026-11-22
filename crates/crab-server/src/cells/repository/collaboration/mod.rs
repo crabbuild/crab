@@ -18,6 +18,7 @@ pub(crate) mod reactions;
 pub(crate) mod state;
 pub(crate) mod submissions;
 mod target;
+pub(crate) mod watches;
 pub(crate) use target::Target;
 
 pub(in crate::cells::repository) fn body_written(
