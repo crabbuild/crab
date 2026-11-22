@@ -5,6 +5,7 @@ on:
     paths:
       - ".github/workflows/pb-provider-qualification.yml"
       - ".github/workflows/provider-cdn-transport.yml"
+      - ".github/workflows/provider-cdn-qualification.yml"
       - "crab/tests/provider_qualification.rs"
       - "crab/Cargo.toml"
       - "crab/scripts/verify-provider-qualification-report.py"
@@ -97,6 +98,7 @@ on:
     paths:
       - ".github/workflows/pb-provider-qualification.yml"
       - ".github/workflows/provider-cdn-transport.yml"
+      - ".github/workflows/provider-cdn-qualification.yml"
       - "crab/tests/provider_qualification.rs"
       - "crab/Cargo.toml"
       - "crab/scripts/verify-provider-qualification-report.py"
@@ -202,6 +204,10 @@ on:
         description: Check the selected providers' approved CDN fixtures
         type: boolean
         default: false
+      cdn_cache_reuse:
+        description: Include the two protected viewer jobs for private CDN fixtures
+        type: boolean
+        default: false
       publish_cdn_evidence:
         description: Assemble and publish measured CDN release evidence for this attempt
         type: boolean
@@ -224,6 +230,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
+      - name: Validate CDN dispatch options
+        if: github.event_name == 'workflow_dispatch' && inputs.cdn_cache_reuse && !inputs.cdn_transport
+        run: |
+          echo '::error::Select cdn_transport to collect private cache reuse evidence.'
+          exit 1
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -606,7 +618,7 @@ jobs:
       !cancelled() && github.event_name == 'workflow_dispatch' && inputs.cdn_transport &&
       (inputs.provider == 'all' || inputs.provider == 's3')
     needs: s3
-    uses: ./.github/workflows/provider-cdn-transport.yml
+    uses: ./.github/workflows/provider-cdn-qualification.yml
     permissions:
       contents: read
       id-token: write
@@ -617,13 +629,14 @@ jobs:
       provider: s3
       native_artifact: amazon-s3
       native_result: ${{ needs.s3.result }}
+      cache_reuse: ${{ inputs.cdn_cache_reuse }}
 
   cdn-gcs:
     if: >-
       !cancelled() && github.event_name == 'workflow_dispatch' && inputs.cdn_transport &&
       (inputs.provider == 'all' || inputs.provider == 'gcs')
     needs: gcs
-    uses: ./.github/workflows/provider-cdn-transport.yml
+    uses: ./.github/workflows/provider-cdn-qualification.yml
     permissions:
       contents: read
       id-token: write
@@ -634,13 +647,14 @@ jobs:
       provider: gcs
       native_artifact: gcs
       native_result: ${{ needs.gcs.result }}
+      cache_reuse: ${{ inputs.cdn_cache_reuse }}
 
   cdn-azure:
     if: >-
       !cancelled() && github.event_name == 'workflow_dispatch' && inputs.cdn_transport &&
       (inputs.provider == 'all' || inputs.provider == 'azure')
     needs: azure
-    uses: ./.github/workflows/provider-cdn-transport.yml
+    uses: ./.github/workflows/provider-cdn-qualification.yml
     permissions:
       contents: read
       id-token: write
@@ -651,6 +665,7 @@ jobs:
       provider: azure
       native_artifact: azure
       native_result: ${{ needs.azure.result }}
+      cache_reuse: ${{ inputs.cdn_cache_reuse }}
 
   publish-cdn-evidence:
     name: Publish CDN release evidence

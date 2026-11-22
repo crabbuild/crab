@@ -528,6 +528,12 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
     def test_cli_imports_same_attempt_canary_bytes_without_redundant_measurements(self) -> None:
         digest = self.inputs("gcs")
         transport = self.canary_inputs("gcs")
+        cache_reuse = fixture.CDN.CACHE_REUSE_CHECK
+        filename = f"{cache_reuse}.json"
+        (self.root / self.row / "traces" / filename).rename(transport / "gcs" / filename)
+        observations = json.loads(self.observations.read_bytes())
+        observations["check_results"].pop(cache_reuse)
+        fixture.json_file(self.observations, observations)
         result = subprocess.run([
             sys.executable, str(Path(ASSEMBLE.__file__)), "--inputs", str(self.root), "--transport-traces", str(transport),
             "--output", str(self.output), "--benchmarks-sha256", digest, "--source-sha", fixture.COMMIT,

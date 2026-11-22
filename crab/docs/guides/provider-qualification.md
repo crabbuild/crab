@@ -308,9 +308,38 @@ python3 -B crab/scripts/e2e/collect_cdn_cache_reuse.py \
 
 Crab Auth authenticates and authorizes each token before issuing the
 corresponding read grant. The collector verifies a first miss and a second
-hit on the same complete bytes while the grants are live. The trace retains
+hit on the same complete bytes while the grants are live. It requires
+different signed expiration times to prove the edge saw distinct viewer
+credentials. The trace retains
 fingerprints and request observations. OIDC tokens stay in the issuer
 exchange. Only the viewer credentials go to the CDN.
+
+To collect the same trace in GitHub Actions, dispatch **Provider contract
+qualification** with `cdn_transport` and `cdn_cache_reuse` for the selected
+private provider. Attach the `cdn-cache-reuse` label to one protected Linux
+runner in the `provider-cdn-qualification` group. Both jobs use that runner
+and its stable network egress so they can reach the same edge cache. Restrict
+the runner group to trusted qualification workflows and install the cloud
+provider CLI used by the deployment inspector.
+
+Configure `provider-cdn-qualification-<provider>-cache-primary` in addition
+to `provider-cdn-qualification-<provider>`. Use the same approved fixture JSON
+and digest in both environments. Set the environment secret
+`CRAB_CDN_CACHE_REUSE_PRINCIPALS` to the approved principal descriptor and
+the variable `CRAB_CDN_CACHE_REUSE_SHA256` to the registered digest in both
+environments. Configure each environment's read-only
+provider inspection identity. In Crab Auth, authorize the environments'
+distinct GitHub OIDC subjects as the primary and second test readers of the
+same isolated repository. Restrict both environments to trusted refs.
+[GitHub environment OIDC subjects](https://docs.github.com/en/actions/reference/security/oidc#filtering-for-a-specific-environment)
+
+The primary job reads the uncached object first. The second job downloads its
+redacted observation, validates the commit, attempt, runner, and fixture, and
+uses its own live GitHub ID token to obtain a separate viewer grant. It
+requires a cache hit for the same verified bytes before running the ordinary
+transport canary. The transport artifact supplies
+`authorized_cache_reuse.json` to release assembly. For another attempt,
+start with an uncached fixture object and rerun both jobs.
 
 ### Verify scoped-view isolation
 
@@ -418,8 +447,8 @@ overlapping range reads of the same object, waits through the signed expiry,
 then checks that all three reads are denied with the same grant. Both traces
 contain the signed expiry and a common grant fingerprint. Viewer credentials
 stay in the collector process. The native inspection role supplies the
-separate native read. The authenticated cache-reuse collector supplies the
-two-principal evidence on the measurement worker.
+separate native read. The two-principal check uses the protected viewer jobs
+or the standalone collector on the measurement worker.
 
 Download `provider-cdn-transport-<provider>-<run-id>-<attempt>` for the redacted
 traces. For an approved fixture using an externally issued grant, collect

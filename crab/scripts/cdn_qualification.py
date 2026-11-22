@@ -1072,26 +1072,35 @@ def verify_cache_reuse(value: Any, report: dict[str, Any], approved: str) -> tup
     requests = trace["requests"]
     require(isinstance(requests, list) and len(requests) == 2, "cache reuse requires two authenticated reads")
     previous_finish = 0
-    for role, cache, value in zip(CACHE_REUSE_ROLES, ("miss", "hit"), requests, strict=True):
-        grant = fields(grants[role], {"subject_sha256", "policy_identity_sha256", "issued_at_unix_ms", "expires_at_unix"},
-                       "authenticated cache reuse grant")
-        require(all(grant[key] == principals[role][key] for key in principals[role])
-                and positive(grant["issued_at_unix_ms"]) and positive(grant["expires_at_unix"]),
-                "cache reuse requires an authenticated grant for each approved principal")
-        row = fields(value, TRACE_REQUEST_FIELDS | {"principal", "body_sha256", "started_at_unix_ms", "finished_at_unix_ms"},
-                     "authenticated cache reuse read")
-        require(row["principal"] == role and row["source"] == "edge" and type(row["status"]) is int
-                and row["status"] == 200 and row["cache"] == cache
-                and all(row[key] == obj[key] for key in obj),
-                "cache reuse requires a verified first miss and second hit for the same complete object")
-        start, finish, expires = row["started_at_unix_ms"], row["finished_at_unix_ms"], grant["expires_at_unix"] * 1000
-        require(type(row["elapsed_ms"]) is int and row["elapsed_ms"] >= 0 and type(row["bytes"]) is int
-                and positive(start) and positive(finish)
-                and previous_finish <= start and grant["issued_at_unix_ms"] <= start <= finish < expires
-                and expires <= grant["issued_at_unix_ms"] + MAX_VIEWER_GRANT_SECONDS * 1000,
-                "cache reuse reads must be ordered and complete within the corresponding signed grant lifetime")
-        previous_finish = finish
+    for role, row in zip(CACHE_REUSE_ROLES, requests, strict=True):
+        previous_finish = verify_cache_reuse_read(role, principals[role], obj, grants[role], row, previous_finish)
+    require(grants["primary"]["expires_at_unix"] != grants["second"]["expires_at_unix"],
+            "cache reuse needs distinct signed viewer grants with different expirations")
     return obj["key_sha256"], obj["bytes"]
+
+
+def verify_cache_reuse_read(
+    role: str, principal: dict[str, str], obj: dict[str, Any], grant: Any, row: Any, previous_finish: int = 0,
+) -> int:
+    fields(grant, {"subject_sha256", "policy_identity_sha256", "issued_at_unix_ms", "expires_at_unix"},
+           "authenticated cache reuse grant")
+    require(all(grant[key] == principal[key] for key in principal)
+            and positive(grant["issued_at_unix_ms"]) and positive(grant["expires_at_unix"]),
+            "cache reuse requires an authenticated grant for each approved principal")
+    fields(row, TRACE_REQUEST_FIELDS | {"principal", "body_sha256", "started_at_unix_ms", "finished_at_unix_ms"},
+           "authenticated cache reuse read")
+    cache = "miss" if role == "primary" else "hit"
+    require(row["principal"] == role and row["source"] == "edge" and type(row["status"]) is int
+            and row["status"] == 200 and row["cache"] == cache
+            and all(row[key] == obj[key] for key in obj),
+            "cache reuse requires a verified first miss and second hit for the same complete object")
+    start, finish, expires = row["started_at_unix_ms"], row["finished_at_unix_ms"], grant["expires_at_unix"] * 1000
+    require(type(row["elapsed_ms"]) is int and row["elapsed_ms"] >= 0 and type(row["bytes"]) is int
+            and positive(start) and positive(finish)
+            and previous_finish <= start and grant["issued_at_unix_ms"] <= start <= finish < expires
+            and expires <= grant["issued_at_unix_ms"] + MAX_VIEWER_GRANT_SECONDS * 1000,
+            "cache reuse reads must be ordered and complete within the corresponding signed grant lifetime")
+    return finish
 
 
 def ordered_full_reads(

@@ -676,8 +676,11 @@ and edge payload through redacted observations.
   Use fresh grants from the real issuer after preflight attestation. Finish
   any native job or environment approval before minting them. Keep native
   inspection, the two authorized subjects and the unrelated control in
-  their separate roles. A CI implementation may use protected workload
-  identities if the issuer authorizes each subject for its fixture scope.
+  their separate roles. The optional hosted cache-reuse run uses two protected
+  GitHub environments on the same measurement runner. The primary job uploads
+  a redacted cold-read observation. The second job checks the fixture, runner,
+  and workflow attempt before requesting its own grant. The combined trace
+  joins the attested transport artifact for release verification.
   Use a short, independently issued grant for the expiry window. Keep viewer
   credentials out of artifacts and avoid long-lived credentials to cover
   scheduling delays. An approved hosted private fixture requests its primary
@@ -719,7 +722,7 @@ run and attempt to bind each observation.
 
 | Gate | Required observation |
 |---|---|
-| Authenticated cache reuse | Preregister the exact private object, issuer endpoint and approval, and two distinct subjects and policy identities. Exchange each OIDC ID token with Crab Auth for the same read scope. Observe a cold miss and then a warm hit for the same complete bytes within the two signed grant lifetimes. Keep only identity and object fingerprints and request observations. |
+| Authenticated cache reuse | Preregister the exact private object, issuer endpoint and approval, and two distinct subjects and policy identities. Exchange each OIDC ID token with Crab Auth for the same read scope. Observe a cold miss and then a warm hit for the same complete bytes within the two grant lifetimes. Use different signed expirations to confirm the requests used distinct viewer credentials. Retain redacted identities, expirations, object fingerprints and request observations. |
 | Key rotation and retirement | Before and after policy snapshots with the actual key IDs. Same-key verified reads by both signers during overlap. After the retired key has left the deployed policy, that grant must still be within its signed lifetime and must fail for both full and ranged warm reads. The replacement grant must still return the original verified bytes. Verify the bounded rollout and retirement window per provider and hostname. |
 | Scoped view and rollback | Preregister the isolated view and sibling control. The collector attests the scoped deployment, verifies warm target bytes and native sibling bytes before and after full and ranged sibling denials, and retains source, scope, generation and immutable-prefix digests. Use the projected shared prefix when applicable. Direct CLI Git, capsule, and LFS release rows require an ordinary edge fetch followed by a native fetch with the binding withdrawn, before retiring the ref. The verifier checks identical verified output, the same independently observed native target and prefix, distinct local caches, and zero edge and cached payload reads after withdrawal. Live scoped-view and direct CLI evidence and ordinary rollback producers for other consumers remain open. Test terminal viewer denial separately. |
 | Public release | Retain the prior and current publish/readback receipts and inventories. The direct CLI Git and LFS fetch workers, SDK and desktop Git read workers, and Git and LFS service workers verify the native ref, active prior approval, absent object membership and zero edge requests on the first read. After sealing the new export, they verify identical content and the exact object through the active edge binding. The release verifier checks both pinned receipts, immutable inventory preservation, readiness order and the retained product records. Other consumer and read-family transition producers remain open. The native history collector checks approved retained versions or snapshots using both an authorized read and anonymous denial. Release verification pins the observed selectors and distinct historical byte digests to the same fixture object as the current public export. Collect the traces on the protected measurement worker in the release attempt. |

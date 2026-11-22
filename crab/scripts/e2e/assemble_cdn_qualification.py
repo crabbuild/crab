@@ -14,7 +14,7 @@ from tempfile import TemporaryDirectory
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cdn_qualification import (  # noqa: E402
-    CDN_PROVENANCE_FIELDS, COMMIT, EXPIRY_CHECKS, GIT_BENCHMARK_DIR, GIT_PRODUCT_DIR, LABEL, PROVIDERS,
+    CACHE_REUSE_CHECK, CDN_PROVENANCE_FIELDS, COMMIT, EXPIRY_CHECKS, GIT_BENCHMARK_DIR, GIT_PRODUCT_DIR, LABEL, PROVIDERS,
     PROVIDER_FOR_EDGE, PUBLIC_EXPORT_BEFORE, PUBLIC_EXPORT_CHECK, PUBLIC_EXPORT_DIR, PUBLIC_EXPORT_FILES,
     PUBLIC_TRANSITION_CHECK, RUN_NUMBER, SCHEMA, SCOPED_VIEW_CHECK, SERVICE_PRODUCT_DIR, SHA256,
     benchmark_registration, collect_desktop_product_action, collect_git_performance, collect_git_product_action,
@@ -42,7 +42,7 @@ CANARY_REQUIRED = {
     "public": CANARY_COMMON | {PUBLIC_EXPORT_CHECK, "live_origin_denied", "export_origin_access", "public_listing_denied"},
 }
 CANARY_OPTIONAL = {
-    "private": {"warm_unrelated_principal_denied"} | EXPIRY_CHECKS,
+    "private": {CACHE_REUSE_CHECK, "warm_unrelated_principal_denied"} | EXPIRY_CHECKS,
     "public": set(),
 }
 
@@ -75,7 +75,8 @@ def load_canary_traces(root: Path, source: str, run_id: str, attempt: str) -> di
                 continue
             raw = read_trace(path, name)
             trace = decode(raw)
-            require(isinstance(trace, dict) and trace.get("schema") == "crab.cdn-trace/v1" and trace.get("check") == name
+            schema = "crab.cdn-authenticated-cache-reuse/v1" if name == CACHE_REUSE_CHECK else "crab.cdn-trace/v1"
+            require(isinstance(trace, dict) and trace.get("schema") == schema and trace.get("check") == name
                     and all(trace.get(key) == provenance[key] for key in CDN_PROVENANCE_FIELDS),
                     f"canary trace provenance mismatch: {name}")
             traces[name] = raw

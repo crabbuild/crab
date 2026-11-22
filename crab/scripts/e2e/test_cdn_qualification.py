@@ -783,7 +783,8 @@ class CdnQualificationTests(unittest.TestCase):
             self.registration["cache_reuse_sha256"] = CDN.deployment_component_digest(authority)
             evidence = {key: self.report[key] for key in CDN.CDN_PROVENANCE_FIELDS} | {
                 "schema": "crab.cdn-authenticated-cache-reuse/v1", "check": check, "authority": authority,
-                "grants": {role: principals[role] | {"issued_at_unix_ms": 1000, "expires_at_unix": 5} for role in principals},
+                "grants": {role: principals[role] | {"issued_at_unix_ms": 1000, "expires_at_unix": 5 + index}
+                           for index, role in enumerate(principals)},
                 "requests": [self.request("edge", 200, cache) | {
                     "principal": role, "body_sha256": "e" * 64,
                     "started_at_unix_ms": 1010 + index * 100, "finished_at_unix_ms": 1020 + index * 100,
@@ -1730,7 +1731,7 @@ class CdnQualificationTests(unittest.TestCase):
         for changes, reason in (
             ({"cache": "miss"}, "verified first miss and second hit"),
             ({"key_sha256": "f" * 64}, "verified first miss and second hit"),
-            ({"finished_at_unix_ms": 5000}, "complete within the corresponding signed grant lifetime"),
+            ({"finished_at_unix_ms": 6000}, "complete within the corresponding signed grant lifetime"),
         ):
             with self.subTest(changes=changes):
                 primary, second = trace["requests"]
@@ -1739,6 +1740,9 @@ class CdnQualificationTests(unittest.TestCase):
         grants = trace["grants"] | {"second": trace["grants"]["primary"]}
         self.cache_reuse_trace(trace | {"grants": grants})
         self.rejected("an authenticated grant for each approved principal")
+        grants = trace["grants"] | {"second": trace["grants"]["second"] | {"expires_at_unix": 5}}
+        self.cache_reuse_trace(trace | {"grants": grants})
+        self.rejected("distinct signed viewer grants with different expirations")
 
     def test_rejects_expiry_without_evidence_the_edge_was_warm(self) -> None:
         self.configure("azure", "private", "direct")

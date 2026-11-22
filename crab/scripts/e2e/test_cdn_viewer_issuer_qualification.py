@@ -58,12 +58,12 @@ def credential(edge, config, prefix, expires):
     return f"header.{payload}.fixture-signature"
 
 
-def issue_reply(edge, config):
+def issue_reply(edge, config, *, expires_in=180):
     provider, cdn = ISSUER.PROVIDERS[edge]
     repo = config["fixture_prefix"] + config["view_suffix"]
     family = ".crab/xorbs" if config["view_suffix"] else "v2/pack-layers"
     prefix = f"{repo}/{family}/"
-    expires = NOW + 180
+    expires = NOW + expires_in
     reply = {"provider": provider, "credentials": {"access_token": "native-credential-fixture"},
              "permissions": ["read"], "expires_at": datetime.fromtimestamp(NOW + 300, timezone.utc).isoformat(),
              "cdn": {"provider": cdn, "origin": config["native_origin"], "base_url": config["base_url"],
@@ -155,9 +155,11 @@ class CdnViewerIssuerQualificationTests(TestCase):
                 fingerprint = json.loads(stdout.getvalue())["cache_reuse_sha256"]
                 reply = issue_reply(edge, config)
                 issued = response(200, json.dumps(reply).encode(), Cache_Control="no-store", X_Crab_CDN_Approval_Sha256="a" * 64)
+                second = response(200, json.dumps(issue_reply(edge, config, expires_in=181)).encode(),
+                                  Cache_Control="no-store", X_Crab_CDN_Approval_Sha256="a" * 64)
                 self.connection.getresponse.side_effect = [
                     issued, response(200, BODY, Cache_Control="private, no-store", **{header: miss}),
-                    issued, response(200, BODY, Cache_Control="private, no-store", **{header: hit}),
+                    second, response(200, BODY, Cache_Control="private, no-store", **{header: hit}),
                 ]
                 self.http.reset_mock()
                 output = root / "trace.json"
@@ -174,6 +176,7 @@ class CdnViewerIssuerQualificationTests(TestCase):
                 attest.assert_not_called()
                 self.http.assert_not_called()
                 with (patch.object(sys, "argv", args), patch.object(REUSE, "attest_fixture") as attest,
+                      patch.object(REUSE.time, "sleep"),
                       patch.object(REUSE.time, "time_ns", side_effect=[NOW * 10**9 + i * 10**6 for i in range(6)])):
                     self.assertEqual(REUSE.main(), 0)
                 self.assertEqual(attest.call_count, 2)
@@ -205,6 +208,67 @@ class CdnViewerIssuerQualificationTests(TestCase):
                 self.assertEqual(REUSE.main(), 1)
             self.assertIn("two distinct OIDC subjects and Crab Auth policy identities", error.getvalue())
             self.http.assert_not_called()
+
+    def test_hosted_cache_reuse_passes_only_the_redacted_cold_read_between_jobs(self):
+        for edge, header, miss, hit in (
+            ("cloudfront", "X_Cache", "Miss from cloudfront", "Hit from cloudfront"),
+            ("cloud-cdn", "X_Crab_CDN_Cache", "miss", "hit"),
+            ("front-door", "X_Cache", "TCP_MISS", "TCP_HIT"),
+        ):
+            with self.subTest(edge=edge), TemporaryDirectory() as directory:
+                self.http.reset_mock()
+                root = Path(directory)
+                config = settings(edge)
+                raw = json.dumps(config).encode()
+                (root / "fixture.json").write_bytes(raw)
+                issuer = "https://token.actions.githubusercontent.com"
+                subjects = {role: f"repo:org/crab:environment:test-{role}" for role in ("primary", "second")}
+                principals = {role: {"issuer": issuer, "subject": sub, "policy_identity": sub}
+                              for role, sub in subjects.items()}
+                (root / "principals.json").write_text(json.dumps(principals), encoding="utf-8")
+                tokens = {role: f"header.{encoded({'iss': issuer, 'sub': sub, 'aud': AUDIENCE})}.token"
+                          for role, sub in subjects.items()}
+                args = ["probe", "--fixture", str(root / "fixture.json"), "--configuration-sha256",
+                        hashlib.sha256(raw).hexdigest(), "--principals", str(root / "principals.json")]
+                with patch.object(sys, "argv", args), redirect_stdout(StringIO()) as inspection:
+                    self.assertEqual(REUSE.main(), 0)
+                args += ["--cache-reuse-sha256", json.loads(inspection.getvalue())["cache_reuse_sha256"],
+                         "--source-sha", "a" * 40, "--run-id", "123", "--run-attempt", "2"]
+                primary = root / "primary.json"
+                output = root / "authorized_cache_reuse.json"
+                for role, cache in (("primary", miss), ("second", hit)):
+                    reply = issue_reply(edge, config, expires_in=180 if role == "primary" else 181)
+                    self.connection.getresponse.side_effect = [
+                        response(200, json.dumps({"value": tokens[role]}).encode()),
+                        response(200, json.dumps(reply).encode(),
+                                 Cache_Control="no-store", X_Crab_CDN_Approval_Sha256="a" * 64),
+                        response(200, BODY, Cache_Control="private, no-store", **{header: cache}),
+                    ]
+                    selected = args + ["--github-role", role, "--output", str(primary if role == "primary" else output)]
+                    if role == "second":
+                        selected += ["--primary-observation", str(primary)]
+                        for field, value in (("workflow_run_attempt", "1"), ("runner_sha256", "1" * 64),
+                                             ("authority_sha256", "2" * 64)):
+                            original = primary.read_text()
+                            primary.write_text(json.dumps(json.loads(original) | {field: value}))
+                            with (patch.object(sys, "argv", selected), patch.dict(ISSUER.os.environ, {"RUNNER_NAME": "worker"}),
+                                  patch.object(REUSE, "github_id_token") as oidc, redirect_stderr(StringIO()) as error):
+                                self.assertEqual(REUSE.main(), 1)
+                            self.assertIn("approved fixture, runner, and attempt", error.getvalue())
+                            oidc.assert_not_called()
+                            primary.write_text(original)
+                    with (patch.object(sys, "argv", selected), patch.dict(ISSUER.os.environ, {"RUNNER_NAME": "worker"}),
+                          patch.object(REUSE, "attest_fixture") as attest,
+                          patch.object(REUSE.time, "time_ns", side_effect=[
+                              NOW * 10**9 + (offset + (0 if role == "primary" else 10)) * 10**6 for offset in range(3)
+                          ])):
+                        self.assertEqual(REUSE.main(), 0)
+                    self.assertEqual(attest.call_count, 2)
+                trace = json.loads(output.read_text())
+                self.assertEqual([row["cache"] for row in trace["requests"]], ["miss", "hit"])
+                for path in (primary, output):
+                    for secret in (*tokens.values(), *subjects.values(), "native-credential-fixture", "fixture-signature"):
+                        self.assertNotIn(secret, path.read_text())
 
     def test_issuer_rejection_and_nonprivate_responses_are_redacted(self):
         cases = (
