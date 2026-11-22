@@ -14,7 +14,7 @@ from collections.abc import Iterable, Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -26,8 +26,9 @@ from cdn_qualification import (  # noqa: E402
     verify_git_traffic, verify_viewer_requests,
 )
 from collect_cdn_fixture_cleanup import bearer  # noqa: E402
+from collect_azure_access_logs import azure_log_archives  # noqa: E402
 from collect_cloud_cdn_deployment_policy import PROJECT, RESOURCE  # noqa: E402
-from collect_front_door_deployment_policy import FRONT_DOOR_HOST, SUBSCRIPTION  # noqa: E402
+from collect_front_door_deployment_policy import FRONT_DOOR, FRONT_DOOR_HOST, SUBSCRIPTION, arm_document  # noqa: E402
 from collect_cloudfront_access_logs import download_logs  # noqa: E402
 from run_cdn_git_workload import read_target_fingerprints  # noqa: E402
 from run_cdn_transport_checks import (  # noqa: E402
@@ -134,23 +135,28 @@ def s3_cloudfront_reads(paths: list[Path], viewers: dict, fixture: dict, client:
     return records
 
 
-def front_door_resources(fixture: dict) -> tuple[str, str]:
+def front_door_resources(fixture: dict) -> tuple[str, str, SplitResult]:
     deployment = deployment_target(fixture, "front-door")
     subscription, group, profile = (deployment[key] for key in ("subscription", "resource_group", "profile"))
     require(matches(SUBSCRIPTION, subscription), "Front Door viewer evidence needs the approved Azure subscription")
     group_id = f"/subscriptions/{subscription}/resourceGroups/{group}".lower()
-    return group_id, f"{group_id}/providers/microsoft.cdn/profiles/{profile.lower()}"
+    _, access, _, _, _ = scope_parts(fixture["scope"])
+    native_origin = fixture["export_origin"] if access == "public" else fixture["native_origin"]
+    origin = fixture_base(native_origin)
+    account = origin.netloc.split(".", 1)[0]
+    profile_id = f"{group_id}/providers/microsoft.cdn/profiles/{profile.lower()}"
+    blob_id = f"{group_id}/providers/microsoft.storage/storageaccounts/{account}/blobservices/default"
+    return profile_id, blob_id, origin
 
 
-def front_door_logs(paths: list[Path], client: dict, fixture: dict) -> dict:
+def front_door_logs(exports: Iterable[object], client: dict, fixture: dict) -> dict:
     expected = client["edge_responses"]
-    _, resource = front_door_resources(fixture)
+    resource, _, _ = front_door_resources(fixture)
     _, access, _, _, _ = scope_parts(fixture["scope"])
     base = fixture_base(fixture["base_url"])
     prefix = f"/{fixture['fixture_prefix']}{fixture['view_suffix']}/"
     records = {}
-    for path in paths:
-        archive = read_json_log(path)
+    for archive in exports:
         require(isinstance(archive, dict) and isinstance(archive.get("records"), list),
                 "expected an Azure Monitor resource log archive with records")
         for row in archive["records"]:
@@ -224,15 +230,10 @@ def azure_backend_ip(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Addres
     return address
 
 
-def azure_blob_front_door_reads(paths: list[Path], authority_path: Path, viewers: dict, fixture: dict, client: dict) -> dict:
+def azure_blob_front_door_reads(exports: Iterable[object], authority: object, viewers: dict, fixture: dict, client: dict) -> dict:
     _, access, _, _, _ = scope_parts(fixture["scope"])
-    group, profile = front_door_resources(fixture)
-    native_origin = fixture["export_origin"] if access == "public" else fixture["native_origin"]
-    origin = fixture_base(native_origin)
-    account = origin.netloc.split(".", 1)[0]
-    resource = f"{group}/providers/microsoft.storage/storageaccounts/{account}/blobservices/default"
+    profile, resource, origin = front_door_resources(fixture)
     root = origin.path.rstrip("/") + "/"
-    authority = read_json_log(authority_path)
     require(isinstance(authority, dict), "expected Azure origin authority JSON")
     if access == "private":
         identity = authority.get("identity")
@@ -245,8 +246,7 @@ def azure_blob_front_door_reads(paths: list[Path], authority_path: Path, viewers
     keys = {row["key_sha256"] for row in viewers.values()}
     start, finish = (client[key] for key in ("started_at_unix_ms", "finished_at_unix_ms"))
     records = {}
-    for path in paths:
-        archive = read_json_log(path)
+    for archive in exports:
         require(isinstance(archive, dict) and isinstance(archive.get("records"), list),
                 "expected an Azure Monitor Blob resource log archive with records")
         for row in archive["records"]:
@@ -303,6 +303,21 @@ def azure_blob_front_door_reads(paths: list[Path], authority_path: Path, viewers
                     "Azure Blob log exports disagree about one origin request")
             records[fingerprint] = observation
     return records
+
+
+def azure_monitor_records(fixture: dict, client: dict, authority_path: Path | None) -> tuple[dict, dict]:
+    profile, blob, _ = front_door_resources(fixture)
+    subscription = profile.split("/")[2]
+    token_args = ("az", "account", "get-access-token", "--subscription", subscription, "--query", "accessToken",
+                  "--output", "tsv", "--only-show-errors")
+    arm = bearer(*token_args, "--resource", "https://management.azure.com/")
+    storage = bearer(*token_args, "--resource", "https://storage.azure.com/")
+    authority = read_json_log(authority_path) if authority_path is not None else arm_document(profile, FRONT_DOOR, arm)
+    viewers = front_door_logs(azure_log_archives(profile, "FrontDoorAccessLog", client, arm, storage, JSON_LOG_LIMIT),
+                              client, fixture)
+    origins = azure_blob_front_door_reads(azure_log_archives(blob, "StorageRead", client, arm, storage, JSON_LOG_LIMIT),
+                                         authority, viewers, fixture, client)
+    return viewers, origins
 
 
 def read_json_log(path: Path):
@@ -487,6 +502,7 @@ def main() -> int:
                         help="CloudFront W3C access log, Cloud Logging JSON export or Azure Monitor Front Door archive")
     source.add_argument("--aws-log-stack", help="download CloudFront and S3 logs from the approved companion stack")
     source.add_argument("--gcp-logging", action="store_true", help="read Cloud CDN logs for the approved fixture from Cloud Logging")
+    source.add_argument("--azure-monitor", action="store_true", help="read Front Door and Blob archives through Azure Monitor settings")
     parser.add_argument("--s3-origin-log", action="append", type=Path, default=[],
                         help="plain-text S3 server access log from the approved CloudFront origin")
     parser.add_argument("--azure-blob-log", action="append", type=Path, default=[],
@@ -506,6 +522,8 @@ def main() -> int:
         fixture = approved_fixture(args.fixture, args.configuration_sha256)
         edge, access, _, family, _ = scope_parts(fixture["scope"])
         require(PROVIDER_FOR_EDGE[edge] in VIEWER_REQUEST_FILES, "no viewer log collector is defined for this CDN fixture")
+        require(not args.gcp_logging or edge == "cloud-cdn", "Cloud Logging requires a Cloud CDN fixture")
+        require(not args.azure_monitor or edge == "front-door", "Azure Monitor collection requires a Front Door fixture")
         if args.aws_log_stack is not None:
             require(edge == "cloudfront" and not args.s3_origin_log,
                     "AWS log stack collection requires a CloudFront fixture and no local viewer or origin files")
@@ -513,9 +531,10 @@ def main() -> int:
             require(args.aws_profile is None and not args.aws_log_wait_seconds, "AWS log options require a companion stack")
             require(bool(args.s3_origin_log) == (edge == "cloudfront"),
                     "CloudFront viewer evidence requires S3 origin access logs")
-        require(not args.gcp_logging or edge == "cloud-cdn", "Cloud Logging requires a Cloud CDN fixture")
-        require(bool(args.azure_blob_log) == bool(args.azure_origin_authority) == (edge == "front-door"),
-                "Front Door viewer evidence requires Blob origin logs and Azure origin authority")
+        require(bool(args.azure_blob_log) == (edge == "front-door" and not args.azure_monitor),
+                "Front Door file collection requires Blob origin logs")
+        require(bool(args.azure_origin_authority) == (edge == "front-door" and (not args.azure_monitor or access == "public")),
+                "Front Door file or public collection requires Azure origin authority")
         raw = read_git_record(args.client, limit=GIT_FETCH_RECORD_LIMIT)
         candidate = decode(raw)
         require(isinstance(candidate, dict) and CDN_PROVENANCE_FIELDS | {"arm", "platform"} <= candidate.keys()
@@ -560,9 +579,13 @@ def main() -> int:
                 records = cloudfront_logs(args.log, client, fixture)
                 proof["origin_requests"] = s3_cloudfront_reads(args.s3_origin_log, records, fixture, client)
             elif edge == "front-door":
-                records = front_door_logs(args.log, client, fixture)
-                proof["origin_requests"] = azure_blob_front_door_reads(args.azure_blob_log, args.azure_origin_authority,
-                                                                      records, fixture, client)
+                if args.azure_monitor:
+                    records, proof["origin_requests"] = azure_monitor_records(fixture, client, args.azure_origin_authority)
+                else:
+                    records = front_door_logs((read_json_log(path) for path in args.log), client, fixture)
+                    origins = (read_json_log(path) for path in args.azure_blob_log)
+                    authority = read_json_log(args.azure_origin_authority)
+                    proof["origin_requests"] = azure_blob_front_door_reads(origins, authority, records, fixture, client)
             else:
                 exports = gcp_logging_pages(fixture, client) if args.gcp_logging else (read_json_log(path) for path in args.log)
                 records = cloud_cdn_logs(exports, client, fixture)

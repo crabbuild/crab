@@ -16,6 +16,7 @@ from unittest.mock import patch
 
 import collect_cdn_viewer_requests as COLLECT
 import collect_cloudfront_access_logs as AWS_LOGS
+import collect_azure_access_logs as AZURE_LOGS
 import test_cdn_qualification as examples
 from test_cdn_transport_qualification import PACK, fixture
 
@@ -428,6 +429,31 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
                         self.assertEqual(proof["client_report_sha256"], snapshot_digest)
                         self.assertEqual(proof["records"][fingerprint]["key_sha256"], digest)
 
+    def test_azure_archive_reads_only_the_hours_around_the_timed_action(self):
+        subscription = "a0a0a0a0-bbbb-cccc-dddd-e1e1e1e1e1e1"
+        resource = f"/subscriptions/{subscription}/resourcegroups/test/providers/microsoft.cdn/profiles/profile"
+        client = {"started_at_unix_ms": 3_600_001, "finished_at_unix_ms": 3_600_010}
+        archive = {"records": []}
+        paths = []
+
+        @contextmanager
+        def storage(_base, _method, path, _headers, _label):
+            paths.append(path)
+            if "/h=00/" in path:
+                yield SimpleNamespace(status=404, getheader=lambda _name: "BlobNotFound")
+            else:
+                yield SimpleNamespace(status=200, read=BytesIO(json.dumps(archive).encode()).read)
+
+        with (patch.object(AZURE_LOGS, "archive_account", return_value="viewerlogs"),
+              patch.object(AZURE_LOGS, "https_response", storage)):
+            records = list(AZURE_LOGS.azure_log_archives(resource, "FrontDoorAccessLog", client, "arm", "storage", 4096))
+            self.assertEqual(records, [archive])
+            prefix = (f"/insights-logs-frontdooraccesslog/resourceId=/SUBSCRIPTIONS/{subscription}"
+                      "/RESOURCEGROUPS/TEST/PROVIDERS/MICROSOFT.CDN/PROFILES/PROFILE/y=1970/m=01/d=01")
+            self.assertEqual(paths, [f"{prefix}/h={hour:02}/m=00/PT1H.json" for hour in (0, 1)])
+            with self.assertRaisesRegex(ValueError, "exceed the JSON size limit"):
+                list(AZURE_LOGS.azure_log_archives(resource, "FrontDoorAccessLog", client, "arm", "storage", 1))
+
     def test_front_door_matches_blob_reads_and_excludes_origin_shield_and_direct_reads(self):
         for access in ("private", "public"):
             with self.subTest(access=access), TemporaryDirectory() as temporary:
@@ -519,3 +545,65 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
                             for private in (reference, resource, host, "192.0.2.1", "2001:db8::1", principal,
                                             blob_resource, key, correlation):
                                 self.assertNotIn(private, retained)
+
+                expected = output.read_bytes()
+                output.unlink()
+                group = f"/subscriptions/{deployment['subscription']}/resourceGroups/test"
+                diagnostics = {
+                    resource.lower(): ("FrontDoorAccessLog", "viewerlogs", archive),
+                    blob_resource.lower(): ("StorageRead", "originlogs", origin_log),
+                }
+                destinations = {
+                    source: [{"properties": {
+                        "storageAccountId": f"{group}/providers/Microsoft.Storage/storageAccounts/{account}",
+                        "logs": [{"category": category, "enabled": True}],
+                    }}]
+                    for source, (category, account, _) in diagnostics.items()
+                }
+
+                def arm(path, version, token):
+                    self.assertEqual(token, "Bearer arm-test")
+                    if path == resource.lower():
+                        self.assertEqual(version, COLLECT.FRONT_DOOR)
+                        self.assertEqual(access, "private")
+                        return authority
+                    self.assertEqual(version, AZURE_LOGS.DIAGNOSTIC_SETTINGS)
+                    suffix = "/providers/Microsoft.Insights/diagnosticSettings"
+                    self.assertTrue(path.endswith(suffix))
+                    return {"value": destinations[path.removesuffix(suffix)]}
+
+                @contextmanager
+                def storage(base, method, target, headers, label):
+                    self.assertEqual((method, label, headers["Authorization"]), ("GET", "Azure Monitor archive", "Bearer storage-test"))
+                    account = base.netloc.removesuffix(".blob.core.windows.net")
+                    source, category, path = next((source, category, path) for source, (category, storage, path) in diagnostics.items()
+                                                  if account == storage)
+                    expected_path = (f"/insights-logs-{category.lower()}/resourceId={source.upper()}"
+                                     "/y=1970/m=01/d=01/h=00/m=00/PT1H.json")
+                    self.assertEqual(target, expected_path)
+                    yield SimpleNamespace(status=200, read=BytesIO(path.read_bytes()).read)
+
+                def auth(*args):
+                    self.assertIn(deployment["subscription"], args)
+                    return {"https://management.azure.com/": "Bearer arm-test",
+                            "https://storage.azure.com/": "Bearer storage-test"}[args[-1]]
+
+                api_command = ["collect", "--fixture", str(fixture_path), "--configuration-sha256", configuration,
+                               "--client", str(client), "--output", str(output), "--azure-monitor", "--require-origin-fill"]
+                if access == "public":
+                    api_command += ["--azure-origin-authority", str(origin_authority)]
+                with (patch.object(sys, "argv", api_command), patch.object(COLLECT, "bearer", auth),
+                      patch.object(COLLECT, "arm_document", arm), patch.object(AZURE_LOGS, "arm_document", arm),
+                      patch.object(AZURE_LOGS, "https_response", storage)):
+                    self.assertEqual(COLLECT.main(), 0)
+                    self.assertEqual(output.read_bytes(), expected)
+                    output.unlink()
+                    destinations[resource.lower()].append({"properties": {
+                        "storageAccountId": f"{group}/providers/Microsoft.Storage/storageAccounts/otherlogs",
+                        "logs": [{"categoryGroup": "allLogs", "enabled": True}],
+                    }})
+                    with redirect_stderr(StringIO()) as errors:
+                        self.assertEqual(COLLECT.main(), 1)
+                    self.assertIn("expected one Azure storage destination", errors.getvalue())
+                    self.assertNotIn("otherlogs", errors.getvalue())
+                    self.assertFalse(output.exists())

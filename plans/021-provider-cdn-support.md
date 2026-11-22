@@ -618,6 +618,8 @@ and edge payload through redacted observations.
   viewer response. The benchmark checks external origin GETs and fill bytes
   against these observations. Front Door separates viewer responses from
   origin-shield traffic and joins Blob reads to measured keys and time.
+  The collector can read the hourly archives from the storage destinations
+  reported by the two approved resources' diagnostic settings.
   Private rows match the profile's system-assigned identity. Public rows match
   anonymous reads of a dedicated export from the Front Door backend service tag.
   The cold arm requires a successful Blob response with body bytes.

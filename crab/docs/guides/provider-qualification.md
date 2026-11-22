@@ -1414,6 +1414,26 @@ Blob response with body bytes. Use distinct fixture publications and keep
 other traffic to those keys outside the measurement window.
 [Front Door access logs](https://learn.microsoft.com/en-us/azure/frontdoor/front-door-diagnostics) · [Blob resource log format](https://learn.microsoft.com/en-us/azure/storage/blobs/monitor-blob-storage-reference#resource-logs)
 
+To collect the archives directly, set both diagnostic streams to archive to
+Azure Storage and use `--azure-monitor` in place of the viewer and Blob log
+file flags. Use an Azure CLI identity that can read the resources' diagnostic
+settings and read blobs from the configured log containers. The collector
+looks up the enabled destination for each category and reads its hourly
+archives around the timed action. Private collection reads the profile's
+managed identity from ARM. Public collection still takes the Azure Public
+service-tags file through `--azure-origin-authority`.
+[Diagnostic settings API](https://learn.microsoft.com/en-us/rest/api/monitor/diagnostic-settings/list?view=rest-monitor-2021-05-01-preview) · [Azure Monitor archive layout](https://learn.microsoft.com/en-us/azure/azure-monitor/logs/resource-logs)
+
+```bash
+python3 -B crab/scripts/e2e/collect_cdn_viewer_requests.py \
+  --fixture "$approved_fixture_json" --configuration-sha256 "$approved_configuration_sha256" \
+  --client "$arm_directory/client.json" --azure-monitor --require-origin-fill \
+  --output "$arm_directory/front-door-requests.json"
+```
+
+This command shows a private cold arm. Use the file-based command below
+for preselected exports or when the direct read reaches its archive limits.
+
 For private delivery, capture the approved profile's system-assigned identity
 for comparison against the Blob log requester's OAuth object ID.
 

@@ -38,6 +38,11 @@ The tests check the compiled resource wiring, gateway policy structure, and
 canonical Git, LFS and projected Xet path matching. Live APIM policy
 compilation and cache behavior require an Azure deployment.
 
+For timing evidence, archive the profile's `FrontDoorAccessLog` and the
+fixture Blob service's `StorageRead` category to dedicated diagnostic
+storage. The qualification collector can discover these archives and read
+them using `--azure-monitor`. [Provider qualification guide](../../../docs/guides/provider-qualification.md#pair-regional-cli-fetch-measurements)
+
 ## Deploy and qualify
 
 1. Provide the fixture's region, resource names, publisher contact, private
