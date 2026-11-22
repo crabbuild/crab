@@ -39,6 +39,7 @@ use crab::core::context::AppContext;
 use crab::core::error::{CrabError, Result};
 use crab::core::output::{ErrorInfo, JsonlStream, OutputMode, emit_error_json};
 use crab::git::remote_helper::{StdIo, run_remote_helper};
+use crab_remote::local::DIRECT_CDN_CHECKOUT_BINDING_ENV;
 
 /// Name Git uses when exec-ing the remote helper for `crab://` URLs.
 const REMOTE_HELPER_STEM: &str = "git-remote-crab";
@@ -2852,6 +2853,16 @@ where
 /// Layer 1 (process env) wins implicitly because dotenvy never overrides.
 /// Layer 5 (AWS SDK credential chain) is handled by `object_store::from_env()`.
 fn load_env_layered() {
+    if std::env::var_os(DIRECT_CDN_CHECKOUT_BINDING_ENV).is_some_and(|path| !path.is_empty()) {
+        // Delegated children use the SDK's selected environment. Worktree and
+        // ancestor dotenv files could restore alternate provider credentials.
+        return;
+    }
+    // Reserve the internal handoff before reading any project-controlled file.
+    // dotenv preserves present variables, including an explicitly empty value.
+    let reserved = format!("{DIRECT_CDN_CHECKOUT_BINDING_ENV}=\n");
+    let _ = dotenvy::from_read(reserved.as_bytes());
+
     // Track which paths we've already loaded to avoid double-loading.
     let mut loaded: Vec<std::path::PathBuf> = Vec::new();
 
@@ -6183,6 +6194,47 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    #[test]
+    fn sdk_checkout_binding_is_only_read_from_the_process_environment() {
+        const CASE: &str = "CRAB_TEST_CHECKOUT_DOTENV_CASE";
+        const ORDINARY_VALUE: &str = "CRAB_TEST_ORDINARY_DOTENV_VALUE";
+        let binding = super::DIRECT_CDN_CHECKOUT_BINDING_ENV;
+        if let Ok(case) = std::env::var(CASE) {
+            super::load_env_layered();
+            let (expected, ordinary) = if case == "delegated" {
+                ("operation-binding", None)
+            } else {
+                ("", Some("loaded"))
+            };
+            assert_eq!(std::env::var(binding).as_deref(), Ok(expected));
+            assert_eq!(std::env::var(ORDINARY_VALUE).ok().as_deref(), ordinary);
+            return;
+        }
+        let scratch = tempfile::tempdir().unwrap();
+        std::fs::write(
+            scratch.path().join(".env"),
+            format!("{binding}=dotenv-binding\n{ORDINARY_VALUE}=loaded\n"),
+        )
+        .unwrap();
+        for case in ["ordinary", "delegated"] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args([
+                    "--exact",
+                    "tests::sdk_checkout_binding_is_only_read_from_the_process_environment",
+                ])
+                .current_dir(scratch.path())
+                .env("HOME", scratch.path())
+                .env(CASE, case)
+                .env_remove(binding)
+                .env_remove(ORDINARY_VALUE);
+            if case == "delegated" {
+                child.env(binding, "operation-binding");
+            }
+            assert!(child.status().unwrap().success(), "{case}");
+        }
     }
 
     #[test]

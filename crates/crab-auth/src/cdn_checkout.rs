@@ -10,8 +10,6 @@ use crate::CrabAuthClientConfig;
 use crate::crab_auth_client::CdnViewerDeployment;
 use crate::error::{AuthError, Result};
 
-/// Path to a private, temporary binding file created by the SDK.
-pub const BINDING_FILE_ENV: &str = "CRAB_INTERNAL_SDK_CDN_BINDING_FILE";
 /// Maximum serialized size accepted by either executable.
 pub const MAX_BINDING_BYTES: usize = 16 * 1024;
 

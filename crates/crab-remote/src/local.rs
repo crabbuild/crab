@@ -26,6 +26,8 @@ pub const GIT_EXECUTABLE_ENV: &str = "CRAB_INTERNAL_GIT_EXECUTABLE";
 
 /// Optional operation-scoped direct CDN checkout protocol.
 pub const DIRECT_CDN_CHECKOUT: &str = "direct-cdn-checkout-v1";
+/// Path to the temporary binding supplied by one SDK checkout invocation.
+pub const DIRECT_CDN_CHECKOUT_BINDING_ENV: &str = "CRAB_INTERNAL_SDK_CDN_BINDING_FILE";
 
 /// Canonical capability document emitted without fallible runtime serialization.
 pub const CURRENT_CAPABILITIES_JSON: &str = concat!(
@@ -503,7 +505,11 @@ impl LocalTools {
                 }
             }
         }
-        command.envs(env);
+        // Only the caller's invocation-scoped environment can delegate a
+        // checkout binding. Ambient state must not reach unrelated tools.
+        command
+            .env_remove(DIRECT_CDN_CHECKOUT_BINDING_ENV)
+            .envs(env);
         command.env(GIT_EXECUTABLE_ENV, &self.inner.git);
         let path = process_path(self.inner.directory.path());
         command.env("PATH", path);

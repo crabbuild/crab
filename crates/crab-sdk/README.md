@@ -170,8 +170,12 @@ builds read from origin and preserve any private issuer's native authorization.
 Typed bindings cover native remote reads, SDK fetch and SDK clone. A direct CDN
 clone requires a Crab executable that advertises `direct-cdn-checkout-v1`.
 Git filters and `crab hydrate` use a temporary binding for the clone's exact
-storage target and view. Private checkout subprocesses verify the parent's
-principal fingerprint against the installed login before obtaining a grant.
+storage target and view. Private clone subprocesses run without ambient
+cloud credential variables or the SDK's explicit storage credentials. The
+filters and hydration command verify the parent's principal fingerprint
+against the installed login before obtaining a grant. Delegated commands
+use the selected process environment without loading dotenv files. Other
+local tool invocations clear inherited checkout bindings.
 See the
 [provider CDN qualification plan](../../plans/021-provider-cdn-support.md).
 

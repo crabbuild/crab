@@ -23,8 +23,12 @@ resolver renews their native and repo-local viewer credentials together.
 Typed direct SDK bindings cover native remote reads, fetch, and clone.
 During clone, the SDK hands Git filters and `crab hydrate`
 a temporary, nonsecret binding for the captured target, view, and private
-principal. The child checks the login and obtains its own private grant.
-Live cross-process provider qualification remains open.
+principal. Private clone children start without ambient cloud credential
+variables or explicit provider overrides. Only the checkout and hydration
+commands get the temporary file path. Delegated commands use the selected
+environment without loading dotenv files. The child checks the login and
+obtains its own private grant. Live cross-process provider qualification
+remains open.
 
 ### Open implementation and release gates
 
@@ -150,7 +154,7 @@ content-shaped name alone never opts a raw read into CDN delivery.
 | Budgeting and retention in `crates/crab-storage/src/transport_read_admission.rs`, `crates/crab-storage/src/read_admission.rs` and `crates/crab-read/src/read_retention.rs` | Carry the operation's admission context into real HTTP requests and spawned range tasks. Charge each physical request and received bytes once, including rejected bodies and restarted attempts. Hold permits through EOF or cancellation. Preserve observers and lease cleanup. |
 | LFS in `crates/crab-lfs/src/object_store.rs` and `crates/crab-lfs/src/object_store/origin.rs` | Preserve SHA-256 through EOF and existing terminal-chunk behavior. Isolate temporary files and session proof. CDN metadata cannot populate an origin verification receipt. Teach the existing LFS primary retry to propagate terminal failures. |
 | Placement in `crab/src/replication/mod.rs` and credentials in `crates/crab-auth-store/src/refreshing_store.rs` and `crates/crab-auth-store/src/managed_repository.rs` | Resolve the CDN after the ready replica and authorized read route are known. An unconfigured replica uses its own origin. A malformed binding or scope change fails the operation. Keep the origin identity when constructing wrappers. |
-| Product composition in `crates/crab-sdk/src/store_options.rs`, `crates/crab-sdk/src/local/fetch.rs` and `packages/desktop/agent/src/storage_auth.rs` | Thread typed options through SDK, sidecar and long-lived mount/server readers. Local clone/fetch also launch Git/helper subprocesses. Pass only the nonsecret target binding through trusted operation-scoped configuration and have the child obtain its own grant. Keep secrets out of Git remotes, argv, environment, renderer IPC and unrelated children. |
+| Product composition in `crates/crab-sdk/src/store_options.rs`, `crates/crab-sdk/src/local/fetch.rs` and `packages/desktop/agent/src/storage_auth.rs` | Thread typed options through SDK, sidecar and long-lived mount/server readers. Direct SDK clone and fetch transfer capsule packs in the SDK process. Git updates local refs and performs checkout, which can launch filters. Pass the nonsecret target binding to checkout and hydration through operation-scoped configuration so each child obtains its own grant. Keep secrets out of Git remotes, argv, environment, renderer IPC and unrelated children. |
 
 Tagged `v2.0.0-alpha.1` includes the local/service/origin cache and provider
 endpoint overrides. The service uses its own capability and object API. An S3

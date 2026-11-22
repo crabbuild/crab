@@ -14,6 +14,9 @@ mod fetch;
 #[path = "local/push.rs"]
 mod push;
 pub use push::{LocalPushOutcome, LocalPushRecoveryToken, PreparedPush, PushOptions, PushRefspec};
+#[cfg(all(test, feature = "service", unix))]
+#[path = "local/checkout_tests.rs"]
+mod checkout_tests;
 
 /// Trust boundary for repository-provided hooks and executable Git drivers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -52,6 +55,31 @@ impl LocalTools {
             .with_environment(store.scoped_local_environment()?);
         Ok(self)
     }
+}
+
+#[cfg(feature = "service")]
+fn issuer_only_checkout(owner: &crab_remote::local::LocalTools) -> crab_remote::local::LocalTools {
+    let removed = std::env::vars_os()
+        .filter_map(|(key, _)| {
+            let name = key.to_string_lossy().to_ascii_uppercase();
+            [
+                "AWS_",
+                "GOOGLE_",
+                "CLOUDSDK_",
+                "GCLOUD_",
+                "AZURE_",
+                "MSI_",
+                "IDENTITY_",
+                "IMDS_",
+            ]
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+            .then_some((key, None))
+        })
+        .collect();
+    // The child uses the captured issuer and its OIDC cache. Replace the tool
+    // owner's explicit overrides as well as removing inherited credentials.
+    owner.with_environment(removed)
 }
 
 /// Validated local tool versions and executable capabilities.
@@ -512,6 +540,19 @@ impl Client {
         self.0
             .operations
             .run(operation, move |cancel| async move {
+                #[cfg(feature = "service")]
+                let cdn = state
+                    .direct_cdn
+                    .as_ref()
+                    .filter(|binding| binding.matches_checkout(&locator, state.cdn_consumer));
+                #[cfg(feature = "service")]
+                let issuer_checkout = cdn.is_some_and(|binding| binding.uses_checkout_issuer());
+                #[cfg(feature = "service")]
+                let tools = if issuer_checkout {
+                    LocalTools { owner: issuer_only_checkout(&tools.owner) }
+                } else {
+                    tools
+                };
                 let _handshake = tools.owner.handshake(&cancel).await.map_err(local_error)?;
                 if destination.exists() {
                     return Err(Error::new(
@@ -560,11 +601,6 @@ impl Client {
                         })?;
                     return discover_local(client, &tools.owner, &destination, &cancel).await;
                 }
-                #[cfg(feature = "service")]
-                let cdn = state
-                    .direct_cdn
-                    .as_ref()
-                    .filter(|binding| binding.matches_checkout(&locator, state.cdn_consumer));
                 #[cfg(feature = "service")]
                 if cdn.is_some()
                     && !_handshake
@@ -714,27 +750,21 @@ impl Client {
                     })
                     .transpose()?;
                 #[cfg(feature = "service")]
-                let (scoped_tools, scoped_environment) = match checkout.as_ref() {
-                    Some((binding, private)) => {
-                        let mut scoped = if *private { Vec::new() } else { environment.clone() };
+                let scoped_environment = match checkout.as_ref() {
+                    Some(binding) => {
+                        let mut scoped = if issuer_checkout { Vec::new() } else { environment };
                         scoped.push((
-                            crab_auth::cdn_checkout::BINDING_FILE_ENV.into(),
+                            crab_remote::local::DIRECT_CDN_CHECKOUT_BINDING_ENV.into(),
                             binding.path().as_os_str().to_owned(),
                         ));
-                        // Private filters authenticate through their own issuer grant.
-                        let owner = if *private {
-                            tools.owner.with_environment(Vec::new())
-                        } else {
-                            tools.owner.clone()
-                        };
-                        (owner, scoped)
+                        scoped
                     }
-                    None => (tools.owner.clone(), environment),
+                    None => environment,
                 };
                 #[cfg(not(feature = "service"))]
-                let (scoped_tools, scoped_environment) = (tools.owner.clone(), environment);
+                let scoped_environment = environment;
                 checkout_cloned_head(
-                    &scoped_tools,
+                    &tools.owner,
                     &staged,
                     &scoped_environment,
                     &fetch.remote,
@@ -744,7 +774,7 @@ impl Client {
                 )
                 .await?;
                 hydrate_cloned_checkout(
-                    &scoped_tools,
+                    &tools.owner,
                     &staged,
                     &hydration,
                     &scoped_environment,
@@ -1243,7 +1273,7 @@ async fn prepare_clone_hydration(
 fn persist_checkout_binding(
     directory: &Path,
     binding: crab_auth::cdn_checkout::CdnCheckoutBinding,
-) -> Result<(tempfile::NamedTempFile, bool)> {
+) -> Result<tempfile::NamedTempFile> {
     use std::io::Write as _;
 
     let body = serde_json::to_vec(&binding).map_err(|source| {
@@ -1259,15 +1289,14 @@ fn persist_checkout_binding(
             "CDN checkout binding is too large",
         ));
     }
-    let file = tempfile::NamedTempFile::new_in(directory)
+    tempfile::NamedTempFile::new_in(directory)
         .and_then(|mut file| {
             file.write_all(&body)?;
             Ok(file)
         })
         .map_err(|source| {
             Error::with_source(ErrorKind::Io, "cannot create CDN checkout binding", source)
-        })?;
-    Ok((file, binding.issuer.is_some()))
+        })
 }
 
 async fn hydrate_cloned_checkout(

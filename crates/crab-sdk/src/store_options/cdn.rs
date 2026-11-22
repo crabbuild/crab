@@ -143,8 +143,13 @@ impl DirectCdnOptions {
         locator: &crate::RepositoryLocator,
         consumer: CdnConsumer,
     ) -> bool {
-        (self.edge_enabled(consumer) || matches!(&self.access, Access::Private(_)))
+        (self.edge_enabled(consumer) || self.uses_checkout_issuer())
             && locator.direct_prefix().ok() == Some(self.deployment.source_repo.as_str())
+    }
+
+    #[cfg(feature = "local")]
+    pub(crate) fn uses_checkout_issuer(&self) -> bool {
+        matches!(&self.access, Access::Private(_))
     }
 
     fn edge_enabled(&self, consumer: CdnConsumer) -> bool {

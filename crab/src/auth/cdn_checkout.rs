@@ -5,11 +5,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crab_auth::CredentialProvider as _;
-use crab_auth::cdn_checkout::{
-    BINDING_FILE_ENV, CdnCheckoutBinding, CdnCheckoutConsumer, MAX_BINDING_BYTES,
-};
+use crab_auth::cdn_checkout::{CdnCheckoutBinding, CdnCheckoutConsumer, MAX_BINDING_BYTES};
 use crab_auth::crab_auth_client::CdnViewerDeployment;
 use crab_git::CrabUrl;
+use crab_remote::local::DIRECT_CDN_CHECKOUT_BINDING_ENV;
 use crab_storage::cdn::{
     CdnAccess, CdnConsumer, CdnPolicy, CdnProfile, CdnRoute, CdnTransport, CdnVisibility,
 };
@@ -27,7 +26,9 @@ pub(crate) struct Checkout {
 
 impl Checkout {
     pub(crate) fn load() -> Result<Option<Self>> {
-        let Some(path) = std::env::var_os(BINDING_FILE_ENV) else {
+        let Some(path) =
+            std::env::var_os(DIRECT_CDN_CHECKOUT_BINDING_ENV).filter(|path| !path.is_empty())
+        else {
             return Ok(None);
         };
         read_binding(Path::new(&path), &std::env::current_dir()?).map(Some)
@@ -194,7 +195,7 @@ fn read_binding(path: &Path, worktree: &Path) -> Result<Checkout> {
 
 fn invalid(message: &'static str) -> CrabError {
     CrabError::Configuration {
-        key: BINDING_FILE_ENV.into(),
+        key: DIRECT_CDN_CHECKOUT_BINDING_ENV.into(),
         origin: message.into(),
     }
 }
