@@ -304,6 +304,14 @@ impl CdnTransport {
         &self.base[url::Position::BeforeHost..url::Position::AfterPort]
     }
 
+    pub(crate) fn binding_sha256(&self, private: bool) -> String {
+        use sha2::{Digest, Sha256};
+
+        let access = if private { "private" } else { "public" };
+        let base = self.base.as_str().trim_end_matches('/');
+        format!("{:x}", Sha256::digest(format!("{access}\n{base}")))
+    }
+
     /// Construct an HTTP transport for a loopback fixture.
     #[cfg(feature = "test-support")]
     pub fn loopback_fixture(addr: std::net::SocketAddr) -> Result<Self> {

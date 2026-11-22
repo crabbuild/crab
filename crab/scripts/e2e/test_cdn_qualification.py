@@ -90,6 +90,10 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str) -> N
                     "configuration_sha256": registration["configuration_sha256"],
                     "workflow_run_id": "123", "workflow_run_attempt": "2", "platform": platform,
                     "candidate": registration["candidate"],
+                    "reader": {
+                        "binding_sha256": "" if arm == "origin" else registration["viewer_binding_sha256"],
+                        "cache_root_sha256": hashlib.sha256(f"{location}/{index}/{arm}/cache".encode()).hexdigest(),
+                    },
                     "publication_oid": oid, "expected_sha256": blob, "observed_sha256": blob,
                     "publication_sha256": publication_digest,
                     "expected_bytes": CDN.GIT_PAYLOAD_SIZE, "observed_bytes": CDN.GIT_PAYLOAD_SIZE,
@@ -134,6 +138,7 @@ class CdnQualificationTests(unittest.TestCase):
         } | publication
         if CDN.requires_cli_workload(self.scope):
             self.registration["candidate"] = cli_candidate(self.scope, platform)
+            self.registration["viewer_binding_sha256"] = "e" * 64
         if profile == "managed":
             self.registration["managed_issuer"] = {
                 "identity_sha256": "1" * 64, "version": "2026.11.22", "approval_sha256": "2" * 64,
@@ -359,6 +364,9 @@ class CdnQualificationTests(unittest.TestCase):
                                "started_at_unix_ms": start, "finished_at_unix_ms": finish,
                                "edge_attempts": attempts, "verified_edge_key_sha256": self.object_key},
         }
+        if CDN.requires_cli_workload(self.scope):
+            trace["after"]["reader"] = fetch["reader"]
+            trace["before"]["reader"] = fetch["reader"] | {"cache_root_sha256": "9" * 64}
         check = CDN.PUBLIC_TRANSITION_CHECK
         path = self.directory / "traces" / f"{check}.json"
         self.report["checks"][check] = {"passed": True, "trace_sha256": json_file(path, trace)}

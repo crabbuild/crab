@@ -13801,6 +13801,7 @@ mod tests {
         let approved = QualificationTarget {
             origin: "s3://qualification-bucket".into(),
             repository_prefix: "crab-cdn-qualification/current".into(),
+            read: None,
         };
         let reads = Arc::new(AtomicUsize::new(0));
         let store = || {

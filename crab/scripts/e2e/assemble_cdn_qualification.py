@@ -160,7 +160,8 @@ def assemble_bundle(
                 (destination / "traces" / filename).write_bytes(trace)
                 checks[check] = {"passed": True, "trace_sha256": hashlib.sha256(trace).hexdigest()}
             if cli_workload:
-                product = collect_git_product_action(inputs / row / GIT_PRODUCT_DIR, measured | {"candidate": registration.get("candidate")},
+                registered_read = {key: registration.get(key) for key in ("candidate", "viewer_binding_sha256")}
+                product = collect_git_product_action(inputs / row / GIT_PRODUCT_DIR, measured | registered_read,
                                                      retain=destination / GIT_PRODUCT_DIR)
                 measured["product_action"] = product | {"fixture_cleanup_verified": True}
             if git_workload:

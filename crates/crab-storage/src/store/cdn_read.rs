@@ -160,6 +160,16 @@ impl Store {
         })
     }
 
+    /// Fingerprint the attached viewer URL and access policy without exposing grants.
+    #[must_use]
+    pub fn cdn_binding_sha256(&self) -> Option<String> {
+        self.cdn.as_ref().map(|route| {
+            route
+                .transport
+                .binding_sha256(matches!(&route.access, CdnAccess::Private(_)))
+        })
+    }
+
     /// Read and verify one immutable unit, optionally using the scoped CDN route.
     ///
     /// Size and range must come from an authenticated descriptor. The verifier

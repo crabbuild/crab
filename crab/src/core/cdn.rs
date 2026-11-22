@@ -21,6 +21,31 @@ const QUALIFICATION_TARGET_ENV: &str = "CRAB_INTERNAL_CDN_QUALIFICATION_TARGET";
 pub(crate) struct QualificationTarget {
     pub(crate) origin: String,
     pub(crate) repository_prefix: String,
+    #[serde(default)]
+    pub(crate) read: Option<QualificationRead>,
+}
+
+#[derive(Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct QualificationRead {
+    binding_sha256: String,
+    cache_root_sha256: String,
+}
+
+impl QualificationRead {
+    fn verify(&self, store: &Store, cache_root: &std::path::Path) -> Result<()> {
+        let root = cache_root.to_str().ok_or_else(|| CrabError::AuthFailed {
+            path: "the CDN qualification cache root needs a UTF-8 path".into(),
+        })?;
+        if self.binding_sha256 != store.cdn_binding_sha256().unwrap_or_default()
+            || self.cache_root_sha256 != qualification_digest(root)
+        {
+            return Err(CrabError::AuthFailed {
+                path: "the selected CDN binding or cache root differs from the approved qualification action".into(),
+            });
+        }
+        Ok(())
+    }
 }
 
 impl QualificationTarget {
@@ -58,7 +83,7 @@ pub(crate) fn qualification_target() -> Result<Option<QualificationTarget>> {
     };
     value
         .to_str()
-        .filter(|value| value.len() <= 512)
+        .filter(|value| value.len() <= 1024)
         .and_then(|value| serde_json::from_str::<QualificationTarget>(value).ok())
         .filter(|target| !target.origin.is_empty() && !target.repository_prefix.is_empty())
         .map(Some)
@@ -66,6 +91,34 @@ pub(crate) fn qualification_target() -> Result<Option<QualificationTarget>> {
             key: QUALIFICATION_TARGET_ENV.to_owned(),
             origin: "an approved native origin and repository prefix are required".to_owned(),
         })
+}
+
+fn qualification_digest(bytes: impl AsRef<[u8]>) -> String {
+    let digest: [u8; 32] = Sha256::digest(bytes).into();
+    crab_git::lfs_pointer::hex_encode(&digest)
+}
+
+pub(crate) fn verify_qualification_cache(cache: &crate::core::config::CacheConfig) -> Result<()> {
+    if cache.service_url.is_some() && qualification_target()?.is_some() {
+        return Err(CrabError::AuthFailed {
+            path: "the CDN qualification workload requires an isolated local cache".into(),
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn verify_qualification_read(store: &Store) -> Result<()> {
+    if let Some(read) = qualification_target()?.and_then(|target| target.read) {
+        read.verify(store, &crab_cache::default_cache_root())?;
+        tracing::debug!(
+            target: "crab::cdn::qualification_read",
+            parent: None,
+            binding_sha256 = read.binding_sha256.as_str(),
+            cache_root_sha256 = read.cache_root_sha256.as_str(),
+            "CDN qualification verified read configuration"
+        );
+    }
+    Ok(())
 }
 
 pub(crate) fn reject_managed_qualification() -> Result<()> {
@@ -80,9 +133,8 @@ pub(crate) fn reject_managed_qualification() -> Result<()> {
 pub(crate) fn verify_qualification_target(store: &Store, prefix: &str) -> Result<()> {
     if let Some(expected) = qualification_target()? {
         expected.verify(store, prefix)?;
-        let origin_digest: [u8; 32] = Sha256::digest(&expected.origin).into();
-        let prefix_digest: [u8; 32] =
-            Sha256::digest(format!("{}/", expected.repository_prefix)).into();
+        let origin_digest = qualification_digest(&expected.origin);
+        let prefix_digest = qualification_digest(format!("{}/", expected.repository_prefix));
         // The guard may restrict an ordinary release build. Only the compiled
         // release policy and Cargo feature can enable edge delivery.
         tracing::debug!(
@@ -94,8 +146,8 @@ pub(crate) fn verify_qualification_target(store: &Store, prefix: &str) -> Result
             cargo_features = env!("CRAB_BUILD_FEATURES"),
             qualification_feature = crab_storage::cdn::qualification_enabled(),
             release_policy_sha256 = %crab_storage::cdn::release_policy_sha256(),
-            origin_sha256 = %crab_git::lfs_pointer::hex_encode(&origin_digest),
-            prefix_sha256 = %crab_git::lfs_pointer::hex_encode(&prefix_digest),
+            origin_sha256 = origin_digest.as_str(),
+            prefix_sha256 = prefix_digest.as_str(),
             "CDN qualification verified native target"
         );
     }
@@ -333,6 +385,7 @@ mod tests {
             let expected = QualificationTarget {
                 origin: origin.into(),
                 repository_prefix: prefix.into(),
+                read: None,
             };
             assert!(expected.require_exact(Some(origin), prefix).is_ok());
             for (actual, path) in [
@@ -353,6 +406,49 @@ mod tests {
     }
 
     #[test]
+    fn cdn_qualification_read_checks_viewer_state_and_cache_root() {
+        use std::{path::Path, sync::Arc};
+
+        use object_store::memory::InMemory;
+
+        let cache = Path::new("scratch-cache");
+        let native = Store::new(Arc::new(InMemory::new())).with_target_identity([3; 32]);
+        let origin = QualificationRead {
+            binding_sha256: String::new(),
+            cache_root_sha256: qualification_digest("scratch-cache"),
+        };
+        assert!(origin.verify(&native, cache).is_ok());
+        let edge = native
+            .clone()
+            .with_cdn_route(CdnRoute::new(
+                [3; 32],
+                "crab-cdn-qualification/viewer".into(),
+                None,
+                CdnAccess::Public,
+                CdnTransport::loopback_fixture(([127, 0, 0, 1], 9876).into()).unwrap(),
+                Duration::from_secs(2),
+            ))
+            .unwrap();
+        let expected = QualificationRead {
+            binding_sha256: qualification_digest("public\nhttp://127.0.0.1:9876"),
+            cache_root_sha256: origin.cache_root_sha256.clone(),
+        };
+        assert!(expected.verify(&edge, cache).is_ok());
+        assert!(matches!(
+            origin.verify(&edge, cache),
+            Err(CrabError::AuthFailed { .. })
+        ));
+        assert!(matches!(
+            expected.verify(&native, cache),
+            Err(CrabError::AuthFailed { .. })
+        ));
+        assert!(matches!(
+            expected.verify(&edge, Path::new("ambient-cache")),
+            Err(CrabError::AuthFailed { .. })
+        ));
+    }
+
+    #[test]
     fn cdn_qualification_uses_the_effective_view_and_checks_for_routed_reads() {
         use std::sync::Arc;
 
@@ -363,6 +459,7 @@ mod tests {
         let expected = QualificationTarget {
             origin: origin.into(),
             repository_prefix: prefix.into(),
+            read: None,
         };
         let base = Store::new(Arc::new(InMemory::new()))
             .with_target_identity([1; 32])

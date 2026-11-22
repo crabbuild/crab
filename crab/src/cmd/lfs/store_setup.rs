@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-use crate::core::cdn::{reject_managed_qualification, verify_qualification_target};
+use crate::core::cdn::{
+    reject_managed_qualification, verify_qualification_cache, verify_qualification_read,
+    verify_qualification_target,
+};
 use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::git::process::{self, MAX_CAPTURE_BYTES};
 use crate::lfs::config::LfsConfig;
@@ -66,6 +69,7 @@ pub(crate) async fn resolve_lfs_remote_context(
     let worktree = crate::git::worktree::WorktreeContext::resolve_from_path(repo_root)?;
     let repo_root = &worktree.current_worktree_root;
     let config = crate::core::config::Config::resolve_for_repo(repo_root)?;
+    verify_qualification_cache(&config.cache)?;
     check_cancelled(cancel)?;
     let open_store = async {
         if operation == "smudge"
@@ -113,6 +117,7 @@ pub(crate) async fn resolve_lfs_remote_context(
                 if is_lfs_read_operation(operation) {
                     let (selection, primary_fallback) =
                         resolver.read_store_with_primary_fallback(operation).await?;
+                    verify_qualification_read(selection.store.as_storage())?;
                     let prefix = selection.router.repo_prefix().to_owned();
                     let store = if let Some(primary) = primary_fallback {
                         let primary_prefix = primary.router.repo_prefix().to_owned();

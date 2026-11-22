@@ -55,7 +55,18 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
             "origin = Path(__file__).parent / 'origin.git'\n"
             "approved = json.loads((origin.parent / 'fixture.json').read_bytes())\n"
             "target = json.loads(os.environ['CRAB_INTERNAL_CDN_QUALIFICATION_TARGET'])\n"
+            "target.pop('read', None)\n"
             "assert target == {'origin':approved['native_origin'], 'repository_prefix':approved['fixture_prefix']}\n"
+            "evidence = origin.parent / 'public-export-events.json'\n"
+            "def emit_read():\n"
+            "    binding = approved['scope'].split('/')[1] + '\\n' + approved['base_url'].rstrip('/')\n"
+            "    binding = hashlib.sha256(binding.encode()).hexdigest()\n"
+            "    if (origin.parent / 'binding-off').exists():\n"
+            "        binding = ''\n"
+            "    cache = hashlib.sha256(os.environ['CRAB_CACHE_DIR'].encode()).hexdigest()\n"
+            "    print(json.dumps({'target':'crab::cdn::qualification_read', 'fields':{\n"
+            "        'message':'CDN qualification verified read configuration',\n"
+            "        'binding_sha256':binding, 'cache_root_sha256':cache}}), file=sys.stderr, flush=True)\n"
             "if Path(sys.argv[0]).name == 'crab':\n"
             "    if sys.argv[1:3] == ['lfs', 'clean']:\n"
             "        data = sys.stdin.buffer.read()\n"
@@ -71,7 +82,7 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
             "    payload.parent.mkdir(parents=True)\n"
             "    payload.write_bytes((origin / digest).read_bytes())\n"
             "    print((origin.parent / 'build-event.json').read_text(), file=sys.stderr)\n"
-            "    evidence = origin.parent / 'public-export-events.json'\n"
+            "    emit_read()\n"
             "    for event in json.loads(evidence.read_bytes()):\n"
             "        print(json.dumps(event), file=sys.stderr)\n"
             "    if not (origin.parent / 'origin-only').exists():\n"
@@ -91,7 +102,8 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
             "        print(flush=True)\n"
             "        if not (origin.parent / 'legacy-helper').exists():\n"
             "            print((origin.parent / 'build-event.json').read_text(), file=sys.stderr, flush=True)\n"
-            "        evidence = origin.parent / 'public-export-events.json'\n"
+            "        if command == 'git-upload-pack':\n"
+            "            emit_read()\n"
             "        if command == 'git-upload-pack' and evidence.exists():\n"
             "            for event in json.loads(evidence.read_bytes()):\n"
             "                print(json.dumps(event), file=sys.stderr, flush=True)\n"
@@ -156,7 +168,10 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         (records / "publication.json").write_bytes(self.receipt.read_bytes())
         (records / "fetch.json").write_text(json.dumps(fetched), encoding="utf-8")
         (records / "retirement.json").write_text(json.dumps(retired), encoding="utf-8")
-        measured = collect_git_product_action(records, fetched)
+        viewer = WORKLOAD.viewer_binding_sha256(json.loads(self.fixture.read_bytes()))
+        measured = collect_git_product_action(records, fetched | {"viewer_binding_sha256": viewer})
+        with self.assertRaisesRegex(ValueError, "product fetch did not use the registered viewer binding"):
+            collect_git_product_action(records, fetched | {"viewer_binding_sha256": "0" * 64})
         self.assertEqual(measured["observed_sha256"], fetched["expected_sha256"])
         self.assertEqual(measured["verified_edge_payloads"], 1)
 
@@ -329,12 +344,14 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
             (records / "publication.json").write_bytes(self.receipt.read_bytes())
             (records / "fetch.json").write_text(json.dumps(fetched), encoding="utf-8")
             (records / "retirement.json").write_text(json.dumps(retired), encoding="utf-8")
-            product = collect_git_product_action(records, fetched)
+            viewer = WORKLOAD.viewer_binding_sha256(sample)
+            product = collect_git_product_action(records, fetched | {"viewer_binding_sha256": viewer})
             self.assertEqual(product["name"], "lfs-fetch")
             export = self.root / "public-export"
             copytree(new, export)
             copytree(old, export / "before")
-            registration = {"previous_publication_sha256": previous, "publication_sha256": current}
+            registration = {"previous_publication_sha256": previous, "publication_sha256": current,
+                            "viewer_binding_sha256": viewer}
             binding, entries, sealed = read_publication(export, current)
             row = fetched | {"product_action": product}
             verify_public_transition(retained, self.root, row, registration, binding, entries, sealed)
@@ -354,6 +371,7 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
 
     def test_origin_control_rejects_edge_traffic_even_for_another_family(self) -> None:
         self.run_phase("publish")
+        (self.root / "binding-off").touch()
         (self.root / "foreign-edge").touch()
         result = self.call("fetch-origin")
         self.assertEqual(result.returncode, 1, result.stdout)
@@ -362,6 +380,14 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         origin = self.run_phase("fetch-origin")
         self.assertEqual(origin["arm"], "origin")
         self.assertEqual(origin["all_edge_attempts"], 0)
+        self.assertTrue(self.run_phase("retire")["ref_retired"])
+
+    def test_origin_control_rejects_an_active_binding_with_zero_edge_requests(self) -> None:
+        self.run_phase("publish")
+        (self.root / "origin-only").touch()
+        result = self.call("fetch-origin")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("a different CDN binding or local cache root", result.stderr)
         self.assertTrue(self.run_phase("retire")["ref_retired"])
 
     def test_warm_local_requires_a_verified_cache_hit_in_the_second_client(self) -> None:

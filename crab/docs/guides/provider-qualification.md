@@ -740,10 +740,11 @@ the benchmark. Omit `--receipt` for inspection. It reads the exact native
 fixture and returns the executable SHA-256, compiled source SHA, target
 triple, Cargo profile and features, qualification feature state, and
 compiled CDN policy SHA-256 under `candidate`. The policy digest uses LF line
-endings on every platform. Register that object for each
-direct CLI row. The worker confirms the same identity on the native
-publication, fetches, and ref retirement. Every timed arm uses the registered
-binary for its platform. [Cargo build-script environment](https://doc.rust-lang.org/cargo/reference/environment-variables.html#environment-variables-cargo-sets-for-build-scripts)
+endings on every platform. Copy `candidate` and `viewer_binding_sha256`
+into each direct CLI benchmark registration. The viewer digest binds the
+approved HTTPS base and access mode. The worker confirms the same binary
+identity on the native publication, fetches, and ref retirement. Every timed
+arm uses the registered binary for its platform. [Cargo build-script environment](https://doc.rust-lang.org/cargo/reference/environment-variables.html#environment-variables-cargo-sets-for-build-scripts)
 
 Promotion requires the packaged target triple, the ordinary release profile,
 the qualification feature disabled, and the exact release checkout's policy
@@ -795,13 +796,19 @@ accepted edge Git payload for the approved scope. It emits the measured
 results as redacted JSON.
 
 Use `fetch-origin` with the same receipt on a worker configured for native
-origin access without CDN bindings or a cache service. That arm starts with
-empty local caches and rejects edge traffic for any scope.
+origin access. Before returning a measured payload, Crab confirms the
+selected store has no viewer binding for the origin arm and the registered
+viewer binding for the edge and warm-local arms. The worker verifies the
+local cache root before the fetch, and Crab rejects a configured shared
+cache service. The origin arm rejects edge traffic for any scope. The public
+export transition uses the previous active binding in its native-only phase
+and proves the approved CDN skips the unlisted object.
 `fetch-warm-local` primes a fresh Crab cache with a verified edge fetch,
 then measures a second fetch from an empty Git object database against that
 cache. It requires a verified local pack hit and zero edge requests for the
-registered scope. Native metadata and sidecar reads still run. Join the
-results with provider request and fill measurements before assembly.
+registered scope. Native metadata and sidecar reads still run. The benchmark
+collector rejects a local cache root reused across any two measured arms.
+Join the results with provider request and fill measurements before assembly.
 
 Run `retire` with the same arguments after the workload. It verifies the
 exact ref is absent after retirement and refuses to remove a ref whose tip

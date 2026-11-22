@@ -17,10 +17,10 @@ from typing import Any
 from uuid import uuid4
 
 from collect_cdn_product_metrics import ROUTE, ROUTE_FIELDS, TARGET, measure
-from run_cdn_transport_checks import approved_fixture, fixture_object_key, native_remote
+from run_cdn_transport_checks import approved_fixture, fixture_base, fixture_object_key, native_remote
 
 from cdn_qualification import (
-    CLI_BUILD_FIELDS, COMMIT, GIT_OID, GIT_PAYLOAD_SIZE, PROVIDER_FOR_EDGE, RUN_NUMBER, cli_action_name, decode, deployment_component_digest,
+    CLI_BUILD_FIELDS, CLI_READ_FIELDS, COMMIT, GIT_OID, GIT_PAYLOAD_SIZE, PROVIDER_FOR_EDGE, RUN_NUMBER, cli_action_name, decode, deployment_component_digest,
     fields, lfs_object_path, matches, read_git_record, require, requires_cli_lfs_workload, requires_cli_workload, scope_parts,
     validate_git_publication, verified_publication, verify_cli_candidate,
 )
@@ -31,6 +31,8 @@ PAYLOAD = "cdn-qualification.bin"
 QUALIFICATION_LOG = "crab::cdn::qualification"
 QUALIFICATION_MESSAGE = "CDN qualification verified native target"
 QUALIFICATION_TARGET_ENV = "CRAB_INTERNAL_CDN_QUALIFICATION_TARGET"
+READ_LOG = "crab::cdn::qualification_read"
+READ_MESSAGE = "CDN qualification verified read configuration"
 NATIVE_TARGET_FIELDS = {"origin_sha256", "prefix_sha256"}
 PUBLIC_TRANSITION_TARGET = "crab_storage::cdn::public_transition"
 
@@ -53,6 +55,31 @@ def runner_platform() -> str:
     machine = platform.machine().lower()
     architecture = {"amd64": "x86_64", "arm64": "aarch64"}.get(machine, machine)
     return f"{system}-{architecture}"
+
+
+def viewer_binding_sha256(fixture: dict) -> str:
+    _, access, _, _, _ = scope_parts(fixture["scope"])
+    base = fixture_base(fixture["base_url"])
+    authority = base.netloc.lower()
+    if base.port == 443:
+        authority = authority.rsplit(":", 1)[0]
+    return hashlib.sha256(f"{access}\nhttps://{authority}{base.path.rstrip('/')}".encode()).hexdigest()
+
+
+def verified_read(lines: list[bytes], expected: dict) -> dict:
+    found = False
+    for line in lines:
+        if READ_LOG.encode() not in line:
+            continue
+        event = decode(line)
+        if not isinstance(event, dict) or event.get("target") != READ_LOG:
+            continue
+        observed = fields(event.get("fields"), CLI_READ_FIELDS | {"message"}, "read configuration observation")
+        require(observed["message"] == READ_MESSAGE and all(observed[key] == expected[key] for key in CLI_READ_FIELDS),
+                "fetch selected a different CDN binding or local cache root")
+        found = True
+    require(found, "fetch did not confirm its CDN binding and local cache root")
+    return expected
 
 
 class NativeTargetGuard:
@@ -120,7 +147,7 @@ def git_environment(helper: Path, root: Path, native_target: dict[str, str]) -> 
         "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_EXEC_PATH": str(helper.absolute().parent),
         "GIT_TERMINAL_PROMPT": "0", "CRAB_CACHE_DIR": str(root / "cache"),
-        "CRAB_LOG": f"{TARGET}=debug,{QUALIFICATION_LOG}=debug,{PUBLIC_TRANSITION_TARGET}=debug",
+        "CRAB_LOG": f"{TARGET}=debug,{QUALIFICATION_LOG}=debug,{READ_LOG}=debug,{PUBLIC_TRANSITION_TARGET}=debug",
         QUALIFICATION_TARGET_ENV: json.dumps(native_target),
     }
 
@@ -242,7 +269,7 @@ def write_transition(proof: dict, record: dict, result: dict, output: Path, befo
         "action": result["name"], "receipt_sha256": proof["receipt_sha256"], "key_sha256": proof["key_sha256"],
         "reference_sha256": reference, "result_sha256": result["observed_sha256"], "result_bytes": result["observed_bytes"],
         "started_at_unix_ms": result["started_at_unix_ms"], "finished_at_unix_ms": result["finished_at_unix_ms"],
-        "edge_attempts": result["all_edge_attempts"], "binding_active": True,
+        "edge_attempts": result["all_edge_attempts"], "binding_active": True, "reader": result["reader"],
         "verified_edge_key_sha256": proof["key_sha256"] if phase == "after" else None,
     }
     trace = common | {phase: observation}
@@ -264,9 +291,14 @@ def write_transition(proof: dict, record: dict, result: dict, output: Path, befo
 
 def fetch_once(
     remote: str, record: dict[str, Any], root: Path, env: dict[str, str], proof: dict | None,
-    crab: Path | None, guard: NativeTargetGuard,
+    crab: Path | None, guard: NativeTargetGuard, binding: str, *, primed: bool = False,
 ) -> dict:
     require(record["published"], "fetch requires a confirmed native publication")
+    cache = Path(env["CRAB_CACHE_DIR"])
+    require(cache.is_dir() if primed else not cache.exists(), "fetch needs the expected fresh or primed scratch cache")
+    read = {"binding_sha256": binding, "cache_root_sha256": hashlib.sha256(env["CRAB_CACHE_DIR"].encode()).hexdigest()}
+    target = decode(env[QUALIFICATION_TARGET_ENV].encode()) | {"read": read}
+    env = env | {QUALIFICATION_TARGET_ENV: json.dumps(target)}
     mode = ("--bare",) if crab is None else ()
     run_git("init", *mode, "--template=", "--object-format=sha1", root=root, env=env)
     if crab is not None:
@@ -303,7 +335,7 @@ def fetch_once(
         "observed_sha256": observed, "expected_bytes": GIT_PAYLOAD_SIZE, "observed_bytes": len(blob),
         "native_writes": 1, "visible_new_ref": True, "elapsed_ms": elapsed,
         "publication_oid": record["oid"], "started_at_unix_ms": started_at, "finished_at_unix_ms": finished_at,
-        "platform": guard.platform, "candidate": guard.candidate,
+        "platform": guard.platform, "candidate": guard.candidate, "reader": verified_read(lines, read),
     } | metrics
 
 
@@ -314,22 +346,23 @@ def require_edge_fetch(result: dict) -> None:
 
 def fetch(
     action: str, remote: str, record: dict[str, Any], root: Path, env: dict[str, str], proof: dict | None,
-    crab: Path | None, guard: NativeTargetGuard,
+    crab: Path | None, guard: NativeTargetGuard, approved_binding: str,
 ) -> dict:
     if action == "fetch-warm-local":
         require(crab is None, "warm-local pack measurement is specific to the Git workload")
         primer = root / "primer"
         primer.mkdir()
-        require_edge_fetch(fetch_once(remote, record, primer, env, None, crab, guard))
+        require_edge_fetch(fetch_once(remote, record, primer, env, None, crab, guard, approved_binding))
         # The cache is shared, but the measured Git object database starts empty.
         measured = root / "measured"
         measured.mkdir()
-        result = fetch_once(remote, record, measured, env, None, crab, guard)
+        result = fetch_once(remote, record, measured, env, None, crab, guard, approved_binding, primed=True)
         require(result["edge_attempts"] == 0 and result["verified_edge_payloads"] == 0
                 and result["local_payload_hits"] > 0,
                 "warm-local fetch must use a verified local pack without an edge request for this scope")
         return result | {"arm": "warm_local"}
-    result = fetch_once(remote, record, root, env, proof, crab, guard)
+    binding = "" if action == "fetch-origin" and proof is None else approved_binding
+    result = fetch_once(remote, record, root, env, proof, crab, guard, binding)
     if action == "fetch-origin":
         require(result["all_edge_attempts"] == 0, "origin control observed edge traffic")
         return result | {"arm": "origin"}
@@ -374,6 +407,7 @@ def main() -> int:
         require(requires_cli_workload(fixture["scope"]), "workload requires a direct CLI Git, capsule or LFS scope")
         crab = companion_crab(args.helper) if requires_cli_lfs_workload(fixture["scope"]) else None
         remote = native_remote(fixture, edge)
+        approved_binding = viewer_binding_sha256(fixture)
         provenance = {
             "scope": fixture["scope"], "configuration_sha256": args.configuration_sha256,
             "source_sha": args.source_sha, "workflow_run_id": args.run_id, "workflow_run_attempt": args.run_attempt,
@@ -388,7 +422,8 @@ def main() -> int:
                 if args.action == "inspect":
                     run_git("init", "--bare", "--template=", "--object-format=sha1", root=root, env=env)
                     ref_tip(remote, "refs/heads/crab-cdn-qualification-build-inspection", root, env, guard)
-                    result = {"candidate": guard.candidate, "platform": guard.platform}
+                    result = {"candidate": guard.candidate, "platform": guard.platform,
+                              "viewer_binding_sha256": approved_binding}
                 else:
                     result = publish(remote, provenance, args.receipt, root, env, crab, guard) | {"candidate": guard.candidate}
             else:
@@ -399,7 +434,7 @@ def main() -> int:
                 if args.action == "retire":
                     result = retire(remote, record, root, env, guard)
                 else:
-                    result = fetch(args.action, remote, record, root, env, proof, crab, guard)
+                    result = fetch(args.action, remote, record, root, env, proof, crab, guard, approved_binding)
                     if proof is not None:
                         write_transition(proof, record, result, args.transition_output, args.before_transition)
                 result["publication_sha256"] = hashlib.sha256(raw).hexdigest()

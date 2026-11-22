@@ -30,6 +30,7 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
             "scope": "cloudfront/private/cli/git/direct", "configuration_sha256": fixture.CONFIGURATION,
             "workload": "git-fetch", "samples": 30, "p95_budget_ms": 150, "cost_budget_microusd": 10,
             "regions": REGIONS, "deployment_policy_sha256": "d" * 64,
+            "viewer_binding_sha256": "e" * 64,
         }
         self.registration["candidate"] = fixture.cli_candidate(self.registration["scope"], PLATFORM)
         fixture.write_git_measurements(self.root, self.registration, PLATFORM)
@@ -79,6 +80,19 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
         issued = self.root / "near/0001/cold_edge/client.json"
         (self.root / "near/0001/warm_edge/client.json").write_bytes(issued.read_bytes())
         with self.assertRaisesRegex(ValueError, "fetch was reused"):
+            self.collect()
+
+    def test_rejects_an_active_binding_in_the_origin_arm(self) -> None:
+        arm = "near/0001/origin"
+        reader = json.loads((self.root / arm / "client.json").read_bytes())["reader"]
+        self.amend_client(arm, reader=reader | {"binding_sha256": self.registration["viewer_binding_sha256"]})
+        with self.assertRaisesRegex(ValueError, "did not use the required viewer configuration"):
+            self.collect()
+
+    def test_rejects_reusing_a_local_cache_across_arms(self) -> None:
+        client = json.loads((self.root / "near/0001/cold_edge/client.json").read_bytes())
+        self.amend_client("near/0001/warm_edge", reader=client["reader"])
+        with self.assertRaisesRegex(ValueError, "benchmark arms reused a local cache root"):
             self.collect()
 
     def test_rejects_overlapping_runs_or_cross_pair_interleaving(self) -> None:

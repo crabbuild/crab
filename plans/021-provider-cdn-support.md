@@ -484,9 +484,11 @@ roots and replica readiness, and records origin and prefix digests. Its
 read-only inspection records the binary SHA-256,
 compiled commit, target, Cargo profile and features, qualification feature
 state, and digest of the embedded policy. Direct CLI product records and Git
-benchmark arms must match the registered build. Promotion rejects fixture
-builds and requires the exact checkout policy. For the ordinary candidate
-run, restrict the writer to the preregistered native target and test prefix.
+benchmark arms must match the registered build. Edge reads confirm the
+attached viewer's access mode and HTTPS base against the registered digest.
+Promotion rejects fixture builds and requires the exact checkout policy.
+For the ordinary candidate run, restrict the writer to the preregistered
+native target and test prefix.
 The independent `cdn-native-ref` probe reads the provider's current root and
 exact single-ref head using native credentials. The release verifier requires
 the committed tip before the fetch and a distinct provider tombstone in the
@@ -561,8 +563,10 @@ and edge payload through redacted observations.
   the gateway's fixed deployment cost at the expected traffic volume. Use
   provider hit evidence and the same commit, repo and workload in every comparison.
   The Git workload includes native-origin and warm-local controls for the
-  same publication receipt. The warm-local arm requires a verified cache hit
-  from a fresh Git client sharing the primed Crab cache.
+  same publication receipt. The origin arm verifies the binding is disabled.
+  Each timed arm confirms its isolated local cache root, and qualification
+  rejects a configured shared cache. The warm-local arm requires a verified
+  cache hit from a fresh Git client sharing the cache of its own edge primer.
   `crab/scripts/e2e/collect_cdn_git_performance.py` binds each Git fetch to its
   measured provider and runner metrics, checks ordered same-publication pairs
   across two preregistered regions, and applies the release budgets. Assembly

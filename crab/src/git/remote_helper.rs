@@ -17,7 +17,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tracing::{Instrument, warn};
 
 use crate::audit::default_log_path;
-use crate::core::cdn::{qualification_target, verify_qualification_target};
+use crate::core::cdn::{
+    qualification_target, verify_qualification_cache, verify_qualification_read,
+    verify_qualification_target,
+};
 use crate::core::error::{CrabError, Result};
 use crate::core::metrics::{Metrics, MetricsSummary, persist_metrics_delta};
 use crate::core::output::{JsonlStream, OutputMode};
@@ -681,6 +684,7 @@ pub async fn run_remote_helper(
 
     // Resolve config early — needed for store construction and CachingStore.
     let config = resolve_remote_helper_config()?;
+    verify_qualification_cache(&config.cache)?;
 
     let (mut reader, mut writer) = io.split();
     let mut options = HelperOptions::default();
@@ -888,6 +892,7 @@ where
                         &cancel,
                     )
                     .await?;
+                    verify_qualification_read(selected.store.as_storage())?;
                     // Bind the cache facade to the selected primary or replica.
                     // Reusing the primary facade after replica routing would read
                     // a different repository view than the pinned layout.
@@ -1987,6 +1992,7 @@ where
         };
         let router = selected.router;
         let root = selected.capsule_root;
+        verify_qualification_read(router.store().as_storage())?;
         // Classic, constrained and raw-object fetches share one admission
         // owner. Direct pack installation must not bypass the repository's
         // reader limit or acquire a separate ticket for each pack source.
