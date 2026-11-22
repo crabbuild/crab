@@ -138,7 +138,7 @@ PRODUCT_VIEWER_RECORD = "viewer-requests.json"
 SERVICE_PRODUCT_DIR = "service-product"
 SERVICE_READ_ACTION = "service-http-read"
 SERVICE_PUBLIC_PRIOR_RECORD = "before-export.json"
-SERVICE_PAYLOAD_LIMIT = 512 * 1024 * 1024
+WORKLOAD_PAYLOAD_LIMIT = 512 * 1024 * 1024
 SERVICE_WORKLOAD_REGISTRATION_FIELDS = {"sha256", "origin_sha256", "prefix_sha256", "etag_sha256", "payload_bytes"}
 GIT_PRIOR_EXPORT_RECORD = "before-export.json"
 DESKTOP_READ_RECORD = "read.json"
@@ -160,7 +160,9 @@ GIT_PAYLOAD_SIZE = 256 * 1024
 GIT_OID = re.compile(r"[0-9a-f]{40}")
 GIT_TEST_REF = re.compile(r"refs/heads/crab-cdn-qualification-[1-9][0-9]{0,19}-[1-9][0-9]{0,19}-[0-9a-f]{12}")
 CDN_PROVENANCE_FIELDS = {"source_sha", "scope", "configuration_sha256", "workflow_run_id", "workflow_run_attempt"}
-GIT_PUBLICATION_FIELDS = CDN_PROVENANCE_FIELDS | {"schema", "ref", "oid", "sha256", "published", "visible_at_unix_ms", "candidate"}
+GIT_PUBLICATION_FIELDS = CDN_PROVENANCE_FIELDS | {
+    "schema", "ref", "oid", "sha256", "payload_bytes", "published", "visible_at_unix_ms", "candidate",
+}
 GIT_RETIREMENT_FIELDS = CDN_PROVENANCE_FIELDS | {"schema", "publication_sha256", "ref_retired", "retired_at_unix_ms", "candidate"}
 CLI_BUILD_FIELDS = {"source_sha", "target_triple", "cargo_profile", "cargo_features", "qualification_feature", "release_policy_sha256"}
 CLI_CANDIDATE_FIELDS = CLI_BUILD_FIELDS | {"binary_sha256"}
@@ -1252,6 +1254,12 @@ def median_savings_lower_bound(savings: list[int]) -> int:
     return ordered[rank]
 
 
+def cli_payload_bytes(configuration: dict[str, Any]) -> int:
+    size = configuration.get("cli_payload_bytes", GIT_PAYLOAD_SIZE)
+    require(positive(size) and size <= WORKLOAD_PAYLOAD_LIMIT, "invalid CLI qualification payload size")
+    return size
+
+
 def benchmark_registration(registration: Any) -> dict[str, Any]:
     expected = {
         "schema", "source_sha", "scope", "configuration_sha256", "workload", "samples", "p95_budget_ms",
@@ -1261,6 +1269,8 @@ def benchmark_registration(registration: Any) -> dict[str, Any]:
     _, access, _, _, profile = scope_parts(registration["scope"])
     if requires_cli_workload(registration["scope"]):
         expected.update(("candidate", "viewer_binding_sha256"))
+        expected |= {"cli_payload_bytes"} & registration.keys()
+        cli_payload_bytes(registration)
         verify_read_candidate(registration.get("candidate"), registration.get("source_sha"))
         require(matches(SHA256, registration.get("viewer_binding_sha256")),
                 "CLI benchmark needs the approved viewer binding digest")
@@ -1307,7 +1317,7 @@ def benchmark_registration(registration: Any) -> dict[str, Any]:
         require(registration.get("workload") == SERVICE_READ_ACTION
                 and matches(SHA256, registration.get("viewer_binding_sha256"))
                 and all(matches(SHA256, workload[key]) for key in SERVICE_WORKLOAD_REGISTRATION_FIELDS - {"payload_bytes"})
-                and positive(workload["payload_bytes"]) and workload["payload_bytes"] <= SERVICE_PAYLOAD_LIMIT,
+                and positive(workload["payload_bytes"]) and workload["payload_bytes"] <= WORKLOAD_PAYLOAD_LIMIT,
                 "service benchmark needs the approved HTTP workload and viewer binding")
         if access == "public":
             expected.add("service_prior_workload_sha256")
@@ -1509,6 +1519,7 @@ def validate_git_publication(raw: bytes, provenance: dict[str, Any]) -> dict[str
             and all(record[key] == provenance[key] for key in CDN_PROVENANCE_FIELDS)
             and matches(GIT_TEST_REF, record["ref"]) and record["ref"].startswith(prefix)
             and matches(GIT_OID, record["oid"]) and matches(SHA256, record["sha256"])
+            and positive(record["payload_bytes"]) and record["payload_bytes"] <= WORKLOAD_PAYLOAD_LIMIT
             and type(record["published"]) is bool
             and (positive(record["visible_at_unix_ms"]) if record["published"] else record["visible_at_unix_ms"] is None),
             "Git publication receipt does not match this qualification run")
@@ -1560,7 +1571,8 @@ def validate_git_fetch(
             require(grant == expected_grant, f"{label} used a different registered managed issuer, repository or approval")
     require(matches(GIT_OID, client["publication_oid"]) and matches(SHA256, client["publication_sha256"])
             and matches(SHA256, client["expected_sha256"]) and client["expected_sha256"] == client["observed_sha256"]
-            and client["expected_bytes"] == client["observed_bytes"] == GIT_PAYLOAD_SIZE
+            and positive(client["expected_bytes"]) and positive(client["observed_bytes"])
+            and client["expected_bytes"] == client["observed_bytes"] <= WORKLOAD_PAYLOAD_LIMIT
             and positive(client["native_writes"]) and client["visible_new_ref"] is True,
             f"{label} did not verify the published payload")
     verify_git_traffic(client, edge, label)
@@ -1705,7 +1717,7 @@ def validate_service_read(value: Any, provenance: dict[str, Any], arm: str) -> d
             "CDN service read has mismatched workflow or product provenance")
     verify_service_candidate(client["candidate"], provenance["source_sha"], provenance["platform"])
     require(matches(GIT_OID, client["commit"]) and positive(client["payload_bytes"])
-            and client["payload_bytes"] <= SERVICE_PAYLOAD_LIMIT
+            and client["payload_bytes"] <= WORKLOAD_PAYLOAD_LIMIT
             and all(matches(SHA256, client[key]) for key in ("workload_sha256", "publication_sha256",
                     "native_published_sha256", "payload_sha256", "etag_sha256", "service_instance_sha256")),
             "CDN service read has invalid publication or payload fingerprints")
@@ -2052,7 +2064,8 @@ def verify_service_lifecycle(
                 and read["native_published_sha256"] == published and read["publication_sha256"] == publication_sha
                 and read["commit"] == publication["oid"] and read["payload_sha256"] == publication["sha256"],
                 "edge and rollback reads must use the same approved workload and native publication")
-        require(read["payload_bytes"] == workload["payload_bytes"] and read["etag_sha256"] == workload["etag_sha256"],
+        require(read["payload_bytes"] == workload["payload_bytes"] == publication["payload_bytes"]
+                and read["etag_sha256"] == workload["etag_sha256"],
                 "service read does not match the approved payload size and ETag")
         require(read["reader"] == {
             "origin_sha256": native_origin_sha256, "prefix_sha256": prefix_sha256,
@@ -2278,10 +2291,11 @@ def collect_git_product_action(
     digest = hashlib.sha256(publication_raw).hexdigest()
     require(fetch["publication_sha256"] == digest and fetch["publication_oid"] == publication["oid"]
             and fetch["expected_sha256"] == publication["sha256"]
+            and fetch["observed_bytes"] == publication["payload_bytes"] == cli_payload_bytes(row)
             and fetch["started_at_unix_ms"] >= publication["visible_at_unix_ms"],
             "Git product fetch did not verify this native publication after the ref became visible")
     rollback = validate_git_fetch(rollback_raw, fetch_provenance, "origin", "CDN rollback", managed_issuer=issuer)
-    require(all(rollback[key] == fetch[key] for key in ("publication_sha256", "publication_oid", "observed_sha256")),
+    require(all(rollback[key] == fetch[key] for key in ("publication_sha256", "publication_oid", "observed_sha256", "observed_bytes")),
             "CDN rollback must verify the same published payload as the edge fetch")
     require(all(rollback["reader"][key] == fetch["reader"][key] for key in CLI_NATIVE_FIELDS),
             "CDN rollback changed the selected native target")
@@ -2329,7 +2343,8 @@ def collect_sdk_product_action(
     edge = verify_sdk_git_read(edge_raw, row, spec, "edge")
     origin = verify_sdk_git_read(rollback_raw, row, spec, "origin")
     require(all(read["publication_sha256"] == receipt and read["commit"] == publication["oid"]
-                and read["sha256"] == publication["sha256"] for read in (edge, origin))
+                and read["sha256"] == publication["sha256"] and read["bytes"] == publication["payload_bytes"]
+                for read in (edge, origin))
             and edge["git_blob_oid_sha256"] == origin["git_blob_oid_sha256"],
             "SDK snapshot and rollback must verify the same published Git blob")
     require(all(edge["reader"][key] == origin["reader"][key] for key in CLI_NATIVE_FIELDS),
@@ -2429,7 +2444,8 @@ def collect_desktop_product_action(
         earliest = verify_desktop_git_read(prior_raw, row, spec, "prior_export")
         reads.insert(0, earliest)
     require(all(read["publication_sha256"] == receipt and read["commit"] == publication["oid"]
-                and read["sha256"] == publication["sha256"] and read["git_blob_oid_sha256"] == edge["git_blob_oid_sha256"]
+                and read["sha256"] == publication["sha256"] and read["bytes"] == publication["payload_bytes"]
+                and read["git_blob_oid_sha256"] == edge["git_blob_oid_sha256"]
                 for read in reads), "desktop product reads must verify the same published Git blob")
     roots = {read["cache_root_sha256"] for read in reads}
     require(len(roots) == len(reads) and all(left["finished_at_unix_ms"] <= right["started_at_unix_ms"]
@@ -2760,6 +2776,8 @@ def collect_git_performance(
                 else:
                     client = validate_git_fetch(client_raw, provenance, GIT_MODES[arm], label,
                                                 managed_issuer=spec.get("managed_issuer"))
+                    require(client["observed_bytes"] == cli_payload_bytes(spec),
+                            f"{label} differs from the registered CLI payload size")
                     reader = client["reader"]
                     require(arm == "origin" or reader["binding_sha256"] == spec["viewer_binding_sha256"],
                             f"{label} did not use the required viewer configuration")
@@ -2866,6 +2884,7 @@ def collect_git_performance(
                 require(publication["published"] and publication["candidate"] == spec["candidate"]
                         and receipt == hashlib.sha256(raw).hexdigest()
                         and (oid, payload_sha256) == (publication["oid"], publication["sha256"])
+                        and publication["payload_bytes"] == (GIT_PAYLOAD_SIZE if desktop else cli_payload_bytes(spec))
                         and publication["visible_at_unix_ms"] <= intervals[0][0],
                         f"{location} {index} must verify the retained {'desktop' if desktop else 'CLI'} publication after the ref became visible")
                 if retain is not None:
@@ -2973,6 +2992,7 @@ def verify_cdn_report(
     if cli_workload:
         require(rollback is not None, "CLI qualification requires a product rollback fetch")
         registered_read = {key: registration[key] for key in ("candidate", "viewer_binding_sha256")}
+        registered_read["cli_payload_bytes"] = cli_payload_bytes(registration)
         if is_managed_cli_git_scope(scope):
             registered_read["managed_issuer"] = registration["managed_issuer"]
         product = collect_git_product_action(

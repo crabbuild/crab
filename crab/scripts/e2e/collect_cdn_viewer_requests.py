@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cdn_qualification import (  # noqa: E402
     CDN_PROVENANCE_FIELDS, GIT_FETCH_RECORD_LIMIT, GIT_OID, MOUNT_XORB_READ_FIELDS, PROVIDER_FOR_EDGE,
-    SDK_HYDRATION_READ_FIELDS, SDK_WORKTREE_VIEWER_FILES, VIEWER_REQUEST_FILES, decode, fields,
+    SDK_HYDRATION_READ_FIELDS, SDK_WORKTREE_VIEWER_FILES, VIEWER_REQUEST_FILES, cli_payload_bytes, decode, fields,
     is_direct_desktop_git_scope, is_direct_mount_xorb_scope, is_direct_sdk_git_scope, is_direct_service_scope,
     is_direct_xorb_read_scope, matches,
     read_git_record, require, scope_parts, validate_desktop_git_read, validate_git_fetch, validate_sdk_git_record, validate_service_read,
@@ -581,6 +581,8 @@ def main() -> int:
                     "service viewer evidence requires the approved native target and CDN binding")
         else:
             client = validate_git_fetch(raw, provenance, candidate["arm"], "CDN benchmark fetch")
+            require(client["observed_bytes"] == cli_payload_bytes(fixture),
+                    "viewer evidence differs from the approved CLI payload size")
         require(client["all_edge_attempts"] > 0 and len(client["edge_responses"]) == client["all_edge_attempts"],
                 "the timed fetch lacks a CDN request fingerprint for each viewer attempt")
         require(not args.require_origin_fill or client["arm"] == "edge", "origin fill requires a timed edge read")

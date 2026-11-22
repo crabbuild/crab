@@ -14,7 +14,10 @@ from shutil import copytree
 from tempfile import TemporaryDirectory
 
 import run_cdn_git_workload as WORKLOAD
-from cdn_qualification import CLI_BUILD_FIELDS, GIT_FETCH_FIELDS, collect_git_product_action, lfs_object_path, verify_public_transition
+from cdn_qualification import (
+    CLI_BUILD_FIELDS, GIT_FETCH_FIELDS, WORKLOAD_PAYLOAD_LIMIT, collect_git_product_action, lfs_object_path,
+    verify_public_transition,
+)
 from public_inventory import Object, SCHEMA, publication_receipt, read_publication
 from test_cdn_transport_qualification import PACK, fixture
 from test_cdn_qualification import cli_candidate, write_product_viewer_proof
@@ -175,7 +178,13 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         return json.loads(result.stdout)
 
     def test_publishes_fetches_and_retires_the_dedicated_ref(self) -> None:
+        payload_bytes = 2 * 1024 * 1024 + 13
+        config = json.loads(self.fixture.read_bytes()) | {"cli_payload_bytes": payload_bytes}
+        raw = json.dumps(config).encode()
+        self.fixture.write_bytes(raw)
+        self.digest = hashlib.sha256(raw).hexdigest()
         inspected = self.run_phase("inspect")
+        self.assertEqual(inspected["cli_payload_bytes"], payload_bytes)
         self.assertFalse(self.receipt.exists())
         published = self.run_phase("publish")
         self.assertTrue(published["visible_new_ref"])
@@ -183,11 +192,12 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         self.assertFalse(published["candidate"]["qualification_feature"])
         self.assertEqual(published["candidate"]["binary_sha256"], hashlib.sha256(self.helper.read_bytes()).hexdigest())
         fetched = self.run_phase("fetch")
+        publication = json.loads(self.receipt.read_bytes())
         self.assertEqual(fetched.keys(), GIT_FETCH_FIELDS)
         self.assertEqual(fetched["observed_sha256"], fetched["expected_sha256"])
-        self.assertEqual(fetched["publication_oid"], json.loads(self.receipt.read_bytes())["oid"])
+        self.assertEqual(fetched["publication_oid"], publication["oid"])
         self.assertLessEqual(fetched["started_at_unix_ms"], fetched["finished_at_unix_ms"])
-        self.assertEqual(fetched["observed_bytes"], WORKLOAD.GIT_PAYLOAD_SIZE)
+        self.assertEqual((publication["payload_bytes"], fetched["observed_bytes"]), (payload_bytes, payload_bytes))
         self.assertEqual(fetched["observed_edge_gets"], 1)
         self.assertEqual(fetched["verified_edge_payloads"], 1)
         self.assertNotIn("fixture_cleanup_verified", fetched)
@@ -205,9 +215,10 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         (records / "retirement.json").write_text(json.dumps(retired), encoding="utf-8")
         viewer = WORKLOAD.viewer_binding_sha256(json.loads(self.fixture.read_bytes()))
         rollback_raw = json.dumps(rollback).encode()
-        measured = collect_git_product_action(records, fetched | {"viewer_binding_sha256": viewer}, rollback_raw)
+        read = fetched | {"viewer_binding_sha256": viewer, "cli_payload_bytes": payload_bytes}
+        measured = collect_git_product_action(records, read, rollback_raw)
         with self.assertRaisesRegex(ValueError, "product fetch did not use the registered viewer binding"):
-            collect_git_product_action(records, fetched | {"viewer_binding_sha256": "0" * 64}, rollback_raw)
+            collect_git_product_action(records, read | {"viewer_binding_sha256": "0" * 64}, rollback_raw)
         self.assertEqual(measured["observed_sha256"], fetched["expected_sha256"])
         self.assertEqual(measured["verified_edge_payloads"], 1)
 
@@ -415,7 +426,7 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         self.run_phase("publish")
         payload = json.loads(self.receipt.read_bytes())
         if family == "lfs":
-            added = Object(lfs_object_path(payload["sha256"]), WORKLOAD.GIT_PAYLOAD_SIZE, payload["sha256"])
+            added = Object(lfs_object_path(payload["sha256"]), payload["payload_bytes"], payload["sha256"])
             selector = ()
         else:
             added = Object(PACK, 6, "d" * 64)
@@ -544,12 +555,15 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
 
     def test_warm_local_lfs_reruns_fetch_against_the_verified_primed_worktree(self) -> None:
         config = fixture(access="private")
-        config |= {"scope": "cloudfront/private/cli/lfs/direct", "object_path": lfs_object_path(config["sha256"])}
+        payload_bytes = 9 * 1024 * 1024 + 3
+        config |= {"scope": "cloudfront/private/cli/lfs/direct", "object_path": lfs_object_path(config["sha256"]),
+                   "cli_payload_bytes": payload_bytes}
         raw = json.dumps(config).encode()
         self.fixture.write_bytes(raw)
         self.digest = hashlib.sha256(raw).hexdigest()
         self.run_phase("publish")
         warm = self.run_phase("fetch-warm-local")
+        self.assertEqual(warm["observed_bytes"], payload_bytes)
         self.assertEqual((warm["name"], warm["arm"], warm["local_payload_hits"], warm["all_edge_attempts"]),
                          ("lfs-fetch", "warm_local", 1, 0))
         (self.root / "unverified-local").touch()
@@ -557,6 +571,27 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         self.assertNotEqual(missed.returncode, 0)
         self.assertIn("warm-local fetch must use a verified local payload", missed.stderr)
         self.assertTrue(self.run_phase("retire")["ref_retired"])
+
+    def test_rejects_invalid_approved_sizes_before_publication(self) -> None:
+        config = fixture(access="private")
+        for size in (True, WORKLOAD_PAYLOAD_LIMIT + 1):
+            with self.subTest(size=size):
+                raw = json.dumps(config | {"cli_payload_bytes": size}).encode()
+                self.fixture.write_bytes(raw)
+                failed = self.call("publish", digest=hashlib.sha256(raw).hexdigest())
+                self.assertIn("invalid CLI qualification payload size", failed.stderr)
+                self.assertFalse(self.receipt.exists())
+
+    def test_fetch_rejects_a_receipt_with_an_unapproved_size(self) -> None:
+        self.run_phase("publish")
+        original = self.receipt.read_bytes()
+        publication = json.loads(original)
+        publication["payload_bytes"] += 1
+        self.receipt.write_text(json.dumps(publication), encoding="utf-8")
+        failed = self.call("fetch")
+        self.assertIn("receipt does not match the approved CLI payload size", failed.stderr)
+        self.receipt.write_bytes(original)
+        self.run_phase("retire")
 
     def test_native_writer_and_independent_probe_support_an_sdk_fixture(self) -> None:
         config = fixture(access="private") | {"scope": "cloudfront/private/sdk/git/direct"}

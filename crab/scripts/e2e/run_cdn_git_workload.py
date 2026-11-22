@@ -8,12 +8,13 @@ import hashlib
 import json
 import os
 import platform
+import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, BinaryIO
 from uuid import uuid4
 
 from collect_cdn_managed_issuer import TARGET as MANAGED_TARGET, grant_fingerprints, observation_events
@@ -21,8 +22,8 @@ from collect_cdn_product_metrics import NATIVE_TARGET, ROUTE, ROUTE_FIELDS, TARG
 from run_cdn_transport_checks import approved_fixture, fixture_base, fixture_object_key, native_remote
 
 from cdn_qualification import (
-    CLI_BUILD_FIELDS, CLI_NATIVE_FIELDS, COMMIT, GIT_OID, GIT_PAYLOAD_SIZE, LABEL, PROVIDER_FOR_EDGE, RUN_NUMBER, SHA256,
-    cli_action_name, decode, deployment_component_digest,
+    CLI_BUILD_FIELDS, CLI_NATIVE_FIELDS, COMMIT, GIT_OID, LABEL, PROVIDER_FOR_EDGE, RUN_NUMBER, SHA256,
+    WORKLOAD_PAYLOAD_LIMIT, cli_action_name, cli_payload_bytes, decode, deployment_component_digest,
     fields, is_direct_desktop_git_scope, is_direct_sdk_git_scope, is_direct_service_scope, lfs_object_path,
     matches, read_git_record, require, requires_cli_lfs_workload,
     requires_cli_workload, scope_parts,
@@ -42,12 +43,13 @@ GCS_VIEWER_LOG_TARGET = "crab_storage::cdn::gcs_viewer_log"
 
 
 def run_command(
-    command: list[str], label: str, root: Path, env: dict[str, str], content: bytes | None = None,
-    *, allow_failure: bool = False,
+    command: list[str], label: str, root: Path, env: dict[str, str],
+    *, allow_failure: bool = False, stdin: BinaryIO | None = None, stdout: BinaryIO | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     try:
         result = subprocess.run(
-            command, cwd=root, env=env, input=content, capture_output=True, timeout=300, check=False,
+            command, cwd=root, env=env, stdin=stdin, stdout=stdout if stdout is not None else subprocess.PIPE,
+            stderr=subprocess.PIPE, timeout=300, check=False,
         )
     except subprocess.TimeoutExpired:
         raise ValueError(f"{label} timed out") from None
@@ -141,7 +143,7 @@ def run_git(*args: str, root: Path, env: dict[str, str], guard: NativeTargetGuar
     return result
 
 
-def lfs_pointer(digest: str, size: int = GIT_PAYLOAD_SIZE) -> bytes:
+def lfs_pointer(digest: str, size: int) -> bytes:
     return f"version https://git-lfs.github.com/spec/v1\noid sha256:{digest}\nsize {size}\n".encode()
 
 
@@ -184,19 +186,28 @@ def ref_tip(remote: str, ref: str, root: Path, env: dict[str, str], guard: Nativ
 
 def publish(
     remote: str, provenance: dict[str, str], receipt: Path, root: Path, env: dict[str, str],
-    crab: Path | None, guard: NativeTargetGuard, *, supplied_content: bytes | None = None,
+    crab: Path | None, guard: NativeTargetGuard, *, payload_bytes: int, supplied_content: bytes | None = None,
 ) -> dict:
     ref = f"refs/heads/crab-cdn-qualification-{provenance['workflow_run_id']}-{provenance['workflow_run_attempt']}-{uuid4().hex[:12]}"
-    content = supplied_content
-    if content is None:
-        content = hashlib.shake_256(f"{provenance['configuration_sha256']}/{ref}".encode()).digest(GIT_PAYLOAD_SIZE)
-    sha256 = hashlib.sha256(content).hexdigest()
     run_git("init", "--template=", "--object-format=sha1", root=root, env=env)
+    payload = root / PAYLOAD
+    if supplied_content is None:
+        seed = f"{provenance['configuration_sha256']}/{ref}".encode()
+        block_bytes = 1024 * 1024
+        with payload.open("wb") as target:
+            for offset in range(0, payload_bytes, block_bytes):
+                block = hashlib.shake_256(seed + offset.to_bytes(8, "big"))
+                target.write(block.digest(min(block_bytes, payload_bytes - offset)))
+    else:
+        payload.write_bytes(supplied_content)
+        payload_bytes = len(supplied_content)
+    with payload.open("rb") as source:
+        sha256 = hashlib.file_digest(source, "sha256").hexdigest()
     if crab is not None:
-        pointer = run_command([str(crab), "lfs", "clean", PAYLOAD], "crab lfs clean", root, env, content).stdout
-        require(pointer == lfs_pointer(sha256, len(content)), "crab lfs clean did not stage the expected fixture pointer")
-        content = pointer
-    (root / PAYLOAD).write_bytes(content)
+        with payload.open("rb") as source:
+            pointer = run_command([str(crab), "lfs", "clean", PAYLOAD], "crab lfs clean", root, env, stdin=source).stdout
+        require(pointer == lfs_pointer(sha256, payload_bytes), "crab lfs clean did not stage the expected fixture pointer")
+        payload.write_bytes(pointer)
     run_git("add", "--", PAYLOAD, root=root, env=env)
     run_git(
         "-c", "user.name=Crab CDN qualification", "-c", "user.email=qualification@example.invalid",
@@ -207,7 +218,8 @@ def publish(
     # A read-only probe prevents an older helper that ignores the origin guard from writing.
     require(ref_tip(remote, ref, root, env, guard) is None, "the qualification ref already exists")
     record = provenance | {"schema": "crab.cdn-git-publication/v1", "ref": ref, "oid": oid,
-                           "sha256": sha256, "published": False, "visible_at_unix_ms": None, "candidate": guard.candidate}
+                           "sha256": sha256, "payload_bytes": payload_bytes, "published": False,
+                           "visible_at_unix_ms": None, "candidate": guard.candidate}
     # Keep a receipt before sending the push so a timed-out publication can be retired.
     with receipt.open("x", encoding="utf-8") as file:
         json.dump(record, file, sort_keys=True)
@@ -380,12 +392,12 @@ def managed_observation(
     return events, grant_fingerprints(grant)
 
 
-def retain_managed_observation(directory: Path, run: subprocess.CompletedProcess[bytes], events: list[dict], payload: bytes | None) -> None:
+def retain_managed_observation(directory: Path, run: subprocess.CompletedProcess[bytes], events: list[dict], payload: Path | None) -> None:
     directory.mkdir(mode=0o700)
     (directory / "stderr.jsonl").write_text("".join(json.dumps(event) + "\n" for event in events), encoding="utf-8")
     (directory / "exit-code").write_text(f"{run.returncode}\n", encoding="ascii")
     if payload is not None:
-        (directory / "payload").write_bytes(payload)
+        shutil.copyfile(payload, directory / "payload")
 
 
 def fetch_once(
@@ -413,7 +425,8 @@ def fetch_once(
             run_git("fetch", "--no-tags", "--no-auto-maintenance", remote, record["ref"], root=root, env=env, guard=guard)
             require(not lfs_payload.exists(), "LFS control needs an empty local payload cache")
         pointer = run_git("cat-file", "blob", f"FETCH_HEAD:{PAYLOAD}", root=root, env=env).stdout
-        require(pointer == lfs_pointer(record["sha256"]), "native ref does not contain the expected LFS pointer")
+        require(pointer == lfs_pointer(record["sha256"], record["payload_bytes"]),
+                "native ref does not contain the expected LFS pointer")
     # Use a new cache and exact refspec so another fetched ref cannot supply the bytes.
     started_at = time.time_ns() // 1_000_000
     started = time.monotonic_ns()
@@ -433,19 +446,27 @@ def fetch_once(
     finished_at = time.time_ns() // 1_000_000
     actual = run_git("rev-parse", "FETCH_HEAD", root=root, env=env).stdout.strip().decode("ascii")
     require(actual == record["oid"], "fetch resolved a different commit")
+    expected_bytes = record["payload_bytes"]
     if crab is None:
-        blob = run_git("cat-file", "blob", f"FETCH_HEAD:{PAYLOAD}", root=root, env=env).stdout
+        ref = f"FETCH_HEAD:{PAYLOAD}"
+        size = run_git("cat-file", "-s", ref, root=root, env=env).stdout.strip()
+        require(size == str(expected_bytes).encode("ascii"), "fetched bytes differ from the writer payload")
+        payload = root / PAYLOAD
+        with payload.open("wb") as target_file:
+            run_command(["git", "cat-file", "blob", ref], "git cat-file", root, env, stdout=target_file)
     else:
-        with lfs_payload.open("rb") as payload:
-            blob = payload.read(GIT_PAYLOAD_SIZE + 1)
-    observed = hashlib.sha256(blob).hexdigest()
-    require(len(blob) == GIT_PAYLOAD_SIZE and observed == record["sha256"], "fetched bytes differ from the writer payload")
+        payload = lfs_payload
+    with payload.open("rb") as source:
+        observed_bytes = os.fstat(source.fileno()).st_size
+        require(observed_bytes == expected_bytes, "fetched bytes differ from the writer payload")
+        observed = hashlib.file_digest(source, "sha256").hexdigest()
+    require(observed == record["sha256"], "fetched bytes differ from the writer payload")
     authority = {}
     if managed is not None:
         events, grant = managed_observation(run, managed, origin=not binding, rejected=False)
         authority = {"managed_grant": grant}
         if managed_capture is not None:
-            retain_managed_observation(managed_capture, run, events, blob)
+            retain_managed_observation(managed_capture, run, events, payload)
     lines = run.stderr.splitlines()
     edge_responses = {}
     lfs_key = None
@@ -458,7 +479,7 @@ def fetch_once(
     action = cli_action_name(record["scope"])
     return {
         "schema": f"crab.cdn-{action}/v1", "name": action, "expected_sha256": record["sha256"],
-        "observed_sha256": observed, "expected_bytes": GIT_PAYLOAD_SIZE, "observed_bytes": len(blob),
+        "observed_sha256": observed, "expected_bytes": expected_bytes, "observed_bytes": observed_bytes,
         "native_writes": 1, "visible_new_ref": True, "elapsed_ms": elapsed,
         "publication_oid": record["oid"], "started_at_unix_ms": started_at, "finished_at_unix_ms": finished_at,
         "platform": guard.platform, "candidate": guard.candidate,
@@ -567,8 +588,10 @@ def main() -> int:
         require((args.service_lfs_payload is not None) == service_lfs_publish,
                 "native service LFS publication requires the exact approved fixture payload")
         if service_lfs_publish:
-            content = read_git_record(args.service_lfs_payload, limit=fixture["size"])
-            require(len(content) == fixture["size"] and hashlib.sha256(content).hexdigest() == fixture["sha256"],
+            size = fixture["size"]
+            require(type(size) is int and 0 < size <= WORKLOAD_PAYLOAD_LIMIT, "invalid service LFS fixture payload size")
+            content = read_git_record(args.service_lfs_payload, limit=size)
+            require(len(content) == size and hashlib.sha256(content).hexdigest() == fixture["sha256"],
                     "service LFS payload differs from the approved fixture")
         crab = companion_crab(args.helper) if requires_cli_lfs_workload(scope) or service_lfs_publish else None
         remote = native_remote(fixture, edge)
@@ -594,13 +617,17 @@ def main() -> int:
                     run_git("init", "--bare", "--template=", "--object-format=sha1", root=root, env=env)
                     ref_tip(remote, "refs/heads/crab-cdn-qualification-build-inspection", root, env, guard)
                     result = {"candidate": guard.candidate, "platform": guard.platform,
+                              "cli_payload_bytes": cli_payload_bytes(fixture),
                               "viewer_binding_sha256": approved_binding}
                 else:
                     result = publish(remote, provenance, args.receipt, root, env, crab, guard,
-                                     supplied_content=content) | {"candidate": guard.candidate}
+                                     payload_bytes=cli_payload_bytes(fixture), supplied_content=content) | {"candidate": guard.candidate}
             else:
                 raw = read_git_record(args.receipt)
                 record = validate_git_publication(raw, provenance)
+                if requires_cli_workload(scope):
+                    require(record["payload_bytes"] == cli_payload_bytes(fixture),
+                            "Git publication receipt does not match the approved CLI payload size")
                 guard = NativeTargetGuard(args.helper, args.source_sha, target, record["candidate"])
                 public_export, proof = prepare_public_export(args, fixture, record)
                 if args.action == "retire":

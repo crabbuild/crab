@@ -64,7 +64,7 @@ class DesktopQualificationTests(unittest.TestCase):
             "configuration_sha256": self.args.configuration_sha256, "source_sha": COMMIT,
             "workflow_run_id": "123", "workflow_run_attempt": "2", "published": True, "visible_at_unix_ms": 1,
             "ref": "refs/heads/crab-cdn-qualification-123-2-0123456789ab", "candidate": cli_candidate(scope, desktop.runner_platform()),
-            "oid": self.oid, "sha256": hashlib.sha256(self.body).hexdigest()})
+            "oid": self.oid, "sha256": hashlib.sha256(self.body).hexdigest(), "payload_bytes": len(self.body)})
         self.config.write_text(f'''[auth]
 provider = "crab-auth"
 auth_endpoint = "{self.issuer}"

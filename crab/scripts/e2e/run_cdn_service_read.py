@@ -23,7 +23,7 @@ from s3_gateway_workload import _canonical_path, _signed_headers
 from public_inventory import ExportError
 
 from cdn_qualification import (
-    CLI_CANDIDATE_FIELDS, COMMIT, GIT_FETCH_RECORD_LIMIT, GIT_OID, RUN_NUMBER, SERVICE_PAYLOAD_LIMIT, SHA256,
+    CLI_CANDIDATE_FIELDS, COMMIT, GIT_FETCH_RECORD_LIMIT, GIT_OID, RUN_NUMBER, SHA256, WORKLOAD_PAYLOAD_LIMIT,
     decode, fields, is_direct_service_scope, matches, positive, read_git_record, require, scope_parts,
     validate_git_publication, validate_service_read, verify_git_native_ref, verify_service_candidate, verify_service_repeat,
 )
@@ -52,7 +52,7 @@ def workload(path: Path, digest: str, configuration: str, consumer: str) -> dict
             and approved["configuration_sha256"] == configuration
             and all(matches(SHA256, approved[field]) for field in ("publication_sha256", "payload_sha256", "etag_sha256"))
             and matches(GIT_OID, approved["commit"]) and positive(approved["payload_bytes"])
-            and approved["payload_bytes"] <= SERVICE_PAYLOAD_LIMIT,
+            and approved["payload_bytes"] <= WORKLOAD_PAYLOAD_LIMIT,
             "CDN service read needs the exact approved workload, publication, and payload")
     repo = approved["repository"]
     require(isinstance(repo, str), "service workload needs the approved logical repository")
@@ -183,7 +183,8 @@ def service_publication(path: Path, provenance: dict, approved: dict) -> tuple[b
     digest = hashlib.sha256(raw).hexdigest()
     publication = validate_git_publication(raw, provenance)
     require(publication["published"] and digest == approved["publication_sha256"]
-            and publication["oid"] == approved["commit"] and publication["sha256"] == approved["payload_sha256"],
+            and publication["oid"] == approved["commit"] and publication["sha256"] == approved["payload_sha256"]
+            and publication["payload_bytes"] == approved["payload_bytes"],
             "service workload needs the exact published commit and payload")
     return raw, publication, digest
 

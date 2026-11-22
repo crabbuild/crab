@@ -120,6 +120,7 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, nati
     desktop = CDN.is_direct_desktop_git_scope(registration["scope"])
     managed = CDN.is_managed_cli_git_scope(registration["scope"])
     cli = CDN.requires_cli_workload(registration["scope"])
+    payload_bytes = CDN.cli_payload_bytes(registration)
     action = CDN.cli_action_name(registration["scope"])
     for ordinal, (location, region) in enumerate(registration["regions"].items()):
         for index in range(1, registration["samples"] + 1):
@@ -134,6 +135,7 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, nati
             if cli or desktop:
                 publication = {
                     "schema": "crab.cdn-git-publication/v1", "oid": oid, "sha256": blob, "published": True,
+                    "payload_bytes": payload_bytes,
                     "ref": f"refs/heads/crab-cdn-qualification-123-2-{oid[:12]}",
                     "visible_at_unix_ms": start - (3 if desktop or managed else 1), "candidate": registration["candidate"],
                     "source_sha": registration["source_sha"], "scope": registration["scope"],
@@ -181,7 +183,7 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, nati
                     } | (native_target or {}),
                     "publication_oid": oid, "expected_sha256": blob, "observed_sha256": blob,
                     "publication_sha256": publication_digest,
-                    "expected_bytes": CDN.GIT_PAYLOAD_SIZE, "observed_bytes": CDN.GIT_PAYLOAD_SIZE,
+                    "expected_bytes": payload_bytes, "observed_bytes": payload_bytes,
                     "started_at_unix_ms": started, "finished_at_unix_ms": started + metrics["elapsed_ms"],
                     "visible_new_ref": True, "native_writes": 1,
                     "edge_responses": {}, "native_traffic": {"get_responses": 1, "head_responses": 0, "body_bytes": 8},
@@ -296,7 +298,7 @@ class CdnQualificationTests(unittest.TestCase):
         (self.directory / "traces").mkdir()
 
     def configure(self, provider: str, access: str, profile: str, *, consumer: str = "cli", family: str = "git",
-                  platform: str = "linux-x86_64") -> None:
+                  platform: str = "linux-x86_64", cli_payload_bytes: int | None = None) -> None:
         self.provider = provider
         self.scope = f"{CDN.PROVIDERS[provider][0]}/{access}/{consumer}/{family}/{profile}"
         self.origin = valid_report(provider)
@@ -319,6 +321,8 @@ class CdnQualificationTests(unittest.TestCase):
         if CDN.requires_cli_workload(self.scope):
             self.registration["candidate"] = cli_candidate(self.scope, platform)
             self.registration["viewer_binding_sha256"] = "e" * 64
+            if cli_payload_bytes is not None:
+                self.registration["cli_payload_bytes"] = cli_payload_bytes
         sdk = CDN.is_direct_sdk_git_scope(self.scope)
         hydration = CDN.is_direct_xorb_read_scope(self.scope)
         mount = CDN.is_direct_mount_xorb_scope(self.scope)
@@ -497,6 +501,7 @@ class CdnQualificationTests(unittest.TestCase):
         receipt = json_file(records / "publication.json", provenance | {
             "schema": "crab.cdn-git-publication/v1", "ref": ref,
             "oid": fetch["publication_oid"], "sha256": fetch["expected_sha256"], "published": True,
+            "payload_bytes": fetch["expected_bytes"],
             "visible_at_unix_ms": fetch["started_at_unix_ms"] - 50, "candidate": fetch["candidate"],
         })
         public = "publication_sha256" in self.registration
@@ -561,6 +566,7 @@ class CdnQualificationTests(unittest.TestCase):
         writer = cli_candidate(self.scope, platform)
         receipt = json_file(records / "publication.json", provenance | {
             "schema": "crab.cdn-git-publication/v1", "ref": ref, "oid": commit, "sha256": payload,
+            "payload_bytes": spec["payload_bytes"],
             "published": True, "visible_at_unix_ms": published_at - 5, "candidate": writer,
         })
         json_file(records / "retirement.json", provenance | {
@@ -658,6 +664,7 @@ class CdnQualificationTests(unittest.TestCase):
         oid, payload = "a" * 40, "b" * 64
         receipt = json_file(records / "publication.json", provenance | {
             "schema": "crab.cdn-git-publication/v1", "ref": ref, "oid": oid, "sha256": payload, "published": True,
+            "payload_bytes": CDN.GIT_PAYLOAD_SIZE,
             "visible_at_unix_ms": PUBLIC_SEAL - 40, "candidate": writer,
         })
         base = provenance | dict.fromkeys(CDN.PRODUCT_COUNTERS, 0) | {

@@ -139,6 +139,7 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
         for change in (
             {"oid": "f" * 40},
             {"sha256": "f" * 64},
+            {"payload_bytes": publication["payload_bytes"] + 1},
             {"published": False, "visible_at_unix_ms": None},
             {"visible_at_unix_ms": origin["started_at_unix_ms"] + 1},
             {"candidate": publication["candidate"] | {"binary_sha256": "f" * 64}},
@@ -149,6 +150,14 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
                     self.amend_client(f"near/0001/{arm}", publication_sha256=digest)
                 with self.assertRaisesRegex(ValueError, "must verify the retained CLI publication"):
                     self.collect()
+
+    def test_cli_performance_requires_the_preregistered_payload_size(self) -> None:
+        self.registration["cli_payload_bytes"] = 2 * 1024 * 1024
+        fixture.write_git_measurements(self.root, self.registration, PLATFORM)
+        self.collect()
+        self.registration["cli_payload_bytes"] += 1
+        with self.assertRaisesRegex(ValueError, "differs from the registered CLI payload size"):
+            self.collect()
 
     def test_rejects_a_client_measurement_from_a_different_release_platform(self) -> None:
         self.amend_client("near/0001/origin", platform="linux-aarch64")

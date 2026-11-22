@@ -42,10 +42,12 @@ class CdnReleaseQualificationTests(unittest.TestCase):
             "head_repository": {"full_name": REPOSITORY},
         }
 
-    def bundle(self, consumer: str, *platforms: str, provider: str = "s3", family: str = "git", profile: str = "direct") -> str:
+    def bundle(self, consumer: str, *platforms: str, provider: str = "s3", family: str = "git", profile: str = "direct",
+               cli_payload_bytes: int | None = None) -> str:
         registrations = {}
         for platform in platforms:
-            self.fixture.configure(provider, "private", profile, consumer=consumer, platform=platform, family=family)
+            self.fixture.configure(provider, "private", profile, consumer=consumer, platform=platform, family=family,
+                                   cli_payload_bytes=cli_payload_bytes)
             scope = self.fixture.scope
             row = f"{scope}/{platform}"
             directory = self.directory / row
@@ -66,7 +68,7 @@ class CdnReleaseQualificationTests(unittest.TestCase):
         return fixture.json_file(self.directory / "benchmarks.json", registrations)
 
     def test_complete_cli_bundle_verifies_every_release_platform(self) -> None:
-        digest = self.bundle("cli", *fixture.CDN.CLI_PLATFORMS)
+        digest = self.bundle("cli", *fixture.CDN.CLI_PLATFORMS, cli_payload_bytes=32 * 1024 * 1024)
         count = RELEASE.verify_bundle(
             self.directory, self.policy, RELEASE.release_scopes(self.policy), fixture.COMMIT,
             RUN_ID, ATTEMPT, digest,

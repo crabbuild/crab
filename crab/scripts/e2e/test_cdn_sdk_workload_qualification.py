@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import run_cdn_sdk_workload as SDK
-from cdn_qualification import CLI_BUILD_FIELDS
+from cdn_qualification import CLI_BUILD_FIELDS, GIT_PAYLOAD_SIZE
 from run_cdn_git_workload import PUBLIC_TRANSITION_TARGET
 from test_cdn_qualification import COMMIT, cli_candidate, json_file, sdk_candidate
 from test_cdn_transport_qualification import fixture
@@ -39,6 +39,7 @@ class CdnSdkWorkloadQualificationTests(unittest.TestCase):
             "schema": "crab.cdn-git-publication/v1", "scope": scope, "configuration_sha256": configuration,
             "source_sha": COMMIT, "workflow_run_id": "123", "workflow_run_attempt": "2",
             "ref": "refs/heads/" + self.branch, "oid": self.oid, "sha256": self.sha, "published": True,
+            "payload_bytes": GIT_PAYLOAD_SIZE,
             "visible_at_unix_ms": 1, "candidate": cli_candidate(scope, SDK.runner_platform()),
         })
         probe = root / "cdn-sdk-read"

@@ -54,6 +54,7 @@ class CdnServiceReadTests(unittest.TestCase):
         ref = "refs/heads/crab-cdn-qualification-123-2-abcdefabcdef"
         publication = provenance | {
             "schema": "crab.cdn-git-publication/v1", "ref": ref, "oid": "c" * 40, "sha256": SHA256,
+            "payload_bytes": len(BODY),
             "published": True, "visible_at_unix_ms": 10, "candidate": cli_candidate(config["scope"], platform),
         }
         publication_sha = json_file(root / "publication.json", publication)

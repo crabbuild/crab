@@ -25,8 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from cdn_qualification import (  # noqa: E402
     COMMIT, EDGE_ROUTE_QUERY_PROBES, EXPIRY_CHECKS, EXPIRY_FULL_CHECK, EXPIRY_RANGE_CHECK, EXPIRY_SETTLE_SECONDS,
     MAX_VIEWER_GRANT_SECONDS, PREFIX, PROVIDERS, PROVIDER_FOR_EDGE, PUBLIC_EXPORT_CHECK,
-    RUN_NUMBER, SHA256, UNRELATED_VIEWER_CHECK, checked_placement, decode, edge_head_denials, edge_route_probe_names,
-    fields, matches, require, scope_parts, require_isolated_public_origins,
+    RUN_NUMBER, SHA256, UNRELATED_VIEWER_CHECK, checked_placement, cli_payload_bytes, decode, edge_head_denials, edge_route_probe_names,
+    fields, matches, require, requires_cli_workload, scope_parts, require_isolated_public_origins,
     verify_expiry_full_window, verify_expiry_range_window, verify_unrelated_viewer_denial,
 )
 
@@ -98,6 +98,9 @@ def approved_fixture(path: Path, configuration_sha256: str, *, operator_binding:
             if (consumer, family, profile) == ("cli", "git", "managed"):
                 expected.add("managed_url")
         expected |= {"deployment"} & fixture.keys()
+        if requires_cli_workload(fixture["scope"]) and "cli_payload_bytes" in fixture:
+            expected.add("cli_payload_bytes")
+            cli_payload_bytes(fixture)
     fields(fixture, expected, "CDN fixture")
     if not operator_binding:
         require(matches(SHA256, fixture["deployment_policy_sha256"]), "fixture needs an approved deployment policy digest")

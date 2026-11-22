@@ -1072,13 +1072,23 @@ and prefix as digests. The workload requires this confirmation on a
 read-only preflight before sending a push. Each phase uses a fresh scratch
 directory and cache.
 
+For a larger or smaller CLI workload, set `cli_payload_bytes` in the approved
+fixture and use the same value in its benchmark registration. The default is
+262,144 bytes and the qualification worker accepts up to 512 MiB. The
+publication receipt records the payload size and SHA-256. The worker checks
+both against the fetched bytes. The size controls the logical Git blob or LFS
+payload. The fixture's separate `size` field describes the transport canary
+object. Use the retained viewer response sizes to set edge limits for
+physical objects such as compressed Git pack layers.
+
 Run the command below with `inspect` in place of `publish` before preregistering
 the benchmark. Omit `--receipt` for inspection. It reads the exact native
 fixture and returns the executable SHA-256, compiled source SHA, target
 triple, Cargo profile and features, qualification feature state, and
 compiled CDN policy SHA-256 under `candidate`. The policy digest uses LF line
-endings on every platform. Copy `candidate` and `viewer_binding_sha256`
-into each direct CLI benchmark registration. The viewer digest binds the
+endings on every platform. Copy `candidate`, `viewer_binding_sha256` and the
+selected `cli_payload_bytes` into each direct CLI benchmark registration.
+The viewer digest binds the
 approved HTTPS base and access mode. The worker confirms the same binary
 identity on the native publication, fetches, and ref retirement. Every timed
 arm uses the registered binary for its platform. [Cargo build-script environment](https://doc.rust-lang.org/cargo/reference/environment-variables.html#environment-variables-cargo-sets-for-build-scripts)

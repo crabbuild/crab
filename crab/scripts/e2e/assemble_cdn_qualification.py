@@ -17,7 +17,7 @@ from cdn_qualification import (  # noqa: E402
     CACHE_REUSE_CHECK, CDN_PROVENANCE_FIELDS, COMMIT, EXPIRY_CHECKS, GIT_BENCHMARK_DIR, GIT_PRODUCT_DIR, LABEL, PROVIDERS,
     PROVIDER_FOR_EDGE, PUBLIC_EXPORT_BEFORE, PUBLIC_EXPORT_CHECK, PUBLIC_EXPORT_DIR, PUBLIC_EXPORT_FILES,
     PUBLIC_TRANSITION_CHECK, RUN_NUMBER, SCHEMA, SCOPED_VIEW_CHECK, SERVICE_PRODUCT_DIR, SHA256, UNRELATED_VIEWER_CHECK,
-    benchmark_registration, collect_desktop_product_action, collect_git_performance, collect_git_product_action,
+    benchmark_registration, cli_payload_bytes, collect_desktop_product_action, collect_git_performance, collect_git_product_action,
     collect_xorb_read_evidence, collect_sdk_product_action, collect_service_product_action, decode,
     derive_git_blob_public_transition, derive_service_public_transition, fields,
     is_direct_sdk_git_scope, is_direct_xorb_read_scope, is_direct_service_scope,
@@ -193,6 +193,7 @@ def assemble_bundle(
                 native_target = {"origin_sha256": origin, "prefix_sha256": cleanup["prefix_sha256"]}
             if cli_workload:
                 registered_read = {key: registration.get(key) for key in ("candidate", "viewer_binding_sha256")}
+                registered_read["cli_payload_bytes"] = cli_payload_bytes(spec)
                 if managed_git:
                     registered_read["managed_issuer"] = spec["managed_issuer"]
                 product = collect_git_product_action(

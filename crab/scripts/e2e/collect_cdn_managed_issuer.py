@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cdn_qualification import (  # noqa: E402
     CDN_PROVENANCE_FIELDS, COMMIT, GIT_FETCH_RECORD_LIMIT, GIT_PRODUCT_DIR, LABEL, MANAGED_GIT_READ_ROLES,
-    RUN_NUMBER, SHA256, benchmark_registration, decode, fields, is_managed_cli_git_scope, matches,
+    RUN_NUMBER, SHA256, benchmark_registration, cli_payload_bytes, decode, fields, is_managed_cli_git_scope, matches,
     positive, read_git_record, read_trace, require, scope_parts, validate_git_fetch, verify_deployment_policy_trace,
     verify_managed_issuer,
 )
@@ -89,6 +89,8 @@ def collect_managed_issuer(
         }
         action = validate_git_fetch(retained_reads["approved_v2"], provenance, "edge", "managed issuer product fetch",
                                     managed_issuer=issuer)
+        require(action["observed_bytes"] == cli_payload_bytes(fixture) == cli_payload_bytes(registration),
+                "managed issuer evidence differs from the approved CLI payload size")
         report = report | {"product_action": action}
     else:
         action = report["product_action"]
