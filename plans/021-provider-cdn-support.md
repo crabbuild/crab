@@ -55,6 +55,7 @@ still pending.
 |---|---|
 | Activation and placement | Direct boundaries require an explicit private deployment digest agreed by the client and reference issuer. The issuer checks live native placement before signing for all three providers, and the client checks that the confirmed digest belongs to the returned viewer URL and origin. SDK checkout preserves the same digest in the child's operation binding. Managed clients capture the approved binding from authenticated repository resolution and check the digest, native placement, and viewer URL on every v2 grant and renewal. Qualify this contract with the production managed issuer. Operators can attest canonical customer repositories that use the reviewed private policies. Release qualification still requires the dedicated fixture namespace. Qualify placement-aware issuance for same-named origins and cross-region S3 replicas, and verify public source and export placement in each live fixture. |
 | Transfer lifetime | Pack, LFS and xorb origin restarts now share the edge attempt's deadline. File downloads signal cancellation and drain local writes before returning. Qualify failed lease renewal, admission across real provider retries and denial during parallel ranges through the complete operations. |
+| Read limits | Product records now retain expected object and request sizes, the range flag, and the elapsed time of each correlated edge attempt. Exercise boundary sizes on each provider to qualify full-object, range and deadline limits. Compile the matching limits into the release policy and enforce them before edge admission. |
 | Authorization refresh | The direct issuer serves negotiated credentials with `Cache-Control: no-store`. Its client bounds responses and redacts issuer bodies from errors. Negotiated CLI, SDK and desktop direct reads and managed v2 direct reads share one origin and viewer refresh per rejected generation, including cancellation and failure. Online cache reads recheck the grant and reject out-of-scope paths. Local cache-store tests exercise separation by physical target and view, and denial on a warm disk cache. Failed edge-grant renewal also denies online cache reads. Private direct and managed renewal bind the original OIDC issuer and subject. Refresh cache writes cannot overwrite a newer login or undo sign-out. Private checkout passes a principal fingerprint to children. Qualify live renewals, namespace isolation, and terminal denial across the product entry points. |
 | Reader coverage | Authenticated catalog pages, detached capsule controls, native layered payload windows, lazy Git index ranges, and catalog-bound shards can use the CDN. Layered Git point reads and coalesced object batches verify final object IDs after delta reconstruction and own the origin restart. Raw pack passthrough, recovery, consolidation and strict provenance checks use origin. Full LFS streams use bounded edge ranges and hold the final bytes until SHA-256 succeeds. Partial LFS streams use a verified local descriptor or the native version proof. Qualify each reader on live deployments. |
 | Projected-view mounts | Direct Crab Auth mounts acquire and renew an issuer-owned GC claim for the exact projected catalog before admitting Xet reads. The issuer checks the resolved native target, and the mount checks both the catalog digest and the Git commit served by a remote-owned clone. Qualify deployed issuer permissions, actual mounted bytes, lease-loss behavior and clean teardown on S3, GCS and Azure. Managed projected mounts still require issuer integration. |
@@ -603,9 +604,13 @@ and edge payload through redacted observations.
   rejected bytes, refresh and restart outcomes. Retain provider cache logs or
   headers plus origin fill evidence. Product edge attempts emit redacted,
   scope-specific transfer events. The qualification reducer counts completed
-  bodies and incomplete bytes separately. Redact cookies, JWTs, signed URLs and
-  sensitive headers in all client and infrastructure logs. An operator can stop
-  issuance, remove the target binding and revert to authorized origin reads.
+  bodies and incomplete bytes separately. The product record retains each
+  correlated request's read family, expected object and request sizes, range
+  flag, and elapsed time for sizing qualification. Release evidence requires
+  completed requests to agree with those sizes. Redact cookies, JWTs, signed
+  URLs and sensitive headers in all client and infrastructure logs. An
+  operator can stop issuance, remove the target binding and revert to
+  authorized origin reads.
   For a disclosure or deletion, restrict the viewer route, revoke/rotate grants,
   purge edge entries, verify denial on every hostname and record propagation
   time. Already distributed bytes cannot be recalled. Ordinary pushes need no purge.

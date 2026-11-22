@@ -84,6 +84,11 @@ def service_candidate(scope: str, platform: str) -> dict:
     }
 
 
+def range_response(family: str, size: int, cache: str = "hit") -> dict:
+    return {"family": family, "status": 206, "cache": cache, "bytes": size, "complete": True,
+            "range": True, "object_bytes": 2 * size, "requested_bytes": size, "elapsed_ms": 1}
+
+
 def write_product_viewer_proof(client_path: Path, key_sha256: str | None = None, *,
                                    filename: str = CDN.PRODUCT_VIEWER_RECORD) -> None:
     raw = client_path.read_bytes()
@@ -186,8 +191,8 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, nati
                 if provider in CDN.VIEWER_REQUEST_FILES and edge:
                     request_id = hashlib.sha256(f"{location}/{index}/{arm}/viewer".encode()).hexdigest()
                     cache = "miss" if arm == "cold_edge" else "hit"
-                    client["edge_responses"][request_id] = {"status": 206, "cache": cache, "bytes": metrics["edge_bytes"],
-                                                           "complete": True}
+                    family = CDN.scope_parts(registration["scope"])[3]
+                    client["edge_responses"][request_id] = range_response(family, metrics["edge_bytes"], cache)
                     proof[request_id] = {"status": 206, "response_bytes": 800, "cache": cache}
                     if provider in ("s3", "azure"):
                         key_sha256 = hashlib.sha256(f"{location}/{index}/key".encode()).hexdigest()
@@ -271,6 +276,15 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, nati
 
 
 class CdnQualificationTests(unittest.TestCase):
+    def test_release_rejects_inconsistent_retained_transfer_size(self):
+        client = dict.fromkeys(CDN.PRODUCT_COUNTERS, 0) | {
+            "started_at_unix_ms": 1, "finished_at_unix_ms": 2, "elapsed_ms": 1,
+            "all_edge_attempts": 1, "native_traffic": dict.fromkeys(CDN.NATIVE_TRAFFIC_FIELDS, 0),
+            "edge_responses": {"1" * 64: range_response("xorb", 8) | {"requested_bytes": 7}},
+        }
+        with self.assertRaisesRegex(ValueError, "inconsistent completed CDN response"):
+            CDN.verify_git_traffic(client, "cloudfront", "product read")
+
     def setUp(self) -> None:
         temp = TemporaryDirectory()
         self.addCleanup(temp.cleanup)
@@ -589,7 +603,7 @@ class CdnQualificationTests(unittest.TestCase):
                                     "public_export_sha256": self.registration["previous_publication_sha256"]},
             })
         request = "d" * 64
-        response = {"status": 206, "cache": "hit", "bytes": 8, "complete": True}
+        response = range_response("lfs" if lfs_key is not None else "git", 8)
         cache = {"cache_root_sha256": "5" * 64} if lfs_key is not None else {}
         client = json_file(records / "edge.json", common | transition | cache | {
             "arm": "edge", "started_at_unix_ms": edge_at, "finished_at_unix_ms": edge_at + 10,
@@ -653,7 +667,7 @@ class CdnQualificationTests(unittest.TestCase):
         transition = {"transition_key_sha256": self.object_key} if export else {}
         binding = reader | {"binding_sha256": self.registration["viewer_binding_sha256"]}
         request = hashlib.sha256(b"product-git-blob-viewer").hexdigest()
-        response = {"status": 206, "cache": "hit", "bytes": 1, "complete": True}
+        response = range_response("git", 1)
         snapshot = records / (CDN.DESKTOP_READ_RECORD if desktop else "snapshot.json")
         if desktop:
             base["cache_root_sha256"] = "1" * 64

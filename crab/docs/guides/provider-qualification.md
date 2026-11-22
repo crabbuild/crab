@@ -882,8 +882,9 @@ Capture stderr from the normal product operation with
 `CRAB_LOG=crab_storage::cdn::transfer=debug` and a redirected, noninteractive
 stderr. The CDN transport emits one redacted event per product attempt.
 The event identifies the provider, access mode, consumer, read family and
-authorization profile, with HTTP status, received bytes, elapsed time and
-cache disposition. Standalone doctor probes do not produce these events.
+authorization profile. It includes HTTP status, received bytes, elapsed time,
+cache disposition, the expected object and request lengths, and whether the
+request used a range. Standalone doctor probes do not produce these events.
 
 ```bash
 CRAB_LOG=crab_storage::cdn::transfer=debug git fetch origin 2>"$fetch_stderr"
@@ -891,9 +892,11 @@ python3 -B crab/scripts/e2e/collect_cdn_product_metrics.py \
   --stderr "$fetch_stderr" --scope cloudfront/private/cli/git/direct
 ```
 
-Retain only the reduced metrics. A completed transfer proves exact HTTP
-framing and delivery. Git payload readers emit a separate observation after
-accepting an authenticated pack digest or a reconstructed object ID. A
+Retain only the reduced records. When a protected worker joins product reads
+with provider logs, the per-request record preserves the read family, size,
+range flag, and elapsed time alongside the result. A completed transfer proves
+exact HTTP framing and delivery. Git payload readers emit a separate
+observation after accepting an authenticated pack digest or a reconstructed object ID. A
 discarded edge batch reports no verified payloads. For xorb evidence, pass
 `--xorb-key-sha256` with the SHA-256 of the approved physical object key,
 including the projected view's prefix and without a leading slash. The

@@ -411,7 +411,7 @@ class DesktopGitPerformanceQualificationTests(unittest.TestCase):
         client = json.loads(client_path.read_bytes())
         client["all_edge_attempts"] += 1
         new_id = "c" * 64
-        client["edge_responses"][new_id] = {"status": 206, "complete": True, "cache": "hit", "bytes": 500}
+        client["edge_responses"][new_id] = fixture.range_response("capsule", 500)
         digest = fixture.json_file(client_path, client)
         viewer_path = arm / "cloudfront-requests.json"
         proof = json.loads(viewer_path.read_bytes())

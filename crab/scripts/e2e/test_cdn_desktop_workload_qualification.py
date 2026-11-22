@@ -91,6 +91,7 @@ base_url = "{config['base_url']}"
         oid = hashlib.sha1(f"blob {len(self.body)}\0".encode() + self.body, usedforsecurity=False).digest()
         verified = route | {"message": "CDN verified Git payload", "git_blob_oid_sha256": hashlib.sha256(oid).hexdigest()}
         response = route | {"message": "CDN immutable GET", "status": 206, "bytes": 64, "elapsed_ms": 4,
+                            "object_bytes": 1024, "requested_bytes": 64,
                             "cache": "hit", "range": True, "complete": True, "request_sha256": "d" * 64}
         if arm == "edge" and transfer:
             if capsule:

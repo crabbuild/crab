@@ -171,6 +171,9 @@ PRODUCT_COUNTERS = {
     "edge_attempts", "observed_edge_gets", "edge_bytes", "edge_hits", "edge_misses", "edge_unknown",
     "incomplete_edge_bytes", "edge_elapsed_ms_total", "verified_edge_payloads", "all_edge_attempts", "local_payload_hits",
 }
+EDGE_RESPONSE_FIELDS = {
+    "family", "status", "cache", "range", "object_bytes", "requested_bytes", "bytes", "complete", "elapsed_ms",
+}
 GIT_CLIENT_METRICS = {"elapsed_ms", "edge_hits", "edge_misses", "edge_unknown", "edge_bytes", "local_payload_hits"}
 GIT_EXTERNAL_METRICS = METRICS - GIT_CLIENT_METRICS
 NATIVE_TRAFFIC_FIELDS = {"get_responses", "head_responses", "body_bytes"}
@@ -1550,6 +1553,24 @@ def validate_git_fetch(
     return client
 
 
+def verify_edge_response(response: dict[str, Any]) -> None:
+    status, ranged, requested, size = (
+        response["status"], response["range"], response["requested_bytes"], response["object_bytes"],
+    )
+    require(isinstance(response["family"], str) and response["family"] in FAMILIES
+            and type(status) is int and (status == 0 or 100 <= status <= 599)
+            and response["cache"] in ("hit", "miss", "unknown")
+            and type(response["complete"]) is bool and type(ranged) is bool
+            and all(type(response[key]) is int and 0 <= response[key] < 2**64
+                    for key in ("bytes", "elapsed_ms", "object_bytes", "requested_bytes"))
+            and (0 < requested <= size if ranged else requested == size)
+            and (status != 0 or response["bytes"] == 0),
+            "invalid CDN transfer observation")
+    if response["complete"]:
+        require(status == (206 if ranged else 200) and response["bytes"] == requested,
+                "inconsistent completed CDN response")
+
+
 def verify_git_traffic(client: dict[str, Any], edge: str, label: str) -> None:
     start, finish = client["started_at_unix_ms"], client["finished_at_unix_ms"]
     require(positive(start) and positive(finish) and finish >= start and positive(client["elapsed_ms"]),
@@ -1566,11 +1587,9 @@ def verify_git_traffic(client: dict[str, Any], edge: str, label: str) -> None:
             and (not responses or provider in VIEWER_REQUEST_FILES),
             f"{label} has invalid CDN viewer response evidence")
     for request_id, evidence in responses.items():
-        response = fields(evidence, {"status", "cache", "bytes", "complete"}, "CDN viewer response")
-        require(matches(SHA256, request_id) and type(response["status"]) is int and 100 <= response["status"] <= 599
-                and response["cache"] in ("hit", "miss", "unknown") and type(response["complete"]) is bool
-                and type(response["bytes"]) is int and response["bytes"] >= 0,
-                f"{label} has an invalid CDN viewer response")
+        response = fields(evidence, EDGE_RESPONSE_FIELDS, "CDN viewer response")
+        verify_edge_response(response)
+        require(matches(SHA256, request_id) and response["status"] != 0, f"{label} has an invalid CDN viewer response")
     require(client["edge_hits"] + client["edge_misses"] + client["edge_unknown"] == client["observed_edge_gets"]
             <= client["edge_attempts"] <= client["all_edge_attempts"], f"{label} has inconsistent edge counts")
 

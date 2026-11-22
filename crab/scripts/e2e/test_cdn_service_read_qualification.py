@@ -32,6 +32,7 @@ ETAG = '"approved-validator"'
 def events(provider, consumer, family, access):
     route = {"provider": provider, "access": access, "consumer": consumer, "family": family, "profile": "direct"}
     transfer = {"message": "CDN immutable GET", "status": 206, "bytes": 64, "cache": "hit", "range": True,
+                "object_bytes": 1024, "requested_bytes": 64,
                 "complete": True, "elapsed_ms": 1, "request_sha256": "d" * 64}
     payload = {"message": f"CDN verified {'Git' if family == 'git' else 'LFS'} payload", "source": "edge"}
     if family == "git":

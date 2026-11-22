@@ -395,7 +395,7 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
             key_sha256 = hashlib.sha256(key.encode()).hexdigest()
             hydration = {key: report[key] for key in examples.CDN.SDK_HYDRATION_READ_FIELDS & report.keys()} | {
                 "schema": "crab.cdn-sdk-hydration/v1", "scope": config["scope"], "xorb_key_sha256": key_sha256,
-                "configuration_sha256": hydration_config, "edge_responses": {fingerprint: response},
+                "configuration_sha256": hydration_config, "edge_responses": {fingerprint: response | {"family": "xorb"}},
                 "workload_sha256": "1" * 64, "crab_sha256": "2" * 64, "pointer_sha256": "3" * 64,
                 "payload": {"sha256": "4" * 64, "bytes": 8},
             }
@@ -446,7 +446,7 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
             ):
                 with self.subTest(observed_key=observed_key, status=status):
                     snapshot_digest = examples.json_file(client, snapshot | {"edge_responses": {
-                        fingerprint: response | {"status": status},
+                        fingerprint: response if status == 206 else response | {"status": status, "complete": False, "bytes": 0},
                     }})
                     request = {"requestMethod": "GET", "requestUrl": f"{config['base_url']}/{observed_key}",
                                "responseSize": "620", "status": status, "userAgent": tag, "cacheLookup": True}

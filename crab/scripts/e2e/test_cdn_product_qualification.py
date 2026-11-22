@@ -17,7 +17,8 @@ def event(**fields):
     payload = {
         "message": PRODUCT.EVENT, "provider": "s3", "access": "private", "consumer": "cli",
         "family": "git", "profile": "direct", "status": 200, "cache": "hit",
-        "range": False, "bytes": 8, "complete": True, "elapsed_ms": 10, "request_sha256": "",
+        "range": False, "object_bytes": 8, "requested_bytes": 8, "bytes": 8,
+        "complete": True, "elapsed_ms": 10, "request_sha256": "",
     }
     return json.dumps({"target": PRODUCT.TARGET, "fields": payload | fields}).encode()
 
@@ -34,8 +35,8 @@ class CdnProductQualificationTests(unittest.TestCase):
         messages = [
             b"remote: progress",
             event(cache="miss"),
-            event(range=True, status=206, bytes=2),
-            event(cache="unknown", bytes=1),
+            event(range=True, status=206, bytes=2, requested_bytes=2),
+            event(cache="unknown", bytes=1, requested_bytes=1, object_bytes=1),
             event(status=403, bytes=0, complete=False),
             event(bytes=3, complete=False),
             event(family="capsule"),
@@ -56,7 +57,8 @@ class CdnProductQualificationTests(unittest.TestCase):
         })
 
     def test_transport_failure_or_empty_body_cannot_prove_payload_delivery(self):
-        metrics = PRODUCT.measure([event(status=0, bytes=0, complete=False), event(bytes=0)], SCOPE)
+        metrics = PRODUCT.measure([event(status=0, bytes=0, complete=False),
+                                   event(bytes=0, requested_bytes=0, object_bytes=0)], SCOPE)
         self.assertEqual(metrics["edge_attempts"], 2)
         self.assertEqual(metrics["observed_edge_gets"], 0)
 
@@ -99,11 +101,29 @@ class CdnProductQualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "invalid fields in CDN transfer event"):
             PRODUCT.measure([event(headers={"cookie": "fake"})], SCOPE)
 
+    def test_rejects_inconsistent_sizes_even_for_other_families(self):
+        for change, error in (
+            ({"object_bytes": 4}, "invalid CDN transfer observation"),
+            ({"range": True, "requested_bytes": 0}, "invalid CDN transfer observation"),
+            ({"range": True, "requested_bytes": 4, "status": 206}, "inconsistent completed CDN response"),
+            ({"elapsed_ms": True}, "invalid CDN transfer observation"),
+        ):
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, error):
+                PRODUCT.measure([event(family="capsule", **change)], SCOPE)
+
     def test_cloudfront_request_fingerprints_bind_all_families_without_entering_metrics(self):
         responses = {}
-        observed = PRODUCT.measure([event(request_sha256="a" * 64), event(family="capsule", request_sha256="b" * 64)],
-                                   SCOPE, edge_responses=responses)
-        self.assertEqual(set(responses), {"a" * 64, "b" * 64})
+        observed = PRODUCT.measure([
+            event(request_sha256="a" * 64),
+            event(family="capsule", request_sha256="b" * 64, status=206, range=True, object_bytes=24),
+        ], SCOPE, edge_responses=responses)
+        self.assertEqual(responses["a" * 64], {
+            "family": "git", "status": 200, "cache": "hit", "range": False, "object_bytes": 8,
+            "requested_bytes": 8, "bytes": 8, "complete": True, "elapsed_ms": 10,
+        })
+        self.assertEqual(responses["b" * 64], responses["a" * 64] | {
+            "family": "capsule", "status": 206, "range": True, "object_bytes": 24,
+        })
         self.assertEqual(observed["observed_edge_gets"], 1)
         with self.assertRaisesRegex(ValueError, "duplicate CDN viewer request fingerprint"):
             PRODUCT.measure([event(request_sha256="a" * 64)], SCOPE, edge_responses=responses)

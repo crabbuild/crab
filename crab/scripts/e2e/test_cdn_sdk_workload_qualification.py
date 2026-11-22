@@ -68,6 +68,7 @@ class CdnSdkWorkloadQualificationTests(unittest.TestCase):
                  "consumer": "sdk", "family": "git", "profile": "direct"}
         transfer = {"target": "crab_storage::cdn::transfer", "fields": route | {
             "message": "CDN immutable GET", "status": 206, "bytes": 64, "elapsed_ms": 1, "cache": "hit",
+            "object_bytes": 1024, "requested_bytes": 64,
             "range": True, "complete": True, "request_sha256": "d" * 64,
         }}
         verify = {"target": "crab_storage::cdn::transfer", "fields": route | {

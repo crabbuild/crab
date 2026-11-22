@@ -317,6 +317,7 @@ pub(super) struct Transfer {
     family: CdnReadFamily,
     started: Instant,
     size: u64,
+    requested_bytes: u64,
     range: bool,
     status: u16,
     cache: &'static str,
@@ -329,6 +330,7 @@ impl Transfer {
     pub(super) fn start(
         (policy, family): (CdnPolicy, CdnReadFamily),
         size: u64,
+        requested_bytes: u64,
         range: bool,
     ) -> Option<Self> {
         tracing::enabled!(target: TARGET, tracing::Level::DEBUG).then(|| Self {
@@ -336,6 +338,7 @@ impl Transfer {
             family,
             started: Instant::now(),
             size,
+            requested_bytes,
             range,
             status: 0,
             cache: "unknown",
@@ -404,6 +407,8 @@ impl Drop for Transfer {
             request_sha256 = request_sha256.as_str(),
             cache = self.cache,
             range = self.range,
+            object_bytes = self.size,
+            requested_bytes = self.requested_bytes,
             bytes = self.bytes,
             complete = self.complete,
             elapsed_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),

@@ -717,7 +717,7 @@ async fn product_read_records_one_redacted_transfer_for_its_actual_scope() {
         panic!("expected one event for one GET")
     };
     let fields = &event.0;
-    assert_eq!(fields.len(), 13);
+    assert_eq!(fields.len(), 15);
     let fingerprint = format!("\"{:x}\"", Sha256::digest("opaque-viewer-id=="));
     assert_eq!(fields["request_sha256"], fingerprint);
     for (name, expected) in [
@@ -729,6 +729,8 @@ async fn product_read_records_one_redacted_transfer_for_its_actual_scope() {
         ("cache", "\"hit\""),
         ("status", "206"),
         ("range", "true"),
+        ("object_bytes", "6"),
+        ("requested_bytes", "2"),
         ("bytes", "2"),
         ("complete", "true"),
     ] {

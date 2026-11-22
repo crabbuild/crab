@@ -12,8 +12,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cdn_qualification import (  # noqa: E402
-    NATIVE_TRAFFIC_FIELDS, PRODUCT_COUNTERS, PROVIDER_FOR_EDGE, SHA256,
-    VIEWER_REQUEST_FILES, decode, fields, matches, require, scope_parts,
+    EDGE_RESPONSE_FIELDS, NATIVE_TRAFFIC_FIELDS, PRODUCT_COUNTERS, PROVIDER_FOR_EDGE, SHA256,
+    VIEWER_REQUEST_FILES, decode, fields, matches, require, scope_parts, verify_edge_response,
 )
 
 
@@ -26,7 +26,7 @@ VERIFIED_XORB_EVENT = "CDN verified xorb payload"
 ROUTE = ("provider", "access", "consumer", "family", "profile")
 ROUTE_FIELDS = {"message", *ROUTE}
 VERIFIED_FIELDS = ROUTE_FIELDS | {"source"}
-TRANSFER_FIELDS = ROUTE_FIELDS | {"status", "cache", "range", "bytes", "complete", "elapsed_ms", "request_sha256"}
+TRANSFER_FIELDS = ROUTE_FIELDS | EDGE_RESPONSE_FIELDS | {"request_sha256"}
 NATIVE_TARGET = "crab_storage::native_read"
 NATIVE_TARGET_MARKER = NATIVE_TARGET.encode()
 
@@ -114,35 +114,27 @@ def measure(lines: Iterable[bytes], scope: str, *, edge_responses: dict | None =
             continue
         event = fields(event, TRANSFER_FIELDS, "CDN transfer event")
         require(event["message"] == EVENT, "unrecognized CDN transfer event")
+        verify_edge_response(event)
         metrics["all_edge_attempts"] += 1
         request_id = event["request_sha256"]
         provider = event["provider"]
-        require(request_id == "" or (isinstance(provider, str) and provider in VIEWER_REQUEST_FILES and matches(SHA256, request_id)),
+        require(request_id == "" or (event["status"] != 0 and isinstance(provider, str)
+                and provider in VIEWER_REQUEST_FILES and matches(SHA256, request_id)),
                 "invalid CDN viewer request fingerprint")
         if edge_responses is not None and request_id:
             require(request_id not in edge_responses, "duplicate CDN viewer request fingerprint")
-            edge_responses[request_id] = {key: event[key] for key in ("status", "cache", "bytes", "complete")}
+            edge_responses[request_id] = {key: event[key] for key in EDGE_RESPONSE_FIELDS}
         route = tuple(event[name] for name in ROUTE)
         if route != selected:
             continue
-        status = event["status"]
         body = event["bytes"]
-        elapsed = event["elapsed_ms"]
-        complete = event["complete"]
-        ranged = event["range"]
-        cache = event["cache"]
-        require(type(status) is int and (status == 0 or 100 <= status <= 599)
-                and type(body) is int and body >= 0 and type(elapsed) is int and elapsed >= 0
-                and type(complete) is bool and type(ranged) is bool and cache in ("hit", "miss", "unknown"),
-                "invalid CDN transfer observation")
         metrics["edge_attempts"] += 1
-        metrics["edge_elapsed_ms_total"] += elapsed
-        if complete:
-            require(status == (206 if ranged else 200), "inconsistent completed CDN response")
+        metrics["edge_elapsed_ms_total"] += event["elapsed_ms"]
+        if event["complete"]:
             if body > 0:
                 metrics["observed_edge_gets"] += 1
                 metrics["edge_bytes"] += body
-                category = {"hit": "edge_hits", "miss": "edge_misses", "unknown": "edge_unknown"}[cache]
+                category = {"hit": "edge_hits", "miss": "edge_misses", "unknown": "edge_unknown"}[event["cache"]]
                 metrics[category] += 1
         else:
             metrics["incomplete_edge_bytes"] += body
