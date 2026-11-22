@@ -9,7 +9,11 @@ use uuid::Uuid;
 use crate::{
     app::{self, Error, Result},
     auth::Principal,
-    cells::{Address, directory::RegisterAccounts, repository::collaboration::watches},
+    cells::{
+        Address, CellClient,
+        directory::RegisterAccounts,
+        repository::collaboration::{Subject, SubjectKind, watches},
+    },
     repository::{Repository, access::actor_id},
     server::Server,
 };
@@ -39,22 +43,8 @@ pub(super) async fn set(
     if desired.version > app::MAX_NUMBER {
         return Err(Error::Invalid("Notification preference version is invalid"));
     }
-    let identity = app::account(&principal)?;
     let cell = app::repository_cell(&server, &repo)?;
-    let accounts = app::command_output(
-        cell.client
-            .command::<RegisterAccounts>(
-                Address::Directory,
-                app::mutation_identity()?,
-                vec![identity],
-            )
-            .await,
-    )?;
-    let [actor] = accounts.as_slice() else {
-        return Err(Error::CellContract(
-            "Notification account registration is inconsistent",
-        ));
-    };
+    let actor = register(&cell.client, &principal).await?;
     app::membership(&server, &principal, &repo).await?;
     app::account(&principal)?;
     let preference = app::command_output(
@@ -62,10 +52,7 @@ pub(super) async fn set(
             .command::<watches::Set>(
                 &cell.target,
                 app::mutation_identity()?,
-                watches::Change {
-                    actor: *actor,
-                    desired,
-                },
+                watches::Change { actor, desired },
             )
             .await,
     )?;
@@ -83,4 +70,93 @@ pub(super) async fn read(
             .query::<watches::Get>(&cell.target, None, actor)
             .await,
     )
+}
+
+async fn register(client: &CellClient, principal: &Principal) -> Result<Uuid> {
+    let identity = app::account(principal)?;
+    let accounts = app::command_output(
+        client
+            .command::<RegisterAccounts>(
+                Address::Directory,
+                app::mutation_identity()?,
+                vec![identity],
+            )
+            .await,
+    )?;
+    match accounts.as_slice() {
+        [actor] => Ok(*actor),
+        _ => Err(Error::CellContract(
+            "Notification account registration is inconsistent",
+        )),
+    }
+}
+
+fn subject(discussion: &str, number: u64) -> Result<Subject> {
+    let kind = match discussion {
+        "issues" => SubjectKind::Issue,
+        "pulls" => SubjectKind::Pull,
+        _ => return Err(Error::NotFound),
+    };
+    Ok(Subject {
+        kind,
+        number: app::number(number)?,
+    })
+}
+
+pub(super) async fn get_thread(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((owner, name, discussion, number)): Path<(String, String, String, u64)>,
+) -> Result<Json<watches::ThreadPreference>> {
+    let subject = subject(&discussion, number)?;
+    let repo = app::repository(&server, &principal, &(owner, name))?;
+    let actor = actor_id(&server, app::account(&principal)?).await?;
+    let cell = app::repository_cell(&server, &repo)?;
+    let preference = app::query_output(
+        cell.client
+            .query::<watches::GetThread>(
+                &cell.target,
+                None,
+                watches::ThreadAccount { subject, actor },
+            )
+            .await,
+    )?;
+    app::membership(&server, &principal, &repo).await?;
+    app::account(&principal)?;
+    preference.map(Json).ok_or(Error::NotFound)
+}
+
+pub(super) async fn set_thread(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((owner, name, discussion, number)): Path<(String, String, String, u64)>,
+    Json(desired): Json<watches::ThreadPreference>,
+) -> Result<Json<watches::ThreadPreference>> {
+    let subject = subject(&discussion, number)?;
+    let repo = app::repository(&server, &principal, &(owner, name))?;
+    if desired.version > app::MAX_NUMBER {
+        return Err(Error::Invalid("Notification preference version is invalid"));
+    }
+    let cell = app::repository_cell(&server, &repo)?;
+    let actor = register(&cell.client, &principal).await?;
+    app::membership(&server, &principal, &repo).await?;
+    app::account(&principal)?;
+    let outcome = app::command_output(
+        cell.client
+            .command::<watches::SetThread>(
+                &cell.target,
+                app::mutation_identity()?,
+                watches::ThreadChange {
+                    subject,
+                    actor,
+                    desired,
+                },
+            )
+            .await,
+    )?;
+    match outcome {
+        watches::ThreadOutcome::Saved(preference) => Ok(Json(preference)),
+        watches::ThreadOutcome::Missing => Err(Error::NotFound),
+        watches::ThreadOutcome::Stale => Err(Error::Conflict),
+    }
 }

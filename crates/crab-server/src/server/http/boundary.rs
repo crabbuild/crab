@@ -334,9 +334,15 @@ async fn archived_mutation_response(
     let owner = segments.next()?;
     let name = segments.next()?;
     let action = segments.next()?;
+    let discussion_preference = matches!(action, "issues" | "pulls")
+        && matches!(
+            (segments.next(), segments.next(), segments.next()),
+            (Some(_), Some("subscription"), None)
+        );
     // Membership belongs to the catalog, including archived repositories. Its
     // handler must authorize against that revision before any Cell response.
     if (matches!(action, "members" | "team-access" | "subscription") && segments.next().is_none())
+        || discussion_preference
         || path == format!("/api/repos/{owner}/{name}/settings/integrations")
     {
         return None;

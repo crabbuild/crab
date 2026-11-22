@@ -51,6 +51,7 @@ pub(in crate::cells) fn dispatch_mutation(
         mentions::Acknowledge::ID => invoke_mutation::<mentions::Acknowledge>(context, input),
         mention_settings::Set::ID => invoke_mutation::<mention_settings::Set>(context, input),
         watches::Set::ID => invoke_mutation::<watches::Set>(context, input),
+        watches::SetThread::ID => invoke_mutation::<watches::SetThread>(context, input),
         #[cfg(test)]
         projection::tests::Historical::ID => {
             invoke_mutation::<projection::tests::Historical>(context, input)
@@ -263,6 +264,7 @@ pub(in crate::cells) fn dispatch_read(
         mentions::Pending::ID => invoke_read::<mentions::Pending>(context, input),
         mention_settings::Get::ID => invoke_read::<mention_settings::Get>(context, input),
         watches::Get::ID => invoke_read::<watches::Get>(context, input),
+        watches::GetThread::ID => invoke_read::<watches::GetThread>(context, input),
         watches::ListWatchers::ID => invoke_read::<watches::ListWatchers>(context, input),
         watches::Unmuted::ID => invoke_read::<watches::Unmuted>(context, input),
         #[cfg(test)]

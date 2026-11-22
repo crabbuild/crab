@@ -1,4 +1,4 @@
-import { RepositoryWatch } from "./watch";
+import { RepositoryWatch } from "@/features/notifications/preferences";
 import { PaneResizer } from "@/components/layout/pane-resizer";
 import { useWorkspaceHeight } from "@/components/layout/use-workspace-height";
 import { Link } from "@/components/navigation/link";

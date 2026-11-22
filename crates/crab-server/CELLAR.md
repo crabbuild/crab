@@ -327,7 +327,12 @@ Watch delivery scans at most 32 index keys per event per sweep and commits
 the exclusive cursor after Directory accepts the page. Replayed
 acknowledgements cannot move the cursor backwards. Delivery checks current
 roster and mute state. Inbox reads check current account, repository grant,
-and mute state before revealing existing notices.
+and mute state before revealing existing notices. Issue and pull request
+overrides use typed subject addresses. The watcher read merges bounded pages
+from the repository and subject indexes, applies the private override to the
+committed event, and emits each eligible actor once. Unsubscribing from a
+discussion updates future activity delivery. Direct activity uses the same
+repository mute rules as before.
 
 Discussion author enrichment uses the bounded native `LookupActors` read (Directory
 operation 6). It resolves qualified private keys into public UUID/handle/name

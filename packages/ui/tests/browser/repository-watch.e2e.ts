@@ -66,3 +66,76 @@ test("repository watch preferences recover a lost reply and refresh the unread b
   await watch.click();
   await expect(choice).toHaveValue("muted");
 });
+
+test("pull request notification settings reload a newer choice before retrying", async ({
+  page,
+}) => {
+  const { lifecycle } = await mockPullRequest(page);
+  let preference = { mode: "inherit", version: 0 };
+  let reads = 0;
+  await page.route("**/api/session", (route) =>
+    route.fulfill({
+      json: {
+        authenticated: true,
+        mode: "oidc",
+        user: { name: "Bob", subject: "bob", issuer: "https://issuer.test" },
+        csrf: "fixture-csrf",
+      },
+    }),
+  );
+  await page.route(
+    (url) => url.pathname === "/api/repos/team/project/pulls/1/subscription",
+    (route) => {
+      const request = route.request();
+      if (request.method() === "GET") {
+        reads += 1;
+        return route.fulfill({ json: preference });
+      }
+      expect(request.method()).toBe("PUT");
+      expect(request.headers()["x-crab-repository-id"]).toBe(
+        lifecycle.repositoryId,
+      );
+      expect(request.headers()["x-csrf-token"]).toBe("fixture-csrf");
+      const update = request.postDataJSON();
+      expect(update.mode).toBe("state_changes");
+      if (update.version === 0 && preference.version === 1) {
+        return route.fulfill({
+          status: 409,
+          json: {
+            error: { code: "conflict", message: "Newer preference saved." },
+          },
+        });
+      }
+      expect(update.version).toBe(1);
+      preference = { mode: "state_changes", version: 2 };
+      return route.fulfill({ json: preference });
+    },
+  );
+  await page.goto("/team/project/pull/1");
+  const trigger = page.getByRole("button", { name: "Notification settings" });
+  await expect(trigger).toBeVisible();
+  expect(reads).toBe(0);
+  await trigger.click();
+  const dialog = page.getByRole("dialog", {
+    name: "Pull request notifications",
+  });
+  const choice = dialog.getByLabel("Notify me about");
+  const save = dialog.getByRole("button", { name: "Save preference" });
+  await expect(choice).toHaveValue("inherit");
+  await expectNoAccessibilityViolations(page);
+
+  preference = { mode: "follow", version: 1 };
+  await choice.selectOption("state_changes");
+  await save.click();
+  await expect(dialog.getByRole("alert")).toHaveText("Newer preference saved.");
+  await expect(save).toBeDisabled();
+  await dialog.getByRole("button", { name: "Reload preference" }).click();
+  await expect(choice).toHaveValue("follow");
+  await choice.selectOption("state_changes");
+  await save.click();
+  await expect(dialog).toBeHidden();
+
+  await page.reload();
+  await trigger.click();
+  await expect(choice).toHaveValue("state_changes");
+});

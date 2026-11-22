@@ -1,3 +1,4 @@
+import { DiscussionWatch } from "@/features/notifications/preferences";
 import { DiscussionProjects } from "@/features/projects/discussion";
 import { useId, useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
@@ -362,6 +363,7 @@ export function DiscussionMetadata({
         csrf={csrf}
         onSaved={onSaved}
       />
+      {csrf && <DiscussionWatch repo={repo} csrf={csrf} subject={path} />}
       {children}
     </aside>
   );

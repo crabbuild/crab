@@ -229,7 +229,7 @@ async fn deliver(
                             Address::Repository(repo.id),
                             None,
                             watches::Query {
-                                kind: event.target.subject().kind,
+                                subject: event.target.subject(),
                                 activity: event.version,
                                 before: watch.before,
                             },

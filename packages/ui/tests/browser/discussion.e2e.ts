@@ -20,6 +20,8 @@ async function openDiscussion(page: Page) {
   };
   let issue = { ...record, title: "Keyboard discussion", state: "open" };
   const comments = [{ ...record, body: "Original comment" }];
+  const repositoryId = "00000000-0000-4000-8000-000000000099";
+  let preference = { mode: "inherit", version: 0 };
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
@@ -68,11 +70,25 @@ async function openDiscussion(page: Page) {
         csrf: "test-csrf",
         user: { issuer: "test", subject: "alice", name: "Alice" },
       };
+    } else if (path === "/api/notifications/unread") {
+      expect(request.method()).toBe("GET");
+      json = { unread: false };
+    } else if (path === "/api/repos/team/project/issues/1/subscription") {
+      if (request.method() === "PUT") {
+        expect(request.headers()["x-csrf-token"]).toBe("test-csrf");
+        expect(request.headers()["x-crab-repository-id"]).toBe(repositoryId);
+        const input = request.postDataJSON();
+        expect(input).toEqual({ mode: "follow", version: preference.version });
+        preference = { mode: input.mode, version: preference.version + 1 };
+      } else {
+        expect(request.method()).toBe("GET");
+      }
+      json = preference;
     } else if (path === "/api/repos") {
       json = {
         repositories: [
           {
-            id: "00000000-0000-4000-8000-000000000099",
+            id: repositoryId,
             owner: "team",
             name: "project",
             description: "",
@@ -177,6 +193,22 @@ async function openDiscussion(page: Page) {
     },
   };
 }
+
+test("issue notification settings save a discussion override", async ({
+  page,
+}) => {
+  await openDiscussion(page);
+  const trigger = page.getByRole("button", { name: "Notification settings" });
+  await trigger.click();
+  const dialog = page.getByRole("dialog", { name: "Issue notifications" });
+  const choice = dialog.getByLabel("Notify me about");
+  await expect(choice).toHaveValue("inherit");
+  await choice.selectOption("follow");
+  await dialog.getByRole("button", { name: "Save preference" }).click();
+  await expect(dialog).toBeHidden();
+  await trigger.click();
+  await expect(choice).toHaveValue("follow");
+});
 
 test("adding an issue to a project uses a new item revision independently of project settings", async ({
   page,

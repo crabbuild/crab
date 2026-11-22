@@ -1,5 +1,5 @@
 import { BellIcon } from "lucide-react";
-import { useState } from "react";
+import { useId, useState } from "react";
 import { useMutation } from "@/components/discussion/mutations";
 import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
@@ -15,10 +15,10 @@ import {
   NativeSelect,
   NativeSelectOption,
 } from "@/components/ui/native-select";
-import { refreshNotificationBadge } from "@/features/notifications";
+import { refreshNotificationBadge } from "./index";
 import { endpoint, useRequest, type Repository } from "@/lib/api";
 
-const modes = {
+const repositoryModes = {
   direct: "Direct notifications",
   issues: "Issue updates",
   pull_requests: "Pull request updates",
@@ -26,8 +26,14 @@ const modes = {
   muted: "Muted",
 };
 
-type Mode = keyof typeof modes;
-type Preference = { mode: Mode; version: number };
+const discussionModes = {
+  inherit: "Use repository setting",
+  follow: "All discussion activity",
+  state_changes: "State changes only",
+  unsubscribed: "Unsubscribe from updates",
+};
+
+type Preference = { mode: string; version: number };
 
 export function RepositoryWatch({
   repo,
@@ -36,9 +42,69 @@ export function RepositoryWatch({
   repo: Repository;
   csrf: string;
 }) {
+  return (
+    <NotificationPreference
+      repo={repo}
+      csrf={csrf}
+      path={endpoint(repo, "subscription")}
+      modes={repositoryModes}
+      label="Watch"
+      title="Repository notifications"
+      description={`Choose what appears in your inbox for ${repo.owner}/${repo.name}. Direct notifications include assignments, review requests, and mentions.`}
+    />
+  );
+}
+
+export function DiscussionWatch({
+  repo,
+  csrf,
+  subject,
+}: {
+  repo: Repository;
+  csrf: string;
+  subject: string;
+}) {
+  const title = subject.startsWith("issues/")
+    ? "Issue notifications"
+    : "Pull request notifications";
+  return (
+    <section>
+      <header>
+        <strong>Notifications</strong>
+      </header>
+      <NotificationPreference
+        repo={repo}
+        csrf={csrf}
+        path={endpoint(repo, `${subject}/subscription`)}
+        modes={discussionModes}
+        label="Notification settings"
+        title={title}
+        description="Choose which future updates appear in your inbox. Direct mentions, assignments, and review requests use your repository notification settings."
+      />
+    </section>
+  );
+}
+
+function NotificationPreference({
+  repo,
+  csrf,
+  path,
+  modes,
+  label,
+  title,
+  description,
+}: {
+  repo: Repository;
+  csrf: string;
+  path: string;
+  modes: Record<string, string>;
+  label: string;
+  title: string;
+  description: string;
+}) {
+  const modeId = useId();
   const [open, setOpen] = useState(false);
-  const [draft, setDraft] = useState<Mode>();
-  const path = endpoint(repo, "subscription");
+  const [draft, setDraft] = useState<string>();
   const preference = useRequest<Preference>(open ? path : null);
   const mutation = useMutation(csrf, repo);
 
@@ -55,19 +121,15 @@ export function RepositoryWatch({
       <DialogTrigger asChild>
         <Button variant="outline" size="sm" className="shrink-0">
           <BellIcon data-icon="inline-start" />
-          Watch
+          {label}
         </Button>
       </DialogTrigger>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Repository notifications</DialogTitle>
-          <DialogDescription>
-            Choose what appears in your inbox for {repo.owner}/{repo.name}.
-            Direct notifications include assignments, review requests, and
-            mentions.
-          </DialogDescription>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
-        <Result state={preference} timingLabel="Repository subscription">
+        <Result state={preference} timingLabel={title}>
           {(saved) => (
             <form
               className="grid gap-3"
@@ -84,14 +146,14 @@ export function RepositoryWatch({
                 }
               }}
             >
-              <label className="text-sm font-medium" htmlFor="watch-mode">
+              <label className="text-sm font-medium" htmlFor={modeId}>
                 Notify me about
               </label>
               <NativeSelect
-                id="watch-mode"
+                id={modeId}
                 value={draft ?? saved.mode}
                 disabled={mutation.pending}
-                onChange={(event) => setDraft(event.target.value as Mode)}
+                onChange={(event) => setDraft(event.target.value)}
               >
                 {Object.entries(modes).map(([value, label]) => (
                   <NativeSelectOption key={value} value={value}>

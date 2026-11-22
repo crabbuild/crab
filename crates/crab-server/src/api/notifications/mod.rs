@@ -41,6 +41,10 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
             "/api/repos/{owner}/{name}/subscription",
             get(subscriptions::get).put(subscriptions::set),
         )
+        .route(
+            "/api/repos/{owner}/{name}/{discussion}/{number}/subscription",
+            get(subscriptions::get_thread).put(subscriptions::set_thread),
+        )
         .layer(DefaultBodyLimit::max(1024))
         .route_layer(middleware::from_fn_with_state(server, app::admit))
 }

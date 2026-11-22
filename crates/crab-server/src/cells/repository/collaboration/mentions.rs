@@ -236,7 +236,7 @@ pub(in crate::cells::repository) fn assigned(
 }
 
 pub(super) fn watched(context: &Transaction<'_>, source: &super::activity::Event) -> Result<()> {
-    if !watches::active(context)? {
+    if !watches::active(context, source.target.subject())? {
         return Ok(());
     }
     let event = Event {
