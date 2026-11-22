@@ -110,7 +110,11 @@ impl RemoteGitReader {
             })
             .await?;
         if from_edge && let Some(observation) = attempt.payload_observation() {
-            observation.record_verified();
+            if object.kind == gix_object::Kind::Blob {
+                observation.record_verified_git_blob(requested.as_bytes());
+            } else {
+                observation.record_verified();
+            }
         }
         Ok(object)
     }

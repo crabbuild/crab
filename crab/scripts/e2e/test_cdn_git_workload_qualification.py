@@ -458,6 +458,16 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         self.assertIn("warm-local fetch must use a verified local payload", missed.stderr)
         self.assertTrue(self.run_phase("retire")["ref_retired"])
 
+    def test_native_writer_publishes_and_retires_on_behalf_of_an_sdk_fixture(self) -> None:
+        config = fixture(access="private") | {"scope": "cloudfront/private/sdk/git/direct"}
+        raw = json.dumps(config).encode()
+        self.fixture.write_bytes(raw)
+        self.digest = hashlib.sha256(raw).hexdigest()
+        self.assertTrue(self.run_phase("publish")["visible_new_ref"])
+        self.assertEqual(json.loads(self.receipt.read_bytes())["scope"], config["scope"])
+        self.assertNotEqual(self.call("fetch").returncode, 0)
+        self.assertTrue(self.run_phase("retire")["ref_retired"])
+
     def test_rejects_unapproved_fixture_or_another_runs_receipt(self) -> None:
         rejected = self.call("publish", digest="f" * 64)
         self.assertEqual(rejected.returncode, 1, rejected.stdout)

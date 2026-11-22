@@ -680,6 +680,13 @@ run and attempt to bind each observation.
 | Managed release | Preregister the production issuer's identity digest and deployed version and the binding receipt digest in `managed_issuer`. The verifier requires a `crab.cdn-managed-issuer/v1` trace for the same platform and workflow attempt. It checks the authenticated resolution digest, attested private placement, matching v2 request and HTTP 201 grant, and the ordinary action's verified output and edge observations. A v1 peer must verify the same output through native reads. HTTP 403 and a v2 grant with a different approval must each terminate with a single v2 request and zero payload reads. The protected production observation job remains open. |
 | Other consumers and read families | Retain action records, verified outputs and associated provider/runner measurements for the row's actual entry point. Recompute the product and performance summaries from those inputs, as the direct CLI Git reducer does. For native controls, compare normal authorization behavior and check that the candidate feature set matches the shipped build. |
 
+The SDK Git snapshot collector uses the ordinary SDK open, snapshot and read
+APIs through `crates/crab-sdk/examples/cdn-sdk-read.rs`. It binds redacted edge
+and native controls to a confirmed native publication and an exact SDK probe
+build. An edge sample needs the verified Git object ID fingerprint for the blob
+delivered to the caller. The protected worker still needs live runs, regional
+pairing, and release assembly and verification of the SDK records.
+
 The protected workflow or its dedicated workers own producing these raw
 observations. The assembly and release jobs own rejecting missing, mismatched
 or semantically incomplete records. Until each affected check has both a live

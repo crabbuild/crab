@@ -51,7 +51,8 @@ def measure_native(lines: Iterable[bytes], scope: str) -> dict[str, int]:
     return metrics
 
 
-def measure(lines: Iterable[bytes], scope: str, *, edge_responses: dict | None = None) -> dict[str, int]:
+def measure(lines: Iterable[bytes], scope: str, *, edge_responses: dict | None = None,
+            expected_git_blob: str | None = None) -> dict[str, int]:
     edge, access, consumer, family, profile = scope_parts(scope)
     selected = (PROVIDER_FOR_EDGE[edge], access, consumer, family, profile)
     metrics = dict.fromkeys(PRODUCT_COUNTERS, 0)
@@ -63,12 +64,17 @@ def measure(lines: Iterable[bytes], scope: str, *, edge_responses: dict | None =
             continue
         event = line.get("fields")
         if isinstance(event, dict) and event.get("message") in (VERIFIED_GIT_EVENT, VERIFIED_LFS_EVENT):
-            fields(event, VERIFIED_FIELDS, "CDN verified payload event")
+            blob = "git_blob_oid_sha256"
+            fields(event, VERIFIED_FIELDS | ({blob} if blob in event else set()), "CDN verified payload event")
             source = event["source"]
             lfs = event["message"] == VERIFIED_LFS_EVENT
             require(lfs == (event["family"] == "lfs") and source in ("edge", "local"),
                     "unknown verified payload source or family")
+            require(blob not in event or (not lfs and source == "edge" and matches(SHA256, event[blob])),
+                    "invalid verified CDN Git blob fingerprint")
             if tuple(event[name] for name in ROUTE) == selected:
+                if expected_git_blob is not None and event.get(blob) != expected_git_blob:
+                    continue
                 metric = "verified_edge_payloads" if source == "edge" else "local_payload_hits"
                 metrics[metric] += 1
             continue

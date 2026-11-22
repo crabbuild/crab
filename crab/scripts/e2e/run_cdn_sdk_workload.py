@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""Verify an ordinary SDK Git snapshot read of a published CDN fixture."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+from collect_cdn_product_metrics import measure, measure_native
+from cdn_viewer_issuer import issuer_settings
+from run_cdn_git_workload import approved_public_export, runner_platform
+from run_cdn_transport_checks import approved_fixture
+
+from cdn_qualification import (
+    COMMIT, GIT_PAYLOAD_SIZE, RUN_NUMBER, SHA256, decode, fields, is_direct_sdk_git_scope, matches,
+    read_git_record, require, scope_parts, validate_git_publication,
+)
+from public_inventory import ExportError
+
+
+PRIVATE_READER_FIELDS = {"oidc_issuer", "oidc_client_id", "token_cache_directory"}
+PROBE_FIELDS = {"commit", "sha256", "bytes", "source_sha", "qualification_feature", "git_blob_oid_sha256"}
+
+
+def binding_for(args: argparse.Namespace, fixture: dict) -> tuple[dict, str]:
+    access = scope_parts(fixture["scope"])[1]
+    if access == "private":
+        require(args.private_reader is not None and args.export_approval is None,
+                "private SDK reads require the trusted issuer configuration")
+        issuer = fields(decode(read_git_record(args.private_reader)), PRIVATE_READER_FIELDS, "SDK issuer configuration")
+        require(all(isinstance(value, str) and bool(value) for value in issuer.values())
+                and Path(issuer["token_cache_directory"]).is_absolute(),
+                "SDK issuer values must include an absolute token-cache directory")
+        endpoint, _, approved_issuer = issuer_settings(fixture)
+        approval = approved_issuer if args.arm == "edge" else ""
+        return {"access": access, **issuer, "endpoint": endpoint.geturl(), "approval_sha256": approval or None}, approval
+    require(args.private_reader is None and ((args.export_approval is not None) == (args.arm == "edge")),
+            "public SDK edge reads require the approved export directory")
+    publication, approval = None, ""
+    if args.export_approval is not None:
+        approval, _, _ = approved_public_export(args.export_approval, fixture)
+        publication = {"path": str((args.export_approval / "publication.json").resolve()), "sha256": approval}
+    return {"access": access, "export_origin": fixture["export_origin"], "publication": publication}, approval
+
+
+def fetch(args: argparse.Namespace) -> dict:
+    require(matches(COMMIT, args.source_sha) and matches(RUN_NUMBER, args.run_id)
+            and matches(RUN_NUMBER, args.run_attempt), "exact workflow run provenance is required")
+    fixture = approved_fixture(args.fixture, args.configuration_sha256)
+    scope = fixture["scope"]
+    require(is_direct_sdk_git_scope(scope) and fixture["view_suffix"] == "",
+            "SDK snapshot qualification uses a direct Git fixture on the repository prefix")
+    provenance = {"scope": scope, "configuration_sha256": args.configuration_sha256, "source_sha": args.source_sha,
+                  "workflow_run_id": args.run_id, "workflow_run_attempt": args.run_attempt}
+    raw = read_git_record(args.receipt)
+    publication = validate_git_publication(raw, provenance)
+    require(publication["published"], "SDK read requires a confirmed native publication")
+    binding, approval = binding_for(args, fixture)
+    request = {"origin": fixture["native_origin"], "repository_prefix": fixture["fixture_prefix"],
+               "base_url": fixture["base_url"], "branch": publication["ref"].removeprefix("refs/heads/"),
+               "expected_oid": publication["oid"], "expected_sha256": publication["sha256"],
+               "expected_bytes": GIT_PAYLOAD_SIZE, "binding": binding}
+    probe = args.probe.resolve(strict=True)
+    with probe.open("rb") as binary:
+        probe_digest = hashlib.file_digest(binary, "sha256").hexdigest()
+    started_at = time.time_ns() // 1_000_000
+    require(publication["visible_at_unix_ms"] <= started_at, "SDK measurement started before native publication")
+    started = time.monotonic_ns()
+    try:
+        result = subprocess.run([str(probe)], input=json.dumps(request).encode(), capture_output=True, timeout=300, check=False)
+    except subprocess.TimeoutExpired:
+        raise ValueError("SDK snapshot read timed out") from None
+    elapsed = max(1, (time.monotonic_ns() - started) // 1_000_000)
+    finished_at = time.time_ns() // 1_000_000
+    require(result.returncode == 0, f"SDK snapshot read failed with exit {result.returncode}")
+    observed = fields(decode(result.stdout), PROBE_FIELDS, "SDK snapshot result")
+    require(observed["source_sha"] == args.source_sha and type(observed["qualification_feature"]) is bool,
+            "SDK snapshot did not use the requested source build")
+    require(observed["commit"] == publication["oid"] and observed["sha256"] == publication["sha256"]
+            and type(observed["bytes"]) is int and observed["bytes"] == GIT_PAYLOAD_SIZE
+            and matches(SHA256, observed["git_blob_oid_sha256"]),
+            "SDK snapshot did not verify the published Git payload")
+    lines = result.stderr.splitlines()
+    responses = {}
+    counters = measure(lines, scope, edge_responses=responses, expected_git_blob=observed["git_blob_oid_sha256"])
+    native = measure_native(lines, scope)
+    if args.arm == "edge":
+        require(counters["observed_edge_gets"] > 0 and counters["verified_edge_payloads"] > 0,
+                "SDK snapshot did not accept verified Git bytes through the approved CDN")
+    else:
+        require(counters["all_edge_attempts"] == 0 and native["get_responses"] > 0 and native["body_bytes"] > 0,
+                "SDK origin control requires native payload reads without edge activity")
+    return provenance | observed | counters | {
+        "schema": "crab.cdn-sdk-git-read/v1", "arm": args.arm, "platform": runner_platform(),
+        "probe_sha256": probe_digest, "approval_sha256": approval,
+        "publication_sha256": hashlib.sha256(raw).hexdigest(), "started_at_unix_ms": started_at,
+        "finished_at_unix_ms": finished_at, "elapsed_ms": elapsed, "edge_responses": responses, "native_traffic": native,
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("arm", choices=("edge", "origin"))
+    parser.add_argument("--fixture", required=True, type=Path)
+    parser.add_argument("--configuration-sha256", required=True)
+    parser.add_argument("--receipt", required=True, type=Path)
+    parser.add_argument("--probe", required=True, type=Path)
+    parser.add_argument("--source-sha", required=True)
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--run-attempt", required=True)
+    parser.add_argument("--private-reader", type=Path)
+    parser.add_argument("--export-approval", type=Path)
+    args = parser.parse_args()
+    try:
+        print(json.dumps(fetch(args), sort_keys=True))
+    except (ExportError, OSError, ValueError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

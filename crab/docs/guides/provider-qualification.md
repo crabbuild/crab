@@ -910,6 +910,41 @@ preceded cleanup. The probe reads the root and exact single-ref head through
 the provider SDK and uses the canonical v2 decoder to resolve the visible tip.
 [Git's explicit push lease](https://git-scm.com/docs/git-push#Documentation/git-push.txt---force-with-leaseltrefnamegtltexpectgt)
 
+### Capture SDK Git snapshot evidence
+
+Use a direct SDK Git fixture on the repository prefix. The same native
+`publish` and `retire` actions work with that fixture. Between them, make two
+ordinary SDK reads of the confirmed branch and payload. Build the reader
+from the checkout used for the native publication.
+
+```bash
+CRAB_CDN_PROBE_SOURCE_SHA="$GITHUB_SHA" CARGO_TARGET_DIR="$measurement_cargo_target" \
+  cargo build --locked -p crab-sdk --features service --example cdn-sdk-read
+
+python3 -B crab/scripts/e2e/run_cdn_sdk_workload.py edge \
+  --fixture "$approved_fixture_json" --configuration-sha256 "$approved_configuration_sha256" \
+  --receipt "$publication_receipt" --probe "$sdk_read_probe" \
+  --source-sha "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
+  --private-reader "$sdk_reader_settings" > "$sdk_edge_observation"
+```
+
+For a private row, the reader settings contain `oidc_issuer`, `oidc_client_id`,
+and the absolute `token_cache_directory`. The approved fixture supplies the
+issuer endpoint and the edge approval. Run the same command with `origin`
+for the native control. For a public row, replace `--private-reader` with
+`--export-approval "$approved_export_directory"` for the edge read and omit
+both options for the native control.
+
+The probe opens the repository through the SDK, checks the snapshot commit,
+verifies the Git blob's SHA-256 and length, and closes the client. The
+collector retains the candidate digest and redacted transfer evidence. Edge
+delivery requires the verified Git object ID fingerprint for the exact
+blob returned by the SDK. The origin control
+requires native body bytes and zero edge attempts. Fixture builds can add
+`provider-cdn-qualification` to exercise unqualified HTTPS rows. The report
+records whether that feature was enabled. These SDK action records still
+need to be incorporated into release assembly and measured regional pairs.
+
 ### Verify fixture cleanup
 
 After retiring the test ref and completing fixture cleanup, collect

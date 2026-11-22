@@ -22,7 +22,8 @@ from run_cdn_transport_checks import approved_fixture, fixture_base, fixture_obj
 from cdn_qualification import (
     CLI_BUILD_FIELDS, CLI_NATIVE_FIELDS, COMMIT, GIT_OID, GIT_PAYLOAD_SIZE, PROVIDER_FOR_EDGE, RUN_NUMBER,
     cli_action_name, decode, deployment_component_digest,
-    fields, lfs_object_path, matches, read_git_record, require, requires_cli_lfs_workload, requires_cli_workload, scope_parts,
+    fields, is_direct_sdk_git_scope, lfs_object_path, matches, read_git_record, require, requires_cli_lfs_workload,
+    requires_cli_workload, scope_parts,
     validate_git_publication, verified_publication, verify_cli_candidate,
 )
 from public_inventory import ExportError, read_document
@@ -230,6 +231,18 @@ def verify_transition_events(lines: list[bytes], scope: str, proof: dict) -> Non
     require(observations == expected, "fetch did not prove the selected object's public export transition")
 
 
+def approved_public_export(directory: Path, fixture: dict) -> tuple:
+    raw, _ = read_document(directory / "publication.json")
+    digest = hashlib.sha256(raw).hexdigest()
+    binding, objects, sealed_at = verified_publication(directory, digest)
+    require(binding["source_origin"] == fixture["native_origin"]
+            and binding["source_placement"] == fixture["source_placement"]
+            and binding["export_origin"] == fixture["export_origin"] and binding["repository_prefix"] == fixture["fixture_prefix"]
+            and binding["base_url"] == fixture["base_url"].rstrip("/"), "public export approval does not match the fixture")
+    require(sealed_at <= time.time_ns() // 1_000_000, "public export approval must be sealed before the fetch")
+    return digest, objects, sealed_at
+
+
 def prepare_public_export(args: argparse.Namespace, fixture: dict, record: dict | None) -> tuple[str, dict | None]:
     _, access, _, family, _ = scope_parts(fixture["scope"])
     transition = any((args.transition_object, args.transition_output, args.before_transition))
@@ -242,14 +255,7 @@ def prepare_public_export(args: argparse.Namespace, fixture: dict, record: dict 
             "an export approval is required for a public edge fetch, warm-local fetch or transition")
     if not approved:
         return "", None
-    raw, _ = read_document(args.export_approval / "publication.json")
-    digest = hashlib.sha256(raw).hexdigest()
-    binding, objects, sealed_at = verified_publication(args.export_approval, digest)
-    require(binding["source_origin"] == fixture["native_origin"]
-            and binding["source_placement"] == fixture["source_placement"]
-            and binding["export_origin"] == fixture["export_origin"] and binding["repository_prefix"] == fixture["fixture_prefix"]
-            and binding["base_url"] == fixture["base_url"].rstrip("/"), "public export approval does not match the fixture")
-    require(sealed_at <= time.time_ns() // 1_000_000, "public export approval must be sealed before the fetch")
+    digest, objects, sealed_at = approved_public_export(args.export_approval, fixture)
     if not transition:
         return digest, None
     path = args.transition_object
@@ -429,7 +435,9 @@ def main() -> int:
         require(args.action == "inspect" or args.receipt is not None, "this action requires a publication receipt path")
         fixture = approved_fixture(args.fixture, args.configuration_sha256)
         edge, _, _, _, _ = scope_parts(fixture["scope"])
-        require(requires_cli_workload(fixture["scope"]), "workload requires a direct CLI Git, capsule or LFS scope")
+        require(requires_cli_workload(fixture["scope"])
+                or (args.action in ("publish", "retire") and is_direct_sdk_git_scope(fixture["scope"])),
+                "workload needs a direct CLI scope or native publication for a direct SDK Git scope")
         crab = companion_crab(args.helper) if requires_cli_lfs_workload(fixture["scope"]) else None
         remote = native_remote(fixture, edge)
         approved_binding = viewer_binding_sha256(fixture)

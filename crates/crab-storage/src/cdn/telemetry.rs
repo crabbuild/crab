@@ -74,7 +74,16 @@ impl PayloadObservation {
 
     /// Report only after accepting content that passed its authenticated digest or object ID check.
     pub fn record_verified(self) {
-        self.record("edge");
+        self.record_verified_with_blob(None);
+    }
+
+    /// Report a verified edge blob and the fingerprint of its exact Git object ID.
+    pub fn record_verified_git_blob(self, oid: &[u8]) {
+        self.record_verified_with_blob(Some(oid));
+    }
+
+    fn record_verified_with_blob(self, oid: Option<&[u8]>) {
+        self.record("edge", oid);
         if let Some(public) = self.public {
             public.record(self.policy, self.family, "verified_edge");
         }
@@ -82,14 +91,15 @@ impl PayloadObservation {
 
     /// Report a verified local payload hit on the selected CDN-enabled route.
     pub fn record_local(self) {
-        self.record("local");
+        self.record("local", None);
     }
 
-    fn record(self, source: &'static str) {
+    fn record(self, source: &'static str, oid: Option<&[u8]>) {
         let message = match self.family {
             CdnReadFamily::Lfs => "CDN verified LFS payload",
             _ => "CDN verified Git payload",
         };
+        let oid = oid.map(|oid| format!("{:x}", Sha256::digest(oid)));
         tracing::event!(
             target: TARGET,
             parent: None,
@@ -100,6 +110,7 @@ impl PayloadObservation {
             profile = self.policy.profile.label(),
             family = self.family.label(),
             source,
+            git_blob_oid_sha256 = oid.as_deref(),
             "{message}"
         );
     }

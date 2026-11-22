@@ -1160,6 +1160,10 @@ def requires_cli_workload(scope: str) -> bool:
     return consumer == "cli" and family in {"git", "capsule", "lfs"} and profile == "direct"
 
 
+def is_direct_sdk_git_scope(scope: str) -> bool:
+    return scope_parts(scope)[2:] == ("sdk", "git", "direct")
+
+
 def cli_action_name(scope: str) -> str:
     return "lfs-fetch" if requires_cli_lfs_workload(scope) else "git-fetch"
 

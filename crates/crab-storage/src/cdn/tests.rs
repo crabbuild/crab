@@ -570,7 +570,11 @@ async fn product_read_records_one_redacted_transfer_for_its_actual_scope() {
     let attempt = store.cdn_attempt(&path).unwrap();
     let body = attempt.get(6, Some(1..3)).await.unwrap();
     assert_eq!(body, Some(Bytes::from_static(b"12")));
-    attempt.payload_observation().unwrap().record_verified();
+    let blob_oid = [0x32; 20];
+    attempt
+        .payload_observation()
+        .unwrap()
+        .record_verified_git_blob(&blob_oid);
     request.await.unwrap();
 
     let events = capture.events.lock().unwrap();
@@ -605,6 +609,13 @@ async fn product_read_records_one_redacted_transfer_for_its_actual_scope() {
             .values()
             .any(|value| value.contains("org/repo") || value.contains("opaque-viewer-id"))
     }));
+    let observed_blob = events
+        .iter()
+        .find_map(|event| event.0.get("git_blob_oid_sha256"));
+    assert_eq!(
+        observed_blob,
+        Some(&format!("\"{:x}\"", Sha256::digest(blob_oid)))
+    );
     let transitions: Vec<_> = events
         .iter()
         .filter(|event| event.0.contains_key("observation"))
