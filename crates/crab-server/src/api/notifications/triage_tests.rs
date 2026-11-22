@@ -69,13 +69,13 @@ async fn saved_threads_survive_history_eviction_and_done_tracks_the_seen_activit
     let first = Notice {
         id: Uuid::now_v7(),
         repository: repo.id,
-        target: Target::Issue { number: 1 },
+        target: Target::Issue { number: 1 }.into(),
         created_at_ms: 1,
         sender: "Alice".into(),
     };
     let second = Notice {
         id: Uuid::now_v7(),
-        target: Target::Issue { number: 2 },
+        target: Target::Issue { number: 2 }.into(),
         created_at_ms: 2,
         ..first.clone()
     };
@@ -120,7 +120,7 @@ async fn saved_threads_survive_history_eviction_and_done_tracks_the_seen_activit
     for number in 3..=(MAX_HISTORY as u64 + 3) {
         let notice = Notice {
             id: Uuid::now_v7(),
-            target: Target::Issue { number },
+            target: Target::Issue { number }.into(),
             created_at_ms: number,
             ..first.clone()
         };
@@ -187,7 +187,8 @@ async fn saved_threads_survive_history_eviction_and_done_tracks_the_seen_activit
         target: Target::IssueComment {
             issue: 1,
             number: 7,
-        },
+        }
+        .into(),
         ..first.clone()
     };
     deliver(latest.clone(), Access::Group, Reason::Subscribed).await;

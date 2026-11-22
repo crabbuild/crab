@@ -155,7 +155,8 @@ async fn inbox_unsubscribe_preserves_bookmarks_and_only_reopens_for_new_direct_a
                     target: Target::IssueComment {
                         issue: 1,
                         number: 1,
-                    },
+                    }
+                    .into(),
                     created_at_ms: first["updated"]["created_at_ms"].as_u64().unwrap(),
                     sender: "Alice".into(),
                 },

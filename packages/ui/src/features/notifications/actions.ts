@@ -1,7 +1,7 @@
 export type Address = { id: string; owner: string; name: string };
 export type NoticeState = { read: boolean; saved: boolean; done: boolean };
 export type Action = { read: boolean } | { save: boolean } | { done: boolean };
-export type Subject = { kind: "issue" | "pull"; number: number };
+export type Subject = { kind: "issue" | "pull" | "release"; number: number };
 type Position = { id: string; created_at_ms: number };
 
 export type Selection = {

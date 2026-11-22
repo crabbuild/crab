@@ -970,7 +970,7 @@ Release routes use durable request reservations and versioned records:
 
 Creation includes a stable universally unique identifier (UUID) in `request_id`, short `tag_name`, full target commit OID, title, Markdown body, prerelease flag, and draft state. The target must be a visible commit.
 
-An existing lightweight or annotated tag is accepted only when it peels to the exact target. A new published release creates a lightweight tag through canonical ref publication. Drafts reserve their release tag but do not publish a new Git tag until a version-bound edit publishes the draft.
+An existing lightweight or annotated tag is accepted only when it peels to the exact target. A new published release creates a lightweight tag through canonical ref publication. Drafts reserve their release tag but do not publish a new Git tag until a version-bound edit publishes the draft. Republishing a withdrawn release verifies the existing Git tag again before notifying watchers.
 
 Readers cannot list or open drafts. Writers can recover drafts after restart. Replaying the same request recovers the same release; changing the payload or racing for the tag returns HTTP 409.
 
@@ -2548,8 +2548,8 @@ and its source path. Missing file paths and inaccessible repositories return
 ### Read the notification inbox
 
 Signed-in users open **Notifications** from the global header. Unread, All,
-Saved, and Done support repository and reason filters. Each issue or pull
-request has one row, ordered by its latest activity. The link opens the latest
+Saved, and Done support repository and reason filters. Each issue, pull
+request, or release has one row, ordered by its latest activity. The link opens the latest
 contribution and the strongest retained notification reason stays visible.
 A personal mention takes precedence over a team mention, review request,
 assignment, or watch update.
@@ -2574,12 +2574,12 @@ reason. Subscribers can still receive discussion updates.
 
 `GET /api/notifications` accepts `view` (`inbox`, `saved`, or `done`),
 `repository` (repository UUID), `unread` (default false), `reason` (`assigned`,
-`review_requested`, `mention`, `team_mention`, or `subscribed`), `limit`
+`review_requested`, `mention`, `team_mention`, `release`, or `subscribed`), `limit`
 (1–50, default 20), and the `before` cursor from `next`. The default inbox
 view excludes completed conversations. Rows have a stable `id`, an `updated`
 stamp with `id` and `created_at_ms`, and `read`, `saved`, and `done` flags.
-Issue and pull request numbers address distinct conversations. The unread
-endpoint reports accessible unread activity in the inbox view.
+Issue, pull request, and release numbers address distinct inbox rows. The
+unread endpoint reports accessible unread activity in the inbox view.
 
 `PUT /api/notifications/{id}/state` accepts the row's `repository_id`, its
 `updated` stamp as `expected`, and one `action` such as `{"done":true}`.
@@ -2612,20 +2612,23 @@ selection after a lost response. The repository remembers what was dismissed
 and a replay preserves any newer follow.
 
 Open **Watch** in a repository to choose direct notifications, new issue
-activity, new pull request activity, both kinds, or mute. Watching adds
-`subscribed` notices for activity after the preference takes effect and
-excludes your own activity. Other direct notifications continue in the
-three watch modes. Muting skips notifications processed while muted and
-hides existing repository notices from the inbox and unread indicator until
-you change the preference.
+activity, new pull request activity, both kinds, or mute. Enable **New
+releases** on its own or with issue or pull request watching. Watching adds
+notices for activity after the preference takes effect and excludes your own
+activity. A release notice is queued when publication commits. Drafts and
+edits to a published release do not queue notices. Opening a release notice
+uses its tag and release number. Withdrawn or deleted releases are hidden
+from the inbox and unread badge. Muting clears the release watch and hides
+existing repository notices until you change the preference.
 
 `GET /api/repos/{owner}/{name}/subscription` returns the signed-in reader's
 current mode and version, defaulting to `{"mode":"direct","version":0}`.
-Send the same shape with `PUT` and the captured version to change the mode.
-The allowed modes are `direct`, `issues`, `pull_requests`,
-`issues_and_pull_requests`, and `muted`. A successful retry of the same mode
-returns the current preference. A stale request for a different mode returns
-409. Both endpoints require current repository access. The private preference
+`releases:true` indicates release watching. Send the captured version and
+desired mode and release choice with `PUT`. Omit `releases` or send false to
+disable release watching. The allowed modes are `direct`, `issues`,
+`pull_requests`, `issues_and_pull_requests`, and `muted`. A successful retry
+of the same choice returns the current preference. A stale request for a
+different choice returns 409. Both endpoints require current repository access. The private preference
 can be changed on an archived repository.
 
 Use **Notification settings** in the issue or pull request sidebar for a private
@@ -2647,8 +2650,7 @@ applies to activity after the source change, including replies that arrive
 before delivery runs. A newer private choice takes precedence, and repository
 mute suppresses automatic following. Group-only recipients need current
 signed group evidence for automatic following. Direct inbox notices retain
-their existing delivery and access rules. Release notifications and email
-delivery remain open.
+their existing delivery and access rules. Email delivery remains open.
 
 ### Link related work
 
@@ -3663,7 +3665,7 @@ The server is complete only when a real account can perform the workflow and obs
 | GitHub-quality design | Themes, responsive layouts, accessible controls, navigation, and loading/error behavior across workflows | In progress |
 | Team identity and authorization | OIDC, sessions, membership, permissions, isolation, revocation, CSRF, and administration | In progress; browser and CLI membership replacement are audited, and back-channel logout revokes delivered exact-identity sessions |
 | Git hosting | Authenticated fetch and push, exact branch/tag lifecycle, protection, publication, and independent-client proof | In progress; additional crash phases and coexistence qualification remain |
-| Collaboration | Durable issues, pulls, comments, reviews, labels, assignees, merge, checks, activity, and notifications | In progress; moderation, edit history, release subscriptions, and external notification delivery remain |
+| Collaboration | Durable issues, pulls, comments, reviews, labels, assignees, merge, checks, activity, and notifications | In progress; moderation, edit history, and external notification delivery remain |
 | Repository management | CLI create/adopt/list, archive, settings, search, import, and audited administration | In progress; browser creation/import and audit history remain |
 | Production operation | Durable concurrency, restart and crash recovery, backup restore, observability, upgrades, and operator guidance | Native process restart and owner handoff tested; native metrics and shutdown wiring implemented. Backup restore, crash matrices, upgrades, and provider qualification remain |
 | Quality gates | API, UI, accessibility, realistic repositories, security, package smoke, and measured performance | In progress |

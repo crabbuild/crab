@@ -10,9 +10,9 @@ use crate::{
         CompleteReleasePublicationOutcome, CreateRelease, CreateReleaseInput, CreateReleaseOutcome,
         DeleteRelease, DeleteReleaseAsset, DeleteReleaseAssetInput, DeleteReleaseAssetOutcome,
         DeleteReleaseInput, DeleteReleaseOutcome, GetRelease, GetReleaseByTag, ListReleases,
-        ReleaseAssetReservation, ReleaseListInput, ReleaseRecord, ReserveReleaseAsset,
-        ReserveReleaseAssetInput, ReserveReleaseAssetOutcome, UpdateRelease, UpdateReleaseInput,
-        UpdateReleaseOutcome,
+        ReleaseAssetReservation, ReleaseListInput, ReleaseRecord, RepositoryAuthor,
+        ReserveReleaseAsset, ReserveReleaseAssetInput, ReserveReleaseAssetOutcome, UpdateRelease,
+        UpdateReleaseInput, UpdateReleaseOutcome,
     },
     repository::Repository,
     server::Server,
@@ -189,6 +189,7 @@ pub(super) async fn complete_publication(
     repo: &Repository,
     release: &Release,
     tag_oid: String,
+    publisher: RepositoryAuthor,
 ) -> Result<Release> {
     let pending = release
         .publication_pending
@@ -205,6 +206,7 @@ pub(super) async fn complete_publication(
                     number: release.number,
                     expected_version: pending.expected_version,
                     tag_oid,
+                    publisher,
                 },
             )
             .await,

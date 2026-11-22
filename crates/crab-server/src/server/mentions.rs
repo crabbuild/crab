@@ -17,8 +17,8 @@ use crate::{
         directory::{
             IdentityKey, LookupAccounts, LookupIdentities, RegisterAccounts,
             notifications::{
-                Access, Deliver, Delivery, HandlesAt, MAX_RECIPIENTS, Notice, Reason, Recipient,
-                ResolveHandlesAt,
+                Access, Deliver, Delivery, HandlesAt, MAX_RECIPIENTS, Notice, NoticeTarget, Reason,
+                Recipient, ReleaseKind, ResolveHandlesAt,
             },
         },
         organization::teams::{MentionMembers, MentionMembersInput, MentionRoster, Page},
@@ -260,6 +260,7 @@ async fn publish(client: &CellClient, notice: &Notice, recipients: Vec<Recipient
 async fn watched_recipients(
     client: &CellClient,
     candidates: Vec<(IdentityKey, Access)>,
+    reason: Reason,
 ) -> Result<Vec<Recipient>> {
     let identities: Vec<_> = candidates
         .iter()
@@ -297,7 +298,7 @@ async fn watched_recipients(
                 .ok_or(Error::CellContract("Watch account is missing"))?;
             Ok(Recipient {
                 actor,
-                reason: Reason::Subscribed,
+                reason,
                 access,
             })
         })
@@ -364,7 +365,7 @@ async fn deliver(
     let notice = Notice {
         id: event.id,
         repository: repo.id,
-        target: event.target,
+        target: event.target.into(),
         created_at_ms: event.created_at_ms,
         sender: event.actor.name.clone(),
     };
@@ -394,7 +395,7 @@ async fn deliver(
             publish(
                 client,
                 &notice,
-                watched_recipients(client, candidates).await?,
+                watched_recipients(client, candidates, Reason::Subscribed).await?,
             )
             .await?;
         }
@@ -509,10 +510,64 @@ async fn deliver(
     Ok(Progress::Ready(None))
 }
 
+async fn deliver_release(
+    server: &Server,
+    repo: &Repository,
+    client: &CellClient,
+    scope: Option<&DeliveryScope>,
+    event: watches::ReleaseEvent,
+) -> Result<()> {
+    let cursor = event.cursor();
+    let mut next = None;
+    if let Some(scope) = scope {
+        let Some(page) = app::query_output(
+            client
+                .query::<watches::ReleaseWatchers>(Address::Repository(repo.id), None, cursor)
+                .await,
+        )?
+        else {
+            return Ok(());
+        };
+        let candidates: Vec<_> = page
+            .recipients
+            .into_iter()
+            .filter_map(|actor| scope.access(&actor).map(|access| (actor, access)))
+            .collect();
+        if !candidates.is_empty() && scope.current(server, repo).await? {
+            let notice = Notice {
+                id: event.id,
+                repository: repo.id,
+                target: NoticeTarget::Release {
+                    kind: ReleaseKind::Release,
+                    number: event.number,
+                },
+                created_at_ms: event.published_at_ms,
+                sender: event.publisher.name,
+            };
+            publish(
+                client,
+                &notice,
+                watched_recipients(client, candidates, Reason::Release).await?,
+            )
+            .await?;
+        }
+        next = page.next;
+    }
+    app::command_output(
+        client
+            .command::<watches::AcknowledgeRelease>(
+                Address::Repository(repo.id),
+                app::mutation_identity()?,
+                watches::AcknowledgeReleaseInput { cursor, next },
+            )
+            .await,
+    )
+}
+
 pub(crate) async fn drain_repository(server: &Server, repo: &Repository) -> Result<()> {
     let cell = app::repository_cell(server, repo)?;
     let events = app::query_output(cell.client.query::<Pending>(&cell.target, None, ()).await)?;
-    if events.is_empty() {
+    if events.discussions.is_empty() && events.releases.is_empty() {
         return Ok(());
     }
     let grants = current_grants(server, repo).await?;
@@ -554,39 +609,54 @@ pub(crate) async fn drain_repository(server: &Server, repo: &Repository) -> Resu
         }
         _ => None,
     };
-    let settings = app::query_output(
-        cell.client
-            .query::<mention_settings::Get>(&cell.target, None, ())
-            .await,
-    )?;
-    for event in events {
-        let progress = if let Some(scope) = &roster
-            && (!scope.subjects.is_empty() || !scope.groups.is_empty())
-        {
-            deliver(server, repo, &cell.client, scope, &settings, &event).await?
-        } else {
-            Progress::Ready(None)
-        };
-        let Progress::Ready(next) = progress else {
-            continue;
-        };
-        app::command_output(
+    // A retry in one outbox must not prevent the other from advancing.
+    let releases = async {
+        for event in events.releases {
+            deliver_release(server, repo, &cell.client, roster.as_ref(), event).await?;
+        }
+        Ok::<(), Error>(())
+    };
+    let discussions = async {
+        if events.discussions.is_empty() {
+            return Ok(());
+        }
+        let settings = app::query_output(
             cell.client
-                .command::<Acknowledge>(
-                    &cell.target,
-                    app::mutation_identity()?,
-                    EventKey {
-                        id: event.id,
-                        created_at_ms: event.created_at_ms,
-                        watch: event.watch,
-                        next,
-                        follow: event.follow,
-                    },
-                )
+                .query::<mention_settings::Get>(&cell.target, None, ())
                 .await,
         )?;
-    }
-    Ok(())
+        for event in events.discussions {
+            let progress = if let Some(scope) = &roster
+                && (!scope.subjects.is_empty() || !scope.groups.is_empty())
+            {
+                deliver(server, repo, &cell.client, scope, &settings, &event).await?
+            } else {
+                Progress::Ready(None)
+            };
+            let Progress::Ready(next) = progress else {
+                continue;
+            };
+            app::command_output(
+                cell.client
+                    .command::<Acknowledge>(
+                        &cell.target,
+                        app::mutation_identity()?,
+                        EventKey {
+                            id: event.id,
+                            created_at_ms: event.created_at_ms,
+                            watch: event.watch,
+                            next,
+                            follow: event.follow,
+                        },
+                    )
+                    .await,
+            )?;
+        }
+        Ok(())
+    };
+    let (releases, discussions) = tokio::join!(releases, discussions);
+    releases?;
+    discussions
 }
 
 pub(super) async fn sweep(server: Arc<Server>) {
@@ -607,7 +677,7 @@ pub(super) async fn sweep(server: Arc<Server>) {
                 () = server.cancellation.cancelled() => return,
                 result = drain_repository(&server, repo) => {
                     if let Err(error) = result {
-                        tracing::warn!(repository_id = %repo.id, %error, "mention notification delivery will be retried");
+                        tracing::warn!(repository_id = %repo.id, %error, "notification delivery will be retried");
                     }
                 }
             }

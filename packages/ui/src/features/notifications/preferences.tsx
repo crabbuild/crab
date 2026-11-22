@@ -3,6 +3,7 @@ import { useId, useState } from "react";
 import { useMutation } from "@/components/discussion/mutations";
 import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -33,7 +34,7 @@ const discussionModes = {
   unsubscribed: "Unsubscribe from updates",
 };
 
-type Preference = { mode: string; version: number };
+type Preference = { mode: string; version: number; releases?: boolean };
 
 export function RepositoryWatch({
   repo,
@@ -48,6 +49,7 @@ export function RepositoryWatch({
       csrf={csrf}
       path={endpoint(repo, "subscription")}
       modes={repositoryModes}
+      releaseChoice
       label="Watch"
       title="Repository notifications"
       description={`Choose what appears in your inbox for ${repo.owner}/${repo.name}. Direct notifications include assignments, review requests, and mentions.`}
@@ -90,6 +92,7 @@ function NotificationPreference({
   csrf,
   path,
   modes,
+  releaseChoice = false,
   label,
   title,
   description,
@@ -98,6 +101,7 @@ function NotificationPreference({
   csrf: string;
   path: string;
   modes: Record<string, string>;
+  releaseChoice?: boolean;
   label: string;
   title: string;
   description: string;
@@ -105,6 +109,7 @@ function NotificationPreference({
   const modeId = useId();
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<string>();
+  const [draftReleases, setDraftReleases] = useState<boolean>();
   const preference = useRequest<Preference>(open ? path : null);
   const mutation = useMutation(csrf, repo);
 
@@ -112,6 +117,7 @@ function NotificationPreference({
     setOpen(next);
     if (!next) {
       setDraft(undefined);
+      setDraftReleases(undefined);
       mutation.reset();
     }
   }
@@ -130,66 +136,89 @@ function NotificationPreference({
           <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
         <Result state={preference} timingLabel={title}>
-          {(saved) => (
-            <form
-              className="grid gap-3"
-              onSubmit={async (event) => {
-                event.preventDefault();
-                const mode = draft ?? saved.mode;
-                const updated = await mutation.run<Preference>(path, "PUT", {
-                  mode,
-                  version: saved.version,
-                });
-                if (updated) {
-                  refreshNotificationBadge();
-                  close(false);
-                }
-              }}
-            >
-              <label className="text-sm font-medium" htmlFor={modeId}>
-                Notify me about
-              </label>
-              <NativeSelect
-                id={modeId}
-                value={draft ?? saved.mode}
-                disabled={mutation.pending}
-                onChange={(event) => setDraft(event.target.value)}
+          {(saved) => {
+            const mode = draft ?? saved.mode;
+            const releases =
+              releaseChoice &&
+              mode !== "muted" &&
+              (draftReleases ?? saved.releases ?? false);
+            const changed =
+              mode !== saved.mode || releases !== !!saved.releases;
+            return (
+              <form
+                className="grid gap-3"
+                onSubmit={async (event) => {
+                  event.preventDefault();
+                  const updated = await mutation.run<Preference>(path, "PUT", {
+                    mode,
+                    version: saved.version,
+                    ...(releases ? { releases: true } : {}),
+                  });
+                  if (updated) {
+                    refreshNotificationBadge();
+                    close(false);
+                  }
+                }}
               >
-                {Object.entries(modes).map(([value, label]) => (
-                  <NativeSelectOption key={value} value={value}>
-                    {label}
-                  </NativeSelectOption>
-                ))}
-              </NativeSelect>
-              {mutation.error && <p role="alert">{mutation.error}</p>}
-              {mutation.status === 409 && (
-                <Button
-                  type="button"
-                  variant="outline"
-                  className="w-fit"
-                  onClick={() => {
-                    setDraft(undefined);
-                    mutation.reset();
-                    preference.retry();
-                  }}
+                <label className="text-sm font-medium" htmlFor={modeId}>
+                  Notify me about
+                </label>
+                <NativeSelect
+                  id={modeId}
+                  value={mode}
+                  disabled={mutation.pending}
+                  onChange={(event) => setDraft(event.target.value)}
                 >
-                  Reload preference
+                  {Object.entries(modes).map(([value, label]) => (
+                    <NativeSelectOption key={value} value={value}>
+                      {label}
+                    </NativeSelectOption>
+                  ))}
+                </NativeSelect>
+                {releaseChoice && (
+                  <label
+                    className="flex w-fit items-center gap-2 text-sm"
+                    htmlFor={`${modeId}-releases`}
+                  >
+                    <Checkbox
+                      id={`${modeId}-releases`}
+                      checked={releases}
+                      disabled={mode === "muted" || mutation.pending}
+                      onCheckedChange={(checked) =>
+                        setDraftReleases(checked === true)
+                      }
+                    />
+                    New releases
+                  </label>
+                )}
+                {mutation.error && <p role="alert">{mutation.error}</p>}
+                {mutation.status === 409 && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="w-fit"
+                    onClick={() => {
+                      setDraft(undefined);
+                      setDraftReleases(undefined);
+                      mutation.reset();
+                      preference.retry();
+                    }}
+                  >
+                    Reload preference
+                  </Button>
+                )}
+                <Button
+                  type="submit"
+                  className="justify-self-end"
+                  disabled={
+                    !changed || mutation.pending || mutation.status === 409
+                  }
+                >
+                  {mutation.pending ? "Saving…" : "Save preference"}
                 </Button>
-              )}
-              <Button
-                type="submit"
-                className="justify-self-end"
-                disabled={
-                  !draft ||
-                  draft === saved.mode ||
-                  mutation.pending ||
-                  mutation.status === 409
-                }
-              >
-                {mutation.pending ? "Saving…" : "Save preference"}
-              </Button>
-            </form>
-          )}
+              </form>
+            );
+          }}
         </Result>
       </DialogContent>
     </Dialog>

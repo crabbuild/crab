@@ -128,19 +128,27 @@ fn key(id: Uuid, created_at_ms: u64) -> String {
     format!("{OUTBOX}{:016x}/{:032x}", !created_at_ms, !id.as_u128())
 }
 
+#[derive(Deserialize, Serialize)]
+pub(crate) struct PendingEvents {
+    pub discussions: Vec<Event>,
+    pub releases: Vec<watches::ReleaseEvent>,
+}
+
 pub(crate) struct Pending;
 impl Read for Pending {
     const CLASS: &'static str = repository::CLASS;
     const ID: u32 = 336;
     type Input = ();
-    type Output = Vec<Event>;
+    type Output = PendingEvents;
 
-    fn execute(context: &mut Transaction<'_>, (): ()) -> Result<Vec<Event>> {
+    fn execute(context: &mut Transaction<'_>, (): ()) -> Result<Self::Output> {
         // Reserve capacity for both queues. A blocked watch page must
         // never keep its unresolved source outside the worker's next page.
         let follows = context.documents::<Event>(FOLLOW_OUTBOX, None, BATCH / 2)?;
-        let others = context.documents::<Event>(OUTBOX, None, BATCH - follows.len())?;
-        follows
+        let releases = watches::pending_releases(context, BATCH / 4)?;
+        let others =
+            context.documents::<Event>(OUTBOX, None, BATCH - follows.len() - releases.len())?;
+        let discussions = follows
             .into_iter()
             .chain(others)
             .map(|(stored_key, event)| {
@@ -154,7 +162,11 @@ impl Read for Pending {
                 }
                 Ok(event)
             })
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+        Ok(PendingEvents {
+            discussions,
+            releases,
+        })
     }
 }
 

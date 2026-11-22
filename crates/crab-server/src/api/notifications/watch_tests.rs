@@ -222,6 +222,7 @@ async fn watch_fanout_advances_over_ineligible_pages() {
                     desired: watches::Preference {
                         version: 0,
                         mode: watches::Mode::Issues,
+                        releases: false,
                     },
                 },
             )
@@ -522,11 +523,15 @@ async fn a_reply_waits_for_the_mention_that_subscribes_its_recipient() {
         .await
         .unwrap()
         .output;
-    let source = events.iter().find(|event| event.follow.is_some()).unwrap();
+    let source = events
+        .discussions
+        .iter()
+        .find(|event| event.follow.is_some())
+        .unwrap();
     let notice = Notice {
         id: source.id,
         repository: repo.id,
-        target: source.target,
+        target: source.target.into(),
         created_at_ms: source.created_at_ms,
         sender: source.actor.name.clone(),
     };

@@ -340,8 +340,8 @@ async fn finish_publication(
             Err(Error::ReleaseConflict)
         };
     }
-    app::actor(principal)?;
-    storage::complete_publication(server, repo, &release, tag_oid).await
+    let publisher = app::actor(principal)?;
+    storage::complete_publication(server, repo, &release, tag_oid, (&publisher).into()).await
 }
 
 async fn create(
@@ -625,16 +625,28 @@ async fn detail(
     Ok(Json(view(&release)))
 }
 
+#[derive(Deserialize)]
+struct ReleaseTagQuery {
+    release_number: Option<u64>,
+}
+
 async fn detail_by_tag(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
     Path((owner, name, tag)): Path<(String, String, String)>,
+    Query(query): Query<ReleaseTagQuery>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
     let (tag, _) = tag_name(&tag)?;
     app::actor(&principal)?;
     let release = storage::release_by_tag(&server, &repo, tag).await?;
     let release = visible_release_record(release, principal.can_write(repo.id))?;
+    if query
+        .release_number
+        .is_some_and(|number| number != release.number || release.draft)
+    {
+        return Err(Error::ReleaseNotFound);
+    }
     Ok(Json(view(&release)))
 }
 

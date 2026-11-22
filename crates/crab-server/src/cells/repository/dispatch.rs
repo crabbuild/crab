@@ -54,6 +54,9 @@ pub(in crate::cells) fn dispatch_mutation(
         watches::Set::ID => invoke_mutation::<watches::Set>(context, input),
         watches::SetThread::ID => invoke_mutation::<watches::SetThread>(context, input),
         watches::Dismiss::ID => invoke_mutation::<watches::Dismiss>(context, input),
+        watches::AcknowledgeRelease::ID => {
+            invoke_mutation::<watches::AcknowledgeRelease>(context, input)
+        }
         #[cfg(test)]
         projection::tests::Historical::ID => {
             invoke_mutation::<projection::tests::Historical>(context, input)
@@ -268,6 +271,8 @@ pub(in crate::cells) fn dispatch_read(
         watches::Get::ID => invoke_read::<watches::Get>(context, input),
         watches::GetThread::ID => invoke_read::<watches::GetThread>(context, input),
         watches::InboxVisibility::ID => invoke_read::<watches::InboxVisibility>(context, input),
+        watches::PublishedReleases::ID => invoke_read::<watches::PublishedReleases>(context, input),
+        watches::ReleaseWatchers::ID => invoke_read::<watches::ReleaseWatchers>(context, input),
         watches::ListWatchers::ID => invoke_read::<watches::ListWatchers>(context, input),
         watches::Unmuted::ID => invoke_read::<watches::Unmuted>(context, input),
         #[cfg(test)]

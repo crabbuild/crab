@@ -15,6 +15,13 @@ pub(crate) use inbox::{
     Dismiss, DismissItem, DismissSelection, InboxActivity, InboxVisibility, InboxVisibilityInput,
 };
 
+mod publications;
+pub(crate) use publications::{
+    AcknowledgeRelease, AcknowledgeReleaseInput, PublishedReleases, ReleaseEvent, ReleaseSource,
+    ReleaseWatchers,
+};
+pub(in crate::cells::repository) use publications::{pending as pending_releases, published};
+
 const PREFERENCES: &str = "collaboration/v2/watches/preferences/";
 const WATCHERS: &str = "collaboration/v2/watches/active/";
 const PAGE_SIZE: usize = 32;
@@ -50,6 +57,8 @@ pub(crate) enum Mode {
 pub(crate) struct Preference {
     pub mode: Mode,
     pub version: u64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub releases: bool,
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -58,6 +67,8 @@ struct Subscription {
     preference: Preference,
     issues_after: Option<u64>,
     pulls_after: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    releases_after: Option<u64>,
 }
 
 fn subscription(context: &Transaction<'_>, actor: Key) -> Result<Subscription> {
@@ -99,7 +110,8 @@ impl Mutation for Set {
         let key = identity_key(&input.actor)?;
         let mut current = subscription(context, key)?;
         let mode = input.desired.mode;
-        if current.preference.mode == mode {
+        let releases = mode != Mode::Muted && input.desired.releases;
+        if current.preference.mode == mode && current.preference.releases == releases {
             return Ok(MutationResult::Success(Some(current.preference)));
         }
         if current.preference.version != input.desired.version {
@@ -110,11 +122,20 @@ impl Mutation for Set {
             .then(|| current.issues_after.unwrap_or(latest));
         current.pulls_after = matches!(mode, Mode::PullRequests | Mode::IssuesAndPullRequests)
             .then(|| current.pulls_after.unwrap_or(latest));
+        let suffix = key_text(key);
+        if current.preference.releases != releases {
+            current.releases_after = if releases {
+                Some(publications::watermark(context)?)
+            } else {
+                None
+            };
+            publications::update_index(context, &suffix, &input.actor, releases)?;
+        }
         current.preference = Preference {
             mode,
             version: next_version(current.preference.version)?,
+            releases,
         };
-        let suffix = key_text(key);
         let watcher = format!("{WATCHERS}{suffix}");
         // The sparse index is updated with the preference. Version tombstones
         // fence stale writes after unwatching without keeping an active row.

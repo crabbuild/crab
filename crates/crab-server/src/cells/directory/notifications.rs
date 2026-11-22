@@ -19,12 +19,31 @@ pub(crate) const MAX_RECIPIENTS: usize = 32;
 pub(crate) const MAX_HISTORY: usize = 100;
 const MAX_HANDLES: usize = 40;
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ReleaseKind {
+    Release,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(untagged, deny_unknown_fields)]
+pub(crate) enum NoticeTarget {
+    Discussion(Target),
+    Release { kind: ReleaseKind, number: u64 },
+}
+
+impl From<Target> for NoticeTarget {
+    fn from(target: Target) -> Self {
+        Self::Discussion(target)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Notice {
     pub id: Uuid,
     pub repository: Uuid,
-    pub target: Target,
+    pub target: NoticeTarget,
     pub created_at_ms: u64,
     pub sender: String,
 }
@@ -38,7 +57,12 @@ impl Notice {
     }
 
     pub(crate) fn thread_id(&self) -> Uuid {
-        thread_id(self.repository, self.target.subject())
+        match self.target {
+            NoticeTarget::Discussion(target) => thread_id(self.repository, target.subject()),
+            NoticeTarget::Release { number, .. } => {
+                subject_id(self.repository, &format!("release/{number:016x}"))
+            }
+        }
     }
 
     fn validate(&self) -> Result<()> {
@@ -52,7 +76,17 @@ impl Notice {
         }
         use Target::*;
         let valid = |number: u64| (1..=MAX_VERSION).contains(&number);
-        let numbers_valid = match self.target {
+        let target = match self.target {
+            NoticeTarget::Release { number, .. } => {
+                return if valid(number) {
+                    Ok(())
+                } else {
+                    Err(Error::Invalid("Release notification target is invalid"))
+                };
+            }
+            NoticeTarget::Discussion(target) => target,
+        };
+        let numbers_valid = match target {
             Issue { number } | Pull { number } => valid(number),
             IssueComment { issue, number } => valid(issue) && valid(number),
             PullComment { pull, number }
@@ -72,9 +106,13 @@ impl Notice {
 }
 
 pub(crate) fn thread_id(repository: Uuid, subject: Subject) -> Uuid {
+    subject_id(repository, &subject.key())
+}
+
+fn subject_id(repository: Uuid, subject: &str) -> Uuid {
     let mut hash = blake3::Hasher::new_derive_key("crab inbox conversation v1");
     hash.update(repository.as_bytes());
-    hash.update(subject.key().as_bytes());
+    hash.update(subject.as_bytes());
     let mut bytes = [0; 16];
     bytes.copy_from_slice(&hash.finalize().as_bytes()[..16]);
     uuid::Builder::from_custom_bytes(bytes).into_uuid()
@@ -85,6 +123,7 @@ pub(crate) fn thread_id(repository: Uuid, subject: Subject) -> Uuid {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Reason {
     Subscribed,
+    Release,
     Assigned,
     ReviewRequested,
     TeamMention,
@@ -492,7 +531,7 @@ mod tests {
             notice: Notice {
                 id: Uuid::from_u128(u128::from(number)),
                 repository: Uuid::from_u128(1000),
-                target,
+                target: target.into(),
                 created_at_ms: number,
                 sender: "Alice".into(),
             },

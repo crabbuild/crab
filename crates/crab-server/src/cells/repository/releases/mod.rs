@@ -95,6 +95,7 @@ pub(crate) struct CompleteReleasePublicationInput {
     pub number: u64,
     pub expected_version: u64,
     pub tag_oid: String,
+    pub publisher: RepositoryAuthor,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

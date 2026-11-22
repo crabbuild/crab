@@ -672,3 +672,104 @@ test("unsubscribe recovers a lost reply and reports a stale row in a batch", asy
   await expect(inbox.getByRole("alert")).toHaveCount(0);
   await expectNoAccessibilityViolations(page);
 });
+
+test("release notifications filter and open the exact publication", async ({
+  page,
+}) => {
+  const { lifecycle } = await mockPullRequest(page);
+  const repository = {
+    id: lifecycle.repositoryId,
+    owner: "team",
+    name: "project",
+  };
+  const tag = "release/train";
+  const releasePath = "/team/project/releases/tag/release%2Ftrain";
+  const href = `${releasePath}?repository_id=${repository.id}&release_number=12`;
+  const notice = {
+    id: "release-notice",
+    repository,
+    subject: { kind: "release", number: 12 },
+    updated: { id: "publish-event", created_at_ms: 1_700_001_000_000 },
+    title: "Release train",
+    href,
+    sender: "Alice",
+    reason: "release",
+    read: false,
+    saved: false,
+    done: false,
+  };
+  await page.route("**/api/session", (route) =>
+    route.fulfill({
+      json: {
+        authenticated: true,
+        user: { name: "Bob", subject: "bob" },
+        csrf: "fixture-csrf",
+      },
+    }),
+  );
+  await page.route("**/api/notifications/unread", (route) =>
+    route.fulfill({ json: { unread: true } }),
+  );
+  await page.route(
+    (url) => url.pathname === "/api/notifications",
+    (route) => {
+      const reason = new URL(route.request().url()).searchParams.get("reason");
+      return route.fulfill({
+        json: {
+          items: !reason || reason === "release" ? [notice] : [],
+          next: null,
+        },
+      });
+    },
+  );
+  await page.route(
+    (url) => url.pathname === `/api/repos${releasePath}`,
+    (route) => {
+      expect(
+        new URL(route.request().url()).searchParams.get("release_number"),
+      ).toBe("12");
+      expect(route.request().headers()["x-crab-repository-id"]).toBe(
+        repository.id,
+      );
+      return route.fulfill({
+        json: {
+          number: 12,
+          tag_name: tag,
+          title: notice.title,
+          body: "Published notes for this train.",
+          tag_oid: "a".repeat(40),
+          target_oid: "a".repeat(40),
+          prerelease: false,
+          draft: false,
+          version: 1,
+          author: "Alice",
+          created_at: notice.updated.created_at_ms,
+          published_at: notice.updated.created_at_ms,
+          updated_at: notice.updated.created_at_ms,
+          assets: [],
+        },
+      });
+    },
+  );
+
+  await page.goto("/-/notifications");
+  const inbox = page.getByRole("region", { name: "Notifications" });
+  await inbox.getByLabel("Reason", { exact: true }).selectOption("release");
+  const link = inbox.getByRole("link", { name: notice.title });
+  await expect(link).toHaveAttribute("href", href);
+  await expect(
+    inbox.getByText(/Release published · Updated by Alice/),
+  ).toBeVisible();
+  await inbox
+    .getByRole("checkbox", { name: "Select all loaded notifications" })
+    .click();
+  await expect(inbox.getByRole("option", { name: "Unsubscribe" })).toHaveCount(
+    0,
+  );
+  await expect(inbox.getByRole("button", { name: "Unsubscribe" })).toHaveCount(
+    0,
+  );
+  await link.click();
+  await expect(page).toHaveURL(new RegExp("release_number=12$"));
+  await expect(page.getByText("Published notes for this train.")).toBeVisible();
+});

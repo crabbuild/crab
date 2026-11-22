@@ -3,6 +3,7 @@ import {
   AtSignIcon,
   BellIcon,
   GitPullRequestIcon,
+  TagIcon,
   UserRoundIcon,
 } from "lucide-react";
 import { useMutation } from "@/components/discussion/mutations";
@@ -37,6 +38,7 @@ function titleOf(repo: Pick<Address, "owner" | "name">) {
 }
 
 const reasons = {
+  release: { label: "Releases", summary: "Release published", icon: TagIcon },
   subscribed: {
     label: "Watched updates",
     summary: "Watched discussion",
@@ -331,6 +333,9 @@ function NotificationList({
         const selected = visible.filter((item) =>
           selection.has(item.updated.id),
         );
+        const selectionCanUnsubscribe =
+          canUnsubscribe &&
+          selected.every((item) => item.subject.kind !== "release");
         const firstRows = visible.slice(0, MAX_SELECTION);
         const allSelected =
           firstRows.length > 0 &&
@@ -462,7 +467,7 @@ function NotificationList({
                           .filter(isBulkAction)
                           .filter((action) =>
                             action === "unsubscribe"
-                              ? canUnsubscribe
+                              ? selectionCanUnsubscribe
                               : view !== "done" ||
                                 !["read", "unread", "done"].includes(action),
                           )
@@ -475,7 +480,12 @@ function NotificationList({
                       <Button
                         variant="outline"
                         size="sm"
-                        disabled={!bulkAction || selectionLocked}
+                        disabled={
+                          !bulkAction ||
+                          selectionLocked ||
+                          (bulkAction === "unsubscribe" &&
+                            !selectionCanUnsubscribe)
+                        }
                         onClick={() => {
                           if (!bulkAction) return;
                           void applyBulk(
@@ -506,7 +516,7 @@ function NotificationList({
                         }
                         actionsDisabled={!!intent || selected.length > 0}
                         onUnsubscribe={
-                          canUnsubscribe
+                          canUnsubscribe && item.subject.kind !== "release"
                             ? () =>
                                 void applyBulk(
                                   notificationIntent("unsubscribe", [item]),

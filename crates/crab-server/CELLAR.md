@@ -336,6 +336,13 @@ of the actor's issuer and subject. A sparse index tracks actors watching
 issues or pull requests. Each
 category has its own activation activity number so a new watch skips activity
 already committed and a category that stays enabled keeps its place.
+Release watching uses a separate sparse index and a publication sequence.
+Finalizing Git-backed release publication records that sequence and enqueues
+the notification in the same Repository transaction. The worker checks the
+current published generation, skips the publisher, and uses the same paged
+Directory delivery and access rules as discussion watches. A withdrawn,
+deleted, or superseded publication ends its pending delivery. Inbox reads
+resolve live published titles and bind the release number in the link.
 Watch delivery scans at most 32 index keys per event per sweep and commits
 the exclusive cursor after Directory accepts the page. Replayed
 acknowledgements cannot move the cursor backwards. Delivery checks current

@@ -7,7 +7,10 @@ test("repository watch preferences recover a lost reply and refresh the unread b
 }) => {
   const { lifecycle } = await mockPullRequest(page);
   const csrf = "fixture-csrf";
-  let preference = { mode: "direct", version: 0 };
+  let preference: { mode: string; version: number; releases?: boolean } = {
+    mode: "direct",
+    version: 0,
+  };
   let loseReply = true;
   await page.route("**/api/session", (route) =>
     route.fulfill({
@@ -33,11 +36,17 @@ test("repository watch preferences recover a lost reply and refresh the unread b
       expect(request.headers()["x-crab-repository-id"]).toBe(
         lifecycle.repositoryId,
       );
-      expect(request.postDataJSON()).toEqual({ mode: "muted", version: 0 });
-      preference = { mode: "muted", version: 1 };
-      if (loseReply) {
-        loseReply = false;
-        return route.abort("failed");
+      const input = request.postDataJSON();
+      if (input.mode === "issues") {
+        expect(input).toEqual({ mode: "issues", version: 0, releases: true });
+        preference = { mode: "issues", version: 1, releases: true };
+        if (loseReply) {
+          loseReply = false;
+          return route.abort("failed");
+        }
+      } else {
+        expect(input).toEqual({ mode: "muted", version: 1 });
+        preference = { mode: "muted", version: 2 };
       }
       return route.fulfill({ json: preference });
     },
@@ -54,9 +63,19 @@ test("repository watch preferences recover a lost reply and refresh the unread b
   await expect(choice).toHaveValue("direct");
   await expect(save).toBeDisabled();
   await expectNoAccessibilityViolations(page);
-  await choice.selectOption("muted");
+  const releases = dialog.getByRole("checkbox", { name: "New releases" });
+  await choice.selectOption("issues");
+  await releases.click();
   await save.click();
   await expect(dialog.getByRole("alert")).toContainText("response was lost");
+  await save.click();
+  await expect(dialog).toBeHidden();
+  await watch.click();
+  await expect(choice).toHaveValue("issues");
+  await expect(releases).toBeChecked();
+  await choice.selectOption("muted");
+  await expect(releases).not.toBeChecked();
+  await expect(releases).toBeDisabled();
   await save.click();
   await expect(dialog).toBeHidden();
   await expect(

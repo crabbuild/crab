@@ -174,7 +174,7 @@ mod tests {
             notice: Notice {
                 id: Uuid::now_v7(),
                 repository: Uuid::now_v7(),
-                target: Target::Issue { number: 1 },
+                target: Target::Issue { number: 1 }.into(),
                 created_at_ms: 1,
                 sender: "Alice".into(),
             },

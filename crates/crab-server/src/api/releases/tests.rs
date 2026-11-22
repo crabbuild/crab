@@ -629,6 +629,33 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
             .unwrap()
             .is_empty()
     );
+    let watch = "/api/repos/team/private/subscription";
+    let inbox = "/api/notifications?reason=release";
+    let choose = async |cookie: &str, version: u64, releases: bool| {
+        h.write(
+            reqwest::Method::PUT,
+            watch,
+            cookie,
+            json!({
+                "mode":"direct", "version":version, "releases":releases
+            }),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()
+    };
+    for cookie in [&alice, &bob] {
+        assert_eq!(
+            choose(cookie, 0, true).await,
+            json!({"mode":"direct","version":1,"releases":true})
+        );
+    }
+    h.deliver_notifications("team", "private").await;
+    assert_eq!(h.json(inbox, &bob).await["items"], json!([]));
+
     let published = edit_release(
         &h,
         &alice,
@@ -671,6 +698,87 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
         h.json(&format!("{RELEASES}?query=REVIEWED"), &bob).await["items"][0]["number"],
         4
     );
+    let cell = crate::app::repository_cell(&h.server, &repo).unwrap();
+    let pending = cell
+        .client
+        .query::<crate::cells::repository::collaboration::mentions::Pending>(&cell.target, None, ())
+        .await
+        .unwrap()
+        .output;
+    assert_eq!(pending.releases.len(), 1);
+    let event = &pending.releases[0];
+    h.deliver_notifications("team", "private").await;
+    let release_inbox = h.json(inbox, &bob).await;
+    let [notice] = release_inbox["items"].as_array().unwrap().as_slice() else {
+        panic!("publishing a draft must produce one notification");
+    };
+    assert_eq!(notice["title"], "Crab 3.0 ready");
+    assert_eq!(notice["subject"], json!({"kind":"release","number":4}));
+    assert_eq!(
+        notice["href"],
+        format!(
+            "/team/private/releases/tag/v3.0.0?repository_id={}&release_number=4",
+            repo.id
+        )
+    );
+    assert_eq!(h.json(inbox, &alice).await["items"], json!([]));
+    assert_eq!(
+        h.json("/api/notifications/unread", &bob).await,
+        json!({"unread":true})
+    );
+    let mark = format!(
+        "/api/notifications/{}/state",
+        notice["id"].as_str().unwrap()
+    );
+    h.write(
+        reqwest::Method::PUT,
+        &mark,
+        &bob,
+        json!({
+            "repository_id":repo.id, "expected":notice["updated"], "action":{"read":true}
+        }),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+
+    // Retry the identical Directory event after the user reads it.
+    use crate::cells::directory::notifications::{
+        Access, Deliver, Delivery, Notice, NoticeTarget, Reason, Recipient, ReleaseKind,
+    };
+    let actor = h.assignee_id(&alice, "Bob").await;
+    cell.client
+        .command::<Deliver>(
+            crate::cells::Address::Directory,
+            crate::app::mutation_identity().unwrap(),
+            Delivery {
+                notice: Notice {
+                    id: event.id,
+                    repository: repo.id,
+                    target: NoticeTarget::Release {
+                        kind: ReleaseKind::Release,
+                        number: event.number,
+                    },
+                    created_at_ms: event.published_at_ms,
+                    sender: event.publisher.name.clone(),
+                },
+                recipients: vec![Recipient {
+                    actor: serde_json::from_value(actor).unwrap(),
+                    access: Access::Direct,
+                    reason: Reason::Release,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+    let read_inbox = h.json(inbox, &bob).await;
+    assert_eq!(read_inbox["items"].as_array().unwrap().len(), 1);
+    assert_eq!(read_inbox["items"][0]["read"], true);
+    assert_eq!(
+        h.json("/api/notifications/unread", &bob).await,
+        json!({"unread":false})
+    );
+
     let bob_session = h.json("/api/session", &bob).await;
     let mut denied_release = first;
     denied_release["request_id"] = json!("66666666-6666-4666-8666-666666666666");
@@ -725,6 +833,70 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
         );
     }
 
+    let publish_slash = |version| {
+        json!({
+            "version":version, "title":"Slash tag", "body":"", "prerelease":false, "draft":false
+        })
+    };
+    let slash_number = slash_tag.1["number"].as_u64().unwrap();
+    assert_eq!(choose(&bob, 1, false).await["version"], 2);
+    let slash = edit_release(&h, &alice, csrf, slash_number, &publish_slash(1)).await;
+    assert_eq!(slash.0, StatusCode::OK, "{}", slash.1);
+    assert_eq!(choose(&bob, 2, true).await["version"], 3);
+    h.deliver_notifications("team", "private").await;
+    assert_eq!(h.json(inbox, &bob).await, read_inbox);
+
+    let draft = edit_release(
+        &h,
+        &alice,
+        csrf,
+        slash_number,
+        &json!({
+            "version":2, "title":"Slash tag", "body":"", "prerelease":false, "draft":true
+        }),
+    )
+    .await;
+    assert_eq!(draft.0, StatusCode::OK, "{}", draft.1);
+    let slash = edit_release(&h, &alice, csrf, slash_number, &publish_slash(3)).await;
+    assert_eq!(slash.0, StatusCode::OK, "{}", slash.1);
+    h.deliver_notifications("team", "private").await;
+    let slash_inbox = h.json(inbox, &bob).await;
+    assert_eq!(
+        slash_inbox["items"][0]["href"],
+        format!(
+            "/team/private/releases/tag/release%2F2026?repository_id={}&release_number={slash_number}",
+            repo.id
+        )
+    );
+    assert_eq!(
+        h.json(
+            &format!("{RELEASES}/tag/release%2F2026?release_number={slash_number}"),
+            &bob
+        )
+        .await["number"],
+        slash_number
+    );
+    let wrong_release = h
+        .http
+        .get(format!(
+            "{}{RELEASES}/tag/release%2F2026?release_number=4",
+            h.origin
+        ))
+        .header(header::COOKIE, &bob)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong_release.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        delete_release(&h, &alice, csrf, slash_number, 4).await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(h.json(inbox, &bob).await, read_inbox);
+    assert_eq!(
+        h.json("/api/notifications/unread", &bob).await,
+        json!({"unread":false})
+    );
+
     *h.provider.mode.lock().await = "outsider".into();
     let outsider = h.login().await;
     let response = h
@@ -758,5 +930,90 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
             .len(),
         1
     );
+    h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires agent-browser and the built embedded UI; uses isolated real OIDC/native Cells"]
+async fn native_browser_watches_releases_and_opens_the_published_version() {
+    use crate::test_support::{git, http::browser::Browser};
+    use reqwest::Method;
+    use uuid::Uuid;
+
+    let h = Harness::new(false).await;
+    let alice = h.login().await;
+    let token: Value = h
+        .write(
+            Method::POST,
+            "/api/git-token",
+            &alice,
+            json!({"owner":"team","repository":"private","access":"write"}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let mut remote = Url::parse(&format!("{}/git/team/private.git", h.origin)).unwrap();
+    remote.set_username("crab").unwrap();
+    remote.set_password(token["token"].as_str()).unwrap();
+    let source = tempfile::tempdir().unwrap();
+    git::push_review_branches(source.path(), remote.as_str()).await;
+    let target = git::success(source.path(), &["rev-parse", "main"]).await;
+
+    *h.provider.mode.lock().await = "member".into();
+    let bob = h.login().await;
+    let browser = Browser::new("release-notifications");
+    browser
+        .run(&["open", &format!("{}/team/private", h.origin)])
+        .await;
+    let click = async |role: &str, name: &str| {
+        browser.run(&["wait", "--text", name]).await;
+        browser
+            .run(&["find", "role", role, "click", "--name", name, "--exact"])
+            .await;
+    };
+    click("button", "Continue to sign in").await;
+    click("button", "Watch").await;
+    click("checkbox", "New releases").await;
+    click("button", "Save preference").await;
+    browser
+        .run(&["wait", "--fn", "!document.querySelector('[role=dialog]')"])
+        .await;
+    assert_eq!(
+        h.json("/api/repos/team/private/subscription", &bob).await,
+        json!({"mode":"direct","version":1,"releases":true})
+    );
+
+    h.write(
+        Method::POST,
+        RELEASES,
+        &alice,
+        json!({
+            "request_id":Uuid::now_v7(), "tag_name":"release/observed", "target_oid":target,
+            "title":"A release for watchers", "body":"Published release notes",
+            "prerelease":false, "draft":false
+        }),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    h.deliver_notifications("team", "private").await;
+    browser
+        .run(&["open", &format!("{}/-/notifications", h.origin)])
+        .await;
+    browser.run(&["wait", "--text", "Release published"]).await;
+    click("link", "A release for watchers").await;
+    browser
+        .run(&["wait", "--text", "Published release notes"])
+        .await;
+    assert!(
+        browser
+            .run(&["get", "url"])
+            .await
+            .contains("release_number=1")
+    );
+    drop(browser);
     h.close().await;
 }
