@@ -156,7 +156,7 @@ impl OperatorCdn {
                         timeout,
                     )
                     .for_consumer(consumer, CdnProfile::Direct)
-                    .with_publication(publication, export)
+                    .with_publication(origin, publication, export)
                     .await?,
                 )?)
             }

@@ -249,7 +249,7 @@ impl DirectCdnOptions {
                     timeout,
                 )
                 .for_consumer(consumer, CdnProfile::Direct)
-                .with_publication(publication, export)
+                .with_publication(&selected.store, publication, export)
                 .await
                 .map_err(|source| {
                     Error::with_source(
@@ -398,12 +398,16 @@ mod tests {
             .unwrap();
             let client = Client::builder()
                 .direct_store(store)
-                .direct_cdn(options)
+                .direct_cdn(options.clone())
                 .build()
                 .unwrap();
-            let selected = client
-                .0
-                .resolve_read_repository(&repo, &cancel)
+            let mut selected = client.0.resolve_repository(&repo, &cancel).await.unwrap();
+            assert_eq!(selected.store.native_cdn_origin(), Some(origin));
+            selected.store = selected
+                .store
+                .with_native_cdn_origin(Some(origin.to_owned()));
+            let selected = options
+                .resolve(selected, CdnConsumer::Sdk, &cancel)
                 .await
                 .unwrap();
             assert_eq!(

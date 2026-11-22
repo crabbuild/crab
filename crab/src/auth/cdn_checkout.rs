@@ -106,19 +106,18 @@ impl Checkout {
                     "public CDN checkout requires an approved publication receipt",
                 ));
             };
-            store.with_cdn_route(
-                CdnRoute::new(
-                    self.binding.target_identity,
-                    url.repo_path.clone(),
-                    None,
-                    CdnAccess::Public,
-                    CdnTransport::new(&deployment.base_url)?,
-                    config.operation_timeout,
-                )
-                .for_consumer(consumer, CdnProfile::Direct)
-                .with_publication(publication, export)
-                .await?,
-            )?
+            let route = CdnRoute::new(
+                self.binding.target_identity,
+                url.repo_path.clone(),
+                None,
+                CdnAccess::Public,
+                CdnTransport::new(&deployment.base_url)?,
+                config.operation_timeout,
+            )
+            .for_consumer(consumer, CdnProfile::Direct)
+            .with_publication(&store, publication, export)
+            .await?;
+            store.with_cdn_route(route)?
         };
         let repository_prefix = store
             .storage_scope()

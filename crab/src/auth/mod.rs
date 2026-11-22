@@ -534,7 +534,7 @@ async fn build_store_for_url(
     }
     let mut store = store
         .into_storage()
-        .with_native_cdn_origin(built.native_cdn_origin);
+        .with_native_cdn_authority(built.native_cdn_origin);
     if read {
         store = CdnBinding::attach_public(
             &config.cdn,

@@ -531,6 +531,16 @@ access on the source as well as the export. Grant source bucket location
 access for S3, source bucket metadata access for GCS, or source storage
 account and container read access in Azure Resource Manager.
 
+Public S3 activation calls `HeadBucket` with the selected credentials and the
+approved bucket owner. Grant `s3:ListBucket` on the source bucket to the
+reader used by the qualification action. Public GCS activation calls
+`buckets.get` with the selected credentials. Grant `storage.buckets.get`
+on the source bucket to that reader. The activation verifies the location
+from the same call and rejects a missing or mismatched proof before sending
+an edge request. Public Azure activation still needs a runtime ARM
+authority to verify the receipt's account resource and primary location.
+[S3 HeadBucket](https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadBucket.html) · [GCS Buckets: get](https://docs.cloud.google.com/storage/docs/json_api/v1/buckets/get) · [Azure storage account properties](https://learn.microsoft.com/en-us/rest/api/storagerp/storage-accounts/get-properties)
+
 Recollect public deployment snapshots before preregistration. They include
 an export component that binds the actual distribution or backend and its
 deployed inventory digest to the independently observed resource identities

@@ -165,19 +165,18 @@ impl CdnBinding {
             .target_identity()
             .copied()
             .ok_or_else(|| config_error("CDN requires a resolved physical target"))?;
-        Ok(store.with_cdn_route(
-            CdnRoute::new(
-                target,
-                prefix.to_owned(),
-                None,
-                CdnAccess::Public,
-                CdnTransport::new(&binding.base_url)?,
-                timeout,
-            )
-            .for_consumer(consumer, CdnProfile::Direct)
-            .with_publication(publication, export)
-            .await?,
-        )?)
+        let route = CdnRoute::new(
+            target,
+            prefix.to_owned(),
+            None,
+            CdnAccess::Public,
+            CdnTransport::new(&binding.base_url)?,
+            timeout,
+        )
+        .for_consumer(consumer, CdnProfile::Direct)
+        .with_publication(&store, publication, export)
+        .await?;
+        Ok(store.with_cdn_route(route)?)
     }
 
     pub(crate) fn private_request_for_selected_origin<'a>(

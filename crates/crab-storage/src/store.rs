@@ -146,7 +146,7 @@ pub struct Store {
     /// explicit identity — typically tests and the in-memory store.
     identity: BucketIdentity,
     target_identity: Option<[u8; 32]>,
-    native_cdn_origin: Option<String>,
+    pub(crate) native_cdn_origin: Option<Arc<crate::cdn::NativeCdnOrigin>>,
     immutable_write_verification: ImmutableWriteVerification,
     /// Optional parallel handle to the same underlying store viewed
     /// as a [`object_store::signer::Signer`]. Populated by storage
@@ -332,15 +332,28 @@ impl Store {
 
     /// Propagate the native cloud origin recorded by the resolved provider builder.
     #[must_use]
-    pub fn with_native_cdn_origin(mut self, origin: Option<String>) -> Self {
-        self.native_cdn_origin = origin;
+    pub fn with_native_cdn_authority(
+        mut self,
+        origin: Option<crate::cdn::NativeCdnOrigin>,
+    ) -> Self {
+        self.native_cdn_origin = origin.map(Arc::new);
+        self.cdn = None;
         self
+    }
+
+    /// Install a simulated origin in a test without cloud credentials.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn with_native_cdn_origin(self, origin: Option<String>) -> Self {
+        self.with_native_cdn_authority(origin.map(crate::cdn::NativeCdnOrigin::fixture))
     }
 
     /// Canonical origin for CDN binding when native provider placement is known.
     #[must_use]
     pub fn native_cdn_origin(&self) -> Option<&str> {
-        self.native_cdn_origin.as_deref()
+        self.native_cdn_origin
+            .as_deref()
+            .map(crate::cdn::NativeCdnOrigin::address)
     }
 
     /// Return target proof only when every read beneath `prefix` uses the bound transport.

@@ -11,6 +11,7 @@ const MAX_BYTES: u64 = 8 * 1024 * 1024;
 
 pub(crate) struct Publication {
     pub(crate) source_origin: String,
+    pub(crate) source_placement: Placement,
     pub(crate) sizes: BTreeMap<String, u64>,
 }
 
@@ -31,12 +32,19 @@ struct Receipt {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Placement {
+pub(crate) struct Placement {
     resource: String,
-    location: String,
+    pub(crate) location: String,
 }
 
 impl Placement {
+    pub(crate) fn account_or_project(&self) -> Option<&str> {
+        self.resource
+            .split('/')
+            .nth(1)
+            .filter(|owner| !owner.is_empty())
+    }
+
     fn matches(&self, origin: &str) -> bool {
         let parts = self.resource.split('/').collect::<Vec<_>>();
         match parts.as_slice() {
@@ -188,6 +196,7 @@ impl Publication {
         }
         Ok(Self {
             source_origin: receipt.source_origin,
+            source_placement: receipt.source_placement,
             sizes,
         })
     }

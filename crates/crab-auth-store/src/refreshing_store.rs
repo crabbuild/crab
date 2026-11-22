@@ -71,15 +71,19 @@ impl ReadAuthority {
             }
             .into());
         }
+        let origin = store
+            .native_cdn_origin
+            .as_ref()
+            .map(|native| native.address());
         if viewer
             .as_ref()
-            .is_some_and(|grant| store.native_cdn_origin.as_deref() != Some(grant.origin.as_str()))
+            .is_some_and(|grant| origin != Some(grant.origin.as_str()))
         {
             return Err(crate::cdn::scope_changed().into());
         }
         Ok(Self {
             scope,
-            origin: store.native_cdn_origin.clone(),
+            origin: origin.map(str::to_owned),
             viewer,
             expires_at,
         })

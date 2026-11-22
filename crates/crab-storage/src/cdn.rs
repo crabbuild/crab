@@ -15,18 +15,21 @@ use reqwest::{
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
+mod placement;
 mod policy;
 mod publication;
 mod telemetry;
 
 pub use crab_types::storage::CdnPublicationFile;
+pub(crate) use placement::NativeAuthority;
+pub use placement::NativeCdnOrigin;
 pub use policy::{CdnConsumer, CdnPolicy, CdnProfile, CdnReadFamily, CdnVisibility};
 #[cfg(any(test, feature = "test-support"))]
 pub use publication::write_publication_fixture;
 pub use telemetry::GitPayloadObservation;
 
 use crate::{
-    Result, StorageError, StorageProviderKind,
+    Result, StorageError, StorageProviderKind, Store,
     layout::StoreLayout,
     map_object_store_error,
     transport_read_admission::{self, TransportReadReceipt},
@@ -53,6 +56,7 @@ pub struct CdnRoute {
     pub(crate) context: Option<(CdnConsumer, CdnProfile)>,
     pub(crate) families: Vec<CdnReadFamily>,
     pub(crate) publication: Option<publication::Publication>,
+    pub(crate) publication_origin: Option<Arc<NativeCdnOrigin>>,
 }
 
 impl CdnRoute {
@@ -80,12 +84,14 @@ impl CdnRoute {
             context: None,
             families: Vec::new(),
             publication: None,
+            publication_origin: None,
         }
     }
 
     /// Pin the immutable inventory that the operator approved for this public export.
     pub async fn with_publication(
         mut self,
+        origin: &Store,
         file: &CdnPublicationFile,
         export_origin: &str,
     ) -> Result<Self> {
@@ -103,13 +109,33 @@ impl CdnRoute {
             .trim_end_matches('/')
             .to_owned();
         let export = export_origin.to_owned();
-        self.publication = Some(
-            tokio::task::spawn_blocking(move || {
-                publication::Publication::load(&file, &layout, &base, &export)
-            })
-            .await
-            .map_err(std::io::Error::other)??,
-        );
+        let publication = tokio::task::spawn_blocking(move || {
+            publication::Publication::load(&file, &layout, &base, &export)
+        })
+        .await
+        .map_err(std::io::Error::other)??;
+        let authority = origin
+            .native_cdn_origin
+            .as_ref()
+            .filter(|native| native.address == publication.source_origin)
+            .filter(|_| origin.read_prefix_target_identity(&Path::ROOT) == Some(&self.target))
+            .filter(|_| origin.storage_scope().is_none())
+            .ok_or_else(|| StorageError::Forbidden {
+                path: "CDN publication receipt does not match the selected native origin".into(),
+            })?;
+        self.provider = origin.bucket_identity().cloud;
+        self.publication_origin = None;
+        if !self.transport.is_loopback()
+            && self
+                .policy()
+                .is_some_and(|policy| !policy.families().is_empty())
+        {
+            authority
+                .verify(&publication.source_placement, self.edge_timeout())
+                .await?;
+            self.publication_origin = Some(Arc::clone(authority));
+        }
+        self.publication = Some(publication);
         Ok(self)
     }
 

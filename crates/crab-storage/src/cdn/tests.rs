@@ -119,7 +119,7 @@ async fn provider_https_route_requires_an_exact_policy_context() {
         .clone()
         .with_cdn_route(
             route()
-                .with_publication(&file, "s3://export")
+                .with_publication(&store, &file, "s3://export")
                 .await
                 .unwrap(),
         )
@@ -134,15 +134,26 @@ async fn provider_https_route_requires_an_exact_policy_context() {
     let approved = include_str!("qualified-scopes.txt")
         .lines()
         .any(|row| row == "cloudfront/public/cli/git/direct");
-    let scoped = store
-        .with_cdn_route(
-            route()
-                .for_consumer(CdnConsumer::Cli, CdnProfile::Direct)
-                .with_publication(&file, "s3://export")
-                .await
-                .unwrap(),
-        )
+    let authorized_route = route()
+        .for_consumer(CdnConsumer::Cli, CdnProfile::Direct)
+        .with_publication(&store, &file, "s3://export")
+        .await
         .unwrap();
+    if qualification_enabled() || approved {
+        let changed_authority = store
+            .clone()
+            .with_native_cdn_origin(Some("s3://origin".into()));
+        let reusing_route = route()
+            .for_consumer(CdnConsumer::Cli, CdnProfile::Direct)
+            .with_publication(&store, &file, "s3://export")
+            .await
+            .unwrap();
+        assert!(matches!(
+            changed_authority.with_cdn_route(reusing_route),
+            Err(StorageError::Forbidden { .. })
+        ));
+    }
+    let scoped = store.with_cdn_route(authorized_route).unwrap();
     assert_eq!(
         scoped.cdn_attempt(&key).is_some(),
         qualification_enabled() || approved
@@ -174,21 +185,23 @@ async fn public_export_approval_pins_digest_origin_and_viewer() {
             Duration::from_secs(5),
         )
     };
+    let source = Store::new(Arc::new(InMemory::new()))
+        .with_target_identity([4; 32])
+        .with_native_cdn_origin(Some("s3://source".into()));
     let wrong_host = route("https://other.example.com")
-        .with_publication(&file, "s3://export")
+        .with_publication(&source, &file, "s3://export")
         .await;
     assert!(wrong_host.is_err());
-    let wrong_export = route(base).with_publication(&file, "s3://other").await;
+    let wrong_export = route(base)
+        .with_publication(&source, &file, "s3://other")
+        .await;
     assert!(wrong_export.is_err());
-    let wrong_source = Store::new(Arc::new(InMemory::new()))
+    let other = Store::new(Arc::new(InMemory::new()))
         .with_target_identity([4; 32])
-        .with_native_cdn_origin(Some("s3://other".into()))
-        .with_cdn_route(
-            route(base)
-                .with_publication(&file, "s3://export")
-                .await
-                .unwrap(),
-        );
+        .with_native_cdn_origin(Some("s3://other".into()));
+    let wrong_source = route(base)
+        .with_publication(&other, &file, "s3://export")
+        .await;
     assert!(matches!(wrong_source, Err(StorageError::Forbidden { .. })));
     let mut receipt: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
@@ -205,16 +218,69 @@ async fn public_export_approval_pins_digest_origin_and_viewer() {
     };
     assert!(
         route(base)
-            .with_publication(&repinned, "s3://export")
+            .with_publication(&source, &repinned, "s3://export")
             .await
             .is_err()
     );
     std::fs::write(path, b"tampered").unwrap();
-    let tampered = route(base).with_publication(&file, "s3://export").await;
+    let tampered = route(base)
+        .with_publication(&source, &file, "s3://export")
+        .await;
     assert!(matches!(
         tampered,
         Err(StorageError::InvalidStaticEnvTarget { .. })
     ));
+}
+
+#[tokio::test]
+async fn public_s3_activation_rejects_the_selected_store_in_another_region() {
+    let directory = tempfile::tempdir().unwrap();
+    let viewer = "https://downloads.example.com";
+    let file = write_publication_fixture(
+        directory.path().join("receipt.json"),
+        "s3://selected-bucket",
+        "s3://public-export",
+        "org/repo",
+        viewer,
+        &format!("v2/pack-layers/aa/{}", "a".repeat(64)),
+        6,
+    )
+    .unwrap();
+    let store = crate::provider_store::build_explicit_store(
+        "selected-bucket",
+        crate::provider_store::ObjectStoreCredentials::Aws {
+            access_key_id: "fixture".into(),
+            secret_access_key: "fixture-key".into(),
+            session_token: None,
+            region: "us-west-2".into(),
+        },
+        None,
+        false,
+    )
+    .unwrap();
+    let route = CdnRoute::new(
+        *store.target_identity().unwrap(),
+        "org/repo".into(),
+        None,
+        CdnAccess::Public,
+        CdnTransport::new(viewer).unwrap(),
+        Duration::from_secs(5),
+    )
+    .for_consumer(CdnConsumer::Cli, CdnProfile::Direct);
+    let enabled = CdnPolicy {
+        provider: StorageProviderKind::S3,
+        consumer: CdnConsumer::Cli,
+        profile: CdnProfile::Direct,
+        visibility: CdnVisibility::Public,
+    }
+    .enabled();
+    let activation = route
+        .with_publication(&store, &file, "s3://public-export")
+        .await;
+    assert_eq!(
+        matches!(activation, Err(StorageError::Forbidden { .. })),
+        enabled
+    );
 }
 
 #[tokio::test]
@@ -235,6 +301,9 @@ async fn public_export_admits_only_the_approved_key_and_object_size() {
         6,
     )
     .unwrap();
+    let store = Store::new(Arc::new(InMemory::new()))
+        .with_target_identity([9; 32])
+        .with_native_cdn_origin(Some("s3://origin".into()));
     let route = CdnRoute::new(
         [9; 32],
         prefix.into(),
@@ -243,14 +312,10 @@ async fn public_export_admits_only_the_approved_key_and_object_size() {
         transport,
         Duration::from_secs(5),
     )
-    .with_publication(&file, "s3://export")
+    .with_publication(&store, &file, "s3://export")
     .await
     .unwrap();
-    let store = Store::new(Arc::new(InMemory::new()))
-        .with_target_identity([9; 32])
-        .with_native_cdn_origin(Some("s3://origin".into()))
-        .with_cdn_route(route)
-        .unwrap();
+    let store = store.with_cdn_route(route).unwrap();
     store
         .put_overwrite(&newer, Bytes::from_static(b"new ref"))
         .await

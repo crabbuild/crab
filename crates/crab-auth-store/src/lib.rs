@@ -224,7 +224,7 @@ fn store_from_built(bucket: &str, endpoint: Option<&str>, built: BuiltObjectStor
     let mut store = Store::new(built.inner)
         .with_bucket_identity(identity)
         .with_target_identity(built.target_identity)
-        .with_native_cdn_origin(built.native_cdn_origin)
+        .with_native_cdn_authority(built.native_cdn_origin)
         .with_immutable_write_verification(built.immutable_write_verification);
     if let Some(signer) = built.signer {
         store = store.with_signer(signer);
@@ -289,7 +289,7 @@ pub fn build_protected_push_store(
             let store = Store::new(default_read)
                 .with_bucket_identity(identity)
                 .with_target_identity(write.target_identity)
-                .with_native_cdn_origin(write.native_cdn_origin)
+                .with_native_cdn_authority(write.native_cdn_origin)
                 .with_read_routes(read_routes);
             Ok(store.with_staging_write_store(upload_prefix.to_owned(), write.inner))
         }

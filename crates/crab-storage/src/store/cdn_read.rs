@@ -106,6 +106,19 @@ impl Store {
         if let Some(policy) = route.policy() {
             route.families = policy.families();
         }
+        if matches!(route.access, CdnAccess::Public)
+            && !route.transport.is_loopback()
+            && !route.families.is_empty()
+            && !route
+                .publication_origin
+                .as_ref()
+                .zip(self.native_cdn_origin.as_ref())
+                .is_some_and(|(approved, selected)| Arc::ptr_eq(approved, selected))
+        {
+            return Err(StorageError::Forbidden {
+                path: "CDN publication requires approval from the selected native authority".into(),
+            });
+        }
         self.cdn =
             (route.transport.is_loopback() || !route.families.is_empty()).then(|| Arc::new(route));
         Ok(self)
