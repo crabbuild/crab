@@ -19,6 +19,12 @@ the default refreshable AWS credential chain, endpoint/addressing policy,
 multipart support and transport identity. This lets generated server config
 carry its discovered region into independent administration processes.
 
+`CdnTransport` reads exact-length immutable bodies and ranges over HTTPS.
+`StoreLayout::cdn_object_namespace` classifies the physical repository and
+global keys eligible for this transport. The composing reader must establish
+whole-object access and verify the returned bytes against authenticated
+metadata. Conditional operations and origin receipts use the provider store.
+
 ## Why it exists
 
 Every higher layer needs object storage, but none should duplicate provider

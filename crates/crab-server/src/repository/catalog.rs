@@ -161,16 +161,25 @@ pub(crate) async fn materialize(
                 "catalog repository HEAD must name a branch",
             ))?;
         let entry = record.runtime_config(catalog.root(), default_branch)?;
+        let namespace = &catalog.root().provider_namespace;
+        let read_layout = crate::server::storage::repository_read_layout(catalog.root(), &layout)
+            .await?
+            .map(|layout| {
+                RepositoryIdentity::new(
+                    format!("cdn:{namespace}"),
+                    prefix.clone(),
+                    record.placement_generation,
+                )
+                .map(|identity| (layout, identity))
+            })
+            .transpose()?;
         let repository = Repository::new(
             record.id,
             entry.clone(),
             layout,
-            RepositoryIdentity::new(
-                catalog.root().provider_namespace.clone(),
-                prefix,
-                record.placement_generation,
-            )?,
-        );
+            RepositoryIdentity::new(namespace.clone(), prefix, record.placement_generation)?,
+        )
+        .with_read_layout(read_layout);
         repositories.insert(
             (entry.owner.clone(), entry.name.clone()),
             Arc::new(repository),

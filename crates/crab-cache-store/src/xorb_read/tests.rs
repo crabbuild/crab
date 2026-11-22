@@ -176,3 +176,60 @@ fn duplicate_insertion_keeps_the_verified_original() {
     assert_eq!(state.get(&key(1)).unwrap(), original);
     assert_eq!(state.cache_guard().charged_bytes, before);
 }
+
+#[tokio::test]
+async fn complete_xorb_read_uses_verified_cdn_body_after_cache_miss() {
+    use axum::{Router, body::Body, response::Response};
+    use crab_storage::cdn::{CdnAccess, CdnRoute, CdnTransport};
+    use crab_xet::xorb::{
+        builder::{RunId, XorbBuilder},
+        format::Chunk,
+    };
+    use object_store::{ObjectStoreExt, memory::InMemory};
+    use std::{sync::Arc, time::Duration};
+
+    let expected = Bytes::from_static(b"cdn verified content");
+    let mut builder = XorbBuilder::new();
+    builder
+        .push(&Chunk::new(expected.clone()), RunId(0))
+        .unwrap();
+    let xorb = builder.finalize().unwrap().pop().unwrap();
+    let path = crab_storage::canonical_global_content_path("xorbs", &xorb.hash.hex());
+    let body = xorb.bytes.clone();
+    let app = Router::new().fallback(move || {
+        let body = body.clone();
+        async move { Response::new(Body::from(body)) }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let transport = CdnTransport::loopback_fixture(listener.local_addr().unwrap()).unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let temp = tempfile::tempdir().unwrap();
+    let local = Arc::new(crab_cache::LocalCache::new(temp.path().join("cache")));
+    let inner = Arc::new(InMemory::new());
+    // Only size is available from origin. A body read at origin would fail
+    // content verification instead of producing the expected bytes.
+    inner
+        .put(&path, Bytes::from(vec![0; xorb.bytes.len()]).into())
+        .await
+        .unwrap();
+    let target = [13; 32];
+    let origin = crab_storage::Store::new(inner)
+        .with_target_identity(target)
+        .with_cdn_route(CdnRoute::new(
+            target,
+            "org/repo".into(),
+            Some(".crab".into()),
+            CdnAccess::Public,
+            transport,
+            Duration::from_secs(10),
+        ))
+        .unwrap();
+    let store =
+        CachingStore::new_with_local_cache(origin, crate::CacheConfig::default(), local).unwrap();
+    let (bytes, _) = store
+        .get_xorb_chunks_without_install(&path, &xorb.hash, &[(0, 1)])
+        .await
+        .unwrap();
+    assert_eq!(bytes, expected);
+    server.abort();
+}

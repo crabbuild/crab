@@ -79,11 +79,15 @@ pub(crate) struct ManagedState {
 }
 
 impl ManagedState {
-    pub(crate) fn new(options: ManagedOptions) -> Result<Self> {
+    pub(crate) fn new(
+        options: ManagedOptions,
+        consumer: crab_storage::cdn::CdnConsumer,
+    ) -> Result<Self> {
         #[cfg(feature = "local")]
         let local_compatible = options.bearer_token.is_none();
         let token_cache_directory = options.token_cache_directory;
         let resolver = ManagedRepositoryResolver::new(token_cache_directory.clone())
+            .with_cdn_consumer(consumer)
             .with_bearer_token(options.bearer_token)
             .map_err(managed_repository_error)?;
         Ok(Self {

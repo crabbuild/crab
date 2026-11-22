@@ -78,7 +78,7 @@ fn resolve_repository() {}
     ),
     request_body = TransferGrantRequest,
     responses(
-        (status = 201, description = "Short-lived transfer grant", body = TransferGrant),
+        (status = 201, description = "Short-lived grant in the requested version. Native direct reads in version 2 can include CDN viewer authority.", body = TransferGrant),
         (status = 400, description = "Invalid grant request", body = ApiErrorEnvelope),
         (status = 401, description = "Authentication required", body = ApiErrorEnvelope),
         (status = 403, description = "Transfer is not authorized", body = ApiErrorEnvelope),

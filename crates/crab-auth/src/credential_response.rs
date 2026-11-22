@@ -5,6 +5,7 @@ use std::time::SystemTime;
 use crab_types::storage::StorageScope;
 use serde::Deserialize;
 
+use crate::cdn::CdnViewerGrant;
 use crate::credentials::{AzureReadScope, AzureToken, CloudCredentials};
 use crate::error::{AuthError, Result};
 
@@ -22,6 +23,8 @@ pub struct CrabAuthCredentialResponse {
     pub permissions: Vec<String>,
     /// Optional path-scoped view storage route.
     pub storage_scope: Option<StorageScope>,
+    /// Optional viewer grant negotiated by the requesting client.
+    pub cdn: Option<CdnViewerGrant>,
 }
 
 impl std::fmt::Debug for CrabAuthCredentialResponse {
@@ -49,6 +52,7 @@ struct RawCredentialResponse {
     expires_at: String,
     permissions: Vec<String>,
     storage_scope: Option<RawStorageScope>,
+    cdn: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -68,6 +72,10 @@ pub fn parse_credential_response(body: &str) -> Result<CrabAuthCredentialRespons
         .storage_scope
         .map(validate_storage_scope)
         .transpose()?;
+    let cdn = response
+        .cdn
+        .map(|grant| CdnViewerGrant::parse(grant, &response.provider, storage_scope.as_ref()))
+        .transpose()?;
 
     Ok(CrabAuthCredentialResponse {
         provider: response.provider,
@@ -75,6 +83,7 @@ pub fn parse_credential_response(body: &str) -> Result<CrabAuthCredentialRespons
         expires_at: response.expires_at,
         permissions: response.permissions,
         storage_scope,
+        cdn,
     })
 }
 

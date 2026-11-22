@@ -128,6 +128,20 @@ where
     READ_CONTEXTS.scope(contexts, future).await
 }
 
+pub(crate) async fn scope_direct<F: Future>(
+    admissions: &[Arc<dyn ReadAdmission>],
+    future: F,
+) -> F::Output {
+    let mut active = contexts();
+    active.extend(admissions.iter().map(|admission| {
+        let context = TransportReadContext::new(Arc::clone(admission));
+        // No ObjectStore facade prepays this physical request.
+        context.prepaid_request.store(false, Ordering::Relaxed);
+        context
+    }));
+    READ_CONTEXTS.scope(active, future).await
+}
+
 fn contexts() -> Vec<Arc<TransportReadContext>> {
     READ_CONTEXTS
         .try_with(Clone::clone)

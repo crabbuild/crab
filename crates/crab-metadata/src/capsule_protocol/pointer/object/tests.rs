@@ -48,6 +48,89 @@ fn catalog(files: u32) -> PointerCatalog {
 }
 
 #[tokio::test]
+async fn catalog_lookup_restarts_a_corrupt_edge_descriptor_and_verifies_edge_pages() {
+    use crab_storage::StoreLayout;
+    use crab_storage::cdn::{CdnAccess, CdnRoute, CdnTransport};
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let target = [1; 32];
+    let origin =
+        Store::new(Arc::new(object_store::memory::InMemory::new())).with_target_identity(target);
+    let layout = StoreLayout::new(origin, "catalog-repo".to_owned());
+    let (descriptor, objects) = Descriptor::build(&catalog(1)).unwrap();
+    let body = descriptor.encode().unwrap();
+    let identity = *blake3::hash(&body).as_bytes();
+    let bytes = body.len();
+    let file_page = descriptor.files.as_ref().unwrap().hash;
+    let file_body = objects[&file_page].clone();
+    let pages = CatalogPages::new(
+        layout.capsule_catalog_prefix(),
+        descriptor,
+        identity,
+        bytes as u64,
+    )
+    .unwrap();
+    layout
+        .store()
+        .create_strict(&pages.pages.path(&identity), body)
+        .await
+        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let transport = CdnTransport::loopback_fixture(listener.local_addr().unwrap()).unwrap();
+    let responses = [
+        (pages.pages.path(&identity), Bytes::from(vec![0; bytes])),
+        (pages.pages.path(&file_page), file_body),
+    ];
+    let edge = tokio::spawn(async move {
+        for (path, body) in responses {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut request = String::new();
+            while !request.ends_with("\r\n\r\n") {
+                assert_ne!(stream.read_line(&mut request).await.unwrap(), 0);
+            }
+            assert!(request.starts_with(&format!("GET /{path} HTTP/1.1\r\n")));
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(header.as_bytes()).await.unwrap();
+            stream.write_all(&body).await.unwrap();
+        }
+    });
+    let store = layout
+        .store()
+        .clone()
+        .with_cdn_route(CdnRoute::new(
+            target,
+            layout.repo_prefix().to_owned(),
+            None,
+            CdnAccess::Public,
+            transport,
+            Duration::from_secs(2),
+        ))
+        .unwrap();
+    let result = pages
+        .rows(
+            &store,
+            Kind::CatalogFiles,
+            &[vec![0; 32]],
+            &mut PageWork::new(1024 * 1024, 0),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        file_from_bytes(result[0].as_ref().unwrap()).unwrap(),
+        FileCatalogEntry::new(1, "a".repeat(64)),
+    );
+    tokio::time::timeout(Duration::from_secs(2), edge)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
 async fn fixed_binding_update_reuses_unrelated_catalog_pages() {
     for count in [100, 10_000, 100_000] {
         let expected = catalog(count);

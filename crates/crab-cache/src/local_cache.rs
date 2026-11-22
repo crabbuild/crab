@@ -248,6 +248,16 @@ impl LocalCache {
         Ok(Self::at(catalog, relative_root, None))
     }
 
+    /// Isolate an authorized view while retaining the current catalog and limits.
+    #[must_use]
+    pub fn for_authorized_reads(&self, namespace: &[u8; 32]) -> Self {
+        let mut hash = blake3::Hasher::new_derive_key("crab cache source v1");
+        hash.update(namespace);
+        hash.update(self.relative_root.as_os_str().as_encoded_bytes());
+        let root = PathBuf::from("namespaces").join(hash.finalize().to_hex().as_str());
+        Self::at(self.catalog.clone(), root, self.shard_max_bytes)
+    }
+
     fn at(
         catalog: crate::catalog::CacheCatalog,
         relative_root: PathBuf,

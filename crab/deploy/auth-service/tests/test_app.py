@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -9,6 +11,7 @@ from fastapi.testclient import TestClient
 from structlog.testing import capture_logs
 
 import src.app as app_module
+import src.cdn_approval as cdn_approval
 from src.auth import TokenClaims
 from src.providers import CredentialResult
 from src.receive_helper import (
@@ -96,6 +99,13 @@ class FakeProvider:
         if self._cleanup_error:
             raise self._cleanup_error
         return 2
+
+
+class LiveExpiryProvider(FakeProvider):
+    async def generate(self, *args, **kwargs):
+        result = await super().generate(*args, **kwargs)
+        result.expires_at = (datetime.now(timezone.utc) + timedelta(minutes=2)).isoformat()
+        return result
 
 
 class FakeReceiveHelper:
@@ -204,6 +214,7 @@ class FakeViewHelper:
     def __init__(self, *, error: Exception | None = None) -> None:
         self._error = error
         self.calls = []
+        self.source_generation = 7
 
     def materialize(
         self,
@@ -223,13 +234,15 @@ class FakeViewHelper:
             "read_paths": read_paths,
             "denied_read_paths": denied_read_paths,
         })
+        digest = "b" * 64
+        prefix = f"restricted/repo/acl-views/v2/{scope_hash}/{self.source_generation}-{digest}"
         return ViewMaterializationResult(
-            repo_prefix=f"restricted/repo/acl-views/v1/{scope_hash}/7-deadbeef",
-            global_prefix=f"restricted/repo/acl-views/v1/{scope_hash}/7-deadbeef/.crab",
+            repo_prefix=prefix,
+            global_prefix=f"{prefix}/.crab",
             source_repo="restricted/repo",
             scope_hash=scope_hash,
-            source_generation=7,
-            source_manifest_hash="deadbeef",
+            source_generation=self.source_generation,
+            source_manifest_hash=digest,
             cache_hit=True,
         )
 
@@ -538,7 +551,7 @@ def test_issue_credentials_path_scoped_read_uses_filtered_view(monkeypatch):
     assert body["permissions"] == ["read"]
     scope = body["storage_scope"]
     assert scope["source_repo"] == "restricted/repo"
-    assert scope["repo_prefix"].startswith("restricted/repo/acl-views/v1/")
+    assert scope["repo_prefix"].startswith("restricted/repo/acl-views/v2/")
     assert scope["global_prefix"] == f"{scope['repo_prefix']}/.crab"
     assert view.calls == [{
         "repo_url": "crab://bucket/restricted/repo",
@@ -941,15 +954,10 @@ def test_push_prepare_passes_filtered_read_scope_to_receive_helper(monkeypatch):
     assert response.status_code == 200
     assert view.calls[0]["read_paths"] == ["src/**"]
     view_scope = receive.prepare_calls[0]["view_scope"]
+    prefix = f"restricted/repo/acl-views/v2/{view.calls[0]['scope_hash']}/7-{'b' * 64}"
     assert view_scope == {
-        "repo_prefix": view.calls[0]["repo_url"].replace(
-            "crab://bucket/", ""
-        )
-        + f"/acl-views/v1/{view.calls[0]['scope_hash']}/7-deadbeef",
-        "global_prefix": (
-            "restricted/repo/acl-views/v1/"
-            f"{view.calls[0]['scope_hash']}/7-deadbeef/.crab"
-        ),
+        "repo_prefix": prefix,
+        "global_prefix": f"{prefix}/.crab",
         "source_repo": "restricted/repo",
         "scope_hash": view.calls[0]["scope_hash"],
     }
@@ -2111,3 +2119,114 @@ def test_ready_does_not_require_unused_default_provider(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["provider_config"] == "ok"
+
+
+def test_issue_credentials_negotiates_cdn_after_origin_authorization(tmp_path, monkeypatch, approve_cdn):
+    provider = LiveExpiryProvider()
+    monkeypatch.setattr(app_module, "get_provider", lambda name: provider)
+    key = tmp_path / "cdn-key"
+    key.write_bytes(base64.urlsafe_b64encode(bytes(range(16))))
+    export = {
+        "provider": "cloud_cdn", "origin": "gs://test-bucket", "repo_prefix": "org/repo",
+        "base_url": "https://downloads.example.com", "allow_unfiltered": True, "key_id": "test-key", "key_file": key,
+    }
+    policy = {
+        "default_provider": "gcp",
+        "rules": [{"group": "platform-admins", "repos": ["org/repo"], "operations": ["fetch"]}],
+    }
+    app_module._policy = app_module.PolicyEngine.from_dict(policy | {"cdn": [export]})
+    app_module._rate_limiter = app_module.RateLimiter(rate_per_minute=0, burst=20)
+    client = TestClient(app_module.app)
+    payload = {"id_token": "token", "repo_url": "crab://test-bucket/org/repo", "operation": "fetch"}
+    assert "cdn" not in client.post("/v1/credentials", json=payload).json()
+    headers = {"X-Crab-CDN-Grant-Version": "1"}
+    native = client.post("/v1/credentials", json=payload, headers=headers)
+    assert native.status_code == 200
+    assert "cdn" not in native.json()
+    assert "credentials" in native.json()
+    observed = []
+    monkeypatch.setattr(cdn_approval, "_gcp", lambda binding: observed.append(binding) is None)
+    approval = approve_cdn(export)
+    app_module._policy = app_module.PolicyEngine.from_dict(policy | {"cdn": [export | {"approval": approval}]})
+    response = client.post("/v1/credentials", json=payload, headers=headers)
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "no-store"
+    grant = response.json()["cdn"]
+    assert grant["repo_prefix"] == "org/repo"
+    assert grant["origin"] == "gs://test-bucket"
+    assert grant["grants"][0]["prefix"] == "org/repo/v2/capsules/"
+    assert all("/.crab/" not in item["prefix"] for item in grant["grants"])
+
+    other_bucket = payload | {"repo_url": "crab://other-bucket/org/repo"}
+    response = client.post("/v1/credentials", json=other_bucket, headers=headers)
+    assert response.headers["Cache-Control"] == "no-store"
+    assert "cdn" not in response.json()
+    denied = payload | {"repo_url": "crab://test-bucket/org/other"}
+    assert client.post("/v1/credentials", json=denied, headers=headers).status_code == 403
+    assert len(provider.calls) == 4
+    assert len(observed) == 1
+
+    # A changed approval is terminal and cannot produce a viewer credential.
+    approval["path"].write_text("{}")
+    mismatch = client.post("/v1/credentials", json=payload, headers=headers)
+    assert mismatch.status_code == 500
+    assert "cdn" not in mismatch.json()
+    assert "credentials" not in mismatch.json()
+    assert len(observed) == 1
+
+
+def test_issue_credentials_pins_cdn_to_approved_view_generation(tmp_path, monkeypatch, approve_cdn):
+    provider = LiveExpiryProvider()
+    view = FakeViewHelper()
+    monkeypatch.setattr(app_module, "get_provider", lambda name: provider)
+    monkeypatch.setattr(app_module, "get_view_helper", lambda: view)
+    config = {
+        "default_provider": "gcp",
+        "rules": [{
+            "group": "platform-admins",
+            "repos": ["restricted/repo"],
+            "operations": ["fetch"],
+            "read_paths": ["src/**"],
+        }],
+    }
+    app_module._policy = app_module.PolicyEngine.from_dict(config)
+    app_module._rate_limiter = app_module.RateLimiter(rate_per_minute=0, burst=20)
+    client = TestClient(app_module.app)
+    payload = {
+        "id_token": "token",
+        "repo_url": "crab://test-bucket/restricted/repo",
+        "operation": "fetch",
+    }
+    headers = {"X-Crab-CDN-Grant-Version": "1"}
+    native = client.post("/v1/credentials", json=payload, headers=headers)
+    assert native.status_code == 200
+    assert "cdn" not in native.json()
+    approved = native.json()["storage_scope"]
+    key = tmp_path / "cdn-key"
+    key.write_bytes(base64.urlsafe_b64encode(bytes(range(16))))
+    export = {
+        "provider": "cloud_cdn",
+        "origin": "gs://test-bucket",
+        "repo_prefix": approved["source_repo"],
+        "protected_view_suffix": approved["repo_prefix"].removeprefix(approved["source_repo"]),
+        "base_url": "https://downloads.example.com",
+        "key_id": "test-key",
+        "key_file": key,
+    }
+    monkeypatch.setattr(cdn_approval, "_gcp", lambda binding: True)
+    app_module._policy = app_module.PolicyEngine.from_dict(config | {"cdn": [export | {"approval": approve_cdn(export)}]})
+
+    response = client.post("/v1/credentials", json=payload, headers=headers)
+    assert response.status_code == 200
+    grant = response.json()["cdn"]
+    assert grant["repo_prefix"] == approved["repo_prefix"]
+    assert grant["global_prefix"] == approved["global_prefix"]
+    assert f"{approved['global_prefix']}/shards/" in {item["prefix"] for item in grant["grants"]}
+
+    view.source_generation += 1
+    response = client.post("/v1/credentials", json=payload, headers=headers)
+    assert response.status_code == 200
+    assert "cdn" not in response.json()
+    current = response.json()["storage_scope"]
+    assert current["repo_prefix"] != approved["repo_prefix"]
+    assert provider.calls[-1]["repo_url"] == f"crab://test-bucket/{current['repo_prefix']}"

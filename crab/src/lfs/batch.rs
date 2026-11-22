@@ -263,7 +263,12 @@ impl BatchResolver {
                         let temp = crate::lfs::cache::new_temp_path(&local_dir)?;
                         let temp_path: PathBuf = temp.to_path_buf();
                         store
-                            .download_to_file(&request.oid, request.size, &temp_path)
+                            .download_to_file_cancellable(
+                                &request.oid,
+                                request.size,
+                                &temp_path,
+                                &cancel,
+                            )
                             .await
                             .map_err(CrabError::from)?;
                         check_cancelled(&cancel)?;

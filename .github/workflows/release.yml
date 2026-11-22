@@ -170,6 +170,13 @@ jobs:
             echo "source_short_sha=$source_short_sha"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Verify enabled CDN release scopes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CRAB_CDN_RELEASE_EVIDENCE: ${{ vars.CRAB_CDN_RELEASE_EVIDENCE }}
+          RELEASE_SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
+        run: python3 -B crab/scripts/release/verify-cdn-release-evidence.py --source-sha "$RELEASE_SOURCE_SHA"
+
   desktop:
     name: Build desktop release
     needs: prepare

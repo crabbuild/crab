@@ -86,17 +86,19 @@ impl ShardHydrator {
         let file_hash = MerkleHash::from(pointer.file_hash);
         // Pointer hints do not authorize inspection outside the selected
         // snapshot. Resolve through its captured catalog before loading metadata.
-        let shard_hash = lookup
-            .lookup(&file_hash)
-            .await?
-            .ok_or_else(|| ReadError::NotFound {
-                path: format!("file_index:{}", file_hash.hex()),
-            })?;
+        let location =
+            lookup
+                .lookup_shard(&file_hash)
+                .await?
+                .ok_or_else(|| ReadError::NotFound {
+                    path: format!("file_index:{}", file_hash.hex()),
+                })?;
+        let shard_hash = location.hash;
         check_cancelled(cancel)?;
         let readers = Mutex::new(HashMap::new());
         let cache = self.store.local_cache();
         let shard =
-            get_or_download_shard(cache, &self.store, &self.router, &readers, &shard_hash).await?;
+            get_or_download_shard(cache, &self.store, &self.router, &readers, location).await?;
         check_cancelled(cancel)?;
         let file = shard
             .get_file_info(&file_hash)?

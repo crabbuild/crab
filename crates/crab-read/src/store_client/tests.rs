@@ -96,7 +96,12 @@ async fn load_shard_checks_availability_before_fetching_external_object() {
     let client = client.with_availability(Arc::new(RecordingAvailability(Arc::clone(&calls))));
     let shard_hash = hash_from_seed(77);
 
-    let _ = client.load_shard(&shard_hash).await;
+    let _ = client
+        .load_shard(ShardLocation {
+            hash: shard_hash,
+            encoded_size: None,
+        })
+        .await;
 
     assert_eq!(
         calls.lock().expect("recording lock").as_slice(),

@@ -105,6 +105,8 @@ pub struct BuiltObjectStore {
     pub multipart: Option<Arc<dyn object_store::multipart::MultipartStore>>,
     /// Credential-free identity of the resolved transport configuration.
     pub target_identity: [u8; 32],
+    /// Native S3, GCS or Azure placement eligible for a CDN binding.
+    pub native_cdn_origin: Option<String>,
     /// Provider evidence available after an acknowledged immutable write.
     pub immutable_write_verification: ImmutableWriteVerification,
 }
@@ -338,6 +340,7 @@ fn build_gcs_object_store(
         None => builder,
     };
     let (builder, target_identity) = target::gcs(builder, bucket)?;
+    let native_cdn_origin = target::gcs_cdn_origin(&builder, bucket);
     let (builder, multipart_identity) = gcs_multipart_builder(builder, bucket)?;
     let gcs = Arc::new(
         builder
@@ -351,6 +354,7 @@ fn build_gcs_object_store(
         signer: None,
         multipart: Some(gcs),
         target_identity,
+        native_cdn_origin,
         immutable_write_verification: ImmutableWriteVerification::ReadbackRequired,
     })
 }
@@ -491,6 +495,7 @@ fn build_object_store_inner(
                 }
             };
             let target_identity = target::azure(&builder, bucket)?;
+            let native_cdn_origin = target::azure_cdn_origin(&builder, bucket)?;
             let azure = builder
                 .build()
                 .map_err(|source| provider_config_error(provider, bucket, source))?;
@@ -501,6 +506,7 @@ fn build_object_store_inner(
                 signer: None,
                 multipart: None,
                 target_identity,
+                native_cdn_origin,
                 immutable_write_verification: ImmutableWriteVerification::ReadbackRequired,
             })
         }
@@ -579,6 +585,7 @@ fn store_from_built(identity: BucketIdentity, built: BuiltObjectStore) -> Store 
     let mut store = Store::new(built.inner)
         .with_bucket_identity(identity)
         .with_target_identity(built.target_identity)
+        .with_native_cdn_origin(built.native_cdn_origin)
         .with_immutable_write_verification(built.immutable_write_verification);
     if let Some(signer) = built.signer {
         store = store.with_signer(signer);
@@ -602,11 +609,13 @@ pub fn build_static_env_azure_account_container_store(
         .with_http_connector(crate::transport_read_admission::ReadAdmissionConnector::default())
         .with_client_options(default_client_options());
     let target_identity = target::azure(&builder, container)?;
+    let native_cdn_origin = target::azure_cdn_origin(&builder, container)?;
     let azure = builder.build().map_err(|source| {
         provider_config_error(provider, &format!("{account}/{container}"), source)
     })?;
     Ok(Store::new(Arc::new(azure))
         .with_bucket_identity(BucketIdentity::new(provider, account, container))
+        .with_native_cdn_origin(native_cdn_origin)
         .with_target_identity(target_identity))
 }
 
@@ -655,6 +664,7 @@ fn build_static_env_object_store(
                 )
                 .with_client_options(default_client_options());
             let (builder, target_identity) = target::gcs(builder, bucket)?;
+            let native_cdn_origin = target::gcs_cdn_origin(&builder, bucket);
             let (builder, multipart_identity) = gcs_multipart_builder(builder, bucket)?;
             let gcs = builder
                 .build()
@@ -667,6 +677,7 @@ fn build_static_env_object_store(
                 signer: None,
                 multipart: Some(gcs),
                 target_identity,
+                native_cdn_origin,
                 immutable_write_verification: ImmutableWriteVerification::ReadbackRequired,
             })
         }
@@ -678,6 +689,7 @@ fn build_static_env_object_store(
                 )
                 .with_client_options(default_client_options());
             let target_identity = target::azure(&builder, bucket)?;
+            let native_cdn_origin = target::azure_cdn_origin(&builder, bucket)?;
             let azure = builder
                 .build()
                 .map_err(|source| provider_config_error(provider, bucket, source))?;
@@ -688,6 +700,7 @@ fn build_static_env_object_store(
                 signer: None,
                 multipart: None,
                 target_identity,
+                native_cdn_origin,
                 immutable_write_verification: ImmutableWriteVerification::ReadbackRequired,
             })
         }
@@ -729,6 +742,7 @@ fn build_s3_object_store(
     }
     let multipart_identity = s3_multipart_identity(&builder, bucket);
     let target_identity = target::s3(&builder, bucket)?;
+    let native_cdn_origin = target::s3_cdn_origin(&builder, bucket)?;
     let (builder, immutable_write_verification) = if endpoint.is_none() {
         (
             builder.with_checksum_algorithm(Checksum::SHA256),
@@ -756,6 +770,7 @@ fn build_s3_object_store(
         signer: Some(s3.clone() as Arc<dyn object_store::signer::Signer>),
         multipart: Some(s3),
         target_identity,
+        native_cdn_origin,
         immutable_write_verification,
     })
 }

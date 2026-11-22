@@ -1,20 +1,28 @@
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
 
 use crab_auth::managed::{
     BearerToken, IdempotencyKey, ManagedApiClient, ManagedApiError, ManagedDiscoveryClient,
     PushAdmissionPlan, PushFinalizeRequest, PushPrepareRequest, PushPrepareResponse,
     PushReplicationRequest, RepositoryState, ServiceCapabilities, ServiceProfile,
-    ServiceProfileLocatorError, ServiceProfileStore, TransferOperation, managed_http_client,
-    managed_token_cache_key, service_profile_directory,
+    ServiceProfileLocatorError, ServiceProfileStore, TransferMode, TransferOperation,
+    managed_http_client, service_profile_directory,
 };
-use crab_auth::token_cache::{CachedTokens, TokenCache};
 use crab_git::{ManagedRepository, RepositoryLocator};
+use crab_storage::{
+    StorageProviderKind,
+    cdn::{CdnConsumer, CdnPolicy, CdnProfile, CdnVisibility},
+};
+use futures_util::FutureExt;
 use tokio_util::sync::CancellationToken;
 
+mod login;
+
+use self::login::ManagedLogin;
 use crate::{
     AuthStoreError, ManagedStore, build_push_store_from_transfer_grant,
-    build_store_from_transfer_grant,
+    build_store_from_transfer_grant, managed_read::build_managed_read_store,
+    refreshing_store::to_object_store_error,
 };
 
 /// A durable managed push session and its canonical-read/staging-write store.
@@ -194,6 +202,7 @@ impl ManagedRepositoryError {
 pub struct ManagedRepositoryResolver {
     token_cache_directory: PathBuf,
     bearer: Option<BearerToken>,
+    cdn_consumer: Option<CdnConsumer>,
 }
 
 impl ManagedRepositoryResolver {
@@ -203,7 +212,15 @@ impl ManagedRepositoryResolver {
         Self {
             token_cache_directory,
             bearer: None,
+            cdn_consumer: None,
         }
+    }
+
+    /// Select the product's managed CDN qualification scope for read grants.
+    #[must_use]
+    pub fn with_cdn_consumer(mut self, consumer: CdnConsumer) -> Self {
+        self.cdn_consumer = Some(consumer);
+        self
     }
 
     /// Uses an explicit in-memory API bearer instead of the encrypted token cache.
@@ -256,7 +273,7 @@ impl ManagedRepositoryResolver {
         };
         self.connect_api(&profiles, &profile, cancel)
             .await
-            .map(|(client, _)| ManagedControlPlane {
+            .map(|(client, _, _)| ManagedControlPlane {
                 authority: profile.authority,
                 client,
             })
@@ -269,7 +286,37 @@ impl ManagedRepositoryResolver {
         operation: TransferOperation,
         cancel: &CancellationToken,
     ) -> Result<ManagedStore, ManagedRepositoryError> {
-        let access = self.resolve_access(repository, cancel).await?;
+        let mut access = self.resolve_access(repository, cancel).await?;
+        // A gateway-only repository keeps its v1 read even when the service
+        // offers v2 direct transfers to other repositories.
+        access
+            .capabilities
+            .transfer_modes
+            .retain(|mode| access.logical.transfer_modes.contains(mode));
+        // The server chooses among the repository's advertised modes. Only
+        // negotiate a viewer grant if every possible direct mode is eligible.
+        if self.cdn_consumer.is_none_or(|consumer| {
+            access.capabilities.transfer_modes.iter().any(|mode| {
+                let provider = match mode {
+                    TransferMode::DirectS3 => StorageProviderKind::S3,
+                    TransferMode::DirectGcs => StorageProviderKind::Gcs,
+                    TransferMode::DirectAzure => StorageProviderKind::Azure,
+                    TransferMode::Gateway => return false,
+                };
+                !CdnPolicy {
+                    provider,
+                    consumer,
+                    visibility: CdnVisibility::Private,
+                    profile: CdnProfile::Managed,
+                }
+                .enabled()
+            })
+        }) {
+            access
+                .capabilities
+                .transfer_grant_versions
+                .retain(|&version| version == 1);
+        }
         let grant = access
             .client
             .issue_transfer_grant(
@@ -282,12 +329,41 @@ impl ManagedRepositoryResolver {
             .await
             .map_err(|source| managed_api_error(repository, source))?;
         cancelled(cancel)?;
-        build_store_from_transfer_grant(&grant, access.gateway_client).map_err(|source| {
-            ManagedRepositoryError::Store {
-                canonical_url: repository.canonical_url(),
-                source: Box::new(source),
+        let store_error = |source| ManagedRepositoryError::Store {
+            canonical_url: repository.canonical_url(),
+            source: Box::new(source),
+        };
+        if grant.schema_version != 2
+            || !matches!(grant.transport, crab_auth::TransferTransport::Direct { .. })
+        {
+            return build_store_from_transfer_grant(&grant, access.gateway_client)
+                .map_err(store_error);
+        }
+        let source = repository.clone();
+        let refresh = move |access: Arc<ManagedAccess>| {
+            let source = source.clone();
+            async move {
+                let renewed_client = match &access.login {
+                    Some(login) => Some(login.connect(false).await.map_err(to_object_store_error)?),
+                    None => None,
+                };
+                renewed_client
+                    .as_ref()
+                    .unwrap_or(&access.client)
+                    .refresh_transfer_grant(
+                        &source.organization,
+                        &source.repository,
+                        access.logical.repository_id,
+                        operation,
+                        &access.capabilities,
+                    )
+                    .await
+                    .map_err(to_object_store_error)
             }
-        })
+            .boxed()
+        };
+        build_managed_read_store(Arc::new(access), grant, self.cdn_consumer, refresh)
+            .map_err(store_error)
     }
 
     /// Prepares or resumes a durable push and composes its exact staging store.
@@ -436,7 +512,8 @@ impl ManagedRepositoryResolver {
                     },
                 )
             })?;
-        let (client, capabilities) = self.connect_api(&profile_store, &profile, cancel).await?;
+        let (client, capabilities, login) =
+            self.connect_api(&profile_store, &profile, cancel).await?;
         cancelled(cancel)?;
 
         let logical = client
@@ -457,6 +534,7 @@ impl ManagedRepositoryResolver {
             capabilities,
             logical,
             gateway_client,
+            login,
         })
     }
 
@@ -465,7 +543,8 @@ impl ManagedRepositoryResolver {
         profiles: &ServiceProfileStore,
         profile: &ServiceProfile,
         cancel: &CancellationToken,
-    ) -> Result<(ManagedApiClient, ServiceCapabilities), ManagedRepositoryError> {
+    ) -> Result<(ManagedApiClient, ServiceCapabilities, Option<ManagedLogin>), ManagedRepositoryError>
+    {
         let authority = &profile.authority;
         let resource = format!("crab://{authority}");
         let resolved = ManagedDiscoveryClient::new()
@@ -476,25 +555,16 @@ impl ManagedRepositoryResolver {
                 source,
             })?;
         cancelled(cancel)?;
-        let mut token_cache = None;
-        let bearer = match self.bearer.as_ref() {
-            Some(bearer) => bearer.clone(),
+        let (bearer, login) = match self.bearer.as_ref() {
+            Some(bearer) => (bearer.clone(), None),
             None => {
-                let cache =
-                    TokenCache::new(self.token_cache_directory.clone()).map_err(|source| {
-                        ManagedRepositoryError::Auth {
-                            authority: authority.clone(),
-                            source,
-                        }
-                    })?;
-                let bearer = managed_access_token(profile, &resolved.document, &cache, false)
-                    .await
-                    .map_err(|source| ManagedRepositoryError::Auth {
-                        authority: authority.clone(),
-                        source,
-                    })?;
-                token_cache = Some(cache);
-                bearer
+                let (login, bearer) = ManagedLogin::load(
+                    self.token_cache_directory.clone(),
+                    profile,
+                    &resolved.document,
+                )
+                .await?;
+                (bearer, Some(login))
             }
         };
         let mut client =
@@ -507,24 +577,13 @@ impl ManagedRepositoryResolver {
         let capabilities = match client.capabilities().await {
             Ok(capabilities) => capabilities,
             Err(error) if managed_unauthorized(&error) => {
-                let Some(cache) = token_cache.as_ref() else {
+                let Some(login) = login.as_ref() else {
                     return Err(ManagedRepositoryError::Api {
                         canonical_url: resource,
                         source: error,
                     });
                 };
-                let bearer = managed_access_token(profile, &resolved.document, cache, true)
-                    .await
-                    .map_err(|source| ManagedRepositoryError::Auth {
-                        authority: authority.clone(),
-                        source,
-                    })?;
-                client = ManagedApiClient::new(profile, &resolved.document, bearer).map_err(
-                    |source| ManagedRepositoryError::Api {
-                        canonical_url: resource.clone(),
-                        source,
-                    },
-                )?;
+                client = login.connect(true).await?;
                 client
                     .capabilities()
                     .await
@@ -541,7 +600,7 @@ impl ManagedRepositoryResolver {
             }
         };
         cancelled(cancel)?;
-        Ok((client, capabilities))
+        Ok((client, capabilities, login))
     }
 
     fn profile_store(&self) -> ServiceProfileStore {
@@ -554,74 +613,7 @@ struct ManagedAccess {
     capabilities: ServiceCapabilities,
     logical: crab_auth::managed::LogicalRepository,
     gateway_client: reqwest::Client,
-}
-
-async fn managed_access_token(
-    profile: &ServiceProfile,
-    discovery: &crab_auth::DiscoveryDocument,
-    cache: &TokenCache,
-    force_refresh: bool,
-) -> Result<BearerToken, crab_auth::error::AuthError> {
-    let cache_key = managed_token_cache_key(&profile.authority)?;
-    let cached = cache.load(&cache_key)?.ok_or_else(|| {
-        crab_auth::error::AuthError::CredentialsExpired(format!(
-            "no managed login is available for {}; run `crab login https://{}`",
-            profile.authority, profile.authority
-        ))
-    })?;
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs());
-    if !force_refresh
-        && cached
-            .expires_at
-            .is_some_and(|expires_at| expires_at > now.saturating_add(60))
-        && let Some(access_token) = cached.access_token
-    {
-        return BearerToken::new(access_token).map_err(|_| {
-            crab_auth::error::AuthError::InvalidManagedContract(
-                "cached access token is invalid for managed API use".to_owned(),
-            )
-        });
-    }
-    refresh_managed_access_token(profile, discovery, cache, &cache_key, cached).await
-}
-
-async fn refresh_managed_access_token(
-    profile: &ServiceProfile,
-    discovery: &crab_auth::DiscoveryDocument,
-    cache: &TokenCache,
-    cache_key: &str,
-    cached: CachedTokens,
-) -> Result<BearerToken, crab_auth::error::AuthError> {
-    let refresh_token = cached.refresh_token.as_deref().ok_or_else(|| {
-        crab_auth::error::AuthError::CredentialsExpired(format!(
-            "managed login for {} cannot be refreshed; run `crab login https://{}`",
-            profile.authority, profile.authority
-        ))
-    })?;
-    let http = managed_http_client(profile)?;
-    let oidc = crab_auth::discover_with_client(&discovery.oidc.issuer, &http).await?;
-    oidc.validate_for_issuer(&discovery.oidc.issuer)?;
-    let tokens = crab_auth::refresh_tokens_with_client(
-        &oidc.token_endpoint,
-        &discovery.oidc.client_id,
-        refresh_token,
-        &http,
-    )
-    .await?;
-    cache.store_oidc_tokens(
-        cache_key,
-        &tokens.id_token,
-        &tokens.access_token,
-        tokens.refresh_token.as_deref().or(Some(refresh_token)),
-        tokens.expires_in,
-    )?;
-    BearerToken::new(tokens.access_token).map_err(|_| {
-        crab_auth::error::AuthError::InvalidManagedContract(
-            "OIDC access token is invalid for managed API use".to_owned(),
-        )
-    })
+    login: Option<ManagedLogin>,
 }
 
 fn managed_unauthorized(error: &ManagedApiError) -> bool {

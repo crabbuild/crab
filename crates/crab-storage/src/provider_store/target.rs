@@ -112,6 +112,47 @@ pub(super) fn azure(builder: &MicrosoftAzureBuilder, bucket: &str) -> Result<[u8
     digest(&fields)
 }
 
+pub(super) fn s3_cdn_origin(builder: &AmazonS3Builder, bucket: &str) -> Result<Option<String>> {
+    let custom = builder
+        .get_config_value(&AmazonS3ConfigKey::S3Endpoint)
+        .is_some()
+        || builder
+            .get_config_value(&AmazonS3ConfigKey::Endpoint)
+            .is_some();
+    let express = flag(builder.get_config_value(&AmazonS3ConfigKey::S3Express))?;
+    let region = builder.get_config_value(&AmazonS3ConfigKey::Region);
+    let commercial = region.as_deref().is_none_or(|region| {
+        !["cn-", "us-gov-", "us-iso", "eu-iso", "eusc-"]
+            .iter()
+            .any(|prefix| region.starts_with(prefix))
+    });
+    Ok((!custom && !express && commercial).then(|| format!("s3://{bucket}")))
+}
+
+pub(super) fn gcs_cdn_origin(builder: &GoogleCloudStorageBuilder, bucket: &str) -> Option<String> {
+    let base = builder.get_config_value(&GoogleConfigKey::BaseUrl);
+    (base.as_deref() == Some("https://storage.googleapis.com")).then(|| format!("gs://{bucket}"))
+}
+
+pub(super) fn azure_cdn_origin(
+    builder: &MicrosoftAzureBuilder,
+    container: &str,
+) -> Result<Option<String>> {
+    let emulator = flag(builder.get_config_value(&AzureConfigKey::UseEmulator))?;
+    let fabric = flag(builder.get_config_value(&AzureConfigKey::UseFabricEndpoint))?;
+    if emulator
+        || fabric
+        || builder
+            .get_config_value(&AzureConfigKey::Endpoint)
+            .is_some()
+    {
+        return Ok(None);
+    }
+    Ok(builder
+        .get_config_value(&AzureConfigKey::AccountName)
+        .map(|account| format!("https://{account}.blob.core.windows.net/{container}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

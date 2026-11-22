@@ -11,6 +11,8 @@ use crab_remote_git::{
     NoopMetrics, OperationKind, RemoteGitRepository, RemoteGitRuntime, RepositoryIdentity,
     RepositoryOptions, RuntimeOptions,
 };
+#[cfg(feature = "service")]
+use crab_storage::cdn::CdnConsumer;
 use crab_storage::{Store, StoreLayout};
 
 use crate::remote_error::{consumer_error, remote_error};
@@ -41,10 +43,20 @@ impl ClientBuilder {
             }
         };
         #[cfg(feature = "service")]
+        let cdn_consumer = if self.desktop_browsing {
+            CdnConsumer::Desktop
+        } else {
+            CdnConsumer::Sdk
+        };
+        #[cfg(feature = "service")]
         let managed = self
             .managed
-            .map(crate::managed_impl::ManagedState::new)
+            .map(|options| crate::managed_impl::ManagedState::new(options, cdn_consumer))
             .transpose()?;
+        #[cfg(feature = "service")]
+        if let Some(options) = &self.direct_cdn {
+            options.validate_origin(&store)?;
+        }
         let git = RemoteGitRuntime::new(RuntimeOptions::default(), Arc::new(NoopMetrics))
             .map_err(remote_error)?;
         Ok(Client(Arc::new(ClientState {
@@ -69,6 +81,10 @@ impl ClientBuilder {
             local_execution_policy: self.local_execution_policy,
             #[cfg(feature = "service")]
             managed,
+            #[cfg(feature = "service")]
+            direct_cdn: self.direct_cdn,
+            #[cfg(feature = "service")]
+            cdn_consumer,
         })))
     }
 }
@@ -89,6 +105,10 @@ pub(crate) struct ClientState {
     pub(crate) local_execution_policy: crate::LocalExecutionPolicy,
     #[cfg(feature = "service")]
     pub(crate) managed: Option<crate::managed_impl::ManagedState>,
+    #[cfg(feature = "service")]
+    pub(crate) direct_cdn: Option<crate::storage::DirectCdnOptions>,
+    #[cfg(feature = "service")]
+    pub(crate) cdn_consumer: CdnConsumer,
 }
 
 pub(crate) struct ResolvedRepository {
@@ -97,6 +117,8 @@ pub(crate) struct ResolvedRepository {
     pub(crate) namespace: String,
     pub(crate) placement: u64,
     pub(crate) managed: bool,
+    #[cfg(all(feature = "local", feature = "service"))]
+    pub(crate) checkout_principal: Option<[u8; 32]>,
 }
 
 pub(crate) struct CapturedRepository {
@@ -110,13 +132,24 @@ pub(crate) struct CapturedRepository {
 }
 
 impl ClientState {
+    #[cfg(feature = "publish")]
     pub(crate) async fn capture_repository(
         &self,
         locator: &RepositoryLocator,
         options: &OperationOptions,
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<CapturedRepository> {
-        let resolved = self.resolve_repository(locator, cancel).await?;
+        let mut resolved = self.resolve_repository(locator, cancel).await?;
+        resolved.store = resolved.store.without_cdn_route();
+        self.capture_resolved(resolved, options, cancel).await
+    }
+
+    async fn capture_resolved(
+        &self,
+        resolved: ResolvedRepository,
+        options: &OperationOptions,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<CapturedRepository> {
         let layout = StoreLayout::new(resolved.store.clone(), resolved.prefix.clone());
         let identity = RepositoryIdentity::new(
             resolved.namespace.clone(),
@@ -242,6 +275,8 @@ impl ClientState {
                 ),
                 placement,
                 managed: true,
+                #[cfg(feature = "local")]
+                checkout_principal: None,
             });
         }
         if !self.direct_store_configured {
@@ -256,7 +291,22 @@ impl ClientState {
             namespace: self.namespace.clone(),
             placement: 1,
             managed: false,
+            #[cfg(all(feature = "local", feature = "service"))]
+            checkout_principal: None,
         })
+    }
+
+    pub(crate) async fn resolve_read_repository(
+        &self,
+        locator: &crate::RepositoryLocator,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<ResolvedRepository> {
+        let selected = self.resolve_repository(locator, cancel).await?;
+        #[cfg(feature = "service")]
+        if let Some(options) = &self.direct_cdn {
+            return options.resolve(selected, self.cdn_consumer, cancel).await;
+        }
+        Ok(selected)
     }
 }
 
@@ -282,6 +332,10 @@ pub(crate) fn memory_local_client(local_tools: crate::LocalTools) -> Client {
         local_execution_policy: crate::LocalExecutionPolicy::Untrusted,
         #[cfg(feature = "service")]
         managed: None,
+        #[cfg(feature = "service")]
+        direct_cdn: None,
+        #[cfg(feature = "service")]
+        cdn_consumer: CdnConsumer::Sdk,
     }))
 }
 
@@ -340,9 +394,10 @@ impl Client {
             .0
             .operations
             .run(options.clone(), move |cancel| async move {
-                state
-                    .capture_repository(&worker_locator, &options, &cancel)
-                    .await
+                let resolved = state
+                    .resolve_read_repository(&worker_locator, &cancel)
+                    .await?;
+                state.capture_resolved(resolved, &options, &cancel).await
             })
             .await?;
         #[cfg(feature = "files")]

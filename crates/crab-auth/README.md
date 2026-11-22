@@ -54,6 +54,21 @@ protected-push, and administrative contracts. OIDC and provider-specific
 clients are opt-in features so a minimal static-credentials build does not
 pull in network clients.
 
+Managed services can advertise transfer-grant versions `[1, 2]` through
+authenticated capabilities. A v2 native direct read grant may carry a
+repo-scoped CDN viewer envelope whose expiry is bounded by the parent grant.
+Clients require the requested response version. V1 grants retain their
+original wire shape, and staging grants use v1. A transfer grant POST is
+issued once per request.
+
+The encrypted token cache commits managed OIDC refresh responses only for the
+current login. The response preserves the original issuer and subject.
+Private direct CDN reads also pin the original issuer and subject. They use
+the same conditional cache write for ID-token refresh and retain the
+ID-token-only cache format. A fresh read is required after a login change.
+Origin-only builds omit viewer negotiation while keeping that principal and
+the issuer's native read scope.
+
 ## Usage
 
 Resolve static environment credentials through the same interface used by

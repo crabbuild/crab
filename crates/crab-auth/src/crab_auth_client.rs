@@ -1,16 +1,18 @@
 //! Crab Auth enterprise service client.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use crab_coordination::active_active::ActiveActiveReplicationConfig;
 use crab_types::storage::StorageScope;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
+use crate::cdn::CdnViewerGrant;
 use crate::client_config::CrabAuthClientConfig;
 use crate::credential_provider::CredentialProvider;
 use crate::credential_response::{CrabAuthCredentialResponse, parse_credential_response};
@@ -20,10 +22,12 @@ use crate::protected_push::{
     PushFinalizeResponse, PushPrepareResponse, PushRefUpdate, validate_push_finalize_response,
     validate_push_prepare_response,
 };
-use crate::token_cache::TokenCache;
+use crate::token_cache::{CachedTokens, TokenCache};
 
 /// Refresh window: credentials within 5 minutes of expiry trigger a refresh.
 const REFRESH_WINDOW: Duration = Duration::from_secs(300);
+const CDN_REFRESH_WINDOW: Duration = Duration::from_secs(15);
+const MAX_NEGOTIATED_CREDENTIAL_BYTES: usize = 1024 * 1024;
 
 /// Default retry count for HTTP 5xx errors.
 const MAX_RETRIES: u32 = 3;
@@ -83,6 +87,78 @@ pub struct CrabAuthProvider {
     token_cache: Arc<TokenCache>,
     cached: RwLock<Option<CachedCrabAuthCreds>>,
     http: reqwest::Client,
+    cdn: Vec<CdnViewerDeployment>,
+    allow_viewer_grants: bool,
+    cdn_principal: OnceLock<[u8; 32]>,
+}
+
+/// Trusted viewer deployment selected for one source repository.
+#[derive(Clone, Debug)]
+pub struct CdnViewerDeployment {
+    pub bucket: String,
+    pub source_repo: String,
+    pub origin: String,
+    pub base_url: String,
+}
+
+impl CdnViewerDeployment {
+    /// Return the native storage provider named by this validated deployment.
+    #[must_use]
+    pub fn storage_provider(&self) -> Option<crab_types::storage::StorageProviderKind> {
+        use crate::cdn::CdnProvider;
+        use crab_types::storage::StorageProviderKind;
+        Some(match native_cdn_identity(&self.origin)?.0 {
+            CdnProvider::Cloudfront => StorageProviderKind::S3,
+            CdnProvider::CloudCdn => StorageProviderKind::Gcs,
+            CdnProvider::FrontDoor => StorageProviderKind::Azure,
+        })
+    }
+
+    /// Validate a native deployment and derive its bucket or container identity.
+    pub fn new(origin: &str, source_repo: &str, base_url: &str) -> Result<Self> {
+        use crate::cdn::{canonical_https_base, canonical_prefix};
+
+        let base_url = base_url.trim_end_matches('/');
+        let Some((_, bucket)) = native_cdn_identity(origin)
+            .filter(|_| canonical_prefix(source_repo) && canonical_https_base(base_url))
+        else {
+            return Err(AuthError::InvalidCredentialResponse(
+                "invalid native origin, repository prefix or CDN HTTPS base".into(),
+            ));
+        };
+        Ok(Self {
+            bucket: bucket.to_owned(),
+            source_repo: source_repo.to_owned(),
+            origin: origin.to_owned(),
+            base_url: base_url.to_owned(),
+        })
+    }
+
+    /// Validate that public bytes are served from a distinct native export of the same cloud.
+    pub fn validate_public_export(&self, export_origin: &str) -> Result<()> {
+        let source = native_cdn_identity(&self.origin).map(|(provider, _)| provider);
+        let export = native_cdn_identity(export_origin).map(|(provider, _)| provider);
+        if source.is_none() || source != export || self.origin == export_origin {
+            return Err(AuthError::InvalidCredentialResponse(
+                "public CDN requires a separate native export origin in the source cloud".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn native_cdn_identity(origin: &str) -> Option<(crate::cdn::CdnProvider, &str)> {
+    use crate::cdn::{CdnProvider, canonical_origin};
+
+    let identity = if let Some(bucket) = origin.strip_prefix("s3://") {
+        (CdnProvider::Cloudfront, bucket)
+    } else if let Some(bucket) = origin.strip_prefix("gs://") {
+        (CdnProvider::CloudCdn, bucket)
+    } else {
+        let (_, container) = origin.split_once(".blob.core.windows.net/")?;
+        (CdnProvider::FrontDoor, container)
+    };
+    canonical_origin(identity.0, origin).then_some(identity)
 }
 
 impl std::fmt::Debug for CrabAuthProvider {
@@ -106,6 +182,7 @@ struct CachedCrabAuthCreds {
     creds: CloudCredentials,
     storage_scope: Option<StorageScope>,
     expires_at: SystemTime,
+    cdn: Option<CdnViewerGrant>,
 }
 
 impl CrabAuthProvider {
@@ -113,6 +190,16 @@ impl CrabAuthProvider {
     pub fn new(config: CrabAuthClientConfig) -> Result<Self> {
         let cache_path = shellexpand_tilde(&config.token_cache_path);
         let token_cache = Arc::new(TokenCache::new(PathBuf::from(cache_path))?);
+        // The request body also carries the identity token. Redirects must
+        // never forward it to another credential endpoint.
+        let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|source| AuthError::CrabAuthRequest {
+                operation: "construct credential transport",
+                endpoint: config.endpoint.clone(),
+                source,
+            })?;
 
         Ok(Self {
             endpoint: config.endpoint,
@@ -121,8 +208,55 @@ impl CrabAuthProvider {
             client_version: config.client_version,
             token_cache,
             cached: RwLock::new(None),
-            http: reqwest::Client::new(),
+            http,
+            cdn: Vec::new(),
+            allow_viewer_grants: true,
+            cdn_principal: OnceLock::new(),
         })
+    }
+
+    /// Opt in to short-lived viewer grants for the selected repository.
+    pub fn with_cdn(self, deployment: CdnViewerDeployment) -> Result<Self> {
+        self.with_cdn_deployments(vec![deployment])
+    }
+
+    /// Approve native deployments for repositories whose source locators share a bucket name.
+    pub fn with_cdn_deployments(mut self, deployments: Vec<CdnViewerDeployment>) -> Result<Self> {
+        crate::cdn_checkout::validate_issuer_urls(&self.endpoint, &self.issuer_url)?;
+        // An earlier origin-only authorization has no pinned CDN principal.
+        *self.cached.get_mut() = None;
+        self.cdn = deployments;
+        Ok(self)
+    }
+
+    /// Disable viewer grant negotiation while retaining the bound issuer and principal.
+    #[must_use]
+    pub fn with_viewer_grants(mut self, enabled: bool) -> Self {
+        if enabled != self.allow_viewer_grants {
+            *self.cached.get_mut() = None;
+            self.allow_viewer_grants = enabled;
+        }
+        self
+    }
+
+    /// Binds a private checkout process to the principal selected by its SDK parent.
+    pub fn with_cdn_checkout(
+        self,
+        deployment: CdnViewerDeployment,
+        principal: [u8; 32],
+    ) -> Result<Self> {
+        let provider = self.with_cdn(deployment)?;
+        let pinned = provider.cdn_principal.get_or_init(|| principal);
+        if *pinned != principal {
+            return Err(cdn_principal_changed());
+        }
+        Ok(provider)
+    }
+
+    /// Returns the principal fingerprint established by a private CDN read.
+    #[must_use]
+    pub fn cdn_principal(&self) -> Option<[u8; 32]> {
+        self.cdn_principal.get().copied()
     }
 
     /// Checks if cached credentials are still valid.
@@ -131,7 +265,16 @@ impl CrabAuthProvider {
             Some(c) => {
                 let now = SystemTime::now();
                 match c.expires_at.duration_since(now) {
-                    Ok(remaining) => remaining > REFRESH_WINDOW,
+                    Ok(remaining) => {
+                        remaining > REFRESH_WINDOW
+                            && c.cdn.as_ref().is_none_or(|grant| {
+                                grant.expiry().is_some_and(|expiry| {
+                                    expiry
+                                        .duration_since(now)
+                                        .is_ok_and(|ttl| ttl > CDN_REFRESH_WINDOW)
+                                })
+                            })
+                    }
                     Err(_) => false,
                 }
             }
@@ -156,6 +299,7 @@ impl CrabAuthProvider {
         id_token: &str,
         repo_url: &str,
         operation: &str,
+        bound_read: bool,
     ) -> Result<CrabAuthCredentialResponse> {
         let body = CrabAuthRequest {
             id_token: id_token.to_owned(),
@@ -176,17 +320,21 @@ impl CrabAuthProvider {
                 tokio::time::sleep(delay).await;
             }
 
-            let result = self
+            let request = self
                 .http
                 .post(&self.endpoint)
                 .header("Content-Type", "application/json")
-                .header("Authorization", format!("Bearer {id_token}"))
+                .bearer_auth(id_token)
                 .json(&body)
-                .timeout(REQUEST_TIMEOUT)
-                .send()
-                .await;
+                .timeout(REQUEST_TIMEOUT);
+            let request = if bound_read && self.allow_viewer_grants {
+                request.header("X-Crab-CDN-Grant-Version", "1")
+            } else {
+                request
+            };
+            let result = request.send().await;
 
-            let resp = match result {
+            let mut resp = match result {
                 Ok(r) => r,
                 Err(source) => {
                     last_err = Some(AuthError::CrabAuthRequest {
@@ -199,15 +347,32 @@ impl CrabAuthProvider {
             };
 
             let status = resp.status();
-            let resp_body = resp
-                .text()
-                .await
-                .map_err(|source| AuthError::CrabAuthRequest {
-                    operation: "read credentials response",
-                    endpoint: self.endpoint.clone(),
-                    source,
-                })?;
-
+            let read_error = |source| AuthError::CrabAuthRequest {
+                operation: "read credentials response",
+                endpoint: self.endpoint.clone(),
+                source,
+            };
+            if bound_read && status.is_success() {
+                let mut body = Vec::new();
+                while let Some(chunk) = resp.chunk().await.map_err(read_error)? {
+                    if body.len().saturating_add(chunk.len()) > MAX_NEGOTIATED_CREDENTIAL_BYTES {
+                        return Err(AuthError::InvalidCredentialResponse(
+                            "negotiated credential response exceeds its byte limit".into(),
+                        ));
+                    }
+                    body.extend_from_slice(&chunk);
+                }
+                // Parse errors can echo invalid values from the issuer's secret-bearing body.
+                return std::str::from_utf8(&body)
+                    .ok()
+                    .and_then(|body| parse_credential_response(body).ok())
+                    .ok_or_else(invalid_negotiated_response);
+            }
+            let resp_body = if bound_read {
+                "credential response omitted".to_owned()
+            } else {
+                resp.text().await.map_err(read_error)?
+            };
             if status.is_success() {
                 return parse_credential_response(&resp_body);
             }
@@ -462,6 +627,55 @@ impl CrabAuthProvider {
 
         Ok(new_tokens.id_token)
     }
+
+    fn load_cdn_login(&self) -> Result<CachedTokens> {
+        let tokens = self
+            .token_cache
+            .load(CRAB_AUTH_CACHE_KEY)?
+            .ok_or(AuthError::NoCredentials)?;
+        let subject = TokenCache::oidc_identity(&tokens.id_token, &self.issuer_url)?.subject;
+        // The issuer is a validated URL, so the zero separator cannot occur
+        // in it. The digest lets a checkout child bind without receiving a token.
+        let mut digest = Sha256::new();
+        digest.update(b"Crab Auth CDN principal\0");
+        digest.update(self.issuer_url.as_bytes());
+        digest.update([0]);
+        digest.update(subject.as_bytes());
+        let principal = digest.finalize().into();
+        if *self.cdn_principal.get_or_init(|| principal) != principal {
+            return Err(cdn_principal_changed());
+        }
+        Ok(tokens)
+    }
+
+    async fn refresh_cdn_id_token(&self, rejected_token: &str) -> Result<String> {
+        let current = self.load_cdn_login()?;
+        if current.id_token != rejected_token {
+            return Ok(current.id_token);
+        }
+        let refresh_token = current.refresh_token.as_deref().ok_or_else(|| {
+            AuthError::CredentialsExpired("no refresh token available; run `crab login`".into())
+        })?;
+        let discovery = crate::oidc::discover_with_client(&self.issuer_url, &self.http)
+            .await
+            .map_err(redact_cdn_oidc_error)?;
+        discovery.validate_for_issuer(&self.issuer_url)?;
+        let replacement = crate::oidc::refresh_tokens_with_client(
+            &discovery.token_endpoint,
+            &self.client_id,
+            refresh_token,
+            &self.http,
+        )
+        .await
+        .map_err(redact_cdn_oidc_error)?;
+        self.token_cache.store_refreshed_id_token(
+            CRAB_AUTH_CACHE_KEY,
+            &self.issuer_url,
+            &current,
+            &replacement,
+        )?;
+        Ok(replacement.id_token)
+    }
 }
 
 #[async_trait]
@@ -480,6 +694,13 @@ impl CredentialProvider for CrabAuthProvider {
             ));
         }
 
+        let mut deployments = self
+            .cdn
+            .iter()
+            .filter(|deployment| deployment.bucket == bucket && deployment.source_repo == prefix);
+        let bound_read = deployments.clone().next().is_some();
+        let cdn_login = bound_read.then(|| self.load_cdn_login()).transpose()?;
+
         {
             let guard = self.cached.read().await;
             if Self::is_cached_valid(guard.as_ref())
@@ -489,29 +710,69 @@ impl CredentialProvider for CrabAuthProvider {
                 return Ok(CredentialResolution {
                     credentials: c.creds.clone(),
                     storage_scope: c.storage_scope.clone(),
+                    cdn: c.cdn.clone(),
                 });
             }
         }
 
-        let cached_tokens = self
-            .token_cache
-            .load(CRAB_AUTH_CACHE_KEY)?
-            .ok_or(AuthError::NoCredentials)?;
-
-        let id_token = cached_tokens.id_token.clone();
+        let id_token = match cdn_login {
+            Some(login) => login.id_token,
+            None => self.cached_id_token()?,
+        };
         let repo_url = format!("crab://{bucket}/{prefix}");
-
-        let auth_resp = match self.call_endpoint(&id_token, &repo_url, operation).await {
+        let auth_resp = match self
+            .call_endpoint(&id_token, &repo_url, operation, bound_read)
+            .await
+        {
             Ok(resp) => resp,
             Err(error) if should_refresh_after_auth_error(&error) => {
                 debug!("crab-auth returned auth error, attempting ID token refresh");
-                let refreshed = self.refresh_id_token().await?;
-                self.call_endpoint(&refreshed, &repo_url, operation).await?
+                let refreshed = if bound_read {
+                    self.refresh_cdn_id_token(&id_token).await?
+                } else {
+                    self.refresh_id_token().await?
+                };
+                self.call_endpoint(&refreshed, &repo_url, operation, bound_read)
+                    .await?
             }
             Err(error) => return Err(error),
         };
 
-        let expires_at = parse_iso8601(&auth_resp.expires_at).unwrap_or_else(|| {
+        let expiry = parse_iso8601(&auth_resp.expires_at);
+        if bound_read && expiry.is_none() {
+            return Err(invalid_negotiated_response());
+        }
+        if bound_read && auth_resp.permissions.as_slice() != ["read"] {
+            return Err(AuthError::InvalidCredentialResponse(
+                "negotiated CDN credentials require a read-only authorization".into(),
+            ));
+        }
+        if let Some(grant) = &auth_resp.cdn {
+            if !self.allow_viewer_grants {
+                return Err(invalid_negotiated_response());
+            }
+            let parent = expiry.ok_or_else(|| {
+                AuthError::InvalidCredentialResponse(
+                    "CDN viewer grant requires a valid parent expiry".into(),
+                )
+            })?;
+            let deployment = deployments
+                .find(|item| item.origin == grant.origin && item.base_url == grant.base_url)
+                .ok_or_else(|| {
+                    AuthError::InvalidCredentialResponse(
+                        "Crab Auth returned a CDN viewer grant for an unapproved deployment".into(),
+                    )
+                })?;
+            grant.validate_binding(
+                &deployment.origin,
+                &deployment.base_url,
+                prefix,
+                auth_resp.storage_scope.as_ref(),
+                parent,
+                SystemTime::now(),
+            )?;
+        }
+        let expires_at = expiry.unwrap_or_else(|| {
             warn!(
                 expires_at = %auth_resp.expires_at,
                 "failed to parse crab-auth expires_at, defaulting to 1 hour from now"
@@ -519,8 +780,15 @@ impl CredentialProvider for CrabAuthProvider {
             SystemTime::now() + Duration::from_secs(3600)
         });
 
-        let creds = auth_resp.cloud_credentials(expires_at)?;
+        let creds = auth_resp.cloud_credentials(expires_at).map_err(|error| {
+            if bound_read {
+                invalid_negotiated_response()
+            } else {
+                error
+            }
+        })?;
         let storage_scope = auth_resp.storage_scope;
+        let cdn = auth_resp.cdn;
 
         let mut guard = self.cached.write().await;
         *guard = Some(CachedCrabAuthCreds {
@@ -530,10 +798,12 @@ impl CredentialProvider for CrabAuthProvider {
             creds: creds.clone(),
             storage_scope: storage_scope.clone(),
             expires_at,
+            cdn: cdn.clone(),
         });
         Ok(CredentialResolution {
             credentials: creds,
             storage_scope,
+            cdn,
         })
     }
 
@@ -575,46 +845,52 @@ fn should_refresh_after_auth_error(error: &AuthError) -> bool {
     }
 }
 
+fn invalid_negotiated_response() -> AuthError {
+    AuthError::InvalidCredentialResponse("invalid negotiated credential response".into())
+}
+
+fn cdn_principal_changed() -> AuthError {
+    AuthError::CredentialsExpired("Crab Auth login changed; resolve a new CDN read".into())
+}
+
+fn redact_cdn_oidc_error(error: AuthError) -> AuthError {
+    let body = || "OIDC response omitted".to_owned();
+    match error {
+        AuthError::OidcRefreshExpired {
+            endpoint, status, ..
+        } => AuthError::OidcRefreshExpired {
+            endpoint,
+            status,
+            body: body(),
+        },
+        AuthError::OidcRejected {
+            operation,
+            endpoint,
+            status,
+            ..
+        } => AuthError::OidcRejected {
+            operation,
+            endpoint,
+            status,
+            body: body(),
+        },
+        AuthError::ParseOidcResponse { .. } => {
+            AuthError::InvalidCredentialResponse("invalid CDN OIDC response".into())
+        }
+        other => other,
+    }
+}
+
 fn normalize_operation(operation: &str) -> String {
     operation.trim().to_ascii_lowercase()
 }
 
 fn parse_iso8601(s: &str) -> Option<SystemTime> {
-    let s = s.trim();
-    let s = s.strip_suffix('Z')?;
-    let (date, time) = s.split_once('T')?;
-    let date_parts: Vec<&str> = date.split('-').collect();
-    let time_parts: Vec<&str> = time.split(':').collect();
-
-    if date_parts.len() != 3 || time_parts.len() != 3 {
-        return None;
-    }
-
-    let year: i64 = date_parts[0].parse().ok()?;
-    let month: i64 = date_parts[1].parse().ok()?;
-    let day: i64 = date_parts[2].parse().ok()?;
-    let hour: i64 = time_parts[0].parse().ok()?;
-    let min: i64 = time_parts[1].parse().ok()?;
-    let sec: i64 = time_parts[2].parse().ok()?;
-
-    let days = days_from_civil(year, month, day);
-    let unix_secs = days * 86400 + hour * 3600 + min * 60 + sec;
-
-    if unix_secs < 0 {
-        return None;
-    }
-
-    Some(std::time::UNIX_EPOCH + Duration::from_secs(unix_secs as u64))
-}
-
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = y.div_euclid(400);
-    let yoe = y.rem_euclid(400);
-    let m = if month > 2 { month - 3 } else { month + 9 };
-    let doy = (153 * m + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
+    let instant =
+        time::OffsetDateTime::parse(s.trim(), &time::format_description::well_known::Rfc3339)
+            .ok()?;
+    let seconds = u64::try_from(instant.unix_timestamp()).ok()?;
+    SystemTime::UNIX_EPOCH.checked_add(Duration::new(seconds, instant.nanosecond()))
 }
 
 fn shellexpand_tilde(path: &str) -> String {
@@ -628,6 +904,9 @@ fn shellexpand_tilde(path: &str) -> String {
     }
     path.to_owned()
 }
+
+#[cfg(test)]
+mod cdn_tests;
 
 #[cfg(test)]
 mod tests {
@@ -652,6 +931,10 @@ mod tests {
         let ts = parse_iso8601("2026-04-24T18:00:00Z").unwrap();
         let epoch_secs = ts.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
         assert_eq!(epoch_secs, 1777053600);
+        assert_eq!(
+            parse_iso8601("2026-04-24T11:00:00.125-07:00"),
+            ts.checked_add(Duration::from_millis(125)),
+        );
     }
 
     #[test]
@@ -659,6 +942,7 @@ mod tests {
         assert!(parse_iso8601("not-a-date").is_none());
         assert!(parse_iso8601("2026-04-24").is_none());
         assert!(parse_iso8601("").is_none());
+        assert!(parse_iso8601("2026-04-99T18:00:00Z").is_none());
     }
 
     #[test]
@@ -678,6 +962,7 @@ mod tests {
             },
             expires_at: SystemTime::now() + Duration::from_secs(240),
             storage_scope: None,
+            cdn: None,
         });
         assert!(!CrabAuthProvider::is_cached_valid(cached.as_ref()));
     }
@@ -694,6 +979,7 @@ mod tests {
             },
             expires_at: SystemTime::now() + Duration::from_secs(1800),
             storage_scope: None,
+            cdn: None,
         });
         assert!(CrabAuthProvider::is_cached_valid(cached.as_ref()));
     }
@@ -710,6 +996,7 @@ mod tests {
             },
             expires_at: SystemTime::now() + Duration::from_secs(1800),
             storage_scope: None,
+            cdn: None,
         };
 
         assert!(CrabAuthProvider::cached_matches(
@@ -747,6 +1034,7 @@ mod tests {
                 source_repo: "repo".to_owned(),
                 scope_hash,
             }),
+            cdn: None,
         };
 
         assert!(!CrabAuthProvider::cached_matches(
@@ -760,6 +1048,78 @@ mod tests {
 
         assert_eq!(provider.endpoint, "https://auth.example.com/v1/credentials");
         assert_eq!(provider.client_version, "test-version");
+    }
+
+    #[tokio::test]
+    async fn negotiated_credential_errors_bound_and_redact_issuer_responses() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let invalid = br#"{"provider": ["fixture-secret"]}"#.to_vec();
+        let denied = b"fixture-secret expired".to_vec();
+        let oversized = vec![b' '; MAX_NEGOTIATED_CREDENTIAL_BYTES + 1];
+        for (viewer_grants, status, body, expected, refresh) in [
+            (
+                true,
+                "200 OK",
+                invalid,
+                "invalid negotiated credential response",
+                false,
+            ),
+            (
+                true,
+                "401 Unauthorized",
+                denied.clone(),
+                "credential response omitted",
+                true,
+            ),
+            (
+                false,
+                "403 Forbidden",
+                denied,
+                "credential response omitted",
+                false,
+            ),
+            (true, "200 OK", oversized, "exceeds its byte limit", false),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}/v1/credentials", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut request = String::new();
+                while !request.ends_with("\r\n\r\n") {
+                    assert_ne!(stream.read_line(&mut request).await.unwrap(), 0);
+                }
+                assert_eq!(
+                    request
+                        .to_ascii_lowercase()
+                        .contains("x-crab-cdn-grant-version: 1\r\n"),
+                    viewer_grants
+                );
+                let header = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(header.as_bytes()).await.unwrap();
+                stream.write_all(&body).await.unwrap();
+            });
+            let mut provider = create_crab_auth_provider(config())
+                .unwrap()
+                .with_viewer_grants(viewer_grants);
+            provider.endpoint = endpoint;
+            provider.http = reqwest::Client::builder().no_proxy().build().unwrap();
+            let error = provider
+                .call_endpoint("fixture-token", "crab://bucket/repo", "fetch", true)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains(expected));
+            assert!(!format!("{error:?}").contains("fixture-secret"));
+            assert_eq!(should_refresh_after_auth_error(&error), refresh);
+            tokio::time::timeout(Duration::from_secs(2), server)
+                .await
+                .unwrap()
+                .unwrap();
+        }
     }
 
     #[tokio::test]

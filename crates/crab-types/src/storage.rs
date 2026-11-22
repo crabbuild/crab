@@ -1,6 +1,14 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// Operator-approved file and digest of a sealed public CDN export receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CdnPublicationFile {
+    pub path: std::path::PathBuf,
+    pub sha256: String,
+}
+
 /// Physical storage provider behind a repository or object URL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]

@@ -16,7 +16,7 @@ path = "src/lib.rs"
 default = []
 aws-oidc-client = ["oidc-client", "dep:sha2", "dep:tokio"]
 azure-entra-client = ["oidc-client", "dep:tokio"]
-crab-auth-client = ["oidc-client", "dep:tokio"]
+crab-auth-client = ["oidc-client", "dep:tokio", "dep:sha2"]
 gcp-workload-identity-client = ["oidc-client", "dep:tokio"]
 oidc-client = ["dep:reqwest", "dep:tokio"]
 

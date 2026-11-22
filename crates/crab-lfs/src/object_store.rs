@@ -8,21 +8,26 @@
 use std::ops::Range;
 use std::path::Path as StdPath;
 use std::pin::Pin;
+use std::sync::Arc;
 
 pub(crate) mod origin;
 #[cfg(test)]
 mod stream_tests;
 
-use crate::LfsReadSession;
+use crate::{LfsReadCache, LfsReadSession};
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use object_store::path::Path;
 use object_store::{MultipartUpload, ObjectMeta, PutPayload, PutPayloadMut};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio_util::sync::CancellationToken;
 
 use crab_git::lfs_pointer::hex_encode;
-use crab_storage::{ETag, StorageError, Store};
+use crab_storage::{
+    ETag, StorageError, Store,
+    store::{CdnReadAttempt, StorageByteStream},
+};
 
 /// Result alias for LFS object storage operations.
 pub type Result<T> = std::result::Result<T, LfsError>;
@@ -84,6 +89,7 @@ const MAX_PENDING_UPLOAD_BYTES: usize = MIN_STREAM_PART_SIZE * MAX_IN_FLIGHT_PAR
 /// accumulators. Sized to match the part size so a single read tops up
 /// one part without an extra copy in the common case.
 const FILE_READ_BUF: usize = MIN_STREAM_PART_SIZE;
+const CDN_STREAM_RANGE_BYTES: u64 = 8 * 1024 * 1024;
 const RECEIPT_MAGIC: &[u8] = b"crab-lfs-receipt\0\x02";
 // Earlier receipts lacked canonical transport binding. They must miss rather
 // than certify another store whose opaque version tokens happen to coincide.
@@ -96,6 +102,8 @@ enum ExistingObject {
     Valid(ObjectMeta),
     Corrupt(ETag),
 }
+
+type OriginDeliveryProof = (LfsReadCache, Store, Path, ObjectMeta);
 
 #[derive(Clone, Copy, Debug)]
 struct UploadPlan {
@@ -236,6 +244,34 @@ impl LfsObjectStore {
             .await
     }
 
+    /// Open a verified byte stream using the descriptor's SHA-256 and size.
+    ///
+    /// Full reads can use an authorized edge without fetching provider metadata.
+    /// Partial reads still bind complete verification to the native version.
+    pub async fn stream_content(
+        &self,
+        oid: &[u8; 32],
+        expected_size: u64,
+        range: Option<Range<u64>>,
+        session: Option<&LfsReadSession>,
+    ) -> Result<(Range<u64>, LfsByteStream)> {
+        let path = self.object_path(oid);
+        if expected_size != 0
+            && range
+                .as_ref()
+                .is_none_or(|range| *range == (0..expected_size))
+            && let Some(attempt) = self.store.cdn_attempt(&path)
+        {
+            return self
+                .stream_from_edge(attempt, *oid, expected_size, range, session)
+                .await;
+        }
+        let (_, range, stream) = self
+            .stream_with_session(oid, expected_size, range, session)
+            .await?;
+        Ok((range, stream))
+    }
+
     async fn stream_with_session(
         &self,
         oid: &[u8; 32],
@@ -279,6 +315,60 @@ impl LfsObjectStore {
                 .await
             }
         }
+    }
+
+    async fn stream_from_edge(
+        &self,
+        attempt: CdnReadAttempt,
+        oid: [u8; 32],
+        size: u64,
+        range: Option<Range<u64>>,
+        session: Option<&LfsReadSession>,
+    ) -> Result<(Range<u64>, LfsByteStream)> {
+        let first_end = size.min(CDN_STREAM_RANGE_BYTES);
+        let Some(first) = attempt.get(size, Some(0..first_end)).await? else {
+            // Restart only the selected native source. Keep the original
+            // deadline while opening and consuming the replacement stream.
+            let (_, range, stream) = attempt
+                .within_deadline(Self::get_verified_stream_at(
+                    &self.store,
+                    &self.prefix,
+                    &oid,
+                    size,
+                    range,
+                    false,
+                    session,
+                ))
+                .await?;
+            return Ok((range, Self::bound_delivery(Arc::new(attempt), stream)));
+        };
+        let attempt = Arc::new(attempt);
+        let edge = Arc::clone(&attempt);
+        let tail = futures_util::stream::try_unfold(first_end, move |offset| {
+            let edge = Arc::clone(&edge);
+            async move {
+                if offset == size {
+                    return Ok(None);
+                }
+                let end = size.min(offset.saturating_add(CDN_STREAM_RANGE_BYTES));
+                let chunk = edge.get_after_delivery(size, offset..end).await?;
+                Ok(Some((chunk, end)))
+            }
+        });
+        let stream = futures_util::stream::iter([Ok(first)]).chain(tail).boxed();
+        // An edge body proves the OID, never the native provider's version.
+        let verified = Self::verify_delivery(stream, size, true, oid, session, None);
+        Ok((0..size, Self::bound_delivery(attempt, verified)))
+    }
+
+    fn bound_delivery(attempt: Arc<CdnReadAttempt>, stream: LfsByteStream) -> LfsByteStream {
+        futures_util::stream::try_unfold((attempt, stream), |(attempt, mut stream)| async move {
+            let next = attempt
+                .within_deadline(async { stream.next().await.transpose() })
+                .await?;
+            Ok(next.map(|chunk| (chunk, (attempt, stream))))
+        })
+        .boxed()
     }
 
     /// Returns the object store path for the given OID.
@@ -707,17 +797,92 @@ impl LfsObjectStore {
         expected_size: u64,
         destination: &StdPath,
     ) -> Result<()> {
+        self.download_to_file_cancellable(
+            oid,
+            expected_size,
+            destination,
+            &CancellationToken::new(),
+        )
+        .await
+    }
+
+    /// Download a verified object, draining writes before returning on cancellation.
+    ///
+    /// The caller owns the unpublished destination and discards it on error.
+    pub async fn download_to_file_cancellable(
+        &self,
+        oid: &[u8; 32],
+        expected_size: u64,
+        destination: &StdPath,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        if cancel.is_cancelled() {
+            return Err(StorageError::Cancelled.into());
+        }
+        let path = self.object_path(oid);
+        if let Some(edge) = self.store.cdn_attempt(&path) {
+            return edge
+                .with_file_deadline(cancel, async |cancel| {
+                    if let Some(parent) = destination.parent() {
+                        tokio::fs::create_dir_all(parent).await?;
+                    }
+                    let mut hasher = Sha256::new();
+                    let complete = edge
+                        .download(
+                            expected_size,
+                            0..expected_size,
+                            destination,
+                            cancel,
+                            |bytes| hasher.update(bytes),
+                        )
+                        .await?;
+                    if complete {
+                        if hasher.finalize().as_slice() == oid {
+                            tokio::fs::File::options()
+                                .write(true)
+                                .open(destination)
+                                .await?
+                                .sync_all()
+                                .await?;
+                            return if cancel.is_cancelled() {
+                                Err(StorageError::Cancelled.into())
+                            } else {
+                                Ok(())
+                            };
+                        }
+                        tokio::fs::File::create(destination).await?;
+                        tracing::warn!("CDN LFS digest mismatch; restarting from selected origin");
+                    }
+                    // The entire object may restart once at the selected origin.
+                    Self::download_from_to_file(
+                        &self.store,
+                        &self.prefix,
+                        oid,
+                        expected_size,
+                        destination,
+                        cancel,
+                    )
+                    .await
+                })
+                .await;
+        }
         match Self::download_from_to_file(
             &self.store,
             &self.prefix,
             oid,
             expected_size,
             destination,
+            cancel,
         )
         .await
         {
             Ok(()) => Ok(()),
-            Err(error @ LfsError::Io { .. }) => Err(error),
+            Err(
+                error @ (LfsError::Io { .. }
+                | LfsError::Storage {
+                    source: StorageError::Cancelled,
+                }),
+            ) => Err(error),
             Err(error) => {
                 let Some((fallback_store, fallback_prefix)) = self.primary_fallback.as_ref() else {
                     return Err(error);
@@ -733,6 +898,7 @@ impl LfsObjectStore {
                     oid,
                     expected_size,
                     destination,
+                    cancel,
                 )
                 .await
             }
@@ -874,8 +1040,20 @@ impl LfsObjectStore {
             .map(LfsReadSession::cache)
             .transpose()?
             .map(|cache| (cache, store.clone(), path, meta.clone()));
+        let stream = Self::verify_delivery(stream, expected_bytes, full, oid, session, proof);
+        Ok((meta, result_range, stream))
+    }
+
+    fn verify_delivery(
+        stream: StorageByteStream,
+        expected_bytes: u64,
+        full: bool,
+        oid: [u8; 32],
+        session: Option<&LfsReadSession>,
+        proof: Option<OriginDeliveryProof>,
+    ) -> LfsByteStream {
         let session = session.cloned();
-        let stream = futures_util::stream::try_unfold(
+        futures_util::stream::try_unfold(
             (stream, 0u64, Sha256::new(), false, session, proof),
             move |(mut stream, received, hasher, complete, session, proof)| async move {
                 if complete {
@@ -918,8 +1096,7 @@ impl LfsObjectStore {
                 )))
             },
         )
-        .boxed();
-        Ok((meta, result_range, stream))
+        .boxed()
     }
 
     async fn download_from_to_file(
@@ -928,13 +1105,19 @@ impl LfsObjectStore {
         oid: &[u8; 32],
         expected_size: u64,
         destination: &StdPath,
+        cancel: &CancellationToken,
     ) -> Result<()> {
         if let Some(parent) = destination.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
 
         let path = Self::object_path_at(prefix, oid);
-        let (meta, range, mut stream) = match store.get_stream(&path, None).await {
+        let response = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(StorageError::Cancelled.into()),
+            result = store.get_stream(&path, None) => result,
+        };
+        let (meta, range, mut stream) = match response {
             Ok(result) => result,
             Err(StorageError::NotFound { .. }) => {
                 return Err(LfsError::ObjectMissing {
@@ -952,19 +1135,35 @@ impl LfsObjectStore {
         let mut file = tokio::fs::File::create(destination).await?;
         let mut hasher = Sha256::new();
         let mut actual_size = 0u64;
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            actual_size = actual_size.checked_add(chunk.len() as u64).ok_or_else(|| {
-                StorageError::CorruptObject {
-                    path: path.to_string(),
-                    reason: "LFS object size overflow while downloading".to_owned(),
-                }
-            })?;
-            hasher.update(&chunk);
-            file.write_all(&chunk).await?;
+        let transfer = async {
+            loop {
+                let chunk = tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => return Err(StorageError::Cancelled.into()),
+                    chunk = stream.next() => chunk,
+                };
+                let Some(chunk) = chunk.transpose()? else {
+                    break;
+                };
+                actual_size = actual_size
+                    .checked_add(chunk.len() as u64)
+                    .filter(|len| *len <= expected_size)
+                    .ok_or_else(|| LfsError::ObjectCorrupt {
+                        oid: hex_encode(oid),
+                    })?;
+                hasher.update(&chunk);
+                file.write_all(&chunk).await?;
+            }
+            Ok::<_, LfsError>(())
         }
-        file.flush().await?;
+        .await;
+        // File writes may be in flight even after a remote read is cancelled.
+        let flushed = file.flush().await.map_err(LfsError::from);
+        transfer.and(flushed)?;
         file.sync_all().await?;
+        if cancel.is_cancelled() {
+            return Err(StorageError::Cancelled.into());
+        }
 
         if actual_size != expected_size || hasher.finalize().as_slice() != oid {
             return Err(LfsError::ObjectCorrupt {
@@ -1926,6 +2125,85 @@ mod tests {
             .unwrap();
 
         assert_eq!(std::fs::read(destination).unwrap(), data);
+    }
+
+    #[tokio::test]
+    async fn cdn_file_reads_verify_sha256_and_do_not_retry_a_denied_view() {
+        use crab_storage::cdn::{CdnAccess, CdnRoute, CdnTransport};
+        use std::time::Duration;
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        let good = b"good";
+        let oid = sha256_oid(good);
+        for (response, body_at_origin, success) in [
+            (
+                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-3/4\r\nContent-Length: 4\r\n\r\ngood",
+                b"bad!",
+                true,
+            ),
+            (
+                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-3/4\r\nContent-Length: 4\r\n\r\nbad!",
+                good,
+                true,
+            ),
+            (
+                "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n",
+                good,
+                false,
+            ),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let transport = CdnTransport::loopback_fixture(listener.local_addr().unwrap()).unwrap();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut request = String::new();
+                while !request.ends_with("\r\n\r\n") {
+                    assert!(stream.read_line(&mut request).await.unwrap() != 0);
+                }
+                stream.write_all(response.as_bytes()).await.unwrap();
+            });
+            let target = [4; 32];
+            let selected = test_base_store()
+                .with_target_identity(target)
+                .with_cdn_route(CdnRoute::new(
+                    target,
+                    "repo".into(),
+                    None,
+                    CdnAccess::Public,
+                    transport,
+                    Duration::from_secs(10),
+                ))
+                .unwrap();
+            let primary = test_base_store();
+            let path = LfsObjectStore::object_path_for_prefix("repo", &oid);
+            selected
+                .inner()
+                .put(&path, Bytes::from_static(body_at_origin).into())
+                .await
+                .unwrap();
+            primary
+                .inner()
+                .put(&path, Bytes::from_static(good).into())
+                .await
+                .unwrap();
+            let lfs = LfsObjectStore::new_with_primary_fallback(selected, "repo", primary, "repo");
+            let dir = tempfile::tempdir().unwrap();
+            let destination = dir.path().join("object");
+            let result = lfs.download_to_file(&oid, 4, &destination).await;
+            if success {
+                result.unwrap();
+                assert_eq!(std::fs::read(destination).unwrap(), good);
+            } else {
+                let error = result.unwrap_err();
+                assert!(matches!(
+                    crab_storage::store::cdn_read_rejection(&error),
+                    Some(StorageError::Forbidden { .. })
+                ));
+                assert!(!destination.exists());
+            }
+            server.await.unwrap();
+        }
     }
 
     #[tokio::test]

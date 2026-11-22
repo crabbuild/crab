@@ -174,8 +174,13 @@ impl ShardHydrator {
         let store =
             crab_lfs::LfsObjectStore::new(self.router.store().clone(), self.router.repo_prefix());
         let read = async {
-            let (_, _, mut stream) = store
-                .get_stream_with_session(&pointer.oid, pointer.size, Some(range.clone()), session)
+            let (_, mut stream) = store
+                .stream_content(
+                    &pointer.oid,
+                    pointer.size,
+                    Some(range.clone()),
+                    Some(session),
+                )
                 .await?;
             let expected =
                 usize::try_from(range.end - range.start).map_err(std::io::Error::other)?;
@@ -702,8 +707,21 @@ impl ShardHydrator {
     async fn preflight_shard_coverage(&self, client: &StoreClient, ptr: &Pointer) -> Result<()> {
         use xet_client::cas_client::Client;
         let file_hash = MerkleHash::from(ptr.file_hash);
-        let Ok(Some((info, _))) = client.get_file_reconstruction_info(&file_hash).await else {
-            return Ok(());
+        let info = match client.get_file_reconstruction_info(&file_hash).await {
+            Ok(Some((info, _))) => info,
+            Err(error) => {
+                let source = crate::error::ReconstructionError::from(
+                    xet_data::file_reconstruction::FileReconstructionError::from(error),
+                );
+                if crate::error::terminal_read_failure(&source) {
+                    return Err(ReadError::Reconstruction {
+                        file_hash: file_hash.hex(),
+                        source,
+                    });
+                }
+                return Ok(());
+            }
+            Ok(None) => return Ok(()),
         };
 
         let covered = info
@@ -1428,13 +1446,11 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn pinned_file_index_lookup_keeps_reconstruction_on_captured_catalog() {
-        let directory = tempfile::tempdir().unwrap();
-        let (hydrator, mut pointer, expected) =
-            reconstruction_fixture(&directory.path().join("cache"), false).await;
+    async fn capture_fixture_catalog(
+        hydrator: &super::ShardHydrator,
+        pointer: &crab_types::pointer::Pointer,
+    ) -> crab_metadata::file_index_lookup::SharedFileIndexLookup {
         let shard_hash = pointer.shard_hint.expect("fixture shard hint");
-        pointer.shard_hint = None;
         let file_hash = crab_xet::hash::MerkleHash::from(pointer.file_hash);
         let mut catalog = crab_metadata::capsule_protocol::PointerCatalog::new();
         catalog
@@ -1537,9 +1553,18 @@ mod tests {
         let captured = control
             .pointer_catalog_lookup(&router, 1024 * 1024)
             .unwrap();
-        let lookup = crab_metadata::file_index_lookup::SharedFileIndexLookup::for_pointer_catalog(
+        crab_metadata::file_index_lookup::SharedFileIndexLookup::for_pointer_catalog(
             router, captured,
-        );
+        )
+    }
+
+    #[tokio::test]
+    async fn pinned_file_index_lookup_keeps_reconstruction_on_captured_catalog() {
+        let directory = tempfile::tempdir().unwrap();
+        let (hydrator, mut pointer, expected) =
+            reconstruction_fixture(&directory.path().join("cache"), false).await;
+        let lookup = capture_fixture_catalog(&hydrator, &pointer).await;
+        pointer.shard_hint = None;
         let hydrator = hydrator.with_file_index_lookup(lookup.clone());
 
         let mut inspected = pointer.clone();
@@ -1609,6 +1634,130 @@ mod tests {
                     .as_ref(),
                 expected
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn captured_shard_cdn_reconstructs_a_projected_file_and_keeps_denial_terminal() {
+        use crab_storage::cdn::{CdnAccess, CdnCredential, CdnCredentials, CdnRoute, CdnTransport};
+        use object_store::path::Path;
+        use std::time::Duration;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        struct ShardGrant(Path);
+
+        #[async_trait::async_trait]
+        impl CdnCredentials for ShardGrant {
+            async fn credential(
+                &self,
+                key: &Path,
+                rejected: Option<u64>,
+            ) -> crab_storage::Result<Option<CdnCredential>> {
+                Ok((key == &self.0 && rejected.is_none())
+                    .then(|| CdnCredential::bearer(0, "fixture-viewer".into())))
+            }
+        }
+
+        for (origin_shard, corrupt, denied) in [
+            (false, false, false),
+            (true, true, false),
+            (true, false, true),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let target = [1; 32];
+            let scope = crab_storage::StorageScope {
+                repo_prefix: format!("runtime-test/acl-views/v1/{}/1-fixture", "a".repeat(64)),
+                global_prefix: format!(
+                    "runtime-test/acl-views/v1/{}/1-fixture/.crab",
+                    "a".repeat(64)
+                ),
+                source_repo: "runtime-test".into(),
+                scope_hash: "a".repeat(64),
+            };
+            let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()))
+                .with_target_identity(target)
+                .with_storage_scope(scope.clone());
+            let (fixture, mut pointer, expected) = reconstruction_fixture_with_origin(
+                &directory.path().join("fixture-cache"),
+                false,
+                store.clone(),
+            )
+            .await;
+            let lookup = capture_fixture_catalog(&fixture, &pointer).await;
+            let location = lookup
+                .lookup_shard(&pointer.file_hash.into())
+                .await
+                .unwrap()
+                .unwrap();
+            let path = fixture.router.shard_path(&location.hash);
+            let (body, _) = store.get_with_etag(&path).await.unwrap();
+            assert_eq!(location.encoded_size, Some(body.len() as u64));
+            if !origin_shard {
+                store.delete(&path).await.unwrap();
+            }
+            // Force authoritative catalog selection even when a stale pointer hint is present.
+            pointer.shard_hint = Some([0xff; 32]);
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let transport = CdnTransport::loopback_fixture(listener.local_addr().unwrap()).unwrap();
+            let request_path = path.clone();
+            let response = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut request = String::new();
+                while !request.ends_with("\r\n\r\n") {
+                    assert_ne!(stream.read_line(&mut request).await.unwrap(), 0);
+                }
+                assert!(request.starts_with(&format!("GET /{request_path} HTTP/1.1\r\n")));
+                assert!(
+                    request
+                        .to_ascii_lowercase()
+                        .contains("authorization: bearer fixture-viewer\r\n")
+                );
+                if denied {
+                    stream
+                        .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+                        .await
+                        .unwrap();
+                } else {
+                    let mut body = body.to_vec();
+                    if corrupt {
+                        body[0] ^= 0xff;
+                    }
+                    let header =
+                        format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());
+                    stream.write_all(header.as_bytes()).await.unwrap();
+                    stream.write_all(&body).await.unwrap();
+                }
+            });
+            let store = store
+                .with_cdn_route(CdnRoute::new(
+                    target,
+                    scope.repo_prefix,
+                    Some(scope.global_prefix),
+                    CdnAccess::Private(Arc::new(ShardGrant(path))),
+                    transport,
+                    Duration::from_secs(5),
+                ))
+                .unwrap();
+            let hydrator = runtime_with_origin(&directory.path().join("cache"), 1024 * 1024, store)
+                .with_file_index_lookup(lookup.clone());
+            let result = hydrator
+                .reconstruct_from_pointer(&pointer.serialize())
+                .await;
+            if denied {
+                assert!(matches!(
+                    crab_storage::store::cdn_read_rejection(&result.unwrap_err()),
+                    Some(crab_storage::StorageError::Forbidden { .. })
+                ));
+            } else {
+                assert_eq!(result.unwrap(), expected);
+            }
+            tokio::time::timeout(Duration::from_secs(2), response)
+                .await
+                .unwrap()
+                .unwrap();
+            lookup.close().await.unwrap();
         }
     }
 

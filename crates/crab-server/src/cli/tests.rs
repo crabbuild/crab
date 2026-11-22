@@ -84,6 +84,8 @@ fn healthcheck_uses_the_stable_tls_name_against_the_local_listener() {
         listen: "127.0.0.1:8788".parse().unwrap(),
         management_listen: "0.0.0.0:8789".parse().unwrap(),
         storage: crab_server::StorageConfig {
+            #[cfg(feature = "provider-cdn")]
+            cdn: Default::default(),
             url: "s3://bucket/root".into(),
             region: None,
         },

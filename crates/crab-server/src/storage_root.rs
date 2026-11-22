@@ -13,6 +13,10 @@ pub(crate) struct StorageRoot {
     pub prefix: String,
     pub provider_namespace: String,
     pub bucket_label: String,
+    #[cfg(feature = "provider-cdn")]
+    pub(crate) cdn: std::sync::Arc<
+        std::collections::BTreeMap<String, crab_auth_store::operator_cdn::OperatorCdn>,
+    >,
 }
 
 impl StorageRoot {
@@ -47,6 +51,8 @@ impl StorageRoot {
             prefix: selection.repo_prefix,
             provider_namespace: format!("{provider}:{}:{}", identity.host, identity.container),
             bucket_label,
+            #[cfg(feature = "provider-cdn")]
+            cdn: std::sync::Arc::new(config.cdn.clone()),
         })
     }
 
@@ -99,6 +105,8 @@ impl StorageRoot {
 impl StorageRoot {
     pub(crate) fn memory(store: Store, prefix: &str) -> Self {
         Self {
+            #[cfg(feature = "provider-cdn")]
+            cdn: Default::default(),
             store,
             prefix: prefix.to_owned(),
             provider_namespace: "memory:test".to_owned(),

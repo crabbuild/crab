@@ -107,19 +107,46 @@ pub(crate) async fn load(
     }))
 }
 
-/// Apply discovered routing only when no explicit local routing is available.
-pub(crate) fn apply_if_unconfigured(
+/// Discover fetch replica routing from the primary when local policy is absent.
+pub(crate) async fn load_if_unconfigured(
+    store: &Store,
+    prefix: &str,
+    primary_url: &str,
     config: &mut Config,
-    discovered: Option<ReplicationConfig>,
-) -> bool {
+) -> Result<()> {
     if config.replication.is_some() {
-        return false;
+        return Ok(());
     }
-    let Some(discovered) = discovered else {
-        return false;
+    let layout = StoreLayout::new(store.clone(), prefix.to_owned());
+    let discovered = match load(store, &layout, primary_url).await {
+        Ok(discovered) => discovered,
+        Err(
+            error @ (CrabError::NetworkTransient(_)
+            | CrabError::Throttled { .. }
+            | CrabError::Forbidden { .. }
+            | CrabError::NoCredentials
+            | CrabError::AuthFailed { .. }
+            | CrabError::AuthExpired { .. }
+            | CrabError::Io(_)
+            | CrabError::Storage(_)),
+        ) => {
+            tracing::debug!(
+                error = %error,
+                discovery_path = %layout.replica_discovery_path(),
+                "replica discovery unavailable; using primary"
+            );
+            return Ok(());
+        }
+        Err(error) => return Err(error),
     };
-    config.replication = Some(discovered);
-    true
+    if let Some(discovered) = discovered {
+        config.replication = Some(discovered);
+        tracing::debug!(
+            discovery_path = %layout.replica_discovery_path(),
+            "loaded replica routing from primary discovery"
+        );
+    }
+    Ok(())
 }
 
 fn canonical_primary(primary: &str) -> Result<String> {
@@ -231,27 +258,45 @@ mod tests {
         assert!(matches!(error, CrabError::IncompatibleFormat { .. }));
     }
 
-    #[test]
-    fn discovery_populates_unconfigured_session() {
+    #[tokio::test]
+    async fn discovery_populates_unconfigured_session() {
+        let (store, layout) = store_and_layout();
         let mut config = Config::default();
         let expected = replication();
+        let url = expected.primary.as_deref().unwrap();
 
-        let changed = apply_if_unconfigured(&mut config, Some(expected.clone()));
+        publish(&store, &layout, url, &expected).await.unwrap();
+        load_if_unconfigured(&store, layout.repo_prefix(), url, &mut config)
+            .await
+            .unwrap();
 
-        assert!(changed);
         assert_eq!(config.replication, Some(expected));
     }
 
-    #[test]
-    fn explicit_local_replication_wins_over_discovery() {
+    #[tokio::test]
+    async fn explicit_local_replication_skips_discovery() {
+        let (store, layout) = store_and_layout();
         let mut config = Config {
             replication: Some(ReplicationConfig::default()),
             ..Config::default()
         };
 
-        let changed = apply_if_unconfigured(&mut config, Some(replication()));
+        store
+            .put_overwrite(
+                &layout.replica_discovery_path(),
+                Bytes::from_static(b"invalid discovery"),
+            )
+            .await
+            .unwrap();
+        load_if_unconfigured(
+            &store,
+            layout.repo_prefix(),
+            "crab://primary/org/repo",
+            &mut config,
+        )
+        .await
+        .unwrap();
 
-        assert!(!changed);
         assert_eq!(config.replication, Some(ReplicationConfig::default()));
     }
 }

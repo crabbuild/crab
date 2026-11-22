@@ -42,7 +42,8 @@ Store consumers compose those results in `crates/crab-auth-store/src/lib.rs`.
 
 - Classify missing tokens from the read result under the cache lock. Never use
   an existence probe to turn filesystem errors into an unauthenticated state.
-  The current lock is Unix-only; non-Unix serialization remains unimplemented.
+  Hold the same file lock for cache reads, login, sign-out and refresh
+  comparison and replacement.
   Source: `crates/crab-auth/src/token_cache.rs`.
 
 - Preserve scopes alongside resolved credentials; translating provider variants must not drop path restrictions.

@@ -24,13 +24,16 @@ pub const PUBLICATION_PLAN_ID_ENV: &str = "CRAB_INTERNAL_MIRROR_PLAN_ID";
 /// Process-scoped target for the compatible executable's Git forwarding entry.
 pub const GIT_EXECUTABLE_ENV: &str = "CRAB_INTERNAL_GIT_EXECUTABLE";
 
+/// Optional operation-scoped direct CDN checkout protocol.
+pub const DIRECT_CDN_CHECKOUT: &str = "direct-cdn-checkout-v1";
+
 /// Canonical capability document emitted without fallible runtime serialization.
 pub const CURRENT_CAPABILITIES_JSON: &str = concat!(
     "{\"schema_version\":1,\"crab_version\":\"",
     env!("CARGO_PKG_VERSION"),
     "\",\"product_build\":\"crab-remote/",
     env!("CARGO_PKG_VERSION"),
-    "\",\"local_workflow_protocol\":1,\"storage_format_version\":2,\"staging_format_version\":1,\"operations\":[\"clone\",\"fetch-content\",\"stage\",\"hydrate\",\"dehydrate\",\"filter-process\",\"remote-helper\",\"git-forward\"]}"
+    "\",\"local_workflow_protocol\":1,\"storage_format_version\":2,\"staging_format_version\":1,\"operations\":[\"clone\",\"fetch-content\",\"stage\",\"hydrate\",\"dehydrate\",\"filter-process\",\"remote-helper\",\"git-forward\",\"direct-cdn-checkout-v1\"]}"
 );
 
 /// Capabilities advertised by a Crab executable to a local SDK client.
@@ -85,6 +88,7 @@ impl ExecutableCapabilities {
                 "filter-process",
                 "remote-helper",
                 "git-forward",
+                DIRECT_CDN_CHECKOUT,
             ]
             .into_iter()
             .map(str::to_owned)

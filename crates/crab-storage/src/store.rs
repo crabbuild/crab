@@ -15,7 +15,11 @@
 //!   coordination pointers, and `update` uses `PutMode::Update(etag)`.
 //!   Callers never hand-build `PutOptions`.
 
+mod cdn_read;
 mod parallel_read;
+pub use cdn_read::{
+    CDN_PROBE_MAX_BYTES, CdnBindingInfo, CdnProbeResult, CdnReadAttempt, cdn_read_rejection,
+};
 
 use std::collections::HashSet;
 use std::ops::Range;
@@ -142,6 +146,7 @@ pub struct Store {
     /// explicit identity — typically tests and the in-memory store.
     identity: BucketIdentity,
     target_identity: Option<[u8; 32]>,
+    native_cdn_origin: Option<String>,
     immutable_write_verification: ImmutableWriteVerification,
     /// Optional parallel handle to the same underlying store viewed
     /// as a [`object_store::signer::Signer`]. Populated by storage
@@ -166,6 +171,9 @@ pub struct Store {
     storage_scope: Option<StorageScope>,
     read_routes: Option<Arc<Vec<ReadRoute>>>,
     staging_writes: Option<Arc<StagingWriteState>>,
+    cdn: Option<Arc<crate::cdn::CdnRoute>>,
+    pub(crate) read_authorization: Option<crate::read_authorization::BoundReadAuthorization>,
+    direct_read_admissions: Vec<Arc<dyn crate::ReadAdmission>>,
     read_byte_observer: Option<Arc<dyn Fn(u64) + Send + Sync>>,
     read_request_observer: Option<Arc<dyn Fn(StorageReadKind) + Send + Sync>>,
 }
@@ -218,6 +226,7 @@ impl Store {
             retry: RetryPolicy::DEFAULT,
             identity: BucketIdentity::local_unset(),
             target_identity: None,
+            native_cdn_origin: None,
             immutable_write_verification: ImmutableWriteVerification::ReadbackRequired,
             signer: None,
             read_wrapped: false,
@@ -226,6 +235,9 @@ impl Store {
             storage_scope: None,
             read_routes: None,
             staging_writes: None,
+            cdn: None,
+            read_authorization: None,
+            direct_read_admissions: Vec::new(),
             read_byte_observer: None,
             read_request_observer: None,
         }
@@ -265,6 +277,7 @@ impl Store {
             retry,
             identity: BucketIdentity::local_unset(),
             target_identity: None,
+            native_cdn_origin: None,
             immutable_write_verification: ImmutableWriteVerification::ReadbackRequired,
             signer: None,
             read_wrapped: false,
@@ -273,6 +286,9 @@ impl Store {
             storage_scope: None,
             read_routes: None,
             staging_writes: None,
+            cdn: None,
+            read_authorization: None,
+            direct_read_admissions: Vec::new(),
             read_byte_observer: None,
             read_request_observer: None,
         }
@@ -312,6 +328,19 @@ impl Store {
     #[must_use]
     pub fn target_identity(&self) -> Option<&[u8; 32]> {
         self.target_identity.as_ref()
+    }
+
+    /// Propagate the native cloud origin recorded by the resolved provider builder.
+    #[must_use]
+    pub fn with_native_cdn_origin(mut self, origin: Option<String>) -> Self {
+        self.native_cdn_origin = origin;
+        self
+    }
+
+    /// Canonical origin for CDN binding when native provider placement is known.
+    #[must_use]
+    pub fn native_cdn_origin(&self) -> Option<&str> {
+        self.native_cdn_origin.as_deref()
     }
 
     /// Return target proof only when every read beneath `prefix` uses the bound transport.
@@ -375,6 +404,9 @@ impl Store {
 
     #[must_use]
     pub fn with_storage_scope(mut self, scope: StorageScope) -> Self {
+        if self.storage_scope.as_ref() != Some(&scope) {
+            self.cdn = None;
+        }
         self.storage_scope = Some(scope);
         self
     }
@@ -416,6 +448,7 @@ impl Store {
     #[must_use]
     pub fn with_read_admission(mut self, admission: Arc<dyn crate::ReadAdmission>) -> Self {
         self.read_wrapped = true;
+        self.direct_read_admissions.push(Arc::clone(&admission));
         let wrap = |inner: Arc<dyn ObjectStore>| -> Arc<dyn ObjectStore> {
             Arc::new(crate::read_admission::AdmittedStore {
                 inner,
@@ -3162,6 +3195,9 @@ impl Store {
             let mut buffer = vec![0_u8; 1024 * 1024];
             let mut size = 0_u64;
             loop {
+                if cancel.is_cancelled() {
+                    return Err(StorageError::Cancelled);
+                }
                 let read = input.read(&mut buffer).await?;
                 if read == 0 {
                     break;
@@ -3381,24 +3417,7 @@ impl Store {
         }
         // A same-length response can still contain bytes from another offset.
         // Direct HTTP must retain the range validation of the provider transport.
-        let mut ranges = response
-            .headers()
-            .get_all(reqwest::header::CONTENT_RANGE)
-            .iter();
-        let actual = ranges.next().and_then(|value| {
-            let value = value.to_str().ok()?.trim().strip_prefix("bytes ")?;
-            let (offsets, size) = value.split_once('/')?;
-            let (start, end) = offsets.split_once('-')?;
-            Some((
-                start.parse::<u64>().ok()?,
-                end.parse::<u64>().ok()?.checked_add(1)?,
-                size.parse::<u64>().ok()?,
-            ))
-        });
-        if ranges.next().is_some()
-            || !actual.is_some_and(|(start, end, size)| {
-                start == range.start && end == range.end && size >= end
-            })
+        if !crate::cdn::content_range(response.headers()).is_some_and(|(actual, _)| actual == range)
         {
             return Err(StorageError::CorruptObject {
                 path: path.to_owned(),

@@ -52,6 +52,9 @@ also apply.
   canonical publication lease.
 - Pin one immutable commit for each read. Tree bytes, object attributes, ETag,
   size, modification time, and checksums must come from that same view.
+- The `provider-cdn` qualification feature attaches viewer routing to the
+  repository's verified reader. Root and freshness probes, writes, and
+  maintenance use the canonical origin layout.
 - A successful object mutation publishes exactly the documented Git result.
   Never acknowledge bytes before durable content, attributes, visibility
   evidence, and ref-journal publication reach their required boundary.

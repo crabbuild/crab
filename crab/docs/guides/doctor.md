@@ -5,7 +5,7 @@ Run a comprehensive health check on the crab setup.
 ## Synopsis
 
 ```
-crab doctor
+crab doctor [OPTIONS]
 ```
 
 ## Description
@@ -32,6 +32,26 @@ This is the first command to run when something isn't working as expected.
 | Staging area | `.crab/staging/` exists and is accessible |
 | Cache | The local cache directory exists |
 | Version guard | The repository's crab version is compatible with the installed binary |
+
+## Provider CDN probe
+
+Run `crab doctor --cdn-probe --json` against an authorized CDN qualification
+deployment. Build with `provider-cdn-qualification` to exercise HTTPS delivery.
+The probe follows Git fetch replica discovery and selection. It
+reports the selected primary or read replica and that store's CDN binding.
+It verifies a root-referenced immutable Git object up to 1 MiB at the selected
+origin, then compares a full CDN GET and a one-byte range. The probe can
+select a standalone pack layer from the native checkpoint when the route
+covers pack layers. Provide an export containing the sample when checking
+public delivery. A repository without an eligible object of that size
+reports no eligible sample.
+
+For private delivery, the probe reports the viewer grant's remaining lifetime
+and uses that same viewer for all edge requests. After the immutable reads
+pass, the final request asks the CDN for one byte of `v2/root` and checks for
+HTTP 401 or 403 without reading the response body. The probe makes no
+repository writes. Its output omits credential values and raw provider errors.
+Use deployment logs and the provider qualification report for release evidence.
 
 ## Output Format
 

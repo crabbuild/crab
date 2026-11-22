@@ -20,6 +20,7 @@ enum Fault {
     CorruptBody,
     ShortBody,
     LongBody,
+    StalledBody,
     WrongRange,
     NoValidator,
     EmptyValidator,
@@ -89,6 +90,12 @@ impl ObjectStore for DeliveryStore {
             }
         }
         if delivery {
+            if matches!(self.fault, Fault::StalledBody) {
+                let partial = futures_util::stream::iter([Ok(Bytes::from_static(b"veri"))]);
+                result.payload = GetResultPayload::Stream(
+                    partial.chain(futures_util::stream::pending()).boxed(),
+                );
+            }
             let replacement = match self.fault {
                 Fault::ChangedVersion => {
                     result.meta.e_tag = Some("changed".to_owned());
@@ -160,6 +167,212 @@ async fn fixture(fault: Fault) -> (LfsObjectStore, Arc<DeliveryStore>, [u8; 32])
         store,
         oid,
     )
+}
+
+async fn edge_fixture(
+    origin: Arc<DeliveryStore>,
+    responses: Vec<(Range<u64>, String, Bytes)>,
+) -> (LfsObjectStore, tokio::task::JoinHandle<()>) {
+    use crab_storage::cdn::{CdnAccess, CdnRoute, CdnTransport};
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let transport = CdnTransport::loopback_fixture(listener.local_addr().unwrap()).unwrap();
+    let target = [4; 32];
+    let store = Store::new(origin)
+        .with_target_identity(target)
+        .with_cdn_route(CdnRoute::new(
+            target,
+            "stream".into(),
+            None,
+            CdnAccess::Public,
+            transport,
+            Duration::from_secs(10),
+        ))
+        .unwrap();
+    let server = tokio::spawn(async move {
+        for (range, headers, body) in responses {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut request = String::new();
+            while !request.ends_with("\r\n\r\n") {
+                assert_ne!(stream.read_line(&mut request).await.unwrap(), 0);
+            }
+            assert!(request.to_ascii_lowercase().contains(&format!(
+                "\r\nrange: bytes={}-{}\r\n",
+                range.start,
+                range.end - 1
+            )));
+            stream.write_all(headers.as_bytes()).await.unwrap();
+            stream.write_all(&body).await.unwrap();
+        }
+    });
+    (LfsObjectStore::new(store, "stream"), server)
+}
+
+fn edge_partial(range: Range<u64>, size: u64, bytes: Bytes) -> (Range<u64>, String, Bytes) {
+    let end = range.end - 1;
+    let start = range.start;
+    let len = range.end - start;
+    (
+        range,
+        format!(
+            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{size}\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n"
+        ),
+        bytes,
+    )
+}
+
+#[tokio::test]
+async fn cdn_stream_validates_edge_bytes_without_proving_the_native_version() {
+    let (_, origin, oid) = fixture(Fault::CorruptBody).await;
+    let response = edge_partial(0..8, 8, Bytes::from_static(b"verified"));
+    let (lfs, edge) = edge_fixture(origin.clone(), vec![response]).await;
+    let session = LfsReadSession::new(LfsReadCache::default());
+    let (range, stream) = lfs
+        .stream_content(&oid, 8, None, Some(&session))
+        .await
+        .unwrap();
+    assert_eq!(range, 0..8);
+    assert_eq!(
+        stream.try_collect::<Vec<_>>().await.unwrap().concat(),
+        b"verified"
+    );
+    assert_eq!(origin.reads.load(Ordering::Relaxed), 0);
+    edge.await.unwrap();
+    let partial = lfs
+        .stream_content(&oid, 8, Some(1..4), Some(&session))
+        .await;
+    assert!(matches!(partial, Err(LfsError::ObjectCorrupt { .. })));
+    assert_eq!(origin.bodies.load(Ordering::Relaxed), 1);
+    session.close().await;
+}
+
+#[tokio::test]
+async fn cdn_stream_denial_stops_before_native_or_primary_io() {
+    let (_, origin, oid) = fixture(Fault::None).await;
+    let (primary, primary_origin, _) = fixture(Fault::None).await;
+    let forbidden = (
+        0..8,
+        "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n".into(),
+        Bytes::new(),
+    );
+    let (lfs, edge) = edge_fixture(origin.clone(), vec![forbidden]).await;
+    let lfs =
+        LfsObjectStore::new_with_primary_fallback(lfs.store, "stream", primary.store, "stream");
+    let Err(error) = lfs.stream_content(&oid, 8, None, None).await else {
+        panic!("edge authorization failure must stop the download");
+    };
+    assert!(matches!(
+        crab_storage::store::cdn_read_rejection(&error),
+        Some(StorageError::Forbidden { .. })
+    ));
+    assert_eq!(origin.reads.load(Ordering::Relaxed), 0);
+    assert_eq!(primary_origin.reads.load(Ordering::Relaxed), 0);
+    edge.await.unwrap();
+}
+
+#[tokio::test]
+async fn cdn_stream_origin_restart_keeps_the_native_partial_reader() {
+    let (_, origin, oid) = fixture(Fault::None).await;
+    let unavailable = (
+        0..8,
+        "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n".into(),
+        Bytes::new(),
+    );
+    let (lfs, edge) = edge_fixture(origin.clone(), vec![unavailable]).await;
+    let (_, partial) = lfs.stream_content(&oid, 8, Some(1..4), None).await.unwrap();
+    assert_eq!(
+        partial.try_collect::<Vec<_>>().await.unwrap().concat(),
+        b"eri"
+    );
+    assert!(!edge.is_finished());
+    origin.bodies.store(0, Ordering::Relaxed);
+    let (_, full) = lfs.stream_content(&oid, 8, Some(0..8), None).await.unwrap();
+    assert_eq!(
+        full.try_collect::<Vec<_>>().await.unwrap().concat(),
+        b"verified"
+    );
+    assert_eq!(origin.bodies.load(Ordering::Relaxed), 1);
+    edge.await.unwrap();
+}
+
+#[tokio::test]
+async fn cdn_stream_withholds_corrupt_final_range_after_delivering_the_first_range() {
+    let prefix = Bytes::from(vec![b'a'; CDN_STREAM_RANGE_BYTES as usize]);
+    let mut hash = Sha256::new();
+    hash.update(&prefix);
+    hash.update(b"z");
+    let oid = hash.finalize().into();
+    let (_, origin, _) = fixture(Fault::None).await;
+    let size = CDN_STREAM_RANGE_BYTES + 1;
+    let first = edge_partial(0..CDN_STREAM_RANGE_BYTES, size, prefix.clone());
+    let last = edge_partial(CDN_STREAM_RANGE_BYTES..size, size, Bytes::from_static(b"x"));
+    let (lfs, edge) = edge_fixture(origin.clone(), vec![first, last]).await;
+    let (_, mut stream) = lfs.stream_content(&oid, size, None, None).await.unwrap();
+    assert_eq!(stream.try_next().await.unwrap().unwrap(), prefix);
+    assert!(matches!(
+        stream.try_next().await,
+        Err(LfsError::ObjectCorrupt { .. })
+    ));
+    assert_eq!(origin.reads.load(Ordering::Relaxed), 0);
+    edge.await.unwrap();
+}
+
+#[tokio::test]
+async fn cdn_origin_restart_respects_deadline_and_drains_partial_file() {
+    use crab_storage::cdn::{CdnAccess, CdnRoute, CdnTransport};
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let (_, origin, oid) = fixture(Fault::StalledBody).await;
+    let (primary, primary_fixture, _) = fixture(Fault::None).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let transport = CdnTransport::loopback_fixture(listener.local_addr().unwrap()).unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut stream = BufReader::new(stream);
+        let mut request = String::new();
+        while !request.ends_with("\r\n\r\n") {
+            assert_ne!(stream.read_line(&mut request).await.unwrap(), 0);
+        }
+        stream
+            .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n")
+            .await
+            .unwrap();
+    });
+    let target = [4; 32];
+    let selected = Store::new(origin.clone())
+        .with_target_identity(target)
+        .with_cdn_route(CdnRoute::new(
+            target,
+            "stream".into(),
+            None,
+            CdnAccess::Public,
+            transport,
+            Duration::from_secs(1),
+        ))
+        .unwrap();
+    let lfs =
+        LfsObjectStore::new_with_primary_fallback(selected, "stream", primary.store, "stream");
+    let directory = tempfile::tempdir().unwrap();
+    let destination = directory.path().join("private-download");
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        lfs.download_to_file(&oid, 8, &destination),
+    )
+    .await
+    .expect("selected origin must stop on the CDN attempt deadline")
+    .unwrap_err();
+    assert!(matches!(
+        crab_storage::store::cdn_read_rejection(&error),
+        Some(StorageError::Io { source }) if source.kind() == std::io::ErrorKind::TimedOut
+    ));
+    server.await.unwrap();
+    assert_eq!(origin.bodies.load(Ordering::Relaxed), 1);
+    assert_eq!(primary_fixture.reads.load(Ordering::Relaxed), 0);
+    assert_eq!(std::fs::read(destination).unwrap(), b"veri");
 }
 
 async fn collect(

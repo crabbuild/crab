@@ -64,13 +64,26 @@ pub(crate) async fn resolve_lfs_remote_context(
     check_cancelled(cancel)?;
     let worktree = crate::git::worktree::WorktreeContext::resolve_from_path(repo_root)?;
     let repo_root = &worktree.current_worktree_root;
-    let url = resolve_lfs_remote_url(remote, repo_root, cancel)?;
     let config = crate::core::config::Config::resolve_for_repo(repo_root)?;
     check_cancelled(cancel)?;
-    let cache_dir = crab_auth::token_cache::expand_token_cache_path(&config.auth.token_cache_path);
-    let managed_resolver = crab_auth_store::ManagedRepositoryResolver::new(cache_dir);
-    let locator = managed_resolver.classify(&url)?;
     let open_store = async {
+        if operation == "smudge"
+            && let Some(checkout) = crate::auth::cdn_checkout::Checkout::load()?
+        {
+            let source = checkout.source_url();
+            let resolved = checkout.open(&config, &source, cancel).await?;
+            let prefix = resolved.repository_prefix;
+            return Ok((
+                Arc::new(LfsObjectStore::new(resolved.store.into_storage(), &prefix)),
+                prefix,
+            ));
+        }
+        let url = resolve_lfs_remote_url(remote, repo_root, cancel)?;
+        let cache_dir =
+            crab_auth::token_cache::expand_token_cache_path(&config.auth.token_cache_path);
+        let managed_resolver = crab_auth_store::ManagedRepositoryResolver::new(cache_dir)
+            .with_cdn_consumer(crab_storage::cdn::CdnConsumer::Cli);
+        let locator = managed_resolver.classify(&url)?;
         Ok(match locator {
             crab_git::RepositoryLocator::Managed(repository) => {
                 if !is_lfs_read_operation(operation) {
@@ -95,18 +108,15 @@ pub(crate) async fn resolve_lfs_remote_context(
                 };
                 let resolver = crate::replication::StoreResolver::new(&config, &parsed, cancel);
                 if is_lfs_read_operation(operation) {
-                    let selection = resolver.read_store(operation).await?;
+                    let (selection, primary_fallback) =
+                        resolver.read_store_with_primary_fallback(operation).await?;
                     let prefix = selection.router.repo_prefix().to_owned();
-                    let store = if matches!(
-                        &selection.source,
-                        crate::replication::ReadSource::Replica { .. }
-                    ) {
-                        let primary = resolver.write_store("lfs-read-primary-fallback").await?;
+                    let store = if let Some(primary) = primary_fallback {
                         let primary_prefix = primary.router.repo_prefix().to_owned();
                         LfsObjectStore::new_with_primary_fallback(
                             selection.store.into_storage(),
                             &prefix,
-                            primary.store.into_storage(),
+                            primary.store.into_storage().without_cdn_route(),
                             &primary_prefix,
                         )
                     } else {
@@ -153,7 +163,8 @@ pub(crate) async fn resolve_crab_read_layout(
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<crate::storage::StoreLayout> {
     let cache_dir = crab_auth::token_cache::expand_token_cache_path(&config.auth.token_cache_path);
-    let managed_resolver = crab_auth_store::ManagedRepositoryResolver::new(cache_dir);
+    let managed_resolver = crab_auth_store::ManagedRepositoryResolver::new(cache_dir)
+        .with_cdn_consumer(crab_storage::cdn::CdnConsumer::Cli);
     match managed_resolver.classify(url)? {
         crab_git::RepositoryLocator::Managed(repository) => {
             let managed = managed_resolver

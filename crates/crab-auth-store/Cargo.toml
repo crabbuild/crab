@@ -32,6 +32,7 @@ managed-service = [
     "dep:tokio-util",
     "dep:uuid",
 ]
+operator-cdn = ["refreshing-store", "crab-auth/crab-auth-client", "dep:serde"]
 
 [dependencies]
 async-trait = { workspace = true, optional = true }
@@ -43,6 +44,7 @@ crab-types = { workspace = true }
 futures-util = { workspace = true, optional = true }
 object_store = { workspace = true, optional = true }
 reqwest = { workspace = true, features = ["json", "rustls-tls", "stream"], optional = true }
+serde = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync"], optional = true }
 tokio-util = { workspace = true, features = ["rt"], optional = true }
@@ -52,6 +54,8 @@ uuid = { workspace = true, optional = true }
 
 [dev-dependencies]
 bytes = { workspace = true }
+crab-storage = { workspace = true, features = ["test-support"] }
+tempfile = { workspace = true }
 time = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync"] }
 tokio-util = { workspace = true, features = ["rt"] }

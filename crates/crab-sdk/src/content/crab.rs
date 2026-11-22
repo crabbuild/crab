@@ -210,6 +210,11 @@ impl ContentRuntime {
             send,
             cancellation: operation.cancellation().clone(),
             runtime: tokio::runtime::Handle::current(),
+            store: self
+                .layout
+                .store()
+                .has_bound_read_authority()
+                .then(|| self.layout.store().clone()),
         };
         let _ = ready.send(());
         let result = if range == (0..pointer.size) {
@@ -270,6 +275,7 @@ struct ChannelWriter {
     send: mpsc::Sender<Bytes>,
     cancellation: CancellationToken,
     runtime: tokio::runtime::Handle,
+    store: Option<Store>,
 }
 
 impl Write for ChannelWriter {
@@ -282,11 +288,20 @@ impl Write for ChannelWriter {
         // Xet invokes Write on its blocking writer. Cancellation must unblock
         // channel backpressure even when the consumer keeps its receiver alive.
         self.runtime.block_on(async {
-            tokio::select! {
+            let permit = tokio::select! {
                 biased;
-                () = self.cancellation.cancelled() => Err(cancelled_write()),
-                result = self.send.send(chunk) => result.map_err(|_| cancelled_write()),
+                () = self.cancellation.cancelled() => return Err(cancelled_write()),
+                result = self.send.reserve() => result.map_err(|_| cancelled_write())?,
+            };
+            if let Some(store) = &self.store {
+                tokio::select! {
+                    biased;
+                    () = self.cancellation.cancelled() => return Err(cancelled_write()),
+                    result = store.check_read_authority() => result.map_err(std::io::Error::other)?,
+                }
             }
+            permit.send(chunk);
+            Ok::<(), std::io::Error>(())
         })?;
         Ok(count)
     }
@@ -335,6 +350,7 @@ mod tests {
             send,
             cancellation: cancellation.clone(),
             runtime: tokio::runtime::Handle::current(),
+            store: None,
         };
         let (started, entered) = oneshot::channel();
         let job = tokio::task::spawn_blocking(move || {

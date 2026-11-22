@@ -15,6 +15,7 @@ path = "src/lib.rs"
 [features]
 default = []
 test-support = []
+provider-cdn-qualification = []
 
 [dependencies]
 async-trait = { workspace = true }
@@ -33,6 +34,7 @@ rand = "0.9"
 reqwest = { workspace = true, features = ["rustls-tls", "stream"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = "0.10"
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt", "rt-multi-thread", "sync", "test-util", "time"] }
 tokio-util = { workspace = true, features = ["rt"] }

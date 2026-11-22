@@ -1018,6 +1018,8 @@ const DEFAULT_SHARD_CHUNK_INDEX_TABLE_MAX_SIZE: u64 = 64 * 1024 * 1024;
 /// defaults ← user TOML ← repo TOML ← remote JSON ← env allowlist.
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// CDN mappings loaded from trusted per-user configuration.
+    pub cdn: Vec<super::cdn::CdnBinding>,
     // -- Remote settings (authoritative from remote JSON) --
     /// Minimum file size (bytes) before content-defined chunking kicks in.
     pub chunk_threshold_bytes: u64,
@@ -1256,6 +1258,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            cdn: Vec::new(),
             chunk_threshold_bytes: DEFAULT_CHUNK_THRESHOLD_BYTES,
             xet_enabled: true,
             xet_prefix: String::from("xet"),
@@ -1843,8 +1846,26 @@ impl Config {
         if let Some(ref path) = user_path
             && path.is_file()
         {
-            let overlay = read_toml_overlay(path)?;
+            let mut table: toml::Table = read_config_toml(path)?;
+            if let Some(cdn) = table.remove("cdn") {
+                config.cdn =
+                    cdn.try_into()
+                        .map_err(|_| super::error::CrabError::Configuration {
+                            key: "invalid cdn bindings".into(),
+                            origin: path.display().to_string(),
+                        })?;
+                super::cdn::CdnBinding::validate_all(&mut config.cdn)?;
+            }
+            let overlay = toml::Value::Table(table)
+                .try_into()
+                .map_err(
+                    |e: toml::de::Error| super::error::CrabError::Configuration {
+                        key: e.to_string(),
+                        origin: path.display().to_string(),
+                    },
+                )?;
             config.apply_overlay(overlay, path.display().to_string())?;
+            super::cdn::CdnBinding::bind_trusted_issuer(&mut config.cdn, &config.auth);
         }
 
         // Layer 3: per-repo TOML
@@ -2836,6 +2857,10 @@ pub fn build_metadb_config_from(
 
 /// Read a TOML file and deserialize into a [`ConfigOverlay`].
 fn read_toml_overlay(path: &Path) -> super::error::Result<ConfigOverlay> {
+    read_config_toml(path)
+}
+
+fn read_config_toml<T: serde::de::DeserializeOwned>(path: &Path) -> super::error::Result<T> {
     let content =
         std::fs::read_to_string(path).map_err(|e| super::error::CrabError::Configuration {
             key: format!("failed to read file: {e}"),
@@ -3196,6 +3221,27 @@ mod tests {
         assert!(!config.workflow.enabled);
         assert_eq!(config.workflow.parallelism, 7);
         clear_workflow_env();
+    }
+
+    #[test]
+    fn cdn_bindings_are_accepted_only_in_user_configuration() {
+        let directory = tempfile::tempdir().unwrap();
+        let user = directory.path().join("user.toml");
+        let local = directory.path().join("local.toml");
+        let binding = r#"
+[[cdn]]
+origin = "s3://models"
+export_origin = "s3://approved-export"
+repo_prefix = "org/models"
+base_url = "https://downloads.example.com"
+access = "public"
+"#;
+        std::fs::write(&user, binding).unwrap();
+        let config = Config::resolve_local_from(Some(user.clone()), local.clone()).unwrap();
+        assert_eq!(config.cdn.len(), 1);
+        assert!(config.resolve_remote(br#"{"cdn":[]}"#).is_err());
+        std::fs::write(&local, binding).unwrap();
+        assert!(Config::resolve_local_from(Some(user), local).is_err());
     }
 
     #[test]

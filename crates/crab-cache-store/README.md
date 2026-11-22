@@ -94,6 +94,7 @@ no duplicate full xorb; decoded-range caching belongs to `crab-read`'s runtime.
 | `object_store()` with mutable paths | Always origin, including HEAD. |
 | `object_store()` with conditions or a version | Entire request goes to origin, including HEAD and ranges. |
 | Unconditional immutable adapter reads | Cache hits and materialized local-cache reads have synthetic metadata; streamed origin misses retain the origin metadata. |
+| Bound online grants | Check the captured scope and renew the grant before cache lookup. Keep local payloads in the physical target's view namespace with the existing shared retention catalog. |
 | Unconditional immutable adapter HEAD | Cache-service hits have synthetic metadata; origin misses retain the actual ETag, version, and modification time. |
 
 Full reads without a local-cache key, and bounded range misses, forward the

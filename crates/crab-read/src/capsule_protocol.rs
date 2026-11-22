@@ -2276,8 +2276,8 @@ fn order_native_pack_payloads(payloads: Vec<GitPackPayload>) -> Result<Vec<GitPa
     Ok(ordered)
 }
 
-/// Install packs from a view, range-reading only origin-backed pack bodies that
-/// are not already present in the destination Git object database.
+/// Install packs from a view, range-reading only bodies that are absent from
+/// the destination Git object database.
 ///
 /// The layout owns the selected origin; a cache never changes read authority.
 /// Signal cancellation and await completion so file and blocking installers drain
@@ -2630,11 +2630,17 @@ pub async fn install_layered_checkpoint(
     git_dir: &Path,
     max_input_bytes: u64,
 ) -> Result<()> {
+    // Recovery must prove the original bucket still has the checkpoint bytes.
+    let origin = StoreLayout::with_global_prefix(
+        router.store().clone().without_cdn_route(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
     install_layered_git_packs_from_store_selected_with_sources(
         checkpoint.sources(),
         &[],
         &[],
-        router,
+        &origin,
         git_dir,
         max_input_bytes,
         LayeredInstallSelection::Native,
@@ -2768,11 +2774,17 @@ pub async fn install_layered_git_packs_from_store_sources_selected(
     cancel: &CancellationToken,
 ) -> Result<Vec<PathBuf>> {
     let selection = LayeredInstallSelection::Maintenance(selected);
+    // Publishing a consolidation requires source bytes from the selected bucket.
+    let origin = StoreLayout::with_global_prefix(
+        router.store().clone().without_cdn_route(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
     install_layered_git_packs_from_store_selected_with_sources(
         sources,
         additional_sources,
         capsules,
-        router,
+        &origin,
         git_dir,
         max_input_bytes,
         selection,

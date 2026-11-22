@@ -28,6 +28,9 @@ use crate::git::push::{
     record_push_audit_event,
 };
 use crate::git::push_staging::PushStaging;
+use crate::replication::fetch::{
+    primary_store_for_batch, read_store_for_batch_with_selector, select_fetch_replica,
+};
 use crate::storage::StoreLayout;
 use crab_metadata::commit_graph::CommitGraphTraversal;
 #[cfg(test)]
@@ -35,6 +38,8 @@ use crab_metadata::manifests::{PackEntry, PackList, PackManifestEntry};
 
 pub(crate) const AGENT_REBASE_FETCH_REF_FILTERING_ENV: &str =
     "CRAB_INTERNAL_AGENT_FETCH_REF_FILTERING";
+
+const CDN_QUALIFICATION_ORIGIN_ENV: &str = "CRAB_INTERNAL_CDN_QUALIFICATION_ORIGIN";
 
 #[derive(Debug, Serialize)]
 struct PushResultEventPayload {
@@ -625,6 +630,50 @@ fn internal_bool_value(value: &str) -> bool {
     )
 }
 
+fn cdn_qualification_origin() -> Result<Option<String>> {
+    let Some(value) = std::env::var_os(CDN_QUALIFICATION_ORIGIN_ENV) else {
+        return Ok(None);
+    };
+    value
+        .into_string()
+        .ok()
+        .filter(|value| !value.is_empty() && crab_storage::cdn::qualification_enabled())
+        .map(Some)
+        .ok_or_else(|| CrabError::Configuration {
+            key: CDN_QUALIFICATION_ORIGIN_ENV.to_owned(),
+            origin: "a CDN qualification build and approved native origin are required".to_owned(),
+        })
+}
+
+fn verify_cdn_qualification_origin(store: &crate::storage::store::Store) -> Result<()> {
+    if let Some(expected) = cdn_qualification_origin()? {
+        require_cdn_qualification_origin(store.as_storage().native_cdn_origin(), &expected)?;
+        tracing::debug!(target: "crab::cdn::qualification", "CDN qualification verified native origin");
+    }
+    Ok(())
+}
+
+fn require_cdn_qualification_origin(actual: Option<&str>, expected: &str) -> Result<()> {
+    if actual != Some(expected) {
+        return Err(CrabError::AuthFailed {
+            path: "the resolved native origin differs from the approved CDN qualification fixture"
+                .to_owned(),
+        });
+    }
+    Ok(())
+}
+
+async fn select_qualification_checked_replica(
+    config: crate::core::config::Config,
+    url: crate::git::url::CrabUrl,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Result<crate::replication::ReadStoreSelection> {
+    let selected = select_fetch_replica(config, url, cancel).await?;
+    // Return a terminal authorization error before any payload read or native fallback.
+    verify_cdn_qualification_origin(&selected.store)?;
+    Ok(selected)
+}
+
 /// Run the git remote helper protocol loop.
 ///
 /// Reads line-framed commands from stdin, batches them until a blank line,
@@ -726,14 +775,21 @@ pub async fn run_remote_helper(
         crab_git::RepositoryLocator::Managed(repository) => Some(repository.clone()),
         crab_git::RepositoryLocator::Direct(_) => None,
     };
+    if managed_repository.is_some() && cdn_qualification_origin()?.is_some() {
+        return Err(CrabError::AuthFailed {
+            path: "the CDN qualification workload requires a direct repository".to_owned(),
+        });
+    }
 
     let resolved = crate::auth::build_repository_store(
         &config,
         locator,
         crab_auth::TransferOperation::Fetch,
+        crab_storage::cdn::CdnConsumer::Cli,
         &cancel,
     )
     .await?;
+    verify_cdn_qualification_origin(&resolved.store)?;
 
     // Protocol parsing and option handling do not depend on storage. Defer the
     // optional discovery read until Git requests repository data.
@@ -862,7 +918,7 @@ where
             };
             if replica_discovery_pending && uses_read_routing {
                 replica_discovery_pending = false;
-                load_replica_discovery_for_session(
+                crate::replication::discovery::load_if_unconfigured(
                     &store,
                     &prefix,
                     &invocation_url,
@@ -954,44 +1010,6 @@ where
     // cache waiters. Drain them before process exit can strand their leases.
     git_runtime.shutdown().await;
     result
-}
-
-async fn load_replica_discovery_for_session(
-    store: &crate::storage::store::Store,
-    prefix: &str,
-    invocation_url: &str,
-    config: &mut crate::core::config::Config,
-) -> Result<()> {
-    let layout = StoreLayout::new(store.clone(), prefix.to_owned());
-    let discovered = match crate::replication::discovery::load(store, &layout, invocation_url).await
-    {
-        Ok(discovered) => discovered,
-        Err(
-            error @ (CrabError::NetworkTransient(_)
-            | CrabError::Throttled { .. }
-            | CrabError::Forbidden { .. }
-            | CrabError::NoCredentials
-            | CrabError::AuthFailed { .. }
-            | CrabError::AuthExpired { .. }
-            | CrabError::Io(_)
-            | CrabError::Storage(_)),
-        ) => {
-            tracing::debug!(
-                error = %error,
-                discovery_path = %layout.replica_discovery_path(),
-                "replica discovery unavailable; using primary"
-            );
-            return Ok(());
-        }
-        Err(error) => return Err(error),
-    };
-    if crate::replication::discovery::apply_if_unconfigured(config, discovered) {
-        tracing::debug!(
-            discovery_path = %layout.replica_discovery_path(),
-            "loaded replica routing from primary discovery"
-        );
-    }
-    Ok(())
 }
 
 fn push_repo_root() -> Result<std::path::PathBuf> {
@@ -1591,10 +1609,7 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                     cache,
                     remote_url,
                     cancel,
-                    |config, parsed, cancel| async move {
-                        crate::replication::select_read_store(&config, &parsed, "fetch", &cancel)
-                            .await
-                    },
+                    select_qualification_checked_replica,
                 )
                 .await
             }
@@ -1797,6 +1812,7 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                                 key: "capsule-protocol push store".to_owned(),
                                 origin: "push requires a resolved object store".to_owned(),
                             })?;
+                    verify_cdn_qualification_origin(push_store)?;
                     // Git owns stdout and negotiates quiet/progress per session.
                     // Keep the shared publisher's display on this caller's stderr.
                     push_config.progress = options.progress.then(|| {
@@ -2076,9 +2092,7 @@ async fn read_store_for_list_batch(
         config,
         for_push,
         cancel,
-        |config, parsed, cancel| async move {
-            crate::replication::select_read_store(&config, &parsed, "fetch", &cancel).await
-        },
+        select_qualification_checked_replica,
     )
     .await
 }
@@ -2106,7 +2120,10 @@ where
         // advertisement is part of write admission, so stale replicas are
         // unsafe even when they are healthy enough for clone/fetch reads.
         ListReadAuthority::Primary => {
-            primary_store_for_batch(primary_store, prefix, primary_root, cancel).await
+            let origin = crate::storage::store::Store::from_storage(
+                primary_store.as_storage().clone().without_cdn_route(),
+            );
+            primary_store_for_batch(&origin, prefix, primary_root, cancel).await
         }
         ListReadAuthority::ReplicaEligible => {
             read_store_for_batch_with_selector(
@@ -2119,86 +2136,6 @@ where
                 select_read,
             )
             .await
-        }
-    }
-}
-
-async fn primary_store_for_batch(
-    primary_store: &crate::storage::store::Store,
-    prefix: &str,
-    primary_root: Option<&crab_metadata::capsule_protocol::RootSnapshot>,
-    cancel: &tokio_util::sync::CancellationToken,
-) -> Result<crate::replication::ReadStoreSelection> {
-    let router = StoreLayout::new(primary_store.clone(), prefix.to_owned());
-    let capsule_root = match primary_root {
-        Some(root) => root.clone(),
-        None => {
-            let layout = crab_storage::StoreLayout::with_global_prefix(
-                primary_store.as_storage().clone(),
-                router.repo_prefix().to_owned(),
-                router.global_prefix().to_owned(),
-            );
-            tokio::select! {
-                biased;
-                () = cancel.cancelled() => return Err(CrabError::Cancelled),
-                result = crab_write::capsule_protocol::open_root(&layout) => result?,
-            }
-        }
-    };
-    Ok(crate::replication::ReadStoreSelection {
-        store: primary_store.clone(),
-        router,
-        source: crate::replication::ReadSource::Primary,
-        capsule_root,
-    })
-}
-
-async fn read_store_for_batch_with_selector<F, Fut>(
-    primary_store: &crate::storage::store::Store,
-    prefix: &str,
-    primary_root: Option<&crab_metadata::capsule_protocol::RootSnapshot>,
-    remote_url: Option<&str>,
-    config: &crate::core::config::Config,
-    cancel: &tokio_util::sync::CancellationToken,
-    select_read: F,
-) -> Result<crate::replication::ReadStoreSelection>
-where
-    F: FnOnce(
-        crate::core::config::Config,
-        crate::git::url::CrabUrl,
-        tokio_util::sync::CancellationToken,
-    ) -> Fut,
-    Fut: Future<Output = Result<crate::replication::ReadStoreSelection>>,
-{
-    // Managed grants already bind this store to one physical repository view.
-    // Re-parsing the logical URL as a direct bucket would bypass that scope.
-    if primary_store.storage_scope().is_some() {
-        return primary_store_for_batch(primary_store, prefix, primary_root, cancel).await;
-    }
-    if config
-        .replication
-        .as_ref()
-        .is_none_or(|replication| !replication.has_read_replicas())
-    {
-        return primary_store_for_batch(primary_store, prefix, primary_root, cancel).await;
-    }
-    let Some(url) = remote_url else {
-        return primary_store_for_batch(primary_store, prefix, primary_root, cancel).await;
-    };
-    let Ok(parsed) = crate::git::url::CrabUrl::parse(url) else {
-        return primary_store_for_batch(primary_store, prefix, primary_root, cancel).await;
-    };
-
-    match select_read(config.clone(), parsed, cancel.clone()).await {
-        Ok(selection) => {
-            if let crate::replication::ReadSource::Replica { name } = &selection.source {
-                tracing::debug!(replica = %name, "selected read replica for remote-helper batch");
-            }
-            Ok(selection)
-        }
-        Err(e) => {
-            tracing::debug!(error = %e, "replica read selection failed; using primary");
-            primary_store_for_batch(primary_store, prefix, primary_root, cancel).await
         }
     }
 }
@@ -2220,9 +2157,7 @@ async fn pinned_read_store_for_batch(
         remote_url,
         config,
         cancel,
-        |config, parsed, cancel| async move {
-            crate::replication::select_read_store(&config, &parsed, "fetch", &cancel).await
-        },
+        select_qualification_checked_replica,
     )
     .await
 }
@@ -3978,6 +3913,27 @@ mod tests {
     }
 
     #[test]
+    fn cdn_qualification_rejects_same_named_targets_and_custom_endpoints() {
+        let s3 = "s3://qualification-bucket";
+        let azure = "https://primaryacct.blob.core.windows.net/container";
+        assert!(require_cdn_qualification_origin(Some(s3), s3).is_ok());
+        assert!(require_cdn_qualification_origin(Some(azure), azure).is_ok());
+        for (actual, expected) in [
+            (Some("gs://qualification-bucket"), s3),
+            (
+                Some("https://otheraccount.blob.core.windows.net/container"),
+                azure,
+            ),
+            (None, s3),
+        ] {
+            assert!(matches!(
+                require_cdn_qualification_origin(actual, expected),
+                Err(CrabError::AuthFailed { .. })
+            ));
+        }
+    }
+
+    #[test]
     fn internal_agent_rebase_override_only_enables_ref_filtering() {
         let mut config = crate::core::config::Config::default();
         config.fetch_ref_filtering = false;
@@ -5059,6 +5015,34 @@ mod tests {
 
         assert!(matches!(error, CrabError::Protocol(message) if message.contains("not visible")));
         assert!(writer.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fetch_store_selection_does_not_fall_back_after_replica_authorization_denial() {
+        let (primary_store, _) = memory_store_with_manifest(
+            "refs/heads/main",
+            "6666666666666666666666666666666666666666",
+        )
+        .await;
+        let config = config_with_read_replica();
+        let cancel = tokio_util::sync::CancellationToken::new();
+
+        let result = read_store_for_batch_with_selector(
+            &primary_store,
+            "org/repo",
+            None,
+            Some("crab://primary/org/repo"),
+            &config,
+            &cancel,
+            |_, _, _| async {
+                Err(CrabError::AuthFailed {
+                    path: "replica viewer".into(),
+                })
+            },
+        )
+        .await;
+
+        assert!(matches!(result, Err(CrabError::AuthFailed { path }) if path == "replica viewer"));
     }
 
     async fn memory_store_with_manifest(

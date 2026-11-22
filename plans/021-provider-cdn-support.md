@@ -1,0 +1,648 @@
+# Provider CDN support for Crab v2
+
+Proposed design. Audited 2026-11-21 against the in-progress worktree on
+`482daa946a7`. Provider qualification is pending.
+
+The storage key classifier, exact HTTPS reads and private viewer headers have
+local coverage. The reference issuer and Rust client implement negotiated,
+scope-bound CloudFront cookies, Cloud CDN cookies and Azure gateway tokens.
+Direct CLI bindings now route verified history, checkpoint and capsule control
+reads, clone pack files, scoped xorbs and full LFS file downloads through the
+selected target. Pack and LFS file downloads use bounded parallel ranges and
+verify whole-payload digests. The private
+[CloudFront fixture](../crab/deploy/cdn/aws/README.md) passed template validation.
+The private [Cloud CDN fixture](../crab/deploy/cdn/gcp/README.md) passed
+Terraform validation and mocked route tests. The private
+[Front Door fixture](../crab/deploy/cdn/azure/README.md) builds with Bicep and
+has local ARM wiring and path-policy tests. Each fixture has a repo-local
+profile and a protected profile pinned to one materialized view. The
+reference issuer grants only the protected view's exact physical prefix.
+The CloudFront and Front Door templates support overlapping signing keys.
+The managed API client negotiates v2 direct read grants, and the managed
+resolver renews their native and repo-local viewer credentials together.
+Typed direct SDK bindings cover native remote reads, fetch, and clone.
+During clone, the SDK hands Git filters and `crab hydrate`
+a temporary, nonsecret binding for the captured target, view, and private
+principal. The child checks the login and obtains its own private grant.
+Live cross-process provider qualification remains open.
+
+### Open implementation and release gates
+
+| Gate | Current evidence and required closure |
+|---|---|
+| Activation and placement | Direct bindings can share a bucket name and source prefix when their viewer paths differ. The CLI, desktop and reference issuer reject aliases of the same viewer path. A ready direct replica can acquire a grant for its native target and replica prefix. The reference issuer requires a pinned private binding and checks live native placement before signing for all three providers. Operators can attest canonical customer repositories that use the reviewed private policies, using a short-lived credential or a local signing key. Release qualification still requires the dedicated fixture namespace. The issuer chooses providers by repository policy and uses one configured Azure account and AWS region per provider instance. Qualify placement-aware issuance for same-named origins and cross-region S3 replicas. Extend concrete approval enforcement to client-side activation, managed grants, and public source and export placement before promoting any row. |
+| Transfer lifetime | Pack, LFS and xorb origin restarts now share the edge attempt's deadline. File downloads signal cancellation and drain local writes before returning. Qualify failed lease renewal, admission across real provider retries and denial during parallel ranges through the complete operations. |
+| Authorization refresh | The direct issuer serves negotiated credentials with `Cache-Control: no-store`. Its client bounds responses and redacts issuer bodies from errors. Negotiated CLI, SDK and desktop direct reads and managed v2 direct reads share one origin and viewer refresh per rejected generation, including cancellation and failure. Online cache reads recheck the grant and reject out-of-scope paths. Local cache-store tests exercise separation by physical target and view, and denial on a warm disk cache. Failed edge-grant renewal also denies online cache reads. Private direct and managed renewal bind the original OIDC issuer and subject. Refresh cache writes cannot overwrite a newer login or undo sign-out. Private checkout passes a principal fingerprint to children. Qualify live renewals, namespace isolation, and terminal denial across the product entry points. |
+| Reader coverage | Authenticated catalog pages, detached capsule controls, native layered payload windows, lazy Git index ranges, and catalog-bound shards can use the CDN. Layered Git point reads and coalesced object batches verify final object IDs after delta reconstruction and own the origin restart. Raw pack passthrough, recovery, consolidation and strict provenance checks use origin. Full LFS streams use bounded edge ranges and hold the final bytes until SHA-256 succeeds. Partial LFS streams use a verified local descriptor or the native version proof. Qualify each reader on live deployments. |
+| Deployment and release | The private CloudFront, Cloud CDN and Front Door fixtures cover repository-local reads and one projected view's Xet content in local policy tests. Public bindings require a distinct same-cloud export origin. All three providers have separate public Git and LFS export templates with public delivery disabled by default, plus publishers that verify an approved inventory and use create-only writes. Local tests exercise staged configuration, canonical viewer paths, destination binding, corrupt bytes and idempotent publishing. Desktop remote browsing passes the trusted user binding into the native SDK. Crab Server and the S3 gateway have opt-in `provider-cdn-qualification` builds with exact per-repository bindings for verified Git and full LFS reads. A loopback gateway test covers a cold pack-layer fetch with ETag, range and access checks, then observes full LFS reads at the edge and partial LFS reads at origin. Live qualification, publication beyond fixture-specific limits, SDK checkout and desktop qualification, managed issuer rollout, and provider and performance evidence remain open. |
+| Publication readiness | The AWS, GCP and Azure publishers seal a common `crab.cdn-export-publication.v1` receipt after verifying each destination object and rechecking the staged deployment. Direct CLI, SDK and checkout, desktop, server and gateway bindings pin the operator's receipt digest. Storage sends only listed keys of the approved size to the edge. The release verifier checks the complete preregistered receipt and inventory against the attested deployment and the digest of the object actually read at the edge. Live publication transitions, historical native access checks and public performance qualification remain open. |
+| Qualification integrity | The transport canary observes wire behavior. Separate viewer strings do not prove distinct principals. The key rotation collector and release verifier bind ordered reads to the deployed key IDs and signed expiration; live rotation remains open. Managed issuer checks still receive generic trace validation. Scope isolation currently accepts a denial without proving the target and control grants are live. Non-Git workloads still submit summary observations. Require the check-specific evidence below before adding any affected row to the release policy. |
+
+The reference issuer's repository-local origin credentials and viewer grants
+cover the repository prefix. Shared bucket-global Xet objects can contain
+other repositories' content. Qualify protected private Xet reads on the
+projected view's separate global prefix. Ordinary native credentials may
+continue to read shared content where their existing origin policy allows it.
+
+Use a nearby CDN edge for verified immutable downloads from the repository's
+selected cloud bucket. Two developers fetching the same Git pack layer, or CI
+runners hydrating the same Xet content, can share an edge fill even with empty
+local caches. Repeated cross-region reads are the target workload. Cold fills,
+short reads dominated by ref lookup, and existing local cache hits have different
+latency profiles. Measure each separately.
+
+Deliver CloudFront with S3 first, then Cloud CDN with GCS and Front Door with
+Azure Blob. Support customer-managed distributions and reproducible templates.
+Opt in per target. Preserve the object layout, on-disk format, publication
+protocol, and origin credentials for ordinary Crab operations. Push, CAS, live
+metadata reads, and maintenance go directly to the authorized origin. Cross-cloud
+origins, browser redirects and automatic resource provisioning are out of scope.
+
+## Routing and trust
+
+1. Resolve the operation's principal, repository, view, permissions and physical
+   read target through the existing access and replica selection path. Read the
+   current root, ref authority, and any required generation or retention claim
+   from origin for online actions that require them. Retain and renew existing
+   leases through cache hits, slow downloads, cancellation and cleanup. A failed
+   lease or lost authorization stops the read.
+2. Let the owning reader select an immutable object from authenticated metadata.
+   Check visibility, allowed key shape, **the entire physical object's access
+   scope**, and the verifier for the requested bytes. A Git object ID or a
+   requested byte range cannot restrict what a holder of a CDN credential can
+   download. Co-packed objects, sibling keys covered by a cookie, and the
+   bucket-global dedup prefix all count when issuing access.
+3. Preserve local and existing Crab cache-service reads wherever the caller's
+   current contract permits them. Resolve the protected view before cache lookup.
+   Separate reusable private entries by physical target and the authorized view,
+   preserve verification on reuse, and honor existing offline policy. Existing
+   cache-service capabilities continue to govern its routes.
+4. On a miss, use the selected target's CDN only when the key, proof, binding
+   and viewer authorization all match. Otherwise an independently authorized
+   in-scope read uses its existing origin route. An out-of-scope request fails
+   before lookup or I/O. An explicit CDN authorization failure is terminal
+   across caches, replicas and credential providers after the refresh rule below.
+5. The format owner verifies bytes before publishing a file, admitting reusable
+   bytes, or declaring the action successful. Preserve application-level streaming
+   guarantees. Origin responses alone can establish canonical ETags, versions,
+   write receipts, replication readiness and strict fsck/recovery results.
+
+Protected views need a physically projected namespace containing only approved
+bytes or proof that the principal may read *every* object exposed by the grant.
+Bind separate grants for repository and global namespaces. When a prefix cannot
+express policy, omit CDN authority for that prefix and use the existing scoped
+origin. Public delivery requires explicit operator approval of everything
+readable in that export, including history, unreachable objects and co-packed
+data. A public head does not make the containing bucket or shared xorbs public.
+The existing view materializer binds the physical prefix to source generation,
+digest and policy scope in `crates/crab-auth-server/src/view.rs`. Never reassign
+an exposed CDN hostname/path to a different private target or trust domain
+while old credentials or cache entries can still serve it.
+
+The private qualification fixtures and reference issuer approve one protected
+scope and generation per logical repository. Materialize the view through
+native credentials first, configure the exact suffix on the edge and issuer,
+and compare their physical prefix with the resolved storage scope. A fresh
+operation for another generation uses its scoped origin. A refresh within an
+active operation must preserve the captured target and view or stop the read.
+Treat changing which bytes an existing edge exposes as an explicit cutover.
+Stop old grant issuance, remove access to the old path, and verify denial
+and cache retirement before reusing its route. Include generation changes and
+rotation in live qualification.
+
+Private prefix authorization applies to all eligible bytes under that prefix
+for the grant's lifetime. Ordinary GC removes origin objects and protects active
+readers under the existing lease protocol. An edge may still serve an unreachable
+object to an authorized viewer until its cache entry expires, including the
+provider's stale window. If policy requires tighter retirement, use a separately
+revocable physical export or leave that namespace on origin. For confidentiality
+deletion, block viewer access before removing objects, then revoke grants, purge
+edges and verify denial with old and freshly issued credentials. Qualify this
+flow separately from routine GC.
+
+### Eligible reads
+
+The storage layout owns exact key matching. Match the resolved, case-sensitive
+repo or global prefix on segment boundaries. For hash fanout require a canonical
+lowercase 64-hex digest and its matching two-hex directory.
+
+| Physical objects | Proof required for edge delivery |
+|---|---|
+| Repo `v2/{capsules,checkpoints,catalogs,pack-layers}/<hh>/<hash>` | Authenticated snapshot or descriptor plus the format's content verifier. For pack-layer ranges, verify the selected section or final Git object ID after delta reconstruction using trusted locator/index data. |
+| Repo `v2/history/<hh>/<hash>` and `v2/history/source-roots/<hh>/<hash>` | Exact immutable segment, digest and current retention/visibility rules. |
+| Global `{xorbs,shards,capsule-chunk-pages}/<hh>/<hash>` | Authorized physical namespace. Verify whole metadata/pages or authenticate xorb framing, reconstruction terms and all requested chunk hashes before publication. |
+| Repo `lfs/objects/<aa>/<bb>/<sha256>` | Verify both fanouts, full declared length and SHA-256. Full downloads can use CDN. Serve a partial read from the same fully verified local file handle, or use the existing verified, strong-validator origin path. A digest for the whole payload cannot authenticate an arbitrary HTTP range. |
+| Older Git packs, indexes and generated pack artifacts used by v2 | Enable each caller only after documenting its independently trusted identity, checksum and scope. A generated descriptor keyed by a request hash has no implicit byte digest. Unqualified paths use origin. |
+
+Keep `v2/root`, ref and source heads, source floor, browse roots and reader
+claims/descriptors, the chunk-hint root, locks, staging, transactions, config
+and registry on origin. Unknown classes, mutable siblings, conditionals,
+versioned reads, list, existence checks and strict readback use origin. A
+content-shaped name alone never opts a raw read into CDN delivery.
+
+## Implementation boundaries
+
+| Owner and current evidence | Implementation requirement |
+|---|---|
+| Layout and transport in `crates/crab-storage/src/layout.rs`, `crates/crab-storage/src/store.rs` and `crates/crab-storage/src/store/parallel_read.rs` | Add opt-in immutable byte/range operations requiring the trusted selection and verification context. Reuse bounded transfer machinery. Keep generic `ObjectStore`, `Store::inner()`, conditional GET/HEAD, origin-pinned parallel reads and signed writes on their original contracts. |
+| Native v2 readers in `crates/crab-metadata/src/capsule_protocol/store.rs`, `crates/crab-remote-git/src/reader.rs` and `crates/crab-remote-git/src/operation.rs` | Migrate eligible body reads individually. Preserve locator/snapshot identity across the admitted store and its raw inner handle. Keep current-state metadata fresh even on a warm CDN. |
+| Cache composition in `crates/crab-cache-store/src/lib.rs`, `crates/crab-cache-store/src/git_pack.rs`, `crates/crab-cache-store/src/xorb_read.rs` and `crates/crab-cache/src/path_class.rs` | Preserve eligibility and cache namespace through wrapping. Route cold Git pack file downloads before the direct S3 signed-range shortcut. Give xorb attempts a distinct CDN source so chunk failures can discard the correct supplier. Carry typed terminal errors through higher-level retries. |
+| Budgeting and retention in `crates/crab-storage/src/transport_read_admission.rs`, `crates/crab-storage/src/read_admission.rs` and `crates/crab-read/src/read_retention.rs` | Carry the operation's admission context into real HTTP requests and spawned range tasks. Charge each physical request and received bytes once, including rejected bodies and restarted attempts. Hold permits through EOF or cancellation. Preserve observers and lease cleanup. |
+| LFS in `crates/crab-lfs/src/object_store.rs` and `crates/crab-lfs/src/object_store/origin.rs` | Preserve SHA-256 through EOF and existing terminal-chunk behavior. Isolate temporary files and session proof. CDN metadata cannot populate an origin verification receipt. Teach the existing LFS primary retry to propagate terminal failures. |
+| Placement in `crab/src/replication/mod.rs` and credentials in `crates/crab-auth-store/src/refreshing_store.rs` and `crates/crab-auth-store/src/managed_repository.rs` | Resolve the CDN after the ready replica and authorized read route are known. An unconfigured replica uses its own origin. A malformed binding or scope change fails the operation. Keep the origin identity when constructing wrappers. |
+| Product composition in `crates/crab-sdk/src/store_options.rs`, `crates/crab-sdk/src/local/fetch.rs` and `packages/desktop/agent/src/storage_auth.rs` | Thread typed options through SDK, sidecar and long-lived mount/server readers. Local clone/fetch also launch Git/helper subprocesses. Pass only the nonsecret target binding through trusted operation-scoped configuration and have the child obtain its own grant. Keep secrets out of Git remotes, argv, environment, renderer IPC and unrelated children. |
+
+Tagged `v2.0.0-alpha.1` includes the local/service/origin cache and provider
+endpoint overrides. The service uses its own capability and object API. An S3
+endpoint override also changes writes. CDN therefore needs an explicit read
+binding. Extend `crates/crab-storage/src/signed_read_tests.rs` and the existing
+`conditional_and_versioned_reads_bypass_a_warm_immutable_cache` and
+`mutable_path_bypasses_cache_even_when_configured` regressions alongside the
+managed-contract tests.
+
+### Trusted configuration and credential lifecycle
+
+For direct mode use an optional, repeatable mapping in user/operator-owned
+configuration, available before clone. A private AWS target would use this entry.
+
+```toml
+[[cdn]]
+origin = "s3://team-repos"
+repo_prefix = "org/models"
+base_url = "https://downloads.example.com"
+access = "private"
+```
+
+Infer the CDN provider from the native origin. Use `gs://<bucket>` for GCS
+and `https://<account>.blob.core.windows.net/<container>` for Azure's standard
+public-cloud endpoint. Normalize the origin to Crab's resolved placement and
+verify the native endpoint/partition, bucket or account/container, repo prefix
+and physical target identity. The mapping names the source repository. When
+the issuer materializes a filtered view, match its authenticated source identity
+and issue only for the returned generation-specific physical prefixes. Obtain
+the global prefix from the authorized layout. Bind private grants to that
+target, view, approved prefixes and exact CDN authority. Reject duplicate or
+ambiguous mappings. Template outputs identify the distribution, origin and
+path mapping. Bring-your-own deployments must provide equivalent control-plane
+evidence and a matching authorized object probe before qualification. A
+custom S3-compatible endpoint, sovereign endpoint or filesystem target has no
+qualified CDN profile in this release. An explicit misbinding is a configuration
+error. Multiple native buckets can use separate mappings in the same process.
+Resolve the cloud, account or partition, and bucket/container before matching
+a private mapping. If the repository locator lacks that identity, get it from
+trusted placement or authorization before asking for viewer authority. An
+unqualified replica stays on its selected origin.
+
+Record the storage resource owner and location where the provider exposes
+them. Use the S3 bucket owner and region, the GCS bucket's owning project and
+location, or the Azure storage account resource and container. Verify them
+through native or control-plane authority. A viewer hostname, a cloud profile
+name and the identity of the inspecting caller do not identify who owns the
+bucket. Exercise a mismatched owner and a replica with a different region.
+[S3 expected bucket owner](https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadBucket.html) · [GCS bucket metadata](https://docs.cloud.google.com/storage/docs/json_api/v1/buckets) · [Azure Blob container resource scope](https://learn.microsoft.com/en-us/azure/storage/common/storage-auth-aad-rbac-cli)
+
+Private is the default access mode for a mapping. Public requires explicit
+selection and a qualified public-only `export_origin` separate from the live
+`origin`. Both origins must be from the same cloud. Absent mapping means existing
+origin/cache behavior. A requested private mapping needs an existing trusted
+issuer and a valid capability before transmitting credentials or reading via
+CDN. Repositories cannot select an issuer, endpoint or public mode. Parse CDN
+settings separately from the shared user/local/remote `ConfigOverlay` in
+`crab/src/core/config.rs`. Reject CDN overrides from tracked project config,
+repo-local overlays and remote repository JSON. SDK callers supply typed
+options. Managed authority comes from authenticated discovery and grants.
+
+- **Reference Crab Auth.** Extend the response to the existing
+  `/v1/credentials` request after `_materialize_filtered_read_scope` and
+  provider authorization succeed. Direct cloud credentials alone cannot mint
+  viewer credentials. Use an opt-in capability header understood by
+  the upgraded issuer to negotiate optional CDN response data. Old servers
+  receive the original strict request body, and old clients receive the original
+  response. A successful older response yields origin-only capability. Bind the
+  optional credential's expiry to the parent read grant and the configured
+  revocation window, whichever ends first. See
+  `crab/deploy/auth-service/src/app.py` and `crates/crab-auth/src/credential_response.rs`.
+- **Managed deployments.** Existing transfer grants reject unknown fields,
+  discovery requires support for v1, and the client requests v1 explicitly.
+  Advertise `[1, 2]` and request transfer-grant schema v2 only when mutually
+  supported. Include a typed optional CDN envelope on direct read grants in v2.
+  Old clients/issuers use the original v1 bytes. Gateway-only and upload grants
+  retain their existing authority. The managed issuer selects the exact viewer
+  endpoint for the authenticated placement. Grant v2 in this release carries
+  only repository-local viewer prefixes. Require the response version requested.
+  Reject malformed v2, mismatched identity and denied issuance without retrying
+  v1. Preserve the existing non-replayed grant
+  POST contract. Update OpenAPI, validators and old/new fixtures. Production
+  managed issuer rollout requires its owner outside this repository. See
+  `crates/crab-auth/src/managed/transfer.rs`, `crates/crab-auth/src/managed/client.rs`
+  and `crates/crab-auth/tests/managed_contract.rs`.
+- **Capabilities.** Use a bounded, provider-typed envelope of exact audience,
+  selected deployment, origin, repo/view, operation, scope prefixes, expiry and
+  corresponding short-lived cookie set or token. Look up the capability for
+  each requested physical path. Sign only issuer-selected, segment-delimited
+  scopes in this release. A narrower policy that cannot be represented stays
+  on its authorized origin. Use separate signer trust per provider deployment
+  and keep signing keys in the operator's secret manager. Bound and redact
+  issuer responses and errors. Credential negotiation, reverse proxies,
+  tracing, and HTTP diagnostics must prevent credential replay from logs or
+  shared caches.
+- **Refresh.** Keep viewer capabilities in memory. Never serialize them in the
+  existing credential cache or reuse filtered grants across view generations.
+  Coalesce refresh by principal, target, view and *observed credential
+  generation*. Share the in-flight result, including failure, for the lifetime
+  of the operation. A cancelled waiter must release its wait without reopening
+  the rejected generation. Revalidate before later ranges.
+  Expiry/key rotation with identical scope can resume at a verification boundary.
+  Changed scope or placement cancels the operation and requires fresh resolution.
+  The existing refresh path and cache policy live in
+  `crates/crab-auth-store/src/refreshing_store.rs` and `crates/crab-auth/src/crab_auth_client.rs`.
+
+## HTTP delivery and failure behavior
+
+Construct one canonical HTTPS URL from the approved base and physical key. The
+template maps that path to exactly one bucket/container and preserves its case.
+Use the locked object-store path representation and its signing/encoding vectors.
+The first profile accepts only canonical ASCII binding and key paths. Existing
+repositories with paths outside that grammar use origin. Exercise spaces,
+Unicode, and literal percent signs in the transport vectors to prove they cannot
+alias admitted keys. Any later expansion must prove round trips to the same
+origin object across issuer, proxy and edge. Reject ambiguous separators,
+traversal, query/fragment/userinfo and all redirects. Attach only the
+provider-specific viewer capability to that exact request. Disable ambient
+cookie jars, automatic decompression and byte transformations. Never forward
+origin credentials. [object_store 0.14.1 path contract](https://docs.rs/object_store/0.14.1/object_store/path/struct.Path.html)
+
+For full GETs enforce object limits, expected identity, length and EOF. For a
+nonempty single range require a matching 206, exact Content-Range including
+the total length, and exactly the requested number of bytes. A 200 response
+to a range is a failed attempt. Handle zero-byte files and empty ranges
+locally when authorized metadata proves them. Bound parallelism, memory,
+temporary disk and file offsets. Select origin upfront when the provider's
+supported object/range sizes or the caller's verifier cannot serve the request.
+Record each qualified profile's full-object, range and duration limits and
+enforce them before sending the first edge request. Reuse trusted descriptor
+sizes to avoid an extra origin HEAD per object.
+
+| Outcome | Required behavior |
+|---|---|
+| Connection timeout, verified transient availability failure, throttling or qualified 5xx | At most one restart at the independently authorized origin of the selected target. Share the operation deadline, physical request/byte budgets and cancellation across both sources. Qualify statuses against the actual deployment before treating them as retryable. |
+| 401/403 | Refresh or recheck once on the same distribution within deadline. If denial persists, surface it through all outer cache, xorb, Git, LFS and replica callers. Zero origin reads after denial. Never interpret an ambiguous 403 as a miss. |
+| 404 or unclassified status | Terminal. Any future miss-based retry needs evidence that no viewer, gateway or origin denial can produce that status. |
+| Framing or content verification fails | The verification owner discards that attempt and can restart once at selected origin if no bytes escaped, budget remains and the whole unit can be reset. Distinguish edge corruption from origin corruption. |
+| Streaming failure after caller-visible bytes | Terminate the stream with its typed error. No transparent source switch or replay. For file downloads, cancel and join parallel writers, discard the private partial file and atomically publish only after verification. |
+| Invalid binding, TLS identity failure, redirect, lost scope/lease, caller cancellation, local I/O failure or exhausted budget | Stop and drain. No alternate endpoint, primary-replica retry, cache success or authorization downgrade. |
+
+A restart belongs to one owner per logical verification unit. A restart is
+permitted only before caller-visible output. Stop and drain sibling reads when
+any range reaches a terminal failure. An availability miss can authorize a
+restart only after all in-flight siblings have either succeeded or returned
+recoverable outcomes. Once the edge has denied a request, only a successful
+same-edge recheck can restore the unit's eligibility. Existing backend retries,
+verification, clean-up and file writes must respect that unit's remaining
+deadline and budget. Preserve both sanitized failure causes and account for
+discarded bytes. Origin restart preserves availability for the same selected
+target when acceleration fails.
+
+## Provider deployments
+
+All templates expose only approved immutable routes and read methods. Use a
+default-deny route on every exposed hostname, including the provider's default
+domain. Reject alternate object APIs, listing, version/response-override
+queries and unexpected methods before cached delivery. Isolate public/private
+routes and cache keys by physical target, view namespace and representation.
+Share across authorized users only where every request passes the applicable
+authorization check. Set the immutable edge TTL independently of viewer expiry.
+Exclude per-user credentials from the shared cache key only after authorization.
+Prevent downstream shared HTTP caches from reusing private viewer responses.
+Test both hits and misses.
+
+For public delivery, publish verified immutable objects into a dedicated export
+using an operator-approved inventory. Bind the source repository identity and
+export origin separately, preserve the relative key and digest, and keep live
+repository state and writes at source. The export writer may publish only
+approved objects and must reject replacement with different bytes. Qualify
+anonymous direct-origin access as part of the public disclosure. On GCS, grant
+anonymous object GET on the export bucket only and deny listing. Any approved
+metadata exposed by anonymous object reads is part of the inventory. Verify
+version and snapshot access at the native origin so that retired bytes with a
+different disclosure policy never become readable through a version query.
+[Cloud Storage public access and IAM](https://docs.cloud.google.com/storage/docs/access-control/making-data-public)
+
+Publish and verify every approved destination object before committing its
+membership in an export inventory. Commit the inventory through the trusted
+operator or issuer after readback from the export. Bind the inventory to the
+source target, repository or view, export target and viewer path. Include the
+canonical key, length and digest for each admitted object. At routing time,
+check membership against the immutable object selected by native metadata. A
+new ref can become visible before its objects are approved and exported. For
+objects absent from the captured inventory, select the independently authorized
+native store before making any edge request. A 404 on an admitted object is
+still terminal. Exercise incomplete publication, retries, new refs and
+concurrent inventory updates. A partially copied export must never be marked
+complete or expose bytes outside the separately approved disclosure inventory.
+
+At activation, attest that the native origin and distribution are correctly
+paired, the same canonical key reaches the same verified bytes, and the
+installed viewer policy denies out-of-scope requests before cache delivery.
+Retain approval from the trusted operator or managed issuer for the exact
+resolved target, view, HTTPS authority/path, access mode, export origin where
+applicable, distribution resource identity and observed policy digest. A
+compiled release row authorizes the class of deployment. The per-binding
+approval authorizes the concrete deployment. Check both at the product's
+activation boundary, before sending any viewer credential. Reuse the approval
+for a captured operation without adding a control-plane request to each read.
+An unapproved but otherwise valid target uses its authorized native route.
+A conflicting approval or an attempted change to a captured binding fails the
+operation. Keep deployment changes within the same operator trust boundary as
+approval. Withdraw approval before changing the origin, DNS target, host/path
+mapping, signer trust, query handling, or cache authorization. Verify the new
+control-plane snapshot and rerun the affected probes before reactivation.
+For a change that could expose new bytes to old grants, also deny the old
+route at the edge and verify denial before moving traffic. Routine key
+overlap can proceed through explicitly approved transition states.
+Test a second HTTPS endpoint with a valid certificate but no matching approval,
+as well as a previously approved endpoint after a trust-sensitive change.
+
+| Origin | Public delivery | Private delivery to qualify |
+|---|---|---|
+| S3 | CloudFront with a restricted S3 REST origin and explicitly public export routes | Read-only Origin Access Control scoped to the distribution, plus CloudFront trusted key groups and signed cookies restricted to approved paths. Keep the bucket private. |
+| GCS | External HTTPS load balancer, Cloud CDN backend bucket and isolated public export | Private GCS bucket, cache-fill service identity and short-lived Cloud CDN signed cookies. Use slash-terminated literal URL prefixes. Deny unsigned access on private routes and isolate the default backend. |
+| Azure Blob | Front Door with an isolated public export and explicit container mapping | Customer-operated Azure API Management (APIM) before a restricted Front Door cache, then Blob. This extra hop and its cost are part of private Azure qualification. |
+
+**AWS.** Check cookie expiry on each new range. Size-limit large transfers using
+CloudFront's documented range behavior. Verify that actual objects written by
+Crab cache at the edge while the response headers policy sends
+`Cache-Control: private, no-store` to viewers. Set the lowest available error
+TTL and disable origin error TTL enlargement and status rewriting. S3-backed CloudFront
+can retain errors for at least one second, and a missing S3 key can return 403
+when listing is disallowed. For a freshly referenced key, the single same-edge
+recheck may wait out the configured error window within the deadline. Persistent
+403 remains a denial. Test a miss immediately before publish followed by an
+authorized fetch immediately after. [OAC](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-restricting-access-to-s3.html) · [Viewer cookies](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-signed-cookies.html) · [Range GET](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/RangeGETs.html) · [Error TTL](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/custom-error-pages-expiration.html) · [S3 GetObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObject.html)
+Use overlapping trusted public keys during routine rotation. Verify a grant
+signed with each key during the overlap and verify denial for the retired key
+after removal. Exercise the cloud fill identity with customer-managed
+encryption if the profile supports it. [Viewer response headers](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/modifying-response-headers.html)
+
+**GCP.** Unsigned requests can pass through Cloud CDN to the backend. The
+deployment must deny missing viewer capability on private routes before
+delivery and deny anonymous bucket reads. Attach a default-deny Cloud Armor
+edge policy to the private backend bucket. Require the expected host, method,
+path and exactly one signed cookie, then let Cloud CDN verify its signature,
+expiry and URLPrefix. Keep a default backend with equivalent denial on
+unmatched hosts or paths. Cloud Armor uses RE2 without backreferences. Check
+fanout equality with separate anchored rules that match the same hex digit
+at each corresponding position. Keep the rules within provider size and
+expression limits and compare their decisions against the storage classifier.
+Grant the cache-fill identity read access only to the approved export, keep
+keys out of infrastructure state, and set the edge TTL using the signed-request
+cache policy. Verify the client-facing `private, no-store` header on a warm hit
+and prove that it leaves the signed cache useful. Test absent, malformed,
+duplicate and wrong-scope cookies on cold and warm paths. Confirm origin
+validators, representation, and range-fill behavior on repeated reads. For
+partial responses, Cloud CDN can use the first request to learn that the
+origin supports ranges. Confirm a cache fill and a later hit with provider
+logs before counting the warmed samples.
+[Signed cookies](https://docs.cloud.google.com/cdn/docs/using-signed-cookies) · [Edge rule language](https://docs.cloud.google.com/armor/docs/create-security-policy-rules) · [URL map defaults](https://docs.cloud.google.com/load-balancing/docs/url-map) · [Byte-range caching](https://docs.cloud.google.com/cdn/docs/caching#support_for_byte_range_requests)
+
+**Private Azure.** The proposed reference deployment is
+`client → APIM → Front Door → private Blob container`. APIM validates a
+short-lived Crab issuer JWT on every request, including cache hits. Enforce
+issuer, audience, expiry, read method, physical view/prefix and exact canonical
+object class. Strip viewer authorization before streaming to a fixed Front Door
+backend. Disable APIM response caching and redirects. Use a dedicated classic
+APIM tier with exclusive, deterministic public egress. Front Door WAF must
+block traffic outside those exact addresses by observed socket address on every
+domain. Restrict all gateway routes and policy authors that can use those
+addresses to the same authorization boundary. Validate APIM's observed egress
+before enabling the Front Door route. Remove obsolete allowlist entries before
+releasing addresses or tearing down the gateway. Exercise direct alias and
+alternate gateway operations in the deployment test. Use Front Door managed identity with narrowly
+scoped Blob data-read permission and anonymous Blob access disabled. This
+reference uses the authenticated Blob endpoint. Front Door managed-identity
+origin auth currently excludes Front Door Private Link. Keep authorized native
+Crab access to Blob working for metadata, writes and recovery. [Gateway JWT validation](https://learn.microsoft.com/en-us/azure/api-management/validate-jwt-policy) · [Gateway forwarding](https://learn.microsoft.com/en-us/azure/api-management/forward-request-policy) · [APIM IP ownership](https://learn.microsoft.com/en-us/azure/api-management/api-management-howto-ip-addresses) · [Front Door WAF](https://learn.microsoft.com/en-us/azure/web-application-firewall/afds/waf-front-door-configure-ip-restriction) · [Origin identity](https://learn.microsoft.com/en-us/azure/frontdoor/origin-authentication-with-managed-identities)
+
+Front Door's native Entra JWT policy is documented as public preview. The
+reference deployment uses APIM viewer validation. Microsoft also lists
+Front Door managed-identity origin authentication as preview in its deployment
+guidance. Treat that Azure fixture as qualification-only until the origin
+authentication profile meets the release requirements. [Front Door security guidance](https://learn.microsoft.com/en-us/azure/frontdoor/secure-front-door)
+
+Probe GET and range delivery directly. Front Door caches GETs, handles large objects
+in chunks, and can serve stale content during origin outages. Measure end-to-end
+from the remote client through APIM. In a single-region deployment the gateway
+can remain far from the viewer even on an edge hit. Record gateway region, its
+observed Front Door edge, throughput limits and charges. Release private Azure
+only if that path meets the same security and performance gates. [Front Door authentication policy](https://learn.microsoft.com/en-us/azure/frontdoor/authentication-policy) · [Front Door caching](https://learn.microsoft.com/en-us/azure/frontdoor/front-door-caching) · [Blob integration](https://learn.microsoft.com/en-us/azure/frontdoor/scenario-storage-blobs)
+
+## Delivery and acceptance
+
+| Slice | Deliverable and exit evidence |
+|---|---|
+| 1. Freeze contracts | Storage, auth and format owners assign every read family a physical scope, verifier and source. Add layout, encoded-path, projected-view and old/new grant fixtures. Start with the private S3 deployment in an isolated test account. |
+| 2. Build shared transport | Loopback HTTP against a real local object store exercises bounded reads, false ranges, truncated or transformed bodies, wrong bytes, zero length, cancellation, file cleanup, budgets and one-source restart. Extend signed-read, conditional-cache and parallel-read regressions. |
+| 3. Qualify private CloudFront for direct CLI | Reference issuer, trusted direct config, OAC template and CLI wiring. Push to S3 and clone/fetch Git and LFS from a clean machine. Use a protected view to qualify private Xet hydration. Repeat with a second authorized principal at the same edge, verify Git IDs and payload hashes, and test newly published data and persistent denial. |
+| 4. Qualify GCP and Azure | Provide provider templates and bring-your-own deployment checks. Repeat slice 3 per public/private profile, including default hostnames, rotated/expired credentials, range-fill amplification and anonymous origin policy. Record Azure gateway overhead separately. |
+| 5. Complete consumer coverage | Exercise CLI/remote-helper clone and fetch, SDK browse/content and Git subprocesses, desktop visible reads, Xet hydrate/filter, VFS mount, LFS full and partial, and server/S3 gateway repository reads. Preserve client-facing HTTP auth, ETag and range semantics. Run packaging/feature combinations, including cross-OS subprocesses, in CI. Publish storage, auth, cache, desktop, SDK and web setup/doctor guides and correct earlier edge-caching advice. |
+| 6. Release per qualified profile | Canary by physical target and consumer. Retain real-provider evidence for each advertised mode and entry point. A managed profile additionally needs the production issuer's v2 compatibility and authorization evidence. An unqualified mode remains disabled. |
+
+Release eligibility is specific to provider, public/private mode, consumer,
+read family and direct or managed profile. The release policy in
+`crates/crab-storage/src/cdn/qualified-scopes.txt` lists the exact enabled rows.
+An opted-in binding must also satisfy the native origin and immutable key checks
+at the storage boundary. A qualified Git pack read leaves capsule, LFS and Xet
+reads on native storage until their own rows qualify.
+
+All provider routes currently have fixture-only status. Default builds keep
+HTTPS bindings on origin, omit the direct viewer-grant request header, and
+request managed transfer grant v1. Direct private bindings continue to use the
+same principal and native scope. The `provider-cdn-qualification` Cargo feature
+enables real-provider routing in dedicated builds. The release policy is empty
+pending retained evidence. The report verifier can require that a verified
+scope exactly match a row in the compiled policy.
+
+The client negotiates private viewer authority only when every configured
+provider the issuer can select for that repository has an eligible row for
+the caller. Direct bindings retain the same principal and native scope during
+a mixed-provider rollout. A provider-selection contract would be needed to
+request a viewer grant for just one provider on a shared locator.
+
+Promote private CloudFront direct CLI Git pack reads first. Qualify the
+exact release candidate commit and the ordinary release build for that row.
+Use the qualification feature to develop and test fixtures. The candidate's
+ordinary build must demonstrate the promoted read and the origin behavior of
+adjacent unpromoted families. Block promotion when required evidence still
+depends on a generic trace or an externally supplied pass flag.
+
+The scripted Git workload currently requires the qualification feature's
+native-origin guard. Keep that guard for fixture builds. For the ordinary
+candidate run, use a dedicated writer restricted to the preregistered storage
+target and test prefix. Inspect the exact native target before the run and
+verify its publication and retirement receipts through the provider. Verify
+the selected replica and edge payload through redacted product or provider
+observations. Retain the binary digest, platform, build features and compiled
+scope inventory alongside the measurements so the release verifier can
+distinguish fixture and candidate results.
+
+### Required release evidence
+
+- **Isolation and freshness.** Use two repositories, two users, a filtered view
+  and shared physical content. Test prefix neighbors, multiple buckets in one
+  process, same-name custom endpoints, scoped global objects, co-packed data,
+  a stale local/service cache, replica selection, staged data, read retention
+  during GC and expiry between parallel ranges. Exercise authorization failures
+  through each outer retry owner. Assert the observable output and actual counts
+  of edge, origin and primary requests. Cover CDN-off operation and offline cache
+  behavior. Exercise the server and S3 gateway owners in
+  `crates/crab-server/src/server/storage.rs` and `crates/crab-s3-gateway/src/repository.rs`.
+  Positive cloud tests include a real write followed by an immediately
+  visible new ref and a byte-identical fetch through the ordinary product.
+  The direct CLI workload in `crab/scripts/e2e/run_cdn_git_workload.py`
+  publishes a leased test ref, verifies bytes from a fresh fetch, requires
+  a completed edge GET and a Git payload accepted after integrity
+  verification, and retires that ref. The release gate derives direct CLI Git
+  and capsule product evidence from the exact publication receipt and its
+  ordered fetch and retirement records. The fixture owner separately proves
+  storage and export cleanup. The read-only cleanup collector verifies empty
+  native inventories for the exact test prefix, records live and historical
+  inventory results, and binds public exports separately. The release gate
+  requires the direct Git inventory check after ref retirement. The helper
+  checks the approved native origin against the repository, selected read
+  replica, and prepared push store.
+- **Deployments and operations.** Inspect actual route, IAM, cache key, TTL,
+  key-rotation, DNS/TLS, error and logging settings. For public and private
+  delivery, bracket HEAD and provider-specific version, generation, snapshot
+  and response override denials with byte-verified full cache hits on the same
+  object. Verify private viewer authorization on warm hits after expiry,
+  unauthorized prefix changes and downstream cache behavior. Exercise supported
+  origin encryption/key access where applicable. The release gate requires a
+  deployment snapshot digest approved in the benchmark registration. The
+  CloudFront, Cloud CDN and Front Door collectors verify read-only
+  control-plane observations for the reference private and public deployments.
+  Cloud CDN checks DNS, the forwarding rule, and conditional bucket IAM. Front
+  Door checks the default endpoint, WAF, APIM viewer policy, and Blob role
+  assignment or public export settings. `crab doctor --cdn-probe` uses the
+  fetch resolver to report the primary or ready replica binding, eligibility,
+  credential lifetime, origin availability,
+  byte-verified GET and range delivery, and the mutable-root denial status. It
+  uses an origin-verified Git object of at most 1 MiB referenced by the current
+  root on the selected physical target, including a pack layer from a native
+  checkpoint. Exercise it on existing authorized cloud fixtures.
+- **Observability and rollback.** Count source, hit/miss/unknown, bytes, latency,
+  rejected bytes, refresh and restart outcomes. Retain provider cache logs or
+  headers plus origin fill evidence. Product edge attempts emit redacted,
+  scope-specific transfer events. The qualification reducer counts completed
+  bodies and incomplete bytes separately. Redact cookies, JWTs, signed URLs and
+  sensitive headers in all client and infrastructure logs. An operator can stop
+  issuance, remove the target binding and revert to authorized origin reads.
+  For a disclosure or deletion, restrict the viewer route, revoke/rotate grants,
+  purge edge entries, verify denial on every hostname and record propagation
+  time. Already distributed bytes cannot be recalled. Ordinary pushes need no purge.
+- **Performance and cost.** Pre-register workloads, sample size, thresholds
+  and budgets before release measurements. Suggested initial gate: at least
+  30 paired, interleaved samples per arm, a positive lower bound on a 95%
+  confidence interval for distant-region warm-edge median action-time savings,
+  and p95 within the agreed action budget. Compare origin-only, cold edge,
+  warm edge with a fresh client, and warm local cache. Include near-origin and
+  remote regions, clone/fetch, large hydration, small ranges and concurrent
+  clients. Measure client bytes, origin GETs and fill bytes, memory, local disk,
+  egress, CDN requests and any gateway charges per successful action. Include
+  the gateway's fixed deployment cost at the expected traffic volume. Use
+  provider hit evidence and the same commit, repo and workload in every comparison.
+  The Git workload includes native-origin and warm-local controls for the
+  same publication receipt. The warm-local arm requires a verified cache hit
+  from a fresh Git client sharing the primed Crab cache.
+  `crab/scripts/e2e/collect_cdn_git_performance.py` binds each Git fetch to its
+  measured provider and runner metrics, checks ordered same-publication pairs
+  across two preregistered regions, and applies the release budgets. Assembly
+  retains the direct CLI Git and capsule measurement inputs. The release
+  gate recomputes each summary and checks the complete platform matrix.
+  Live metric collection and provider runs still need configured fixtures.
+- **Artifacts and sign-off.** Keep a versioned CDN evidence supplement beside
+  the existing provider qualification report. The verifier at
+  `crab/scripts/verify-provider-qualification-report.py` checks the native
+  storage contract and the optional v1 CDN supplement. It binds both reports by
+  commit, run, attempt and native report digest. The release job supplies the
+  required row, platform, configuration digest and prior benchmark registration.
+  Release preparation calls `crab/scripts/release/verify-cdn-release-evidence.py`
+  before the CLI and desktop jobs. It uses the exact successful workflow run
+  attempt and the previously approved benchmark digest, then verifies every
+  enabled row on the required platforms against the compiled scope inventory.
+  The provider workflow can qualify native S3 using a dedicated OIDC role.
+  `crab/scripts/e2e/run_cdn_transport_checks.py` records the exact GET and range,
+  mutable and neighbor denial, and optional warm viewer expiry traces from an
+  existing approved CloudFront, Cloud CDN, or Front Door fixture. Private
+  evidence requires an authorized cache hit on the same complete object
+  before and after denied anonymous full and ranged GETs.
+  An unrelated viewer must also be denied full and ranged GETs of that warm
+  object. Its grant must read a separate, approved control object before and
+  after the denials. The control uses a disjoint grant prefix on the same
+  endpoint, so an expired or invalid credential cannot supply the evidence.
+  The transport expiry probe checks the signed expiry and verifies two
+  overlapping range reads of the same warm object on each side of expiry.
+  Both early reads must return the approved bytes, and the expired grant
+  must be denied both ranges. Product refresh and expiry during an in-flight
+  action still require workload evidence.
+  A second authorized viewer grant exercises same-object cache reuse. The
+  collector verifies the second response's bytes and cache hit and records
+  miss-to-hit evidence when the first response was cold. Distinct credential
+  strings establish two grants. Prove two distinct principals with redacted
+  issuer observations from two independently authorized subjects. Correlate
+  issuance and probes within the same attempt and fixture. Record only
+  pseudonymous principal labels, signing key IDs and scope identifiers.
+  Use fresh grants from the real issuer after preflight attestation. Finish
+  any native job or environment approval before minting them. Keep native
+  inspection, the two authorized subjects and the unrelated control in
+  their separate roles. A CI implementation may use protected workload
+  identities if the issuer authorizes each subject for its fixture scope.
+  Use a short, independently issued grant for the expiry window. Keep viewer
+  credentials out of artifacts and avoid long-lived credentials to cover
+  scheduling delays. An approved hosted private fixture can request its primary
+  viewer grant from a dedicated Crab Auth issuer using GitHub OIDC after
+  deployment preflight. The collector binds the response and signed prefix to
+  the exact fixture. Live issuer setup, distinct-subject evidence, and the
+  separate expiry window still require qualification.
+  The collector also probes live-origin anonymity and the separate public
+  export object and listing policies through the provider's native API.
+  The verifier pairs live-origin denial with a successful authenticated read
+  of the same complete object. The hosted canary uses the protected provider
+  identity for the exact native GET. S3 uses an in-memory signed URL, and
+  GCS and Azure use bearer tokens on their native APIs. The collector verifies
+  the full response against the edge bytes. A separately issued signed URL
+  remains available for standalone collection.
+  Manual provider qualification uses read-only OIDC credentials in the
+  protected canary environment to attest the approved deployment before and
+  after the transport and origin probes. The canary requires native evidence
+  from the same commit and attempt. Publication waits for requested canaries.
+  `crab/scripts/e2e/assemble_cdn_qualification.py` combines measured results
+  with native evidence and approved benchmarks, verifies every required
+  platform, and stages the release artifact. Assembly imports same-attempt
+  canary traces for the exact scope and fixture digest. Conflicting measured
+  traces or failed observations stop publication. A manual provider qualification
+  run can publish the verified bundle using same-attempt native reports and
+  the measured inputs on a dedicated runner. The live product, deployment,
+  and regional jobs or external workers still need configured fixtures.
+  Record provider/profile, configuration, region, client
+  and product action, expected/observed bytes, redacted traces, metrics and
+  cleanup. Use test-owned prefixes and distributions in dedicated CI. Level 3
+  requires user action, real cloud side effect and visible verified content.
+  Release records must distinguish verified provider, access mode, consumer and
+  managed issuer. A passing mock or another provider's evidence cannot fill a row.
+
+The release verifier must enforce the following check-specific observations
+before accepting a row. Use the existing report's commit, scope, configuration,
+run and attempt to bind each observation.
+
+| Gate | Required observation |
+|---|---|
+| Key rotation and retirement | Before and after policy snapshots with the actual key IDs. Same-key verified reads by both signers during overlap. After the retired key has left the deployed policy, that grant must still be within its signed lifetime and must fail for both full and ranged warm reads. The replacement grant must still return the original verified bytes. Verify the bounded rollout and retirement window per provider and hostname. |
+| Scoped view and rollback | Prove the scoped grant serves the authorized object and the denied sibling target exists by reading it with its own control grant. Include source, sibling generation or scope, and shared prefixes when applicable. For rollback, withdraw the binding between two executions of the ordinary action. Compare verified output, prove the authorized post-change action used zero edge payload requests, and inspect account and replica selection. Test terminal viewer denial separately. |
+| Public release | Verify the complete publish/readback receipt and inventory membership for the selected key. Run the ordinary product after advancing a native ref to an unexported object. Require visible native results and zero edge requests for that object. After approval and export copy, prove the edge can serve the same bytes. Probe any actual historical versions or snapshots at native origin under the configured retention policy. |
+| Managed release | Retain the production issuer's identity and version, negotiated grant version, redacted placement and scope, and a successful ordinary managed operation. Also verify v1 peers and the absence of downgrade after rejected or mismatched v2 issuance. The reference issuer or a direct CLI run cannot establish this gate. |
+| Other consumers and read families | Retain action records, verified outputs and associated provider/runner measurements for the row's actual entry point. Recompute the product and performance summaries from those inputs, as the direct CLI Git reducer does. For native controls, compare normal authorization behavior and check that the candidate feature set matches the shipped build. |
+
+The protected workflow or its dedicated workers own producing these raw
+observations. The assembly and release jobs own rejecting missing, mismatched
+or semantically incomplete records. Until each affected check has both a live
+producer and a verifier, leave its scope out of `qualified-scopes.txt`.

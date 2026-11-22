@@ -38,6 +38,7 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 crab-metadata = { workspace = true, features = ["remote-index", "storage"] }
+crab-storage = { workspace = true, features = ["test-support"] }
 object_store = { workspace = true }
 proptest = "1"
 tempfile = { workspace = true }

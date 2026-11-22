@@ -268,7 +268,7 @@ pub(crate) async fn upload_pack(
         ));
     }
     let (view, repository) = entry
-        .open_capsule_repository(&server, upload_pack_repository_options()?, &cancel)
+        .open_capsule_read_repository(&server, upload_pack_repository_options()?, &cancel)
         .await?;
     let mut response = Vec::new();
     match request.command.as_str() {

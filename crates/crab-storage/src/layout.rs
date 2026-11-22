@@ -5,6 +5,8 @@ use std::fmt::Display;
 use crab_types::storage::StorageScope;
 use object_store::path::Path as ObjectPath;
 
+use crate::cdn::CdnReadFamily;
+
 /// The default bucket-level prefix for all content-addressed objects.
 pub const GLOBAL_PREFIX: &str = ".crab";
 /// Number of leading hash characters used to partition global content.
@@ -51,16 +53,27 @@ pub fn content_hash_from_path<'a>(path: &'a str, kind: &str) -> Option<&'a str> 
     let mut parts = path.rsplit('/');
     let hash = parts.next()?;
     let partition = parts.next()?;
-    if parts.next()? != kind
-        || hash.len() != 64
-        || !hash
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-        || partition != hash.get(..GLOBAL_CONTENT_FANOUT_WIDTH)?
-    {
+    if parts.next()? != kind || !has_content_fanout(partition, hash) {
         return None;
     }
     Some(hash)
+}
+
+fn has_content_fanout(partition: &str, hash: &str) -> bool {
+    hash.len() == 64
+        && hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        && hash.starts_with(partition)
+        && partition.len() == GLOBAL_CONTENT_FANOUT_WIDTH
+}
+
+fn below_prefix<'a>(key: &'a str, prefix: &str) -> Option<&'a str> {
+    if prefix.is_empty() {
+        Some(key)
+    } else {
+        key.strip_prefix(prefix)?.strip_prefix('/')
+    }
 }
 
 /// Provides optional scoped prefixes for path-limited repository views.
@@ -152,6 +165,68 @@ impl<S> StoreLayout<S> {
     #[must_use]
     pub fn repo_path(&self, relative_path: &str) -> ObjectPath {
         ObjectPath::from(format!("{}/{relative_path}", self.repo_prefix))
+    }
+
+    /// Match only known immutable key shapes in this physical layout.
+    ///
+    /// Callers also need proof of access to the whole object and a verifier for
+    /// the requested bytes. This classifier supplies neither authorization.
+    #[must_use]
+    pub fn cdn_read_family(&self, path: &ObjectPath) -> Option<CdnReadFamily> {
+        if let Some(key) = below_prefix(path.as_ref(), &self.repo_prefix) {
+            let mut parts = key.split('/');
+            let first = parts.next();
+            let second = parts.next();
+            let shape = match (first, second) {
+                (Some("v2"), Some("history")) => {
+                    let next = parts.next();
+                    let partition = if next == Some("source-roots") {
+                        parts.next()
+                    } else {
+                        next
+                    };
+                    partition
+                        .zip(parts.next())
+                        .is_some_and(|(part, hash)| has_content_fanout(part, hash))
+                        .then_some(CdnReadFamily::Capsule)
+                }
+                (
+                    Some("v2"),
+                    Some(kind @ ("capsules" | "checkpoints" | "catalogs" | "pack-layers")),
+                ) => parts
+                    .next()
+                    .zip(parts.next())
+                    .is_some_and(|(part, hash)| has_content_fanout(part, hash))
+                    .then_some(if kind == "pack-layers" {
+                        CdnReadFamily::Git
+                    } else {
+                        CdnReadFamily::Capsule
+                    }),
+                (Some("lfs"), Some("objects")) => parts
+                    .next()
+                    .zip(parts.next())
+                    .zip(parts.next())
+                    .is_some_and(|((first, second), oid)| {
+                        has_content_fanout(first, oid) && oid.get(2..4) == Some(second)
+                    })
+                    .then_some(CdnReadFamily::Lfs),
+                _ => None,
+            };
+            if shape.is_some() && parts.next().is_none() {
+                return shape;
+            }
+        }
+
+        let key = below_prefix(path.as_ref(), &self.global_prefix)?;
+        let (kind, suffix) = key.split_once('/')?;
+        let family = match kind {
+            "xorbs" => CdnReadFamily::Xorb,
+            "shards" => CdnReadFamily::Shard,
+            CAPSULE_CHUNK_PAGE_KIND => CdnReadFamily::ChunkPage,
+            _ => return None,
+        };
+        let (partition, hash) = suffix.split_once('/')?;
+        has_content_fanout(partition, hash).then_some(family)
     }
 
     /// Convenience: xorb path at `.crab/xorbs/{first-two-hex}/{hash}`.

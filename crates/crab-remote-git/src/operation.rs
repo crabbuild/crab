@@ -234,7 +234,7 @@ impl OperationContext {
         &self,
         read: impl std::future::Future<Output = crab_metadata::error::Result<T>>,
     ) -> Result<T> {
-        self.ensure_active()?;
+        self.check_read_authority().await?;
         let result = tokio::select! {
             biased;
             () = self.cancellation.cancelled() => {
@@ -244,7 +244,24 @@ impl OperationContext {
             result = read => result?,
         };
         self.ensure_active()?;
+        self.check_read_authority().await?;
         Ok(result)
+    }
+
+    /// Revalidate the captured online grant before consuming cached data.
+    pub async fn check_read_authority(&self) -> Result<()> {
+        if !self.state.store.has_bound_read_authority() {
+            return Ok(());
+        }
+        self.ensure_active()?;
+        tokio::select! {
+            biased;
+            () = self.cancellation.cancelled() => {
+                self.ensure_active()?;
+                Err(Error::Cancelled)
+            }
+            result = self.state.store.check_read_authority() => Ok(result?),
+        }
     }
 
     pub(crate) async fn open_pack_transfer(
@@ -295,6 +312,21 @@ impl OperationContext {
         let span = operation_span(correlation_id, kind);
         check_cancelled(cancellation)?;
         check_cancelled(&runtime_cancellation)?;
+        if state.store.has_bound_read_authority() {
+            let authorization = state.store.check_read_authority();
+            let authorization = match deadline {
+                Some(deadline) => Either::Left(tokio::time::timeout_at(deadline, authorization)),
+                None => Either::Right(authorization.map(Ok)),
+            };
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return Err(Error::Cancelled),
+                () = runtime_cancellation.cancelled() => return Err(Error::Cancelled),
+                result = authorization => {
+                    result.map_err(|_| Error::Timeout { operation: "authorize read" })??;
+                }
+            }
+        }
         let session = if open_catalog && let Some(catalog) = state.lookup_catalog_identity {
             // Keep catalog acquisition and later page reads on the same budget.
             // The pinned repository store remains reusable by other operations.
@@ -324,7 +356,10 @@ impl OperationContext {
             };
             let session = match session {
                 Ok(session) => session,
-                Err(error) if state.catalog_identity.is_none() => {
+                Err(error)
+                    if state.catalog_identity.is_none()
+                        && crab_storage::read_rejection(&error).is_none() =>
+                {
                     tracing::warn!(%error, "snapshot lookup catalog unavailable; using immutable pack indexes");
                     GitObjectLocatorSession::without_catalog()
                 }
@@ -441,6 +476,10 @@ impl OperationContext {
     /// # }
     /// ```
     pub async fn finish<T>(mut self, operation: Result<T>) -> Result<T> {
+        let operation = match operation {
+            Ok(value) => self.check_read_authority().await.map(|()| value),
+            Err(error) => Err(error),
+        };
         let timed_out = self
             .deadline
             .is_some_and(|deadline| tokio::time::Instant::now() >= deadline);
@@ -793,6 +832,7 @@ impl OperationContext {
     }
 
     async fn read_object_uncharged(&self, oid: gix_hash::ObjectId) -> Result<GitObject> {
+        self.check_read_authority().await?;
         let reader = self.state.reader.as_ref().ok_or(Error::EmptyRepository)?;
         let session = self
             .session
@@ -805,7 +845,9 @@ impl OperationContext {
         // downstream async callers fit Rust's default type-depth limit.
         let read: futures_util::future::BoxFuture<'_, Result<GitObject>> =
             Box::pin(reader.read_with_session(session, oid, &self.budget, &self.cancellation));
-        read.instrument(self.span.clone()).await
+        let object = read.instrument(self.span.clone()).await?;
+        self.check_read_authority().await?;
+        Ok(object)
     }
 
     pub(crate) async fn read_commit(&self, oid: gix_hash::ObjectId) -> Result<Commit> {
@@ -833,6 +875,7 @@ impl OperationContext {
             .charge(BudgetDimension::LogicalObjects, 1)
             .await?;
         if let Some(commit) = self.cached_commit(oid).await {
+            self.check_read_authority().await?;
             return Ok(commit);
         }
         let object = self.read_object_uncharged(oid).await?;
@@ -968,6 +1011,7 @@ impl OperationContext {
     }
 
     pub(crate) async fn parse_tag_object(&self, object: &GitObject) -> Result<AnnotatedTag> {
+        self.check_read_authority().await?;
         let key = crate::runtime::ObjectCacheKey::new(
             &self.state.identity,
             self.state.generation,
@@ -1103,6 +1147,7 @@ impl OperationContext {
         &self,
         oid: gix_hash::ObjectId,
     ) -> Result<crate::objects::SharedTree> {
+        self.check_read_authority().await?;
         let key =
             crate::runtime::ObjectCacheKey::new(&self.state.identity, self.state.generation, oid);
         let maximum = self.state.options.object_limits().max_object_bytes;
@@ -1166,6 +1211,7 @@ impl OperationContext {
         &self,
         oids: &[gix_hash::ObjectId],
     ) -> Result<Vec<crate::RemoteGitObject>> {
+        self.check_read_authority().await?;
         let reader = self.state.reader.as_ref().ok_or(Error::EmptyRepository)?;
         let session = self
             .session
@@ -1174,7 +1220,7 @@ impl OperationContext {
             .ok_or(Error::InternalInvariant {
                 invariant: "non-empty operation has no locator session",
             })?;
-        reader
+        let objects = reader
             .read_many_with_session(
                 session,
                 oids,
@@ -1187,7 +1233,9 @@ impl OperationContext {
                 &self.cancellation,
             )
             .instrument(self.span.clone())
-            .await
+            .await?;
+        self.check_read_authority().await?;
+        Ok(objects)
     }
 
     pub(crate) async fn read_packed_entries(

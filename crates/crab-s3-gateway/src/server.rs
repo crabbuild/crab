@@ -84,7 +84,7 @@ pub async fn serve(config: Config) -> Result<()> {
     let listen_address = listener.local_addr()?;
     let management_address = management_listener.local_addr()?;
     let cancellation = CancellationToken::new();
-    let gateway = Gateway::new(config, cancellation.clone())?;
+    let gateway = Gateway::new(config, cancellation.clone(), true).await?;
     let multipart_maintenance = gateway.start_multipart_maintenance();
     let s3_connections = Arc::new(Semaphore::new(connection_capacity(max_in_flight_requests)));
     let management_connections = Arc::new(Semaphore::new(MANAGEMENT_CONNECTIONS));
@@ -452,7 +452,7 @@ fn metrics_response(body: String) -> Response<Full<Bytes>> {
 /// Initialize every configured repository without starting the listener.
 pub async fn initialize(config: Config) -> Result<()> {
     config.validate()?;
-    let gateway = Gateway::new(config, CancellationToken::new())?;
+    let gateway = Gateway::new(config, CancellationToken::new(), false).await?;
     let result = gateway.initialize_repositories().await;
     gateway.shutdown().await;
     result

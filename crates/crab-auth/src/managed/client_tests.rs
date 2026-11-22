@@ -164,6 +164,7 @@ async fn transfer_grant_issue_is_not_retried_and_refreshes_with_new_request() {
                 token: SecretString::new("grant-token").unwrap(),
             },
         },
+        cdn: None,
     };
     let capabilities = ServiceCapabilities {
         schema_version: 1,
@@ -204,7 +205,93 @@ async fn transfer_grant_issue_is_not_retried_and_refreshes_with_new_request() {
 
     assert_eq!(issued.grant_id, first);
     assert_eq!(refreshed.grant_id, second);
-    assert_eq!(transport.requests.lock().unwrap().len(), 2);
+    let requests = transport.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    let v1_body =
+        format!(r#"{{"schema_version":1,"repository_id":"{repository_id}","operation":"fetch"}}"#);
+    for request in requests.iter() {
+        assert_eq!(request.body.as_deref(), Some(v1_body.as_bytes()));
+    }
+}
+
+fn direct_cdn_capabilities() -> ServiceCapabilities {
+    ServiceCapabilities {
+        schema_version: 1,
+        api_versions: vec![1],
+        transfer_grant_versions: vec![1, 2],
+        transfer_modes: vec![TransferMode::DirectS3],
+        capabilities: vec![],
+        max_page_size: 100,
+        max_grant_lifetime_seconds: 900,
+    }
+}
+
+fn current_cdn_grant() -> TransferGrant {
+    let mut grant: TransferGrant = serde_json::from_str(include_str!(
+        "../../tests/fixtures/managed-v2/transfer-grant-direct-cdn.json"
+    ))
+    .unwrap();
+    let now = OffsetDateTime::now_utc();
+    grant.expires_at = now + time::Duration::minutes(5);
+    grant.cdn.as_mut().unwrap().expires_at = (now + time::Duration::minutes(2))
+        .unix_timestamp()
+        .try_into()
+        .unwrap();
+    grant
+}
+
+#[tokio::test]
+async fn native_read_negotiates_v2_only_with_advertised_support() {
+    let grant = current_cdn_grant();
+    let (client, transport) = client(vec![response(StatusCode::CREATED, &grant)]);
+    let issued = client
+        .issue_transfer_grant(
+            "acme",
+            "models",
+            grant.repository_id,
+            TransferOperation::Clone,
+            &direct_cdn_capabilities(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(issued, grant);
+    let requests = transport.requests.lock().unwrap();
+    let request: TransferGrantRequest =
+        serde_json::from_slice(requests[0].body.as_deref().unwrap()).unwrap();
+    assert_eq!(request.schema_version, 2);
+}
+
+#[tokio::test]
+async fn denied_or_invalid_v2_grants_never_downgrade_or_replay() {
+    let grant = current_cdn_grant();
+    let mut malformed = serde_json::to_value(&grant).unwrap();
+    malformed["cdn"] = serde_json::json!("fixture-do-not-log");
+    let mut v1 = grant.clone();
+    v1.schema_version = 1;
+    v1.cdn = None;
+    for response in [
+        service_error(StatusCode::FORBIDDEN, true),
+        response(StatusCode::CREATED, &malformed),
+        response(StatusCode::CREATED, &v1),
+    ] {
+        let (client, transport) = client(vec![response]);
+        let error = client
+            .issue_transfer_grant(
+                "acme",
+                "models",
+                grant.repository_id,
+                TransferOperation::Clone,
+                &direct_cdn_capabilities(),
+            )
+            .await
+            .unwrap_err();
+        assert!(!format!("{error:?}").contains("fixture-do-not-log"));
+        let requests = transport.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let request: TransferGrantRequest =
+            serde_json::from_slice(requests[0].body.as_deref().unwrap()).unwrap();
+        assert_eq!(request.schema_version, 2);
+    }
 }
 
 #[tokio::test]
@@ -264,6 +351,7 @@ async fn push_prepare_retries_same_request_and_resumes_same_session_with_fresh_g
                 token: SecretString::new("grant-token").unwrap(),
             },
         },
+        cdn: None,
     };
     let prepared = |grant_id| PushPrepareResponse {
         schema_version: 1,

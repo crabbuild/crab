@@ -373,6 +373,8 @@ fn client(
 ) -> Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        // Managed API calls declare replay safety above the HTTP client.
+        .retry(reqwest::retry::never())
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(15))
         .tls_built_in_root_certs(system_roots);

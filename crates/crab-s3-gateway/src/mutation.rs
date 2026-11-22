@@ -533,7 +533,7 @@ impl Coordinator {
                     )
                     .await;
                     if result.is_ok() {
-                        repository.read_views.invalidate().await;
+                        repository.invalidate_read_views().await;
                     }
                     result
                 }
@@ -1429,7 +1429,7 @@ async fn apply_with_gc_fences(
     .await;
     fences.release().await;
     if result.is_ok() {
-        repository.read_views.invalidate().await;
+        repository.invalidate_read_views().await;
     }
     result
 }
@@ -1465,7 +1465,7 @@ async fn apply_with_fences(
                 .await;
                 lease.release().await;
                 if !current? {
-                    repository.read_views.invalidate().await;
+                    repository.invalidate_read_views().await;
                     continue;
                 }
             }
@@ -1521,7 +1521,7 @@ async fn apply_with_fences(
                     .record_mutation_commits(prepared.commit_count);
                 return Ok(prepared.outcomes);
             }
-            Publish::Reprepare => repository.read_views.invalidate().await,
+            Publish::Reprepare => repository.invalidate_read_views().await,
         }
     }
     Err(crab_write::WriteError::RefChanged {
@@ -1632,7 +1632,7 @@ async fn prepare_and_upload_batch(
             ),
             None => (None, None),
         };
-        repository.read_views.invalidate().await;
+        repository.invalidate_read_views().await;
         current_view = None;
         base = Box::new(crab_metadata::capsule_protocol::load_root(&repository.layout).await?);
         if checkpointed.work.published
@@ -4505,6 +4505,8 @@ mod tests {
             .unwrap();
         let repository = Repository::new(
             RepositoryConfig {
+                #[cfg(feature = "provider-cdn")]
+                cdn: None,
                 name: "repo".to_owned(),
                 provider: crab_storage::StorageProviderKind::Local,
                 bucket: "memory".to_owned(),
@@ -4672,7 +4674,7 @@ mod tests {
             .unwrap()
             .published
         );
-        repository.read_views.invalidate().await;
+        repository.invalidate_read_views().await;
         assert_eq!(
             read(&repository, Arc::clone(&runtime), &cancel, "second").await,
             Bytes::from_static(b"two")

@@ -502,6 +502,37 @@ when deployment DNS and TLS cover its wildcard hosts.
 Every gateway instance serving the same repository must use an identical Git
 blob limit and identical multipart session, byte-budget, and expiry settings.
 
+### Provider CDN qualification
+
+Build the gateway with `--features provider-cdn-qualification` to test an
+operator-owned CDN binding. The physical origin must match the repository's
+resolved native S3 bucket, GCS bucket, or Azure account and container. Use
+`access = "public"` with an `export_origin` for a separate approved bucket
+or container in the same cloud. Set `publication` with the absolute receipt
+`path` and publisher-reported `sha256` to accelerate the listed objects.
+
+```toml
+[repositories.cdn]
+origin = "s3://team-repos"
+base_url = "https://downloads.example.com"
+access = "private"
+
+[repositories.cdn.issuer]
+endpoint = "https://auth.example.com/v1/credentials"
+oidc_issuer = "https://login.example.com"
+client_id = "crab-gateway"
+token_cache_directory = "/var/lib/crab/gateway/issuer-tokens"
+```
+
+Use the gateway process's installed Crab Auth login for that deployment. The
+issuer must authorize the exact full repository. The gateway applies its own
+client permissions before serving verified Git reads or full LFS downloads
+through the CDN. Partial LFS requests keep their native version proof. Control
+reads, writes and shared bucket-global reads use the native store. Gateway
+ranges and ETags come from the pinned repository object and its attributes.
+The default build excludes CDN configuration. Live deployment qualification
+is tracked in [Plan 021](../../plans/021-provider-cdn-support.md).
+
 ### Background maintenance
 
 The gateway schedules Capsule checkpoint and physical pack maintenance after a

@@ -30,3 +30,4 @@ tempfile = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
+crab-storage = { workspace = true, features = ["test-support"] }

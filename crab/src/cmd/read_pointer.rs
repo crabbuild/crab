@@ -558,6 +558,7 @@ async fn remote_capture(
                     config,
                     managed,
                     crab_auth::TransferOperation::Hydrate,
+                    crab_storage::cdn::CdnConsumer::Cli,
                     cancel,
                 )
                 .await?;

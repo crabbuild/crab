@@ -8,6 +8,12 @@ use xet_data::file_reconstruction::FileReconstructionError;
 
 pub type Result<T> = std::result::Result<T, ReadError>;
 
+#[cfg(feature = "hydration")]
+pub(crate) fn terminal_read_failure(error: &(dyn std::error::Error + 'static)) -> bool {
+    crab_storage::read_rejection(error).is_some()
+        || crab_storage::store::cdn_read_rejection(error).is_some()
+}
+
 /// Errors from read-side reconstruction and hydration.
 #[derive(thiserror::Error, Debug)]
 pub enum ReadError {

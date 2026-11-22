@@ -512,7 +512,7 @@ impl Client {
         self.0
             .operations
             .run(operation, move |cancel| async move {
-                tools.owner.handshake(&cancel).await.map_err(local_error)?;
+                let _handshake = tools.owner.handshake(&cancel).await.map_err(local_error)?;
                 if destination.exists() {
                     return Err(Error::new(
                         ErrorKind::Conflict,
@@ -560,7 +560,25 @@ impl Client {
                         })?;
                     return discover_local(client, &tools.owner, &destination, &cancel).await;
                 }
-                let resolved = state.resolve_repository(&locator, &cancel).await?;
+                #[cfg(feature = "service")]
+                let cdn = state
+                    .direct_cdn
+                    .as_ref()
+                    .filter(|binding| binding.matches_checkout(&locator, state.cdn_consumer));
+                #[cfg(feature = "service")]
+                if cdn.is_some()
+                    && !_handshake
+                        .capabilities
+                        .operations
+                        .iter()
+                        .any(|operation| operation == crab_remote::local::DIRECT_CDN_CHECKOUT)
+                {
+                    return Err(Error::new(
+                        ErrorKind::UnsupportedCapability,
+                        "selected Crab executable does not support direct CDN checkout",
+                    ));
+                }
+                let resolved = state.resolve_read_repository(&locator, &cancel).await?;
                 let (remote, environment, managed_token_cache) = if resolved.managed {
                     #[cfg(feature = "service")]
                     {
@@ -686,10 +704,39 @@ impl Client {
                     managed_token_cache,
                 )
                 .await?;
+                #[cfg(feature = "service")]
+                let checkout = cdn
+                    .map(|cdn| {
+                        persist_checkout_binding(
+                            staging.path(),
+                            cdn.checkout_binding(&resolved, &staged, state.cdn_consumer)?,
+                        )
+                    })
+                    .transpose()?;
+                #[cfg(feature = "service")]
+                let (scoped_tools, scoped_environment) = match checkout.as_ref() {
+                    Some((binding, private)) => {
+                        let mut scoped = if *private { Vec::new() } else { environment.clone() };
+                        scoped.push((
+                            crab_auth::cdn_checkout::BINDING_FILE_ENV.into(),
+                            binding.path().as_os_str().to_owned(),
+                        ));
+                        // Private filters authenticate through their own issuer grant.
+                        let owner = if *private {
+                            tools.owner.with_environment(Vec::new())
+                        } else {
+                            tools.owner.clone()
+                        };
+                        (owner, scoped)
+                    }
+                    None => (tools.owner.clone(), environment),
+                };
+                #[cfg(not(feature = "service"))]
+                let (scoped_tools, scoped_environment) = (tools.owner.clone(), environment);
                 checkout_cloned_head(
-                    &tools.owner,
+                    &scoped_tools,
                     &staged,
-                    &environment,
+                    &scoped_environment,
                     &fetch.remote,
                     &head,
                     trusted,
@@ -697,14 +744,16 @@ impl Client {
                 )
                 .await?;
                 hydrate_cloned_checkout(
-                    &tools.owner,
+                    &scoped_tools,
                     &staged,
                     &hydration,
-                    &environment,
+                    &scoped_environment,
                     trusted,
                     &cancel,
                 )
                 .await?;
+                #[cfg(feature = "service")]
+                drop(checkout);
                 fetch::verify_repository(&tools.owner, &staged, &cancel).await?;
                 if destination.exists() {
                     return Err(Error::new(
@@ -1188,6 +1237,37 @@ async fn prepare_clone_hydration(
         &[],
         repository.as_ref(),
     ))
+}
+
+#[cfg(feature = "service")]
+fn persist_checkout_binding(
+    directory: &Path,
+    binding: crab_auth::cdn_checkout::CdnCheckoutBinding,
+) -> Result<(tempfile::NamedTempFile, bool)> {
+    use std::io::Write as _;
+
+    let body = serde_json::to_vec(&binding).map_err(|source| {
+        Error::with_source(
+            ErrorKind::InvalidInput,
+            "cannot encode CDN checkout binding",
+            source,
+        )
+    })?;
+    if body.len() > crab_auth::cdn_checkout::MAX_BINDING_BYTES {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "CDN checkout binding is too large",
+        ));
+    }
+    let file = tempfile::NamedTempFile::new_in(directory)
+        .and_then(|mut file| {
+            file.write_all(&body)?;
+            Ok(file)
+        })
+        .map_err(|source| {
+            Error::with_source(ErrorKind::Io, "cannot create CDN checkout binding", source)
+        })?;
+    Ok((file, binding.issuer.is_some()))
 }
 
 async fn hydrate_cloned_checkout(

@@ -291,6 +291,21 @@ and are never forwarded to SSH hosts. Forge tokens remain separate. Re-enter leg
 in the connection form; v1 `.crab/config.toml` is no longer read. Repository
 configuration uses v2 `crab.toml`.
 
+Remote browsing reads `[[cdn]]` bindings from the user Crab configuration
+at `~/.config/crab/config.toml` when it opens a repository. A binding must
+match the repository prefix and native S3, GCS, or Azure origin. For a
+`crab://` URL with default credentials, `[auth].storage_provider` selects the
+provider when set. Azure also takes its account from
+`[auth.azure].storage_account` or `AZURE_STORAGE_ACCOUNT_NAME`.
+
+For a private export, select **Use default credentials** and sign in through
+the configured Crab Auth issuer. A sidecar built with
+`provider-cdn-qualification` obtains the viewer grant and keeps it in memory.
+Default builds use the authorized origin. An approved public export can use
+the selected connection's native credentials. Set the receipt's absolute
+`path` and publisher-reported `sha256` in the public binding's
+`publication` field. Managed repositories use their managed service grants.
+
 ## Checks
 
 Run `npm run build:agent` first so JavaScript subprocess tests use the matching

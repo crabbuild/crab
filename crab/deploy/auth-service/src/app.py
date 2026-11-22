@@ -10,16 +10,25 @@ import math
 import os
 import secrets
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any
 
 import structlog
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from jwt import PyJWTError
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.auth import JWTVerifier, TokenClaims
+from src.cdn import (
+    CAPABILITY_HEADER,
+    CAPABILITY_VERSION,
+    CdnGrant,
+    issue_viewer_grant,
+    resolve_export,
+)
 from src.policy import PolicyEngine, PolicyDecision
 from src.providers import get_provider
 from src.receive_helper import (
@@ -379,6 +388,7 @@ class AuthResponse(BaseModel):
     expires_at: str
     permissions: list[str]
     storage_scope: StorageScope | None = None
+    cdn: CdnGrant | None = Field(default=None, repr=False)
 
 
 class PushRefUpdate(RequestModel):
@@ -704,7 +714,9 @@ def _raise_provider_env(provider: str, name: str) -> None:
         429: {"model": ErrorResponse},
     },
 )
-async def issue_credentials(body: AuthRequest, request: Request) -> AuthResponse:
+async def issue_credentials(
+    body: AuthRequest, request: Request, response: Response
+) -> AuthResponse:
     start = time.time()
     log = logger.bind(
         repo_url=body.repo_url,
@@ -771,6 +783,40 @@ async def issue_credentials(body: AuthRequest, request: Request) -> AuthResponse
             },
         )
 
+    cdn = None
+    if request.headers.get(CAPABILITY_HEADER) == CAPABILITY_VERSION:
+        response.headers["Cache-Control"] = "no-store"
+        source = parse_repo_url(body.repo_url)
+        export = resolve_export(
+            get_policy().cdn_exports,
+            decision.provider,
+            source.bucket,
+            source.prefix,
+            result.credentials,
+        )
+        if export is not None:
+            try:
+                cdn = await asyncio.to_thread(
+                    issue_viewer_grant,
+                    export,
+                    operation=body.operation,
+                    permissions=decision.permissions,
+                    parent_expiry=result.expires_at,
+                    view_repo_prefix=storage_scope.repo_prefix if storage_scope else None,
+                    view_global_prefix=storage_scope.global_prefix if storage_scope else None,
+                    credentials=result.credentials,
+                    now=datetime.now(timezone.utc),
+                )
+            except (OSError, ValueError, PyJWTError) as e:
+                log.error("cdn_grant_issue_failed", error_type=type(e).__name__)
+                raise HTTPException(
+                    status_code=500,
+                    detail={
+                        "error": "internal",
+                        "message": "Failed to issue CDN viewer credentials",
+                    },
+                ) from None
+
     elapsed_ms = (time.time() - start) * 1000
     log.info(
         "credentials_issued",
@@ -790,6 +836,7 @@ async def issue_credentials(body: AuthRequest, request: Request) -> AuthResponse
         expires_at=result.expires_at,
         permissions=decision.permissions,
         storage_scope=storage_scope,
+        cdn=cdn,
     )
 
 

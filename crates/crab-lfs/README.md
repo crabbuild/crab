@@ -32,6 +32,11 @@ verified bytes through crab-storage
 CLI transfer path verify immutable objects while keeping file-sized payloads
 out of memory.
 
+`LfsObjectStore::stream_content` can use an authorized CDN for a full read
+using the descriptor's OID and size. It validates bounded edge ranges and
+holds the final bytes until SHA-256 verification succeeds. Partial reads still
+require proof of the native object version or a verified local descriptor.
+
 `local` shares local payload paths and storage-key precedence with CLI and SDK
 callers. Its preparation snapshots verify SHA-256 and exact size while copying
 into caller-owned scratch, then return the Blake3 digest for durable recovery.

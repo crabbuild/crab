@@ -5,7 +5,7 @@ use std::ops::Range;
 
 use bytes::Bytes;
 use crab_cache::CacheError;
-use crab_storage::StorageError;
+use crab_storage::{StorageError, store::CdnReadAttempt};
 use crab_xet::hash::MerkleHash;
 use crab_xet::xorb::format::{ChunkMeta, FOOTER_SIZE, MAX_XORB_SIZE};
 use crab_xet::xorb::parser::{
@@ -19,11 +19,48 @@ const XORB_READ_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 const XORB_READ_CACHE_MAX_ENTRIES: usize = 4096;
 const XORB_READ_LOCK_STRIPES: usize = 256;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum XorbSource {
+#[derive(Clone, Copy)]
+enum XorbSource<'a> {
     Local,
     Service,
-    Origin,
+    Cdn(&'a CdnReadAttempt),
+    Origin(Option<&'a CdnReadAttempt>),
+}
+
+impl<'a> XorbSource<'a> {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Service => "service",
+            Self::Cdn(_) => "cdn",
+            Self::Origin(_) => "origin",
+        }
+    }
+
+    fn edge_attempt(self) -> Option<&'a CdnReadAttempt> {
+        match self {
+            Self::Cdn(attempt) => Some(attempt),
+            Self::Origin(attempt) => attempt,
+            Self::Local | Self::Service => None,
+        }
+    }
+
+    async fn read_origin<T>(
+        self,
+        read: impl Future<Output = crab_storage::Result<T>>,
+    ) -> crab_storage::Result<T> {
+        match self.edge_attempt() {
+            Some(attempt) => attempt.within_deadline(read).await,
+            None => read.await,
+        }
+    }
+
+    fn check_deadline(self) -> crab_storage::Result<()> {
+        if let Some(attempt) = self.edge_attempt() {
+            attempt.check_deadline()?;
+        }
+        Ok(())
+    }
 }
 
 impl CachingStore {
@@ -54,9 +91,16 @@ impl CachingStore {
         xorb_hash: &MerkleHash,
     ) -> Result<Vec<ChunkMeta>> {
         let _fill_guard = self.xorb_reads.lock(xorb_hash).await;
-        for source in [XorbSource::Local, XorbSource::Service, XorbSource::Origin] {
+        self.origin.check_cached_read(path).await?;
+        let edge = self.origin.cdn_attempt(path);
+        for source in [XorbSource::Local, XorbSource::Service]
+            .into_iter()
+            .chain(edge.as_ref().map(XorbSource::Cdn))
+            .chain([XorbSource::Origin(edge.as_ref())])
+        {
             match self.xorb_read_plan(path, xorb_hash, source).await {
                 Ok(Some(plan)) => {
+                    source.check_deadline()?;
                     self.observe_xorb_source(source, CacheReadOutcome::Hit, 0);
                     return Ok(plan.chunks);
                 }
@@ -84,12 +128,14 @@ impl CachingStore {
         if ranges.is_empty() {
             return Ok((Bytes::new(), vec![0]));
         }
+        self.origin.check_cached_read(path).await?;
         let key = XorbReadKey::new(*xorb_hash, ranges, install_full_xorb);
         if let Some(result) = key.as_ref().and_then(|key| self.xorb_reads.get(key)) {
             self.observe_cache_read(CacheSource::Memory, CacheReadOutcome::Hit, result.0.len());
             return Ok(result);
         }
         let _fill_guard = self.xorb_reads.lock(xorb_hash).await;
+        self.origin.check_cached_read(path).await?;
         if let Some(result) = key.as_ref().and_then(|key| self.xorb_reads.get(key)) {
             self.observe_cache_read(CacheSource::Memory, CacheReadOutcome::Hit, result.0.len());
             return Ok(result);
@@ -100,12 +146,18 @@ impl CachingStore {
 
         // An attempt never switches sources. A parser failure therefore has
         // a known owner, even when a cache disappears between metadata and payload.
-        for source in [XorbSource::Local, XorbSource::Service, XorbSource::Origin] {
+        let edge = self.origin.cdn_attempt(path);
+        for source in [XorbSource::Local, XorbSource::Service]
+            .into_iter()
+            .chain(edge.as_ref().map(XorbSource::Cdn))
+            .chain([XorbSource::Origin(edge.as_ref())])
+        {
             match self
                 .xorb_chunks_from_source(path, xorb_hash, ranges, source, install_full_xorb)
                 .await
             {
                 Ok(Some(result)) => {
+                    source.check_deadline()?;
                     self.observe_xorb_source(source, CacheReadOutcome::Hit, result.0.len());
                     if let Some(key) = key {
                         self.xorb_reads.insert(key, &result);
@@ -130,17 +182,24 @@ impl CachingStore {
         &self,
         path: &Path,
         xorb_hash: &MerkleHash,
-        source: XorbSource,
+        source: XorbSource<'_>,
         error: CacheStoreError,
     ) -> Result<()> {
         // Invalid requested chunk bounds are a caller error, not damaged cache.
-        if matches!(
-            &error,
-            CacheStoreError::Cache(CacheError::ChunkNotFound { .. })
-        ) {
+        if crab_storage::read_rejection(&error).is_some()
+            || matches!(
+                &error,
+                CacheStoreError::Cache(CacheError::ChunkNotFound { .. })
+            )
+        {
             return Err(error);
         }
-        if source == XorbSource::Origin {
+        if matches!(source, XorbSource::Cdn(_)) && matches!(error, CacheStoreError::Storage(_)) {
+            // The transport already classified recoverable edge failures as
+            // None. An error here cannot select another authorized source.
+            return Err(error);
+        }
+        if matches!(source, XorbSource::Origin(_)) {
             return Err(match error {
                 CacheStoreError::Cache(source) => CacheStoreError::OriginIntegrity {
                     path: path.to_string(),
@@ -153,14 +212,14 @@ impl CachingStore {
             family = "xorb",
             operation = "read-and-verify",
             path = %path,
-            cache_source = ?source,
+            cache_source = source.label(),
             recovery = "try-next-source",
             %error,
             "optional xorb cache read failed"
         );
         // Decoding outlives the local read handle. Reverify the current payload
         // under its removal lock; old bytes cannot authorize deleting a refill.
-        if source == XorbSource::Local
+        if matches!(source, XorbSource::Local)
             && let Err(error) = self.local_cache.evict_corrupt_xorb(xorb_hash).await
         {
             tracing::warn!(
@@ -180,12 +239,12 @@ impl CachingStore {
         path: &Path,
         xorb_hash: &MerkleHash,
         ranges: &[(u32, u32)],
-        source: XorbSource,
+        source: XorbSource<'_>,
         install_full_xorb: bool,
     ) -> Result<Option<(Bytes, Vec<u32>)>> {
         if !install_full_xorb {
             return self
-                .complete_xorb_ranges(path, xorb_hash, ranges, source, false)
+                .complete_xorb_ranges(path, xorb_hash, ranges, source, None, false)
                 .await;
         }
         let Some(plan) = self.xorb_read_plan(path, xorb_hash, source).await? else {
@@ -196,7 +255,7 @@ impl CachingStore {
             || requested_bytes.saturating_mul(2) >= plan.payload_len
         {
             return self
-                .complete_xorb_ranges(path, xorb_hash, ranges, source, true)
+                .complete_xorb_ranges(path, xorb_hash, ranges, source, plan.object_len, true)
                 .await;
         }
 
@@ -210,7 +269,13 @@ impl CachingStore {
             let payload_start = u64::from(first.offset);
             let payload_end = u64::from(last.offset) + u64::from(last.compressed_len);
             let Some(payload) = self
-                .xorb_range(path, xorb_hash, payload_start..payload_end, source)
+                .xorb_range(
+                    path,
+                    xorb_hash,
+                    payload_start..payload_end,
+                    source,
+                    plan.object_len,
+                )
                 .await?
             else {
                 return Ok(None);
@@ -225,7 +290,8 @@ impl CachingStore {
         path: &Path,
         xorb_hash: &MerkleHash,
         ranges: &[(u32, u32)],
-        source: XorbSource,
+        source: XorbSource<'_>,
+        object_len: Option<u64>,
         install: bool,
     ) -> Result<Option<(Bytes, Vec<u32>)>> {
         let data = match source {
@@ -237,9 +303,20 @@ impl CachingStore {
                 )
                 .await?
             }
-            XorbSource::Origin => Some(
-                self.origin
-                    .get_with_etag_bounded(path, MAX_XORB_SIZE as u64)
+            XorbSource::Cdn(edge) => {
+                let size = match object_len {
+                    Some(size) => size,
+                    None => source.read_origin(self.origin.head(path)).await?.size,
+                };
+                Self::validate_xorb_size(path, size)?;
+                edge.get(size, None).await?
+            }
+            XorbSource::Origin(_) => Some(
+                source
+                    .read_origin(
+                        self.origin
+                            .get_with_etag_bounded(path, MAX_XORB_SIZE as u64),
+                    )
                     .await?
                     .0,
             ),
@@ -257,10 +334,11 @@ impl CachingStore {
         }
         parser.verify_payload_digest().map_err(CacheError::from)?;
         let result = collect_full_xorb_ranges(&parser, ranges)?;
-        if install && source != XorbSource::Local {
+        if install && !matches!(source, XorbSource::Local) {
             // Validate at the source boundary before best-effort installation.
             // A local write/index failure cannot change a verified read result.
             parser.verify_all_chunks().map_err(CacheError::from)?;
+            source.check_deadline()?;
             if let Err(error) = self.local_cache.put_read_xorb(xorb_hash, data).await {
                 self.observe_local_write_failure();
                 tracing::warn!(
@@ -276,11 +354,15 @@ impl CachingStore {
         Ok(Some(result))
     }
 
-    fn observe_xorb_source(&self, source: XorbSource, outcome: CacheReadOutcome, bytes: usize) {
+    fn observe_xorb_source(&self, source: XorbSource<'_>, outcome: CacheReadOutcome, bytes: usize) {
         let source = match source {
             XorbSource::Local => CacheSource::Local,
             XorbSource::Service if self.cache_reads_enabled() => CacheSource::Service,
-            XorbSource::Service | XorbSource::Origin => return,
+            XorbSource::Cdn(_) => {
+                tracing::debug!(outcome = outcome.label(), bytes, "xorb CDN attempt");
+                return;
+            }
+            XorbSource::Service | XorbSource::Origin(_) => return,
         };
         self.observe_cache_read(source, outcome, bytes);
     }
@@ -289,7 +371,7 @@ impl CachingStore {
         &self,
         path: &Path,
         xorb_hash: &MerkleHash,
-        source: XorbSource,
+        source: XorbSource<'_>,
     ) -> Result<Option<XorbReadPlan>> {
         let object_len = match source {
             XorbSource::Local => {
@@ -300,6 +382,7 @@ impl CachingStore {
                     .map(|(chunks, payload_len)| XorbReadPlan {
                         chunks,
                         payload_len,
+                        object_len: None,
                     }));
             }
             XorbSource::Service => {
@@ -308,18 +391,20 @@ impl CachingStore {
                 };
                 head.size
             }
-            XorbSource::Origin => self.origin.head(path).await?.size,
-        };
-        if !(FOOTER_SIZE as u64..=MAX_XORB_SIZE as u64).contains(&object_len) {
-            return Err(CacheError::CorruptObject {
-                path: path.to_string(),
-                reason: format!("xorb size {object_len} is outside format bounds"),
+            XorbSource::Cdn(_) | XorbSource::Origin(_) => {
+                source.read_origin(self.origin.head(path)).await?.size
             }
-            .into());
-        }
+        };
+        Self::validate_xorb_size(path, object_len)?;
         let footer_start = object_len - FOOTER_SIZE as u64;
         let Some(footer) = self
-            .xorb_range(path, xorb_hash, footer_start..object_len, source)
+            .xorb_range(
+                path,
+                xorb_hash,
+                footer_start..object_len,
+                source,
+                Some(object_len),
+            )
             .await?
         else {
             return Ok(None);
@@ -328,7 +413,13 @@ impl CachingStore {
         let region = xorb_metadata_region(object_len, &footer).map_err(CacheError::from)?;
         let metadata_range = region.offset as u64..(region.offset + region.len) as u64;
         let Some(metadata) = self
-            .xorb_range(path, xorb_hash, metadata_range, source)
+            .xorb_range(
+                path,
+                xorb_hash,
+                metadata_range,
+                source,
+                Some(object_len as u64),
+            )
             .await?
         else {
             return Ok(None);
@@ -345,6 +436,7 @@ impl CachingStore {
         Ok(Some(XorbReadPlan {
             chunks,
             payload_len: region.offset as u64,
+            object_len: Some(object_len as u64),
         }))
     }
 
@@ -353,7 +445,8 @@ impl CachingStore {
         path: &Path,
         xorb_hash: &MerkleHash,
         range: Range<u64>,
-        source: XorbSource,
+        source: XorbSource<'_>,
+        object_len: Option<u64>,
     ) -> Result<Option<Bytes>> {
         match source {
             XorbSource::Local => Ok(self
@@ -364,8 +457,28 @@ impl CachingStore {
                 .range_get_cache_service_object(path, range)
                 .await?
                 .map(|result| result.data)),
-            XorbSource::Origin => Ok(Some(self.origin.range_get(path, range).await?)),
+            XorbSource::Cdn(edge) => {
+                let size = object_len.ok_or_else(|| {
+                    StorageError::Internal("CDN xorb range needs captured size".into())
+                })?;
+                Ok(edge.get(size, Some(range)).await?)
+            }
+            XorbSource::Origin(_) => Ok(Some(
+                source
+                    .read_origin(self.origin.range_get(path, range))
+                    .await?,
+            )),
         }
+    }
+    fn validate_xorb_size(path: &Path, object_len: u64) -> Result<()> {
+        if !(FOOTER_SIZE as u64..=MAX_XORB_SIZE as u64).contains(&object_len) {
+            return Err(CacheError::CorruptObject {
+                path: path.to_string(),
+                reason: format!("xorb size {object_len} is outside format bounds"),
+            }
+            .into());
+        }
+        Ok(())
     }
 }
 
@@ -536,6 +649,7 @@ impl XorbReadState {
 struct XorbReadPlan {
     chunks: Vec<ChunkMeta>,
     payload_len: u64,
+    object_len: Option<u64>,
 }
 
 fn requested_payload_bytes(chunks: &[ChunkMeta], ranges: &[(u32, u32)]) -> Result<u64> {

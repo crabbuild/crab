@@ -311,7 +311,7 @@ pub(crate) async fn read(
         let opened = if conditional {
             entry.revalidate(&server, &cancellation).await
         } else {
-            entry.open(&server, &cancellation).await
+            entry.open_read(&server, &cancellation).await
         };
         open_ms = timer.elapsed().as_secs_f64() * 1000.0;
         let opened = opened?;

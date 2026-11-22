@@ -1,0 +1,963 @@
+"""Validate one retained CDN qualification row for a real provider."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import re
+import subprocess
+import sys
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "deploy/cdn"))
+from public_inventory import ExportError, read_publication  # noqa: E402
+
+
+SCHEMA = "crab.cdn-qualification"
+PROVIDERS = {
+    "s3": ("cloudfront", "amazon-s3"),
+    "gcs": ("cloud-cdn", "google-cloud-storage"),
+    "azure": ("front-door", "azure-blob-storage"),
+}
+PROVIDER_FOR_EDGE = {edge: provider for provider, (edge, _) in PROVIDERS.items()}
+CONSUMERS = {"cli", "sdk", "desktop", "mount", "server", "s3-gateway"}
+FAMILIES = {"git", "lfs", "xorb", "capsule", "chunk-page", "shard"}
+COMMON_CHECKS = {
+    "exact_get",
+    "exact_range",
+    "mutable_route_denied",
+    "neighbor_route_denied",
+    "edge_route_policy",
+    "native_origin_read",
+    "origin_only_control",
+    "deployment_policy",
+    "rollback",
+    "cleanup",
+}
+DEPLOYMENT_POLICY_COMPONENTS = {
+    "cloudfront": {"distribution", "origin-access-control", "cache-policy", "viewer-controls", "viewer-function",
+                   "bucket-policy", "bucket-access", "viewer-key-ids"},
+    "cloud-cdn": {"https-route", "backend-cache", "viewer-policy", "bucket-access", "viewer-key-ids"},
+    "front-door": {"front-door-route", "viewer-policy", "blob-access", "viewer-key-ids"},
+}
+KEY_ROTATION_CHECK = "key_rotation"
+MAX_ROTATION_GRANT_SECONDS = 900
+VIEWER_KEY_ID = re.compile(r"[A-Za-z0-9_-]{1,90}")
+ROTATING_POLICY = {"cloudfront": "viewer-controls", "cloud-cdn": "backend-cache", "front-door": "viewer-policy"}
+TRACE_REQUEST_FIELDS = {"source", "status", "cache", "bytes", "elapsed_ms", "key_sha256"}
+EDGE_ROUTE_QUERY_PROBES = {
+    "cloudfront": {"version": "?versionId=null", "response_override": "?response-content-type=application%2Foctet-stream"},
+    "cloud-cdn": {"generation": "?generation=1", "response_override": "?response-content-type=application%2Foctet-stream"},
+    "front-door": {"version": "?versionid=1970-01-01T00%3A00%3A00.0000000Z",
+                   "snapshot": "?snapshot=1970-01-01T00%3A00%3A00.0000000Z",
+                   "response_override": "?rsct=application%2Foctet-stream"},
+}
+EXPIRY_RANGE_CHECK = "expired_parallel_range_denied"
+EXPIRY_RANGE_FIELDS = {"range_offset", "started_at_unix_us", "finished_at_unix_us"}
+EXPIRY_SETTLE_SECONDS = 2
+WARM_DENIAL_CHECKS = {
+    "warm_anonymous_viewer_denied",
+    "warm_expired_viewer_denied",
+    "warm_unrelated_principal_denied",
+}
+PRIVATE_CHECKS = WARM_DENIAL_CHECKS | {
+    "primary_and_second_principal",
+    "private_origin_denied",
+    KEY_ROTATION_CHECK,
+    "authorized_cache_reuse",
+    EXPIRY_RANGE_CHECK,
+    "scoped_view_isolation",
+}
+PUBLIC_EXPORT_CHECK = "approved_public_export"
+PUBLIC_EXPORT_DIR = "public-export"
+PUBLIC_EXPORT_FILES = ("inventory.json", "publication.json")
+PUBLIC_CHECKS = {PUBLIC_EXPORT_CHECK, "live_origin_denied", "export_origin_access", "public_listing_denied"}
+CLEANUP_INVENTORIES = {
+    "cloudfront": ({"versions_and_delete_markers": "empty"},),
+    "cloud-cdn": ({"generations": "empty", "soft_deleted": "empty"},
+                  {"generations": "empty", "soft_deleted": "disabled"}),
+    "front-door": ({"blobs": "empty", "soft_deleted": "empty"}, {"versions_and_snapshots": "empty"}),
+}
+ARMS = ("origin", "cold_edge", "warm_edge", "warm_local")
+METRICS = {
+    "elapsed_ms",
+    "client_bytes",
+    "origin_gets",
+    "origin_fill_bytes",
+    "edge_hits",
+    "edge_misses",
+    "edge_unknown",
+    "edge_bytes",
+    "local_payload_hits",
+    "rejected_bytes",
+    "peak_memory_bytes",
+    "peak_disk_bytes",
+    "cost_microusd",
+}
+GIT_BENCHMARK_DIR = "git-benchmarks"
+GIT_PRODUCT_DIR = "git-product"
+GIT_PAYLOAD_SIZE = 256 * 1024
+GIT_OID = re.compile(r"[0-9a-f]{40}")
+GIT_TEST_REF = re.compile(r"refs/heads/crab-cdn-qualification-[1-9][0-9]{0,19}-[1-9][0-9]{0,19}-[0-9a-f]{12}")
+CDN_PROVENANCE_FIELDS = {"source_sha", "scope", "configuration_sha256", "workflow_run_id", "workflow_run_attempt"}
+GIT_PUBLICATION_FIELDS = CDN_PROVENANCE_FIELDS | {"schema", "ref", "oid", "sha256", "published", "visible_at_unix_ms"}
+GIT_RETIREMENT_FIELDS = CDN_PROVENANCE_FIELDS | {"schema", "publication_sha256", "ref_retired", "retired_at_unix_ms"}
+PRODUCT_COUNTERS = {
+    "edge_attempts", "observed_edge_gets", "edge_bytes", "edge_hits", "edge_misses", "edge_unknown",
+    "incomplete_edge_bytes", "edge_elapsed_ms_total", "verified_edge_payloads", "all_edge_attempts", "local_payload_hits",
+}
+GIT_CLIENT_METRICS = {"elapsed_ms", "edge_hits", "edge_misses", "edge_unknown", "edge_bytes", "local_payload_hits"}
+GIT_EXTERNAL_METRICS = METRICS - GIT_CLIENT_METRICS
+GIT_MEASUREMENT_FIELDS = GIT_EXTERNAL_METRICS | {"schema", "client_report_sha256", "provider", "region"}
+GIT_FETCH_FIELDS = PRODUCT_COUNTERS | CDN_PROVENANCE_FIELDS | {
+    "schema", "name", "arm", "expected_sha256", "observed_sha256", "expected_bytes", "observed_bytes",
+    "native_writes", "visible_new_ref", "elapsed_ms", "publication_oid", "started_at_unix_ms", "finished_at_unix_ms",
+    "platform", "publication_sha256",
+}
+GIT_MODES = {"origin": "origin", "cold_edge": "edge", "warm_edge": "edge", "warm_local": "warm_local"}
+SHA256 = re.compile(r"[0-9a-f]{64}")
+COMMIT = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
+RUN_NUMBER = re.compile(r"[1-9][0-9]{0,19}")
+LABEL = re.compile(r"[a-z0-9][a-z0-9_.-]{0,79}")
+PREFIX = re.compile(r"crab-cdn-qualification/[a-z0-9][a-z0-9-]{0,79}")
+CLI_PLATFORMS = (
+    "darwin-aarch64", "darwin-x86_64", "linux-aarch64", "linux-x86_64",
+    "windows-aarch64", "windows-x86_64",
+)
+DESKTOP_PLATFORMS = ("darwin-aarch64", "darwin-x86_64", "linux-aarch64", "linux-x86_64", "windows-x86_64")
+
+
+class CdnEvidenceError(ValueError):
+    """The retained evidence does not qualify this release row."""
+
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise CdnEvidenceError(message)
+
+
+def fields(value: Any, names: set[str], where: str) -> dict[str, Any]:
+    require(isinstance(value, dict) and value.keys() == names, f"invalid fields in {where}")
+    return value
+
+
+def matches(pattern: re.Pattern[str], value: Any) -> bool:
+    return isinstance(value, str) and pattern.fullmatch(value) is not None
+
+
+def positive(value: Any) -> bool:
+    return type(value) is int and value > 0
+
+
+def unique_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result = dict(pairs)
+    require(len(result) == len(pairs), "duplicate evidence field")
+    return result
+
+
+def decode(raw: bytes) -> Any:
+    return json.loads(raw, object_pairs_hook=unique_fields)
+
+
+def scope_parts(scope: str) -> tuple[str, str, str, str, str]:
+    parts = scope.split("/")
+    require(len(parts) == 5, "expected CDN scope provider/access/consumer/read-family/profile")
+    edge, access, consumer, family, profile = parts
+    require(edge in PROVIDER_FOR_EDGE and access in {"private", "public"} and consumer in CONSUMERS
+            and family in FAMILIES and profile in {"direct", "managed"}, "invalid CDN qualification scope")
+    require(access != "public" or (family in {"git", "capsule", "lfs"} and profile == "direct"),
+            "public qualification requires direct Git, capsule, or LFS delivery")
+    return edge, access, consumer, family, profile
+
+
+def release_scopes(path: Path) -> set[str]:
+    """Read the same exact scope rows that the Rust build embeds."""
+    scopes = set()
+    for line in path.read_bytes().decode("utf-8").replace("\r\n", "\n").split("\n"):
+        if not line or line.startswith("#"):
+            continue
+        scope_parts(line)
+        require(line not in scopes, f"duplicate CDN release scope: {line}")
+        scopes.add(line)
+    return scopes
+
+
+def required_platform_rows(scopes: set[str]) -> set[str]:
+    rows = set()
+    for scope in scopes:
+        _, _, consumer, _, _ = scope_parts(scope)
+        # The embedded policy is active on every published platform for the
+        # product. Other consumers currently qualify on Linux x86_64.
+        platforms = {
+            "cli": CLI_PLATFORMS, "mount": CLI_PLATFORMS, "desktop": DESKTOP_PLATFORMS,
+        }.get(consumer, ("linux-x86_64",))
+        rows.update(f"{scope}/{platform}" for platform in platforms)
+    return rows
+
+
+def verify_bundle_row(
+    directory: Path, row: str, registration: Any, source: str, run_id: str, attempt: str,
+    *, policy: Path | None = None,
+) -> None:
+    scope, platform = row.rsplit("/", 1)
+    edge, _, _, _, _ = scope_parts(scope)
+    provider = PROVIDER_FOR_EDGE[edge]
+    require(matches(LABEL, platform), "invalid CDN qualification platform")
+    require(isinstance(registration, dict), f"missing approved CDN benchmark registration for {row}")
+    configuration = registration.get("configuration_sha256")
+    require(matches(SHA256, configuration), f"invalid CDN configuration digest for {row}")
+    with TemporaryDirectory(prefix="crab-cdn-benchmark-") as temporary:
+        benchmark = Path(temporary) / "registration.json"
+        benchmark.write_text(json.dumps(registration), encoding="utf-8")
+        command = [
+            sys.executable, str(Path(__file__).with_name("verify-provider-qualification-report.py")),
+            str(directory / provider / "report.json"), "--provider", provider, "--source-sha", source,
+            "--run-id", run_id, "--run-attempt", attempt,
+            "--cdn-report", str(directory / row / "cdn-report.json"), "--cdn-scope", scope,
+            "--cdn-configuration-sha256", configuration, "--cdn-platform", platform,
+            "--cdn-benchmark-registration", str(benchmark),
+        ]
+        if policy is not None:
+            command.extend(("--cdn-release-policy", str(policy)))
+        subprocess.run(command, check=True)
+
+
+def required_check_names(access: str, profile: str) -> set[str]:
+    required = COMMON_CHECKS | (PRIVATE_CHECKS if access == "private" else PUBLIC_CHECKS)
+    if profile == "managed":
+        required |= {"managed_v2_issuer"}
+    return required
+
+
+def read_trace(path: Path, name: str) -> bytes:
+    with path.open("rb") as trace_file:
+        raw = trace_file.read(256 * 1024 + 1)
+    require(len(raw) <= 256 * 1024, f"trace artifact is too large: {name}")
+    return raw
+
+
+def verify_cleanup_trace(value: Any, report: dict[str, Any], edge: str, access: str) -> int:
+    trace = fields(value, CDN_PROVENANCE_FIELDS | {"schema", "check", "prefix_sha256", "targets", "observed_at_unix_ms"},
+                   "cleanup inventory trace")
+    require(trace["schema"] == "crab.cdn-cleanup-trace/v1" and trace["check"] == "cleanup"
+            and all(trace[key] == report[key] for key in CDN_PROVENANCE_FIELDS), "trace provenance mismatch: cleanup")
+    prefix = (report["fixture_prefix"] + "/").encode()
+    require(trace["prefix_sha256"] == hashlib.sha256(prefix).hexdigest() and positive(trace["observed_at_unix_ms"]),
+            "cleanup inventory must observe the approved fixture prefix")
+    roles = {"native", "export"} if access == "public" else {"native"}
+    targets = fields(trace["targets"], roles, "cleanup targets")
+    origins = set()
+    for target in targets.values():
+        observed = fields(target, {"origin_sha256", "inventories"}, "cleanup target")
+        require(matches(SHA256, observed["origin_sha256"]) and observed["inventories"] in CLEANUP_INVENTORIES[edge],
+                "cleanup requires completed empty native inventories for the selected provider")
+        origins.add(observed["origin_sha256"])
+    require(len(origins) == len(roles), "cleanup must check the live origin and export independently")
+    return trace["observed_at_unix_ms"]
+
+
+def deployment_component_digest(value: Any) -> str:
+    canonical = json.dumps(value, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def deployment_component_names(edge: str, access: str) -> set[str]:
+    return DEPLOYMENT_POLICY_COMPONENTS[edge] | ({"public-export"} if access == "public" else {"private-binding"})
+
+
+def deployment_policy_digest(edge: str, access: str, components: Any) -> str:
+    require(isinstance(components, dict) and components.keys() == deployment_component_names(edge, access),
+            "deployment policy components are incomplete")
+    require(all(matches(SHA256, digest) for digest in components.values()), "deployment policy requires redacted component digests")
+    return deployment_component_digest({"edge": edge, "access": access, "components": components})
+
+
+def public_export_binding(fixture: dict[str, Any], deployment: str, inventory_sha256: str) -> dict[str, str]:
+    return {"source_origin": fixture["native_origin"], "export_origin": fixture["export_origin"],
+            "repository_prefix": fixture["fixture_prefix"], "base_url": fixture["base_url"].rstrip("/"),
+            "deployment": deployment, "inventory_sha256": inventory_sha256}
+
+
+def verify_deployment_policy_trace(value: Any, report: dict[str, Any], edge: str, access: str, expected: str) -> None:
+    provenance = {"source_sha", "scope", "configuration_sha256", "workflow_run_id", "workflow_run_attempt"}
+    trace = fields(value, provenance | {"schema", "components", "deployment_policy_sha256"}, "deployment policy trace")
+    require(trace["schema"] == "crab.cdn-deployment-policy/v1" and all(trace[key] == report[key] for key in provenance),
+            "deployment policy trace must match the release scope, configuration and workflow attempt")
+    actual = deployment_policy_digest(edge, access, trace["components"])
+    require(trace["deployment_policy_sha256"] == actual == expected,
+            "observed deployment policy differs from the approved policy")
+
+
+def verify_key_rotation(value: Any, report: dict[str, Any], edge: str, approved_policy: str) -> tuple[str, int]:
+    trace = fields(value, CDN_PROVENANCE_FIELDS | {"schema", "grants", "policies", "requests"},
+                   "viewer key rotation trace")
+    require(trace["schema"] == "crab.cdn-key-rotation/v1"
+            and all(trace[key] == report[key] for key in CDN_PROVENANCE_FIELDS),
+            "viewer key rotation must match the release scope, configuration and workflow attempt")
+    roles = ("retired", "replacement")
+    grants = fields(trace["grants"], set(roles), "viewer key rotation grants")
+    keys = []
+    for role in roles:
+        grant = fields(grants[role], {"key_id", "expires_at_unix"}, "rotation grant")
+        require(matches(VIEWER_KEY_ID, grant["key_id"]) and positive(grant["expires_at_unix"]),
+                "rotation grant needs a valid signer and signed expiration")
+        keys.append(grant["key_id"])
+    require(keys[0] != keys[1], "rotation requires two distinct viewer keys")
+
+    phases = ("overlap", "retired", "confirmed")
+    policies = fields(trace["policies"], set(phases), "viewer key rotation policies")
+    for phase in phases:
+        snapshot = fields(policies[phase], {"observed_at_unix_us", "components"}, "rotation policy snapshot")
+        components = snapshot["components"]
+        digest = deployment_policy_digest(edge, "private", components)
+        expected_keys = sorted(keys) if phase == "overlap" else [keys[1]]
+        require(positive(snapshot["observed_at_unix_us"]) and
+                components["viewer-key-ids"] == deployment_component_digest(expected_keys),
+                "rotation policy must attest the expected deployed key IDs")
+        if phase != "overlap":
+            require(digest == approved_policy, "rotated policy differs from the approved deployment")
+    overlap_start = policies["overlap"]["observed_at_unix_us"]
+    require(all(grant["expires_at_unix"] * 1_000_000 - overlap_start <= MAX_ROTATION_GRANT_SECONDS * 1_000_000
+                for grant in grants.values()), "rotation requires short-lived viewer grants")
+    for component in deployment_component_names(edge, "private") - {ROTATING_POLICY[edge], "viewer-key-ids"}:
+        require(policies["overlap"]["components"][component] == policies["retired"]["components"][component],
+                "deployment changed outside viewer signing controls during rotation")
+
+    requests = trace["requests"]
+    expected = [
+        ("overlap", "retired", "full", (200,)),
+        ("overlap", "replacement", "full", (200,)),
+        ("retired", "replacement", "full", (200,)),
+        ("retired", "retired", "full", (401, 403)),
+        ("retired", "retired", "range", (401, 403)),
+        ("retired", "replacement", "full", (200,)),
+    ]
+    require(isinstance(requests, list) and len(requests) == len(expected), "key rotation needs all six ordered edge probes")
+    key, size = None, None
+    previous = 0
+    for request, (phase, role, read, statuses) in zip(requests, expected):
+        row = fields(request, TRACE_REQUEST_FIELDS | {
+            "phase", "signer", "read", "started_at_unix_us", "finished_at_unix_us",
+        }, "rotation request")
+        start, end = row["started_at_unix_us"], row["finished_at_unix_us"]
+        next_phase = "retired" if phase == "overlap" else "confirmed"
+        require((row["phase"], row["signer"], row["read"], row["source"]) == (phase, role, read, "edge")
+                and type(row["status"]) is int and row["status"] in statuses and matches(SHA256, row["key_sha256"])
+                and type(row["elapsed_ms"]) is int and row["elapsed_ms"] >= 0
+                and positive(start) and positive(end) and previous <= start <= end
+                and policies[phase]["observed_at_unix_us"] <= start
+                and end <= policies[next_phase]["observed_at_unix_us"]
+                and end < grants[role]["expires_at_unix"] * 1_000_000,
+                "rotation probes must match the deployed phase and complete before the tested grant expires")
+        previous = end
+        if key is None:
+            key, size = row["key_sha256"], row["bytes"]
+            require(type(size) is int and size > 1, "rotation needs a complete range-capable object")
+        require(row["key_sha256"] == key and type(row["bytes"]) is int, "rotation must use the same object")
+        if row["status"] == 200:
+            require(row["bytes"] == size and row["cache"] in ("hit", "miss", "unknown")
+                    and (phase == "overlap" or row["cache"] == "hit"),
+                    "replacement viewer must receive the complete warm object around retired key denial")
+        else:
+            require(row["bytes"] == 0 and row["cache"] in ("miss", "unknown"),
+                    "the retired viewer key must receive no cached content")
+    return key, size
+
+
+def verify_public_export(
+    directory: Path, report: dict[str, Any], registration: dict[str, Any], policy: dict[str, Any],
+    reads: dict[str, list[dict[str, Any]]], native_reads: set[str], cleanup_targets: dict[str, Any],
+) -> None:
+    root = directory / PUBLIC_EXPORT_DIR
+    require(root.is_dir() and not root.is_symlink(), "public qualification needs retained publication inputs")
+    require(all((root / name).is_file() and not (root / name).is_symlink() for name in PUBLIC_EXPORT_FILES),
+            "public qualification needs the exact approved inventory and publication receipt")
+    try:
+        binding, entries = read_publication(root, registration["publication_sha256"])
+    except (ExportError, ValueError, OSError) as error:
+        raise CdnEvidenceError(f"invalid public export publication evidence: {error}") from None
+    require(binding["repository_prefix"] == report["fixture_prefix"]
+            and policy["components"]["public-export"] == deployment_component_digest(binding),
+            "publication receipt must match the attested public export and approved repository")
+    require(all(
+        cleanup_targets[role]["origin_sha256"] == hashlib.sha256(binding[origin].encode()).hexdigest()
+        for role, origin in (("native", "source_origin"), ("export", "export_origin"))
+    ), "public cleanup must cover the source and destination of the approved publication")
+    observations = reads[PUBLIC_EXPORT_CHECK]
+    require(len(observations) == 1, "public export needs one complete verified edge observation")
+    read = observations[0]
+    require(read["source"] == "edge" and read["status"] == 200 and positive(read["bytes"])
+            and matches(SHA256, read["body_sha256"]), "public export needs the actual full edge body digest")
+    key = read["key_sha256"]
+    family = scope_parts(report["scope"])[3]
+    for entry in entries:
+        path = f"{binding['repository_prefix']}/{entry.path}"
+        if hashlib.sha256(path.encode()).hexdigest() == key:
+            observed_family = ("git" if entry.path.startswith("v2/pack-layers/")
+                               else "lfs" if entry.path.startswith("lfs/objects/") else "capsule")
+            require(entry.sha256 == read["body_sha256"] and entry.size == read["bytes"] and family == observed_family,
+                    "verified edge object differs from the approved publication entry or read family")
+            break
+    else:
+        raise CdnEvidenceError("verified edge object is absent from the approved publication")
+    full_observation = {name: read[name] for name in TRACE_REQUEST_FIELDS}
+    require(key in native_reads
+            and full_observation in reads["exact_get"]
+            and any(row["key_sha256"] == key for row in reads["live_origin_denied"])
+            and any(row["key_sha256"] == key for row in reads["export_origin_access"])
+            and all(row["key_sha256"] == key for row in reads["edge_route_policy"])
+            and any(row["key_sha256"] == key and row["source"] == "edge"
+                    and row["status"] == 206 and 0 < row["bytes"] < read["bytes"] for row in reads["exact_range"]),
+            "public export proof must cover the same edge, native, and export object")
+
+
+def verify_check_evidence(
+    report: dict[str, Any], edge: str, access: str, profile: str, directory: Path, *, registration: dict[str, Any],
+) -> tuple[int, int]:
+    required = required_check_names(access, profile)
+    checks = fields(report["checks"], required, "checks")
+    origin_denial = "private_origin_denied" if access == "private" else "live_origin_denied"
+    fixture_checks = WARM_DENIAL_CHECKS | {
+        "exact_get", "exact_range", "edge_route_policy", "native_origin_read", origin_denial, "export_origin_access",
+        EXPIRY_RANGE_CHECK, PUBLIC_EXPORT_CHECK,
+    }
+    fixture_reads = {}
+    cleanup_at = 0
+    cleanup_targets = {}
+    rotation_key = None
+    policy = {}
+    deployment_policy_sha256 = registration["deployment_policy_sha256"]
+    for name, value in checks.items():
+        check = fields(value, {"passed", "trace_sha256"}, name)
+        require(check["passed"] is True, f"required check failed: {name}")
+        raw = read_trace(directory / "traces" / f"{name}.json", name)
+        require(
+            matches(SHA256, check["trace_sha256"])
+            and check["trace_sha256"] == hashlib.sha256(raw).hexdigest(),
+            f"trace digest mismatch: {name}",
+        )
+        decoded = decode(raw)
+        if name == "cleanup":
+            cleanup_at = verify_cleanup_trace(decoded, report, edge, access)
+            cleanup_targets = decoded["targets"]
+            continue
+        if name == "deployment_policy":
+            verify_deployment_policy_trace(decoded, report, edge, access, deployment_policy_sha256)
+            policy = decoded
+            continue
+        if name == KEY_ROTATION_CHECK:
+            rotation_key = verify_key_rotation(decoded, report, edge, deployment_policy_sha256)
+            continue
+        trace_fields = {"schema", "source_sha", "scope", "configuration_sha256",
+                        "workflow_run_id", "workflow_run_attempt", "check", "requests"}
+        if name == EXPIRY_RANGE_CHECK:
+            trace_fields.add("viewer_expires_at_unix")
+        trace = fields(decoded, trace_fields, name)
+        require(trace["schema"] == "crab.cdn-trace/v1" and trace["check"] == name and all(
+            trace[key] == report[key] for key in (
+                "source_sha", "scope", "configuration_sha256", "workflow_run_id", "workflow_run_attempt",
+            )
+        ), f"trace provenance mismatch: {name}")
+        requests = trace["requests"]
+        require(isinstance(requests, list) and requests, f"trace has no observations: {name}")
+        request_fields = TRACE_REQUEST_FIELDS.copy()
+        if name == "edge_route_policy":
+            request_fields.add("probe")
+        if name == PUBLIC_EXPORT_CHECK:
+            request_fields.add("body_sha256")
+        if name == EXPIRY_RANGE_CHECK:
+            request_fields.update(EXPIRY_RANGE_FIELDS)
+        for value in requests:
+            request = fields(value, request_fields, f"{name} request")
+            require(request["source"] in ("edge", "origin")
+                    and request["cache"] in ("hit", "miss", "unknown")
+                    and type(request["status"]) is int and 100 <= request["status"] <= 599
+                    and type(request["bytes"]) is int and request["bytes"] >= 0
+                    and type(request["elapsed_ms"]) is int and request["elapsed_ms"] >= 0,
+                    f"invalid trace observation: {name}")
+            require(matches(SHA256, request["key_sha256"]), f"invalid trace key fingerprint: {name}")
+        verify_trace_observations(name, requests)
+        if name == EXPIRY_RANGE_CHECK:
+            verify_expiry_range_window(requests, trace["viewer_expires_at_unix"])
+        if name in fixture_checks:
+            fixture_reads[name] = requests
+    full_sizes = {}
+    for row in fixture_reads["exact_get"]:
+        if row["source"] == "edge" and row["status"] == 200:
+            key = row["key_sha256"]
+            full_sizes[key] = max(full_sizes.get(key, 0), row["bytes"])
+    require(any(row["source"] == "edge" and row["status"] == 206
+                and 0 < row["bytes"] < full_sizes.get(row["key_sha256"], 0)
+                for row in fixture_reads["exact_range"]),
+            "exact range and full GET must observe the same edge object")
+    verify_edge_route_policy(fixture_reads["edge_route_policy"], edge, access, full_sizes)
+    if access == "private":
+        key, size = rotation_key
+        require(full_sizes.get(key) == size, "rotation must probe the same complete object verified by exact GET")
+        expired = fixture_reads["warm_expired_viewer_denied"][0]
+        require(fixture_reads[EXPIRY_RANGE_CHECK][0]["key_sha256"] == expired["key_sha256"],
+                "expired parallel ranges must probe the same warm object")
+        for name in sorted(WARM_DENIAL_CHECKS):
+            warm = fixture_reads[name][0]
+            require(full_sizes.get(warm["key_sha256"]) == warm["bytes"],
+                    f"warm denial must probe the complete object verified by exact GET: {name}")
+    native_reads = {row["key_sha256"] for row in fixture_reads["native_origin_read"]
+                    if row["source"] == "origin" and row["status"] == 200
+                    and row["cache"] == "unknown"
+                    and row["bytes"] == full_sizes.get(row["key_sha256"], 0) > 0}
+    require(any(row["key_sha256"] in native_reads for row in fixture_reads[origin_denial]),
+            "anonymous origin denial needs a verified native read of the same complete edge object")
+    if access == "public":
+        export = fixture_reads["export_origin_access"]
+        if edge == "cloudfront":
+            require(all(anonymous_origin_denial(row) for row in export),
+                    "the S3 export must deny anonymous object reads")
+        else:
+            require(all(row["source"] == "origin" and row["status"] == 200 and row["cache"] == "unknown"
+                        and row["bytes"] == full_sizes.get(row["key_sha256"], 0) > 0 for row in export),
+                    "the public export must serve the complete approved object")
+        require(any(row["key_sha256"] in native_reads for row in export),
+                "export access must use the same object key as the live source")
+        verify_public_export(directory, report, registration, policy, fixture_reads, native_reads, cleanup_targets)
+    return len(checks), cleanup_at
+
+
+def anonymous_origin_denial(row: dict[str, Any]) -> bool:
+    return row["source"] == "origin" and row["status"] in (401, 403) and row["cache"] == "unknown" and row["bytes"] == 0
+
+
+def edge_head_denials(edge: str, access: str) -> tuple[int, ...]:
+    # API Management can reject HEAD at operation matching, before policy evaluation.
+    return (401, 403, 404, 405) if (edge, access) == ("front-door", "private") else (401, 403, 405)
+
+
+def edge_route_probe_names(edge: str) -> list[str]:
+    return ["warm_before", "head", *EDGE_ROUTE_QUERY_PROBES[edge], "warm_after"]
+
+
+def verify_edge_route_policy(
+    requests: list[dict[str, Any]], edge: str, access: str, full_sizes: dict[str, int],
+) -> None:
+    require([row["probe"] for row in requests] == edge_route_probe_names(edge), "edge route policy trace lacks required probes")
+    first, method, *queries, last = requests
+    key = first["key_sha256"]
+    require(all(row["source"] == "edge" and row["key_sha256"] == key for row in requests)
+            and all(row["status"] == 200 and row["cache"] == "hit"
+                    and 0 < row["bytes"] == full_sizes.get(key) for row in (first, last)),
+            "edge route policy requires same-object cache hits before and after denials")
+    require(method["status"] in edge_head_denials(edge, access) and method["bytes"] == 0,
+            "edge route policy must deny HEAD on the approved object")
+    require(all(row["status"] in (401, 403) and row["bytes"] == 0 for row in queries),
+            "edge route policy must deny version, snapshot, and response override queries")
+
+
+def verify_expiry_range_window(requests: list[dict[str, Any]], expires_at: int) -> None:
+    require(positive(expires_at) and len(requests) == 4
+            and all(type(row["range_offset"]) is int for row in requests)
+            and [row["range_offset"] for row in requests] == [0, 1, 0, 1],
+            "parallel expiry needs two distinct byte ranges on each side of expiry")
+    start, end = "started_at_unix_us", "finished_at_unix_us"
+    require(all(row["source"] == "edge" and row["key_sha256"] == requests[0]["key_sha256"]
+                and positive(row[start]) and positive(row[end]) and row[start] < row[end] for row in requests),
+            "parallel expiry ranges need valid intervals on the same edge object")
+    before, after = requests[:2], requests[2:]
+    require(all(max(row[start] for row in group) < min(row[end] for row in group) for group in (before, after)),
+            "parallel expiry range requests must overlap in each phase")
+    expiration = expires_at * 1_000_000
+    require(all(row[end] < expiration and row["status"] == 206 and row["bytes"] == 1 for row in before),
+            "parallel ranges must return the approved bytes before the viewer grant expires")
+    settled = (expires_at + EXPIRY_SETTLE_SECONDS) * 1_000_000
+    require(all(row[start] >= settled and row["status"] in (401, 403) and row["bytes"] == 0
+                for row in after), "parallel ranges must be denied after the viewer grant expires")
+
+
+def verify_trace_observations(name: str, requests: list[dict[str, Any]]) -> None:
+    successful = {"exact_get": ("edge", 200), "exact_range": ("edge", 206),
+                  "native_origin_read": ("origin", 200), "origin_only_control": ("origin", 200)}
+    if name in successful:
+        require(any((row["source"], row["status"]) == successful[name] and row["bytes"] > 0
+                    for row in requests), f"positive read evidence missing: {name}")
+    if name == "origin_only_control":
+        require(all(row["source"] == "origin" for row in requests),
+                "origin-only control observed edge traffic")
+    if name == "primary_and_second_principal":
+        require(ordered_full_reads(requests, ("edge", None), ("edge", "hit")),
+                "the second principal requires a cache hit on the same complete object")
+    if name == "authorized_cache_reuse":
+        require(ordered_full_reads(requests, ("edge", "miss"), ("edge", "hit")),
+                "cache reuse requires a miss followed by a hit for the same complete object")
+    if name == "rollback":
+        require(ordered_full_reads(requests, ("edge", None), ("origin", None)),
+                "rollback requires an edge read followed by a native read of the same complete object")
+    if name in {"private_origin_denied", "live_origin_denied", "public_listing_denied"}:
+        require(all(anonymous_origin_denial(row) for row in requests), f"authorization denial evidence missing: {name}")
+    if name in {"mutable_route_denied", "neighbor_route_denied", "scoped_view_isolation"}:
+        require(any(row["source"] == "edge" and row["status"] in (401, 403) for row in requests),
+                f"authorization denial evidence missing: {name}")
+    if name in WARM_DENIAL_CHECKS:
+        verify_warm_denial(name, requests)
+
+
+def verify_warm_denial(name: str, requests: list[dict[str, Any]]) -> None:
+    if name == "warm_unrelated_principal_denied":
+        verify_unrelated_viewer_denial(requests)
+        return
+    anonymous = name == "warm_anonymous_viewer_denied"
+    require(len(requests) == (4 if anonymous else 2), f"authorized warm hit evidence missing before same-key denial: {name}")
+    warm = requests[0]
+    require(warm["status"] == 200 and warm["cache"] == "hit" and warm["bytes"] > 0
+            and all(row["source"] == "edge" and row["key_sha256"] == warm["key_sha256"] for row in requests),
+            f"authorized warm hit evidence missing before same-key denial: {name}")
+    denials = requests[1:3] if anonymous else requests[1:]
+    require(all(row["status"] in (401, 403) and row["bytes"] == 0 for row in denials),
+            f"authorization denial evidence missing: {name}")
+    if anonymous:
+        after = requests[3]
+        require(after["status"] == 200 and after["cache"] == "hit" and after["bytes"] == warm["bytes"],
+                "authorized warm hit evidence missing after anonymous denial")
+
+
+def verify_unrelated_viewer_denial(requests: list[dict[str, Any]]) -> None:
+    require(len(requests) == 6 and all(row["source"] == "edge" for row in requests),
+            "unrelated viewer denial requires six edge observations")
+    warm, control_before, denied, denied_range, control_after, confirmed = requests
+    key, size = warm["key_sha256"], warm["bytes"]
+    require(all(row["status"] == 200 and row["cache"] == "hit" and row["bytes"] == size > 0
+                and row["key_sha256"] == key for row in (warm, confirmed)),
+            "unrelated viewer denial requires full cache hits of the same target")
+    require(all(row["status"] in (401, 403) and row["bytes"] == 0 and row["key_sha256"] == key
+                for row in (denied, denied_range)),
+            "unrelated viewer must be denied a full and ranged GET of the warm target")
+    control_key, control_size = control_before["key_sha256"], control_before["bytes"]
+    require(control_key != key and all(row["status"] == 200 and row["bytes"] == control_size > 0
+                                      and row["key_sha256"] == control_key for row in (control_before, control_after)),
+            "unrelated viewer must read the same distinct control object before and after denial")
+
+
+def ordered_full_reads(
+    requests: list[dict[str, Any]], before: tuple[str, str | None], after: tuple[str, str | None],
+) -> bool:
+    previous = set()
+    for row in requests:
+        if row["status"] != 200 or row["bytes"] == 0:
+            continue
+        identity = (row["key_sha256"], row["bytes"])
+        source, cache = row["source"], row["cache"]
+        if identity in previous and source == after[0] and (after[1] is None or cache == after[1]):
+            return True
+        if source == before[0] and (before[1] is None or cache == before[1]):
+            previous.add(identity)
+    return False
+
+
+def verify_product_action(value: Any, family: str) -> None:
+    required = {
+        "name", "expected_sha256", "observed_sha256", "expected_bytes", "observed_bytes",
+        "native_writes", "observed_edge_gets", "visible_new_ref", "fixture_cleanup_verified",
+    }
+    git_payload_required = family in {"git", "capsule"}
+    if git_payload_required:
+        required.add("verified_edge_payloads")
+    action = fields(value, required, "product action")
+    require(matches(LABEL, action["name"]), "invalid product action name")
+    require(
+        matches(SHA256, action["expected_sha256"])
+        and action["expected_sha256"] == action["observed_sha256"]
+        and positive(action["expected_bytes"]) and positive(action["observed_bytes"])
+        and action["expected_bytes"] == action["observed_bytes"],
+        "product action did not reconstruct the expected bytes",
+    )
+    require(positive(action["native_writes"]) and positive(action["observed_edge_gets"]),
+            "product action must prove a native write and a CDN GET")
+    if git_payload_required:
+        require(positive(action["verified_edge_payloads"]), "product action accepted no verified edge Git payload")
+    require(action["visible_new_ref"] is True and action["fixture_cleanup_verified"] is True,
+            "product action must prove immediate ref visibility and fixture cleanup")
+
+
+def median_savings_lower_bound(savings: list[int]) -> int:
+    # Exact sign interval for paired median savings. Use the largest rank
+    # whose lower tail has probability <= 2.5% for a two-sided 95% interval.
+    ordered = sorted(savings)
+    count = len(savings)
+    tail = 0
+    rank = 0
+    for index in range(count // 2):
+        tail += math.comb(count, index)
+        if tail * 40 > 2 ** count:
+            break
+        rank = index
+    return ordered[rank]
+
+
+def benchmark_registration(registration: Any) -> dict[str, Any]:
+    expected = {
+        "schema", "source_sha", "scope", "configuration_sha256", "workload", "samples", "p95_budget_ms",
+        "cost_budget_microusd", "regions", "deployment_policy_sha256",
+    }
+    require(isinstance(registration, dict) and isinstance(registration.get("scope"), str), "benchmark needs a CDN scope")
+    if scope_parts(registration["scope"])[1] == "public":
+        expected.add("publication_sha256")
+        require(matches(SHA256, registration.get("publication_sha256")),
+                "public benchmark needs the approved publication receipt digest")
+    spec = fields(registration, expected, "benchmark registration")
+    require(spec["schema"] == "crab.cdn-benchmark/v1" and matches(LABEL, spec["workload"]),
+            "invalid benchmark registration")
+    require(matches(SHA256, spec["deployment_policy_sha256"]), "benchmark registration requires the approved deployment policy digest")
+    sample_count = spec["samples"]
+    require(type(sample_count) is int and 30 <= sample_count <= 1000
+            and positive(spec["p95_budget_ms"]) and positive(spec["cost_budget_microusd"]),
+            "invalid preregistered sample size or budgets")
+    regions = fields(spec["regions"], {"near", "distant"}, "preregistered client regions")
+    require(all(matches(LABEL, region) for region in regions.values()) and regions["near"] != regions["distant"],
+            "benchmark requires distinct preregistered near and distant regions")
+    return spec
+
+
+def verify_performance(value: Any, registration: Any) -> int:
+    performance = fields(value, {"near", "distant"}, "performance")
+    spec = benchmark_registration(registration)
+    sample_count = spec["samples"]
+    for location, value in performance.items():
+        region = fields(value, {"region", "pairs"}, location)
+        require(region["region"] == spec["regions"][location], f"client region differs from registration: {location}")
+        pairs = region["pairs"]
+        require(isinstance(pairs, list) and len(pairs) == sample_count,
+                f"sample count differs from registration: {location}")
+        for pair in pairs:
+            arms = fields(pair, set(ARMS), "benchmark pair")
+            for name, value in arms.items():
+                arm = fields(value, METRICS, name)
+                require(all(type(n) is int and n >= 0 for n in arm.values()) and arm["elapsed_ms"] > 0,
+                        f"invalid benchmark metrics: {name}")
+            require(arms["origin"]["origin_gets"] > 0 and all(
+                arms["origin"][metric] == 0 for metric in ("edge_hits", "edge_misses", "edge_unknown", "edge_bytes")
+            ), "origin-only sample must prove an origin read")
+            require(arms["cold_edge"]["edge_misses"] > 0 and arms["cold_edge"]["origin_fill_bytes"] > 0
+                    and arms["cold_edge"]["edge_bytes"] > 0,
+                    "cold edge sample must prove a miss, origin fill and delivered bytes")
+            require(arms["warm_edge"]["edge_hits"] > 0 and arms["warm_edge"]["edge_bytes"] > 0,
+                    "warm edge sample must prove a hit and delivered bytes")
+            require(arms["warm_local"]["local_payload_hits"] > 0 and
+                    all(arms["warm_local"][metric] == 0
+                        for metric in ("edge_hits", "edge_misses", "edge_unknown", "edge_bytes")),
+                    "warm local sample must prove a local payload hit without edge payload bytes")
+            require(arms["warm_edge"]["cost_microusd"] <= spec["cost_budget_microusd"],
+                    f"warm edge exceeds the registered cost budget: {location}")
+        warm = sorted(pair["warm_edge"]["elapsed_ms"] for pair in pairs)
+        p95_index = (sample_count * 95 + 99) // 100 - 1
+        require(warm[p95_index] <= spec["p95_budget_ms"],
+                f"warm edge p95 exceeds the registered budget: {location}")
+    savings = [pair["origin"]["elapsed_ms"] - pair["warm_edge"]["elapsed_ms"]
+               for pair in performance["distant"]["pairs"]]
+    lower = median_savings_lower_bound(savings)
+    require(lower > 0, "distant warm edge did not show positive paired median savings")
+    return lower
+
+
+def requires_git_workload(scope: str) -> bool:
+    _, _, consumer, family, profile = scope_parts(scope)
+    return consumer == "cli" and family in {"git", "capsule"} and profile == "direct"
+
+
+def read_git_record(path: Path) -> bytes:
+    limit = 8 * 1024
+    with path.open("rb") as record:
+        raw = record.read(limit + 1)
+    require(len(raw) <= limit, f"Git evidence record is too large: {path.name}")
+    return raw
+
+
+def validate_git_publication(raw: bytes, provenance: dict[str, Any]) -> dict[str, Any]:
+    record = fields(decode(raw), GIT_PUBLICATION_FIELDS, "Git publication receipt")
+    prefix = f"refs/heads/crab-cdn-qualification-{provenance['workflow_run_id']}-{provenance['workflow_run_attempt']}-"
+    require(record["schema"] == "crab.cdn-git-publication/v1"
+            and all(record[key] == provenance[key] for key in CDN_PROVENANCE_FIELDS)
+            and matches(GIT_TEST_REF, record["ref"]) and record["ref"].startswith(prefix)
+            and matches(GIT_OID, record["oid"]) and matches(SHA256, record["sha256"])
+            and type(record["published"]) is bool
+            and (positive(record["visible_at_unix_ms"]) if record["published"] else record["visible_at_unix_ms"] is None),
+            "Git publication receipt does not match this qualification run")
+    return record
+
+
+def validate_git_fetch(raw: bytes, provenance: dict[str, Any], mode: str, label: str) -> dict[str, Any]:
+    client = fields(decode(raw), GIT_FETCH_FIELDS, "redacted Git fetch")
+    require(client["schema"] == "crab.cdn-git-fetch/v1" and client["name"] == "git-fetch"
+            and client["arm"] == mode and all(client[key] == value for key, value in provenance.items()),
+            f"{label} has mismatched Git fetch provenance")
+    require(matches(GIT_OID, client["publication_oid"]) and matches(SHA256, client["publication_sha256"])
+            and matches(SHA256, client["expected_sha256"]) and client["expected_sha256"] == client["observed_sha256"]
+            and client["expected_bytes"] == client["observed_bytes"] == GIT_PAYLOAD_SIZE
+            and positive(client["native_writes"]) and client["visible_new_ref"] is True,
+            f"{label} did not verify the published Git payload")
+    start, finish = client["started_at_unix_ms"], client["finished_at_unix_ms"]
+    require(positive(start) and positive(finish) and finish >= start and positive(client["elapsed_ms"]),
+            f"{label} has an invalid measurement interval")
+    require(all(type(client[key]) is int and client[key] >= 0 for key in PRODUCT_COUNTERS),
+            f"{label} has invalid Git transfer counters")
+    require(client["edge_hits"] + client["edge_misses"] + client["edge_unknown"] == client["observed_edge_gets"]
+            <= client["edge_attempts"] <= client["all_edge_attempts"], f"{label} has inconsistent edge counts")
+    if mode == "edge":
+        require(positive(client["observed_edge_gets"]) and positive(client["verified_edge_payloads"]),
+                f"{label} accepted no verified edge Git payload")
+    return client
+
+
+def collect_git_product_action(
+    inputs: Path, row: dict[str, Any], *, retain: Path | None = None, cleanup_at: int | None = None,
+) -> dict[str, Any]:
+    publication_raw = read_git_record(inputs / "publication.json")
+    publication = validate_git_publication(publication_raw, row)
+    require(publication["published"], "Git product action requires a ref confirmed after native push")
+    provenance = {key: row[key] for key in CDN_PROVENANCE_FIELDS}
+    fetch_raw = read_git_record(inputs / "fetch.json")
+    fetch = validate_git_fetch(fetch_raw, provenance | {"platform": row["platform"]}, "edge", "Git product action")
+    digest = hashlib.sha256(publication_raw).hexdigest()
+    require(fetch["publication_sha256"] == digest and fetch["publication_oid"] == publication["oid"]
+            and fetch["expected_sha256"] == publication["sha256"]
+            and fetch["started_at_unix_ms"] >= publication["visible_at_unix_ms"],
+            "Git product fetch did not verify this native publication after the ref became visible")
+    retirement_raw = read_git_record(inputs / "retirement.json")
+    retirement = fields(decode(retirement_raw), GIT_RETIREMENT_FIELDS, "Git retirement report")
+    require(retirement["schema"] == "crab.cdn-git-retirement/v1"
+            and all(retirement[key] == value for key, value in provenance.items())
+            and retirement["publication_sha256"] == digest and retirement["ref_retired"] is True
+            and positive(retirement["retired_at_unix_ms"])
+            and retirement["retired_at_unix_ms"] >= fetch["finished_at_unix_ms"],
+            "Git product action requires retirement of the same published ref after the fetch")
+    if cleanup_at is not None:
+        require(cleanup_at >= retirement["retired_at_unix_ms"], "fixture cleanup must be verified after Git ref retirement")
+    if retain is not None:
+        retain.mkdir()
+        for filename, raw in (("publication.json", publication_raw), ("fetch.json", fetch_raw),
+                              ("retirement.json", retirement_raw)):
+            (retain / filename).write_bytes(raw)
+    return {key: fetch[key] for key in (
+        "name", "expected_sha256", "observed_sha256", "expected_bytes", "observed_bytes",
+        "native_writes", "observed_edge_gets", "visible_new_ref", "verified_edge_payloads",
+    )}
+
+
+def collect_git_performance(
+    inputs: Path, registration: dict[str, Any], platform: str, run_id: str, attempt: str,
+    *, retain: Path | None = None,
+) -> dict[str, Any]:
+    spec = benchmark_registration(registration)
+    scope = spec["scope"]
+    require(isinstance(scope, str) and requires_git_workload(scope) and spec["workload"] == "git-fetch",
+            "benchmark must register the direct CLI Git workload")
+    require(matches(COMMIT, spec["source_sha"]) and matches(SHA256, spec["configuration_sha256"])
+            and matches(RUN_NUMBER, run_id) and matches(RUN_NUMBER, attempt) and matches(LABEL, platform),
+            "invalid benchmark provenance")
+    provider = PROVIDER_FOR_EDGE[scope.split("/", 1)[0]]
+    provenance = {key: spec[key] for key in ("source_sha", "scope", "configuration_sha256")}
+    provenance |= {"workflow_run_id": run_id, "workflow_run_attempt": attempt, "platform": platform}
+    seen = set()
+    performance = {}
+    for location, region in spec["regions"].items():
+        pairs = []
+        previous_end = 0
+        for index in range(1, spec["samples"] + 1):
+            pair = {}
+            fixtures = set()
+            windows = {}
+            for arm in ARMS:
+                slot = Path(location) / f"{index:04d}" / arm
+                label = f"{location} {index} {arm}"
+                client_raw = read_git_record(inputs / slot / "client.json")
+                digest = hashlib.sha256(client_raw).hexdigest()
+                require(digest not in seen, "a Git fetch was reused in another benchmark arm or pair")
+                seen.add(digest)
+                client = validate_git_fetch(client_raw, provenance, GIT_MODES[arm], label)
+                fixtures.add((client["publication_oid"], client["expected_sha256"], client["publication_sha256"]))
+                windows[arm] = (client["started_at_unix_ms"], client["finished_at_unix_ms"])
+                if arm == "origin":
+                    require(client["all_edge_attempts"] == 0, "origin control observed edge requests")
+                if arm == "warm_local":
+                    require(client["edge_attempts"] == 0, "warm-local control observed edge requests")
+                external_raw = read_git_record(inputs / slot / "measurement.json")
+                external = fields(decode(external_raw), GIT_MEASUREMENT_FIELDS, "benchmark measurement")
+                require(external["schema"] == "crab.cdn-git-measurement/v1" and external["provider"] == provider
+                        and external["region"] == region and external["client_report_sha256"] == digest,
+                        f"{label} has mismatched provider measurements")
+                measured = {key: client[key] for key in GIT_CLIENT_METRICS}
+                measured.update({key: external[key] for key in GIT_EXTERNAL_METRICS})
+                require(all(type(value) is int and value >= 0 for value in measured.values()),
+                        f"{label} is missing measured metrics")
+                require(positive(measured["peak_memory_bytes"]) and positive(measured["peak_disk_bytes"]),
+                        f"{label} is missing Git memory or disk measurements")
+                incomplete = client["incomplete_edge_bytes"]
+                require(incomplete <= measured["rejected_bytes"] and measured["client_bytes"] >= measured["edge_bytes"] + incomplete,
+                        f"{label} undercounts observed client bytes")
+                pair[arm] = measured
+                if retain is not None:
+                    destination = retain / slot
+                    destination.mkdir(parents=True)
+                    (destination / "client.json").write_bytes(client_raw)
+                    (destination / "measurement.json").write_bytes(external_raw)
+            require(len(fixtures) == 1, f"{location} {index} arms fetched different published Git fixtures")
+            intervals = sorted(windows.values())
+            require(intervals[0][0] >= previous_end
+                    and all(left[1] <= right[0] for left, right in zip(intervals, intervals[1:])),
+                    f"{location} {index} benchmark arms and pairs must be interleaved without overlapping")
+            require(windows["cold_edge"][1] <= windows["warm_edge"][0]
+                    and windows["warm_edge"][1] <= windows["warm_local"][0],
+                    f"{location} {index} must measure cold edge, warm edge and warm local in order")
+            previous_end = intervals[-1][1]
+            pairs.append(pair)
+        performance[location] = {"region": region, "pairs": pairs}
+    return performance
+
+
+def verify_cdn_report(
+    report: Any, *, scope: str, configuration_sha256: str, platform: str, provider: str,
+    verified_origin: dict[str, Any], origin_sha256: str, source_sha: str,
+    run_id: str, run_attempt: str, directory: Path, registration: Any,
+) -> dict[str, Any]:
+    """Validate a report after the existing verifier has checked its origin report."""
+    row = fields(report, {
+        "schema", "schema_version", "status", "scope", "source_sha", "workflow_run_id",
+        "workflow_run_attempt", "origin_report_sha256", "configuration_sha256", "deployment",
+        "platform", "fixture_prefix", "checks", "product_action", "performance",
+    }, "CDN report")
+    require(row["schema"] == SCHEMA and type(row["schema_version"]) is int
+            and row["schema_version"] == 1, "invalid CDN report schema")
+    require(row["status"] == "qualified", "report does not claim a qualified CDN row")
+    require(matches(COMMIT, source_sha) and matches(RUN_NUMBER, run_id) and matches(RUN_NUMBER, run_attempt),
+            "CDN qualification requires an exact commit and numeric workflow run and attempt")
+    require(row["scope"] == scope, "CDN report scope does not match the required row")
+    edge, access, _, family, profile = scope_parts(scope)
+    expected_edge, expected_service = PROVIDERS[provider]
+    require(edge == expected_edge and verified_origin["provider"] == provider
+            and verified_origin["service"] == expected_service,
+            "CDN qualification requires the matching real cloud provider")
+    require(row["source_sha"] == source_sha and row["workflow_run_id"] == run_id
+            and row["workflow_run_attempt"] == run_attempt
+            and row["origin_report_sha256"] == origin_sha256,
+            "CDN report does not match the verified origin report commit, run, attempt and digest")
+    require(matches(SHA256, configuration_sha256) and row["configuration_sha256"] == configuration_sha256,
+            "CDN configuration digest does not match")
+    require(matches(LABEL, row["deployment"]), "invalid deployment label")
+    require(matches(LABEL, platform) and row["platform"] == platform, "CDN platform does not match")
+    require(matches(PREFIX, row["fixture_prefix"]), "unsafe CDN qualification fixture prefix")
+    require(isinstance(registration, dict) and all(
+        registration.get(name) == row[name] for name in ("source_sha", "scope", "configuration_sha256")
+    ), "benchmark registration does not match the release row")
+
+    lower = verify_performance(row["performance"], registration)
+    verify_product_action(row["product_action"], family)
+    require(row["product_action"]["name"] == registration["workload"],
+            "product action does not match the registered workload")
+    checks, cleanup_at = verify_check_evidence(row, edge, access, profile, directory, registration=registration)
+    if requires_git_workload(scope):
+        measured = collect_git_performance(directory / GIT_BENCHMARK_DIR, registration, platform, run_id, run_attempt)
+        require(measured == row["performance"], "Git performance summary differs from the retained measurements")
+        product = collect_git_product_action(directory / GIT_PRODUCT_DIR, row, cleanup_at=cleanup_at)
+        require(row["product_action"] == product | {"fixture_cleanup_verified": True},
+                "Git product action differs from the retained publication, fetch, and retirement evidence")
+    return {"status": "verified", "scope": scope, "platform": platform, "deployment": row["deployment"],
+            "checks": checks, "distant_median_savings_lower_bound_ms": lower}

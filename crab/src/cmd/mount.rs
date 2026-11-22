@@ -2198,6 +2198,7 @@ async fn resolve_mount_read_context_from_remote_url(
                 &config,
                 managed,
                 crab_auth::TransferOperation::Hydrate,
+                crab_storage::cdn::CdnConsumer::Mount,
                 &cancel,
             )
             .await?;

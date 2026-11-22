@@ -10,6 +10,10 @@ use crab_storage::Store;
 
 mod azure;
 pub use azure::AzureOptions;
+#[cfg(feature = "service")]
+mod cdn;
+#[cfg(feature = "service")]
+pub use cdn::{CdnIssuerOptions, DirectCdnOptions};
 
 /// Explicit provider selection; building resolves only the selected credential policy.
 #[derive(Clone)]

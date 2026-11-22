@@ -374,11 +374,16 @@ pub(crate) async fn download(
     let cancel = server.cancellation.child_token();
     let permit = server.acquire_transfer(&cancel).await?;
     let guard = cancel.clone().drop_guard();
-    let lfs = LfsObjectStore::new(entry.store.clone(), &entry.config.prefix);
+    let store = if method == Method::GET {
+        entry.read_store()
+    } else {
+        &entry.store
+    };
+    let lfs = LfsObjectStore::new(store.clone(), &entry.config.prefix);
     let deadline = tokio::time::Instant::now() + BUDGET;
-    let (_, delivered_range, stream) = tokio::select! {
+    let (delivered_range, stream) = tokio::select! {
         () = cancel.cancelled() => return Err(Error::Cancelled),
-        result = tokio::time::timeout_at(deadline, lfs.get_stream(&pointer.oid, pointer.size, range.clone())) => result.map_err(|_| Error::Cancelled)??,
+        result = tokio::time::timeout_at(deadline, lfs.stream_content(&pointer.oid, pointer.size, range.clone(), None)) => result.map_err(|_| Error::Cancelled)??,
     };
     let stream = stream.take_until(async move {
         tokio::select! { () = cancel.cancelled() => {}, () = tokio::time::sleep_until(deadline) => {} }

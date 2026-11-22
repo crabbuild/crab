@@ -312,6 +312,9 @@ enum Cmd {
         /// Run an opt-in cache-service write/read/cleanup probe.
         #[arg(long, conflicts_with_all = ["cost", "metadb", "support_bundle"])]
         cache_service_active_probe: bool,
+        /// Check an authorized provider CDN deployment with bounded, read-only probes.
+        #[arg(long, conflicts_with_all = ["cost", "metadb", "support_bundle"])]
+        cdn_probe: bool,
         /// Write the support bundle as pretty JSON.
         #[arg(long, value_name = "PATH", requires = "support_bundle")]
         output: Option<PathBuf>,
@@ -3718,6 +3721,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             metadb,
             support_bundle,
             cache_service_active_probe,
+            cdn_probe,
             output,
             pricing_file,
             inventory_source,
@@ -3730,7 +3734,8 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                 cost,
                 metadb,
                 support_bundle,
-                cache_service_active_probe
+                cache_service_active_probe,
+                cdn_probe
             )
             .entered();
             let mode = OutputMode::from_flags(json, false);
@@ -3751,7 +3756,8 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             } else if support_bundle {
                 crab::cmd::doctor::run_cache_service_support_bundle(mode, output).await?;
             } else {
-                crab::cmd::doctor::run_doctor(mode, cache_service_active_probe).await?;
+                crab::cmd::doctor::run_doctor(mode, cache_service_active_probe, cdn_probe, &cancel)
+                    .await?;
             }
             Ok(ExitCode::SUCCESS)
         }

@@ -754,8 +754,9 @@ impl ManagedApiClient {
                 reason: "read grant client cannot request a push operation".to_owned(),
             });
         }
+        let schema_version = capabilities.read_grant_version();
         let body = serde_json::to_vec(&TransferGrantRequest {
-            schema_version: 1,
+            schema_version,
             repository_id,
             operation,
             push_id: None,
@@ -775,7 +776,13 @@ impl ManagedApiClient {
             )
             .await?
             .value;
-        validate_grant(&grant, repository_id, operation, capabilities)?;
+        validate_grant(
+            &grant,
+            schema_version,
+            repository_id,
+            operation,
+            capabilities,
+        )?;
         Ok(grant)
     }
 
@@ -1087,6 +1094,7 @@ impl ManagedApiClient {
 
 fn validate_grant(
     grant: &TransferGrant,
+    schema_version: u16,
     repository_id: Uuid,
     operation: TransferOperation,
     capabilities: &ServiceCapabilities,
@@ -1109,6 +1117,7 @@ fn validate_grant(
         TransferPermission::ListPrefix,
     ];
     grant.validate(GrantValidationContext {
+        schema_version,
         repository_id,
         operation,
         repository_prefix: &grant.storage_scope.repository_prefix,
@@ -1196,6 +1205,7 @@ fn validate_push_prepare_response(
         TransferPermission::CreateImmutableObject,
     ];
     prepared.staging_grant.validate(GrantValidationContext {
+        schema_version: super::MANAGED_SCHEMA_VERSION,
         repository_id,
         operation: TransferOperation::PushUpload,
         repository_prefix: &prepared.staging_grant.storage_scope.repository_prefix,

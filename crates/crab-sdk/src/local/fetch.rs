@@ -48,7 +48,7 @@ pub(super) async fn fetch_locked(
     let locator =
         super::discover_locator(state, tools, root, &options.remote, false, cancel).await?;
     if let Some(locator) = locator {
-        let resolved = state.resolve_repository(&locator, cancel).await?;
+        let resolved = state.resolve_read_repository(&locator, cancel).await?;
         let layout = crab_storage::StoreLayout::new(
             state.admitted_store(&resolved.store, operation, cancel)?,
             resolved.prefix.clone(),

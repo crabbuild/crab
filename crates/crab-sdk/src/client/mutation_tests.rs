@@ -193,6 +193,10 @@ pub(super) fn memory_client() -> Client {
         local_execution_policy: crate::LocalExecutionPolicy::Untrusted,
         #[cfg(feature = "service")]
         managed: None,
+        #[cfg(feature = "service")]
+        direct_cdn: None,
+        #[cfg(feature = "service")]
+        cdn_consumer: crab_storage::cdn::CdnConsumer::Sdk,
     }))
 }
 

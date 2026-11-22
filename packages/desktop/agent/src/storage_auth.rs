@@ -64,6 +64,16 @@ impl Connection {
         }
     }
 
+    pub(crate) fn cdn_origin(&self) -> String {
+        match &self.credentials {
+            Credentials::S3 { .. } => format!("s3://{}", self.bucket),
+            Credentials::Gcs { .. } => format!("gs://{}", self.bucket),
+            Credentials::Azure { account, .. } => {
+                format!("https://{account}.blob.core.windows.net/{}", self.bucket)
+            }
+        }
+    }
+
     pub fn options(&self) -> Result<DirectStoreOptions> {
         let options = match &self.credentials {
             Credentials::S3 {

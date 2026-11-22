@@ -353,6 +353,8 @@ pub(crate) async fn test_node_with_application(
         listen: public_address,
         management_listen: address,
         storage: crate::StorageConfig {
+            #[cfg(feature = "provider-cdn")]
+            cdn: Default::default(),
             url: "s3://test/repositories".into(),
             region: None,
         },

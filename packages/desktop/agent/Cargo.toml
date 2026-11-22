@@ -9,6 +9,9 @@ description = "JSON-RPC sidecar for Crab Desktop. Speaks NDJSON over stdio and d
 name = "crab-desktop-agent"
 path = "src/main.rs"
 
+[features]
+provider-cdn-qualification = ["crab-sdk/provider-cdn-qualification"]
+
 [dependencies]
 # Read-side verbs go through the SDK.
 crab-sdk = { workspace = true, features = ["files", "service", "local", "results"] }

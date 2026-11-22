@@ -64,6 +64,27 @@ Azure split credentials are intentionally accepted only by
 exact prepared upload prefix uses the write token. A mismatched prefix is an
 authorization error, not a fallback to a broader store.
 
+For direct reads negotiated with Crab Auth and managed v2 direct reads, the
+origin store and viewer route share one credential generation. Concurrent
+refreshes share the same issuer request and result, including when a waiter
+cancels. A replacement must preserve the provider target, physical view,
+deployment and permissions. If refresh fails, the bound read store requires
+fresh resolution. The same origin refresh works without a viewer grant.
+Online cache readers share the bound store's renewal check. A warm cache can
+reuse verified bytes while its grant is current and retains the captured view.
+
+Managed grant renewal uses the installed login's original OIDC issuer and
+subject. It refreshes an expiring access token before requesting a new grant.
+The token cache accepts a refresh response only if that login is still current.
+The grant request is issued once. Managed viewer grants cover repository-local
+object families.
+
+The `operator-cdn` feature composes trusted per-repository deployments for
+services that already have independently authorized native storage. It
+compares the issuer's placement and full-repository scope before attaching
+viewer authority to a read store. The service keeps its own native origin
+credentials.
+
 ## Usage
 
 Build a canonical store from a resolution produced by `crab-auth`:

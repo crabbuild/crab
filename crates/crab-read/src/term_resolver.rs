@@ -10,14 +10,14 @@ use std::future::Future;
 use std::sync::Arc;
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{Mutex, OnceCell, Semaphore};
 use tracing::{debug, warn};
 
-use crab_cache::{CacheKey, LocalCache};
+use crab_cache::LocalCache;
 use crab_cache_store::CachingStore;
 use crab_diff::chunk_sequence::{ChunkOrigin, ChunkSequence, ChunkSpan};
 use crab_diff::types::ChunkSequenceSourceKind;
-use crab_metadata::file_index_lookup::SharedFileIndexLookup;
+use crab_metadata::file_index_lookup::{ShardLocation, SharedFileIndexLookup};
 use crab_xet::hash::MerkleHash;
 use crab_xet::shard::ShardReader;
 use crab_xet::shard::{FileDataSequenceEntry, XorbChunkSequenceEntry};
@@ -25,15 +25,16 @@ use crab_xet::shard_parse::MAX_SHARD_SIZE_BYTES;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-use crate::{ReadError, ReadStoreLayout as StoreLayout};
+use crate::{ReadError, ReadStoreLayout as StoreLayout, error::terminal_read_failure};
 
 type Result<T> = crate::Result<T>;
+type ShardReaders = Mutex<HashMap<ShardLocation, Arc<OnceCell<Arc<ShardReader>>>>>;
 
 struct SequenceResolveContext<'a> {
     store: &'a CachingStore,
     router: &'a StoreLayout,
     cache: &'a LocalCache,
-    shard_readers: &'a Mutex<HashMap<MerkleHash, Arc<ShardReader>>>,
+    shard_readers: &'a ShardReaders,
     xorb_chunks: &'a Mutex<HashMap<MerkleHash, Arc<Vec<XorbChunkSequenceEntry>>>>,
     file_index_lookup: &'a SharedFileIndexLookup,
     source: ChunkSequenceSourceKind,
@@ -88,8 +89,8 @@ impl TermResolver {
     /// Resolve a batch of file hashes to their reconstruction terms.
     ///
     /// `file_hashes` is a list of `(file_hash, optional_shard_hint)` pairs.
-    /// When a shard hint is present, that shard is tried first before
-    /// falling back to the file-index lookup.
+    /// Origin reads can try the shard hint first. CDN reads start at the
+    /// authenticated catalog.
     ///
     /// Each unique shard is downloaded at most once within the batch.
     /// Concurrent downloads are bounded by the configured concurrency limit.
@@ -117,8 +118,7 @@ impl TermResolver {
         let cancel = cancel.child_token();
         let _cancel_on_drop = cancel.clone().drop_guard();
         let semaphore = Arc::clone(&self.semaphore);
-        let shard_readers: Arc<Mutex<HashMap<MerkleHash, Arc<ShardReader>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let shard_readers = Arc::new(ShardReaders::default());
         let results: Arc<Mutex<HashMap<MerkleHash, Vec<FileDataSequenceEntry>>>> =
             Arc::new(Mutex::new(HashMap::with_capacity(file_hashes.len())));
         let file_index_lookup =
@@ -177,6 +177,9 @@ impl TermResolver {
                         results.lock().await.insert(file_hash, segments);
                     }
                     Err(e) => {
+                        if terminal_read_failure(&e) {
+                            return Err(e);
+                        }
                         // NotFound is expected for staged-but-unpushed files
                         // (file-index doesn't exist on the remote yet). Use
                         // debug! to avoid noisy warnings during `git diff --cached`.
@@ -262,8 +265,7 @@ impl TermResolver {
         let cancel = cancel.child_token();
         let _cancel_on_drop = cancel.clone().drop_guard();
         let semaphore = Arc::clone(&self.semaphore);
-        let shard_readers: Arc<Mutex<HashMap<MerkleHash, Arc<ShardReader>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let shard_readers = Arc::new(ShardReaders::default());
         let xorb_chunks: Arc<Mutex<HashMap<MerkleHash, Arc<Vec<XorbChunkSequenceEntry>>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let results: Arc<Mutex<HashMap<MerkleHash, ChunkSequence>>> =
@@ -326,7 +328,7 @@ impl TermResolver {
                         results.lock().await.insert(file_hash, sequence);
                     }
                     Err(e) => {
-                        if strict {
+                        if strict || terminal_read_failure(&e) {
                             return Err(e);
                         }
                         if matches!(&e, ReadError::NotFound { .. }) {
@@ -383,14 +385,17 @@ impl ResolutionOutcome {
             self.first_error = Some((index, error));
             return;
         }
-        if !self.strict {
+        let denied = terminal_read_failure(&error);
+        if !self.strict && !denied {
             warn!(err = %error, "term resolution task failed");
             return;
         }
-        // Reap whichever worker finishes first without changing strict mode's
-        // input-order error selection. Cancellation retains precedence.
+        // Retain a terminal read failure even if an earlier input had an
+        // ordinary miss. Within each class, keep input order.
         if self.first_error.as_ref().is_none_or(|(first, previous)| {
-            !matches!(previous, ReadError::Cancelled) && index < *first
+            let previous_denied = terminal_read_failure(previous);
+            !matches!(previous, ReadError::Cancelled)
+                && ((denied && !previous_denied) || (denied == previous_denied && index < *first))
         }) {
             self.first_error = Some((index, error));
         }
@@ -422,15 +427,22 @@ async fn resolve_single(
     store: &CachingStore,
     router: &StoreLayout,
     cache: &LocalCache,
-    shard_readers: &Mutex<HashMap<MerkleHash, Arc<ShardReader>>>,
+    shard_readers: &ShardReaders,
     file_index_lookup: &SharedFileIndexLookup,
     file_hash: MerkleHash,
     shard_hint: Option<MerkleHash>,
 ) -> Result<Vec<FileDataSequenceEntry>> {
     // Try shard hint first if available.
-    if let Some(hint_hash) = shard_hint {
-        match try_shard(cache, store, router, shard_readers, &hint_hash, &file_hash).await {
+    if let Some(hint_hash) = shard_hint
+        && !shard_uses_cdn(store, router, &hint_hash)
+    {
+        let hint = ShardLocation {
+            hash: hint_hash,
+            encoded_size: None,
+        };
+        match try_shard(cache, store, router, shard_readers, hint, &file_hash).await {
             Ok(segments) => return Ok(segments),
+            Err(error) if terminal_read_failure(&error) => return Err(error),
             Err(e) => {
                 debug!(
                     file_hash = %file_hash.hex(),
@@ -443,10 +455,10 @@ async fn resolve_single(
     }
 
     // Resolve shard hash via file-index.
-    let shard_hash = resolve_file_index(file_index_lookup, &file_hash).await?;
+    let shard = resolve_file_index(file_index_lookup, &file_hash).await?;
 
     // Download shard and extract file info.
-    try_shard(cache, store, router, shard_readers, &shard_hash, &file_hash).await
+    try_shard(cache, store, router, shard_readers, shard, &file_hash).await
 }
 
 async fn resolve_sequence_single(
@@ -455,11 +467,19 @@ async fn resolve_sequence_single(
     shard_hint: Option<MerkleHash>,
     file_size: u64,
 ) -> Result<ChunkSequence> {
-    if let Some(hint_hash) = shard_hint {
-        match try_sequence_shard(context, &hint_hash, &file_hash, file_size).await {
+    if let Some(hint_hash) = shard_hint
+        && !shard_uses_cdn(context.store, context.router, &hint_hash)
+    {
+        let hint = ShardLocation {
+            hash: hint_hash,
+            encoded_size: None,
+        };
+        match try_sequence_shard(context, hint, &file_hash, file_size).await {
             Ok(sequence) => return Ok(sequence),
             Err(e) => {
-                if context.strict && !sequence_hint_error_allows_fallback(&e) {
+                if terminal_read_failure(&e)
+                    || (context.strict && !sequence_hint_error_allows_fallback(&e))
+                {
                     return Err(e);
                 }
                 debug!(
@@ -472,8 +492,8 @@ async fn resolve_sequence_single(
         }
     }
 
-    let shard_hash = resolve_file_index(context.file_index_lookup, &file_hash).await?;
-    try_sequence_shard(context, &shard_hash, &file_hash, file_size).await
+    let shard = resolve_file_index(context.file_index_lookup, &file_hash).await?;
+    try_sequence_shard(context, shard, &file_hash, file_size).await
 }
 
 fn sequence_hint_error_allows_fallback(error: &ReadError) -> bool {
@@ -490,8 +510,8 @@ fn sequence_hint_error_allows_fallback(error: &ReadError) -> bool {
 async fn resolve_file_index(
     file_index_lookup: &SharedFileIndexLookup,
     file_hash: &MerkleHash,
-) -> Result<MerkleHash> {
-    match file_index_lookup.lookup(file_hash).await? {
+) -> Result<ShardLocation> {
+    match file_index_lookup.lookup_shard(file_hash).await? {
         Some(shard_hash) => Ok(shard_hash),
         None => Err(ReadError::NotFound {
             path: format!("file_index:{}", file_hash.hex()),
@@ -522,11 +542,11 @@ async fn try_shard(
     cache: &LocalCache,
     store: &CachingStore,
     router: &StoreLayout,
-    shard_readers: &Mutex<HashMap<MerkleHash, Arc<ShardReader>>>,
-    shard_hash: &MerkleHash,
+    shard_readers: &ShardReaders,
+    location: ShardLocation,
     file_hash: &MerkleHash,
 ) -> Result<Vec<FileDataSequenceEntry>> {
-    let reader = get_or_download_shard(cache, store, router, shard_readers, shard_hash).await?;
+    let reader = get_or_download_shard(cache, store, router, shard_readers, location).await?;
 
     let file_info = reader
         .get_file_info(file_hash)?
@@ -534,7 +554,7 @@ async fn try_shard(
             path: format!(
                 "file {} not found in shard {}",
                 file_hash.hex(),
-                shard_hash.hex()
+                location.hash.hex()
             ),
         })?;
 
@@ -543,7 +563,7 @@ async fn try_shard(
 
 async fn try_sequence_shard(
     context: &SequenceResolveContext<'_>,
-    shard_hash: &MerkleHash,
+    location: ShardLocation,
     file_hash: &MerkleHash,
     file_size: u64,
 ) -> Result<ChunkSequence> {
@@ -552,9 +572,10 @@ async fn try_sequence_shard(
         context.store,
         context.router,
         context.shard_readers,
-        shard_hash,
+        location,
     )
     .await?;
+    let shard_hash = &location.hash;
 
     let file_info = reader
         .get_file_info(file_hash)?
@@ -725,6 +746,10 @@ async fn get_or_fetch_xorb_chunks(
     xorb_chunks: &Mutex<HashMap<MerkleHash, Arc<Vec<XorbChunkSequenceEntry>>>>,
     xorb_hash: &MerkleHash,
 ) -> Result<Arc<Vec<XorbChunkSequenceEntry>>> {
+    store
+        .origin()
+        .check_cached_read(&router.xorb_path(xorb_hash))
+        .await?;
     {
         let cache = xorb_chunks.lock().await;
         if let Some(chunks) = cache.get(xorb_hash) {
@@ -771,46 +796,67 @@ pub(crate) async fn get_or_download_shard(
     cache: &LocalCache,
     store: &CachingStore,
     router: &StoreLayout,
-    shard_readers: &Mutex<HashMap<MerkleHash, Arc<ShardReader>>>,
-    shard_hash: &MerkleHash,
+    shard_readers: &ShardReaders,
+    location: ShardLocation,
 ) -> Result<Arc<ShardReader>> {
-    // Check in-memory dedup map first.
-    {
-        let readers = shard_readers.lock().await;
-        if let Some(reader) = readers.get(shard_hash) {
-            return Ok(Arc::clone(reader));
-        }
-    }
+    let hash = location.hash;
+    let obj_path = router.shard_path(&hash);
+    let origin = store.origin();
+    origin.check_cached_read(&obj_path).await?;
+    let cache = if origin.authorized_cache_namespace().is_some() {
+        store.local_cache()
+    } else {
+        cache
+    };
+    let edge_size = location
+        .encoded_size
+        .filter(|_| origin.cdn_attempt(&obj_path).is_some());
+    let location = ShardLocation {
+        hash,
+        encoded_size: edge_size,
+    };
+    // Scoped shards skip disk caching. Share a verified load within this
+    // authorized batch without holding the map lock during I/O.
+    let slot = shard_readers
+        .lock()
+        .await
+        .entry(location)
+        .or_default()
+        .clone();
+    slot.get_or_try_init(|| async {
+        let data = if let Some(size) = edge_size {
+            store.get_captured_shard(&obj_path, hash, size).await?
+        } else if let Some(key) = crab_cache::path_class::cache_key_for_path(obj_path.as_ref()) {
+            cache
+                .get_or_fetch_with(&key, || async {
+                    debug!(shard_hash = %hash.hex(), "downloading shard");
+                    let (data, _) = origin
+                        .get_with_etag_bounded(&obj_path, MAX_SHARD_SIZE_BYTES as u64)
+                        .await?;
+                    Ok::<_, ReadError>(data)
+                })
+                .await?
+        } else {
+            origin
+                .get_with_etag_bounded(&obj_path, MAX_SHARD_SIZE_BYTES as u64)
+                .await?
+                .0
+        };
+        Ok(Arc::new(ShardReader::from_bytes(data, hash)))
+    })
+    .await
+    .cloned()
+}
 
-    // Download via LocalCache (handles disk cache + store download).
-    let key = CacheKey::Shard(*shard_hash);
-    let origin = store.origin().clone();
-    let obj_path = router.shard_path(shard_hash);
-    let hash = *shard_hash;
-
-    let data = cache
-        .get_or_fetch_with(&key, || {
-            let origin = origin;
-            let obj_path = obj_path;
-            async move {
-                debug!(shard_hash = %hash.hex(), "downloading shard");
-                let (data, _) = origin
-                    .get_with_etag_bounded(&obj_path, MAX_SHARD_SIZE_BYTES as u64)
-                    .await?;
-                Ok::<_, ReadError>(data)
-            }
-        })
-        .await?;
-
-    let reader = Arc::new(ShardReader::from_bytes(data, *shard_hash));
-
-    // Store in dedup map for other files in this batch.
-    {
-        let mut readers = shard_readers.lock().await;
-        readers.insert(*shard_hash, Arc::clone(&reader));
-    }
-
-    Ok(reader)
+pub(crate) fn shard_uses_cdn(
+    store: &CachingStore,
+    router: &StoreLayout,
+    hash: &MerkleHash,
+) -> bool {
+    store
+        .origin()
+        .cdn_attempt(&router.shard_path(hash))
+        .is_some()
 }
 
 #[cfg(test)]
@@ -1081,13 +1127,17 @@ mod tests {
             .await
             .unwrap();
         let readers = Mutex::new(HashMap::new());
-        let first = get_or_download_shard(&local, &store, &router, &readers, &hash)
+        let location = ShardLocation {
+            hash,
+            encoded_size: None,
+        };
+        let first = get_or_download_shard(&local, &store, &router, &readers, location)
             .await
             .unwrap();
         assert_eq!(first.data().as_ref(), bytes);
         first.shard_info_public().unwrap();
         origin.delete(&router.shard_path(&hash)).await.unwrap();
-        let second = get_or_download_shard(&local, &store, &router, &readers, &hash)
+        let second = get_or_download_shard(&local, &store, &router, &readers, location)
             .await
             .unwrap();
         assert!(Arc::ptr_eq(&first, &second));
@@ -1123,7 +1173,7 @@ mod tests {
         let mut corrupt = xorb.bytes.to_vec();
         let last = corrupt.len() - 1;
         corrupt[last] ^= 0xFF;
-        let key = CacheKey::Xorb(xorb.hash);
+        let key = crab_cache::CacheKey::Xorb(xorb.hash);
         store
             .local_cache()
             .put_unchecked_for_test(&key, &corrupt)

@@ -25,6 +25,7 @@ pub(crate) struct Repository {
     pub(crate) config: RepositoryConfig,
     pub(crate) store: Store,
     pub(crate) layout: StoreLayout<Store>,
+    edge_reads: Option<EdgeReads>,
     pub(crate) identity: RepositoryIdentity,
     pinned: Mutex<Option<PinnedRepository>>,
     pub(crate) projection_source: Mutex<Option<crate::repository::projection::CachedSource>>,
@@ -60,6 +61,12 @@ struct PinnedRepository {
     opened: BrowseRepository,
 }
 
+struct EdgeReads {
+    layout: StoreLayout<Store>,
+    identity: RepositoryIdentity,
+    pinned: Mutex<Option<PinnedRepository>>,
+}
+
 #[derive(Clone)]
 pub(crate) struct BrowseRepository {
     pub(crate) git: RemoteGitRepository,
@@ -77,6 +84,7 @@ impl Repository {
             id,
             config,
             store: layout.store().clone(),
+            edge_reads: None,
             layout,
             identity,
             pinned: Mutex::new(None),
@@ -84,6 +92,18 @@ impl Repository {
             maintenance: Mutex::new(MaintenanceState::default()),
             integrity: crate::integrity::Status::default(),
         }
+    }
+
+    pub(crate) fn with_read_layout(
+        mut self,
+        read_layout: Option<(StoreLayout<Store>, RepositoryIdentity)>,
+    ) -> Self {
+        self.edge_reads = read_layout.map(|(layout, identity)| EdgeReads {
+            layout,
+            identity,
+            pinned: Mutex::new(None),
+        });
+        self
     }
 
     pub(crate) async fn finish_maintenance(&self) -> Result<()> {
@@ -102,19 +122,25 @@ impl Repository {
 
     #[cfg(test)]
     pub(crate) async fn expire_browse_probe(&self) {
-        if let Some(cached) = self.pinned.lock().await.as_mut() {
-            cached.checked = None;
-        }
+        self.invalidate_browse_probes().await;
     }
 
     pub(crate) async fn invalidate(&self) {
         // Maintenance can finish without changing Git state. Keep verified
         // data while forcing the next read to check ref and index authority.
-        if let Some(cached) = self.pinned.lock().await.as_mut() {
-            cached.checked = None;
-        }
+        self.invalidate_browse_probes().await;
         *self.projection_source.lock().await = None;
         self.maintenance.lock().await.completed = None;
+    }
+
+    async fn invalidate_browse_probes(&self) {
+        for pinned in
+            std::iter::once(&self.pinned).chain(self.edge_reads.iter().map(|reader| &reader.pinned))
+        {
+            if let Some(cached) = pinned.lock().await.as_mut() {
+                cached.checked = None;
+            }
+        }
     }
 
     pub(crate) async fn schedule_maintenance(
@@ -144,9 +170,7 @@ impl Repository {
                     state.completed = completed.map(|source| (source, Instant::now()));
                 }
             }
-            if let Some(cached) = self.pinned.lock().await.as_mut() {
-                cached.checked = None;
-            }
+            self.invalidate_browse_probes().await;
             *self.projection_source.lock().await = None;
             // Retain the completed source while forcing a control/index probe;
             // invalidate would erase completion and reschedule the same epoch.
@@ -268,13 +292,47 @@ impl Repository {
         crab_read::capsule_protocol::CapsuleRepositoryView,
         RemoteGitRepository,
     )> {
+        self.open_capsule(&self.layout, &self.identity, server, options, cancellation)
+            .await
+    }
+
+    pub(crate) async fn open_capsule_read_repository(
+        &self,
+        server: &Server,
+        options: RepositoryOptions,
+        cancellation: &CancellationToken,
+    ) -> Result<(
+        crab_read::capsule_protocol::CapsuleRepositoryView,
+        RemoteGitRepository,
+    )> {
+        let (layout, identity) = self
+            .edge_reads
+            .as_ref()
+            .map_or((&self.layout, &self.identity), |reader| {
+                (&reader.layout, &reader.identity)
+            });
+        self.open_capsule(layout, identity, server, options, cancellation)
+            .await
+    }
+
+    async fn open_capsule(
+        &self,
+        layout: &StoreLayout<Store>,
+        identity: &RepositoryIdentity,
+        server: &Server,
+        options: RepositoryOptions,
+        cancellation: &CancellationToken,
+    ) -> Result<(
+        crab_read::capsule_protocol::CapsuleRepositoryView,
+        RemoteGitRepository,
+    )> {
         let root = crab_metadata::capsule_protocol::load_root(&self.layout)
             .await
             .map_err(|source| crate::Error::Settings {
                 source: Box::new(source),
             })?;
         let view = crab_read::capsule_protocol::open_git_view_from_root(
-            &self.layout,
+            layout,
             root,
             crab_read::capsule_protocol::CapsuleReadLimits {
                 max_capsule_bytes: 2 * 1024 * 1024 * 1024,
@@ -284,8 +342,8 @@ impl Repository {
         .await?;
         let repository = view
             .git_repository_from_store(
-                self.layout.clone(),
-                self.identity.clone(),
+                layout.clone(),
+                identity.clone(),
                 Arc::clone(&server.runtime),
                 options,
                 2 * 1024 * 1024 * 1024,
@@ -323,7 +381,15 @@ impl Repository {
         server: &Server,
         cancellation: &CancellationToken,
     ) -> Result<BrowseRepository> {
-        self.open_cached(server, cancellation, true).await
+        self.open_pinned(
+            &self.layout,
+            &self.identity,
+            &self.pinned,
+            server,
+            cancellation,
+            true,
+        )
+        .await
     }
 
     pub(crate) async fn revalidate(
@@ -334,18 +400,54 @@ impl Repository {
         // A 304 reuses browser-held bytes as a current response. The browse
         // freshness window cannot authorize that decision after a ref/epoch
         // change; unchanged captures still reuse their verified reader.
-        self.open_cached(server, cancellation, false).await
+        self.open_pinned(
+            &self.layout,
+            &self.identity,
+            &self.pinned,
+            server,
+            cancellation,
+            false,
+        )
+        .await
     }
 
-    async fn open_cached(
+    pub(crate) async fn open_read(
         &self,
+        server: &Server,
+        cancellation: &CancellationToken,
+    ) -> Result<BrowseRepository> {
+        let Some(reader) = &self.edge_reads else {
+            return self.open(server, cancellation).await;
+        };
+        self.open_pinned(
+            &reader.layout,
+            &reader.identity,
+            &reader.pinned,
+            server,
+            cancellation,
+            true,
+        )
+        .await
+    }
+
+    pub(crate) fn read_store(&self) -> &Store {
+        self.edge_reads
+            .as_ref()
+            .map_or(&self.store, |reader| reader.layout.store())
+    }
+
+    async fn open_pinned(
+        &self,
+        layout: &StoreLayout<Store>,
+        identity: &RepositoryIdentity,
+        pinned: &Mutex<Option<PinnedRepository>>,
         server: &Server,
         cancellation: &CancellationToken,
         reuse_recent: bool,
     ) -> Result<BrowseRepository> {
         let mut pinned = tokio::select! {
             _ = cancellation.cancelled() => return Err(crab_remote_git::Error::Cancelled.into()),
-            pinned = self.pinned.lock() => pinned,
+            pinned = pinned.lock() => pinned,
         };
         if let Some(cached) = pinned.as_mut() {
             if reuse_recent
@@ -367,7 +469,7 @@ impl Repository {
         let cached = tokio::select! {
             biased;
             () = cancellation.cancelled() => return Err(crab_remote_git::Error::Cancelled.into()),
-            cached = self.open_browse(server, server.options, cancellation) => cached?,
+            cached = self.open_browse(layout, identity, server, server.options, cancellation) => cached?,
         };
         let opened = cached.opened.clone();
         *pinned = Some(cached);
@@ -389,18 +491,20 @@ impl Repository {
 
     async fn open_browse(
         &self,
+        layout: &StoreLayout<Store>,
+        identity: &RepositoryIdentity,
         server: &Server,
         options: RepositoryOptions,
         cancellation: &CancellationToken,
     ) -> Result<PinnedRepository> {
-        let view = crate::repository::projection::open_view(&self.layout).await?;
+        let view = crate::repository::projection::open_view(layout).await?;
         let state_digest = view.state_digest();
         let browse_indexes = view.browse_indexes().cloned();
         let source = crate::repository::projection::source_identity(&view.git_snapshot()?)?;
         let git = view
             .git_repository_from_store(
-                self.layout.clone(),
-                self.identity.clone(),
+                layout.clone(),
+                identity.clone(),
                 Arc::clone(&server.runtime),
                 options,
                 2 * 1024 * 1024 * 1024,

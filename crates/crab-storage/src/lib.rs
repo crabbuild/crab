@@ -1,6 +1,7 @@
 //! Object-store layout and transport helpers for Crab.
 
 pub mod cas;
+pub mod cdn;
 pub mod error;
 pub mod error_map;
 pub mod external;
@@ -12,8 +13,10 @@ mod observation;
 pub mod provider_options;
 pub mod provider_store;
 mod read_admission;
+mod read_authorization;
 mod read_progress;
 pub use read_admission::ReadAdmission;
+pub use read_authorization::ReadAuthorization;
 pub use read_progress::{ReadProgress, ReadProgressReceiver};
 pub mod retry;
 mod s3_upload;

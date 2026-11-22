@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use crab_remote_git::{
-    ContentClassification, OperationKind, RemoteGitRepository, RemoteGitSnapshot,
+    ContentClassification, OperationContext, OperationKind, RemoteGitRepository, RemoteGitSnapshot,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -113,7 +113,7 @@ pub(crate) async fn open(
             deliver_bytes(
                 blob.bytes.slice(range.start as usize..range.end as usize),
                 &send,
-                operation.cancellation(),
+                &operation,
             )
             .await?;
             Ok(())
@@ -154,21 +154,19 @@ pub(crate) async fn open(
 async fn deliver_bytes(
     bytes: Bytes,
     send: &mpsc::Sender<Bytes>,
-    cancellation: &tokio_util::sync::CancellationToken,
+    operation: &OperationContext,
 ) -> crab_remote_git::Result<()> {
     let mut offset = 0;
     while offset < bytes.len() {
         let end = offset.saturating_add(OUTPUT_CHUNK_BYTES).min(bytes.len());
         let chunk = bytes.slice(offset..end);
-        tokio::select! {
+        let permit = tokio::select! {
             biased;
-            () = cancellation.cancelled() => return Err(crab_remote_git::Error::Cancelled),
-            result = send.send(chunk) => {
-                if result.is_err() {
-                    return Err(crab_remote_git::Error::Cancelled);
-                }
-            }
-        }
+            () = operation.cancellation().cancelled() => return Err(crab_remote_git::Error::Cancelled),
+            result = send.reserve() => result.map_err(|_| crab_remote_git::Error::Cancelled)?,
+        };
+        operation.check_read_authority().await?;
+        permit.send(chunk);
         offset = end;
     }
     Ok(())

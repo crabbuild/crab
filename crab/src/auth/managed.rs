@@ -1,9 +1,10 @@
 use crab_auth::managed::TransferOperation;
 use crab_auth::token_cache::expand_token_cache_path;
 use crab_auth_store::ManagedRepositoryResolver;
+use crab_storage::cdn::CdnConsumer;
 use tokio_util::sync::CancellationToken;
 
-use super::{build_store, open_repository_root};
+use super::{build_store_for_consumer, open_repository_root};
 use crate::core::config::Config;
 use crate::core::error::Result;
 use crate::storage::store::Store;
@@ -20,16 +21,18 @@ pub async fn build_repository_store(
     config: &Config,
     locator: crab_git::RepositoryLocator,
     operation: TransferOperation,
+    consumer: CdnConsumer,
     cancel: &CancellationToken,
 ) -> Result<RepositoryStore> {
     match locator {
         crab_git::RepositoryLocator::Direct(repository) => {
             let repository_prefix = repository.repo_prefix.clone();
             let canonical_url = format!("crab://{}/{}", repository.bucket, repository_prefix);
-            let store = build_store(
+            let store = build_store_for_consumer(
                 config,
                 crab_git::url::CrabUrl::from(repository),
                 transfer_operation_name(operation),
+                consumer,
                 cancel,
             )
             .await?;
@@ -45,6 +48,7 @@ pub async fn build_repository_store(
             let canonical_url = repository.canonical_url();
             let cache_dir = expand_token_cache_path(&config.auth.token_cache_path);
             let managed = ManagedRepositoryResolver::new(cache_dir)
+                .with_cdn_consumer(consumer)
                 .resolve(&repository, operation, cancel)
                 .await?;
             let store = Store::from_storage(managed.store);
@@ -59,7 +63,7 @@ pub async fn build_repository_store(
     }
 }
 
-fn transfer_operation_name(operation: TransferOperation) -> &'static str {
+pub(super) fn transfer_operation_name(operation: TransferOperation) -> &'static str {
     match operation {
         TransferOperation::Clone => "clone",
         TransferOperation::Fetch => "fetch",

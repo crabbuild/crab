@@ -1585,6 +1585,8 @@ mod tests {
             .unwrap();
         Repository::new(
             RepositoryConfig {
+                #[cfg(feature = "provider-cdn")]
+                cdn: None,
                 name: "repo".to_owned(),
                 provider: crab_storage::StorageProviderKind::Local,
                 bucket: "memory".to_owned(),

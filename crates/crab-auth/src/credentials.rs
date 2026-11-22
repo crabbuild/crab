@@ -72,6 +72,8 @@ impl fmt::Debug for CloudCredentials {
 pub struct CredentialResolution {
     pub credentials: CloudCredentials,
     pub storage_scope: Option<StorageScope>,
+    /// Validated viewer authority kept only in process memory.
+    pub cdn: Option<crate::cdn::CdnViewerGrant>,
 }
 
 impl CredentialResolution {
@@ -80,6 +82,7 @@ impl CredentialResolution {
         Self {
             credentials,
             storage_scope: None,
+            cdn: None,
         }
     }
 
@@ -88,6 +91,7 @@ impl CredentialResolution {
         Self {
             credentials,
             storage_scope: Some(storage_scope),
+            cdn: None,
         }
     }
 }

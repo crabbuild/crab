@@ -32,6 +32,8 @@ use crate::core::project_config::ProjectConfig;
 use crate::core::style::CliStyle;
 use tokio_util::sync::CancellationToken;
 
+mod cdn;
+
 const MAX_CACHE_SERVICE_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 /// Outcome of a single diagnostic check.
@@ -199,9 +201,14 @@ impl CheckResult {
 }
 
 /// Run `crab doctor` in the current working directory.
-pub async fn run_doctor(mode: OutputMode, cache_service_active_probe: bool) -> Result<()> {
+pub async fn run_doctor(
+    mode: OutputMode,
+    cache_service_active_probe: bool,
+    cdn_probe: bool,
+    cancel: &CancellationToken,
+) -> Result<()> {
     let cwd = std::env::current_dir()?;
-    run_doctor_in(&cwd, mode, cache_service_active_probe).await
+    run_doctor_in(&cwd, mode, cache_service_active_probe, cdn_probe, cancel).await
 }
 
 /// Collect a redacted cache-service support bundle for incidents.
@@ -294,6 +301,8 @@ pub async fn run_doctor_in(
     root: &Path,
     mode: OutputMode,
     cache_service_active_probe: bool,
+    cdn_probe: bool,
+    cancel: &CancellationToken,
 ) -> Result<()> {
     #[cfg(feature = "otlp")]
     let _span = tracing::info_span!(
@@ -313,7 +322,11 @@ pub async fn run_doctor_in(
     results.push(check_crab_config(root));
     results.push(check_remote_url(root));
     results.push(check_auth());
-    results.push(check_remote_access(root).await);
+    if cdn_probe {
+        results.extend(cdn::check(root, cancel).await);
+    } else {
+        results.push(check_remote_access(root).await);
+    }
     results.push(check_credential_discovery(root).await);
     results.push(check_staging(root).await);
     results.extend(check_cache(root).await);

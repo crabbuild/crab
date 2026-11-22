@@ -54,12 +54,12 @@ impl<T: std::fmt::Debug> std::fmt::Debug for Retained<T> {
     }
 }
 
-struct ReservedBytes {
+struct ReservedBytes<R> {
     bytes: Bytes,
-    _reservation: ReadReservation,
+    _reservation: R,
 }
 
-impl AsRef<[u8]> for ReservedBytes {
+impl<R> AsRef<[u8]> for ReservedBytes<R> {
     fn as_ref(&self) -> &[u8] {
         &self.bytes
     }
@@ -141,6 +141,24 @@ impl ReadReservation {
     ///
     /// Returns a resource limit error if the supplied payload exceeds admission.
     pub fn bind(self, bytes: Bytes) -> Result<Bytes> {
+        self.check_payload(&bytes)?;
+        // Bytes owns this guard through the last clone or slice, including
+        // transport-held frames after the handler has returned.
+        Ok(Bytes::from_owner(ReservedBytes {
+            bytes,
+            _reservation: self,
+        }))
+    }
+
+    pub(crate) fn bind_shared(self: &Arc<Self>, bytes: Bytes) -> Result<Bytes> {
+        self.check_payload(&bytes)?;
+        Ok(Bytes::from_owner(ReservedBytes {
+            bytes,
+            _reservation: Arc::clone(self),
+        }))
+    }
+
+    fn check_payload(&self, bytes: &Bytes) -> Result<()> {
         let maximum = self.amount - OWNER_BYTES;
         if bytes.len() > maximum {
             return Err(Error::LimitExceeded {
@@ -149,12 +167,7 @@ impl ReadReservation {
                 maximum: maximum as u64,
             });
         }
-        // Bytes owns this guard through the last clone or slice, including
-        // transport-held frames after the handler has returned.
-        Ok(Bytes::from_owner(ReservedBytes {
-            bytes,
-            _reservation: self,
-        }))
+        Ok(())
     }
 }
 

@@ -1753,7 +1753,7 @@
         },
         "responses": {
           "201": {
-            "description": "Short-lived transfer grant",
+            "description": "Short-lived grant in the requested version. Native direct reads in version 2 can include CDN viewer authority.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2041,6 +2041,59 @@
       "CapabilityName": {
         "type": "string",
         "description": "Named managed-service capability. Unknown valid names are intentionally retained."
+      },
+      "CdnProvider": {
+        "type": "string",
+        "description": "CDN viewer mechanism selected by an authorized issuer.",
+        "enum": [
+          "cloudfront",
+          "cloud_cdn",
+          "front_door"
+        ]
+      },
+      "CdnViewerGrant": {
+        "type": "object",
+        "description": "A short-lived viewer grant whose credentials are redacted in diagnostics.",
+        "required": [
+          "provider",
+          "origin",
+          "base_url",
+          "repo_prefix",
+          "expires_at",
+          "grants"
+        ],
+        "properties": {
+          "base_url": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "global_prefix": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "grants": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PrefixCredential"
+            }
+          },
+          "origin": {
+            "type": "string"
+          },
+          "provider": {
+            "$ref": "#/components/schemas/CdnProvider"
+          },
+          "repo_prefix": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
       },
       "DirectObjectCredentials": {
         "type": "object",
@@ -2399,6 +2452,22 @@
       "PageCursor": {
         "type": "string",
         "description": "Opaque signed pagination cursor."
+      },
+      "PrefixCredential": {
+        "type": "object",
+        "required": [
+          "prefix",
+          "credential"
+        ],
+        "properties": {
+          "credential": {
+            "$ref": "#/components/schemas/SecretString"
+          },
+          "prefix": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
       },
       "PromoteReplicaRequest": {
         "type": "object",
@@ -2909,6 +2978,10 @@
           "transport"
         ],
         "properties": {
+          "cdn": {
+            "$ref": "#/components/schemas/CdnViewerGrant",
+            "description": "Present only on a v2 native direct read grant."
+          },
           "expires_at": {
             "type": "string",
             "format": "date-time"
@@ -2970,6 +3043,7 @@
           "schema_version": {
             "type": "integer",
             "format": "int32",
+            "description": "Version 1, or version 2 for reads when advertised by capabilities.",
             "minimum": 0
           }
         },
