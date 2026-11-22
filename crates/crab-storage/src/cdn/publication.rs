@@ -33,7 +33,7 @@ struct Receipt {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Placement {
-    resource: String,
+    pub(crate) resource: String,
     pub(crate) location: String,
 }
 

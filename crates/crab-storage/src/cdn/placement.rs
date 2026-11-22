@@ -87,28 +87,25 @@ impl NativeCdnOrigin {
                         .await
                         .map_err(|source| StorageError::ObjectStore { source })?;
                     let url = format!("https://storage.googleapis.com/storage/v1/b/{bucket}");
-                    let mut response = client
+                    let response = client
                         .get(url)
                         .query(&[("fields", "name,projectNumber,location")])
                         .bearer_auth(&credential.bearer)
                         .send()
                         .await
                         .map_err(request_error)?;
-                    if response.status() != StatusCode::OK {
-                        return Err(mismatch());
-                    }
-                    let mut body = Vec::new();
-                    while let Some(chunk) = response.chunk().await.map_err(request_error)? {
-                        if chunk.len() > 4096 - body.len() {
-                            return Err(mismatch());
-                        }
-                        body.extend_from_slice(&chunk);
-                    }
+                    let body = bounded_response(response, 4096).await?;
                     verify_gcs_bucket(&body, bucket, placement)
                 }
+                #[cfg(feature = "azure-cdn-placement")]
+                NativeAuthority::Azure => {
+                    verify_azure_placement(&client, &self.address, placement).await
+                }
+                #[cfg(not(feature = "azure-cdn-placement"))]
                 NativeAuthority::Azure => Err(StorageError::Forbidden {
-                    path: "public CDN needs independently authorized Azure placement at activation"
-                        .into(),
+                    path:
+                        "this build lacks Azure Resource Manager support for public CDN placement"
+                            .into(),
                 }),
                 #[cfg(any(test, feature = "test-support"))]
                 NativeAuthority::Fixture => Ok(()),
@@ -121,6 +118,105 @@ impl NativeCdnOrigin {
                     .into(),
             })?
     }
+}
+
+async fn bounded_response(mut response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
+    if response.status() != StatusCode::OK {
+        return Err(mismatch());
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(request_error)? {
+        if chunk.len() > limit - body.len() {
+            return Err(mismatch());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+#[cfg(feature = "azure-cdn-placement")]
+async fn verify_azure_placement(
+    client: &Client,
+    address: &str,
+    placement: &Placement,
+) -> Result<()> {
+    // Blob credentials authorize the selected data plane. ARM independently verifies
+    // its account and subscription with an Entra token for the management audience.
+    let unauthorized = |_| StorageError::AuthFailed {
+        path: "Azure Resource Manager credentials for public CDN placement".into(),
+    };
+    let credential = azure_identity::create_credential().map_err(unauthorized)?;
+    let token = credential
+        .get_token(&["https://management.azure.com/.default"])
+        .await
+        .map_err(unauthorized)?;
+    let get = |resource: &str| {
+        let url = format!("https://management.azure.com{resource}");
+        client
+            .get(url)
+            .query(&[("api-version", "2025-08-01")])
+            .bearer_auth(token.token.secret())
+    };
+    let (account_id, _) = placement
+        .resource
+        .split_once("/blobservices/")
+        .ok_or_else(mismatch)?;
+    let read = |request: reqwest::RequestBuilder| async move {
+        let response = request.send().await.map_err(request_error)?;
+        bounded_response(response, 1024 * 1024).await
+    };
+    let (account, container) =
+        tokio::try_join!(read(get(account_id)), read(get(&placement.resource)))?;
+    verify_azure_resources(&account, &container, address, placement)
+}
+
+#[cfg(feature = "azure-cdn-placement")]
+fn verify_azure_resources(
+    account: &[u8],
+    container: &[u8],
+    address: &str,
+    placement: &Placement,
+) -> Result<()> {
+    #[derive(Deserialize)]
+    struct ResourceId {
+        id: String,
+    }
+    #[derive(Deserialize)]
+    struct Account {
+        id: String,
+        properties: AccountProperties,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct AccountProperties {
+        primary_location: String,
+        primary_endpoints: PrimaryEndpoints,
+    }
+    #[derive(Deserialize)]
+    struct PrimaryEndpoints {
+        blob: String,
+    }
+
+    let account: Account = serde_json::from_slice(account).map_err(|_| mismatch())?;
+    let container: ResourceId = serde_json::from_slice(container).map_err(|_| mismatch())?;
+    let (account_id, _) = placement
+        .resource
+        .split_once("/blobservices/")
+        .ok_or_else(mismatch)?;
+    let (blob_endpoint, _) = address.rsplit_once('/').ok_or_else(mismatch)?;
+    if account.id.eq_ignore_ascii_case(account_id)
+        && container.id.eq_ignore_ascii_case(&placement.resource)
+        && account.properties.primary_location == placement.location
+        && account
+            .properties
+            .primary_endpoints
+            .blob
+            .trim_end_matches('/')
+            == blob_endpoint
+    {
+        return Ok(());
+    }
+    Err(mismatch())
 }
 
 fn signed_head(
@@ -254,5 +350,51 @@ mod tests {
                 accepted
             );
         }
+    }
+
+    #[cfg(feature = "azure-cdn-placement")]
+    #[test]
+    fn azure_native_proof_binds_arm_ids_primary_location_and_blob_endpoint() {
+        let account_id = "/subscriptions/11111111-2222-3333-4444-555555555555/resourcegroups/fixture/providers/microsoft.storage/storageaccounts/fixtureacct";
+        let expected = Placement {
+            resource: format!("{account_id}/blobservices/default/containers/repo"),
+            location: "westus2".into(),
+        };
+        let address = "https://fixtureacct.blob.core.windows.net/repo";
+        let account = serde_json::json!({
+            "id": account_id.to_ascii_uppercase(),
+            "properties": {
+                "primaryLocation": "westus2",
+                "primaryEndpoints": {"blob": "https://fixtureacct.blob.core.windows.net/"}
+            }
+        });
+        let container = serde_json::json!({"id": expected.resource.to_ascii_uppercase()});
+        let verify = |account: &serde_json::Value, container: &serde_json::Value| {
+            verify_azure_resources(
+                &serde_json::to_vec(account).unwrap(),
+                &serde_json::to_vec(container).unwrap(),
+                address,
+                &expected,
+            )
+        };
+        assert!(verify(&account, &container).is_ok());
+
+        for (path, value) in [
+            (
+                "/id",
+                account_id.replace("resourcegroups/fixture", "resourcegroups/other"),
+            ),
+            ("/properties/primaryLocation", "eastus".into()),
+            (
+                "/properties/primaryEndpoints/blob",
+                "https://otheracct.blob.core.windows.net/".into(),
+            ),
+        ] {
+            let mut wrong = account.clone();
+            *wrong.pointer_mut(path).unwrap() = value.into();
+            assert!(verify(&wrong, &container).is_err(), "{path}");
+        }
+        let sibling = serde_json::json!({"id": format!("{account_id}/blobservices/default/containers/sibling")});
+        assert!(verify(&account, &sibling).is_err());
     }
 }

@@ -537,9 +537,21 @@ reader used by the qualification action. Public GCS activation calls
 `buckets.get` with the selected credentials. Grant `storage.buckets.get`
 on the source bucket to that reader. The activation verifies the location
 from the same call and rejects a missing or mismatched proof before sending
-an edge request. Public Azure activation still needs a runtime ARM
-authority to verify the receipt's account resource and primary location.
-[S3 HeadBucket](https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadBucket.html) · [GCS Buckets: get](https://docs.cloud.google.com/storage/docs/json_api/v1/buckets/get) · [Azure storage account properties](https://learn.microsoft.com/en-us/rest/api/storagerp/storage-accounts/get-properties)
+an edge request.
+
+Public Azure activation uses the runtime Azure Entra credential chain to
+obtain a token for Azure Resource Manager. Give that identity
+`Microsoft.Storage/storageAccounts/read` and
+`Microsoft.Storage/storageAccounts/blobServices/containers/read` at the
+approved source. Crab verifies the account and container resource IDs,
+primary location, and Blob endpoint. Use `AZURE_CREDENTIAL_KIND` to select
+the existing credential kind when the runtime has multiple identities.
+Blob bearer tokens, SAS tokens, and account keys remain scoped to data access.
+For an explicit-credential SDK checkout, the Git helper can obtain its ARM
+identity from Azure CLI login or managed identity after the SDK scopes the
+child's storage environment. Use `azure_from_env` when the helper needs the
+launcher-provided Entra environment credential chain.
+[S3 HeadBucket](https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadBucket.html) · [GCS Buckets: get](https://docs.cloud.google.com/storage/docs/json_api/v1/buckets/get) · [Azure storage account properties](https://learn.microsoft.com/en-us/rest/api/storagerp/storage-accounts/get-properties?view=rest-storagerp-2025-08-01) · [Azure container properties](https://learn.microsoft.com/en-us/rest/api/storagerp/blob-containers/get?view=rest-storagerp-2025-08-01)
 
 Recollect public deployment snapshots before preregistration. They include
 an export component that binds the actual distribution or backend and its

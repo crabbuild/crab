@@ -166,7 +166,7 @@ crab-write = { workspace = true }
 crab-remote = { workspace = true, features = ["local", "publication"] }
 crab-remote-git = { workspace = true }
 crab-staging = { workspace = true }
-crab-storage = { workspace = true }
+crab-storage = { workspace = true, features = ["azure-cdn-placement"] }
 crab-types = { workspace = true }
 crab-vfs = { workspace = true }
 crab-workflow = { workspace = true, features = ["schema"] }
