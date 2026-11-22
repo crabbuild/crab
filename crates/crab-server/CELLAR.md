@@ -358,7 +358,12 @@ and mute state before revealing existing notices. Issue and pull request
 overrides use typed subject addresses. The subscriptions view walks canonical
 issue and pull request keys and probes the account's current thread preference
 in the same Repository transaction. Each native read examines at most 32
-discussions. Existing follows require no index preparation. Bulk unsubscribe
+discussions. New follows store the activation reason and time alongside the
+preference and update a private chronological index in the same transaction.
+Automatic follows use the committed activity time. Changes between active
+follow modes preserve the origin, and ending a follow removes its index row.
+Existing follows keep their unknown origin and require no index preparation.
+Bulk unsubscribe
 groups changes by Repository Cell, runs each captured version through the
 canonical setter, and leaves earlier inbox activity in place. The watcher
 read merges bounded pages

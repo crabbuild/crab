@@ -135,6 +135,7 @@ impl Mutation for Dismiss {
                 key,
                 &mut current,
                 ThreadMode::Unsubscribed,
+                None,
             )?;
             results.push(true);
         }

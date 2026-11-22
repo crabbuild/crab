@@ -361,8 +361,13 @@ impl Mutation for Enroll {
                     "Notification follow source does not match activity",
                 ));
             }
+            let reason = if event.assignees.is_empty() {
+                watches::SubscriptionReason::Mention
+            } else {
+                watches::SubscriptionReason::Assignment
+            };
             for actor in &input.recipients {
-                watches::follow_recipient(context, &source, actor, event.assignees.is_empty())?;
+                watches::follow_recipient(context, &source, actor, reason)?;
             }
         }
         Ok(MutationResult::Success(()))

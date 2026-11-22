@@ -53,6 +53,8 @@ pub(in crate::cells) fn dispatch_mutation(
         mention_settings::Set::ID => invoke_mutation::<mention_settings::Set>(context, input),
         watches::Set::ID => invoke_mutation::<watches::Set>(context, input),
         watches::SetThread::ID => invoke_mutation::<watches::SetThread>(context, input),
+        #[cfg(test)]
+        watches::SetFollowTimes::ID => invoke_mutation::<watches::SetFollowTimes>(context, input),
         watches::UnsubscribeDiscussions::ID => {
             invoke_mutation::<watches::UnsubscribeDiscussions>(context, input)
         }
@@ -274,6 +276,9 @@ pub(in crate::cells) fn dispatch_read(
         watches::Get::ID => invoke_read::<watches::Get>(context, input),
         watches::GetThread::ID => invoke_read::<watches::GetThread>(context, input),
         watches::ListDiscussions::ID => invoke_read::<watches::ListDiscussions>(context, input),
+        watches::ListTimedDiscussions::ID => {
+            invoke_read::<watches::ListTimedDiscussions>(context, input)
+        }
         watches::InboxVisibility::ID => invoke_read::<watches::InboxVisibility>(context, input),
         watches::PublishedReleases::ID => invoke_read::<watches::PublishedReleases>(context, input),
         watches::ReleaseWatchers::ID => invoke_read::<watches::ReleaseWatchers>(context, input),

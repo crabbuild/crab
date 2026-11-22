@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    CLASS, IdentityKey, Mode, Mutation, Read, Result, Subject, SubjectKind, ThreadPreference,
-    Transaction, identity_key, subscription, thread_subscription,
+    CLASS, IdentityKey, Mode, Mutation, Read, Result, Subject, SubjectKind, SubscriptionOrigin,
+    SubscriptionReason, ThreadPreference, Transaction, identity_key, subscription,
+    thread_subscription,
 };
 use crate::cells::{
     Error,
@@ -16,6 +17,7 @@ const SCAN: usize = 32;
 pub(crate) struct DiscussionQuery {
     pub actor: IdentityKey,
     pub kind: Option<SubjectKind>,
+    pub reason: Option<SubscriptionReason>,
     pub after: Option<Subject>,
 }
 
@@ -24,6 +26,7 @@ pub(crate) struct DiscussionQuery {
 pub(crate) struct DiscussionSubscription {
     pub discussion: SubjectSummary,
     pub preference: ThreadPreference,
+    pub origin: Option<SubscriptionOrigin>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -95,13 +98,18 @@ impl Read for ListDiscussions {
         let next = (scanned.len() > SCAN).then(|| scanned[SCAN - 1]);
         let mut items = Vec::new();
         for subject in scanned.into_iter().take(SCAN) {
-            let preference = thread_subscription(context, subject, actor)?.preference;
-            if preference.mode.follows()
+            let subscription = thread_subscription(context, subject, actor)?;
+            let reason = subscription
+                .origin
+                .map_or(SubscriptionReason::Unknown, |origin| origin.reason);
+            if subscription.preference.mode.follows()
+                && input.reason.is_none_or(|filter| filter == reason)
                 && let Some(discussion) = subject.summary(context)?
             {
                 items.push(DiscussionSubscription {
                     discussion,
-                    preference,
+                    preference: subscription.preference,
+                    origin: subscription.origin,
                 });
             }
         }

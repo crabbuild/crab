@@ -94,18 +94,45 @@ impl Transaction<'_> {
         before: Option<&str>,
         limit: usize,
     ) -> Result<Vec<(String, T)>> {
+        // Descending pagination needs the exclusive upper bound.
+        self.document_page(
+            prefix,
+            cellar::sdk::storage::ListOptions {
+                end: before.map(str::to_owned),
+                reverse: true,
+                ..Default::default()
+            },
+            limit,
+        )
+    }
+
+    pub(crate) fn documents_after<T: DeserializeOwned>(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(String, T)>> {
+        self.document_page(
+            prefix,
+            cellar::sdk::storage::ListOptions {
+                start_after: after.map(str::to_owned),
+                ..Default::default()
+            },
+            limit,
+        )
+    }
+
+    fn document_page<T: DeserializeOwned>(
+        &self,
+        prefix: &str,
+        mut options: cellar::sdk::storage::ListOptions,
+        limit: usize,
+    ) -> Result<Vec<(String, T)>> {
         if !(1..=51).contains(&limit) {
             return Err(Error::Invalid("Cell document page size is invalid"));
         }
-        // Cellar's start_after remains a lower bound even in reverse order;
-        // descending pagination needs the exclusive upper bound instead.
-        let options = cellar::sdk::storage::ListOptions {
-            prefix: Some(prefix.to_owned()),
-            end: before.map(str::to_owned),
-            limit: Some(limit),
-            reverse: true,
-            ..Default::default()
-        };
+        options.prefix = Some(prefix.to_owned());
+        options.limit = Some(limit);
         let mut bytes = 0usize;
         self.storage
             .list(&options)

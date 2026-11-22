@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import { RelativeTime } from "@/components/discussion/time";
 import { Link } from "@/components/navigation/link";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -18,12 +19,21 @@ import {
 } from "./preferences";
 
 type Kind = "issue" | "pull";
+const reasons = {
+  manual: "Manually subscribed",
+  participation: "Participation",
+  mention: "Mention",
+  assignment: "Assignment",
+  unknown: "Source unavailable",
+};
+type Reason = keyof typeof reasons;
 type Subscription = {
   repository: Address;
   subject: { kind: Kind; number: number };
   title: string;
   state: "open" | "closed" | "merged";
   preference: DiscussionPreference;
+  origin?: { reason: Reason; subscribed_at_ms: number } | null;
   muted: boolean;
 };
 type Page = { items: Subscription[]; next: string | null };
@@ -40,10 +50,20 @@ export function DiscussionSubscriptions({
   const repository = url.searchParams.get("repository") ?? "";
   const kind = url.searchParams.get("kind");
   const selectedKind = kind === "issue" || kind === "pull" ? kind : "";
-  function filter(repository: string, kind: string) {
-    const query = new URLSearchParams();
-    if (repository) query.set("repository", repository);
-    if (kind) query.set("kind", kind);
+  const reason = url.searchParams.get("reason");
+  const selectedReason = reason && Object.hasOwn(reasons, reason) ? reason : "";
+  const sort = url.searchParams.get("sort");
+  const selectedSort = sort === "recent" || sort === "oldest" ? sort : "";
+  const filters = new URLSearchParams();
+  if (repository) filters.set("repository", repository);
+  if (selectedKind) filters.set("kind", selectedKind);
+  if (selectedReason) filters.set("reason", selectedReason);
+  if (selectedSort) filters.set("sort", selectedSort);
+
+  function filter(field: string, value: string) {
+    const query = new URLSearchParams(filters);
+    if (value) query.set(field, value);
+    else query.delete(field);
     navigate(`/-/notifications/subscriptions${query.size ? `?${query}` : ""}`);
   }
   return (
@@ -67,7 +87,7 @@ export function DiscussionSubscriptions({
           Repository
           <NativeSelect
             value={repository}
-            onChange={(event) => filter(event.target.value, selectedKind)}
+            onChange={(event) => filter("repository", event.target.value)}
           >
             <NativeSelectOption value="">All repositories</NativeSelectOption>
             {repository &&
@@ -87,7 +107,7 @@ export function DiscussionSubscriptions({
           Discussion type
           <NativeSelect
             value={selectedKind}
-            onChange={(event) => filter(repository, event.target.value)}
+            onChange={(event) => filter("kind", event.target.value)}
           >
             <NativeSelectOption value="">
               Issues and pull requests
@@ -96,12 +116,45 @@ export function DiscussionSubscriptions({
             <NativeSelectOption value="pull">Pull requests</NativeSelectOption>
           </NativeSelect>
         </label>
+        <label className="grid gap-1 text-sm font-medium">
+          Subscription reason
+          <NativeSelect
+            value={selectedReason}
+            onChange={(event) => filter("reason", event.target.value)}
+          >
+            <NativeSelectOption value="">All reasons</NativeSelectOption>
+            {Object.entries(reasons).map(([value, label]) => (
+              <NativeSelectOption key={value} value={value}>
+                {label}
+              </NativeSelectOption>
+            ))}
+          </NativeSelect>
+        </label>
+        <label className="grid gap-1 text-sm font-medium">
+          Sort subscriptions
+          <NativeSelect
+            value={selectedSort}
+            onChange={(event) => filter("sort", event.target.value)}
+          >
+            <NativeSelectOption value="">Repository order</NativeSelectOption>
+            <NativeSelectOption value="recent">
+              Most recently subscribed
+            </NativeSelectOption>
+            <NativeSelectOption value="oldest">
+              Least recently subscribed
+            </NativeSelectOption>
+          </NativeSelect>
+        </label>
       </div>
+      {selectedSort && !selectedReason && (
+        <p className="text-sm text-muted-foreground">
+          Subscriptions without a recorded date appear last.
+        </p>
+      )}
       <SubscriptionList
-        key={`${repository}:${selectedKind}`}
+        key={filters.toString()}
         csrf={csrf}
-        repository={repository}
-        kind={selectedKind}
+        filters={filters.toString()}
       />
     </section>
   );
@@ -117,12 +170,10 @@ function follows({ mode }: DiscussionPreference) {
 
 function SubscriptionList({
   csrf,
-  repository,
-  kind,
+  filters,
 }: {
   csrf: string;
-  repository: string;
-  kind: Kind | "";
+  filters: string;
 }) {
   const [after, setAfter] = useState<string>();
   const [earlier, setEarlier] = useState<Subscription[]>([]);
@@ -130,10 +181,8 @@ function SubscriptionList({
   const [announcement, setAnnouncement] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const list = useRef<HTMLDivElement>(null);
-  const query = new URLSearchParams();
+  const query = new URLSearchParams(filters);
   if (after) query.set("after", after);
-  if (repository) query.set("repository", repository);
-  if (kind) query.set("kind", kind);
   const page = useRequest<Page>(`/api/notifications/subscriptions?${query}`);
   const rows = [...earlier, ...(page.data?.items ?? [])].filter((item) =>
     follows(saved[rowKey(item)] ?? item.preference),
@@ -202,7 +251,14 @@ function SubscriptionList({
       {rows.length > 0 && (
         <ul className="divide-y overflow-hidden rounded-lg border">
           {rows.map((item) => {
-            const { repository: repo, subject, title, state, muted } = item;
+            const {
+              repository: repo,
+              subject,
+              title,
+              state,
+              muted,
+              origin,
+            } = item;
             const key = rowKey(item);
             const isIssue = subject.kind === "issue";
             const preference = saved[key] ?? item.preference;
@@ -243,6 +299,15 @@ function SubscriptionList({
                           : "Merged"}{" "}
                       · {discussionModeLabel(preference.mode)}
                       {muted && " · Repository muted"}
+                    </div>
+                    <div className="text-sm text-muted-foreground">
+                      {reasons[origin?.reason ?? "unknown"]}
+                      {origin && (
+                        <>
+                          {" "}
+                          · <RelativeTime value={origin.subscribed_at_ms} />
+                        </>
+                      )}
                     </div>
                   </div>
                 </div>

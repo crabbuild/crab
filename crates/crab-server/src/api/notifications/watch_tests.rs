@@ -355,6 +355,14 @@ async fn discussion_preferences_override_repository_watch_and_mentions_restore_f
         h.json(&preference, &bob).await,
         json!({"mode":"follow","version":4})
     );
+    let follows = h
+        .json(
+            "/api/notifications/subscriptions?reason=mention&sort=recent",
+            &bob,
+        )
+        .await;
+    assert_eq!(follows["items"][0]["origin"]["reason"], "mention");
+    assert_eq!(follows["items"][0]["title"], "Followed discussion");
     choose("inherit", 4).await.error_for_status().unwrap();
     comment(&first, "Back to the repository setting").await;
     h.deliver_notifications("team", "private").await;
@@ -652,6 +660,14 @@ async fn a_newer_unsubscribe_survives_assignment_delivery_and_reassignment_follo
         h.json(&preference, &bob).await,
         json!({"mode":"follow","version":2})
     );
+    let follows = h
+        .json(
+            "/api/notifications/subscriptions?reason=assignment&sort=oldest",
+            &bob,
+        )
+        .await;
+    assert_eq!(follows["items"][0]["origin"]["reason"], "assignment");
+    assert_eq!(follows["items"][0]["title"], "Assigned to this discussion");
     let assigned = h.json(assigned, &bob).await;
     let [item] = assigned["items"].as_array().unwrap().as_slice() else {
         panic!("reassignment keeps one thread and its reason");

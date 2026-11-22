@@ -12,8 +12,14 @@ use crate::cells::{
 
 mod discussions;
 pub(crate) use discussions::{
-    DiscussionQuery, ListDiscussions, SelectedThread, ThreadSelection, UnsubscribeDiscussions,
+    DiscussionQuery, DiscussionSubscription, ListDiscussions, SelectedThread, ThreadSelection,
+    UnsubscribeDiscussions,
 };
+
+mod chronology;
+#[cfg(test)]
+pub(crate) use chronology::tests::SetFollowTimes;
+pub(crate) use chronology::{ListTimedDiscussions, TIMED_PAGE, TimeBound, TimedQuery};
 
 mod inbox;
 pub(crate) use inbox::{
@@ -200,6 +206,23 @@ pub(crate) struct ThreadPreference {
     pub version: u64,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SubscriptionReason {
+    Manual,
+    Participation,
+    Mention,
+    Assignment,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SubscriptionOrigin {
+    pub reason: SubscriptionReason,
+    pub subscribed_at_ms: u64,
+}
+
 #[derive(Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ThreadSubscription {
@@ -207,6 +230,8 @@ struct ThreadSubscription {
     after: u64,
     #[serde(default)]
     choice_after: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    origin: Option<SubscriptionOrigin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dismissed: Option<inbox::Dismissal>,
 }
@@ -236,7 +261,22 @@ fn save_thread(
     key: Key,
     current: &mut ThreadSubscription,
     mode: ThreadMode,
+    activation: Option<SubscriptionOrigin>,
 ) -> Result<ThreadPreference> {
+    let origin = mode
+        .follows()
+        .then(|| {
+            if current.preference.mode.follows() {
+                current.origin
+            } else {
+                activation
+            }
+        })
+        .flatten();
+    if current.origin != origin {
+        chronology::update(context, key, subject, current.origin, origin)?;
+        current.origin = origin;
+    }
     current.preference = ThreadPreference {
         mode,
         version: next_version(current.preference.version)?,
@@ -273,15 +313,16 @@ pub(super) fn participate(context: &Transaction<'_>, source: &activity::Event) -
         issuer: source.actor.issuer.clone(),
         subject: source.actor.subject.clone(),
     };
-    follow_recipient(context, source, &actor, true)
+    follow_recipient(context, source, &actor, SubscriptionReason::Participation)
 }
 
 pub(super) fn follow_recipient(
     context: &Transaction<'_>,
     source: &activity::Event,
     actor: &IdentityKey,
-    can_resume: bool,
+    reason: SubscriptionReason,
 ) -> Result<()> {
+    let can_resume = reason != SubscriptionReason::Assignment;
     let key = identity_key(actor)?;
     if subscription(context, key)?.preference.mode == Mode::Muted {
         return Ok(());
@@ -310,6 +351,10 @@ pub(super) fn follow_recipient(
             key,
             &mut current,
             ThreadMode::Follow,
+            Some(SubscriptionOrigin {
+                reason,
+                subscribed_at_ms: source.created_at,
+            }),
         )?;
     }
     Ok(())
@@ -391,6 +436,16 @@ impl Mutation for SetThread {
         {
             dismissal.resume();
         }
+        let activation = if mode.follows() && !current.preference.mode.follows() {
+            let subscribed_at_ms = u64::try_from(context.now_ms())
+                .map_err(|_| Error::Invalid("Subscription time is invalid"))?;
+            Some(SubscriptionOrigin {
+                reason: SubscriptionReason::Manual,
+                subscribed_at_ms,
+            })
+        } else {
+            None
+        };
         let saved = save_thread(
             context,
             input.subject,
@@ -398,6 +453,7 @@ impl Mutation for SetThread {
             key,
             &mut current,
             mode,
+            activation,
         )?;
         Ok(MutationResult::Success(ThreadOutcome::Saved(saved)))
     }

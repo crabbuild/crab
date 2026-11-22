@@ -14,12 +14,17 @@ use crate::{
     auth::Principal,
     cells::repository::collaboration::{
         Subject, SubjectKind, SubjectSummary,
-        watches::{DiscussionQuery, ListDiscussions, ThreadPreference},
+        watches::{
+            DiscussionQuery, DiscussionSubscription, ListDiscussions, SubscriptionOrigin,
+            SubscriptionReason, ThreadPreference,
+        },
     },
+    repository::Repository,
     server::Server,
 };
 
 pub(super) mod bulk;
+mod timed;
 
 const REPOSITORIES_PER_PAGE: usize = 4;
 
@@ -28,7 +33,16 @@ const REPOSITORIES_PER_PAGE: usize = 4;
 pub(super) struct Parameters {
     repository: Option<Uuid>,
     kind: Option<SubjectKind>,
+    reason: Option<SubscriptionReason>,
+    sort: Option<Sort>,
     after: Option<String>,
+}
+
+#[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum Sort {
+    Recent,
+    Oldest,
 }
 
 #[derive(Serialize)]
@@ -37,7 +51,24 @@ struct Item {
     #[serde(flatten)]
     discussion: SubjectSummary,
     preference: ThreadPreference,
+    origin: Option<SubscriptionOrigin>,
     muted: bool,
+}
+
+impl Item {
+    fn new(repo: &Repository, item: DiscussionSubscription, muted: bool) -> Self {
+        Self {
+            repository: RepositoryLabel {
+                id: repo.id,
+                owner: repo.config.owner.clone(),
+                name: repo.config.name.clone(),
+            },
+            discussion: item.discussion,
+            preference: item.preference,
+            origin: item.origin,
+            muted,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -49,9 +80,37 @@ pub(super) struct Page {
 pub(super) async fn list(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
-    Query(params): Query<Parameters>,
+    Query(mut params): Query<Parameters>,
 ) -> Result<Json<Page>> {
     let actor = app::account(&principal)?;
+    let repositories = visible_repositories(&server, &principal, params.repository).await?;
+    if params.repository.is_some() && repositories.is_empty() {
+        return Err(Error::NotFound);
+    }
+    let append_undated = params.sort.is_some() && params.reason.is_none();
+    if let Some(sort) = params
+        .sort
+        .filter(|_| params.reason != Some(SubscriptionReason::Unknown))
+    {
+        if append_undated && let Some(after) = params.after.as_deref().and_then(undated_cursor) {
+            params.after = after.map(str::to_owned);
+        } else {
+            let page = timed::list(
+                &server,
+                &principal,
+                actor.clone(),
+                &params,
+                sort,
+                &repositories,
+            )
+            .await?;
+            if !page.items.is_empty() || !append_undated {
+                return Ok(Json(page));
+            }
+            params.after = None;
+        }
+        params.reason = Some(SubscriptionReason::Unknown);
+    }
     let after = params.after.as_deref().map(Cursor::parse).transpose()?;
     if let Some(after) = &after
         && (params.repository.is_some_and(|id| id != after.repository)
@@ -62,15 +121,6 @@ pub(super) async fn list(
         return Err(Error::Invalid(
             "Subscription cursor does not match the filters",
         ));
-    }
-    let repositories: Vec<_> = catalog::visible(&server, &principal, None, None)
-        .await?
-        .into_iter()
-        .map(|visible| visible.repository)
-        .filter(|repository| params.repository.is_none_or(|id| id == repository.id))
-        .collect();
-    if params.repository.is_some() && repositories.is_empty() {
-        return Err(Error::NotFound);
     }
     let start = match &after {
         None => 0,
@@ -100,6 +150,7 @@ pub(super) async fn list(
                     DiscussionQuery {
                         actor: actor.clone(),
                         kind: params.kind,
+                        reason: params.reason,
                         after: after
                             .as_ref()
                             .filter(|after| after.repository == repo.id)
@@ -109,16 +160,11 @@ pub(super) async fn list(
                 .await,
         )?;
         scanned.push(repo);
-        items.extend(page.items.into_iter().map(|item| Item {
-            repository: RepositoryLabel {
-                id: repo.id,
-                owner: repo.config.owner.clone(),
-                name: repo.config.name.clone(),
-            },
-            discussion: item.discussion,
-            preference: item.preference,
-            muted: page.muted,
-        }));
+        items.extend(
+            page.items
+                .into_iter()
+                .map(|item| Item::new(repo, item, page.muted)),
+        );
         next = (page.next.is_some() || index + 1 < repositories.len()).then(|| {
             Cursor {
                 repository: repo.id,
@@ -137,7 +183,31 @@ pub(super) async fn list(
             return Err(Error::PageChanged);
         }
     }
+    if append_undated {
+        next = next.map(|cursor| format!("undated:{cursor}"));
+    }
     Ok(Json(Page { items, next }))
+}
+
+fn undated_cursor(value: &str) -> Option<Option<&str>> {
+    if value == "undated" {
+        Some(None)
+    } else {
+        value.strip_prefix("undated:").map(Some)
+    }
+}
+
+async fn visible_repositories(
+    server: &Server,
+    principal: &Principal,
+    repository: Option<Uuid>,
+) -> Result<Vec<Arc<Repository>>> {
+    Ok(catalog::visible(server, principal, None, None)
+        .await?
+        .into_iter()
+        .map(|visible| visible.repository)
+        .filter(|repo| repository.is_none_or(|id| id == repo.id))
+        .collect())
 }
 
 struct Cursor {

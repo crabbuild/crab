@@ -2667,17 +2667,23 @@ version to recover a possible completed write. The browser splits larger
 selections into bounded requests.
 
 Open **Subscriptions** from the notification inbox to manage discussions you
-follow, including those with no inbox activity. Filter by repository or by
-issue and pull request type. Each row shows the discussion state, current
-follow choice, and whether the repository is muted. Use **Notification settings**
+follow, including those with no inbox activity. Filter by repository,
+discussion type, or subscription reason. Sort by most or least recently
+subscribed across accessible repositories, or choose repository order. Each
+row shows the discussion state, follow choice, recorded source, and repository
+mute state. Earlier follows with no recorded source or date remain available
+and appear last in the time sorts. Use **Notification settings**
 on a row to change which updates you receive or stop following it.
 
-`GET /api/notifications/subscriptions` accepts optional `repository` (UUID)
-and `kind` (`issue` or `pull`) filters. It returns `items` with the current
-repository address, typed subject, title, state, versioned preference, and
-repository mute flag. Results follow catalog order, then issue and pull request
-numbers within each repository. Pass `next` as `after` to continue with the
-same filters. A page can be empty with more discussions to scan. The server
+`GET /api/notifications/subscriptions` accepts optional `repository` (UUID),
+`kind` (`issue` or `pull`), and `reason` (`manual`, `participation`, `mention`,
+`assignment`, or `unknown`) filters. It returns `items` with the repository
+address, typed subject, title, state, versioned preference, repository mute flag,
+and `origin` with a reason and `subscribed_at_ms` when available.
+`sort=recent` and `sort=oldest` order dated subscriptions across repositories.
+Default results follow catalog order, then issue and pull request numbers
+within each repository. Undated subscriptions use that same order. Pass
+`next` as `after` to continue with the same filters and sort. A page can be empty with more discussions to scan. The server
 checks repository grants before reading preferences and refreshes them before
 returning titles or continuation positions. Edits use the existing
 discussion subscription endpoints.

@@ -180,6 +180,21 @@ async fn native_browser_manages_quiet_discussion_subscriptions() {
     browser
         .run(&["wait", "--text", "Quiet followed discussion"])
         .await;
+    browser
+        .run(&["select", "select:has(option[value=oldest])", "oldest"])
+        .await;
+    browser
+        .run(&[
+            "select",
+            "select:has(option[value=participation])",
+            "participation",
+        ])
+        .await;
+    browser
+        .run(&["wait", "--text", "Quiet followed discussion"])
+        .await;
+    let url = browser.run(&["get", "url"]).await;
+    assert!(url.contains("sort=oldest") && url.contains("reason=participation"));
     let settings = "Notification settings for team/private issue #1";
     click("button", settings).await;
     browser.run(&["wait", "[role=dialog] select"]).await;
@@ -456,6 +471,18 @@ async fn native_browser_unsubscribes_selected_quiet_discussions() {
             .len(),
         2
     );
+    browser
+        .run(&[
+            "wait",
+            "--fn",
+            r#"(() => {
+                const button = document.querySelector('[role=dialog] button[data-variant=destructive]');
+                if (!button) return false;
+                const box = button.getBoundingClientRect();
+                return button.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
+            })()"#,
+        ])
+        .await;
     click("button", "Unsubscribe").await;
     browser
         .run(&["wait", "--text", "Unsubscribed from 2 discussions."])
