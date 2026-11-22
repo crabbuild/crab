@@ -57,7 +57,7 @@ export function DiscussionRow({
     <li>
       {selection && (
         <Checkbox
-          className="mt-1"
+          className="discussion-row-checkbox"
           aria-label={`Select ${item.kind === "pull" ? "pull request" : "issue"} #${item.number}: ${item.title}`}
           checked={selection.checked}
           disabled={selection.disabled}
@@ -71,17 +71,19 @@ export function DiscussionRow({
         />
       )}
       <span
-        className={`${item.kind === "pull" ? "pull" : "issue"}-status-icon ${status}`}
+        className={`discussion-row-status ${item.kind === "pull" ? "pull" : "issue"}-status-icon ${status}`}
         role="img"
         aria-label={status}
       >
         <Icon />
       </span>
       <div className="discussion-row-content">
-        <Link className="issue-link" href={href}>
-          {item.title}
-        </Link>
-        <LabelBadges labels={item.labels} />
+        <div className="discussion-row-title">
+          <Link className="issue-link" href={href}>
+            {item.title}
+          </Link>
+          <LabelBadges labels={item.labels} />
+        </div>
         <p className="muted">
           {item.state === "open" ? (
             <>

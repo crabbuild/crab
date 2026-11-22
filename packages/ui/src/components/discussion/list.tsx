@@ -134,12 +134,11 @@ export function DiscussionListControls({
           </span>
         ) : navigation?.kind === "state" ? (
           <nav
-            className="discussion-state-controls"
             aria-label={
               view === "issues" ? "Issue state" : "Pull request state"
             }
           >
-            <ButtonGroup>
+            <ButtonGroup className="discussion-segments">
               {(["open", "closed"] as const).map((state) => {
                 const query = navigation[state];
                 const label = (
@@ -153,7 +152,7 @@ export function DiscussionListControls({
                 return query === null ? (
                   <Button
                     key={state}
-                    variant="outline"
+                    variant="ghost"
                     size="sm"
                     disabled
                     title="Shorten this search to change its state filter"
@@ -161,7 +160,7 @@ export function DiscussionListControls({
                     {label}
                   </Button>
                 ) : (
-                  <Button asChild variant="outline" size="sm" key={state}>
+                  <Button asChild variant="ghost" size="sm" key={state}>
                     <Link
                       aria-current={
                         navigation.selected === state ? "page" : undefined
@@ -273,9 +272,8 @@ export function DiscussionListControls({
           />
         )}
         <ToggleGroup
-          className="discussion-density"
+          className="discussion-segments"
           type="single"
-          variant="outline"
           size="sm"
           spacing={0}
           aria-label="List density"
