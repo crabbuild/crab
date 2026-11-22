@@ -1124,6 +1124,15 @@ remote-tracking ref and preserve local HEAD and the worktree. The probe then
 checks out that ref and verifies the visible file and installed pack. The
 origin fetch must install the same pack verified by the edge arm.
 
+Pass each edge action record as `--client` to
+`collect_cdn_viewer_requests.py`. Save the snapshot, clone, and fetch proof
+as `git-product/viewer-requests.json`,
+`git-product/clone-viewer-requests.json`, and
+`git-product/fetch-viewer-requests.json`, respectively. The verifier joins
+each action to its own provider requests and checks for successful delivery
+with body bytes. A viewer request cannot be reused across those actions or in
+a regional benchmark.
+
 For each registered regional pair, start a fresh probe for `origin`,
 `cold_edge`, and `warm_edge`. The timed window covers repository open,
 snapshot capture, and reading and verifying the blob. For the warm edge
@@ -1151,10 +1160,8 @@ and verifies that the absent pack key was read natively with zero edge
 requests. Seal the new export after that read. Use its approval for the
 `edge` arm and pass the same `--transition-object`, retaining stdout as
 `git-product/snapshot.json`. Both reads prove the exact Git blob on the
-specified layer. Pass the edge snapshot as `--client` to
-`collect_cdn_viewer_requests.py` and retain its output as
-`git-product/viewer-requests.json`. The release verifier joins the snapshot
-to a successful provider request for that same pack-layer key. Assembly
+specified layer. The release verifier joins the snapshot to a successful
+provider request for that same pack-layer key. Assembly
 builds the transition trace from those records and verifies both retained
 inventories and their sealing order. Run the separate `origin` rollback
 with the public binding withdrawn before retirement.

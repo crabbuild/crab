@@ -106,7 +106,8 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
         sdk_product = row / fixture.CDN.GIT_PRODUCT_DIR
         self.assertEqual({path.name for path in sdk_product.iterdir()},
                          {"publication.json", "snapshot.json", "retirement.json", *fixture.CDN.GIT_NATIVE_REF_FILES.values(),
-                          *fixture.CDN.SDK_CLONE_FILES.values(), *fixture.CDN.SDK_FETCH_FILES.values()})
+                          *fixture.CDN.SDK_CLONE_FILES.values(), *fixture.CDN.SDK_FETCH_FILES.values(),
+                          fixture.CDN.GIT_PRODUCT_VIEWER_RECORD, *fixture.CDN.SDK_WORKTREE_VIEWER_FILES.values()})
         self.assertEqual(report["product_action"], self.example.report["product_action"])
         self.assertEqual(
             release.RELEASE.verify_bundle(

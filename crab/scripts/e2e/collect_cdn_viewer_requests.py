@@ -19,9 +19,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cdn_qualification import (  # noqa: E402
     CDN_PROVENANCE_FIELDS, GIT_FETCH_RECORD_LIMIT, PROVIDER_FOR_EDGE,
-    SDK_GIT_READ_FIELDS, SDK_HYDRATION_READ_FIELDS, SHA256, VIEWER_REQUEST_FILES, decode, fields,
+    SDK_HYDRATION_READ_FIELDS, SDK_WORKTREE_VIEWER_FILES, VIEWER_REQUEST_FILES, decode, fields,
     is_direct_sdk_git_scope, is_direct_sdk_hydration_scope, is_direct_service_scope, matches,
-    read_git_record, require, scope_parts, validate_git_fetch, validate_service_read,
+    read_git_record, require, scope_parts, validate_git_fetch, validate_sdk_git_record, validate_service_read,
     verify_git_traffic, verify_viewer_requests,
 )
 from collect_front_door_deployment_policy import FRONT_DOOR_HOST, SUBSCRIPTION  # noqa: E402
@@ -463,15 +463,10 @@ def main() -> int:
                 "CDN viewer evidence needs a fetch for the approved fixture")
         provenance = {key: candidate[key] for key in CDN_PROVENANCE_FIELDS | {"platform"}}
         if is_direct_sdk_git_scope(fixture["scope"]):
-            expected = SDK_GIT_READ_FIELDS
-            if "transition_key_sha256" in candidate:
-                require(access == "public" and matches(SHA256, candidate["transition_key_sha256"]),
-                        "SDK transition needs an exact public pack-layer fingerprint")
-                expected = expected | {"transition_key_sha256"}
-            client = fields(candidate, expected, "CDN SDK snapshot")
-            require(client["schema"] == "crab.cdn-sdk-git-read/v1" and client["arm"] == "edge",
-                    "SDK viewer evidence requires a timed edge snapshot")
-            verify_git_traffic(client, edge, "CDN SDK snapshot")
+            action = next((action for action in SDK_WORKTREE_VIEWER_FILES
+                           if candidate.get("schema") == f"crab.cdn-sdk-git-{action}/v1"), None)
+            client = validate_sdk_git_record(candidate, access, "edge", worktree_action=action)
+            verify_git_traffic(client, edge, "CDN SDK Git action")
         elif is_direct_sdk_hydration_scope(fixture["scope"]):
             client = fields(candidate, SDK_HYDRATION_READ_FIELDS, "CDN benchmark SDK hydration")
             key = fixture_object_key(fixture, "private", "xorb")

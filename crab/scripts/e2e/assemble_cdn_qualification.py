@@ -176,6 +176,7 @@ def assemble_bundle(
                 (destination / "traces" / filename).write_bytes(trace)
                 checks[check] = {"passed": True, "trace_sha256": hashlib.sha256(trace).hexdigest()}
             sdk_native = None
+            product_request_ids = None
             if cli_workload:
                 registered_read = {key: registration.get(key) for key in ("candidate", "viewer_binding_sha256")}
                 rollback = read_trace(destination / "traces/rollback.json", "rollback")
@@ -189,7 +190,7 @@ def assemble_bundle(
                 origin = cleanup["targets"]["native"]["origin_sha256"]
                 sdk_native = {"origin_sha256": origin, "prefix_sha256": cleanup["prefix_sha256"]}
                 rollback = read_trace(destination / "traces/rollback.json", "rollback")
-                measured["product_action"] = collect_sdk_product_action(
+                measured["product_action"], product_request_ids = collect_sdk_product_action(
                     inputs / row / GIT_PRODUCT_DIR, measured, spec, rollback,
                     cleanup_at=cleanup_at, native_origin_sha256=origin,
                     retain=destination / GIT_PRODUCT_DIR,
@@ -218,7 +219,7 @@ def assemble_bundle(
                 measured["performance"] = collect_git_performance(
                     inputs / row / GIT_BENCHMARK_DIR, registration, platform, run_id, attempt,
                     retain=destination / GIT_BENCHMARK_DIR, sdk_native=sdk_native,
-                    service_row=destination if service else None,
+                    service_row=destination if service else None, product_request_ids=product_request_ids,
                 )
             report = measured | {
                 "schema": SCHEMA,

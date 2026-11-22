@@ -84,7 +84,8 @@ def service_candidate(scope: str, platform: str) -> dict:
     }
 
 
-def write_git_product_viewer_proof(client_path: Path, key_sha256: str | None = None) -> None:
+def write_git_product_viewer_proof(client_path: Path, key_sha256: str | None = None, *,
+                                   filename: str = CDN.GIT_PRODUCT_VIEWER_RECORD) -> None:
     raw = client_path.read_bytes()
     client = json.loads(raw)
     edge = client["scope"].split("/", 1)[0]
@@ -100,7 +101,7 @@ def write_git_product_viewer_proof(client_path: Path, key_sha256: str | None = N
         if edge == "cloud-cdn":
             log.update(cache_fill_bytes=0, origin_requests={})
         records[request] = log
-    json_file(client_path.parent / CDN.GIT_PRODUCT_VIEWER_RECORD, proof)
+    json_file(client_path.parent / filename, proof)
 
 
 def write_git_measurements(inputs: Path, registration: dict, platform: str, sdk_native: dict | None = None,
@@ -572,7 +573,8 @@ class CdnQualificationTests(unittest.TestCase):
         export = self.registration.get("publication_sha256", "")
         transition = {"transition_key_sha256": self.object_key} if export else {}
         binding = reader | {"binding_sha256": self.registration["viewer_binding_sha256"]}
-        request = hashlib.sha256(b"public-sdk-transition-viewer").hexdigest()
+        request = hashlib.sha256(b"sdk-snapshot-viewer").hexdigest()
+        response = {"status": 206, "cache": "hit", "bytes": 1, "complete": True}
         snapshot = records / "snapshot.json"
         json_file(snapshot, base | dict.fromkeys(
             ("edge_attempts", "observed_edge_gets", "edge_hits", "edge_bytes", "verified_edge_payloads", "all_edge_attempts"), 1,
@@ -580,11 +582,10 @@ class CdnQualificationTests(unittest.TestCase):
             "arm": "edge", "started_at_unix_ms": PUBLIC_SEAL + 10, "finished_at_unix_ms": PUBLIC_SEAL + 20,
             "approval_sha256": self.registration.get("viewer_approval_sha256", export),
             "reader": binding | {"public_export_sha256": export},
-        } | transition | ({"edge_responses": {
-            request: {"status": 206, "cache": "hit", "bytes": 1, "complete": True},
-        }} if export else {}))
+            "edge_responses": {request: response},
+        } | transition)
+        write_git_product_viewer_proof(snapshot, transition.get("transition_key_sha256"))
         if export:
-            write_git_product_viewer_proof(snapshot, self.object_key)
             prior = self.registration["previous_publication_sha256"]
             json_file(records / CDN.SDK_PRIOR_EXPORT_RECORD, base | transition | {
                 "arm": "prior_export", "started_at_unix_ms": PUBLIC_SEAL - 20, "finished_at_unix_ms": PUBLIC_SEAL - 10,
@@ -599,17 +600,23 @@ class CdnQualificationTests(unittest.TestCase):
             path = records / filename if arm == "edge" else self.directory / filename
             read = json.loads(path.read_bytes())
             read.pop("transition_key_sha256", None)
-            json_file(records / CDN.SDK_CLONE_FILES[arm], read | {
+            clone, fetch = (records / files[arm] for files in (CDN.SDK_CLONE_FILES, CDN.SDK_FETCH_FILES))
+            json_file(clone, read | {
                 "schema": "crab.cdn-sdk-git-clone/v1", "crab_sha256": writer["binary_sha256"],
                 "started_at_unix_ms": PUBLIC_SEAL + start, "finished_at_unix_ms": PUBLIC_SEAL + start + 5,
                 "elapsed_ms": 5, "installed_packs": [pack], "verified_edge_packs": [pack] if arm == "edge" else [],
+                "edge_responses": {hashlib.sha256(b"sdk-clone-viewer").hexdigest(): response} if arm == "edge" else {},
             })
-            json_file(records / CDN.SDK_FETCH_FILES[arm], read | {
+            json_file(fetch, read | {
                 "schema": "crab.cdn-sdk-git-fetch/v1", "crab_sha256": writer["binary_sha256"],
                 "started_at_unix_ms": PUBLIC_SEAL + start + 12, "finished_at_unix_ms": PUBLIC_SEAL + start + 17,
                 "elapsed_ms": 5, "installed_packs": [pack], "verified_edge_packs": [pack] if arm == "edge" else [],
                 "previous_head": "5" * 40, "head_after_fetch": "5" * 40,
+                "edge_responses": {hashlib.sha256(b"sdk-fetch-viewer").hexdigest(): response} if arm == "edge" else {},
             })
+            if arm == "edge":
+                for action, client in (("clone", clone), ("fetch", fetch)):
+                    write_git_product_viewer_proof(client, filename=CDN.SDK_WORKTREE_VIEWER_FILES[action])
         json_file(records / "retirement.json", provenance | {
             "schema": "crab.cdn-git-retirement/v1", "publication_sha256": receipt, "ref_retired": True,
             "retired_at_unix_ms": PUBLIC_SEAL + 59, "candidate": writer,
@@ -1372,6 +1379,56 @@ class CdnQualificationTests(unittest.TestCase):
                 policy.write_text(self.scope + "\n", encoding="utf-8")
                 result = self.command("--cdn-release-policy", str(policy))
                 self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_private_sdk_release_requires_provider_logs_for_each_product_action(self) -> None:
+        self.configure("s3", "private", "direct", consumer="sdk")
+        product = self.directory / CDN.GIT_PRODUCT_DIR
+        for name in (CDN.GIT_PRODUCT_VIEWER_RECORD, *CDN.SDK_WORKTREE_VIEWER_FILES.values()):
+            with self.subTest(name=name):
+                path = product / name
+                raw = path.read_bytes()
+                path.unlink()
+                self.rejected(name)
+                path.write_bytes(raw)
+
+    def test_sdk_product_actions_cannot_reuse_the_same_provider_request(self) -> None:
+        self.configure("gcs", "private", "direct", consumer="sdk")
+        product = self.directory / CDN.GIT_PRODUCT_DIR
+        clone = product / CDN.SDK_CLONE_FILES["edge"]
+        fetch = product / CDN.SDK_FETCH_FILES["edge"]
+        responses = json.loads(clone.read_bytes())["edge_responses"]
+        json_file(fetch, json.loads(fetch.read_bytes()) | {"edge_responses": responses})
+        write_git_product_viewer_proof(fetch, filename=CDN.SDK_WORKTREE_VIEWER_FILES["fetch"])
+        self.rejected("SDK product actions reused provider requests")
+
+    def test_sdk_distinct_viewer_reads_can_share_an_s3_fill_with_second_precision(self) -> None:
+        self.configure("s3", "private", "direct", consumer="sdk")
+        product = self.directory / CDN.GIT_PRODUCT_DIR
+        snapshot = json.loads((product / "snapshot.json").read_bytes())
+        at = snapshot["started_at_unix_ms"] // 1000
+        for name in (CDN.GIT_PRODUCT_VIEWER_RECORD, *CDN.SDK_WORKTREE_VIEWER_FILES.values()):
+            path = product / name
+            proof = json.loads(path.read_bytes())
+            key = next(iter(proof["records"].values()))["key_sha256"]
+            json_file(path, proof | {"origin_requests": {"0" * 64: {
+                "key_sha256": key, "status": 206, "response_body_bytes": 32, "at_unix_s": at,
+            }}})
+        result = self.command()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_sdk_regional_pair_cannot_reuse_a_product_request(self) -> None:
+        self.configure("gcs", "private", "direct", consumer="sdk")
+        snapshot = self.directory / CDN.GIT_PRODUCT_DIR / "snapshot.json"
+        request = next(iter(json.loads(snapshot.read_bytes())["edge_responses"]))
+        arm = self.directory / CDN.GIT_BENCHMARK_DIR / "near/0001/cold_edge"
+        client = json.loads((arm / "client.json").read_bytes())
+        response = next(iter(client["edge_responses"].values()))
+        digest = json_file(arm / "client.json", client | {"edge_responses": {request: response}})
+        log = arm / CDN.VIEWER_REQUEST_FILES["gcs"]
+        proof = json.loads(log.read_bytes())
+        record = next(iter(proof["records"].values()))
+        json_file(log, proof | {"client_report_sha256": digest, "records": {request: record}})
+        self.rejected("CDN log requests were reused across arms")
 
     def test_sdk_hydration_requires_the_exact_lifecycle(self) -> None:
         self.configure("s3", "private", "direct", consumer="sdk", family="xorb")

@@ -137,6 +137,7 @@ SERVICE_WORKLOAD_REGISTRATION_FIELDS = {"sha256", "origin_sha256", "prefix_sha25
 SDK_PRIOR_EXPORT_RECORD = "before-export.json"
 SDK_CLONE_FILES = {"edge": "clone-edge.json", "origin": "clone-origin.json"}
 SDK_FETCH_FILES = {"edge": "fetch-edge.json", "origin": "fetch-origin.json"}
+SDK_WORKTREE_VIEWER_FILES = {"clone": "clone-viewer-requests.json", "fetch": "fetch-viewer-requests.json"}
 VIEWER_REQUEST_FILES = {"s3": "cloudfront-requests.json", "gcs": "cloud-cdn-requests.json", "azure": "front-door-requests.json"}
 GIT_FETCH_RECORD_LIMIT = 256 * 1024
 GIT_NATIVE_REF_FILES = {"published": "provider-published.json", "retired": "provider-retired.json"}
@@ -1475,33 +1476,39 @@ def verify_service_repeat(local: dict[str, Any], primer: dict[str, Any], primer_
             "service warm-local LFS read must reuse its own edge primer's cache root")
 
 
-def verify_sdk_git_read(raw: bytes, row: dict[str, Any], spec: dict[str, Any], mode: str, *,
-                        worktree_action: str | None = None) -> dict[str, Any]:
-    local = mode == "warm_local"
-    prior = mode == "prior_export"
-    expected_fields = SDK_GIT_READ_FIELDS | ({"primer_sha256"} if local else set())
+def validate_sdk_git_record(value: Any, access: str, mode: str, *,
+                            worktree_action: str | None = None) -> dict[str, Any]:
+    expected_fields = SDK_GIT_READ_FIELDS | ({"primer_sha256"} if mode == "warm_local" else set())
     if worktree_action:
         expected_fields |= {"crab_sha256", "installed_packs", "verified_edge_packs"}
     if worktree_action == "fetch":
         expected_fields |= {"previous_head", "head_after_fetch"}
-    edge, access, _, _, _ = scope_parts(row["scope"])
-    value = decode(raw)
     transition = isinstance(value, dict) and "transition_key_sha256" in value
     if transition:
         expected_fields.add("transition_key_sha256")
     client = fields(value, expected_fields, "redacted SDK Git snapshot")
-    require(not prior or transition, "SDK prior export needs the verified transition object")
+    require(mode != "prior_export" or transition, "SDK prior export needs the verified transition object")
     if transition:
-        require(access == "public" and mode in ("edge", "prior_export") and matches(SHA256, client["transition_key_sha256"]),
+        require(worktree_action is None and access == "public" and mode in ("edge", "prior_export")
+                and matches(SHA256, client["transition_key_sha256"]),
                 "SDK transition needs an exact public pack-layer fingerprint")
     schema = f"crab.cdn-sdk-git-{worktree_action or 'read'}/v1"
-    require(client["schema"] == schema and client["arm"] == mode
-            and all(client[key] == row[key] for key in CDN_PROVENANCE_FIELDS | {"platform"}),
+    require(client["schema"] == schema and client["arm"] == mode, "SDK snapshot has mismatched product or workflow provenance")
+    return client
+
+
+def verify_sdk_git_read(raw: bytes, row: dict[str, Any], spec: dict[str, Any], mode: str, *,
+                        worktree_action: str | None = None) -> dict[str, Any]:
+    local = mode == "warm_local"
+    prior = mode == "prior_export"
+    edge, access, _, _, _ = scope_parts(row["scope"])
+    client = validate_sdk_git_record(decode(raw), access, mode, worktree_action=worktree_action)
+    require(all(client[key] == row[key] for key in CDN_PROVENANCE_FIELDS | {"platform"}),
             "SDK snapshot has mismatched product or workflow provenance")
     verify_sdk_candidate(client["candidate"], row["source_sha"], row["platform"])
     require(client["candidate"] == spec["sdk_candidate"], "SDK snapshot did not run the registered SDK build")
     if worktree_action:
-        require(mode in ("edge", "origin") and not transition
+        require(mode in ("edge", "origin")
                 and "local" in client["candidate"]["cargo_features"].split(",")
                 and matches(SHA256, client["crab_sha256"]),
                 "SDK worktree action needs the local build and an approved Crab executable")
@@ -1647,6 +1654,15 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
     # Collapsed traffic and separate range-fills can describe the same bytes
     # at both levels. Use the strongest floor without adding overlapping totals.
     return logged_ids, origin_gets, max(viewer_fill_bytes, child_fill_bytes)
+
+
+def verify_product_viewer_requests(raw: bytes, client: dict[str, Any], client_raw: bytes, edge: str) -> set[str]:
+    verify_viewer_requests(decode(raw), client, hashlib.sha256(client_raw).hexdigest(), edge)
+    require(any(response["status"] in (200, 206) and response["complete"] and response["bytes"] > 0
+                for response in client["edge_responses"].values()), "provider logs confirm no completed product response")
+    # S3 logs have second precision and can associate a shared origin fill
+    # with distinct viewer requests. Deduplicate product reads by viewer ID.
+    return set(client["edge_responses"])
 
 
 def verify_git_native_ref(
@@ -1969,9 +1985,7 @@ def collect_git_product_action(
         verify_git_lifecycle(observations, row, publication, digest, fetch["started_at_unix_ms"], fetch["reader"],
                              retired_at, cleanup_at, native_origin_sha256)
     viewer_raw = read_git_record(inputs / GIT_PRODUCT_VIEWER_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
-    verify_viewer_requests(decode(viewer_raw), fetch, hashlib.sha256(fetch_raw).hexdigest(), scope_parts(row["scope"])[0])
-    require(any(response["status"] in (200, 206) and response["complete"] and response["bytes"] > 0
-                for response in fetch["edge_responses"].values()), "provider logs confirm no completed product fetch response")
+    verify_product_viewer_requests(viewer_raw, fetch, fetch_raw, scope_parts(row["scope"])[0])
     if retain is not None:
         retain.mkdir()
         for filename, raw in (("publication.json", publication_raw), ("fetch.json", fetch_raw),
@@ -1988,7 +2002,8 @@ def collect_git_product_action(
 def collect_sdk_product_action(
     inputs: Path, row: dict[str, Any], spec: dict[str, Any], rollback_raw: bytes,
     *, cleanup_at: int, native_origin_sha256: str, retain: Path | None = None,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], set[str]]:
+    provider_edge, access, _, _, _ = scope_parts(row["scope"])
     native_records = {phase: read_git_record(inputs / name) for phase, name in GIT_NATIVE_REF_FILES.items()}
     publication_raw = read_git_record(inputs / "publication.json")
     publication = validate_git_publication(publication_raw, row)
@@ -2006,6 +2021,9 @@ def collect_sdk_product_action(
     require(edge["finished_at_unix_ms"] <= origin["started_at_unix_ms"],
             "SDK rollback must follow the verified edge snapshot")
     retained = {"publication.json": publication_raw, "snapshot.json": edge_raw}
+    viewer_raw = read_git_record(inputs / GIT_PRODUCT_VIEWER_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
+    viewer_ids = verify_product_viewer_requests(viewer_raw, edge, edge_raw, provider_edge)
+    retained[GIT_PRODUCT_VIEWER_RECORD] = viewer_raw
     previous_end = origin["finished_at_unix_ms"]
     for action, files in (("clone", SDK_CLONE_FILES), ("fetch", SDK_FETCH_FILES)):
         pair = {}
@@ -2029,16 +2047,20 @@ def collect_sdk_product_action(
         require(previous_end <= edge_worktree["started_at_unix_ms"]
                 and edge_worktree["finished_at_unix_ms"] <= native_worktree["started_at_unix_ms"],
                 f"SDK {action} arms must follow the preceding workload in order")
+        viewer_name = SDK_WORKTREE_VIEWER_FILES[action]
+        viewer_raw = read_git_record(inputs / viewer_name, limit=GIT_FETCH_RECORD_LIMIT)
+        ids = verify_product_viewer_requests(viewer_raw, edge_worktree, retained[files["edge"]], provider_edge)
+        require(viewer_ids.isdisjoint(ids), "SDK product actions reused provider requests")
+        viewer_ids.update(ids)
+        retained[viewer_name] = viewer_raw
         previous_end = native_worktree["finished_at_unix_ms"]
     retirement_raw = read_git_record(inputs / "retirement.json")
     retired_at = verify_git_retirement(retirement_raw, row, receipt, publication["candidate"], previous_end)
     earliest = edge
     retained["retirement.json"] = retirement_raw
-    if scope_parts(row["scope"])[1] == "public":
+    if access == "public":
         prior_raw = read_git_record(inputs / SDK_PRIOR_EXPORT_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
         retained[SDK_PRIOR_EXPORT_RECORD] = prior_raw
-        if retain is not None:
-            retained[GIT_PRODUCT_VIEWER_RECORD] = read_git_record(inputs / GIT_PRODUCT_VIEWER_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
         earliest = verify_sdk_git_read(prior_raw, row, spec, "prior_export")
     verify_git_lifecycle(native_records, row, publication, receipt, earliest["started_at_unix_ms"], earliest["reader"],
                          retired_at, cleanup_at, native_origin_sha256)
@@ -2052,7 +2074,7 @@ def collect_sdk_product_action(
         "expected_bytes": GIT_PAYLOAD_SIZE, "observed_bytes": edge["bytes"],
         "native_writes": 1, "visible_new_ref": True, "fixture_cleanup_verified": True,
         "observed_edge_gets": edge["observed_edge_gets"], "verified_edge_payloads": edge["verified_edge_payloads"],
-    }
+    }, viewer_ids
 
 
 def derive_sdk_public_transition(inputs: Path, row: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
@@ -2140,7 +2162,7 @@ def collect_git_performance(
     inputs: Path, registration: dict[str, Any], platform: str, run_id: str, attempt: str,
     *, retain: Path | None = None, sdk_native: dict[str, str] | None = None,
     verify_hydration: Callable[[bytes, str], dict[str, Any]] | None = None,
-    service_row: Path | None = None,
+    service_row: Path | None = None, product_request_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     spec = benchmark_registration(registration)
     scope = spec["scope"]
@@ -2165,7 +2187,7 @@ def collect_git_performance(
         provenance["candidate"] = spec["candidate"]
     service_anchor = None
     service_instances = set()
-    provider_request_ids = set()
+    provider_request_ids = set(product_request_ids or ())
     cache_roots = set()
     published_at, retired_at, export_ready_at = 0, 0, 0
     if service_row is not None:
@@ -2430,13 +2452,13 @@ def verify_cdn_report(
                 "product action differs from the retained publication, fetch, and retirement evidence")
     if sdk_git:
         require(rollback is not None, "direct SDK qualification requires an ordinary SDK rollback read")
-        product = collect_sdk_product_action(directory / GIT_PRODUCT_DIR, row, registration, rollback,
-                                             cleanup_at=cleanup_at, native_origin_sha256=native_origin_sha256)
+        product, request_ids = collect_sdk_product_action(directory / GIT_PRODUCT_DIR, row, registration, rollback,
+                                                          cleanup_at=cleanup_at, native_origin_sha256=native_origin_sha256)
         require(row["product_action"] == product, "product action differs from the retained SDK snapshot evidence")
         sdk_native = {"origin_sha256": native_origin_sha256,
                       "prefix_sha256": hashlib.sha256(f"{row['fixture_prefix']}/".encode()).hexdigest()}
         measured = collect_git_performance(directory / GIT_BENCHMARK_DIR, registration, platform, run_id, run_attempt,
-                                          sdk_native=sdk_native)
+                                          sdk_native=sdk_native, product_request_ids=request_ids)
         require(measured == row["performance"], "SDK performance summary differs from the retained measurements")
     if sdk_hydration:
         require(rollback is not None, "direct SDK hydration requires its native rollback")

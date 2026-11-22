@@ -204,13 +204,22 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
             }
             examples.write_git_measurements(root, sdk_registration, "linux-x86_64")
             snapshot = json.loads(client.read_bytes()) | {"edge_responses": {fingerprint: response}}
-            sdk_digest = examples.json_file(client, snapshot)
-            sdk_output = root / "sdk-cloudfront-requests.json"
+            pack = "8" * 64
+            worktree = {"crab_sha256": "9" * 64, "installed_packs": [pack], "verified_edge_packs": [pack]}
+            sdk_records = {
+                "read": snapshot,
+                "clone": snapshot | worktree,
+                "fetch": snapshot | worktree | {"previous_head": "1" * 40, "head_after_fetch": "1" * 40},
+            }
             command[command.index(configuration)] = sdk_configuration
-            command[command.index(str(output))] = str(sdk_output)
-            result = subprocess.run(command, capture_output=True, text=True, check=False)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(json.loads(sdk_output.read_bytes())["client_report_sha256"], sdk_digest)
+            for action, record in sdk_records.items():
+                with self.subTest(action=action):
+                    sdk_digest = examples.json_file(client, record | {"schema": f"crab.cdn-sdk-git-{action}/v1"})
+                    sdk_output = root / f"sdk-{action}-requests.json"
+                    args = [str(sdk_output) if arg == str(output) else arg for arg in command]
+                    result = subprocess.run(args, capture_output=True, text=True, check=False)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(json.loads(sdk_output.read_bytes())["client_report_sha256"], sdk_digest)
 
     def test_cloud_cdn_joins_range_fills_and_validations_to_the_tagged_viewer(self):
         with TemporaryDirectory() as temporary:
