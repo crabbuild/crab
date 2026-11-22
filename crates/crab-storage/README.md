@@ -24,8 +24,8 @@ carry its discovered region into independent administration processes.
 global keys eligible for this transport. The composing reader must establish
 whole-object access and verify the returned bytes against authenticated
 metadata. Conditional operations and origin receipts use the provider store.
-CloudFront transfer diagnostics emit a SHA-256 request ID fingerprint for
-joining qualification fetches to viewer access logs.
+CloudFront and Front Door transfer diagnostics emit a SHA-256 request ID
+fingerprint for joining qualification fetches to viewer access logs.
 
 ## Why it exists
 

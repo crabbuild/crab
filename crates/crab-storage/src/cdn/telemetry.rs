@@ -139,9 +139,7 @@ impl Transfer {
 
     pub(super) fn response(&mut self, response: &Response) {
         self.status = response.status().as_u16();
-        if self.policy.provider == StorageProviderKind::S3 {
-            self.request_id = cloudfront_request_id(response.headers());
-        }
+        self.request_id = viewer_request_id(self.policy.provider, response.headers());
         let header = if self.policy.provider == StorageProviderKind::Gcs {
             "x-crab-cdn-cache"
         } else {
@@ -190,8 +188,16 @@ impl Drop for Transfer {
     }
 }
 
-fn cloudfront_request_id(headers: &reqwest::header::HeaderMap) -> Option<Output<Sha256>> {
-    let values = headers.get_all("x-amz-cf-id");
+fn viewer_request_id(
+    provider: StorageProviderKind,
+    headers: &reqwest::header::HeaderMap,
+) -> Option<Output<Sha256>> {
+    let header = match provider {
+        StorageProviderKind::S3 => "x-amz-cf-id",
+        StorageProviderKind::Azure => "x-azure-ref",
+        _ => return None,
+    };
+    let values = headers.get_all(header);
     let mut values = values.iter();
     let value = values.next()?.as_bytes();
     (values.next().is_none()
@@ -232,20 +238,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cloudfront_request_id_is_hashed_only_when_present_and_unambiguous() {
+    fn viewer_request_id_is_hashed_only_for_the_selected_provider_and_one_header() {
         use reqwest::header::{HeaderMap, HeaderValue};
 
         let mut headers = HeaderMap::new();
-        assert!(cloudfront_request_id(&headers).is_none());
+        assert_eq!(viewer_request_id(StorageProviderKind::S3, &headers), None,);
         headers.insert("x-amz-cf-id", HeaderValue::from_static("opaque-example=="));
+        headers.insert("x-azure-ref", HeaderValue::from_static("opaque-azure-ref"));
         assert_eq!(
-            cloudfront_request_id(&headers),
+            viewer_request_id(StorageProviderKind::S3, &headers),
             Some(Sha256::digest("opaque-example=="))
         );
+        assert_eq!(
+            viewer_request_id(StorageProviderKind::Azure, &headers),
+            Some(Sha256::digest("opaque-azure-ref"))
+        );
+        assert!(viewer_request_id(StorageProviderKind::Local, &headers).is_none());
         headers.append("x-amz-cf-id", HeaderValue::from_static("other"));
-        assert!(cloudfront_request_id(&headers).is_none());
-        headers.insert("x-amz-cf-id", HeaderValue::from_static("opaque example"));
-        assert!(cloudfront_request_id(&headers).is_none());
+        assert!(viewer_request_id(StorageProviderKind::S3, &headers).is_none());
+        headers.insert("x-azure-ref", HeaderValue::from_static("opaque example"));
+        assert!(viewer_request_id(StorageProviderKind::Azure, &headers).is_none());
     }
 
     #[test]

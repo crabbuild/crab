@@ -11,7 +11,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from cdn_qualification import PRODUCT_COUNTERS, PROVIDER_FOR_EDGE, SHA256, decode, fields, matches, require, scope_parts  # noqa: E402
+from cdn_qualification import (  # noqa: E402
+    PRODUCT_COUNTERS, PROVIDER_FOR_EDGE, SHA256, VIEWER_REQUEST_FILES, decode, fields, matches, require, scope_parts,
+)
 
 
 TARGET = "crab_storage::cdn::transfer"
@@ -50,10 +52,11 @@ def measure(lines: Iterable[bytes], scope: str, *, edge_responses: dict | None =
         require(event["message"] == EVENT, "unrecognized CDN transfer event")
         metrics["all_edge_attempts"] += 1
         request_id = event["request_sha256"]
-        require(request_id == "" or (event["provider"] == "s3" and matches(SHA256, request_id)),
-                "invalid CloudFront request fingerprint")
+        provider = event["provider"]
+        require(request_id == "" or (isinstance(provider, str) and provider in VIEWER_REQUEST_FILES and matches(SHA256, request_id)),
+                "invalid CDN viewer request fingerprint")
         if edge_responses is not None and request_id:
-            require(request_id not in edge_responses, "duplicate CloudFront viewer request fingerprint")
+            require(request_id not in edge_responses, "duplicate CDN viewer request fingerprint")
             edge_responses[request_id] = {key: event[key] for key in ("status", "cache", "bytes", "complete")}
         route = tuple(event[name] for name in ROUTE)
         if route != selected:

@@ -103,7 +103,7 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str) -> N
                     "edge_responses": {},
                 }
                 proof = {}
-                if provider == "s3" and edge:
+                if provider in CDN.VIEWER_REQUEST_FILES and edge:
                     request_id = hashlib.sha256(f"{location}/{index}/{arm}/viewer".encode()).hexdigest()
                     cache = "miss" if arm == "cold_edge" else "hit"
                     client["edge_responses"][request_id] = {"status": 206, "cache": cache, "bytes": metrics["edge_bytes"],
@@ -111,8 +111,9 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str) -> N
                     proof[request_id] = {"status": 206, "response_bytes": 800, "cache": cache}
                 digest = json_file(directory / "client.json", client)
                 if proof:
-                    json_file(directory / CDN.CLOUDFRONT_REQUEST_FILE, {
-                        "schema": "crab.cloudfront-viewer-requests/v1", "client_report_sha256": digest, "records": proof,
+                    edge_name = CDN.PROVIDERS[provider][0]
+                    json_file(directory / CDN.VIEWER_REQUEST_FILES[provider], {
+                        "schema": f"crab.{edge_name}-viewer-requests/v1", "client_report_sha256": digest, "records": proof,
                     })
                 external = {key: metrics[key] for key in CDN.GIT_EXTERNAL_METRICS} | {
                     "schema": "crab.cdn-git-measurement/v1", "provider": provider,

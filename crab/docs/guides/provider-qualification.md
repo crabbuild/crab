@@ -965,28 +965,36 @@ attribute request and fill counts and runner measurements for client and
 resource totals. The transport counter includes incomplete response bodies;
 the rejected total also needs any bytes discarded by higher-level verification.
 
-For each timed CloudFront fetch that made edge attempts, collect its
-`cloudfront-requests.json` beside `client.json`. Export CloudFront standard
-access logs in W3C format from the approved distribution. Keep the `#Fields`
+For each timed CloudFront or Front Door fetch that made edge attempts, collect
+provider viewer evidence beside `client.json`. For CloudFront, write
+`cloudfront-requests.json` from the approved distribution's standard
+access logs in W3C format. Keep the `#Fields`
 header and the request ID, viewer host, URI stem, method, protocol, response
 status, sent bytes and response result type fields. Leave cookie logging
 disabled and keep raw exports on the protected worker. [CloudFront standard logging](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/standard-logs-reference.html)
 
 ```bash
-python3 -B crab/scripts/e2e/collect_cloudfront_viewer_requests.py \
+python3 -B crab/scripts/e2e/collect_cdn_viewer_requests.py \
   --fixture "$approved_fixture_json" \
   --configuration-sha256 "$approved_configuration_sha256" \
   --client "$arm_directory/client.json" --log "$decompressed_cloudfront_log" \
   --output "$arm_directory/cloudfront-requests.json"
 ```
 
-Repeat `--log` for additional files. The collector joins the access log to
-the fetch using SHA-256 fingerprints of CloudFront's response request IDs.
-Every viewer attempt needs a matching log record. Missing logs, conflicting
-records, or disagreements with the completed client's status, byte count or
-cache classification fail the check. Viewer response bytes include HTTP
-overhead. Collect S3 request counts and origin fill bytes separately. AWS
-delivers S3 server access logs on a best-effort basis, so an empty export
+For Front Door, use the same command with the approved Azure fixture, the
+Azure Monitor `PT1H.json` access log archive for that Front Door profile, and
+`front-door-requests.json` as the output. The private path forwards through
+APIM before Front Door and removes the `/crab` prefix. The collector matches
+the Front Door tracking reference and resource profile and excludes duplicate
+traffic from origin-shield logs. [Front Door access logs](https://learn.microsoft.com/en-us/azure/frontdoor/front-door-diagnostics) · [Azure Monitor resource logs](https://learn.microsoft.com/en-us/azure/azure-monitor/essentials/resource-logs)
+
+Repeat `--log` for additional files. Every viewer attempt needs a matching
+access log record for its hashed response request ID. Missing logs,
+conflicting records, or disagreements with the client's status or cache
+classification fail the check. Viewer response bytes include HTTP overhead
+and must cover the observed payload bytes. Collect native request counts and
+origin fill bytes separately. AWS delivers S3 server access logs on a
+best-effort basis, so an empty export
 alone cannot verify zero origin traffic. [S3 server access logging](https://docs.aws.amazon.com/AmazonS3/latest/userguide/ServerLogs.html)
 
 ```bash

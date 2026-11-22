@@ -122,7 +122,7 @@ METRICS = {
 }
 GIT_BENCHMARK_DIR = "git-benchmarks"
 GIT_PRODUCT_DIR = "git-product"
-CLOUDFRONT_REQUEST_FILE = "cloudfront-requests.json"
+VIEWER_REQUEST_FILES = {"s3": "cloudfront-requests.json", "azure": "front-door-requests.json"}
 GIT_FETCH_RECORD_LIMIT = 256 * 1024
 GIT_NATIVE_REF_FILES = {"published": "provider-published.json", "retired": "provider-retired.json"}
 GIT_NATIVE_REF_FIELDS = {
@@ -1245,15 +1245,16 @@ def validate_git_fetch(raw: bytes, provenance: dict[str, Any], mode: str, label:
     require(all(type(client[key]) is int and client[key] >= 0 for key in PRODUCT_COUNTERS),
             f"{label} has invalid Git transfer counters")
     responses = client["edge_responses"]
+    provider = PROVIDER_FOR_EDGE[scope_parts(provenance["scope"])[0]]
     require(isinstance(responses, dict) and len(responses) <= min(1024, client["all_edge_attempts"])
-            and (not responses or provenance["scope"].startswith("cloudfront/")),
-            f"{label} has invalid CloudFront response evidence")
+            and (not responses or provider in VIEWER_REQUEST_FILES),
+            f"{label} has invalid CDN viewer response evidence")
     for request_id, evidence in responses.items():
-        response = fields(evidence, {"status", "cache", "bytes", "complete"}, "CloudFront client response")
+        response = fields(evidence, {"status", "cache", "bytes", "complete"}, "CDN viewer response")
         require(matches(SHA256, request_id) and type(response["status"]) is int and 100 <= response["status"] <= 599
                 and response["cache"] in ("hit", "miss", "unknown") and type(response["complete"]) is bool
                 and type(response["bytes"]) is int and response["bytes"] >= 0,
-                f"{label} has an invalid CloudFront client response")
+                f"{label} has an invalid CDN viewer response")
     require(client["edge_hits"] + client["edge_misses"] + client["edge_unknown"] == client["observed_edge_gets"]
             <= client["edge_attempts"] <= client["all_edge_attempts"], f"{label} has inconsistent edge counts")
     if mode == "origin":
@@ -1265,24 +1266,24 @@ def validate_git_fetch(raw: bytes, provenance: dict[str, Any], mode: str, label:
     return client
 
 
-def verify_cloudfront_requests(value: Any, client: dict[str, Any], client_digest: str) -> set[str]:
-    proof = fields(value, {"schema", "client_report_sha256", "records"}, "CloudFront viewer request evidence")
-    require(proof["schema"] == "crab.cloudfront-viewer-requests/v1" and proof["client_report_sha256"] == client_digest,
-            "CloudFront viewer evidence differs from the measured fetch")
+def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: str, edge: str) -> set[str]:
+    proof = fields(value, {"schema", "client_report_sha256", "records"}, "CDN viewer request evidence")
+    require(proof["schema"] == f"crab.{edge}-viewer-requests/v1" and proof["client_report_sha256"] == client_digest,
+            "CDN viewer evidence differs from the measured fetch")
     expected = client["edge_responses"]
     records = proof["records"]
     require(isinstance(records, dict) and records.keys() == expected.keys()
             and len(records) == client["all_edge_attempts"],
-            "CloudFront logs must cover each measured viewer attempt exactly once")
+            "CDN logs must cover each measured viewer attempt exactly once")
     for request_id, record in records.items():
-        row = fields(record, {"status", "cache", "response_bytes"}, "CloudFront viewer log record")
+        row = fields(record, {"status", "cache", "response_bytes"}, "CDN viewer log record")
         response = expected[request_id]
         require(type(row["status"]) is int and row["status"] == response["status"]
                 and row["cache"] in ("hit", "miss", "unknown")
                 and type(row["response_bytes"]) is int and row["response_bytes"] >= response["bytes"],
-                "CloudFront log status or response bytes disagree with the client")
+                "CDN log status or response bytes disagree with the client")
         if response["complete"] and response["cache"] != "unknown":
-            require(row["cache"] == response["cache"], "CloudFront log cache result disagrees with the completed response")
+            require(row["cache"] == response["cache"], "CDN log cache result disagrees with the completed response")
     return set(records)
 
 
@@ -1428,11 +1429,12 @@ def collect_git_performance(
                 windows[arm] = (client["started_at_unix_ms"], client["finished_at_unix_ms"])
                 if arm == "warm_local":
                     require(client["edge_attempts"] == 0, "warm-local control observed edge requests")
-                cloudfront_raw = None
-                if provider == "s3" and client["all_edge_attempts"]:
-                    cloudfront_raw = read_git_record(inputs / slot / CLOUDFRONT_REQUEST_FILE, limit=GIT_FETCH_RECORD_LIMIT)
-                    request_ids = verify_cloudfront_requests(decode(cloudfront_raw), client, digest)
-                    require(viewer_request_ids.isdisjoint(request_ids), "CloudFront viewer requests were reused across arms")
+                viewer_log = None
+                if provider in VIEWER_REQUEST_FILES and client["all_edge_attempts"]:
+                    log_name = VIEWER_REQUEST_FILES[provider]
+                    viewer_log = read_git_record(inputs / slot / log_name, limit=GIT_FETCH_RECORD_LIMIT)
+                    request_ids = verify_viewer_requests(decode(viewer_log), client, digest, PROVIDERS[provider][0])
+                    require(viewer_request_ids.isdisjoint(request_ids), "CDN viewer requests were reused across arms")
                     viewer_request_ids.update(request_ids)
                 external_raw = read_git_record(inputs / slot / "measurement.json")
                 external = fields(decode(external_raw), GIT_MEASUREMENT_FIELDS, "benchmark measurement")
@@ -1454,8 +1456,8 @@ def collect_git_performance(
                     destination.mkdir(parents=True)
                     (destination / "client.json").write_bytes(client_raw)
                     (destination / "measurement.json").write_bytes(external_raw)
-                    if cloudfront_raw is not None:
-                        (destination / CLOUDFRONT_REQUEST_FILE).write_bytes(cloudfront_raw)
+                    if viewer_log is not None:
+                        (destination / log_name).write_bytes(viewer_log)
             require(len(fixtures) == 1, f"{location} {index} arms fetched different published Git fixtures")
             intervals = sorted(windows.values())
             require(intervals[0][0] >= previous_end

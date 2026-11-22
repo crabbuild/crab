@@ -68,5 +68,5 @@ class CdnProductQualificationTests(unittest.TestCase):
                                    SCOPE, edge_responses=responses)
         self.assertEqual(set(responses), {"a" * 64, "b" * 64})
         self.assertEqual(observed["observed_edge_gets"], 1)
-        with self.assertRaisesRegex(ValueError, "duplicate CloudFront viewer request fingerprint"):
+        with self.assertRaisesRegex(ValueError, "duplicate CDN viewer request fingerprint"):
             PRODUCT.measure([event(request_sha256="a" * 64)], SCOPE, edge_responses=responses)

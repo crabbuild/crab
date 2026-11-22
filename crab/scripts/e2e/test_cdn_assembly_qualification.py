@@ -156,6 +156,8 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
         self.assertEqual({path.name for path in retained.iterdir()}, {"client.json", "measurement.json"})
         for file in retained.iterdir():
             self.assertEqual(file.read_bytes(), (measurements / sample / file.name).read_bytes())
+        proof = Path("near/0001/warm_edge") / fixture.CDN.VIEWER_REQUEST_FILES["azure"]
+        self.assertEqual((row / fixture.CDN.GIT_BENCHMARK_DIR / proof).read_bytes(), (measurements / proof).read_bytes())
         report = json.loads((row / "cdn-report.json").read_bytes())
         self.assertEqual(report["performance"], self.example.report["performance"])
         self.assertEqual(report["product_action"], self.example.report["product_action"])
@@ -172,7 +174,7 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
 
     def test_cloudfront_viewer_records_are_preserved_with_measured_requests(self) -> None:
         digest = self.inputs("s3", consumer="cli")
-        proof = Path(self.row) / fixture.CDN.GIT_BENCHMARK_DIR / "near/0001/warm_edge" / fixture.CDN.CLOUDFRONT_REQUEST_FILE
+        proof = Path(self.row) / fixture.CDN.GIT_BENCHMARK_DIR / "near/0001/warm_edge" / fixture.CDN.VIEWER_REQUEST_FILES["s3"]
         self.assertEqual(self.assemble(digest), 1)
         self.assertEqual((self.output / proof).read_bytes(), (self.root / proof).read_bytes())
 

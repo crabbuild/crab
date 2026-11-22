@@ -572,11 +572,12 @@ and edge payload through redacted observations.
   across two preregistered regions, and applies the release budgets. Assembly
   retains the direct CLI Git and capsule measurement inputs. The release
   gate recomputes each summary and checks the complete platform matrix.
-  CloudFront measurements join the timed fetch to W3C access logs using
-  hashed viewer request IDs and retain the verified status, cache result,
-  and viewer response bytes. Native request and fill measurements are
-  separate inputs. Live metric collection and provider runs still need
-  configured fixtures.
+  CloudFront and Front Door measurements match timed fetches to access logs
+  using hashed viewer request IDs and retain the verified status, cache
+  result, and viewer response bytes. Front Door separates viewer responses
+  from origin-shield traffic before measuring egress. Native request and fill
+  measurements remain separate inputs. Live metric collection and provider
+  runs still need configured fixtures.
 - **Artifacts and sign-off.** Keep a versioned CDN evidence supplement beside
   the existing provider qualification report. The verifier at
   `crab/scripts/verify-provider-qualification-report.py` checks the native

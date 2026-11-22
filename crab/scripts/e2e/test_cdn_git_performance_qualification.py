@@ -46,7 +46,7 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
         digest = fixture.json_file(directory / "client.json", client)
         external = json.loads((directory / "measurement.json").read_bytes())
         fixture.json_file(directory / "measurement.json", external | {"client_report_sha256": digest})
-        proof_path = directory / fixture.CDN.CLOUDFRONT_REQUEST_FILE
+        proof_path = directory / fixture.CDN.VIEWER_REQUEST_FILES["s3"]
         if proof_path.exists():
             proof = json.loads(proof_path.read_bytes())
             fixture.json_file(proof_path, proof | {"client_report_sha256": digest})
@@ -96,7 +96,7 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
             self.collect()
 
     def test_cloudfront_hashes_must_cover_the_timed_requests_and_agree_on_cache_status(self) -> None:
-        path = self.root / "near/0001/cold_edge" / fixture.CDN.CLOUDFRONT_REQUEST_FILE
+        path = self.root / "near/0001/cold_edge" / fixture.CDN.VIEWER_REQUEST_FILES["s3"]
         proof = json.loads(path.read_bytes())
         request_id, record = next(iter(proof["records"].items()))
         for records, error in (
