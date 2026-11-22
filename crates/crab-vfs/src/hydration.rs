@@ -398,6 +398,13 @@ impl HydrationService {
         })
     }
 
+    pub(crate) async fn check_read_authority(&self) -> Result<()> {
+        if let Some(reader) = &self.pointer_reader {
+            reader.check_read_authority(&self.state.cancel).await?;
+        }
+        Ok(())
+    }
+
     /// Start the owned queue workers once; calls after shutdown do nothing.
     ///
     /// Await [`Self::shutdown`] to finish both workers and read-window prefetch.

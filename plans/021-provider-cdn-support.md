@@ -957,14 +957,17 @@ The qualification guard checks the native target in the Git clone child and
 the viewer binding and projected content prefix in the mount's own read
 context. Mounted Xet and LFS windows use the authorized target and scope as
 part of the cache key. Warm reads and in-flight waiters recheck the current
-claim and grant before returning bytes. A local macOS NFS smoke with RustFS
-and Crab Auth observed a warm userspace Xet window, then a fresh NFS request
-that returned zero bytes after renewal denial. `run_cdn_mount_workload.py`
+claim and grant before returning bytes. Ordinary Git file and symlink reads
+recheck the same authority around local-cache and promisor reads. A local
+macOS NFS smoke with RustFS and Crab Auth observed a warm userspace Xet
+window and warmed the Git blob cache with a regular file and symlink. After
+renewal denial, fresh NFS reads returned no bytes for the Xet file, the Git
+file, or a symlink sharing the warmed target blob. `run_cdn_mount_workload.py`
 checks the live NFS session's projected Git revision, the Xet pointer in that
 commit, mounted file bytes, and clean detach. Assembly and release verification
 require the exact xorb request in provider logs, rollback through a fresh
-native mount, independently observed
-publication and cleanup, and regional benchmarks. The warm local arm remounts
+native mount, independently observed publication and cleanup, and regional
+benchmarks. The warm local arm remounts
 with a fresh Git cache and requires verified Crab chunk-cache hits with zero
 edge attempts. Live provider runs and measurements on the packaged platform
 matrix remain open.

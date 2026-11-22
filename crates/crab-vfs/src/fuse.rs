@@ -1319,10 +1319,14 @@ impl Filesystem for CrabFs {
             return;
         };
 
-        match self.resolver.resolve_path(&path) {
+        let view = self.resolver.capture_view();
+        match self.resolver.resolve_path_in(&view, &path) {
             Ok(ResolvedNode::Base(base)) => {
                 if let Some(ref oid) = base.object_oid {
-                    match self.engine.read_symlink_target(oid) {
+                    match self
+                        .rt
+                        .block_on(self.engine.read_captured_symlink_target(&view, oid))
+                    {
                         Ok(target) => reply.data(target.as_bytes()),
                         Err(e) => {
                             warn!(path = %path, oid = %oid, error = %e, "readlink failed");

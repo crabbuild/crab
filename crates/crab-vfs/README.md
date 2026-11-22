@@ -17,7 +17,9 @@ than putting filesystem lifecycle policy into the storage or Xet layers.
 Git LFS pointer blobs expose their declared payload size and verified content.
 Snapshot walking and late blob classification share one typed content identity;
 Crab BLAKE3 and LFS SHA-256 addresses cannot share a read-window entry. Ordinary
-Git bytes retain their existing object-ID verification.
+Git bytes retain their existing object-ID verification. Mounted Git file and
+symlink reads also check the grant and retention claim of their captured
+snapshot before reading the Git object and again before delivery.
 
 LFS reads use canonical `crab-read`/`crab-lfs` verification. A selected local
 payload must pass complete SHA-256 and exact-size verification; only absence

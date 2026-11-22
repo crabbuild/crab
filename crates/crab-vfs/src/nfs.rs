@@ -893,10 +893,19 @@ impl NfsReadFileSystem for CrabNfsFs {
             return Err(nfsstat3::NFS3ERR_INVAL);
         }
         let path = self.ids.path(id)?;
-        match self.resolver.resolve_path(&path).map_err(to_nfs)? {
+        let view = self.resolver.capture_view();
+        match self
+            .resolver
+            .resolve_path_in(&view, &path)
+            .map_err(to_nfs)?
+        {
             ResolvedNode::Base(base) if base.node_type == NodeType::Symlink => {
                 let oid = base.object_oid.ok_or(nfsstat3::NFS3ERR_NOENT)?;
-                let target = self.engine.read_symlink_target(&oid).map_err(to_nfs)?;
+                let target = self
+                    .engine
+                    .read_captured_symlink_target(&view, &oid)
+                    .await
+                    .map_err(to_nfs)?;
                 Ok(target.into_bytes().into())
             }
             ResolvedNode::Overlay(entry) if entry.node_type == NodeType::Symlink => {

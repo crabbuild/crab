@@ -1320,11 +1320,6 @@ impl VfsEngine {
                 result
             }
             ReadSource::BaseBlob { path, oid } => {
-                let Some(ref reader) = self.odb_reader else {
-                    return Err(CrabError::Internal(format!(
-                        "no ODB reader configured for small-file read of {path}"
-                    )));
-                };
                 trace!(
                     path,
                     oid = oid.as_str(),
@@ -1332,8 +1327,12 @@ impl VfsEngine {
                     size,
                     "reading small file from ODB"
                 );
-                let data = reader.read_blob_range(oid, offset, size).await?;
-                Ok(data)
+                self.read_captured_git_blob(
+                    lease._snapshot_view.as_deref(),
+                    oid,
+                    Some((offset, size)),
+                )
+                .await
             }
             ReadSource::BaseEmpty => Ok(Bytes::new()),
             ReadSource::OverlayFile { path, backing } => {
@@ -1356,6 +1355,32 @@ impl VfsEngine {
             }
         }
         result
+    }
+
+    async fn read_captured_git_blob(
+        &self,
+        view: Option<&SnapshotView>,
+        oid: &str,
+        range: Option<(u64, u32)>,
+    ) -> Result<Bytes> {
+        let reader = self
+            .odb_reader
+            .as_ref()
+            .ok_or_else(|| CrabError::Internal("no ODB reader for captured Git blob".into()))?;
+        let hydration = view.and_then(|view| view.hydration.as_deref());
+        if let Some(hydration) = hydration {
+            hydration.check_read_authority().await?;
+        }
+        let data = match range {
+            Some((offset, size)) => reader.read_blob_range(oid, offset, size).await?,
+            None => reader.read_blob_async(oid).await?,
+        };
+        // A local cache hit or a completed promisor fetch is a byte proof.
+        // Delivery still belongs to the current grant of the captured view.
+        if let Some(hydration) = hydration {
+            hydration.check_read_authority().await?;
+        }
+        Ok(data)
     }
 
     fn validate_read_lease(&self, lease: &VfsReadLease) -> Result<()> {
@@ -1704,6 +1729,15 @@ impl VfsEngine {
                 "no ODB reader for symlink target".into(),
             ))
         }
+    }
+
+    pub(crate) async fn read_captured_symlink_target(
+        &self,
+        view: &SnapshotView,
+        oid: &str,
+    ) -> Result<String> {
+        let blob = self.read_captured_git_blob(Some(view), oid, None).await?;
+        Ok(String::from_utf8_lossy(&blob).into_owned())
     }
 
     // -----------------------------------------------------------------------
@@ -4072,6 +4106,93 @@ mod tests {
             .classify_unknown_base_node(1, "file.txt", old_node)
             .unwrap();
         assert_eq!(snapshot.get_node(2, "file.txt").unwrap().unwrap().size, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn warm_git_blob_and_symlink_reads_recheck_the_captured_claim() {
+        use crab_coordination::{
+            read_retention::{ReadRetentionLease, RetainedReadRoot},
+            read_retention_runtime::ReadRetentionSession,
+        };
+
+        let bytes = Bytes::from_static(b"target.txt");
+        let (root, git_dir, oid) = create_git_repo_with_blob(&bytes);
+        let nodes = vec![
+            BaseNode {
+                path: "ordinary.txt".into(),
+                node_type: NodeType::File,
+                mode: 0o100_644,
+                object_oid: Some(oid.clone()),
+                pointer: None,
+                size: bytes.len() as u64,
+            },
+            BaseNode {
+                path: "link".into(),
+                node_type: NodeType::Symlink,
+                mode: 0o120_000,
+                object_oid: Some(oid.clone()),
+                pointer: None,
+                size: bytes.len() as u64,
+            },
+        ];
+        let mut fixture = test_engine_with_nodes(nodes);
+        Arc::get_mut(&mut fixture.engine).unwrap().odb_reader =
+            Some(Arc::new(OdbReader::new(&git_dir).unwrap()));
+
+        let stored = crate::test_support::StoredPointer::new(
+            &root.path().join("native"),
+            Bytes::from_static(b"native capture"),
+        )
+        .await;
+        let layout = &stored.context.store_layout;
+        let claim = ReadRetentionLease::create(
+            layout.store().inner().clone(),
+            layout.read_retention_claim_path("fixture"),
+            RetainedReadRoot::new("a".repeat(64), 1).unwrap(),
+        )
+        .await
+        .unwrap();
+        let retention = ReadRetentionSession::default();
+        let hydrator = stored
+            .context
+            .hydrator
+            .as_ref()
+            .clone()
+            .with_read_retention(retention.capture().unwrap().retain(claim).unwrap());
+        let hydration =
+            fixture
+                .engine
+                .hydration
+                .for_reader(Arc::new(crab_read::PointerReader::new(
+                    Some(Arc::new(hydrator)),
+                    None,
+                    None,
+                )));
+        let engine = &fixture.engine;
+        engine
+            .resolver
+            .set_generation(1, 0, Some(hydration), None)
+            .unwrap();
+        let view = engine.resolver.capture_view();
+        let lease = engine.open_read("ordinary.txt").unwrap();
+        assert_eq!(engine.read_at(&lease, 0, 1024).await.unwrap(), bytes);
+        assert_eq!(
+            engine
+                .read_captured_symlink_target(&view, &oid)
+                .await
+                .unwrap(),
+            "target.txt"
+        );
+
+        retention.shutdown().await.unwrap();
+        assert!(matches!(
+            engine.read_at(&lease, 0, 1024).await,
+            Err(CrabError::Read(crab_read::ReadError::Retention(_)))
+        ));
+        assert!(matches!(
+            engine.read_captured_symlink_target(&view, &oid).await,
+            Err(CrabError::Read(crab_read::ReadError::Retention(_)))
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread")]
