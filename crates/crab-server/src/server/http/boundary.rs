@@ -13,6 +13,8 @@ use std::{net::IpAddr, sync::Arc, time::Instant};
 use tracing::Instrument;
 use uuid::Uuid;
 
+use super::moved;
+
 pub(super) async fn protect(
     State(server): State<Arc<Server>>,
     request: Request,
@@ -153,53 +155,130 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
         && !principal.is_git();
     let requested_repository = repository_identity(request.headers());
     let mut authorization_error = None;
-    if !denied
-        && !rejected_mutation
-        && principal.authenticated()
-        && let Some(params) = &params
-        && let (Some(owner), Some(name)) = (params.get("owner"), params.get("name"))
-        && let Some(name) = (if git_request {
-            name.strip_suffix(".git")
-        } else {
-            Some(name.as_str())
-        })
-        && let Some(repository) = server.repositories.get(&(owner.clone(), name.to_owned()))
+    let mut redirect = None;
+    let redirect_kind = if signed_webhook || principal.import_grant().is_some() {
+        None
+    } else if git_request {
+        Some(moved::Kind::Git)
+    } else if browser_repository
+        && !unsafe_method
+        && (requested_repository.is_some()
+            || !request.headers().contains_key("x-crab-repository-id"))
     {
-        let current = if principal.is_local() {
-            true
-        } else {
-            match app::membership(&server, &principal, &repository).await {
-                Ok(current) => {
-                    principal = current.principal;
-                    true
+        Some(moved::Kind::Api)
+    } else {
+        None
+    };
+    if !denied && !rejected_mutation && principal.authenticated() {
+        let address = params.as_ref().and_then(|params| {
+            let owner = params.get("owner")?.as_str();
+            let name = params.get("name")?.as_str();
+            let name = if git_request {
+                name.strip_suffix(".git")?
+            } else {
+                name
+            };
+            Some((owner, name))
+        });
+        if let Some((owner, name)) = address {
+            let key = (owner.to_owned(), name.to_owned());
+            let mut repository = server.repositories.get(&key);
+            let needs_lookup = repository.is_none() || principal.is_local();
+            if needs_lookup && let Some(kind) = redirect_kind {
+                match moved::response(
+                    &server,
+                    &principal,
+                    request.uri(),
+                    kind,
+                    (owner, name),
+                    requested_repository,
+                )
+                .await
+                {
+                    Ok(response) => redirect = response,
+                    Err(error) => authorization_error = Some(error.into_response()),
                 }
-                Err(app::Error::NotFound) => false,
-                Err(error) => {
-                    authorization_error = Some(error.into_response());
-                    false
+                repository = server.repositories.get(&key);
+            }
+            if redirect.is_none()
+                && authorization_error.is_none()
+                && let Some(repository) = repository
+            {
+                let current = if principal.is_local() {
+                    true
+                } else {
+                    match app::membership(&server, &principal, &repository).await {
+                        Ok(current) => {
+                            principal = current.principal;
+                            true
+                        }
+                        Err(app::Error::NotFound) => false,
+                        Err(error) => {
+                            authorization_error = Some(error.into_response());
+                            false
+                        }
+                    }
+                };
+                if current {
+                    principal = principal.scoped_to_repository(Some(repository.id));
+                } else if !needs_lookup
+                    && authorization_error.is_none()
+                    && let Some(kind) = redirect_kind
+                {
+                    match moved::response(
+                        &server,
+                        &principal,
+                        request.uri(),
+                        kind,
+                        (owner, name),
+                        requested_repository,
+                    )
+                    .await
+                    {
+                        Ok(response) => redirect = response,
+                        Err(error) => authorization_error = Some(error.into_response()),
+                    }
+                }
+                // A reused browser address must not retarget a scoped request.
+                if current
+                    && unsafe_method
+                    && protected
+                    && !principal.is_git()
+                    && requested_repository != Some(repository.id)
+                {
+                    authorization_error = Some(app::Error::RepositoryChanged.into_response());
+                }
+                if browser_repository
+                    && !unsafe_method
+                    && request.headers().contains_key("x-crab-repository-id")
+                    && requested_repository != Some(repository.id)
+                {
+                    authorization_error = Some(app::Error::NotFound.into_response());
                 }
             }
-        };
-        if current {
-            principal = principal.scoped_to_repository(Some(repository.id));
-        }
-        // Browser sessions authorize names through the current catalog. Bind the
-        // captured UUID before any mutation, so a reused name cannot retarget it.
-        // Git credentials already carry the UUID in their authenticated scope.
-        if current
-            && unsafe_method
-            && protected
-            && !principal.is_git()
-            && requested_repository != Some(repository.id)
-        {
-            authorization_error = Some(app::Error::RepositoryChanged.into_response());
-        }
-        if browser_repository
+        } else if !protected
+            && !git_request
             && !unsafe_method
-            && request.headers().contains_key("x-crab-repository-id")
-            && requested_repository != Some(repository.id)
+            && let Some((owner, name)) = moved::web_address(request.uri())
+            && (principal.is_local()
+                || server
+                    .repositories
+                    .get(&(owner.to_owned(), name.to_owned()))
+                    .is_none())
         {
-            authorization_error = Some(app::Error::NotFound.into_response());
+            match moved::response(
+                &server,
+                &principal,
+                request.uri(),
+                moved::Kind::Web,
+                (owner, name),
+                None,
+            )
+            .await
+            {
+                Ok(response) => redirect = response,
+                Err(error) => authorization_error = Some(error.into_response()),
+            }
         }
     }
     if browser_repository && unsafe_method {
@@ -243,6 +322,8 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
     } else if rejected_mutation {
         (StatusCode::FORBIDDEN, Json(json!({"error":{"code":"csrf_rejected","message":"Reload the page before trying again"}}))).into_response()
     } else if let Some(response) = authorization_error {
+        response
+    } else if let Some(response) = redirect {
         response
     } else if let Some(response) = archived_response {
         response

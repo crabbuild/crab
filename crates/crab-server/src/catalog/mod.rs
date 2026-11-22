@@ -1,4 +1,6 @@
 mod read;
+mod rename;
+pub(crate) use rename::Rename;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -29,6 +31,8 @@ pub enum CatalogError {
     Json(#[from] serde_json::Error),
     #[error("repository catalog is invalid: {0}")]
     Invalid(&'static str),
+    #[error("repository destination is already in use")]
+    NameUnavailable,
     #[error("repository catalog changed concurrently")]
     Conflict,
     #[error("repository is not present in the catalog")]
@@ -59,6 +63,8 @@ pub struct CatalogRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) organization: Option<OrganizationAccess>,
     pub protected_branches: Vec<BranchProtection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    naming: Option<rename::Naming>,
 }
 
 pub(crate) const MAX_TEAM_GRANTS: usize = 100;
@@ -140,6 +146,8 @@ pub struct MembershipActor {
 pub struct MembershipSnapshot {
     pub repository_id: Uuid,
     pub revision: u64,
+    #[serde(skip)]
+    pub(crate) renamed: bool,
     pub members: Vec<RepositoryMember>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<RepositoryGroup>,
@@ -265,6 +273,7 @@ impl CatalogDocument {
             crate::config::validate_repository(&runtime)
                 .map_err(|_| CatalogError::Invalid("repository record failed validation"))?;
         }
+        self.validate_renames(&mut names)?;
         Ok(())
     }
 
@@ -411,6 +420,7 @@ impl CatalogRecord {
         MembershipSnapshot {
             repository_id: self.id,
             revision,
+            renamed: self.name_version() > 0,
             organization: source.organization.clone(),
             members: source.members.clone(),
             groups: source.groups.clone(),
@@ -515,6 +525,7 @@ impl CatalogStore {
             members,
             groups: Vec::new(),
             protected_branches: Vec::new(),
+            naming: None,
         };
         self.initialize_git(&record, &default_branch, false).await?;
         self.insert_with_mode(record, InsertMode::ExistingPrefix)
@@ -551,6 +562,7 @@ impl CatalogStore {
                 members,
                 groups: Vec::new(),
                 protected_branches: Vec::new(),
+                naming: None,
             },
             InsertMode::Reserved(actor),
         )
@@ -582,6 +594,7 @@ impl CatalogStore {
                 members,
                 groups: Vec::new(),
                 protected_branches: Vec::new(),
+                naming: None,
             },
             InsertMode::Reserved(actor),
         )
@@ -634,6 +647,7 @@ impl CatalogStore {
             members,
             groups: Vec::new(),
             protected_branches: Vec::new(),
+            naming: None,
         };
         let runtime = record.runtime_config(&self.root, "main")?;
         crate::config::validate_repository(&runtime)
@@ -978,6 +992,7 @@ impl CatalogStore {
                 .version
                 .checked_add(1)
                 .ok_or(CatalogError::Invalid("catalog version overflowed"))?;
+            document.release_alias(&record.owner, &record.name);
             document.repositories.push(record.clone());
             document.normalize();
             if !record.members.is_empty() || record.organization.is_some() {

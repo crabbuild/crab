@@ -175,7 +175,10 @@ export function App() {
   const [importedRepository, setImportedRepository] =
     useState<Pick<Repository, "owner" | "name">>();
   const requestedRepository = route ?? importedRepository;
-  const repositoryCatalog = useRequest<{ repositories: Repository[] }>(
+  const repositoryCatalog = useRequest<{
+    repositories: Repository[];
+    redirect?: Pick<Repository, "id" | "owner" | "name">;
+  }>(
     session.data?.authenticated && requestedRepository
       ? `/api/repos?${new URLSearchParams({ owner: requestedRepository.owner, name: requestedRepository.name })}`
       : null,
@@ -200,6 +203,18 @@ export function App() {
     }
   }
   const expectedRepository = url.searchParams.get("repository_id");
+  const renamed = repositoryCatalog.data?.redirect;
+  useEffect(() => {
+    if (
+      !renamed ||
+      !route ||
+      (expectedRepository !== null && expectedRepository !== renamed.id)
+    )
+      return;
+    const remainder = url.pathname.split("/").slice(3).join("/");
+    const path = repoHref(renamed) + (remainder ? `/${remainder}` : "");
+    window.location.replace(path + url.search + url.hash);
+  }, [renamed, route, expectedRepository, url.pathname, url.search, url.hash]);
   const repo = repositoryCatalog.data?.repositories.find(
     (repo) =>
       repo.owner === route?.owner &&

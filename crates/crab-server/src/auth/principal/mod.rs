@@ -178,12 +178,24 @@ impl Principal {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn with_membership(
         &self,
         repository: Uuid,
         config: &RepositoryConfig,
         issuer: &str,
         organization_access: Option<RepositoryAccess>,
+    ) -> Self {
+        self.with_catalog_membership(repository, config, issuer, organization_access, false)
+    }
+
+    pub(crate) fn with_catalog_membership(
+        &self,
+        repository: Uuid,
+        config: &RepositoryConfig,
+        issuer: &str,
+        organization_access: Option<RepositoryAccess>,
+        renamed: bool,
     ) -> Self {
         let account = match &self.credential {
             Credential::Local => return self.clone(),
@@ -196,7 +208,9 @@ impl Principal {
                 if token.active()
                     && token.repository_id == repository
                     && token.owner == config.owner
-                    && token.repository == config.name
+                    // The current catalog can attest to a rename of this UUID.
+                    // The issuance address alone cannot establish that identity.
+                    && (token.repository == config.name || renamed)
                     && token.session.active() =>
             {
                 Some((

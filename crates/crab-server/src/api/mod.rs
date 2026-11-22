@@ -26,6 +26,7 @@ mod projects;
 mod pulls;
 mod reactions;
 mod releases;
+mod repository_name;
 mod results;
 mod rulesets;
 mod statuses;
@@ -565,6 +566,7 @@ pub(crate) fn routes(server: Arc<Server>) -> axum::Router<Arc<Server>> {
         )
         .route("/api/repos", axum::routing::get(catalog::list))
         .merge(catalog::creation_routes(Arc::clone(&server)))
+        .merge(repository_name::routes(Arc::clone(&server)))
         .route(
             "/api/repos/{owner}/{name}/archive",
             axum::routing::get(archive::download),

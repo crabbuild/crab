@@ -19,7 +19,9 @@ impl CatalogStore {
         Ok((document.as_ref().clone(), etag))
     }
 
-    async fn load_snapshot(&self) -> Result<(Arc<CatalogDocument>, Option<ETag>), CatalogError> {
+    pub(crate) async fn load_snapshot(
+        &self,
+    ) -> Result<(Arc<CatalogDocument>, Option<ETag>), CatalogError> {
         let previous = self.latest.read().await.clone();
         if let Some(previous) = previous {
             // Every reuse needs a fresh provider token, or a warm reader could

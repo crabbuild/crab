@@ -272,6 +272,10 @@ and session migration paths are supported.
   receive, and LFS endpoints and their route assembly. `auth/` assembles login
   and session routes. `server/http/mod.rs` applies the common security boundary
   after merging these routers. Shared request policy remains in `app.rs`.
+- `catalog/rename.rs` owns the versioned name and redirect transaction.
+  `api/repository_name/` binds the administrative action to the durable
+  repository UUID. `server/repository_route.rs` rechecks current authority
+  before serving historical addresses from the shared catalog.
 - `api/catalog_browse/` ranks and pages catalog matches. Reuse `api/catalog.rs`
   for current direct, group, organization, and fork grants. Browse reads
   lifecycle settings only for the result page and rechecks access before

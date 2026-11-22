@@ -23,6 +23,7 @@ pub(crate) mod email;
 pub(crate) mod http;
 pub(crate) mod management;
 pub(crate) mod mentions;
+pub(crate) mod repository_route;
 pub(crate) mod storage;
 
 pub(crate) const MAX_RELEASE_ASSET_BYTES: u64 = 512 * 1024 * 1024;

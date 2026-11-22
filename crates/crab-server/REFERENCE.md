@@ -636,6 +636,28 @@ Exact `owner` plus `name` lookups return the repository detail needed by
 repository pages and settings. Search and exact lookup options are mutually
 exclusive.
 
+### Rename a repository
+
+Repository administrators can change the name in **Settings → General**.
+Crab keeps the repository UUID, storage placement, Git refs, collaboration
+records, and access grants. Existing links and smart HTTP Git remotes
+continue to resolve to the current name while their old address is available.
+Crab checks current access before redirecting. Claiming a former name for a
+different repository replaces its redirect. Git tokens retain their original
+repository UUID and permission ceiling after a rename.
+
+`GET /api/repositories/{repository}/name` returns the canonical `id`, `owner`,
+`name`, and version to a repository administrator. To rename it, send `name`,
+the captured `version`, and a UUID `request_id` with `PUT` on the same path.
+Use the same input and request ID to recover a lost response. The current
+name version prevents a stale submission from overwriting a newer rename.
+Archived repositories must be unarchived before renaming.
+
+Upgrade serving replicas together before the first rename. The shared
+catalog stores the revision and former addresses for renamed repositories.
+Clients that use an old remote can update it with `git remote set-url origin`
+and the current URL.
+
 ### Git imports
 
 The catalog page exposes **Import from Git** for an authenticated browser

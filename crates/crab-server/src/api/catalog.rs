@@ -69,12 +69,24 @@ pub(super) async fn list(
         .await;
     }
     let address = selection.owner.as_deref().zip(selection.name.as_deref());
+    let mut matches = visible(&server, &principal, address, selection.organization).await?;
+    if matches.is_empty()
+        && selection.organization.is_none()
+        && let Some((owner, name)) = address
+        && let Some(destination) =
+            crate::server::repository_route::renamed(&server, &principal, owner, name, None).await?
+    {
+        if (destination.owner.as_str(), destination.name.as_str()) != (owner, name) {
+            return Ok(Json(json!({"repositories": [], "redirect": destination})));
+        }
+        matches = visible(&server, &principal, address, selection.organization).await?;
+    }
     let mut repositories = Vec::new();
     for VisibleRepository {
         repository,
         principal: current,
         organization_owner,
-    } in visible(&server, &principal, address, selection.organization).await?
+    } in matches
     {
         let protections = crate::repository::settings::load(&server, &repository).await?;
         let lifecycle = crate::repository::settings::load_lifecycle(&server, &repository).await?;
@@ -213,7 +225,7 @@ pub(super) async fn visible_matching(
             let mut config = repository.config.clone();
             config.members = source.members.clone();
             config.groups = source.groups.clone();
-            principal.with_membership(
+            principal.with_catalog_membership(
                 repository.id,
                 &config,
                 issuer,
@@ -225,6 +237,7 @@ pub(super) async fn visible_matching(
                             crate::repository::access::organization_access(grant, &access.teams)
                         })
                     }),
+                record.name_version() > 0,
             )
         } else {
             principal.clone()

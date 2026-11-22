@@ -988,7 +988,8 @@ pub(crate) async fn membership_snapshot(
     let inherited = grant
         .as_ref()
         .and_then(|grant| crate::repository::access::organization_access(grant, &teams));
-    let principal = principal.with_membership(repo.id, &config, issuer, inherited);
+    let principal =
+        principal.with_catalog_membership(repo.id, &config, issuer, inherited, snapshot.renamed);
     let grant = grant.unwrap_or_default();
     let mut review_teams = grant.teams;
     let mut bypass_teams = grant.bypass_teams.clone();
