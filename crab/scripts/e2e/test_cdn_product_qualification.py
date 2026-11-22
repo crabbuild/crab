@@ -1,6 +1,10 @@
 """CDN product metrics consume only the route-specific redacted events."""
 
 import json
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
 import unittest
 
 import collect_cdn_product_metrics as PRODUCT
@@ -55,6 +59,32 @@ class CdnProductQualificationTests(unittest.TestCase):
         metrics = PRODUCT.measure([event(status=0, bytes=0, complete=False), event(bytes=0)], SCOPE)
         self.assertEqual(metrics["edge_attempts"], 2)
         self.assertEqual(metrics["observed_edge_gets"], 0)
+
+    def test_xorb_proof_requires_verified_chunks_from_the_selected_physical_key(self):
+        scope = "cloudfront/private/sdk/xorb/direct"
+        key = "a" * 64
+        xorb = {"message": PRODUCT.VERIFIED_XORB_EVENT, "consumer": "sdk", "family": "xorb",
+                "xorb_key_sha256": key}
+        messages = [event(consumer="sdk", family="xorb"), verified(**(xorb | {"xorb_key_sha256": "b" * 64})),
+                    verified(**(xorb | {"consumer": "cli"}))]
+        self.assertEqual(PRODUCT.measure(messages, scope, expected_xorb_key=key)["verified_edge_payloads"], 0)
+        messages.append(verified(**xorb))
+        self.assertEqual(PRODUCT.measure(messages, scope, expected_xorb_key=key)["verified_edge_payloads"], 1)
+        for overrides in ({"source": "local"}, {"xorb_key_sha256": "unredacted"}, {"family": "git"}):
+            with self.assertRaisesRegex(ValueError, "invalid verified CDN xorb key"):
+                PRODUCT.measure([verified(**(xorb | overrides))], scope, expected_xorb_key=key)
+
+    def test_xorb_collector_requires_a_preregistered_physical_key(self):
+        scope = "cloudfront/private/cli/xorb/direct"
+        key = "a" * 64
+        with tempfile.TemporaryDirectory() as scratch:
+            trace = Path(scratch) / "read.jsonl"
+            trace.write_bytes(verified(message=PRODUCT.VERIFIED_XORB_EVENT, family="xorb", xorb_key_sha256=key) + b"\n")
+            command = [sys.executable, "-B", PRODUCT.__file__, "--stderr", str(trace), "--scope", scope]
+            missing = subprocess.run(command, capture_output=True, check=False)
+            self.assertEqual(missing.returncode, 1)
+            result = subprocess.run([*command, "--xorb-key-sha256", key], capture_output=True, check=True)
+            self.assertEqual(json.loads(result.stdout)["verified_edge_payloads"], 1)
 
     def test_rejects_an_inconsistent_completed_range_or_raw_event_field(self):
         with self.assertRaisesRegex(ValueError, "inconsistent completed CDN response"):

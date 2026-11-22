@@ -379,6 +379,15 @@ impl CdnReadAttempt {
         PayloadObservation::new(self.route.policy()?, self.family, public)
     }
 
+    /// Record a nonempty xorb payload after verifying the requested chunks.
+    pub fn observe_verified_xorb(&self) {
+        if self.family == CdnReadFamily::Xorb
+            && let Some(observation) = self.payload_observation()
+        {
+            observation.record_verified_xorb(self.path.as_ref());
+        }
+    }
+
     /// Check direct edge delivery against caller-verified bytes from the native target.
     ///
     /// For an operator-authorized diagnostic deployment only. The mutable root

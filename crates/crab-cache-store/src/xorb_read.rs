@@ -159,6 +159,12 @@ impl CachingStore {
                 Ok(Some(result)) => {
                     source.check_deadline()?;
                     self.observe_xorb_source(source, CacheReadOutcome::Hit, result.0.len());
+                    // Metadata alone and a native restart cannot prove edge delivery.
+                    if let XorbSource::Cdn(attempt) = source
+                        && !result.0.is_empty()
+                    {
+                        attempt.observe_verified_xorb();
+                    }
                     if let Some(key) = key {
                         self.xorb_reads.insert(key, &result);
                     }

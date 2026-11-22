@@ -178,58 +178,155 @@ fn duplicate_insertion_keeps_the_verified_original() {
 }
 
 #[tokio::test]
-async fn complete_xorb_read_uses_verified_cdn_body_after_cache_miss() {
-    use axum::{Router, body::Body, response::Response};
-    use crab_storage::cdn::{CdnAccess, CdnRoute, CdnTransport};
+async fn only_verified_xorb_chunks_count_as_edge_payload() {
+    use axum::{Router, body::Body, http::HeaderMap, response::Response};
+    use crab_storage::cdn::{CdnAccess, CdnConsumer, CdnProfile, CdnRoute, CdnTransport};
     use crab_xet::xorb::{
         builder::{RunId, XorbBuilder},
         format::Chunk,
     };
     use object_store::{ObjectStoreExt, memory::InMemory};
-    use std::{sync::Arc, time::Duration};
+    use std::{
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
+    use tracing::{
+        Event, Metadata, Subscriber,
+        field::{Field, Visit},
+        span::{Attributes, Id, Record},
+    };
 
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<String>>>);
+    impl Visit for Capture {
+        fn record_debug(&mut self, _: &Field, _: &dyn std::fmt::Debug) {}
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            if field.name() == "xorb_key_sha256" {
+                self.0.lock().unwrap().push(value.to_owned());
+            }
+        }
+    }
+    impl Subscriber for Capture {
+        fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+            metadata.target() == "crab_storage::cdn::transfer"
+        }
+
+        fn new_span(&self, _: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+        fn record(&self, _: &Id, _: &Record<'_>) {}
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+        fn enter(&self, _: &Id) {}
+        fn exit(&self, _: &Id) {}
+        fn event(&self, event: &Event<'_>) {
+            event.record(&mut self.clone());
+        }
+    }
+
+    let capture = Capture::default();
+    let dispatch = tracing::Dispatch::new(capture.clone());
+    let _guard = tracing::dispatcher::set_default(&dispatch);
     let expected = Bytes::from_static(b"cdn verified content");
     let mut builder = XorbBuilder::new();
-    builder
-        .push(&Chunk::new(expected.clone()), RunId(0))
-        .unwrap();
+    for chunk in [
+        expected.clone(),
+        Bytes::from_static(b"another chunk in the fixture"),
+        Bytes::from_static(b"unrequested xorb chunk"),
+    ] {
+        builder.push(&Chunk::new(chunk), RunId(0)).unwrap();
+    }
     let xorb = builder.finalize().unwrap().pop().unwrap();
     let path = crab_storage::canonical_global_content_path("xorbs", &xorb.hash.hex());
-    let body = xorb.bytes.clone();
-    let app = Router::new().fallback(move || {
-        let body = body.clone();
-        async move { Response::new(Body::from(body)) }
-    });
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let transport = CdnTransport::loopback_fixture(listener.local_addr().unwrap()).unwrap();
-    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let temp = tempfile::tempdir().unwrap();
-    let local = Arc::new(crab_cache::LocalCache::new(temp.path().join("cache")));
-    let inner = Arc::new(InMemory::new());
-    // Only size is available from origin. A body read at origin would fail
-    // content verification instead of producing the expected bytes.
-    inner
-        .put(&path, Bytes::from(vec![0; xorb.bytes.len()]).into())
-        .await
-        .unwrap();
-    let target = [13; 32];
-    let origin = crab_storage::Store::new(inner)
-        .with_target_identity(target)
-        .with_cdn_route(CdnRoute::new(
-            target,
-            "org/repo".into(),
-            Some(".crab".into()),
-            CdnAccess::Public,
-            transport,
-            Duration::from_secs(10),
-        ))
-        .unwrap();
-    let store =
-        CachingStore::new_with_local_cache(origin, crate::CacheConfig::default(), local).unwrap();
-    let (bytes, _) = store
-        .get_xorb_chunks_without_install(&path, &xorb.hash, &[(0, 1)])
-        .await
-        .unwrap();
-    assert_eq!(bytes, expected);
-    server.abort();
+    let mut corrupt = xorb.bytes.to_vec();
+    corrupt[0] ^= 1;
+    let corrupt = Bytes::from(corrupt);
+
+    for (selective, valid_edge) in [(false, true), (false, false), (true, true), (true, false)] {
+        let (edge, native) = if valid_edge {
+            (xorb.bytes.clone(), corrupt.clone())
+        } else {
+            (corrupt.clone(), xorb.bytes.clone())
+        };
+        let app = Router::new().fallback(move |headers: HeaderMap| {
+            let edge = edge.clone();
+            async move {
+                let Some(range) = headers.get("range") else {
+                    return Response::new(Body::from(edge));
+                };
+                let (start, end) = range
+                    .to_str()
+                    .unwrap()
+                    .strip_prefix("bytes=")
+                    .unwrap()
+                    .split_once('-')
+                    .unwrap();
+                let (start, end): (usize, usize) = (start.parse().unwrap(), end.parse().unwrap());
+                Response::builder()
+                    .status(206)
+                    .header(
+                        "content-range",
+                        format!("bytes {start}-{end}/{}", edge.len()),
+                    )
+                    .body(Body::from(edge.slice(start..=end)))
+                    .unwrap()
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let transport = CdnTransport::loopback_fixture(listener.local_addr().unwrap()).unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let temp = tempfile::tempdir().unwrap();
+        let local = Arc::new(crab_cache::LocalCache::new(temp.path().join("cache")));
+        let inner = Arc::new(InMemory::new());
+        inner.put(&path, native.into()).await.unwrap();
+        let target = [13; 32];
+        let origin = crab_storage::Store::new(inner)
+            .with_target_identity(target)
+            .with_cdn_route(
+                CdnRoute::new(
+                    target,
+                    "org/repo".into(),
+                    Some(".crab".into()),
+                    CdnAccess::Public,
+                    transport,
+                    Duration::from_secs(10),
+                )
+                .for_consumer(CdnConsumer::Sdk, CdnProfile::Direct),
+            )
+            .unwrap();
+        let store =
+            CachingStore::new_with_local_cache(origin, crate::CacheConfig::default(), local)
+                .unwrap();
+        if selective {
+            assert_eq!(
+                store
+                    .xorb_chunk_metadata(&path, &xorb.hash)
+                    .await
+                    .unwrap()
+                    .len(),
+                3
+            );
+            assert!(capture.0.lock().unwrap().is_empty());
+        }
+        let range = [(0, 1)];
+        for _ in 0..2 {
+            let (bytes, _) = if selective {
+                store.get_xorb_chunks(&path, &xorb.hash, &range).await
+            } else {
+                store
+                    .get_xorb_chunks_without_install(&path, &xorb.hash, &range)
+                    .await
+            }
+            .unwrap();
+            assert_eq!(bytes, expected);
+        }
+        let fingerprints = std::mem::take(&mut *capture.0.lock().unwrap());
+        assert_eq!(fingerprints.len(), usize::from(valid_edge));
+        assert!(
+            fingerprints
+                .iter()
+                .all(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        );
+        server.abort();
+    }
 }

@@ -58,6 +58,13 @@ pub struct PayloadObservation {
     public: Option<PublicTransitionObservation>,
 }
 
+enum PayloadIdentity<'a> {
+    None,
+    GitBlob(&'a [u8]),
+    GitPack(blake3::Hash),
+    XorbKey(&'a str),
+}
+
 impl PayloadObservation {
     pub(crate) fn new(
         policy: CdnPolicy,
@@ -84,7 +91,10 @@ impl PayloadObservation {
     }
 
     fn record_verified_with_blob(self, oid: Option<&[u8]>) {
-        self.record("edge", oid, None);
+        self.record(
+            "edge",
+            oid.map_or(PayloadIdentity::None, PayloadIdentity::GitBlob),
+        );
         if let Some(public) = self.public {
             public.record(self.policy, self.family, "verified_edge", oid);
         }
@@ -92,28 +102,41 @@ impl PayloadObservation {
 
     /// Report an edge pack after its complete authenticated BLAKE3 digest matches.
     pub fn record_verified_git_pack(self, hash: blake3::Hash) {
-        self.record("edge", None, Some(hash));
+        self.record("edge", PayloadIdentity::GitPack(hash));
         if let Some(public) = self.public {
             public.record(self.policy, self.family, "verified_edge", None);
         }
     }
 
+    pub(crate) fn record_verified_xorb(self, key: &str) {
+        self.record("edge", PayloadIdentity::XorbKey(key));
+    }
+
     /// Report a verified local payload hit on the selected CDN-enabled route.
     pub fn record_local(self) {
-        self.record("local", None, None);
+        self.record("local", PayloadIdentity::None);
     }
 
     pub(crate) fn record_local_git_blob(self, oid: &[u8]) {
-        self.record("local", Some(oid), None);
+        self.record("local", PayloadIdentity::GitBlob(oid));
     }
 
-    fn record(self, source: &'static str, oid: Option<&[u8]>, pack: Option<blake3::Hash>) {
+    fn record(self, source: &'static str, identity: PayloadIdentity<'_>) {
         let message = match self.family {
             CdnReadFamily::Lfs => "CDN verified LFS payload",
+            CdnReadFamily::Xorb => "CDN verified xorb payload",
             _ => "CDN verified Git payload",
         };
-        let oid = oid.map(|oid| format!("{:x}", Sha256::digest(oid)));
-        let pack = pack.map(|pack| pack.to_hex());
+        let (oid, pack, xorb) = match identity {
+            PayloadIdentity::None => (None, None, None),
+            PayloadIdentity::GitBlob(oid) => {
+                (Some(format!("{:x}", Sha256::digest(oid))), None, None)
+            }
+            PayloadIdentity::GitPack(pack) => (None, Some(pack.to_hex()), None),
+            PayloadIdentity::XorbKey(key) => {
+                (None, None, Some(format!("{:x}", Sha256::digest(key))))
+            }
+        };
         tracing::event!(
             target: TARGET,
             parent: None,
@@ -126,6 +149,7 @@ impl PayloadObservation {
             source,
             git_blob_oid_sha256 = oid.as_deref(),
             git_pack_blake3 = pack.as_ref().map(|digest| digest.as_str()),
+            xorb_key_sha256 = xorb.as_deref(),
             "{message}"
         );
     }

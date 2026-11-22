@@ -782,7 +782,12 @@ python3 -B crab/scripts/e2e/collect_cdn_product_metrics.py \
 Retain only the reduced metrics. A completed transfer proves exact HTTP
 framing and delivery. Git payload readers emit a separate observation after
 accepting an authenticated pack digest or a reconstructed object ID. A
-discarded edge batch reports no verified payloads. The sum of parallel
+discarded edge batch reports no verified payloads. For xorb evidence, pass
+`--xorb-key-sha256` with the SHA-256 of the approved physical object key,
+including the projected view's prefix and without a leading slash. The
+xorb reader reports this fingerprint after it verifies nonempty requested
+chunks from the edge. Retain the action's separately verified output bytes
+or digest with the transfer evidence. The sum of parallel
 transfer times differs from elapsed action time. Front Door's response
 header describes the first 8 MB chunk, so Crab records an unknown cache
 disposition for larger objects. Use provider logs for their cache and

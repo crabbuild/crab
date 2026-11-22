@@ -714,8 +714,11 @@ read with each active approval. The prior read proves native delivery of
 the exact blob from its unlisted pack layer. The current read proves CDN
 delivery of that blob from the same layer. The release verifier reconstructs
 the transition trace from the retained SDK records. Live runs still require
-the protected provider fixtures. SDK child hydration still needs its own
-product evidence.
+the protected provider fixtures. Xorb readers now report the physical key
+fingerprint after verifying the requested chunks from the edge. The
+collector can match that fingerprint to the approved projected view.
+SDK child hydration still needs a worker that captures this observation
+from the child and verifies the hydrated file.
 
 The protected workflow or its dedicated workers own producing these raw
 observations. The assembly and release jobs own rejecting missing, mismatched
