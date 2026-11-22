@@ -70,6 +70,12 @@ holds the same binding across renewals and rejects a different version,
 placement, viewer URL, or approval digest. V1 reads and staging grants keep
 their original wire shape. Each transfer grant POST is issued once.
 
+The `crab_auth::managed::cdn` debug target reports authenticated resolution
+and the observed status, schema versions, and acceptance decision for each
+read grant exchange. It uses fingerprints for the issuer, repository, and
+native or viewer placement. Qualification uses these observations to check
+v2 reads, v1 peers, and terminal denial.
+
 The encrypted token cache commits managed OIDC refresh responses only for the
 current login. The response preserves the original issuer and subject.
 Private direct CDN reads also pin the original issuer and subject. They use

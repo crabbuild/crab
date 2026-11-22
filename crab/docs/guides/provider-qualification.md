@@ -802,6 +802,50 @@ transport trace, and the signed lifetime of each tested grant. The operator
 performs the provider change while the collector reads policy and object
 bytes and retains redacted observations. [CloudFront key rotation](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-trusted-signers.html) · [Cloud CDN key retirement](https://docs.cloud.google.com/cdn/docs/using-signed-cookies) · [APIM signer policy](https://learn.microsoft.com/en-us/azure/api-management/validate-jwt-policy)
 
+### Collect managed issuer observations
+
+Use the issuer owner's protected repository-local fixture with the approved
+native placement. Preregister the `managed_issuer` identity, service version
+and private binding approval in that row's benchmark registration. The
+identity digest is SHA-256 of the UTF-8 authority, the parsed API base URL
+with its trailing slash, and the advertised OIDC issuer, joined by NUL bytes.
+Use the service version from the authority-bound discovery document.
+
+Run the same product read in a fresh process and cache for each role.
+
+- `approved_v2` uses the approved binding and verifies a CDN payload.
+- `v1_peer` requests v1 and reads the same fixture bytes from the approved
+  native target.
+- `denied_v2` receives HTTP 403 from the issuer after authenticated
+  resolution.
+- `mismatched_v2` receives HTTP 201 with a different binding approval from
+  the issuer's controlled fixture. The client rejects that grant.
+
+Set `CRAB_LOG=crab_auth::managed::cdn=debug,crab_storage::cdn::transfer=debug,crab_storage::native_read=debug`
+and redirect each process's stderr to its `<role>/stderr.jsonl` on the protected
+worker. Record the process's exit status in `<role>/exit-code` after it exits.
+For each successful role, save the exact reconstructed file as
+`<role>/payload`. Both rejected roles should exit with no payload file.
+
+```bash
+python3 -B crab/scripts/e2e/collect_cdn_managed_issuer.py \
+  --fixture "$approved_fixture_json" --configuration-sha256 "$configuration_sha256" \
+  --benchmarks "$registration_file" --benchmarks-sha256 "$benchmarks_sha256" \
+  --observations "$row_directory/observations.json" \
+  --deployment-policy "$row_directory/traces/deployment_policy.json" \
+  --actions "$protected_role_directory" \
+  --output "$row_directory/traces/managed_v2_issuer.json"
+```
+
+The collector requires one authenticated resolution and one grant exchange
+per role. It checks the issuer, logical repository and native placement,
+then derives the four outcomes from the observed HTTP status, client's
+decision, transfer events and verified product bytes. Keep the working logs
+and payload files on the protected worker. Retain the redacted issuer trace
+with the row. Managed release promotion still requires the production
+issuer run and a product-specific verifier for the corresponding managed
+consumer and regional runs.
+
 ### Measure CDN transfers during product actions
 
 Capture stderr from the normal product operation with

@@ -400,6 +400,138 @@ async fn denied_or_invalid_v2_grants_never_downgrade_or_replay() {
 }
 
 #[tokio::test]
+async fn managed_read_observes_actual_status_and_approval_without_credentials() {
+    #[derive(Default)]
+    struct Capture(Mutex<Vec<BTreeMap<String, String>>>);
+
+    impl tracing::Subscriber for Capture {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            metadata.target() == CDN_OBSERVATION_TARGET
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::Id {
+            tracing::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::Id, _: &tracing::Id) {}
+        fn enter(&self, _: &tracing::Id) {}
+        fn exit(&self, _: &tracing::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            if event.metadata().target() != CDN_OBSERVATION_TARGET {
+                return;
+            }
+            struct Fields(BTreeMap<String, String>);
+            impl tracing::field::Visit for Fields {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    self.0.insert(field.name().to_owned(), format!("{value:?}"));
+                }
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    self.0.insert(field.name().to_owned(), value.to_owned());
+                }
+            }
+            let mut fields = Fields(BTreeMap::new());
+            event.record(&mut fields);
+            self.0.lock().unwrap().push(fields.0);
+        }
+    }
+
+    let repository = cdn_repository();
+    let binding = repository.cdn_read_binding.as_ref().unwrap();
+    let mut resolved = response(StatusCode::OK, &repository);
+    resolved.etag = Some("\"revision-7\"".to_owned());
+    let v2 = current_cdn_grant();
+    let mut v1 = v2.clone();
+    v1.schema_version = 1;
+    v1.cdn = None;
+    v1.cdn_approval_sha256 = None;
+    let mut foreign = v2.clone();
+    let foreign_approval = "b".repeat(64);
+    foreign.cdn_approval_sha256 = Some(foreign_approval.clone());
+    let (client, transport) = client(vec![
+        resolved,
+        response(StatusCode::CREATED, &v2),
+        response(StatusCode::CREATED, &v1),
+        service_error(StatusCode::FORBIDDEN, true),
+        response(StatusCode::CREATED, &foreign),
+    ]);
+    let capture = Arc::new(Capture::default());
+    // Keep callsite interest dynamic while other test threads use a silent subscriber.
+    let _silent = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let dispatcher = tracing::Dispatch::new(capture.clone());
+    let _guard = tracing::dispatcher::set_default(&dispatcher);
+    let resolved = client
+        .resolve_repository("acme", "models")
+        .await
+        .unwrap()
+        .value;
+    for (approved, outcome) in [
+        (Some(binding), true),
+        (None, true),
+        (Some(binding), false),
+        (Some(binding), false),
+    ] {
+        let result = client
+            .issue_transfer_grant(
+                "acme",
+                "models",
+                resolved.repository_id,
+                TransferOperation::Clone,
+                &direct_cdn_capabilities(),
+                approved,
+            )
+            .await;
+        assert_eq!(result.is_ok(), outcome);
+    }
+    assert_eq!(transport.requests.lock().unwrap().len(), 5);
+    let seen = capture.0.lock().unwrap();
+    assert_eq!(seen.len(), 5, "managed resolution and grant events");
+    let [resolution, approved, peer, denied, rejected] = seen.as_slice() else {
+        panic!("expected one resolution and four grant observations");
+    };
+    assert_eq!(
+        resolution["binding_approval_sha256"],
+        binding.approval_sha256
+    );
+    assert_eq!(
+        approved["grant_origin_sha256"],
+        sha256(binding.origin.as_bytes())
+    );
+    assert_eq!(
+        peer["grant_prefix_sha256"],
+        sha256(binding.repository_prefix.as_bytes())
+    );
+    for (event, status, request, response, accepted) in [
+        (approved, "201", "2", "2", "true"),
+        (peer, "201", "1", "1", "true"),
+        (denied, "403", "2", "0", "false"),
+        (rejected, "201", "2", "2", "false"),
+    ] {
+        assert_eq!(event["repository_sha256"], resolution["repository_sha256"]);
+        assert_eq!(event["status"], status);
+        assert_eq!(event["request_version"], request);
+        assert_eq!(event["grant_version"], response);
+        assert_eq!(event["accepted"], accepted);
+    }
+    assert_eq!(rejected["grant_approval_sha256"], foreign_approval);
+    assert!(rejected["grant_origin_sha256"].is_empty());
+    let formatted = format!("{seen:?}");
+    for private in [
+        "secret-token",
+        "fixture-session-token",
+        "crab://crab.build/acme/models",
+        binding.origin.as_str(),
+        binding.base_url.as_str(),
+    ] {
+        assert!(!formatted.contains(private));
+    }
+}
+
+#[tokio::test]
 async fn transfer_grant_failure_requires_explicit_refresh_attempt() {
     let repository_id = Uuid::now_v7();
     let capabilities = ServiceCapabilities {
