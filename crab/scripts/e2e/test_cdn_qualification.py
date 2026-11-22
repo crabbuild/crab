@@ -101,7 +101,7 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, sdk_
                 if hydration is not None:
                     started += 100_000
                 if service is not None:
-                    started += (service["started_at_unix_ms"] // 1000) * 1000 - 3_000_000
+                    started += (service["started_at_unix_ms"] // 1000) * 1000
                 edge = int(arm in ("cold_edge", "warm_edge"))
                 counters = dict.fromkeys(CDN.PRODUCT_COUNTERS, 0) | {
                     "verified_edge_payloads": edge, "edge_attempts": edge,
@@ -153,6 +153,7 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, sdk_
                 if service is not None:
                     read_fields = CDN.PRODUCT_COUNTERS | CDN.SDK_TIMING_FIELDS | {"arm", "edge_responses", "native_traffic"}
                     client = service | {key: client[key] for key in read_fields}
+                    client.pop("transition_key_sha256", None)
                     client["reader"] = service["reader"]
                     if arm == "origin":
                         client["reader"] = service["reader"] | {"binding_sha256": "", "public_export_sha256": ""}
@@ -342,6 +343,9 @@ class CdnQualificationTests(unittest.TestCase):
         self.public_origins = {"native": source, "export": export}
         entry = Object("v2/pack-layers/aa/" + "a" * 64, len(EXPORT_BODY), hashlib.sha256(EXPORT_BODY).hexdigest())
         old_entry = Object("v2/pack-layers/bb/" + "b" * 64, len(EXPORT_BODY), "c" * 64)
+        if CDN.scope_parts(self.scope)[3] == "lfs":
+            entry = Object(CDN.lfs_object_path(entry.sha256), entry.size, entry.sha256)
+            old_entry = Object(CDN.lfs_object_path("f" * 64), entry.size, "f" * 64)
         self.object_key = hashlib.sha256(f"{FIXTURE_PREFIX}/{entry.path}".encode()).hexdigest()
         inventory = json_file(root / "inventory.json", {
             "schema": INVENTORY_SCHEMA, "source_origin": source, "repository_prefix": FIXTURE_PREFIX,
@@ -426,9 +430,13 @@ class CdnQualificationTests(unittest.TestCase):
         report = self.report
         records = self.directory / CDN.SERVICE_PRODUCT_DIR
         records.mkdir()
-        edge, _, _, family, _ = CDN.scope_parts(self.scope)
+        edge, access, _, family, _ = CDN.scope_parts(self.scope)
+        if access == "public":
+            self.cleanup_trace(access, edge, observed_at_unix_ms=PUBLIC_SEAL + 4_000_000)
         cleanup = json.loads((self.directory / "traces/cleanup.json").read_bytes())
         cleanup_at = cleanup["observed_at_unix_ms"]
+        published_at = PUBLIC_SEAL - 35 if access == "public" else cleanup_at - 3_000_100
+        edge_at = PUBLIC_SEAL + 10 if access == "public" else published_at + 30
         reader = {"origin_sha256": cleanup["targets"]["native"]["origin_sha256"], "prefix_sha256": cleanup["prefix_sha256"]}
         spec = reader | {"sha256": "5" * 64, "etag_sha256": "6" * 64, "payload_bytes": 8}
         service = service_candidate(self.scope, report["platform"])
@@ -439,16 +447,19 @@ class CdnQualificationTests(unittest.TestCase):
         platform = report["platform"]
         ref = "refs/heads/crab-cdn-qualification-123-2-abcdefabcdef"
         commit, payload = "a" * 40, report["product_action"]["expected_sha256"]
+        if access == "public" and family == "lfs":
+            payload = hashlib.sha256(EXPORT_BODY).hexdigest()
+            report["product_action"].update(expected_sha256=payload, observed_sha256=payload)
         writer = cli_candidate(self.scope, platform)
         receipt = json_file(records / "publication.json", provenance | {
             "schema": "crab.cdn-git-publication/v1", "ref": ref, "oid": commit, "sha256": payload,
-            "published": True, "visible_at_unix_ms": cleanup_at - 3_000_010, "candidate": writer,
+            "published": True, "visible_at_unix_ms": published_at - 5, "candidate": writer,
         })
         json_file(records / "retirement.json", provenance | {
             "schema": "crab.cdn-git-retirement/v1", "publication_sha256": receipt, "ref_retired": True,
             "retired_at_unix_ms": cleanup_at - 30, "candidate": writer,
         })
-        for phase, at, marker in (("published", cleanup_at - 3_000_000, "1"), ("retired", cleanup_at - 20, "2")):
+        for phase, at, marker in (("published", published_at, "1"), ("retired", cleanup_at - 20, "2")):
             digest = json_file(records / CDN.GIT_NATIVE_REF_FILES[phase], provenance | {
                 "schema": "crab.cdn-native-ref/v1", "phase": phase, "platform": platform,
                 "publication_sha256": receipt, "started_at_unix_ms": at, "observed_at_unix_ms": at + 5,
@@ -474,11 +485,21 @@ class CdnQualificationTests(unittest.TestCase):
             "reader": reader | {"binding_sha256": "", "public_export_sha256": ""},
             "native_traffic": {"get_responses": 1, "head_responses": 0, "body_bytes": 8},
         }
-        self.rollback_trace(common | {"started_at_unix_ms": cleanup_at - 50, "finished_at_unix_ms": cleanup_at - 40})
+        self.rollback_trace(common | {"started_at_unix_ms": edge_at + 20, "finished_at_unix_ms": edge_at + 30})
+        transition = {}
+        if access == "public":
+            self.registration["service_prior_workload_sha256"] = "4" * 64
+            transition = {"transition_key_sha256": self.object_key}
+            json_file(records / CDN.SERVICE_PUBLIC_PRIOR_RECORD, common | transition | {
+                "arm": "prior_export", "started_at_unix_ms": PUBLIC_SEAL - 20, "finished_at_unix_ms": PUBLIC_SEAL - 10,
+                "service_instance_sha256": "3" * 64, "workload_sha256": self.registration["service_prior_workload_sha256"],
+                "reader": reader | {"binding_sha256": "e" * 64,
+                                    "public_export_sha256": self.registration["previous_publication_sha256"]},
+            })
         request = "d" * 64
         response = {"status": 206, "cache": "hit", "bytes": 8, "complete": True}
-        client = json_file(records / "edge.json", common | {
-            "arm": "edge", "started_at_unix_ms": cleanup_at - 70, "finished_at_unix_ms": cleanup_at - 60,
+        client = json_file(records / "edge.json", common | transition | {
+            "arm": "edge", "started_at_unix_ms": edge_at, "finished_at_unix_ms": edge_at + 10,
             "service_instance_sha256": "2" * 64,
             "all_edge_attempts": 1, "edge_attempts": 1, "observed_edge_gets": 1, "verified_edge_payloads": 1,
             "edge_bytes": 8, "edge_hits": 1, "edge_responses": {request: response},
@@ -486,8 +507,8 @@ class CdnQualificationTests(unittest.TestCase):
                                 "public_export_sha256": self.registration.get("publication_sha256", "")},
         })
         log = {"status": 206, "cache": "hit", "response_bytes": 30}
-        if edge != "cloud-cdn" or lfs_key:
-            log["key_sha256"] = lfs_key or "8" * 64
+        if edge != "cloud-cdn" or lfs_key or transition:
+            log["key_sha256"] = lfs_key or transition.get("transition_key_sha256", "8" * 64)
         proof = {"schema": f"crab.{edge}-viewer-requests/v1", "client_report_sha256": client, "records": {request: log}}
         if edge == "cloud-cdn":
             log.update(cache_fill_bytes=0, origin_requests={})
@@ -761,6 +782,8 @@ class CdnQualificationTests(unittest.TestCase):
                                                          "public_export_sha256": self.registration["previous_publication_sha256"]}
         elif CDN.is_direct_sdk_git_scope(self.scope):
             trace = CDN.derive_sdk_public_transition(self.directory / CDN.GIT_PRODUCT_DIR, self.report, self.registration)
+        elif CDN.is_direct_service_scope(self.scope):
+            trace = CDN.derive_service_public_transition(self.directory / CDN.SERVICE_PRODUCT_DIR, self.report, self.registration)
         check = CDN.PUBLIC_TRANSITION_CHECK
         path = self.directory / "traces" / f"{check}.json"
         self.report["checks"][check] = {"passed": True, "trace_sha256": json_file(path, trace)}

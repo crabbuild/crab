@@ -80,13 +80,16 @@ class CdnServiceReadTests(unittest.TestCase):
             workload=root / "workload.json", workload_sha256=json_file(root / "workload.json", workload),
             credentials=root / "credentials.json", service_log=root / "server.log",
             publication=root / "publication.json", native_published=root / "native-published.json",
-            source_sha=COMMIT, run_id="123", run_attempt="2", arm="edge", export_approval=None, primer=None)
+            source_sha=COMMIT, run_id="123", run_attempt="2", arm="edge", export_approval=None, primer=None,
+            transition_object=None, before_export=None, prior_workload=None, prior_workload_sha256=None)
 
     def request(self, args, provider, consumer, family, fault=""):
         config = json.loads(args.fixture.read_bytes())
         _, access, _, _, _ = SERVICE.scope_parts(config["scope"])
         edge = events(PROVIDER_FOR_EDGE[provider], consumer, family, access)
         instance = "f" * 64 if args.arm == "origin" or fault == "another-process" else "a" * 64
+        if args.arm == "prior_export":
+            instance = "8" * 64
         candidate = service_candidate(config["scope"], SERVICE.runner_platform())
         if fault == "wrong-build-source":
             candidate["source_sha"] = "b" * 40
@@ -122,6 +125,8 @@ class CdnServiceReadTests(unittest.TestCase):
                 edge[0]["request_sha256"] = ""
             reading_at_edge = args.arm != "origin" or fault == "rollback-binding"
             export = "b" * 64 if reading_at_edge and access == "public" else ""
+            if args.arm == "prior_export":
+                export = "9" * 64
             reader = SERVICE.read_target_fingerprints(config, edge=reading_at_edge, export_sha256=export)
             for different in reader:
                 if fault == different:
@@ -139,6 +144,19 @@ class CdnServiceReadTests(unittest.TestCase):
             if args.arm == "warm_local" and fault != "no-local":
                 local = edge[1] | {"source": "local"}
                 lines.append({"target": "crab_storage::cdn::transfer", "fields": local})
+            if args.transition_object is not None and fault != "no-transition":
+                before = args.arm == "prior_export"
+                key = hashlib.sha256(f"{config['fixture_prefix']}/{args.transition_object}".encode()).hexdigest()
+                route = {name: edge[0][name] for name in ("provider", "consumer", "access", "family", "profile")}
+                event = route | {"message": "CDN public export observation", "approval_sha256": export,
+                                 "key_sha256": key, "observation": "unlisted" if before else "listed"}
+                target_name = "crab_storage::cdn::public_transition"
+                lines.append({"target": target_name, "fields": event})
+                if not before or family == "git":
+                    verified = event | {"observation": "verified_native" if before else "verified_edge"}
+                    if family == "git":
+                        verified["git_blob_oid_sha256"] = GIT_SHA256
+                    lines.append({"target": target_name, "fields": verified})
             with args.service_log.open("a", encoding="utf-8") as log:
                 log.writelines(json.dumps(line) + "\n" for line in lines)
             output = Message()
@@ -242,6 +260,32 @@ class CdnServiceReadTests(unittest.TestCase):
                     with self.subTest(fault=fault), self.assertRaisesRegex(ValueError, error):
                         self.request(args, "cloudfront", consumer, "git", fault)
 
+    def test_service_read_observes_the_exact_public_transition_key(self):
+        for consumer, family in (("server", "git"), ("s3-gateway", "lfs")):
+            with self.subTest(family=family), TemporaryDirectory() as directory:
+                root = Path(directory)
+                args = self.prepare(root, "cloud-cdn", consumer, family, access="public")
+                args.export_approval = root
+                args.transition_object = json.loads(args.fixture.read_bytes())["object_path"]
+                object = SimpleNamespace(path=args.transition_object)
+                latest = json.loads(args.workload.read_bytes())
+                args.arm = "prior_export"
+                args.workload_sha256 = json_file(args.workload, latest | {"public_export_sha256": "9" * 64})
+                with patch.object(SERVICE, "approved_public_export", return_value=("9" * 64, [object], 1)):
+                    with self.assertRaisesRegex(ValueError, "membership does not match"):
+                        self.request(args, "cloud-cdn", consumer, family)
+                with patch.object(SERVICE, "approved_public_export", return_value=("9" * 64, [], 1)):
+                    prior = self.request(args, "cloud-cdn", consumer, family)
+                    self.assertEqual(prior["all_edge_attempts"], 0)
+                args.arm = "edge"
+                args.workload_sha256 = json_file(args.workload, latest)
+                with patch.object(SERVICE, "approved_public_export", return_value=("b" * 64, [object], 50)):
+                    with self.assertRaisesRegex(ValueError, "selected object's public export transition"):
+                        self.request(args, "cloud-cdn", consumer, family, "no-transition")
+                    edge = self.request(args, "cloud-cdn", consumer, family)
+                self.assertEqual(prior["transition_key_sha256"], edge["transition_key_sha256"])
+                self.assertEqual(prior["payload_sha256"], edge["payload_sha256"])
+
     def test_service_lifecycle_requires_edge_rollback_distinct_tombstone_and_matching_cleanup(self):
         provider, consumer, family = "cloud-cdn", "s3-gateway", "lfs"
         with TemporaryDirectory() as directory:
@@ -299,15 +343,29 @@ class CdnServiceReadTests(unittest.TestCase):
                         json_file(path, record)
 
     def test_cloud_cdn_viewer_logs_require_the_exact_service_lfs_key_and_traffic(self):
+        self.check_viewer_key("lfs", "lfs_key_sha256", lfs_object_path("1" * 64), "approved service LFS object")
+
+    def test_cloud_cdn_viewer_logs_join_the_exact_service_git_transition_key(self):
+        self.check_viewer_key("git", "transition_key_sha256", "v2/pack-layers/ff/" + "f" * 64,
+                              "did not confirm the new service export object")
+
+    def check_viewer_key(self, family, fingerprint_field, unrelated_key, error_message):
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            args = self.prepare(root, "cloud-cdn", "server", "lfs")
-            report = self.request(args, "cloud-cdn", "server", "lfs")
+            access = "public" if family == "git" else "private"
+            args = self.prepare(root, "cloud-cdn", "server", family, access=access)
+            config = json.loads(args.fixture.read_bytes())
+            if family == "git":
+                args.export_approval, args.transition_object = root, config["object_path"]
+                objects = [SimpleNamespace(path=args.transition_object)]
+                with patch.object(SERVICE, "approved_public_export", return_value=("b" * 64, objects, 50)):
+                    report = self.request(args, "cloud-cdn", "server", family)
+            else:
+                report = self.request(args, "cloud-cdn", "server", family)
             tag = f"crab-cdn-qualification/{'0a' * 16}"
             fingerprint = hashlib.sha256(tag.encode()).hexdigest()
             report["edge_responses"] = {fingerprint: report["edge_responses"]["d" * 64]}
             project, rule = "fixture-project", "crab-https"
-            config = json.loads(args.fixture.read_bytes())
             prefix = f"{config['base_url']}/{config['fixture_prefix']}"
             viewer = {"logName": f"projects/{project}/logs/requests", "insertId": "viewer",
                       "resource": {"type": "http_load_balancer",
@@ -318,7 +376,7 @@ class CdnServiceReadTests(unittest.TestCase):
                        "--configuration-sha256", args.configuration_sha256, "--client", str(client),
                        "--log", str(log), "--output", str(output)]
             for key, extras, error in (
-                (lfs_object_path("1" * 64), {}, "approved service LFS object"),
+                (unrelated_key, {}, error_message),
                 (config["object_path"], {"edge_bytes": report["edge_bytes"] + 1}, "transfer totals disagree with the logged responses"),
                 (config["object_path"], {"reader": report["reader"] | {"binding_sha256": "e" * 64}}, "approved native target"),
                 (config["object_path"], {}, None),
@@ -336,7 +394,7 @@ class CdnServiceReadTests(unittest.TestCase):
                     else:
                         self.assertEqual(result.returncode, 0, result.stderr)
                         proof = json.loads(output.read_bytes())
-                        self.assertEqual(proof["records"][fingerprint]["key_sha256"], report["lfs_key_sha256"])
+                        self.assertEqual(proof["records"][fingerprint]["key_sha256"], report[fingerprint_field])
 
 
 if __name__ == "__main__":

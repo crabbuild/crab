@@ -130,6 +130,7 @@ GIT_BENCHMARK_DIR = "git-benchmarks"
 GIT_PRODUCT_DIR = "git-product"
 SERVICE_PRODUCT_DIR = "service-product"
 SERVICE_READ_ACTION = "service-http-read"
+SERVICE_PUBLIC_PRIOR_RECORD = "before-export.json"
 SERVICE_PAYLOAD_LIMIT = 512 * 1024 * 1024
 SERVICE_WORKLOAD_REGISTRATION_FIELDS = {"sha256", "origin_sha256", "prefix_sha256", "etag_sha256", "payload_bytes"}
 SDK_PRIOR_EXPORT_RECORD = "before-export.json"
@@ -523,6 +524,7 @@ def verify_public_transition(
             and all(trace[key] == report[key] for key in CDN_PROVENANCE_FIELDS | {"platform"}),
             "public export transition does not match the release row and workflow attempt")
     sdk = is_direct_sdk_git_scope(report["scope"])
+    service = is_direct_service_scope(report["scope"])
     previous_approval = registration["previous_publication_sha256"]
     previous, previous_entries, previous_seal = verified_publication(directory / PUBLIC_EXPORT_DIR / PUBLIC_EXPORT_BEFORE,
                                                                       previous_approval)
@@ -556,7 +558,7 @@ def verify_public_transition(
     records = {"action", "receipt_sha256", "key_sha256", "reference_sha256", "result_sha256", "result_bytes",
                "started_at_unix_ms", "finished_at_unix_ms", "edge_attempts", "verified_edge_key_sha256", "binding_active"}
     cli_workload = requires_cli_workload(report["scope"])
-    if cli_workload or sdk:
+    if cli_workload or sdk or service:
         records.add("reader")
     product = report["product_action"]
     if family == "lfs":
@@ -603,6 +605,9 @@ def verify_public_transition(
     elif sdk:
         measured = derive_sdk_public_transition(directory / GIT_PRODUCT_DIR, report, registration)
         require(trace == measured, "public transition differs from the retained SDK snapshot reads")
+    elif service:
+        measured = derive_service_public_transition(directory / SERVICE_PRODUCT_DIR, report, registration)
+        require(trace == measured, "public transition differs from the retained service reads")
 
 
 def verify_public_export(
@@ -1150,6 +1155,11 @@ def benchmark_registration(registration: Any) -> dict[str, Any]:
                 and all(matches(SHA256, workload[key]) for key in SERVICE_WORKLOAD_REGISTRATION_FIELDS - {"payload_bytes"})
                 and positive(workload["payload_bytes"]) and workload["payload_bytes"] <= SERVICE_PAYLOAD_LIMIT,
                 "service benchmark needs the approved HTTP workload and viewer binding")
+        if access == "public":
+            expected.add("service_prior_workload_sha256")
+            prior = registration.get("service_prior_workload_sha256")
+            require(matches(SHA256, prior) and prior != workload["sha256"],
+                    "public service benchmark needs the distinct prior HTTP workload")
     if access == "public":
         expected |= {"publication_sha256", "previous_publication_sha256", "historical_origin_sha256"}
         require(matches(SHA256, registration.get("publication_sha256")),
@@ -1396,9 +1406,15 @@ def verify_git_traffic(client: dict[str, Any], edge: str, label: str) -> None:
 
 def validate_service_read(value: Any, provenance: dict[str, Any], arm: str) -> dict[str, Any]:
     local = arm == "warm_local"
-    client = fields(value, SERVICE_READ_FIELDS | ({"primer_sha256"} if local else set()), "CDN service read")
+    prior = arm == "prior_export"
+    transition = isinstance(value, dict) and "transition_key_sha256" in value
+    expected = SERVICE_READ_FIELDS | ({"primer_sha256"} if local else set())
+    if transition:
+        expected.add("transition_key_sha256")
+    client = fields(value, expected, "CDN service read")
     edge, access, _, family, _ = scope_parts(provenance["scope"])
-    require(is_direct_service_scope(provenance["scope"]) and (arm in ("edge", "origin") or (local and family == "git"))
+    require(is_direct_service_scope(provenance["scope"])
+            and (arm in ("edge", "origin") or (local and family == "git") or (prior and transition))
             and client["schema"] == "crab.cdn-service-read/v1" and client["arm"] == arm
             and all(client[key] == provenance[key] for key in CDN_PROVENANCE_FIELDS | {"platform"}),
             "CDN service read has mismatched workflow or product provenance")
@@ -1411,6 +1427,10 @@ def validate_service_read(value: Any, provenance: dict[str, Any], arm: str) -> d
     git, lfs = client["git_blob_oid_sha256"], client["lfs_key_sha256"]
     require((matches(SHA256, git) and lfs is None) if family == "git" else (matches(SHA256, lfs) and git is None),
             "CDN service read needs the exact Git blob or LFS object fingerprint")
+    if transition:
+        key = client["transition_key_sha256"]
+        require(access == "public" and arm in ("prior_export", "edge") and matches(SHA256, key)
+                and (family != "lfs" or key == lfs), "service transition needs the exact public object fingerprint")
     reader = fields(client["reader"], DIRECT_READ_TARGET_FIELDS, "CDN service read target")
     require(all(matches(SHA256, reader[key]) for key in CLI_NATIVE_FIELDS)
             and (matches(SHA256, reader["binding_sha256"]) if arm != "origin" else reader["binding_sha256"] == "")
@@ -1422,11 +1442,11 @@ def validate_service_read(value: Any, provenance: dict[str, Any], arm: str) -> d
         require(matches(SHA256, client["primer_sha256"]) and positive(client["local_payload_hits"])
                 and all(client[key] == 0 for key in PRODUCT_COUNTERS - {"local_payload_hits"}),
                 "service warm-local read requires a verified cached blob without edge traffic")
-    elif arm == "origin":
+    elif arm == "origin" or prior:
         native = client["native_traffic"]
         require(all(client[key] == 0 for key in PRODUCT_COUNTERS)
                 and positive(native["get_responses"]) and positive(native["body_bytes"]),
-                "service rollback requires native body reads and zero edge attempts")
+                "service native control requires native body reads and zero edge attempts")
     else:
         require(all(positive(client[key]) for key in ("observed_edge_gets", "edge_bytes", "verified_edge_payloads"))
                 and client["local_payload_hits"] == 0
@@ -1522,6 +1542,8 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
     lfs_key = client.get("lfs_key_sha256")
     object_key = xorb_key or lfs_key
     service = client.get("schema") == "crab.cdn-service-read/v1"
+    transition_key = client.get("transition_key_sha256") if service else None
+    verified_transition = False
     proof_fields = {"schema", "client_report_sha256", "records"}
     if keyed_origin:
         proof_fields.add("origin_requests")
@@ -1536,7 +1558,7 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
     record_fields = {"status", "cache", "response_bytes"}
     if edge == "cloud-cdn":
         record_fields |= {"cache_fill_bytes", "origin_requests"}
-    if keyed_origin or object_key is not None:
+    if keyed_origin or object_key is not None or transition_key is not None:
         record_fields.add("key_sha256")
     viewer_keys = set()
     logged_ids = set(records)
@@ -1551,13 +1573,15 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
                 "CDN log status or response bytes disagree with the client")
         if response["complete"] and response["cache"] != "unknown":
             require(row["cache"] == response["cache"], "CDN log cache result disagrees with the completed response")
-        if keyed_origin or object_key is not None:
+        if keyed_origin or object_key is not None or transition_key is not None:
             require(matches(SHA256, row["key_sha256"]), "invalid CDN object key fingerprint")
             require(xorb_key is None or row["key_sha256"] == xorb_key,
                     "CDN viewer request did not read the approved hydration xorb")
             require(lfs_key is None or row["key_sha256"] == lfs_key,
                     "CDN viewer request did not read the approved service LFS object")
             viewer_keys.add(row["key_sha256"])
+            if row["key_sha256"] == transition_key and response["complete"] and response["bytes"] > 0:
+                verified_transition = True
         if xorb_key is not None or service:
             if response["complete"]:
                 require(response["status"] in (200, 206), "completed CDN response did not return object bytes")
@@ -1585,6 +1609,7 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
     if xorb_key is not None or service:
         require(client["edge_attempts"] == len(records) and all(client[key] == count for key, count in observed_transfer.items()),
                 "CDN transfer totals disagree with the logged responses")
+    require(transition_key is None or verified_transition, "CDN logs did not confirm the new service export object")
     if keyed_origin:
         service, viewer, timestamp, precision = (
             ("S3", "CloudFront", "at_unix_s", 1000) if edge == "cloudfront"
@@ -1683,7 +1708,7 @@ def verify_service_lifecycle(
     require(publication["published"], "service lifecycle requires a confirmed native publication")
     edge = validate_service_read(decode(records["edge"]), row, "edge")
     origin = validate_service_read(decode(records["origin"]), row, "origin")
-    provider, _, _, family, _ = scope_parts(row["scope"])
+    provider, access, _, family, _ = scope_parts(row["scope"])
     published = hashlib.sha256(records["published"]).hexdigest()
     prefix_sha256 = hashlib.sha256(f"{row['fixture_prefix']}/".encode()).hexdigest()
     workload = spec["service_workload"]
@@ -1717,7 +1742,12 @@ def verify_service_lifecycle(
     retired_at = verify_git_retirement(
         records["retirement"], row, publication_sha, publication["candidate"], origin["finished_at_unix_ms"],
     )
-    verify_git_lifecycle(records, row, publication, publication_sha, edge["started_at_unix_ms"], edge["reader"],
+    earliest = edge
+    if access == "public":
+        earliest = verify_service_transition_reads(records["before_export"], edge, row, spec)
+        require(earliest["service_instance_sha256"] != origin["service_instance_sha256"],
+                "prior export and rollback must use separate service processes")
+    verify_git_lifecycle(records, row, publication, publication_sha, earliest["started_at_unix_ms"], edge["reader"],
                          retired_at, cleanup_at, native_origin_sha256)
     return {
         "name": SERVICE_READ_ACTION, "expected_sha256": publication["sha256"], "observed_sha256": edge["payload_sha256"],
@@ -1731,13 +1761,16 @@ def collect_service_product_action(
     inputs: Path, row: dict[str, Any], spec: dict[str, Any], rollback_raw: bytes,
     *, cleanup_at: int, native_origin_sha256: str, retain: Path | None = None,
 ) -> dict[str, Any]:
+    paths = SERVICE_PRODUCT_FILES
+    if scope_parts(row["scope"])[1] == "public":
+        paths = paths | {"before_export": SERVICE_PUBLIC_PRIOR_RECORD}
     records = {name: read_git_record(inputs / filename, limit=GIT_FETCH_RECORD_LIMIT if name in ("edge", "viewer_requests")
-                                    else 8 * 1024) for name, filename in SERVICE_PRODUCT_FILES.items()}
+                                    else 8 * 1024) for name, filename in paths.items()}
     result = verify_service_lifecycle(records | {"origin": rollback_raw}, row, spec,
                                       cleanup_at=cleanup_at, native_origin_sha256=native_origin_sha256)
     if retain is not None:
         retain.mkdir()
-        for name, filename in SERVICE_PRODUCT_FILES.items():
+        for name, filename in paths.items():
             (retain / filename).write_bytes(records[name])
     return result
 
@@ -2036,6 +2069,52 @@ def derive_sdk_public_transition(inputs: Path, row: dict[str, Any], spec: dict[s
     return trace
 
 
+def verify_service_transition_reads(prior_raw: bytes, edge: dict[str, Any], row: dict[str, Any],
+                                    spec: dict[str, Any]) -> dict[str, Any]:
+    prior = validate_service_read(decode(prior_raw), row, "prior_export")
+    key = prior["transition_key_sha256"]
+    require(key == edge.get("transition_key_sha256"), "service transition must prove the same export object")
+    require(prior["workload_sha256"] == spec["service_prior_workload_sha256"]
+            and edge["workload_sha256"] == spec["service_workload"]["sha256"],
+            "service transition must use the approved prior and current workloads")
+    require(all(prior[key] == edge[key] for key in (
+        "candidate", "publication_sha256", "native_published_sha256", "commit",
+        "payload_sha256", "payload_bytes", "etag_sha256", "git_blob_oid_sha256", "lfs_key_sha256",
+    )), "service transition must verify the same published payload and service binary")
+    require(prior["reader"] == edge["reader"] | {"public_export_sha256": spec["previous_publication_sha256"]}
+            and edge["reader"]["public_export_sha256"] == spec["publication_sha256"],
+            "service transition must keep the native target and viewer while applying the approved receipts")
+    require(prior["service_instance_sha256"] != edge["service_instance_sha256"]
+            and prior["finished_at_unix_ms"] <= edge["started_at_unix_ms"],
+            "service transition requires fresh processes and a prior read before edge delivery")
+    return prior
+
+
+def derive_service_public_transition(inputs: Path, row: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
+    publication_raw = read_git_record(inputs / "publication.json")
+    publication = validate_git_publication(publication_raw, row)
+    edge = validate_service_read(decode(read_git_record(inputs / "edge.json", limit=GIT_FETCH_RECORD_LIMIT)), row, "edge")
+    prior = verify_service_transition_reads(read_git_record(inputs / SERVICE_PUBLIC_PRIOR_RECORD), edge, row, spec)
+    require(publication["published"] and edge["publication_sha256"] == hashlib.sha256(publication_raw).hexdigest()
+            and edge["commit"] == publication["oid"] and edge["payload_sha256"] == publication["sha256"],
+            "service transition must use the confirmed native publication")
+    key = edge["transition_key_sha256"]
+    reference = deployment_component_digest({"ref": publication["ref"], "oid": publication["oid"]})
+    trace = {field: row[field] for field in CDN_PROVENANCE_FIELDS | {"platform"}} | {
+        "schema": "crab.cdn-public-transition/v1", "key_sha256": key,
+        "native_publication": {"reference_sha256": reference, "visible_at_unix_ms": publication["visible_at_unix_ms"]},
+    }
+    for phase, read in (("before", prior), ("after", edge)):
+        trace[phase] = {
+            "action": SERVICE_READ_ACTION, "receipt_sha256": read["reader"]["public_export_sha256"],
+            "key_sha256": key, "reference_sha256": reference, "result_sha256": read["payload_sha256"],
+            "result_bytes": read["payload_bytes"], "started_at_unix_ms": read["started_at_unix_ms"],
+            "finished_at_unix_ms": read["finished_at_unix_ms"], "edge_attempts": read["all_edge_attempts"],
+            "binding_active": True, "reader": read["reader"], "verified_edge_key_sha256": key if phase == "after" else None,
+        }
+    return trace
+
+
 def collect_git_performance(
     inputs: Path, registration: dict[str, Any], platform: str, run_id: str, attempt: str,
     *, retain: Path | None = None, sdk_native: dict[str, str] | None = None,
@@ -2066,7 +2145,7 @@ def collect_git_performance(
     service_anchor = None
     service_instances = set()
     provider_request_ids = set()
-    published_at, retired_at = 0, 0
+    published_at, retired_at, export_ready_at = 0, 0, 0
     if service_row is not None:
         require(inputs.is_dir(), "direct service Git requires retained regional benchmark records")
         product = service_row / SERVICE_PRODUCT_DIR
@@ -2102,6 +2181,11 @@ def collect_git_performance(
                     "origin_sha256": workload["origin_sha256"], "prefix_sha256": workload["prefix_sha256"],
                     "binding_sha256": spec["viewer_binding_sha256"], "public_export_sha256": spec.get("publication_sha256", ""),
                 }, "regional service reads require the approved lifecycle workload and viewer")
+        if scope_parts(scope)[1] == "public":
+            prior = verify_service_transition_reads(read_git_record(product / SERVICE_PUBLIC_PRIOR_RECORD),
+                                                    service_anchor, provenance, spec)
+            service_instances.add(prior["service_instance_sha256"])
+            _, _, export_ready_at = verified_publication(service_row / PUBLIC_EXPORT_DIR, spec["publication_sha256"])
         provider_request_ids, _, _ = verify_viewer_requests(
             decode(read_trace(product / "viewer-requests.json", "service viewer requests")), service_anchor,
             hashlib.sha256(edge_raw).hexdigest(), PROVIDERS[provider][0],
@@ -2163,6 +2247,8 @@ def collect_git_performance(
                     )), f"{label} used a different service workload or read target")
                     require(published_at <= client["started_at_unix_ms"] <= client["finished_at_unix_ms"] <= retired_at,
                             f"{label} ran outside the independently observed publication interval")
+                    require(arm == "origin" or export_ready_at <= client["started_at_unix_ms"],
+                            f"{label} started before the registered export was sealed")
                     if arm == "warm_local":
                         require(service_primer is not None, f"{label} has no warm edge primer")
                         verify_service_repeat(client, service_primer, primer_digest)
@@ -2287,8 +2373,8 @@ def verify_cdn_report(
     cli_workload = requires_cli_workload(scope)
     sdk_git = is_direct_sdk_git_scope(scope)
     sdk_hydration = is_direct_sdk_hydration_scope(scope)
-    # Public service rows need their own transition proof. Service LFS still lacks warm-local measurements.
-    service_release = is_direct_service_git_scope(scope) and access == "private"
+    # Service LFS still lacks warm-local measurements.
+    service_release = is_direct_service_git_scope(scope)
     require(policy is None or cli_workload or sdk_git or sdk_hydration or service_release,
             "CDN promotion requires a product-specific workload and per-run regional evidence verifier")
     if cli_workload:

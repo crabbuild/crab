@@ -188,13 +188,36 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
 
     def test_public_service_assembly_requires_the_registered_export(self) -> None:
         digest = self.inputs("s3", consumer="server", access="public")
-        path = self.root / self.row / fixture.CDN.SERVICE_PRODUCT_DIR / "edge.json"
+        row = self.root / self.row
+        path = row / fixture.CDN.SERVICE_PRODUCT_DIR / "edge.json"
         edge = json.loads(path.read_bytes())
         fixture.json_file(path, edge | {"reader": edge["reader"] | {"public_export_sha256": "0" * 64}})
-        with self.assertRaisesRegex(ValueError, "different native target or viewer binding"):
+        with self.assertRaisesRegex(ValueError, "applying the approved receipts"):
             self.assemble(digest)
         self.assertFalse(self.output.exists())
         fixture.json_file(path, edge)
+        trace_path = Path(self.row) / "traces" / f"{fixture.CDN.PUBLIC_TRANSITION_CHECK}.json"
+        (self.root / trace_path).unlink()
+        self.assertEqual(self.assemble(digest), 1)
+        derived = json.loads((self.output / trace_path).read_bytes())
+        self.assertEqual(derived["before"]["edge_attempts"], 0)
+        self.assertEqual(derived["after"]["verified_edge_key_sha256"], edge["transition_key_sha256"])
+        self.assertTrue((self.output / self.row / fixture.CDN.SERVICE_PRODUCT_DIR / fixture.CDN.SERVICE_PUBLIC_PRIOR_RECORD).exists())
+        policy = self.root / "qualified-scopes.txt"
+        policy.write_text(self.example.scope + "\n", encoding="utf-8")
+        fixture.CDN.verify_bundle_row(self.output, self.row, self.example.registration, fixture.COMMIT, "123", "2", policy=policy)
+
+    def test_public_service_lfs_transition_rejects_a_prior_process_reused_at_the_edge(self) -> None:
+        digest = self.inputs("azure", consumer="s3-gateway", access="public", family="lfs")
+        product = self.root / self.row / fixture.CDN.SERVICE_PRODUCT_DIR
+        edge = json.loads((product / "edge.json").read_bytes())
+        prior = product / fixture.CDN.SERVICE_PUBLIC_PRIOR_RECORD
+        original = json.loads(prior.read_bytes())
+        fixture.json_file(prior, original | {"service_instance_sha256": edge["service_instance_sha256"]})
+        with self.assertRaisesRegex(ValueError, "requires fresh processes"):
+            self.assemble(digest)
+        self.assertFalse(self.output.exists())
+        fixture.json_file(prior, original)
         self.assertEqual(self.assemble(digest), 1)
 
     def test_regional_service_git_rejects_cross_process_primers_and_reused_workers(self) -> None:

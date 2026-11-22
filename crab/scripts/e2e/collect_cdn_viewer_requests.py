@@ -43,7 +43,8 @@ S3_CLOUDFRONT_READ = re.compile(
 AZURE_BLOB_TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?Z")
 
 
-def cloudfront_logs(paths: list[Path], expected: dict, fixture: dict) -> dict:
+def cloudfront_logs(paths: list[Path], client: dict, fixture: dict) -> dict:
+    expected = client["edge_responses"]
     base = fixture_base(fixture["base_url"])
     host = base.netloc.encode()
     base_path = (base.path.rstrip("/") + "/").encode()
@@ -130,7 +131,8 @@ def front_door_resources(fixture: dict) -> tuple[str, str]:
     return group_id, f"{group_id}/providers/microsoft.cdn/profiles/{profile.lower()}"
 
 
-def front_door_logs(paths: list[Path], expected: dict, fixture: dict) -> dict:
+def front_door_logs(paths: list[Path], client: dict, fixture: dict) -> dict:
+    expected = client["edge_responses"]
     _, resource = front_door_resources(fixture)
     _, access, _, _, _ = scope_parts(fixture["scope"])
     base = fixture_base(fixture["base_url"])
@@ -319,13 +321,13 @@ def cloud_cdn_forwarding_rule(entry: dict, project: str, rule: str) -> bool:
             and labels.get("project_id") == project and labels.get("forwarding_rule_name") == rule)
 
 
-def cloud_cdn_logs(paths: list[Path], expected: dict, fixture: dict) -> dict:
+def cloud_cdn_logs(paths: list[Path], client: dict, fixture: dict) -> dict:
+    expected = client["edge_responses"]
     deployment = deployment_target(fixture, "cloud-cdn")
     project, rule = deployment["project"], deployment["forwarding_rule"]
     base = fixture_base(fixture["base_url"])
     prefix = f"{base.path.rstrip('/')}/{fixture['fixture_prefix']}{fixture['view_suffix']}/"
-    scope = fixture["scope"]
-    needs_key = is_direct_sdk_hydration_scope(scope) or (is_direct_service_scope(scope) and scope_parts(scope)[3] == "lfs")
+    needs_key = any(client.get(name) for name in ("xorb_key_sha256", "lfs_key_sha256", "transition_key_sha256"))
     records, inserts, origin_entries = {}, {}, []
     for path in paths:
         entries = read_json_log(path)
@@ -448,7 +450,7 @@ def main() -> int:
         require(client["all_edge_attempts"] > 0 and len(client["edge_responses"]) == client["all_edge_attempts"],
                 "the timed fetch lacks a CDN request fingerprint for each viewer attempt")
         loaders = {"cloudfront": cloudfront_logs, "cloud-cdn": cloud_cdn_logs, "front-door": front_door_logs}
-        records = loaders[edge](args.log, client["edge_responses"], fixture)
+        records = loaders[edge](args.log, client, fixture)
         digest = hashlib.sha256(raw).hexdigest()
         proof = {"schema": f"crab.{edge}-viewer-requests/v1", "client_report_sha256": digest, "records": records}
         if edge == "cloudfront":

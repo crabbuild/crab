@@ -18,7 +18,8 @@ from cdn_qualification import (  # noqa: E402
     PROVIDER_FOR_EDGE, PUBLIC_EXPORT_BEFORE, PUBLIC_EXPORT_CHECK, PUBLIC_EXPORT_DIR, PUBLIC_EXPORT_FILES,
     PUBLIC_TRANSITION_CHECK, RUN_NUMBER, SCHEMA, SCOPED_VIEW_CHECK, SERVICE_PRODUCT_DIR, SHA256,
     benchmark_registration, collect_git_performance, collect_git_product_action, collect_sdk_hydration_evidence,
-    collect_sdk_product_action, collect_service_product_action, decode, derive_sdk_public_transition, fields,
+    collect_sdk_product_action, collect_service_product_action, decode, derive_sdk_public_transition,
+    derive_service_public_transition, fields,
     is_direct_sdk_git_scope, is_direct_sdk_hydration_scope, is_direct_service_git_scope, is_direct_service_scope,
     matches, read_trace, release_scopes, require,
     required_check_names, required_platform_rows, requires_cli_workload, scope_parts, verify_bundle_row,
@@ -160,11 +161,14 @@ def assemble_bundle(
                 filename = f"{check}.json"
                 trace_path = inputs / row / "traces" / filename
                 require(outcomes.get(check, True) is True, f"{row} failed measured check: {check}")
-                if sdk_workload and check == PUBLIC_TRANSITION_CHECK:
-                    transition = derive_sdk_public_transition(inputs / row / GIT_PRODUCT_DIR, measured, spec)
+                if check == PUBLIC_TRANSITION_CHECK and (sdk_workload or service):
+                    if service:
+                        transition = derive_service_public_transition(inputs / row / SERVICE_PRODUCT_DIR, measured, spec)
+                    else:
+                        transition = derive_sdk_public_transition(inputs / row / GIT_PRODUCT_DIR, measured, spec)
                     if trace_path.exists():
                         require(decode(read_trace(trace_path, check)) == transition,
-                                "measured SDK public transition differs from the retained snapshot reads")
+                                "measured public transition differs from the retained product reads")
                     trace = (json.dumps(transition, sort_keys=True) + "\n").encode()
                 elif check in canary:
                     trace = canary[check]

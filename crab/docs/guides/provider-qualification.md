@@ -822,6 +822,21 @@ name. Put the dedicated viewer credential in a separate protected JSON file
 with `cookie` for a Crab browser session, `authorization` for the Git LFS
 Basic header, or `access_key`, `secret_key`, and `region` for S3 gateway SigV4.
 
+For a public transition, enable
+`crab_storage::cdn::public_transition=debug` in both service processes. Seal
+the prior export before publishing the native ref. Use a workload with that
+receipt's digest in `public_export_sha256` and run `prior_export` with the
+prior `--export-approval` directory and `--transition-object` set to the exact
+new repository-relative pack-layer or LFS key. The worker verifies that the
+active old receipt omits the key and that the ordinary request returns the
+approved native bytes with zero CDN attempts. Keep the result as
+`service-product/before-export.json`. After this read, publish and seal the
+new export. Keep the endpoint, logical repository, published commit, payload,
+and ETag the same, and seal a second workload with the new receipt digest.
+Start a fresh service with the new receipt and pass the same
+`--transition-object` to the edge action. Retain viewer logs that confirm
+delivery of that exact object.
+
 ```bash
 python3 -B crab/scripts/e2e/run_cdn_service_read.py edge \
   --fixture "$fixture" --configuration-sha256 "$configuration_sha256" \
@@ -870,6 +885,11 @@ as assembly inputs for the service fixture row.
   `sha256`, the native origin hash in `origin_sha256`, the hash of the physical
   prefix with its trailing slash in `prefix_sha256`, and the approved
   `etag_sha256` and `payload_bytes`.
+- For public rows, register the digest of the prior workload as
+  `service_prior_workload_sha256`, retain both sealed export inventories, and
+  pass `--before-export`, `--prior-workload`, and `--prior-workload-sha256`
+  to the lifecycle verifier. Assembly rebuilds the transition trace from the
+  retained prior and edge reads.
 - Register `service_candidate` with the approved executable's
   `binary_sha256`, `source_sha`, `target_triple`, `cargo_profile`,
   `cargo_features`, `qualification_feature`, and `release_policy_sha256`.
@@ -877,8 +897,8 @@ as assembly inputs for the service fixture row.
   container image before registration. Container builds pass the commit using
   the `GIT_SHA` build argument and compile the regular `provider-cdn` feature.
   For source builds, set `GIT_SHA` to the full checked-out revision when
-  invoking Cargo. Use `provider-cdn-qualification` for fixture tests. Private
-  service Git release verification requires the release profile and rejects
+  invoking Cargo. Use `provider-cdn-qualification` for fixture tests.
+  Service Git release verification requires the release profile and rejects
   the qualification feature.
 - Provide the fixture performance summary for service LFS in
   `observations.json`. Assembly and bundle verification derive

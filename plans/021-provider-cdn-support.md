@@ -767,10 +767,14 @@ the warm edge process's verified in-memory blob. The verifier joins provider
 requests and proves each arm used the same published fixture before
 retirement. Both service images embed the checked-out commit and compile the
 ordinary CDN feature. Each read pins the executable hash, target, build
-features, and embedded policy reported by its own process. Private service
-Git promotion requires the registered release binary and per-run evidence.
-Service LFS warm-local evidence, live regional measurements, and public
-service transition proof remain release requirements.
+features, and embedded policy reported by its own process. Service Git
+promotion requires the registered release binary and per-run evidence. For
+public service Git and LFS, assembly derives the transition from ordinary
+reads in fresh processes with the prior and current receipt. It checks the
+same native publication, bytes, ETag, and physical key against each approved
+inventory and joins the new object's successful delivery to its provider log.
+Service LFS warm-local evidence and live regional measurements remain release
+requirements.
 
 The protected workflow or its dedicated workers own producing these raw
 observations. The assembly and release jobs own rejecting missing, mismatched

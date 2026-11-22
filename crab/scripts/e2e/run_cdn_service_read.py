@@ -16,7 +16,7 @@ from pathlib import Path
 from urllib.parse import SplitResult
 
 from collect_cdn_product_metrics import measure, measure_native
-from run_cdn_git_workload import PAYLOAD, approved_public_export, read_target_fingerprints, runner_platform
+from run_cdn_git_workload import PAYLOAD, approved_public_export, read_target_fingerprints, runner_platform, verify_transition_events
 from run_cdn_sdk_workload import json_record
 from run_cdn_transport_checks import approved_fixture, fixture_base, fixture_object_key, https_response
 from s3_gateway_workload import _canonical_path, _signed_headers
@@ -43,12 +43,12 @@ BASIC = re.compile(r"Basic [A-Za-z0-9+/]{2,8192}={0,2}")
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 
 
-def workload(args: argparse.Namespace, consumer: str) -> dict:
-    raw = read_git_record(args.workload)
+def workload(path: Path, digest: str, configuration: str, consumer: str) -> dict:
+    raw = read_git_record(path)
     approved = fields(decode(raw), SERVICE_WORKLOAD_FIELDS, "CDN service workload")
-    require(hashlib.sha256(raw).hexdigest() == args.workload_sha256
+    require(hashlib.sha256(raw).hexdigest() == digest
             and approved["schema"] == "crab.cdn-service-workload/v1"
-            and approved["configuration_sha256"] == args.configuration_sha256
+            and approved["configuration_sha256"] == configuration
             and all(matches(SHA256, approved[field]) for field in ("publication_sha256", "payload_sha256", "etag_sha256"))
             and matches(GIT_OID, approved["commit"]) and positive(approved["payload_bytes"])
             and approved["payload_bytes"] <= SERVICE_PAYLOAD_LIMIT,
@@ -176,9 +176,13 @@ def probe(args: argparse.Namespace) -> dict:
     require(is_direct_service_scope(fixture["scope"])
             and not fixture["view_suffix"], "service read evidence requires a direct Git or LFS repository fixture")
     local = args.arm == "warm_local"
+    prior = args.arm == "prior_export"
     require((args.primer is not None) == local and (not local or family == "git"),
             "service warm-local reads require a Git workload and its own edge primer")
-    approved = workload(args, consumer)
+    require((not prior or args.transition_object is not None)
+            and (args.transition_object is None or (access == "public" and args.arm in ("edge", "prior_export"))),
+            "service export transition requires a public edge or prior export read and the exact object")
+    approved = workload(args.workload, args.workload_sha256, args.configuration_sha256, consumer)
     provenance = {"scope": fixture["scope"], "configuration_sha256": args.configuration_sha256,
                   "source_sha": args.source_sha, "workflow_run_id": args.run_id,
                   "workflow_run_attempt": args.run_attempt, "platform": runner_platform()}
@@ -190,14 +194,26 @@ def probe(args: argparse.Namespace) -> dict:
     require((args.export_approval is not None) == public_edge,
             "only public service edge reads require the approved export directory")
     export_sha256 = ""
-    if public_edge:
-        export_sha256, _, _ = approved_public_export(args.export_approval, fixture)
-        require(approved["public_export_sha256"] == export_sha256,
-                "service workload must pin the exact public export receipt")
-    elif access == "public":
+    transition = None
+    if access == "public":
         require(matches(SHA256, approved["public_export_sha256"]), "public workload needs its registered export receipt")
     else:
         require(approved["public_export_sha256"] == "", "private workload cannot name a public export receipt")
+    if public_edge:
+        export_sha256, objects, sealed_at = approved_public_export(args.export_approval, fixture)
+        require(approved["public_export_sha256"] == export_sha256,
+                "service workload must pin the exact public export receipt")
+        if args.transition_object is not None:
+            path = args.transition_object
+            require(family != "lfs" or path == fixture["object_path"],
+                    "service LFS transition must use the approved payload key")
+            key = fixture_object_key(fixture | {"object_path": path}, access, family)
+            require(any(obj.path == path for obj in objects) != prior,
+                    "service export inventory membership does not match the transition phase")
+            require(not prior or sealed_at <= publication["visible_at_unix_ms"],
+                    "prior service export must be sealed before native publication")
+            transition = {"key_sha256": hashlib.sha256(key.encode()).hexdigest(),
+                          "receipt_sha256": export_sha256, "phase": "before" if prior else "after"}
     reader = read_target_fingerprints(fixture, edge=args.arm != "origin", export_sha256=export_sha256)
     raw_observation = read_git_record(args.native_published)
     observed = verify_git_native_ref(decode(raw_observation), provenance | {"fixture_prefix": fixture["fixture_prefix"]},
@@ -235,6 +251,8 @@ def probe(args: argparse.Namespace) -> dict:
     responses = {}
     counters = measure(lines, fixture["scope"], expected_git_blob=blob, edge_responses=responses)
     native = measure_native(lines, fixture["scope"])
+    if transition is not None:
+        verify_transition_events(lines, fixture["scope"], transition, git_blob=blob)
     record = provenance | counters | {
         "schema": "crab.cdn-service-read/v1", "arm": args.arm,
         "workload_sha256": args.workload_sha256, "publication_sha256": publication_sha256,
@@ -249,16 +267,19 @@ def probe(args: argparse.Namespace) -> dict:
     if primer is not None:
         record["primer_sha256"] = hashlib.sha256(primer_raw).hexdigest()
         verify_service_repeat(record, primer, record["primer_sha256"])
+    if transition is not None:
+        record["transition_key_sha256"] = transition["key_sha256"]
     return validate_service_read(record, provenance, args.arm)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("arm", choices=("edge", "origin", "warm_local"))
+    parser.add_argument("arm", choices=("edge", "origin", "warm_local", "prior_export"))
     for name in ("fixture", "workload", "credentials", "service-log", "publication", "native-published"):
         parser.add_argument(f"--{name}", type=Path, required=True)
     parser.add_argument("--export-approval", type=Path)
     parser.add_argument("--primer", type=Path, help="complete edge read record from the same service process")
+    parser.add_argument("--transition-object", help="exact repository-relative key newly approved for public export")
     for name in ("configuration-sha256", "workload-sha256", "source-sha", "run-id", "run-attempt"):
         parser.add_argument(f"--{name}", required=True)
     try:
