@@ -5,7 +5,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use super::{MANAGED_SCHEMA_VERSION, TransferMode};
+use super::{MANAGED_SCHEMA_VERSION, ManagedCdnBinding, TransferMode};
 use crate::error::{AuthError, Result};
 
 /// Stable managed API error envelope.
@@ -53,6 +53,9 @@ pub struct LogicalRepository {
     pub revision: u64,
     pub transfer_modes: Vec<TransferMode>,
     pub protected_push: bool,
+    /// Present only when authorized resolution selects an approved private deployment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cdn_read_binding: Option<ManagedCdnBinding>,
 }
 
 /// Versioned repository-create body shared by clients and the service.
@@ -97,6 +100,16 @@ impl LogicalRepository {
         }
         if !self.canonical_url.starts_with("crab://") {
             return invalid("logical repository canonical_url is not a crab URL");
+        }
+        if let Some(binding) = &self.cdn_read_binding {
+            binding.validate()?;
+            if self.state != RepositoryState::Active
+                || !self.transfer_modes.contains(&binding.mode())
+            {
+                return invalid(
+                    "managed CDN approval requires an active repository and its advertised native mode",
+                );
+            }
         }
         Ok(())
     }

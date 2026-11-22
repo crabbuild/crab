@@ -1181,7 +1181,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Logical repository",
+            "description": "Logical repository with optional approved private read placement",
             "content": {
               "application/json": {
                 "schema": {
@@ -1753,7 +1753,7 @@
         },
         "responses": {
           "201": {
-            "description": "Short-lived grant in the requested version. Native direct reads in version 2 can include CDN viewer authority.",
+            "description": "Short-lived grant in the requested version. Version 2 direct reads confirm the requested deployment approval and can include CDN viewer authority.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2394,6 +2394,17 @@
           "canonical_url": {
             "type": "string"
           },
+          "cdn_read_binding": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ManagedCdnBinding",
+                "description": "Present only when authorized resolution selects an approved private deployment."
+              }
+            ]
+          },
           "organization_id": {
             "type": "string",
             "format": "uuid"
@@ -2425,6 +2436,44 @@
             }
           }
         }
+      },
+      "ManagedCdnBinding": {
+        "type": "object",
+        "description": "Approved private placement attached to an authenticated repository resolution.",
+        "required": [
+          "provider",
+          "origin",
+          "repository_prefix",
+          "base_url",
+          "approval_sha256"
+        ],
+        "properties": {
+          "approval_sha256": {
+            "type": "string",
+            "description": "Digest of the operator-approved private deployment receipt."
+          },
+          "base_url": {
+            "type": "string"
+          },
+          "origin": {
+            "type": "string",
+            "description": "Credential-free URL of the selected native bucket or container."
+          },
+          "provider": {
+            "$ref": "#/components/schemas/CdnProvider"
+          },
+          "repository_prefix": {
+            "type": "string"
+          },
+          "s3_region": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Signing region for the selected S3 bucket."
+          }
+        },
+        "additionalProperties": false
       },
       "OidcClientDiscovery": {
         "type": "object",
@@ -2982,6 +3031,13 @@
             "$ref": "#/components/schemas/CdnViewerGrant",
             "description": "Present only on a v2 native direct read grant."
           },
+          "cdn_approval_sha256": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Echo of the requested deployment approval, present only on v2 reads."
+          },
           "expires_at": {
             "type": "string",
             "format": "date-time"
@@ -3026,6 +3082,12 @@
           "operation"
         ],
         "properties": {
+          "cdn_approval_sha256": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "operation": {
             "$ref": "#/components/schemas/TransferOperation"
           },

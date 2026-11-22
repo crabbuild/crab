@@ -6,9 +6,9 @@ use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use super::MANAGED_SCHEMA_VERSION;
 use super::api::{invalid, require_v1};
 use super::discovery::validate_https_url;
+use super::{MANAGED_SCHEMA_VERSION, ManagedCdnBinding};
 use crate::cdn::{CdnProvider, CdnViewerGrant};
 use crate::error::Result;
 
@@ -204,6 +204,9 @@ pub struct TransferGrant {
     )]
     #[schema(value_type = CdnViewerGrant, required = false)]
     pub cdn: Option<CdnViewerGrant>,
+    /// Echo of the requested deployment approval, present only on v2 reads.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cdn_approval_sha256: Option<String>,
 }
 
 fn deserialize_cdn<'de, D: Deserializer<'de>>(
@@ -224,6 +227,8 @@ pub struct TransferGrantRequest {
     pub operation: TransferOperation,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub push_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cdn_approval_sha256: Option<String>,
 }
 
 /// Client-side facts required to validate a grant before store construction.
@@ -234,6 +239,7 @@ pub struct GrantValidationContext<'a> {
     pub repository_id: Uuid,
     pub operation: TransferOperation,
     pub repository_prefix: &'a str,
+    pub cdn_binding: Option<&'a ManagedCdnBinding>,
     pub push_id: Option<Uuid>,
     pub allowed_permissions: &'a [TransferPermission],
     pub now: OffsetDateTime,
@@ -246,9 +252,12 @@ impl TransferGrant {
         if self.schema_version != context.schema_version {
             return invalid("transfer grant version does not match the requested version");
         }
-        match self.schema_version {
-            MANAGED_SCHEMA_VERSION if self.cdn.is_none() => {}
-            CDN_TRANSFER_GRANT_VERSION if self.operation.is_read() => {}
+        match (self.schema_version, context.cdn_binding) {
+            (MANAGED_SCHEMA_VERSION, None)
+                if self.cdn.is_none() && self.cdn_approval_sha256.is_none() => {}
+            (CDN_TRANSFER_GRANT_VERSION, Some(binding)) if self.operation.is_read() => {
+                binding.validate_grant(self)?;
+            }
             _ => {
                 return invalid(
                     "transfer grant version or CDN authority is invalid for this operation",
@@ -347,20 +356,8 @@ impl DirectObjectCredentials {
         if self.endpoint.is_some() {
             return invalid("CDN transfer requires a native endpoint without overrides");
         }
-        let container = &self.container;
-        let (provider, origin) = match &self.credentials {
-            ProviderCredentials::Aws { .. } => {
-                (CdnProvider::Cloudfront, format!("s3://{container}"))
-            }
-            ProviderCredentials::Gcp { .. } => (CdnProvider::CloudCdn, format!("gs://{container}")),
-            ProviderCredentials::Azure { account, .. } => (
-                CdnProvider::FrontDoor,
-                format!("https://{account}.blob.core.windows.net/{container}"),
-            ),
-        };
+        let (provider, origin) = self.cdn_origin();
         cdn.validate_authority(provider)?;
-        // The authenticated managed issuer selects the deployment. Its viewer
-        // grant remains limited to the physical repository and parent expiry.
         if cdn.origin != origin {
             return invalid("CDN viewer grant does not match the managed origin");
         }
@@ -372,6 +369,20 @@ impl DirectObjectCredentials {
             return invalid("CDN viewer grant expires outside its managed read authorization");
         }
         Ok(())
+    }
+
+    pub(super) fn cdn_origin(&self) -> (CdnProvider, String) {
+        let container = &self.container;
+        match &self.credentials {
+            ProviderCredentials::Aws { .. } => {
+                (CdnProvider::Cloudfront, format!("s3://{container}"))
+            }
+            ProviderCredentials::Gcp { .. } => (CdnProvider::CloudCdn, format!("gs://{container}")),
+            ProviderCredentials::Azure { account, .. } => (
+                CdnProvider::FrontDoor,
+                format!("https://{account}.blob.core.windows.net/{container}"),
+            ),
+        }
     }
 
     fn validate(&self, scope: &TransferScope, operation: TransferOperation) -> Result<()> {

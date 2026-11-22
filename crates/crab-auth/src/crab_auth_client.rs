@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
-use crate::cdn::CdnViewerGrant;
+use crate::cdn::{CdnViewerGrant, valid_approval_digest};
 use crate::client_config::CrabAuthClientConfig;
 use crate::credential_provider::CredentialProvider;
 use crate::credential_response::{CrabAuthCredentialResponse, parse_credential_response};
@@ -167,13 +167,6 @@ impl CdnViewerDeployment {
         }
         Ok(())
     }
-}
-
-fn valid_approval_digest(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn native_cdn_identity(origin: &str) -> Option<(crate::cdn::CdnProvider, &str)> {

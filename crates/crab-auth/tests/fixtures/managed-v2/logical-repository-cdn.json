@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "repository_id": "01900000-0000-7000-8000-000000000001",
+  "organization_id": "01900000-0000-7000-8000-000000000002",
+  "canonical_url": "crab://crab.build/acme/models",
+  "state": "active",
+  "revision": 7,
+  "transfer_modes": [
+    "direct_s3",
+    "gateway"
+  ],
+  "protected_push": true,
+  "cdn_read_binding": {
+    "provider": "cloudfront",
+    "origin": "s3://crab-managed-prod",
+    "s3_region": "us-west-2",
+    "repository_prefix": "environments/env-1/repositories/01900000-0000-7000-8000-000000000001",
+    "base_url": "https://cdn.example.com",
+    "approval_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+}

@@ -39,5 +39,6 @@
         "credential": "CloudFront-Policy=fixture-policy; CloudFront-Signature=fixture-viewer-signature; CloudFront-Key-Pair-Id=test-key; CloudFront-Hash-Algorithm=SHA256"
       }
     ]
-  }
+  },
+  "cdn_approval_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 }

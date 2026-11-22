@@ -161,6 +161,7 @@ mod tests {
                 },
             },
             cdn,
+            cdn_approval_sha256: Some("a".repeat(64)),
         }
     }
 
@@ -211,7 +212,10 @@ mod tests {
                 "{}/.crab/xorbs/aa/{hash}",
                 managed.repository_prefix
             ));
-            assert_eq!(reader.cdn_attempt(&path).is_some(), use_cdn);
+            assert_eq!(
+                reader.cdn_attempt(&path).is_some(),
+                use_cdn && crab_storage::cdn::qualification_enabled()
+            );
             assert!(reader.cdn_attempt(&global).is_none());
 
             let sign = || reader.signed_url(&path, Duration::from_secs(10));

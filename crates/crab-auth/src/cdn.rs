@@ -209,6 +209,13 @@ pub(crate) fn canonical_prefix(path: &str) -> bool {
         })
 }
 
+pub(crate) fn valid_approval_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 pub(crate) fn canonical_https_base(value: &str) -> bool {
     let Some(origin) = value.strip_prefix("https://") else {
         return false;

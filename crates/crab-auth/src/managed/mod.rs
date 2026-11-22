@@ -2,6 +2,7 @@
 
 mod admin;
 mod api;
+mod cdn_binding;
 mod discovery;
 mod openapi;
 mod operations;
@@ -22,6 +23,7 @@ pub use api::{
     ApiError, ApiErrorEnvelope, CreateRepositoryRequest, EntityTag, IdempotencyKey,
     LogicalRepository, PageCursor, RepositoryPage, RepositoryState,
 };
+pub use cdn_binding::ManagedCdnBinding;
 #[cfg(feature = "oidc-client")]
 mod client;
 #[cfg(feature = "oidc-client")]

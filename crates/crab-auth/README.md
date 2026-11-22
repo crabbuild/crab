@@ -55,11 +55,20 @@ clients are opt-in features so a minimal static-credentials build does not
 pull in network clients.
 
 Managed services can advertise transfer-grant versions `[1, 2]` through
-authenticated capabilities. A v2 native direct read grant may carry a
-repo-scoped CDN viewer envelope whose expiry is bounded by the parent grant.
-Clients require the requested response version. V1 grants retain their
-original wire shape, and staging grants use v1. A transfer grant POST is
-issued once per request.
+authenticated capabilities. For an authorized read, repository resolution can
+also return a `cdn_read_binding` with the approved native origin, physical
+repository prefix, viewer URL, and operator approval digest. S3 bindings
+also identify the signing region. Crab requests v2 only when the binding's
+direct mode is eligible. The request carries `cdn_approval_sha256` and the
+grant echoes it. A viewer envelope is optional and its expiry is bounded by
+the parent grant.
+
+Issue the binding only to readers of the selected repository and only after
+verifying the operator's deployment approval. Recheck placement before
+issuing a v2 grant. If approval changed, reject the request. The client
+holds the same binding across renewals and rejects a different version,
+placement, viewer URL, or approval digest. V1 reads and staging grants keep
+their original wire shape. Each transfer grant POST is issued once.
 
 The encrypted token cache commits managed OIDC refresh responses only for the
 current login. The response preserves the original issuer and subject.

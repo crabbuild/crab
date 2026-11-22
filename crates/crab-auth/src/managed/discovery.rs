@@ -198,14 +198,11 @@ impl ServiceCapabilities {
     }
 
     #[cfg(feature = "oidc-client")]
-    pub(super) fn read_grant_version(&self) -> u16 {
+    pub(super) fn read_grant_version(&self, approved_mode: Option<TransferMode>) -> u16 {
         if self
             .transfer_grant_versions
             .contains(&CDN_TRANSFER_GRANT_VERSION)
-            && self
-                .transfer_modes
-                .iter()
-                .any(|mode| *mode != TransferMode::Gateway)
+            && approved_mode.is_some_and(|mode| self.transfer_modes.contains(&mode))
         {
             CDN_TRANSFER_GRANT_VERSION
         } else {

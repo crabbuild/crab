@@ -480,6 +480,7 @@ mod tests {
                 },
             },
             cdn: None,
+            cdn_approval_sha256: None,
         };
 
         let managed = build_store_from_transfer_grant(&grant, reqwest::Client::new())
@@ -523,6 +524,7 @@ mod tests {
                 },
             },
             cdn: None,
+            cdn_approval_sha256: None,
         };
 
         let managed = build_push_store_from_transfer_grant(read, &grant, reqwest::Client::new())

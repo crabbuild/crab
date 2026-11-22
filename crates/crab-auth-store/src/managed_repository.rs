@@ -1,12 +1,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crab_auth::cdn::CdnProvider;
 use crab_auth::managed::{
     BearerToken, IdempotencyKey, ManagedApiClient, ManagedApiError, ManagedDiscoveryClient,
     PushAdmissionPlan, PushFinalizeRequest, PushPrepareRequest, PushPrepareResponse,
     PushReplicationRequest, RepositoryState, ServiceCapabilities, ServiceProfile,
-    ServiceProfileLocatorError, ServiceProfileStore, TransferMode, TransferOperation,
-    managed_http_client, service_profile_directory,
+    ServiceProfileLocatorError, ServiceProfileStore, TransferOperation, managed_http_client,
+    service_profile_directory,
 };
 use crab_git::{ManagedRepository, RepositoryLocator};
 use crab_storage::{
@@ -293,30 +294,25 @@ impl ManagedRepositoryResolver {
             .capabilities
             .transfer_modes
             .retain(|mode| access.logical.transfer_modes.contains(mode));
-        // The server chooses among the repository's advertised modes. Only
-        // negotiate a viewer grant if every possible direct mode is eligible.
-        if self.cdn_consumer.is_none_or(|consumer| {
-            access.capabilities.transfer_modes.iter().any(|mode| {
-                let provider = match mode {
-                    TransferMode::DirectS3 => StorageProviderKind::S3,
-                    TransferMode::DirectGcs => StorageProviderKind::Gcs,
-                    TransferMode::DirectAzure => StorageProviderKind::Azure,
-                    TransferMode::Gateway => return false,
-                };
-                !CdnPolicy {
-                    provider,
-                    consumer,
-                    visibility: CdnVisibility::Private,
-                    profile: CdnProfile::Managed,
-                }
-                .enabled()
-            })
-        }) {
-            access
-                .capabilities
-                .transfer_grant_versions
-                .retain(|&version| version == 1);
-        }
+        // Capture the independently resolved placement for this operation and
+        // for every renewal. A v2 response cannot select a different mode.
+        access.logical.cdn_read_binding =
+            access.logical.cdn_read_binding.take().filter(|binding| {
+                self.cdn_consumer.is_some_and(|consumer| {
+                    let provider = match binding.provider {
+                        CdnProvider::Cloudfront => StorageProviderKind::S3,
+                        CdnProvider::CloudCdn => StorageProviderKind::Gcs,
+                        CdnProvider::FrontDoor => StorageProviderKind::Azure,
+                    };
+                    CdnPolicy {
+                        provider,
+                        consumer,
+                        visibility: CdnVisibility::Private,
+                        profile: CdnProfile::Managed,
+                    }
+                    .enabled()
+                })
+            });
         let grant = access
             .client
             .issue_transfer_grant(
@@ -325,6 +321,7 @@ impl ManagedRepositoryResolver {
                 access.logical.repository_id,
                 operation,
                 &access.capabilities,
+                access.logical.cdn_read_binding.as_ref(),
             )
             .await
             .map_err(|source| managed_api_error(repository, source))?;
@@ -356,6 +353,7 @@ impl ManagedRepositoryResolver {
                         access.logical.repository_id,
                         operation,
                         &access.capabilities,
+                        access.logical.cdn_read_binding.as_ref(),
                     )
                     .await
                     .map_err(to_object_store_error)
@@ -427,6 +425,7 @@ impl ManagedRepositoryResolver {
                 access.logical.repository_id,
                 TransferOperation::Fetch,
                 &access.capabilities,
+                None,
             )
             .await
             .map_err(|source| managed_api_error(repository, source))?;

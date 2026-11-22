@@ -12,14 +12,14 @@ use uuid::Uuid;
 use super::{
     AddOrganizationMemberRequest, ApiError, ApiErrorEnvelope, CreateOrganizationRequest,
     CreateRepositoryRequest, CreateServiceAccountRequest, DiscoveryDocument, EntityTag,
-    GrantValidationContext, IdempotencyKey, IssuedServiceToken, LogicalRepository, Organization,
-    OrganizationMemberPage, OrganizationMembership, OrganizationPage, OrganizationRole, PageCursor,
-    PushAbortResponse, PushFinalizeRequest, PushPrepareRequest, PushPrepareResponse,
-    RepositoryPage, RepositoryRequestedState, RotateServiceTokenRequest, ServiceAccount,
-    ServiceAccountKind, ServiceAccountList, ServiceCapabilities, ServiceProfile, TransferGrant,
-    TransferGrantRequest, TransferMode, TransferOperation, TransferPermission, TransferTransport,
-    UpdateOrganizationMemberRequest, UpdateOrganizationRequest, UpdateRepositoryRequest,
-    managed_http_client,
+    GrantValidationContext, IdempotencyKey, IssuedServiceToken, LogicalRepository,
+    ManagedCdnBinding, Organization, OrganizationMemberPage, OrganizationMembership,
+    OrganizationPage, OrganizationRole, PageCursor, PushAbortResponse, PushFinalizeRequest,
+    PushPrepareRequest, PushPrepareResponse, RepositoryPage, RepositoryRequestedState,
+    RotateServiceTokenRequest, ServiceAccount, ServiceAccountKind, ServiceAccountList,
+    ServiceCapabilities, ServiceProfile, TransferGrant, TransferGrantRequest, TransferMode,
+    TransferOperation, TransferPermission, TransferTransport, UpdateOrganizationMemberRequest,
+    UpdateOrganizationRequest, UpdateRepositoryRequest, managed_http_client,
 };
 use crate::error::AuthError;
 use crate::{PushFinalizeResponse, validate_push_finalize_response};
@@ -418,7 +418,7 @@ impl ManagedApiClient {
         .await
     }
 
-    /// Resolves one logical repository without exposing its physical placement.
+    /// Resolves one logical repository and any private binding authorized for the reader.
     pub async fn resolve_repository(
         &self,
         organization: &str,
@@ -734,7 +734,9 @@ impl ManagedApiClient {
         .await
     }
 
-    /// Issues a new short-lived read grant. Grant POSTs are never auto-retried.
+    /// Issues a read grant using the captured approval when the service advertises its mode.
+    ///
+    /// Grant POSTs are never auto-retried. Obtain the binding from authenticated resolution.
     pub async fn issue_transfer_grant(
         &self,
         organization: &str,
@@ -742,6 +744,7 @@ impl ManagedApiClient {
         repository_id: Uuid,
         operation: TransferOperation,
         capabilities: &ServiceCapabilities,
+        cdn_binding: Option<&ManagedCdnBinding>,
     ) -> ManagedApiResult<TransferGrant> {
         validate_slug(organization, "organization")?;
         validate_slug(repository, "repository")?;
@@ -754,12 +757,19 @@ impl ManagedApiClient {
                 reason: "read grant client cannot request a push operation".to_owned(),
             });
         }
-        let schema_version = capabilities.read_grant_version();
+        let schema_version =
+            capabilities.read_grant_version(cdn_binding.map(ManagedCdnBinding::mode));
+        let cdn_binding =
+            cdn_binding.filter(|_| schema_version == super::transfer::CDN_TRANSFER_GRANT_VERSION);
+        if let Some(binding) = cdn_binding {
+            binding.validate()?;
+        }
         let body = serde_json::to_vec(&TransferGrantRequest {
             schema_version,
             repository_id,
             operation,
             push_id: None,
+            cdn_approval_sha256: cdn_binding.map(|binding| binding.approval_sha256.clone()),
         })
         .map_err(|source| ManagedApiError::Encode { source })?;
         let grant = self
@@ -782,6 +792,7 @@ impl ManagedApiClient {
             repository_id,
             operation,
             capabilities,
+            cdn_binding,
         )?;
         Ok(grant)
     }
@@ -794,6 +805,7 @@ impl ManagedApiClient {
         repository_id: Uuid,
         operation: TransferOperation,
         capabilities: &ServiceCapabilities,
+        cdn_binding: Option<&ManagedCdnBinding>,
     ) -> ManagedApiResult<TransferGrant> {
         self.issue_transfer_grant(
             organization,
@@ -801,6 +813,7 @@ impl ManagedApiClient {
             repository_id,
             operation,
             capabilities,
+            cdn_binding,
         )
         .await
     }
@@ -1098,6 +1111,7 @@ fn validate_grant(
     repository_id: Uuid,
     operation: TransferOperation,
     capabilities: &ServiceCapabilities,
+    cdn_binding: Option<&ManagedCdnBinding>,
 ) -> ManagedApiResult<()> {
     let mode = transfer_mode(grant);
     if !capabilities.transfer_modes.contains(&mode) {
@@ -1120,7 +1134,10 @@ fn validate_grant(
         schema_version,
         repository_id,
         operation,
-        repository_prefix: &grant.storage_scope.repository_prefix,
+        repository_prefix: cdn_binding.map_or(&grant.storage_scope.repository_prefix, |binding| {
+            &binding.repository_prefix
+        }),
+        cdn_binding,
         push_id: None,
         allowed_permissions: &allowed,
         now,
@@ -1209,6 +1226,7 @@ fn validate_push_prepare_response(
         repository_id,
         operation: TransferOperation::PushUpload,
         repository_prefix: &prepared.staging_grant.storage_scope.repository_prefix,
+        cdn_binding: None,
         push_id: Some(prepared.push_id),
         allowed_permissions: &allowed,
         now,
