@@ -879,8 +879,11 @@ reader ID and the selected native transport target. It checks view readiness
 on acquisition and uses backend age plus the last acknowledged incarnation
 and sequence for conditional renewal. Stale revisions cannot release a newer
 claim or revive a retired one. The reference issuer also verifies the exact
-projected namespace before granting credentials. The authenticated HTTP
-lease lifecycle, mount client integration, and live provider proof remain open.
+projected namespace before granting credentials. `POST /v1/views/retention`
+checks the same mount policy on every request and derives the reader from the
+verified issuer and subject. Acquisition confirms the current source without
+rematerializing the view. The ordinary mount client, deployed issuer access,
+and live provider proof remain open.
 
 The qualification guard leaves the native target check active in the Git clone
 child and checks the expected viewer binding and projected content prefix in

@@ -368,6 +368,38 @@ materialized filtered view. Clients must use the returned `repo_prefix` and
 `global_prefix`; the original repo prefix and bucket-level `.crab` globals are
 not readable with view credentials.
 
+### Retain a projected mount view
+
+`POST /v1/views/retention` takes the same `id_token` and source `repo_url` as
+the credentials endpoint. The request also includes `view_prefix` from
+`storage_scope.repo_prefix`, a fresh `reader_nonce` of 32 random bytes encoded
+as lowercase hexadecimal, and an `operation` object.
+
+| `operation.action` | Additional operation field | Successful response |
+| --- | --- | --- |
+| `acquire` | — | `acquired`, `repo_prefix`, `view_state_digest`, `revision`, `remaining_ms` |
+| `renew` | `revision` from the preceding response | `renewed`, `revision`, `remaining_ms` |
+| `release` | `revision` from the last acknowledged response | `released` |
+
+The caller keeps the same nonce and exact projected view for the life of the
+claim. Crab Auth checks the verified issuer, subject, and `mount` policy on
+every operation. The native helper confirms that the source still matches the
+view on acquisition. Renewal keeps the exact admitted view while the same
+scope remains authorized, even if the source advances.
+
+Use the request's monotonic start time plus the returned `remaining_ms` as
+the local deadline. Stop serving new reads after denial, loss of the acknowledged
+revision, or expiry. Drain outstanding reads before release. A `409` indicates
+that the helper could not acknowledge the requested view or revision. A `503`
+leaves its outcome uncertain. A subsequent `acquire` uses a fresh nonce.
+
+The helper runs with the issuer's native storage identity. For each deployed
+view it needs the same source and view reads as materialization, plus writes
+to the view's `v2/readers/` subtree and repository GC clock. AWS Lambda
+operators must scope that native access to the function execution role. The
+existing permission to assume the role for viewer credentials covers a
+separate part of the request. The retention reply contains lease metadata only.
+
 ### Push Flow
 
 Push uses the existing crab-auth service as a server-verified receive boundary:

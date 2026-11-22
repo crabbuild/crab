@@ -52,6 +52,15 @@ from src.view_helper import (
     ViewMaterializationResult,
     ViewRuntimeStatus,
 )
+from src.view_retention import (
+    ChangeRetention,
+    HexDigest,
+    RetentionAcquired,
+    RetentionAction,
+    RetentionConflict,
+    RetentionRenewed,
+    RetentionReply,
+)
 
 logger = structlog.get_logger()
 
@@ -63,6 +72,8 @@ MAX_REF_NAME_LEN = 512
 MAX_REF_UPDATES = 32
 MAX_CHANGED_PATHS = 10000
 MAX_CHANGED_PATH_LEN = 4096
+VIEW_RETENTION_PATH = "/v1/views/retention"
+NO_STORE_HEADERS = {"Cache-Control": "no-store"}
 DEFAULT_STAGING_TTL_SECONDS = 86400
 DEFAULT_RATE_LIMIT_MAX_KEYS = 10000
 RATE_LIMIT_IDLE_TTL_SECONDS = 3600
@@ -102,6 +113,7 @@ async def validation_exception_handler(
     )
     return JSONResponse(
         status_code=400,
+        headers=NO_STORE_HEADERS if request.url.path == VIEW_RETENTION_PATH else None,
         content={
             "detail": {
                 "error": "invalid_request",
@@ -393,6 +405,14 @@ class AuthResponse(BaseModel):
     permissions: list[str]
     storage_scope: StorageScope | None = None
     cdn: CdnGrant | None = Field(default=None, repr=False)
+
+
+class ViewRetentionRequest(RequestModel):
+    id_token: IdTokenField = Field(repr=False)
+    repo_url: RepoUrlField
+    view_prefix: Annotated[str, Field(min_length=1, max_length=1024)]
+    reader_nonce: HexDigest = Field(repr=False)
+    operation: RetentionAction
 
 
 class PushRefUpdate(RequestModel):
@@ -861,6 +881,70 @@ async def issue_credentials(
         storage_scope=storage_scope,
         cdn=cdn,
     )
+
+
+@app.post(VIEW_RETENTION_PATH, response_model=RetentionReply)
+async def retain_projected_view(
+    body: ViewRetentionRequest, request: Request, response: Response,
+) -> RetentionReply:
+    operation = body.operation
+    log = logger.bind(action=operation.action)
+    try:
+        claims, decision = await _authorize_request(
+            id_token=body.id_token, repo_url=body.repo_url, operation="mount", request=request, log=log,
+        )
+    except HTTPException as error:
+        error.headers = dict(error.headers or {}) | NO_STORE_HEADERS
+        raise
+
+    if not claims.issuer or not claims.subject or not _requires_filtered_read_view(decision):
+        raise _retention_failure(403, "projected_mount_required")
+    parsed = parse_repo_url(body.repo_url)
+    repo_url = f"crab://{parsed.bucket}/{parsed.prefix}"
+    scope_hash = _read_scope_hash(
+        source_repo=parsed.prefix, read_paths=decision.read_paths, denied_read_paths=decision.denied_read_paths,
+    )
+    prefix = f"{parsed.prefix}/acl-views/v2/{scope_hash}/"
+    selection = re.fullmatch(r"(0|[1-9][0-9]{0,19})-([0-9a-f]{64})", body.view_prefix.removeprefix(prefix))
+    if not body.view_prefix.startswith(prefix) or selection is None or int(selection[1]) >= 2**64:
+        raise _retention_failure(403, "retention_scope_mismatch")
+
+    # Only the issuer derives ownership. Client-controlled nonces and native
+    # revisions are insufficient to select another principal's claim.
+    reader = hashlib.sha256(json.dumps([
+        "crab retention reader v1", claims.issuer, claims.subject, decision.provider,
+        repo_url, body.view_prefix, body.reader_nonce,
+    ], separators=(",", ":")).encode()).hexdigest()
+    try:
+        reply = await asyncio.to_thread(get_view_helper().retention, {
+            "repo_url": repo_url, "provider": decision.provider, "scope_hash": scope_hash,
+            "source_generation": int(selection[1]), "source_digest": selection[2],
+            "reader": reader, "operation": operation.model_dump(),
+        })
+    except RetentionConflict:
+        raise _retention_failure(409, "retention_revision_lost") from None
+    except Exception as error:
+        log.error("view_retention_helper_failed", error_type=type(error).__name__)
+        raise _retention_failure(503, "retention_unavailable") from None
+
+    expected = {"acquire": "acquired", "renew": "renewed", "release": "released"}[operation.action]
+    if reply.action != expected:
+        raise _retention_failure(503, "retention_invalid_reply")
+    if isinstance(reply, RetentionAcquired) and (
+        reply.repo_prefix != body.view_prefix or reply.revision.sequence != 0
+    ):
+        raise _retention_failure(503, "retention_invalid_reply")
+    if isinstance(reply, RetentionRenewed) and isinstance(operation, ChangeRetention) and (
+        reply.revision.incarnation != operation.revision.incarnation
+        or reply.revision.sequence != operation.revision.sequence + 1
+    ):
+        raise _retention_failure(503, "retention_invalid_reply")
+    response.headers.update(NO_STORE_HEADERS)
+    return reply
+
+
+def _retention_failure(status: int, code: str) -> HTTPException:
+    return HTTPException(status_code=status, detail={"error": code}, headers=NO_STORE_HEADERS)
 
 
 @app.post(

@@ -28,6 +28,7 @@ _JWKS_CACHE_LIFETIME = 3600
 class TokenClaims:
     """Verified claims extracted from an ID token."""
 
+    issuer: str
     subject: str
     email: str | None
     name: str | None
@@ -95,6 +96,7 @@ class JWTVerifier:
             groups = []
 
         return TokenClaims(
+            issuer=self._issuer,
             subject=subject,
             email=email,
             name=name,

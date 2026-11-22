@@ -24,6 +24,7 @@ from src.receive_helper import (
     ReceiveVerifyResult,
 )
 from src.view_helper import ViewMaterializationResult, ViewRuntimeStatus
+from src.view_retention import RETENTION_REPLY, RetentionConflict
 
 
 class FakeVerifier:
@@ -33,16 +34,21 @@ class FakeVerifier:
         error: str | None = None,
         email: str = "alice@corp.example.com",
         groups: list[str] | None = None,
+        subject: str = "user-123",
+        issuer: str = "https://idp.example.com",
     ) -> None:
         self._error = error
         self._email = email
         self._groups = ["platform-admins"] if groups is None else groups
+        self._subject = subject
+        self._issuer = issuer
 
     async def verify(self, token: str) -> TokenClaims:
         if self._error:
             raise ValueError(self._error)
         return TokenClaims(
-            subject="user-123",
+            issuer=self._issuer,
+            subject=self._subject,
             email=self._email,
             name=None,
             groups=self._groups,
@@ -688,6 +694,114 @@ def test_issue_credentials_path_scoped_read_does_not_mint_on_view_failure(monkey
     assert response.status_code == 500
     assert response.json()["detail"]["error"] == "internal"
     assert provider.calls == []
+
+
+def retention_policy(paths=None, operations=("mount",)):
+    rule = {"group": "platform-admins", "repos": ["restricted/repo"], "operations": list(operations)}
+    if paths is not None:
+        rule["read_paths"] = paths
+    return app_module.PolicyEngine.from_dict({"default_provider": "aws", "rules": [rule]})
+
+
+@pytest.fixture
+def retention_client(monkeypatch):
+    app_module._policy = retention_policy(["src/**"])
+    app_module._rate_limiter = app_module.RateLimiter(rate_per_minute=0, burst=20)
+    scope = app_module._read_scope_hash(source_repo="restricted/repo", read_paths=["src/**"], denied_read_paths=[])
+    payload = {
+        "id_token": "token",
+        "repo_url": "crab://bucket/restricted/repo",
+        "view_prefix": f"restricted/repo/acl-views/v2/{scope}/7-{'b' * 64}",
+        "reader_nonce": "a" * 64,
+    }
+    calls = []
+    incarnation = "0" * 8 + "-0000-7000-8000-" + "0" * 12
+
+    def retain(request):
+        calls.append(request)
+        if request["reader"] != calls[0]["reader"]:
+            raise RetentionConflict("native reader changed")
+        operation = request["operation"]
+        match operation["action"]:
+            case "acquire":
+                reply = {"action": "acquired", "repo_prefix": payload["view_prefix"],
+                         "view_state_digest": "c" * 64, "remaining_ms": 149_000,
+                         "revision": {"incarnation": incarnation, "sequence": 0}}
+            case "renew":
+                reply = {"action": "renewed", "remaining_ms": 149_000,
+                         "revision": {"incarnation": incarnation, "sequence": operation["revision"]["sequence"] + 1}}
+            case "release":
+                reply = {"action": "released"}
+        return RETENTION_REPLY.validate_python(reply)
+
+    helper = FakeViewHelper()
+    monkeypatch.setattr(helper, "retention", retain, raising=False)
+    app_module._view_helper = helper
+    client = TestClient(app_module.app)
+
+    def post(action, revision=None, **changes):
+        operation = {"action": action}
+        if revision is not None:
+            operation["revision"] = revision
+        result = client.post("/v1/views/retention", json=payload | {"operation": operation} | changes)
+        assert result.headers["Cache-Control"] == "no-store"
+        return result
+
+    return post, helper, calls
+
+
+def test_retention_keeps_one_reader_for_the_same_verified_issuer_and_subject(retention_client):
+    post, helper, calls = retention_client
+    acquired = post("acquire")
+    assert acquired.status_code == 200
+    app_module._verifier = FakeVerifier(email="new-email@corp.example.com")
+    renewed = post("renew", acquired.json()["revision"])
+    assert renewed.status_code == 200
+    assert post("release", renewed.json()["revision"]).json() == {"action": "released"}
+    assert len({call["reader"] for call in calls}) == 1
+    assert all(call["source_generation"] == 7 and call["source_digest"] == "b" * 64 for call in calls)
+    assert all({"id_token", "reader_nonce"}.isdisjoint(call) for call in calls)
+    assert helper.calls == []  # Retention uses native view proofs without rebuilding a projection.
+
+
+@pytest.mark.parametrize("changed", ["issuer", "subject"])
+def test_retention_rejects_another_principal_with_the_same_email_and_nonce(retention_client, changed):
+    post, _, calls = retention_client
+    acquired = post("acquire")
+    app_module._verifier = FakeVerifier(**{changed: "other-verified-principal"})
+    denied = post("renew", acquired.json()["revision"])
+    assert denied.status_code == 409
+    assert denied.json()["detail"]["error"] == "retention_revision_lost"
+    assert calls[-1]["reader"] != calls[0]["reader"]
+
+
+@pytest.mark.parametrize("paths,operations", [(["different/**"], ["mount"]), (None, ["mount"]), (["src/**"], ["fetch"])])
+def test_retention_reevaluates_mount_policy_before_touching_a_claim(retention_client, paths, operations):
+    post, _, calls = retention_client
+    acquired = post("acquire")
+    app_module._policy = retention_policy(paths, operations)
+    assert post("renew", acquired.json()["revision"]).status_code == 403
+    assert len(calls) == 1
+
+
+def test_retention_rejects_client_selected_owner_and_unscoped_prefix(retention_client):
+    post, _, calls = retention_client
+    assert post("acquire", reader="a" * 64).status_code == 400
+    assert post("acquire", view_prefix="restricted/repo").status_code == 403
+    assert calls == []
+
+
+def test_retention_never_echoes_native_helper_errors(retention_client, monkeypatch):
+    post, helper, _ = retention_client
+
+    def bad_helper(payload):
+        raise RuntimeError("opaque backend authorization")
+
+    monkeypatch.setattr(helper, "retention", bad_helper)
+    with capture_logs() as logs:
+        error = post("acquire")
+    assert error.status_code == 503
+    assert "opaque backend authorization" not in error.text and "opaque backend authorization" not in repr(logs)
 
 
 def test_issue_credentials_repo_wide_read_skips_view_helper(monkeypatch):
