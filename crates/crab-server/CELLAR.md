@@ -336,6 +336,9 @@ of the actor's issuer and subject. A sparse index tracks actors watching
 issues or pull requests. Each
 category has its own activation activity number so a new watch skips activity
 already committed and a category that stays enabled keeps its place.
+The watched-repositories view reads those same documents in bounded windows
+of the authorized catalog and refreshes access before returning results.
+Its continuation names a repository in the rechecked window.
 Release watching uses a separate sparse index and a publication sequence.
 Finalizing Git-backed release publication records that sequence and enqueues
 the notification in the same Repository transaction. The worker checks the

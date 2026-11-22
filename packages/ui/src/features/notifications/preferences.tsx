@@ -17,7 +17,8 @@ import {
   NativeSelectOption,
 } from "@/components/ui/native-select";
 import { refreshNotificationBadge } from "./index";
-import { endpoint, useRequest, type Repository } from "@/lib/api";
+import { endpoint, useRequest } from "@/lib/api";
+import type { Address } from "./actions";
 
 const repositoryModes = {
   direct: "Direct notifications",
@@ -34,14 +35,33 @@ const discussionModes = {
   unsubscribed: "Unsubscribe from updates",
 };
 
-type Preference = { mode: string; version: number; releases?: boolean };
+export type RepositoryPreference = {
+  mode: keyof typeof repositoryModes;
+  version: number;
+  releases?: boolean;
+};
+
+type Preference<Mode extends string> = {
+  mode: Mode;
+  version: number;
+  releases?: boolean;
+};
+
+export function watchTopics({ mode, releases }: RepositoryPreference) {
+  if (mode === "muted") return [];
+  const topics = mode === "direct" ? [] : [repositoryModes[mode]];
+  if (releases) topics.push("New releases");
+  return topics;
+}
 
 export function RepositoryWatch({
   repo,
   csrf,
+  onSaved,
 }: {
-  repo: Repository;
+  repo: Address;
   csrf: string;
+  onSaved?: (updated: RepositoryPreference) => void;
 }) {
   return (
     <NotificationPreference
@@ -51,6 +71,8 @@ export function RepositoryWatch({
       modes={repositoryModes}
       releaseChoice
       label="Watch"
+      triggerLabel={onSaved ? `Watch ${repo.owner}/${repo.name}` : undefined}
+      onSaved={onSaved}
       title="Repository notifications"
       description={`Choose what appears in your inbox for ${repo.owner}/${repo.name}. Direct notifications include assignments, review requests, and mentions.`}
     />
@@ -62,7 +84,7 @@ export function DiscussionWatch({
   csrf,
   subject,
 }: {
-  repo: Repository;
+  repo: Address;
   csrf: string;
   subject: string;
 }) {
@@ -87,7 +109,7 @@ export function DiscussionWatch({
   );
 }
 
-function NotificationPreference({
+function NotificationPreference<Mode extends string>({
   repo,
   csrf,
   path,
@@ -96,8 +118,10 @@ function NotificationPreference({
   label,
   title,
   description,
+  onSaved,
+  triggerLabel,
 }: {
-  repo: Repository;
+  repo: Address;
   csrf: string;
   path: string;
   modes: Record<string, string>;
@@ -105,12 +129,14 @@ function NotificationPreference({
   label: string;
   title: string;
   description: string;
+  onSaved?: (updated: Preference<Mode>) => void;
+  triggerLabel?: string;
 }) {
   const modeId = useId();
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<string>();
   const [draftReleases, setDraftReleases] = useState<boolean>();
-  const preference = useRequest<Preference>(open ? path : null);
+  const preference = useRequest<Preference<Mode>>(open ? path : null, repo.id);
   const mutation = useMutation(csrf, repo);
 
   function close(next: boolean) {
@@ -125,7 +151,12 @@ function NotificationPreference({
   return (
     <Dialog open={open} onOpenChange={close}>
       <DialogTrigger asChild>
-        <Button variant="outline" size="sm" className="shrink-0">
+        <Button
+          variant="outline"
+          size="sm"
+          className="shrink-0"
+          aria-label={triggerLabel}
+        >
           <BellIcon data-icon="inline-start" />
           {label}
         </Button>
@@ -149,14 +180,19 @@ function NotificationPreference({
                 className="grid gap-3"
                 onSubmit={async (event) => {
                   event.preventDefault();
-                  const updated = await mutation.run<Preference>(path, "PUT", {
-                    mode,
-                    version: saved.version,
-                    ...(releases ? { releases: true } : {}),
-                  });
+                  const updated = await mutation.run<Preference<Mode>>(
+                    path,
+                    "PUT",
+                    {
+                      mode,
+                      version: saved.version,
+                      ...(releases ? { releases: true } : {}),
+                    },
+                  );
                   if (updated) {
                     refreshNotificationBadge();
                     close(false);
+                    onSaved?.(updated);
                   }
                 }}
               >

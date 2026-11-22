@@ -1849,6 +1849,7 @@ owner label does not acquire ownership.
 | Markdown suggestions | `GET /api/repos/{owner}/{name}/discussion-search/{mentions,team-mentions,references}` |
 | Team mention settings | `GET/PUT /api/repos/{owner}/{name}/mention-settings` |
 | Account notification inbox | `GET /api/notifications`, `GET /api/notifications/unread`, `PUT /api/notifications/{id}/state`, `POST /api/notifications/bulk`, `POST /api/notifications/unsubscribe` |
+| Watched repositories | `GET /api/notifications/watched` |
 | Repository notification preference | `GET /api/repos/{owner}/{name}/subscription`, `PUT /api/repos/{owner}/{name}/subscription` |
 | Discussion notification preference | `GET` and `PUT /api/repos/{owner}/{name}/issues/{number}/subscription` or `/pulls/{number}/subscription` |
 | Stable discussion links | `GET /api/discussion-references/{repository_id}/{kind}/{number}` |
@@ -2630,6 +2631,20 @@ disable release watching. The allowed modes are `direct`, `issues`,
 of the same choice returns the current preference. A stale request for a
 different choice returns 409. Both endpoints require current repository access. The private preference
 can be changed on an archived repository.
+
+Open **Watched repositories** from the notification inbox to see and edit your
+repository watches in one place. Each row shows which updates you selected.
+To stop watching, choose **Direct notifications** and turn off **New releases**.
+Your discussion subscriptions and direct notices remain available.
+
+`GET /api/notifications/watched` returns `items` with the repository address
+(`id`, `owner`, `name`) and the signed-in account's current preference.
+Each page scans up to `limit` currently readable repositories (1–50, default
+32) in owner/name order, and includes only active watches. A page can be empty
+with additional repositories left to scan. Pass `next` as `after` to continue
+until `next` is null. Access is refreshed after the preference reads. A change
+to the scanned portion returns 409 so the client can reload from the first
+page. Watch edits use the versioned repository subscription endpoints.
 
 Use **Notification settings** in the issue or pull request sidebar for a private
 override. Each discussion starts with the repository setting (`inherit`).

@@ -224,6 +224,7 @@ function withAbort<T>(
 export async function request<T>(
   url: string,
   signal: AbortSignal,
+  repositoryId?: string,
 ): Promise<{ data: T; timing: Timing }> {
   if (signal.aborted) return Promise.reject(abortReason(signal));
   // Stable cross-repository links carry their UUID through the server
@@ -233,9 +234,10 @@ export async function request<T>(
     page && new URLSearchParams(page.search).get("repository_id");
   const [, owner, name] = page?.pathname.split("/") ?? [];
   const requested =
-    owner && name && url.startsWith(`/api/repos/${owner}/${name}/`)
+    repositoryId ??
+    (owner && name && url.startsWith(`/api/repos/${owner}/${name}/`)
       ? expected
-      : null;
+      : null);
   const key = requested
     ? JSON.stringify([requestKey(url), requested])
     : requestKey(url);
@@ -400,23 +402,26 @@ export async function gitImportStatus(
 
 export function useRequest<T>(
   url: string | null,
+  repositoryId?: string,
 ): Loaded<T> & { retry: () => void } {
   const [attempt, setAttempt] = useState(0);
   const retry = useCallback(() => setAttempt((value) => value + 1), []);
-  const [state, setState] = useState<Loaded<T> & { url?: string | null }>({
+  const [state, setState] = useState<
+    Loaded<T> & { url?: string | null; repositoryId?: string }
+  >({
     loading: true,
   });
   useEffect(() => {
     const controller = new AbortController();
     if (!url) {
-      setState({ loading: false, url });
+      setState({ loading: false, url, repositoryId });
       return;
     }
-    setState({ loading: true, url });
-    request<T>(url, controller.signal)
+    setState({ loading: true, url, repositoryId });
+    request<T>(url, controller.signal, repositoryId)
       .then((result) => {
         if (!controller.signal.aborted)
-          setState({ ...result, loading: false, url });
+          setState({ ...result, loading: false, url, repositoryId });
       })
       .catch((error: unknown) => {
         if (!controller.signal.aborted)
@@ -424,13 +429,16 @@ export function useRequest<T>(
             loading: false,
             error: error instanceof Error ? error.message : "Request failed",
             url,
+            repositoryId,
           });
       });
     return () => controller.abort();
-  }, [url, attempt]);
+  }, [url, repositoryId, attempt]);
   // Never paint the preceding route's data while the new effect is pending.
   return {
-    ...(state.url === url ? state : { loading: !!url }),
+    ...(state.url === url && state.repositoryId === repositoryId
+      ? state
+      : { loading: !!url }),
     retry,
   };
 }

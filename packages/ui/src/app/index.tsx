@@ -21,6 +21,7 @@ import { GitAccess } from "@/features/git-access";
 import { GitImport } from "@/features/imports";
 import { CreateRepository } from "@/features/repository/create";
 import { NotificationLink, Notifications } from "@/features/notifications";
+import { WatchedRepositories } from "@/features/notifications/watched";
 import { gitOwnerSuggestion } from "@/features/imports/source";
 import {
   OrganizationPage,
@@ -122,7 +123,9 @@ export function App() {
     };
   }, [codeTheme, resolved]);
   const url = new URL(location, window.location.origin);
-  const notifications = url.pathname === "/-/notifications";
+  const inbox = url.pathname === "/-/notifications";
+  const watched = url.pathname === "/-/notifications/watched";
+  const notifications = inbox || watched;
   const savedReplies = url.pathname === "/-/settings/saved-replies";
   const profileSettings = url.pathname === "/-/profile" || savedReplies;
   const actorId =
@@ -163,7 +166,7 @@ export function App() {
   const [gitAccessOpen, setGitAccessOpen] = useState(false);
   const catalog = useRequest<{ repositories: Repository[] }>(
     session.data?.authenticated &&
-      (url.pathname === "/" || notifications || gitAccessOpen)
+      (url.pathname === "/" || inbox || gitAccessOpen)
       ? "/api/repos"
       : null,
   );
@@ -208,12 +211,14 @@ export function App() {
   useEffect(() => {
     document.title = repo
       ? `${repo.owner}/${repo.name} · Crab`
-      : notifications
-        ? "Notifications · Crab"
-        : projectWorkspace
-          ? "Projects · Crab"
-          : "Repositories · Crab";
-  }, [repo, notifications, projectWorkspace]);
+      : watched
+        ? "Watched repositories · Crab"
+        : inbox
+          ? "Notifications · Crab"
+          : projectWorkspace
+            ? "Projects · Crab"
+            : "Repositories · Crab";
+  }, [repo, watched, inbox, projectWorkspace]);
   useEffect(() => {
     if (!importedRepository || !catalog.data) return;
     if (
@@ -405,7 +410,12 @@ export function App() {
                     : "Continue to sign in"}
                 </Button>
               </div>
-            ) : notifications ? (
+            ) : watched ? (
+              <WatchedRepositories
+                key={teamAccount}
+                csrf={session.data.csrf ?? ""}
+              />
+            ) : inbox ? (
               <Notifications
                 csrf={session.data.csrf ?? ""}
                 repositories={catalog.data?.repositories ?? []}
