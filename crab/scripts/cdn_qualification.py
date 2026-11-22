@@ -44,6 +44,11 @@ DEPLOYMENT_POLICY_COMPONENTS = {
     "front-door": {"front-door-route", "viewer-policy", "blob-access", "viewer-key-ids"},
 }
 KEY_ROTATION_CHECK = "key_rotation"
+SCOPED_VIEW_CHECK = "scoped_view_isolation"
+SCOPED_VIEW_ROLES = {"target", "sibling"}
+SCOPED_VIEW_PROBES = ("target_before", "sibling_before", "sibling_full", "sibling_range", "sibling_after", "target_after")
+SCOPED_VIEW_FIELDS = {"scope_sha256", "generation_sha256", "physical_prefix_sha256", "grant_prefix_sha256",
+                      "key_sha256", "body_sha256", "bytes"}
 MANAGED_ISSUER_CHECK = "managed_v2_issuer"
 MANAGED_ISSUER_FIELDS = {"identity_sha256", "version", "approval_sha256"}
 MAX_ROTATION_GRANT_SECONDS = 900
@@ -71,7 +76,7 @@ PRIVATE_CHECKS = WARM_DENIAL_CHECKS | {
     KEY_ROTATION_CHECK,
     "authorized_cache_reuse",
     EXPIRY_RANGE_CHECK,
-    "scoped_view_isolation",
+    SCOPED_VIEW_CHECK,
 }
 PUBLIC_EXPORT_CHECK = "approved_public_export"
 HISTORICAL_ORIGIN_CHECK = "historical_origin"
@@ -701,6 +706,9 @@ def verify_check_evidence(
         if name == KEY_ROTATION_CHECK:
             rotation_key = verify_key_rotation(decoded, report, edge, deployment_policy_sha256)
             continue
+        if name == SCOPED_VIEW_CHECK:
+            verify_scoped_view(decoded, report, registration["scoped_view_sha256"])
+            continue
         if name == MANAGED_ISSUER_CHECK:
             managed_issuer = decoded
             continue
@@ -856,7 +864,7 @@ def verify_trace_observations(name: str, requests: list[dict[str, Any]]) -> None
                 "rollback requires an edge read followed by a native read of the same complete object")
     if name in {"private_origin_denied", "live_origin_denied", "public_listing_denied"}:
         require(all(anonymous_origin_denial(row) for row in requests), f"authorization denial evidence missing: {name}")
-    if name in {"mutable_route_denied", "neighbor_route_denied", "scoped_view_isolation"}:
+    if name in {"mutable_route_denied", "neighbor_route_denied"}:
         require(any(row["source"] == "edge" and row["status"] in (401, 403) for row in requests),
                 f"authorization denial evidence missing: {name}")
     if name in WARM_DENIAL_CHECKS:
@@ -897,6 +905,52 @@ def verify_unrelated_viewer_denial(requests: list[dict[str, Any]]) -> None:
     require(control_key != key and all(row["status"] == 200 and row["bytes"] == control_size > 0
                                       and row["key_sha256"] == control_key for row in (control_before, control_after)),
             "unrelated viewer must read the same distinct control object before and after denial")
+
+
+def verify_scoped_view(value: Any, report: dict[str, Any], approved: str) -> None:
+    trace = fields(value, CDN_PROVENANCE_FIELDS | {"schema", "check", "placement", "requests"}, SCOPED_VIEW_CHECK)
+    require(trace["schema"] == "crab.cdn-scoped-view/v1" and trace["check"] == SCOPED_VIEW_CHECK
+            and all(trace[key] == report[key] for key in CDN_PROVENANCE_FIELDS),
+            "scoped view evidence must match the qualification row and workflow attempt")
+    placement = fields(trace["placement"], {"fixture_sha256", "origin_sha256", "source_prefix_sha256",
+                                            "deployment_policy_sha256", "views"}, "scoped view placement")
+    require(all(matches(SHA256, placement[key]) for key in placement.keys() - {"views"})
+            and deployment_component_digest(placement) == approved,
+            "scoped view placement differs from the approved control fixture")
+    views = fields(placement["views"], SCOPED_VIEW_ROLES, "approved scoped views")
+    for role, view in views.items():
+        fields(view, SCOPED_VIEW_FIELDS, f"scoped view {role}")
+        require(all(matches(SHA256, view[key]) for key in SCOPED_VIEW_FIELDS - {"bytes"})
+                and positive(view["bytes"]) and 2 <= view["bytes"] <= 1024 * 1024,
+                "scoped view requires the exact physical view, immutable prefix, and expected bytes")
+    target, sibling = views["target"], views["sibling"]
+    require(all(target[key] != sibling[key] for key in ("generation_sha256", "physical_prefix_sha256",
+                                                       "grant_prefix_sha256", "key_sha256")),
+            "scoped view control must address a distinct materialized view")
+    requests = trace["requests"]
+    require(isinstance(requests, list) and len(requests) == len(SCOPED_VIEW_PROBES),
+            "scoped view isolation needs authorized reads around full and ranged denials")
+    for name, request in zip(SCOPED_VIEW_PROBES, requests, strict=True):
+        row = fields(request, TRACE_REQUEST_FIELDS | {"probe", "range_offset", "body_sha256"}, "scoped view probe")
+        is_target = name.startswith("target_")
+        denied = name in {"sibling_full", "sibling_range"}
+        view = target if is_target else sibling
+        require(row["probe"] == name and row["source"] == ("edge" if is_target or denied else "origin")
+                and row["key_sha256"] == view["key_sha256"]
+                and row["cache"] in ("hit", "miss", "unknown")
+                and type(row["elapsed_ms"]) is int and row["elapsed_ms"] >= 0
+                and type(row["status"]) is int and type(row["bytes"]) is int,
+                "scoped view probes must use the approved target and sibling keys in order")
+        if denied:
+            offset = row["range_offset"]
+            require(row["status"] in (401, 403) and row["bytes"] == 0 and row["body_sha256"] is None
+                    and (type(offset) is int and offset == 0 if name == "sibling_range" else offset is None),
+                    "the scoped viewer must be denied a full and ranged GET of the sibling")
+        else:
+            require(row["status"] == 200 and row["cache"] == ("hit" if is_target else "unknown")
+                    and row["bytes"] == view["bytes"] and row["body_sha256"] == view["body_sha256"]
+                    and row["range_offset"] is None,
+                    "scoped view needs verified warm target and authorized sibling reads before and after denial")
 
 
 def ordered_full_reads(
@@ -976,6 +1030,10 @@ def benchmark_registration(registration: Any) -> dict[str, Any]:
                 "public benchmark needs the distinct prior publication approval")
         require(matches(SHA256, registration.get("historical_origin_sha256")),
                 "public benchmark needs approved native history")
+    else:
+        expected.add("scoped_view_sha256")
+        require(matches(SHA256, registration.get("scoped_view_sha256")),
+                "private benchmark needs the approved scoped view control digest")
     if profile == "managed":
         expected.add("managed_issuer")
         issuer = fields(registration.get("managed_issuer"), MANAGED_ISSUER_FIELDS, "registered production issuer")

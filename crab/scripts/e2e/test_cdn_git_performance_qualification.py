@@ -31,6 +31,7 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
             "workload": "git-fetch", "samples": 30, "p95_budget_ms": 150, "cost_budget_microusd": 10,
             "regions": REGIONS, "deployment_policy_sha256": "d" * 64,
             "viewer_binding_sha256": "e" * 64,
+            "scoped_view_sha256": "c" * 64,
         }
         self.registration["candidate"] = fixture.cli_candidate(self.registration["scope"], PLATFORM)
         fixture.write_git_measurements(self.root, self.registration, PLATFORM)

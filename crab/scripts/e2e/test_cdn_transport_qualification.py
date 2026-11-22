@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import sys
+import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from http.client import HTTPMessage
@@ -16,6 +17,7 @@ from unittest.mock import Mock, patch
 from urllib.parse import urlsplit
 
 import collect_cdn_key_rotation as ROTATION
+import collect_cdn_scoped_view as SCOPED
 import run_cdn_transport_checks as TRANSPORT
 from cdn_qualification import CDN_PROVENANCE_FIELDS, deployment_component_digest, deployment_component_names, deployment_policy_digest
 
@@ -93,6 +95,74 @@ class CdnTransportQualificationTests(unittest.TestCase):
         self.client = ctx.start()
         self.addCleanup(ctx.stop)
         self.connection = self.client.return_value
+
+    def test_scoped_view_requires_live_sibling_control_on_all_providers(self) -> None:
+        for edge, header, hit, endpoint, query in (
+            ("cloudfront", "X_Cache", "Hit from cloudfront", "s3.us-east-1.amazonaws.com/fixture-bucket", S3_SIGNATURE),
+            ("cloud-cdn", "X_Crab_CDN_Cache", "hit", "storage.googleapis.com/fixture-bucket", GCS_SIGNATURE),
+            ("front-door", "X_Cache", "TCP_HIT", "fixtureacct.blob.core.windows.net/container", BLOB_SIGNATURE),
+        ):
+            with self.subTest(edge=edge), TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                target_suffix = f"/acl-views/v2/{'a' * 64}/1-{'b' * 64}"
+                sibling_suffix = f"/acl-views/v2/{'a' * 64}/2-{'c' * 64}"
+                config = fixture(edge, "private") | {"view_suffix": target_suffix}
+                raw = json.dumps(config).encode()
+                (root / "fixture.json").write_bytes(raw)
+                sibling = {"view_suffix": sibling_suffix, "object_path": PACK,
+                           "size": len(CONTROL_BODY), "sha256": CONTROL_DIGEST}
+                (root / "sibling.json").write_text(json.dumps(sibling), encoding="utf-8")
+                fingerprint = hashlib.sha256(raw).hexdigest()
+                repo = config["fixture_prefix"]
+                expiry = int(time.time()) + 120
+                grant = f"{repo}{target_suffix}/v2/pack-layers/"
+                base = config["base_url"]
+                resource = f"{base}/{grant}"
+                if edge == "cloudfront":
+                    policy = {"Statement": [{"Resource": resource + "*",
+                                             "Condition": {"DateLessThan": {"AWS:EpochTime": expiry}}}]}
+                    encoded = base64.b64encode(json.dumps(policy).encode()).decode().translate(str.maketrans("+=/", "-_~"))
+                    credential = f"CloudFront-Policy={encoded}; CloudFront-Signature=fixture-secret; CloudFront-Key-Pair-Id=test"
+                elif edge == "cloud-cdn":
+                    encoded = base64.urlsafe_b64encode(resource.encode()).decode()
+                    credential = f"Cloud-CDN-Cookie=URLPrefix={encoded}:Expires={expiry}:KeyName=test:Signature=fixture-secret"
+                else:
+                    claims = {"iss": base, "aud": base, "sub": repo + target_suffix, "prefix": grant,
+                              "origin": config["native_origin"], "exp": expiry}
+                    encoded = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+                    credential = f"header.{encoded}.fixture-secret"
+                (root / "viewer").write_text(credential, encoding="utf-8")
+                signed = root / "signed"
+                signed.write_text(f"https://{endpoint}/{repo}{sibling_suffix}/{PACK}?{query}", encoding="utf-8")
+                hot = response(200, BODY, Cache_Control="private, no-store", **{header: hit})
+                control = response(200, CONTROL_BODY)
+                native_discovery = [response(403, x_amz_bucket_region="us-east-1")] if edge == "cloudfront" else []
+                self.connection.getresponse.side_effect = native_discovery + [hot, hot, control, response(403), response(401), control, hot]
+                self.connection.request.reset_mock()
+                args = ["probe", "--fixture", str(root / "fixture.json"), "--configuration-sha256", fingerprint,
+                        "--sibling", str(root / "sibling.json")]
+                captured = StringIO()
+                with patch.object(sys, "argv", args), redirect_stdout(captured):
+                    self.assertEqual(SCOPED.main(), 0)
+                digest = json.loads(captured.getvalue())["scoped_view_sha256"]
+                self.connection.request.assert_not_called()
+                output = root / "trace.json"
+                with (patch.object(sys, "argv", args + ["--output", str(output), "--scoped-view-sha256", digest,
+                        "--row-configuration-sha256", "9" * 64, "--viewer-file", str(root / "viewer"),
+                        "--sibling-read-url-file", str(signed), "--source-sha", "a" * 40, "--run-id", "123", "--run-attempt", "1"]),
+                      patch.object(SCOPED, "attest_fixture") as attest):
+                    self.assertEqual(SCOPED.main(), 0)
+                self.assertEqual(attest.call_count, 2)
+                trace = json.loads(output.read_bytes())
+                self.assertEqual(trace["configuration_sha256"], "9" * 64)
+                self.assertEqual(trace["placement"]["fixture_sha256"], fingerprint)
+                sibling_requests = [call for call in self.connection.request.call_args_list if sibling_suffix in call.args[1]]
+                self.assertEqual([call.kwargs["headers"].get("Range") for call in sibling_requests], [None, None, "bytes=0-0", None])
+                self.assertEqual(["?" in call.args[1] for call in sibling_requests], [True, False, False, True])
+                viewer_header = "Authorization" if edge == "front-door" else "Cookie"
+                self.assertEqual([viewer_header in call.kwargs["headers"] for call in sibling_requests], [False, True, True, False])
+                for secret in ("fixture-secret", "test-signature", repo, config["base_url"]):
+                    self.assertNotIn(secret, output.read_text(encoding="utf-8"))
 
     def test_rotation_reads_the_same_grants_on_both_sides_of_retirement(self) -> None:
         headers = {

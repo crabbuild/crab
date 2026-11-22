@@ -181,7 +181,6 @@ class CdnQualificationTests(unittest.TestCase):
             "warm_expired_viewer_denied": [edge_hit, edge_deny],
             "warm_unrelated_principal_denied": [edge_hit, control, edge_deny, edge_deny, control, edge_hit],
             CDN.EXPIRY_RANGE_CHECK: expiry_rows(edge_hit | {"status": 206, "bytes": 1}, edge_deny),
-            "scoped_view_isolation": [edge_deny],
             "private_origin_denied": [origin_deny],
             "live_origin_denied": [origin_deny],
             "export_origin_access": [origin_deny if provider == "s3" else origin_read],
@@ -196,6 +195,8 @@ class CdnQualificationTests(unittest.TestCase):
                 self.deployment_trace(self.policy_components, policy_digest)
             elif check == CDN.KEY_ROTATION_CHECK:
                 self.rotation_trace(edge)
+            elif check == CDN.SCOPED_VIEW_CHECK:
+                self.scoped_view_trace()
             elif check == CDN.MANAGED_ISSUER_CHECK:
                 self.managed_issuer_trace()
             elif check == CDN.HISTORICAL_ORIGIN_CHECK:
@@ -313,6 +314,32 @@ class CdnQualificationTests(unittest.TestCase):
     def rollback_trace(self, evidence: dict[str, Any]) -> None:
         path = self.directory / "traces/rollback.json"
         self.report["checks"]["rollback"] = {"passed": True, "trace_sha256": json_file(path, evidence)}
+
+    def scoped_view_trace(self, evidence: dict[str, Any] | None = None) -> None:
+        check = CDN.SCOPED_VIEW_CHECK
+        if evidence is None:
+            views = {
+                role: dict.fromkeys(CDN.SCOPED_VIEW_FIELDS - {"bytes"}, marker * 64) | {"bytes": 8}
+                for role, marker in (("target", "a"), ("sibling", "b"))
+            }
+            placement = {"fixture_sha256": CONFIGURATION, "origin_sha256": "c" * 64,
+                         "source_prefix_sha256": "d" * 64, "deployment_policy_sha256": "e" * 64, "views": views}
+            self.registration["scoped_view_sha256"] = CDN.deployment_component_digest(placement)
+            requests = []
+            for probe in CDN.SCOPED_VIEW_PROBES:
+                target = probe.startswith("target_")
+                denied = probe in {"sibling_full", "sibling_range"}
+                view = views["target" if target else "sibling"]
+                requests.append(self.request("edge" if target or denied else "origin", 403 if denied else 200,
+                                             "hit" if target else "unknown") | {
+                    "probe": probe, "body_sha256": None if denied else view["body_sha256"],
+                    "key_sha256": view["key_sha256"], "range_offset": 0 if probe == "sibling_range" else None,
+                })
+            evidence = {key: self.report[key] for key in CDN.CDN_PROVENANCE_FIELDS} | {
+                "schema": "crab.cdn-scoped-view/v1", "check": check, "placement": placement, "requests": requests,
+            }
+        path = self.directory / "traces" / f"{check}.json"
+        self.report["checks"][check] = {"passed": True, "trace_sha256": json_file(path, evidence)}
 
     def request(self, source: str, status: int, cache: str = "unknown") -> dict[str, Any]:
         return {"source": source, "status": status, "bytes": 0 if status in (401, 403) else 8,
@@ -881,6 +908,32 @@ class CdnQualificationTests(unittest.TestCase):
         json_file(fetch_path, fetch | {"reader": fetch["reader"] | other_origin})
         self.rollback_trace(rollback | {"reader": rollback["reader"] | other_origin})
         self.rejected("must use the independently observed native target")
+
+    def test_scoped_view_cannot_be_qualified_with_a_bare_denial(self) -> None:
+        self.configure("s3", "private", "direct")
+        self.trace(CDN.SCOPED_VIEW_CHECK, [self.request("edge", 403)])
+        self.rejected("invalid fields in scoped_view_isolation")
+
+    def test_scoped_view_rejects_wrong_sibling_payload_and_missing_ranges(self) -> None:
+        self.configure("azure", "private", "direct")
+        trace = json.loads((self.directory / "traces" / f"{CDN.SCOPED_VIEW_CHECK}.json").read_bytes())
+        for index, changes, reason in (
+            (1, {"body_sha256": "7" * 64}, "verified warm target and authorized sibling reads"),
+            (2, {"key_sha256": trace["placement"]["views"]["target"]["key_sha256"]}, "approved target and sibling keys"),
+            (3, {"range_offset": None}, "denied a full and ranged GET of the sibling"),
+            (5, {"cache": "miss"}, "verified warm target and authorized sibling reads"),
+        ):
+            with self.subTest(index=index, changes=changes):
+                requests = trace["requests"].copy()
+                requests[index] = requests[index] | changes
+                self.scoped_view_trace(trace | {"requests": requests})
+                self.rejected(reason)
+
+    def test_scoped_view_rejects_unapproved_placement(self) -> None:
+        self.configure("gcs", "private", "direct")
+        trace = json.loads((self.directory / "traces" / f"{CDN.SCOPED_VIEW_CHECK}.json").read_bytes())
+        self.scoped_view_trace(trace | {"placement": trace["placement"] | {"source_prefix_sha256": "7" * 64}})
+        self.rejected("placement differs from the approved control fixture")
 
     def test_cache_reuse_requires_a_hit_after_the_miss(self) -> None:
         self.configure("s3", "private", "direct")

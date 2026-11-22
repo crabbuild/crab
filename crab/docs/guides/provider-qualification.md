@@ -282,6 +282,46 @@ aws s3 presign "$live_s3_object_uri" --profile crab --region "$aws_region" \
 Keep the exact fixture path, including any protected-view suffix. Use the GCS
 XML endpoint or the canonical Azure Blob endpoint. [GCS signed URL command](https://docs.cloud.google.com/sdk/gcloud/reference/storage/sign-url) · [Azure blob SAS command](https://learn.microsoft.com/en-us/cli/azure/storage/blob#az-storage-blob-generate-sas)
 
+### Verify scoped-view isolation
+
+For a private release row, prepare a protected-view fixture for its exact
+provider, consumer, read family and profile. Use the row's fixture if it
+already targets a materialized view. For a repository-local row, approve a
+companion fixture on a dedicated protected-view deployment. Materialize the
+target and a sibling generation or scope under the same test repository and
+native origin. The sibling descriptor contains `view_suffix`, `object_path`,
+`size`, and `sha256`. Use the same read family in both views, including the
+projected `.crab` prefix for bucket-global families.
+
+Run `collect_cdn_scoped_view.py` with the first three options below before
+preregistration. Copy its `scoped_view_sha256` into the private row's
+benchmark registration. The digest binds the deployment approval, source
+repository, both view generations or scopes, immutable prefixes, and object
+digests. Supply the target's short-lived viewer grant and a read-only signed
+native GET URL for the sibling's exact physical object. The native URL uses
+the same provider signing requirements described above.
+
+```bash
+python3 -B crab/scripts/e2e/collect_cdn_scoped_view.py \
+  --fixture "$approved_protected_fixture_json" \
+  --configuration-sha256 "$approved_protected_fixture_sha256" \
+  --sibling "$sibling_descriptor_json" \
+  --scoped-view-sha256 "$approved_scoped_view_sha256" \
+  --row-configuration-sha256 "$approved_configuration_sha256" \
+  --viewer-file "$protected_viewer_file" --sibling-read-url-file "$sibling_read_url_file" \
+  --source-sha "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
+  --output "$row_directory/traces/scoped_view_isolation.json"
+```
+
+The collector checks the deployed policy before and after the probes. It
+verifies the exact target bytes on warm cache hits and the exact sibling
+bytes through its native read grant on both sides of the denial. The target
+viewer must receive 401 or 403 on both full and ranged sibling GETs. Keep
+the credentials in protected files on the measurement worker. The trace
+retains only fingerprints and redacted observations.
+
+### Run the hosted transport canary
+
 These traces cover part of release evidence. Product actions and two-region
 measurements have their own requirements.
 
