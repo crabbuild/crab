@@ -765,9 +765,12 @@ Service Git fixture assembly rebuilds each benchmark pair from a native
 control, distinct cold and warm edge processes, and an exact re-read using
 the warm edge process's verified in-memory blob. The verifier joins provider
 requests and proves each arm used the same published fixture before
-retirement. Service LFS warm-local evidence, live regional measurements,
-public service transition proof, and service release build identity remain
-release requirements.
+retirement. Both service images embed the checked-out commit and compile the
+ordinary CDN feature. Each read pins the executable hash, target, build
+features, and embedded policy reported by its own process. Private service
+Git promotion requires the registered release binary and per-run evidence.
+Service LFS warm-local evidence, live regional measurements, and public
+service transition proof remain release requirements.
 
 The protected workflow or its dedicated workers own producing these raw
 observations. The assembly and release jobs own rejecting missing, mismatched

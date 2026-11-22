@@ -186,7 +186,7 @@ SDK_HYDRATION_READ_FIELDS = PRODUCT_COUNTERS | CDN_PROVENANCE_FIELDS | SDK_TIMIN
 SERVICE_READ_FIELDS = PRODUCT_COUNTERS | CDN_PROVENANCE_FIELDS | SDK_TIMING_FIELDS | {
     "schema", "arm", "platform", "workload_sha256", "publication_sha256", "commit", "payload_sha256",
     "payload_bytes", "etag_sha256", "git_blob_oid_sha256", "lfs_key_sha256", "reader", "native_traffic", "edge_responses",
-    "native_published_sha256", "service_instance_sha256",
+    "native_published_sha256", "service_instance_sha256", "candidate",
 }
 GIT_MODES = {"origin": "origin", "cold_edge": "edge", "warm_edge": "edge", "warm_local": "warm_local"}
 SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -1141,7 +1141,8 @@ def benchmark_registration(registration: Any) -> dict[str, Any]:
                         ("viewer_binding_sha256", "viewer_approval_sha256", "hydration_workload_sha256")),
                 "SDK hydration benchmark needs the approved workload and viewer binding")
     if is_direct_service_scope(registration["scope"]):
-        expected.update(("service_workload", "viewer_binding_sha256"))
+        expected.update(("service_workload", "viewer_binding_sha256", "service_candidate"))
+        verify_service_candidate(registration.get("service_candidate"), registration.get("source_sha"))
         workload = fields(registration.get("service_workload"), SERVICE_WORKLOAD_REGISTRATION_FIELDS,
                           "registered service HTTP workload")
         require(registration.get("workload") == SERVICE_READ_ACTION
@@ -1298,6 +1299,15 @@ def verify_sdk_candidate(
     return candidate
 
 
+def verify_service_candidate(
+    value: Any, source: str, platform: str | None = None, *, policy: Path | None = None,
+) -> dict[str, Any]:
+    candidate = verify_read_candidate(value, source, platform, policy=policy, consumer="service")
+    require("provider-cdn" in candidate["cargo_features"].split(","),
+            "service candidate must compile the provider-cdn feature")
+    return candidate
+
+
 def read_git_record(path: Path, *, limit: int = 8 * 1024) -> bytes:
     with path.open("rb") as record:
         raw = record.read(limit + 1)
@@ -1392,6 +1402,7 @@ def validate_service_read(value: Any, provenance: dict[str, Any], arm: str) -> d
             and client["schema"] == "crab.cdn-service-read/v1" and client["arm"] == arm
             and all(client[key] == provenance[key] for key in CDN_PROVENANCE_FIELDS | {"platform"}),
             "CDN service read has mismatched workflow or product provenance")
+    verify_service_candidate(client["candidate"], provenance["source_sha"], provenance["platform"])
     require(matches(GIT_OID, client["commit"]) and positive(client["payload_bytes"])
             and client["payload_bytes"] <= SERVICE_PAYLOAD_LIMIT
             and all(matches(SHA256, client[key]) for key in ("workload_sha256", "publication_sha256",
@@ -1426,7 +1437,7 @@ def validate_service_read(value: Any, provenance: dict[str, Any], arm: str) -> d
 
 def verify_service_repeat(local: dict[str, Any], primer: dict[str, Any], primer_sha256: str) -> None:
     require(local["primer_sha256"] == primer_sha256 and all(local[key] == primer[key] for key in
-                ("service_instance_sha256", "publication_sha256", "native_published_sha256", "workload_sha256",
+                ("candidate", "service_instance_sha256", "publication_sha256", "native_published_sha256", "workload_sha256",
                  "reader", "commit", "payload_sha256", "payload_bytes", "etag_sha256", "git_blob_oid_sha256"))
             and primer["finished_at_unix_ms"] <= local["started_at_unix_ms"],
             "service warm-local read must repeat its own edge primer in the same process")
@@ -1683,6 +1694,8 @@ def verify_service_lifecycle(
         key = f"{row['fixture_prefix']}/{lfs_object_path(publication['sha256'])}"
         lfs_key = hashlib.sha256(key.encode()).hexdigest()
     for arm, read in (("edge", edge), ("origin", origin)):
+        require(read["candidate"] == spec["service_candidate"],
+                "service read did not use the registered service binary")
         require(read["workload_sha256"] == workload["sha256"]
                 and read["native_published_sha256"] == published and read["publication_sha256"] == publication_sha
                 and read["commit"] == publication["oid"] and read["payload_sha256"] == publication["sha256"],
@@ -2079,6 +2092,8 @@ def collect_git_performance(
                 "regional service reads require a valid publication interval")
         retired_at = verify_git_retirement(read_git_record(product / "retirement.json"), provenance, receipt,
                                            publication["candidate"], service_origin["finished_at_unix_ms"])
+        require(service_anchor["candidate"] == service_origin["candidate"] == spec["service_candidate"],
+                "regional service reads require the registered service binary")
         require(service_anchor["workload_sha256"] == workload["sha256"]
                 and service_anchor["commit"] == publication["oid"] and service_anchor["payload_sha256"] == publication["sha256"]
                 and service_anchor["payload_bytes"] == workload["payload_bytes"]
@@ -2143,7 +2158,7 @@ def collect_git_performance(
                     if arm == "origin":
                         expected = expected | {"binding_sha256": "", "public_export_sha256": ""}
                     require(reader == expected and all(client[key] == service_anchor[key] for key in (
-                        "workload_sha256", "publication_sha256", "native_published_sha256", "commit",
+                        "candidate", "workload_sha256", "publication_sha256", "native_published_sha256", "commit",
                         "payload_sha256", "payload_bytes", "etag_sha256", "git_blob_oid_sha256",
                     )), f"{label} used a different service workload or read target")
                     require(published_at <= client["started_at_unix_ms"] <= client["finished_at_unix_ms"] <= retired_at,
@@ -2272,13 +2287,16 @@ def verify_cdn_report(
     cli_workload = requires_cli_workload(scope)
     sdk_git = is_direct_sdk_git_scope(scope)
     sdk_hydration = is_direct_sdk_hydration_scope(scope)
-    # Service rows still need release build identity and complete public transition evidence.
-    require(policy is None or cli_workload or sdk_git or sdk_hydration,
+    # Public service rows need their own transition proof. Service LFS still lacks warm-local measurements.
+    service_release = is_direct_service_git_scope(scope) and access == "private"
+    require(policy is None or cli_workload or sdk_git or sdk_hydration or service_release,
             "CDN promotion requires a product-specific workload and per-run regional evidence verifier")
     if cli_workload:
         verify_read_candidate(registration.get("candidate"), source_sha, platform, policy=policy)
     if sdk_git or sdk_hydration:
         verify_sdk_candidate(registration.get("sdk_candidate"), source_sha, platform, policy=policy)
+    if service_release:
+        verify_service_candidate(registration.get("service_candidate"), source_sha, platform, policy=policy)
     lower = verify_performance(row["performance"], registration)
     verify_product_action(row["product_action"], family, sdk_hydration=sdk_hydration)
     require(row["product_action"]["name"] == registration["workload"],

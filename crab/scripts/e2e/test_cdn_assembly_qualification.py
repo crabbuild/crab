@@ -215,6 +215,7 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
         for change, error in (
             ({"started_at_unix_ms": 1, "finished_at_unix_ms": 2}, "outside the independently observed publication interval"),
             ({"service_instance_sha256": warm["service_instance_sha256"]}, "must use a fresh service process"),
+            ({"candidate": warm["candidate"] | {"binary_sha256": "0" * 64}}, "different service workload or read target"),
         ):
             with self.subTest(error=error), self.assertRaisesRegex(ValueError, error):
                 replacement = fixture.json_file(cold, cold_original | change)
@@ -224,6 +225,21 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
                     fixture.json_file(path, previous | {"client_report_sha256": replacement})
                 self.assemble(digest)
         self.assertFalse(self.output.exists())
+
+    def test_private_service_git_requires_the_registered_release_candidate(self) -> None:
+        digest = self.inputs("gcs", consumer="server")
+        self.assertEqual(self.assemble(digest), 1)
+        policy = self.root / "qualified-scopes.txt"
+        policy.write_text(self.example.scope + "\n", encoding="utf-8")
+        spec = self.example.registration
+        fixture.CDN.verify_bundle_row(self.output, self.row, spec, fixture.COMMIT, "123", "2", policy=policy)
+
+        qualified = spec["service_candidate"] | {
+            "cargo_features": "provider-cdn,provider-cdn-qualification", "qualification_feature": True,
+        }
+        with self.assertRaises(subprocess.CalledProcessError):
+            fixture.CDN.verify_bundle_row(self.output, self.row, spec | {"service_candidate": qualified},
+                                          fixture.COMMIT, "123", "2", policy=policy)
 
     def test_failed_operational_check_leaves_no_artifact(self) -> None:
         self.inputs("gcs")

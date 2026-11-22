@@ -19,7 +19,8 @@ COPY crab/ crab/
 COPY crates/ crates/
 COPY packages/desktop/agent/ packages/desktop/agent/
 COPY --from=frontend /build/packages/ui/dist/ packages/ui/dist/
-RUN cargo build --release --locked -p crab-server
+ARG GIT_SHA=unknown
+RUN GIT_SHA="$GIT_SHA" cargo build --release --locked -p crab-server --features provider-cdn
 
 FROM caddy:2.11.9-builder-alpine@sha256:646fee578e680989ca5c7fd1ce6f1de574d19fd71ef2221810cc0510a9f40c86 AS proxy
 
@@ -28,6 +29,9 @@ FROM caddy:2.11.9-builder-alpine@sha256:646fee578e680989ca5c7fd1ce6f1de574d19fd7
 RUN xcaddy build v2.11.9 --replace golang.org/x/net=golang.org/x/net@v0.62.0
 
 FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
+
+ARG GIT_SHA=unknown
+LABEL org.opencontainers.image.revision="$GIT_SHA"
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \

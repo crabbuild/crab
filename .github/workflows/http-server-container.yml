@@ -684,7 +684,7 @@ jobs:
             fi
             git archive --format=tar HEAD | docker build \
               --file crates/crab-server/deploy/Dockerfile \
-              --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" \
+              --build-arg "GIT_SHA=$(git rev-parse HEAD)" \
               --tag crab-server:test \
               -
             digest="$(docker image inspect crab-server:test --format '{{.Id}}')"

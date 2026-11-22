@@ -23,13 +23,14 @@ from s3_gateway_workload import _canonical_path, _signed_headers
 from public_inventory import ExportError
 
 from cdn_qualification import (
-    COMMIT, GIT_FETCH_RECORD_LIMIT, GIT_OID, RUN_NUMBER, SERVICE_PAYLOAD_LIMIT, SHA256,
+    CLI_CANDIDATE_FIELDS, COMMIT, GIT_FETCH_RECORD_LIMIT, GIT_OID, RUN_NUMBER, SERVICE_PAYLOAD_LIMIT, SHA256,
     decode, fields, is_direct_service_scope, matches, positive, read_git_record, require, scope_parts,
-    validate_git_publication, validate_service_read, verify_git_native_ref, verify_service_repeat,
+    validate_git_publication, validate_service_read, verify_git_native_ref, verify_service_candidate, verify_service_repeat,
 )
 
 
 READ_TARGET = "crab_storage::cdn::read_target"
+SERVICE_BUILD_TARGET = "crab_storage::cdn::service_build"
 SERVICE_WORKLOAD_FIELDS = {
     "schema", "configuration_sha256", "publication_sha256", "endpoint", "repository", "commit",
     "payload_sha256", "payload_bytes", "etag_sha256", "public_export_sha256",
@@ -140,6 +141,23 @@ def verify_read_target(lines: list[bytes], reader: dict, consumer: str) -> str:
     return observed["service_instance_sha256"]
 
 
+def service_candidate(startup: list[bytes], consumer: str, instance: str, provenance: dict) -> dict:
+    builds = []
+    for line in startup:
+        if SERVICE_BUILD_TARGET.encode() not in line:
+            continue
+        event = decode(line)
+        if isinstance(event, dict) and event.get("target") == SERVICE_BUILD_TARGET:
+            builds.append(event.get("fields"))
+    require(len(builds) == 1, "service log needs exactly one startup build observation")
+    build = fields(builds[0], CLI_CANDIDATE_FIELDS | {"consumer", "service_instance_sha256", "message"}, "service build")
+    require(build["message"] == "CDN service build identity" and build["consumer"] == consumer
+            and build["service_instance_sha256"] == instance,
+            "service read came from a different process than the startup build")
+    return verify_service_candidate({key: build[key] for key in CLI_CANDIDATE_FIELDS},
+                                    provenance["source_sha"], provenance["platform"])
+
+
 def service_publication(path: Path, provenance: dict, approved: dict) -> tuple[bytes, dict, str]:
     raw = read_git_record(path)
     digest = hashlib.sha256(raw).hexdigest()
@@ -195,6 +213,7 @@ def probe(args: argparse.Namespace) -> dict:
     with os.fdopen(os.open(args.service_log, os.O_RDONLY | os.O_NONBLOCK), "rb") as log:
         file = os.fstat(log.fileno())
         require(stat.S_ISREG(file.st_mode), "service logs must be a regular append-only capture file")
+        startup = log.read(GIT_FETCH_RECORD_LIMIT).split(b"\n")[:-1]
         offset = log.seek(0, os.SEEK_END)
         start = time.time_ns() // 1_000_000
         require(observed["observed_at_unix_ms"] <= start, "service read started before the independent publication observation")
@@ -212,6 +231,7 @@ def probe(args: argparse.Namespace) -> dict:
                 "service logs did not retain the complete read interval")
     lines = capture.splitlines()
     instance = verify_read_target(lines, reader, consumer)
+    candidate = service_candidate(startup, consumer, instance, provenance)
     responses = {}
     counters = measure(lines, fixture["scope"], expected_git_blob=blob, edge_responses=responses)
     native = measure_native(lines, fixture["scope"])
@@ -222,7 +242,7 @@ def probe(args: argparse.Namespace) -> dict:
         "payload_sha256": approved["payload_sha256"], "payload_bytes": approved["payload_bytes"],
         "etag_sha256": approved["etag_sha256"], "git_blob_oid_sha256": blob,
         "lfs_key_sha256": lfs_key, "reader": reader,
-        "service_instance_sha256": instance,
+        "service_instance_sha256": instance, "candidate": candidate,
         "started_at_unix_ms": start, "finished_at_unix_ms": finish, "elapsed_ms": elapsed,
         "native_traffic": native, "edge_responses": responses,
     }

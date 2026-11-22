@@ -18,7 +18,7 @@ import collect_cdn_viewer_requests as COLLECT
 import run_cdn_service_read as SERVICE
 import verify_cdn_service_lifecycle as LIFECYCLE
 from cdn_qualification import CDN_PROVENANCE_FIELDS, CLEANUP_INVENTORIES, PROVIDER_FOR_EDGE, lfs_object_path
-from test_cdn_qualification import COMMIT, cli_candidate, json_file
+from test_cdn_qualification import COMMIT, cli_candidate, json_file, service_candidate
 from test_cdn_transport_qualification import fixture
 
 
@@ -86,10 +86,19 @@ class CdnServiceReadTests(unittest.TestCase):
         config = json.loads(args.fixture.read_bytes())
         _, access, _, _, _ = SERVICE.scope_parts(config["scope"])
         edge = events(PROVIDER_FOR_EDGE[provider], consumer, family, access)
+        instance = "f" * 64 if args.arm == "origin" or fault == "another-process" else "a" * 64
+        candidate = service_candidate(config["scope"], SERVICE.runner_platform())
+        if fault == "wrong-build-source":
+            candidate["source_sha"] = "b" * 40
+        build = {"target": SERVICE.SERVICE_BUILD_TARGET, "fields": candidate | {
+            "consumer": consumer, "message": "CDN service build identity",
+            "service_instance_sha256": "c" * 64 if fault == "wrong-build-instance" else instance,
+        }}
         natives = {"target": "crab_storage::native_read", "fields": {"message": "Native object store read",
                    "provider": PROVIDER_FOR_EDGE[provider], "method": "get", "status": 200, "bytes": len(BODY)}}
         prior = {"target": "crab_storage::cdn::transfer", "fields": edge[0]}
-        args.service_log.write_text(json.dumps(prior) + "\n", encoding="utf-8")
+        initial = [prior] if fault == "no-build" else [build, prior]
+        args.service_log.write_text("".join(json.dumps(line) + "\n" for line in initial), encoding="utf-8")
 
         @contextmanager
         def exchange(base, method, path, headers, _label):
@@ -119,8 +128,7 @@ class CdnServiceReadTests(unittest.TestCase):
                     reader[different] = "e" * 64
             target = {"target": SERVICE.READ_TARGET,
                       "fields": reader | {"consumer": consumer, "message": "CDN service read target",
-                                          "service_instance_sha256": "f" * 64 if args.arm == "origin"
-                                          or fault == "another-process" else "a" * 64}}
+                                          "service_instance_sha256": instance}}
             lines = [natives]
             if fault != "no-target":
                 lines.append(target)
@@ -170,7 +178,10 @@ class CdnServiceReadTests(unittest.TestCase):
                                   ("wrong-blob-header", "blob ID did not match"), ("partial", "incomplete or transformed"),
                                   ("no-edge", "requires verified edge delivery"), ("missing-request", "every viewer attempt"),
                                   ("wrong-blob-event", "requires verified edge delivery"),
-                                  ("unrelated-route", "requires verified edge delivery"), ("rotate", "log rotated")):
+                                  ("unrelated-route", "requires verified edge delivery"), ("rotate", "log rotated"),
+                                  ("wrong-build-source", "build identity is invalid"),
+                                  ("wrong-build-instance", "different process than the startup build"),
+                                  ("no-build", "exactly one startup build observation")):
                 with self.subTest(fault=fault), self.assertRaisesRegex(ValueError, reason):
                     self.request(args, provider, consumer, family, fault)
             args.arm = "origin"

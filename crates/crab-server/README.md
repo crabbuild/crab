@@ -451,9 +451,11 @@ be native S3, GCS, or Azure Blob Storage. Browser and native Git read
 handlers authorize the requesting user, then verified immutable Git and full
 LFS downloads can use CDN. Partial LFS requests keep their native version
 proof. Catalog and Cellar operations, ref controls, writes and maintenance
-use the native storage paths. The default build excludes this
-configuration. See [Plan 021](../../plans/021-provider-cdn-support.md) for
-the live qualification requirements.
+use the native storage paths. Container builds include `provider-cdn` and
+enable only qualified scopes. Pass the checkout's full commit as the
+`GIT_SHA` Docker build argument to capture build identity for qualification.
+See [Plan 021](../../plans/021-provider-cdn-support.md) for the live
+qualification requirements.
 
 The repository HTTP smoke test covers full Git and LFS delivery with native
 body reads blocked, native LFS ranges, and Git rollback with the same ETag.

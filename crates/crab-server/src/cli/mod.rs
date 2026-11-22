@@ -5,7 +5,7 @@ use std::time::Duration;
 use clap::{Args, Parser, Subcommand};
 use crab_server::catalog::CatalogStore;
 use crab_server::{RepositoryAccess, RepositoryMember};
-use crab_storage::cdn::is_read_evidence_target;
+use crab_storage::cdn::{CdnConsumer, is_read_evidence_target, observe_service_build};
 use serde::Deserialize;
 use tracing_subscriber::{
     EnvFilter, Layer as _, filter::filter_fn, layer::SubscriberExt as _,
@@ -334,7 +334,16 @@ pub(super) async fn run() -> crab_server::Result<()> {
     }
     config.set_cell_failure_zone(arguments.cell_failure_zone.as_deref())?;
     match arguments.command.unwrap_or(Command::Serve) {
-        Command::Serve => crab_server::serve(config).await,
+        Command::Serve => {
+            observe_service_build(
+                CdnConsumer::Server,
+                env!("CRAB_SERVICE_SOURCE_SHA"),
+                env!("CRAB_SERVICE_TARGET"),
+                env!("CRAB_SERVICE_PROFILE"),
+                env!("CRAB_SERVICE_FEATURES"),
+            );
+            crab_server::serve(config).await
+        }
         Command::Healthcheck => healthcheck(&config).await,
         Command::StorageProbe => crab_server::probe_storage(&config).await,
         Command::Repository { command } => repository(&config, command).await,

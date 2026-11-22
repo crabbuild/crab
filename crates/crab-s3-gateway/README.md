@@ -46,6 +46,7 @@ From the repository root, build the image:
 
 ```sh
 docker build -f crates/crab-s3-gateway/deploy/Dockerfile \
+  --build-arg "GIT_SHA=$(git rev-parse HEAD)" \
   -t crab-s3-gateway:local .
 ```
 
@@ -532,8 +533,10 @@ client permissions before serving verified Git reads or full LFS downloads
 through the CDN. Partial LFS requests keep their native version proof. Control
 reads, writes and shared bucket-global reads use the native store. Gateway
 ranges and ETags come from the pinned repository object and its attributes.
-The default build excludes CDN configuration. Live deployment qualification
-is tracked in [Plan 021](../../plans/021-provider-cdn-support.md).
+Container builds include `provider-cdn` and enable only qualified scopes.
+The `GIT_SHA` build argument records the source revision for qualification.
+Live deployment qualification is tracked in
+[Plan 021](../../plans/021-provider-cdn-support.md).
 
 ### Background maintenance
 

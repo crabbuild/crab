@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use crab_storage::cdn::is_read_evidence_target;
+use crab_storage::cdn::{CdnConsumer, is_read_evidence_target, observe_service_build};
 use tracing::Level;
 use tracing_subscriber::{
     EnvFilter, Layer as _, filter::filter_fn, layer::SubscriberExt as _,
@@ -65,6 +65,13 @@ async fn main() -> Result<(), Box<crab_s3_gateway::Error>> {
     } else if args.readiness_check {
         crab_s3_gateway::check_readiness(&config).await?;
     } else {
+        observe_service_build(
+            CdnConsumer::S3Gateway,
+            env!("CRAB_SERVICE_SOURCE_SHA"),
+            env!("CRAB_SERVICE_TARGET"),
+            env!("CRAB_SERVICE_PROFILE"),
+            env!("CRAB_SERVICE_FEATURES"),
+        );
         crab_s3_gateway::serve(config).await?;
     }
     Ok(())

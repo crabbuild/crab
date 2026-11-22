@@ -793,11 +793,13 @@ header describes the first 8 MB chunk, so Crab records an unknown cache
 disposition for larger objects. Use provider logs for their cache and
 origin-fill evidence. [Front Door caching documentation](https://learn.microsoft.com/en-us/azure/frontdoor/front-door-caching#response-headers)
 
-For Crab Server and the S3 gateway, start a dedicated qualification build with
-`RUST_LOG=crab_storage::cdn::transfer=debug,crab_storage::cdn::read_target=debug,crab_storage::native_read=debug`.
+For Crab Server and the S3 gateway, start the candidate in a dedicated process with
+`RUST_LOG=crab_storage::cdn::transfer=debug,crab_storage::cdn::read_target=debug,crab_storage::cdn::service_build=debug,crab_storage::native_read=debug`.
 On Cloud CDN, append `,crab_storage::cdn::gcs_viewer_log=trace` to correlate
 each request with Cloud Logging. Redirect stderr to a protected append-only
-file. Keep the process idle except for the measured request because the worker
+file from startup. The worker matches the authenticated read's process to its
+startup record and retains the executable SHA-256 and embedded build metadata.
+Keep the process idle except for the measured request because the worker
 uses the bytes appended during that request to isolate storage observations.
 Use a fresh process and cache for each arm.
 
@@ -868,6 +870,16 @@ as assembly inputs for the service fixture row.
   `sha256`, the native origin hash in `origin_sha256`, the hash of the physical
   prefix with its trailing slash in `prefix_sha256`, and the approved
   `etag_sha256` and `payload_bytes`.
+- Register `service_candidate` with the approved executable's
+  `binary_sha256`, `source_sha`, `target_triple`, `cargo_profile`,
+  `cargo_features`, `qualification_feature`, and `release_policy_sha256`.
+  Compare the startup record with the SHA-256 of the binary from the approved
+  container image before registration. Container builds pass the commit using
+  the `GIT_SHA` build argument and compile the regular `provider-cdn` feature.
+  For source builds, set `GIT_SHA` to the full checked-out revision when
+  invoking Cargo. Use `provider-cdn-qualification` for fixture tests. Private
+  service Git release verification requires the release profile and rejects
+  the qualification feature.
 - Provide the fixture performance summary for service LFS in
   `observations.json`. Assembly and bundle verification derive
   `product_action` from the retained records. For service Git, they also

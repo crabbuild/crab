@@ -440,6 +440,7 @@ impl Subscriber for Capture {
         match metadata.target() {
             "crab_storage::cdn::transfer"
             | "crab_storage::cdn::public_transition"
+            | "crab_storage::cdn::service_build"
             | "crab_storage::cdn::read_target" => true,
             "crab_storage::cdn::gcs_viewer_log" => self.gcs_viewer_log,
             _ => false,
@@ -492,9 +493,16 @@ fn service_read_target_reports_fingerprints_of_the_selected_layout() {
         .unwrap();
     layout(routed).observe_cdn_read_target(CdnConsumer::S3Gateway);
     layout(origin).observe_cdn_read_target(CdnConsumer::Server);
+    observe_service_build(
+        CdnConsumer::Server,
+        "fixture-source",
+        "fixture-target",
+        "debug",
+        "provider-cdn",
+    );
 
     let events = capture.events.lock().unwrap();
-    assert_eq!(events.len(), 2);
+    assert_eq!(events.len(), 3);
     let edge = &events[0].0;
     let native = &events[1].0;
     assert_eq!(edge["consumer"], "\"s3-gateway\"");
@@ -522,6 +530,18 @@ fn service_read_target_reports_fingerprints_of_the_selected_layout() {
         format!("\"{:x}\"", Sha256::digest(format!("public\n{base}")))
     );
     assert_eq!(native["binding_sha256"], "\"\"");
+    let build = &events[2].0;
+    assert_eq!(
+        build["service_instance_sha256"],
+        native["service_instance_sha256"]
+    );
+    assert_eq!(build["source_sha"], "\"fixture-source\"");
+    let executable = std::fs::read(std::env::current_exe().unwrap()).unwrap();
+    assert_eq!(
+        build["binary_sha256"],
+        format!("{:x}", Sha256::digest(executable))
+    );
+    assert_eq!(build["release_policy_sha256"], release_policy_sha256());
 }
 
 #[tokio::test]

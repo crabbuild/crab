@@ -64,6 +64,7 @@ on:
       - "crates/crab-auth/src/crab_auth_client.rs"
       - "crates/crab-auth-store/src/managed_repository.rs"
       - "crates/crab-sdk/Cargo.toml"
+      - "crates/build/service_metadata.rs"
       - "crates/crab-server/Cargo.toml"
       - "crates/crab-server/build.rs"
       - "crates/crab-server/src/cli/mod.rs"
@@ -71,6 +72,7 @@ on:
       - "crates/crab-server/src/repository/mod.rs"
       - "crates/crab-server/src/repository/tests/cdn.rs"
       - "crates/crab-s3-gateway/Cargo.toml"
+      - "crates/crab-s3-gateway/build.rs"
       - "crates/crab-s3-gateway/src/main.rs"
       - "crates/crab-s3-gateway/src/gateway.rs"
       - "crates/crab-s3-gateway/src/gateway/cdn_tests.rs"
@@ -142,6 +144,7 @@ on:
       - "crates/crab-auth/src/crab_auth_client.rs"
       - "crates/crab-auth-store/src/managed_repository.rs"
       - "crates/crab-sdk/Cargo.toml"
+      - "crates/build/service_metadata.rs"
       - "crates/crab-server/Cargo.toml"
       - "crates/crab-server/build.rs"
       - "crates/crab-server/src/cli/mod.rs"
@@ -149,6 +152,7 @@ on:
       - "crates/crab-server/src/repository/mod.rs"
       - "crates/crab-server/src/repository/tests/cdn.rs"
       - "crates/crab-s3-gateway/Cargo.toml"
+      - "crates/crab-s3-gateway/build.rs"
       - "crates/crab-s3-gateway/src/main.rs"
       - "crates/crab-s3-gateway/src/gateway.rs"
       - "crates/crab-s3-gateway/src/gateway/cdn_tests.rs"
@@ -256,6 +260,7 @@ jobs:
       - name: Exercise CDN delivery through both service interfaces
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/provider-cdn-features
+          GIT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           smoke() {

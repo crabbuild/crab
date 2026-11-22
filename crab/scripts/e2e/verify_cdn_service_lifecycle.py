@@ -54,6 +54,7 @@ def verify(args: argparse.Namespace) -> dict:
                              "prefix_sha256": cleanup["prefix_sha256"], "etag_sha256": approved["etag_sha256"],
                              "payload_bytes": approved["payload_bytes"]},
         "viewer_binding_sha256": viewer_binding_sha256(fixture),
+        "service_candidate": decode(records["edge"]).get("candidate"),
         "publication_sha256": approved["public_export_sha256"],
     }, cleanup_at=cleanup_at, native_origin_sha256=native_origin)
     retained = records | {"cleanup": cleanup_raw}

@@ -1,4 +1,9 @@
-use std::{sync::OnceLock, time::Instant};
+use std::{
+    fs::File,
+    io::{self, Read as _},
+    sync::OnceLock,
+    time::Instant,
+};
 
 use reqwest::{RequestBuilder, Response, header};
 use sha2::{Digest as _, Sha256, digest::Output};
@@ -10,6 +15,7 @@ const TARGET: &str = "crab_storage::cdn::transfer";
 const GCS_VIEWER_LOG_TARGET: &str = "crab_storage::cdn::gcs_viewer_log";
 const PUBLIC_TRANSITION_TARGET: &str = "crab_storage::cdn::public_transition";
 const READ_TARGET: &str = "crab_storage::cdn::read_target";
+const SERVICE_BUILD_TARGET: &str = "crab_storage::cdn::service_build";
 static SERVICE_INSTANCE: OnceLock<String> = OnceLock::new();
 
 /// Identify the storage targets used for redacted CDN qualification evidence.
@@ -21,8 +27,64 @@ pub fn is_read_evidence_target(target: &str) -> bool {
             | PUBLIC_TRANSITION_TARGET
             | GCS_VIEWER_LOG_TARGET
             | READ_TARGET
+            | SERVICE_BUILD_TARGET
             | crate::native_read_telemetry::TARGET
     )
+}
+
+fn service_instance() -> &'static str {
+    SERVICE_INSTANCE.get_or_init(|| format!("{:x}", Sha256::digest(rand::random::<[u8; 32]>())))
+}
+
+/// Record the running service binary and its compiled CDN policy for qualification.
+pub fn observe_service_build(
+    consumer: CdnConsumer,
+    source: &str,
+    target: &str,
+    profile: &str,
+    features: &str,
+) {
+    if !tracing::enabled!(target: SERVICE_BUILD_TARGET, tracing::Level::DEBUG) {
+        return;
+    }
+    let digest = match service_binary_digest() {
+        Ok(digest) => digest,
+        Err(error) => {
+            tracing::warn!(target: SERVICE_BUILD_TARGET, parent: None,
+                error_kind = ?error.kind(), "CDN service executable could not be fingerprinted");
+            return;
+        }
+    };
+    tracing::debug!(target: SERVICE_BUILD_TARGET, parent: None,
+        consumer = consumer.label(),
+        service_instance_sha256 = service_instance(),
+        source_sha = source,
+        target_triple = target,
+        cargo_profile = profile,
+        cargo_features = features,
+        qualification_feature = super::qualification_enabled(),
+        release_policy_sha256 = %super::release_policy_sha256(),
+        binary_sha256 = %format_args!("{digest:x}"),
+        "CDN service build identity"
+    );
+}
+
+fn service_binary_digest() -> io::Result<Output<Sha256>> {
+    // Linux container measurements must hash the running inode, even if a
+    // staged executable has replaced its directory entry since startup.
+    #[cfg(target_os = "linux")]
+    let mut binary = File::open("/proc/self/exe")?;
+    #[cfg(not(target_os = "linux"))]
+    let mut binary = File::open(std::env::current_exe()?)?;
+    let mut digest = Sha256::new();
+    let mut chunk = [0; 64 * 1024];
+    loop {
+        let length = binary.read(&mut chunk)?;
+        if length == 0 {
+            return Ok(digest.finalize());
+        }
+        digest.update(&chunk[..length]);
+    }
 }
 
 impl StoreLayout<Store> {
@@ -44,8 +106,6 @@ impl StoreLayout<Store> {
         }
         let binding = store.cdn_binding_sha256();
         let publication = store.cdn_public_export_sha256();
-        let instance = SERVICE_INSTANCE
-            .get_or_init(|| format!("{:x}", Sha256::digest(rand::random::<[u8; 32]>())));
         let mut prefix_hash = Sha256::new();
         prefix_hash.update(prefix.as_bytes());
         prefix_hash.update(b"/");
@@ -54,7 +114,7 @@ impl StoreLayout<Store> {
             parent: None,
             tracing::Level::DEBUG,
             consumer = consumer.label(),
-            service_instance_sha256 = instance.as_str(),
+            service_instance_sha256 = service_instance(),
             origin_sha256 = %format_args!("{:x}", Sha256::digest(origin.as_bytes())),
             prefix_sha256 = %format_args!("{:x}", prefix_hash.finalize()),
             binding_sha256 = binding.as_deref().unwrap_or_default(),
@@ -373,6 +433,7 @@ mod tests {
             PUBLIC_TRANSITION_TARGET,
             GCS_VIEWER_LOG_TARGET,
             READ_TARGET,
+            SERVICE_BUILD_TARGET,
             crate::native_read_telemetry::TARGET,
         ] {
             assert!(is_read_evidence_target(target), "{target}");

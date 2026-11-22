@@ -78,6 +78,12 @@ def sdk_candidate(scope: str, platform: str) -> dict:
     }
 
 
+def service_candidate(scope: str, platform: str) -> dict:
+    return cli_candidate(scope, platform) | {
+        "cargo_features": "provider-cdn", "binary_sha256": hashlib.sha256(f"{scope}/{platform}".encode()).hexdigest(),
+    }
+
+
 def write_git_measurements(inputs: Path, registration: dict, platform: str, sdk_native: dict | None = None,
                            hydration: dict | None = None, service: dict | None = None) -> None:
     provider = CDN.PROVIDER_FOR_EDGE[registration["scope"].split("/", 1)[0]]
@@ -95,7 +101,7 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, sdk_
                 if hydration is not None:
                     started += 100_000
                 if service is not None:
-                    started += service["started_at_unix_ms"] - 3_000_000
+                    started += (service["started_at_unix_ms"] // 1000) * 1000 - 3_000_000
                 edge = int(arm in ("cold_edge", "warm_edge"))
                 counters = dict.fromkeys(CDN.PRODUCT_COUNTERS, 0) | {
                     "verified_edge_payloads": edge, "edge_attempts": edge,
@@ -425,7 +431,9 @@ class CdnQualificationTests(unittest.TestCase):
         cleanup_at = cleanup["observed_at_unix_ms"]
         reader = {"origin_sha256": cleanup["targets"]["native"]["origin_sha256"], "prefix_sha256": cleanup["prefix_sha256"]}
         spec = reader | {"sha256": "5" * 64, "etag_sha256": "6" * 64, "payload_bytes": 8}
-        self.registration.update(workload=CDN.SERVICE_READ_ACTION, service_workload=spec, viewer_binding_sha256="e" * 64)
+        service = service_candidate(self.scope, report["platform"])
+        self.registration.update(workload=CDN.SERVICE_READ_ACTION, service_workload=spec, viewer_binding_sha256="e" * 64,
+                                 service_candidate=service)
         report["product_action"]["name"] = CDN.SERVICE_READ_ACTION
         provenance = {key: report[key] for key in CDN.CDN_PROVENANCE_FIELDS}
         platform = report["platform"]
@@ -461,6 +469,7 @@ class CdnQualificationTests(unittest.TestCase):
             "workload_sha256": spec["sha256"], "payload_sha256": payload, "payload_bytes": spec["payload_bytes"],
             "etag_sha256": spec["etag_sha256"], "git_blob_oid_sha256": "7" * 64 if family == "git" else None,
             "service_instance_sha256": "1" * 64,
+            "candidate": service,
             "lfs_key_sha256": lfs_key, "elapsed_ms": 10, "edge_responses": {},
             "reader": reader | {"binding_sha256": "", "public_export_sha256": ""},
             "native_traffic": {"get_responses": 1, "head_responses": 0, "body_bytes": 8},
