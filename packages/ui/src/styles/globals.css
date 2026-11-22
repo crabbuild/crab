@@ -4628,12 +4628,33 @@ main {
 .repo-file-workspace .code-layout.no-sidebar {
   grid-template-columns: minmax(0, 1fr);
 }
-.repo-file-workspace .tree-sidebar,
-.repo-file-workspace .tree-resizer {
-  position: sticky;
-  top: 0;
-  height: var(--workspace-available-height, 100dvh);
-  align-self: start;
+@media (min-width: 641px) {
+  main:has(.repo-file-workspace),
+  .repo-file-workspace,
+  .timing-widget:has(> .repo-file-workspace),
+  .repo-file-workspace > .timing-widget:has(> .code-layout) {
+    display: flex;
+    flex-direction: column;
+  }
+  .repo-file-workspace,
+  .timing-widget:has(> .repo-file-workspace),
+  .repo-file-workspace > .timing-widget:has(> .code-layout),
+  .repo-file-workspace .code-layout {
+    flex: 1 0 auto;
+  }
+  .repo-file-workspace {
+    margin: 0;
+  }
+  .repo-file-workspace .tree-sidebar,
+  .repo-file-workspace .tree-resizer {
+    /* The content column sets the grid's natural height. The rails fill the
+       visible part of that grid without feeding back into its measurement. */
+    contain: size;
+    align-self: stretch;
+    position: sticky;
+    top: 0;
+    max-height: var(--workspace-available-height, 100dvh);
+  }
 }
 .repo-file-workspace .tree-sidebar {
   display: flex;
@@ -6291,13 +6312,10 @@ main {
     border-width: 1px;
     border-radius: var(--radius-md);
   }
-  .repo-file-workspace .repository-tree {
-    height: 300px;
-    min-height: 0;
-  }
+  .repo-file-workspace .repository-tree,
   .repo-file-workspace .tree-search-results {
+    flex: none;
     height: 300px;
-    min-height: 0;
   }
   .repo-file-workspace .code-main {
     padding: 0;
