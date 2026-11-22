@@ -317,8 +317,10 @@ explicit grants from being displaced by pending SSO group notices. The
 Directory retains 100 conversations per collection. It folds existing event
 rows per repository and typed subject, selecting the latest contribution and
 strongest reason before applying pagination. A replay of the current activity
-preserves read state across both collections. Triage compares the latest
-activity before changing read, saved, or completed state. Saved and Done
+preserves read state across both collections. Single and bulk triage share one
+Directory mutation. It compares every selected activity and rolls back the
+whole batch on a stale row. Bulk retries use an account-scoped native receipt
+with the exact submission payload. Saved and Done
 records use per-account documents keyed by conversation plus activity-order
 indexes for each view. The indexes, recent read flags, and triage document
 update in the same native transaction. Completed rows stay out of the recent inbox. The

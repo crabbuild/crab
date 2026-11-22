@@ -5,9 +5,9 @@ use std::{
 
 use axum::{
     Extension, Json, Router,
-    extract::{DefaultBodyLimit, Path, Query, State, rejection::JsonRejection},
+    extract::{DefaultBodyLimit, Query, State},
     middleware,
-    routing::{get, put},
+    routing::{get, post, put},
 };
 use futures_util::{StreamExt, TryStreamExt, stream};
 use serde::{Deserialize, Serialize};
@@ -21,8 +21,8 @@ use crate::{
         directory::{
             IdentityKey,
             notifications::{
-                Action, List, ListInput, Position, Reason, SetState, SetStateInput,
-                State as NotificationState, Thread, ThreadPage, View,
+                List, ListInput, Position, Reason, State as NotificationState, Thread, ThreadPage,
+                View,
             },
         },
         repository::{
@@ -34,13 +34,14 @@ use crate::{
     server::Server,
 };
 
+mod state;
 mod subscriptions;
 
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
         .route("/api/notifications", get(list))
         .route("/api/notifications/unread", get(unread))
-        .route("/api/notifications/{id}/state", put(set_state))
+        .route("/api/notifications/{id}/state", put(state::single))
         .route(
             "/api/repos/{owner}/{name}/subscription",
             get(subscriptions::get).put(subscriptions::set),
@@ -50,6 +51,11 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
             get(subscriptions::get_thread).put(subscriptions::set_thread),
         )
         .layer(DefaultBodyLimit::max(1024))
+        .merge(
+            Router::new()
+                .route("/api/notifications/bulk", post(state::bulk))
+                .layer(DefaultBodyLimit::max(16 * 1024)),
+        )
         .route_layer(middleware::from_fn_with_state(server, app::admit))
 }
 
@@ -372,53 +378,6 @@ fn location(target: Target) -> (SubjectKind, u64, &'static str, String) {
     }
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StateRequest {
-    repository_id: Uuid,
-    expected: Position,
-    action: Action,
-}
-
-async fn set_state(
-    State(server): State<Arc<Server>>,
-    Extension(principal): Extension<Principal>,
-    Path(id): Path<Uuid>,
-    input: std::result::Result<Json<StateRequest>, JsonRejection>,
-) -> Result<Json<NotificationState>> {
-    let identity = app::account(&principal)?;
-    let Json(input) = input.map_err(Error::Body)?;
-    valid_position(input.expected)?;
-    let repo = server
-        .repositories
-        .by_id(input.repository_id)
-        .ok_or(Error::NotFound)?;
-    if !may_notify(&server, &principal, &repo, &identity).await? {
-        return Err(Error::NotFound);
-    }
-    let cells = server.cells().ok_or(Error::CellUnavailable)?;
-    let state = app::command_output(
-        cells
-            .command::<SetState>(
-                Address::Directory,
-                app::mutation_identity()?,
-                SetStateInput {
-                    identity: identity.clone(),
-                    thread: id,
-                    repository: repo.id,
-                    expected: input.expected,
-                    action: input.action,
-                },
-            )
-            .await,
-    )?;
-    if !may_notify(&server, &principal, &repo, &identity).await? {
-        return Err(Error::NotFound);
-    }
-    app::account(&principal)?;
-    state.map(Json).ok_or(Error::PageChanged)
-}
-
 #[cfg(test)]
 mod delivery_tests;
 
@@ -427,6 +386,9 @@ mod watch_tests;
 
 #[cfg(test)]
 mod triage_tests;
+
+#[cfg(test)]
+mod bulk_tests;
 
 #[cfg(test)]
 mod tests {

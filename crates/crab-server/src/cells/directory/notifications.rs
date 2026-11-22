@@ -8,7 +8,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 mod filing;
+mod triage;
 use filing::Filed;
+pub(crate) use triage::{Action, Changed, Selected, SetState, SetStateInput, validate_selection};
 
 pub(crate) const MAX_RECIPIENTS: usize = 32;
 pub(crate) const MAX_HISTORY: usize = 100;
@@ -404,114 +406,6 @@ impl Read for List {
         let mut threads: Vec<_> = threads.into_values().collect();
         threads.sort_unstable_by_key(|thread| std::cmp::Reverse(thread.entry.notice.position()));
         Ok(ThreadPage { threads, next })
-    }
-}
-
-#[derive(Clone, Copy, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum Action {
-    Read(bool),
-    Save(bool),
-    Done(bool),
-}
-
-#[derive(Deserialize, Serialize)]
-pub(crate) struct SetStateInput {
-    pub identity: IdentityKey,
-    pub thread: Uuid,
-    pub repository: Uuid,
-    pub expected: Position,
-    pub action: Action,
-}
-
-pub(crate) struct SetState;
-impl Mutation for SetState {
-    const CLASS: &'static str = CLASS;
-    const ID: u32 = 20;
-    type Input = SetStateInput;
-    type Output = Option<State>;
-
-    fn execute(
-        context: &mut Transaction<'_>,
-        input: SetStateInput,
-    ) -> Result<MutationResult<Self::Output>> {
-        input.expected.validate()?;
-        let Some(actor) = active_account(context, input.identity)? else {
-            return Ok(MutationResult::Rejected(None));
-        };
-        let matches = |entry: &Entry| {
-            entry.notice.repository == input.repository && entry.notice.thread_id() == input.thread
-        };
-        let previous =
-            filing::load(context, actor, input.thread)?.filter(|item| matches(&item.entry));
-        let mut recent = Vec::new();
-        let mut inboxes = Vec::new();
-        for access in Access::CHANNELS {
-            let key = access.inbox(actor);
-            let inbox: Inbox = context.document(&key)?.unwrap_or_default();
-            recent.extend(inbox.entries.iter().filter(|entry| matches(entry)).cloned());
-            inboxes.push((key, inbox));
-        }
-        let in_recent = recent
-            .iter()
-            .any(|entry| entry.notice.position() == input.expected);
-        let current = conversations(
-            recent
-                .into_iter()
-                .chain(previous.iter().map(|item| item.entry.clone())),
-        )
-        .pop();
-        let Some(entry) = current.filter(|entry| entry.notice.position() == input.expected) else {
-            // Only the observed activity can be read, saved or completed.
-            return Ok(MutationResult::Rejected(None));
-        };
-        let now = context.now_ms();
-        let mut filed = previous
-            .clone()
-            .unwrap_or_else(|| Filed::new(entry.clone()));
-        if !filed.retained(now) && (!in_recent || filed.done_at.is_some()) {
-            return Ok(MutationResult::Rejected(None));
-        }
-        filed.entry = entry;
-        match input.action {
-            Action::Read(read) => filed.entry.read = read,
-            Action::Save(save) => filed.saved = save,
-            Action::Done(true) => {
-                filed.entry.read = true;
-                filed.done_at.get_or_insert(now);
-                filed.restored_at = None;
-            }
-            Action::Done(false) => {
-                if filed.done_at.take().is_some() && !in_recent {
-                    filed.restored_at = Some(now);
-                }
-            }
-        }
-        let mut changed = filing::store(context, actor, previous.as_ref(), &filed)?;
-        for (key, mut inbox) in inboxes {
-            let mut updates = false;
-            for entry in &mut inbox.entries {
-                if matches(entry) {
-                    let reason = if entry.notice.position() == input.expected {
-                        entry.reason.max(filed.entry.reason)
-                    } else {
-                        entry.reason
-                    };
-                    updates |= entry.read != filed.entry.read || entry.reason != reason;
-                    entry.read = filed.entry.read;
-                    entry.reason = reason;
-                }
-            }
-            if updates {
-                inbox.entries = conversations(inbox.entries);
-                context.put_document(&key, &inbox)?;
-                changed = true;
-            }
-        }
-        if changed {
-            advance(context)?;
-        }
-        Ok(MutationResult::Success(Some(Thread::from(filed).state)))
     }
 }
 

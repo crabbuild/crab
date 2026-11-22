@@ -10,6 +10,7 @@ import { RelativeTime } from "@/components/discussion/time";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   NativeSelect,
   NativeSelectOption,
@@ -56,6 +57,28 @@ function isReason(value: string | null): value is Reason {
 
 type NoticeState = { read: boolean; saved: boolean; done: boolean };
 type Action = { read: boolean } | { save: boolean } | { done: boolean };
+
+const MAX_SELECTION = 50;
+const bulkActions = {
+  read: { label: "Mark as read", action: { read: true } },
+  unread: { label: "Mark as unread", action: { read: false } },
+  save: { label: "Save", action: { save: true } },
+  unsave: { label: "Unsave", action: { save: false } },
+  done: { label: "Mark as done", action: { done: true } },
+  restore: { label: "Move to inbox", action: { done: false } },
+} satisfies Record<string, { label: string; action: Action }>;
+
+type BulkAction = keyof typeof bulkActions;
+type BulkIntent = {
+  request_id: string;
+  issued_at_ms: number;
+  items: { id: string; repository_id: string; expected: Notice["updated"] }[];
+  action: Action;
+};
+
+function isBulkAction(value: string): value is BulkAction {
+  return Object.hasOwn(bulkActions, value);
+}
 
 type Notice = NoticeState & {
   id: string;
@@ -219,6 +242,11 @@ function NotificationList({
   const [older, setOlder] = useState<Notice[]>([]);
   const [confirmed, setConfirmed] = useState<Record<string, NoticeState>>({});
   const [announcement, setAnnouncement] = useState("");
+  const [selection, setSelection] = useState<Set<string>>(() => new Set());
+  const [rowPending, setRowPending] = useState(0);
+  const [bulkAction, setBulkAction] = useState<BulkAction | "">("");
+  const [intent, setIntent] = useState<BulkIntent>();
+  const bulk = useMutation(csrf, null);
   const filters = new URLSearchParams({ unread: String(view === "unread") });
   if (view === "saved" || view === "done") filters.set("view", view);
   if (repository) filters.set("repository", repository);
@@ -236,6 +264,43 @@ function NotificationList({
       repositoryFilter.current?.focus();
     }
   }, [initial.data, initial.loading]);
+  function refresh() {
+    focusAfterRefresh.current = true;
+    setOlder([]);
+    setCursor(undefined);
+    setConfirmed({});
+    setSelection(new Set());
+    setBulkAction("");
+    setIntent(undefined);
+    bulk.reset();
+    initial.retry();
+  }
+
+  async function applyBulk(submission: BulkIntent) {
+    setIntent(submission);
+    const result = await bulk.run<{ items: (NoticeState & { id: string })[] }>(
+      "/api/notifications/bulk",
+      "POST",
+      submission,
+    );
+    if (!result) return;
+    const stamps = new Map(
+      submission.items.map(({ id, expected }) => [id, expected.id]),
+    );
+    const confirmedStates: Record<string, NoticeState> = {};
+    for (const { id, ...state } of result.items) {
+      const stamp = stamps.get(id);
+      if (stamp) confirmedStates[stamp] = state;
+    }
+    setConfirmed((current) => ({ ...current, ...confirmedStates }));
+    setAnnouncement(`Updated ${result.items.length} notifications.`);
+    setSelection(new Set());
+    setBulkAction("");
+    setIntent(undefined);
+    repositoryFilter.current?.focus();
+    refreshNotificationBadge();
+  }
+
   return (
     <Result state={initial} timingLabel="Notification inbox">
       {(first) => {
@@ -251,6 +316,15 @@ function NotificationList({
         const visible = Array.from(threads.values())
           .map((item) => ({ ...item, ...confirmed[item.updated.id] }))
           .filter((item) => visibleIn(view, item));
+        const selected = visible.filter((item) =>
+          selection.has(item.updated.id),
+        );
+        const firstRows = visible.slice(0, MAX_SELECTION);
+        const allSelected =
+          firstRows.length > 0 &&
+          firstRows.every((item) => selection.has(item.updated.id));
+        const selectionLocked = !!intent || rowPending > 0;
+        const reloadRequired = [400, 404, 409, 410].includes(bulk.status ?? 0);
         return (
           <div className="grid gap-4">
             <div className="flex flex-wrap items-center gap-2">
@@ -299,34 +373,153 @@ function NotificationList({
               {announcement}
             </p>
             {visible.length ? (
-              <ul
-                aria-label="Notifications"
-                className="divide-y overflow-hidden rounded-lg border"
-              >
-                {visible.map((item) => (
-                  <NotificationRow
-                    key={item.id}
-                    item={item}
-                    csrf={csrf}
-                    onRefresh={() => {
-                      focusAfterRefresh.current = true;
-                      setOlder([]);
-                      setCursor(undefined);
-                      setConfirmed({});
-                      initial.retry();
-                    }}
-                    onChanged={(state, message) => {
-                      if (!visibleIn(view, state))
-                        repositoryFilter.current?.focus();
-                      setAnnouncement(message);
-                      setConfirmed((current) => ({
-                        ...current,
-                        [item.updated.id]: state,
-                      }));
-                    }}
+              <>
+                <div className="flex flex-wrap items-center gap-3 rounded-lg border px-4 py-2">
+                  <Checkbox
+                    id="inbox-select-all"
+                    aria-label={
+                      visible.length > MAX_SELECTION
+                        ? `Select first ${MAX_SELECTION} loaded notifications`
+                        : "Select all loaded notifications"
+                    }
+                    checked={
+                      allSelected
+                        ? true
+                        : selected.length
+                          ? "indeterminate"
+                          : false
+                    }
+                    disabled={selectionLocked}
+                    onCheckedChange={() =>
+                      setSelection(
+                        new Set(
+                          allSelected
+                            ? []
+                            : firstRows.map((item) => item.updated.id),
+                        ),
+                      )
+                    }
                   />
-                ))}
-              </ul>
+                  <label htmlFor="inbox-select-all" className="text-sm">
+                    {selected.length
+                      ? `${selected.length} selected`
+                      : "Select notifications"}
+                  </label>
+                  {!!selected.length && (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <NativeSelect
+                        aria-label="Bulk notification action"
+                        value={bulkAction}
+                        onChange={(event) => {
+                          const value = event.target.value;
+                          setBulkAction(isBulkAction(value) ? value : "");
+                        }}
+                        disabled={!!intent}
+                      >
+                        <NativeSelectOption value="">
+                          Choose action
+                        </NativeSelectOption>
+                        {Object.keys(bulkActions)
+                          .filter(isBulkAction)
+                          .filter(
+                            (action) =>
+                              view !== "done" ||
+                              !["read", "unread", "done"].includes(action),
+                          )
+                          .map((action) => (
+                            <NativeSelectOption key={action} value={action}>
+                              {bulkActions[action].label}
+                            </NativeSelectOption>
+                          ))}
+                      </NativeSelect>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={!bulkAction || selectionLocked}
+                        onClick={() => {
+                          if (!bulkAction) return;
+                          void applyBulk({
+                            request_id: crypto.randomUUID(),
+                            issued_at_ms: Date.now(),
+                            items: selected.map((item) => ({
+                              id: item.id,
+                              repository_id: item.repository.id,
+                              expected: item.updated,
+                            })),
+                            action: bulkActions[bulkAction].action,
+                          });
+                        }}
+                      >
+                        Apply to selected
+                      </Button>
+                    </div>
+                  )}
+                </div>
+                {bulk.error && (
+                  <div
+                    className="notice error flex flex-wrap items-center gap-2"
+                    role="alert"
+                  >
+                    <p>{bulk.error}</p>
+                    {intent && !reloadRequired && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void applyBulk(intent)}
+                      >
+                        Retry bulk action
+                      </Button>
+                    )}
+                    <Button variant="outline" size="sm" onClick={refresh}>
+                      Refresh inbox
+                    </Button>
+                  </div>
+                )}
+                <ul
+                  aria-label="Notifications"
+                  className="divide-y overflow-hidden rounded-lg border"
+                >
+                  {visible.map((item) => {
+                    const checked = selection.has(item.updated.id);
+                    return (
+                      <NotificationRow
+                        key={item.id}
+                        item={item}
+                        csrf={csrf}
+                        checked={checked}
+                        selectionDisabled={
+                          selectionLocked ||
+                          (!checked && selected.length >= MAX_SELECTION)
+                        }
+                        actionsDisabled={!!intent || selected.length > 0}
+                        onSelect={() => {
+                          setSelection((current) => {
+                            const next = new Set(current);
+                            if (checked) next.delete(item.updated.id);
+                            else next.add(item.updated.id);
+                            return next;
+                          });
+                        }}
+                        onPending={(pending) =>
+                          setRowPending(
+                            (current) => current + (pending ? 1 : -1),
+                          )
+                        }
+                        onRefresh={refresh}
+                        onChanged={(state, message) => {
+                          if (!visibleIn(view, state))
+                            repositoryFilter.current?.focus();
+                          setAnnouncement(message);
+                          setConfirmed((current) => ({
+                            ...current,
+                            [item.updated.id]: state,
+                          }));
+                        }}
+                      />
+                    );
+                  })}
+                </ul>
+              </>
             ) : (
               <p className="rounded-lg border px-4 py-8 text-center text-muted-foreground">
                 {views[view].empty}
@@ -363,11 +556,21 @@ function NotificationList({
 function NotificationRow({
   item,
   csrf,
+  checked,
+  selectionDisabled,
+  actionsDisabled,
+  onSelect,
+  onPending,
   onChanged,
   onRefresh,
 }: {
   item: Notice;
   csrf: string;
+  checked: boolean;
+  selectionDisabled: boolean;
+  actionsDisabled: boolean;
+  onSelect: () => void;
+  onPending: (pending: boolean) => void;
   onChanged: (state: NoticeState, message: string) => void;
   onRefresh: () => void;
 }) {
@@ -375,21 +578,33 @@ function NotificationRow({
   const { icon: Icon, summary } = reasons[item.reason];
 
   async function apply(action: Action, message: string) {
-    const result = await mutation.run<NoticeState>(
-      `/api/notifications/${item.id}/state`,
-      "PUT",
-      { repository_id: item.repository.id, expected: item.updated, action },
-    );
-    if (result !== undefined) {
-      onChanged(result, message);
-      refreshNotificationBadge();
+    onPending(true);
+    try {
+      const result = await mutation.run<NoticeState>(
+        `/api/notifications/${item.id}/state`,
+        "PUT",
+        { repository_id: item.repository.id, expected: item.updated, action },
+      );
+      if (result !== undefined) {
+        onChanged(result, message);
+        refreshNotificationBadge();
+      }
+    } finally {
+      onPending(false);
     }
   }
 
   return (
     <li
-      className={`grid grid-cols-[auto_1fr] items-start gap-3 px-3 py-4 sm:grid-cols-[auto_1fr_auto] sm:px-4${item.read ? "" : " bg-muted/50"}`}
+      className={`grid grid-cols-[auto_auto_1fr] items-start gap-3 px-3 py-4 sm:grid-cols-[auto_auto_1fr_auto] sm:px-4${item.read ? "" : " bg-muted/50"}`}
     >
+      <Checkbox
+        className="mt-1"
+        aria-label={`Select ${item.title} in ${titleOf(item.repository)}`}
+        checked={checked}
+        disabled={selectionDisabled}
+        onCheckedChange={onSelect}
+      />
       <Icon aria-hidden="true" className="mt-1 size-4 text-muted-foreground" />
       <div className="min-w-0 space-y-1 text-sm">
         <p className="break-words text-muted-foreground">
@@ -408,7 +623,7 @@ function NotificationRow({
         </p>
         {mutation.error && <p role="alert">{mutation.error}</p>}
       </div>
-      <div className="col-start-2 flex flex-wrap gap-2 sm:col-start-3 sm:justify-end">
+      <div className="col-start-3 flex flex-wrap gap-2 sm:col-start-4 sm:justify-end">
         {mutation.status === 409 ? (
           <Button variant="outline" size="sm" onClick={onRefresh}>
             Refresh inbox
@@ -419,7 +634,7 @@ function NotificationRow({
               <Button
                 variant="outline"
                 size="sm"
-                disabled={mutation.pending}
+                disabled={mutation.pending || actionsDisabled}
                 onClick={() =>
                   apply(
                     { read: !item.read },
@@ -433,7 +648,7 @@ function NotificationRow({
             <Button
               variant="outline"
               size="sm"
-              disabled={mutation.pending}
+              disabled={mutation.pending || actionsDisabled}
               onClick={() =>
                 apply(
                   { save: !item.saved },
@@ -446,7 +661,7 @@ function NotificationRow({
             <Button
               variant="outline"
               size="sm"
-              disabled={mutation.pending}
+              disabled={mutation.pending || actionsDisabled}
               onClick={() =>
                 apply(
                   { done: !item.done },

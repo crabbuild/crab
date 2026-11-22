@@ -179,10 +179,11 @@ their qualified identity before scheduling delivery. Watch outbox events carry
 the activity number and advance by bounded pages after Directory delivery.
 The mention outbox pins enrollment sources to committed activity and gates
 later watch pages until the inbox delivery and follow commit. The Directory
-groups inbox entries by typed discussion and binds triage to the observed
-activity. `notifications/filing.rs` retains saved and completed conversations
-with a private activity-order index. `api/notifications/` checks repository
-access and mute state before listing entries or changing their state.
+groups inbox entries by typed discussion. `notifications/triage.rs` binds all
+selected rows to observed activity in one transaction. `notifications/filing.rs`
+retains saved and completed conversations with private activity-order indexes.
+`api/notifications/` checks repository access and mute state before listing
+entries or changing their state.
 
 The native runtime lives in `src/cells/runtime.rs`; `src/cells/client.rs` owns
 the authority-checked `CellClient` and target-bound read receipts.

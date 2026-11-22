@@ -347,3 +347,175 @@ test("saved and done views persist and restore a conversation", async ({
     row.getByRole("button", { name: "Save", exact: true }),
   ).toBeVisible();
 });
+
+test("bulk selection spans loaded pages and retries the same submission", async ({
+  page,
+}) => {
+  const { lifecycle } = await mockPullRequest(page);
+  const rows = [
+    {
+      id: "first-thread",
+      repository: {
+        id: lifecycle.repositoryId,
+        owner: "team",
+        name: "project",
+      },
+      title: "Review the first change",
+      href: "/team/project/pull/1",
+      updated: { id: "first-activity", created_at_ms: 1_700_001_000_000 },
+      sender: "Alice",
+      reason: "review_requested",
+      read: false,
+      saved: false,
+      done: false,
+    },
+    {
+      id: "second-thread",
+      repository: { id: "another-repository", owner: "team", name: "library" },
+      title: "Review the second change",
+      href: "/team/library/pull/1",
+      updated: { id: "second-activity", created_at_ms: 1_700_000_000_000 },
+      sender: "Alice",
+      reason: "review_requested",
+      read: false,
+      saved: false,
+      done: false,
+    },
+  ];
+  await page.route("**/api/session", (route) =>
+    route.fulfill({
+      json: {
+        authenticated: true,
+        user: { name: "Bob", subject: "bob" },
+        csrf: "bulk-csrf",
+      },
+    }),
+  );
+  await page.route("**/api/notifications/unread", (route) =>
+    route.fulfill({
+      json: { unread: rows.some((row) => !row.read && !row.done) },
+    }),
+  );
+  await page.route(
+    (url) => url.pathname === "/api/notifications",
+    (route) => {
+      const query = new URL(route.request().url()).searchParams;
+      const done = query.get("view") === "done";
+      const items = rows.filter(
+        (row) => row.done === done && (done || !row.read),
+      );
+      const before = query.has("before");
+      return route.fulfill({
+        json: {
+          items: before ? items.slice(1) : items.slice(0, 1),
+          next: !before && items.length > 1 ? "older" : null,
+        },
+      });
+    },
+  );
+  let rejectStale = true;
+  let loseSaveReply = true;
+  let savedIntent: unknown;
+  await page.route("**/api/notifications/bulk", (route) => {
+    const request = route.request();
+    const body = request.postDataJSON();
+    expect(request.method()).toBe("POST");
+    expect(request.headers()["x-csrf-token"]).toBe("bulk-csrf");
+    expect(body.request_id).toEqual(expect.any(String));
+    expect(body.issued_at_ms).toEqual(expect.any(Number));
+    expect(body.items).toEqual(
+      rows.map((row) => ({
+        id: row.id,
+        repository_id: row.repository.id,
+        expected: row.updated,
+      })),
+    );
+    if (rejectStale) {
+      rejectStale = false;
+      rows[1].updated = {
+        id: "newer-activity",
+        created_at_ms: 1_700_000_500_000,
+      };
+      return route.fulfill({
+        status: 409,
+        json: { error: { code: "page_changed", message: "This list changed" } },
+      });
+    }
+    for (const row of rows) {
+      if (typeof body.action.save === "boolean") row.saved = body.action.save;
+      if (typeof body.action.done === "boolean") {
+        row.done = body.action.done;
+        row.read ||= row.done;
+      }
+    }
+    if (body.action.save && loseSaveReply) {
+      loseSaveReply = false;
+      savedIntent = body;
+      return route.abort("failed");
+    }
+    if (body.action.save) expect(body).toEqual(savedIntent);
+    return route.fulfill({
+      json: {
+        items: rows.map(({ id, read, saved, done }) => ({
+          id,
+          read,
+          saved,
+          done,
+        })),
+      },
+    });
+  });
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/-/notifications");
+  const inbox = page.getByRole("region", { name: "Notifications" });
+  const selectAll = inbox.getByRole("checkbox", {
+    name: "Select all loaded notifications",
+  });
+  const older = inbox.getByRole("button", { name: "Load older notifications" });
+  const action = inbox.getByLabel("Bulk notification action");
+  const apply = inbox.getByRole("button", { name: "Apply to selected" });
+  await inbox
+    .getByRole("checkbox", { name: /Select Review the first change/ })
+    .click();
+  await expect(inbox.getByText("1 selected", { exact: true })).toBeVisible();
+  await older.click();
+  await expect(selectAll).toHaveAttribute("aria-checked", "mixed");
+  await inbox
+    .getByRole("checkbox", { name: /Select Review the second change/ })
+    .click();
+  await expect(inbox.getByText("2 selected", { exact: true })).toBeVisible();
+  expect(
+    await page.evaluate(() => document.documentElement.scrollWidth),
+  ).toBeLessThanOrEqual(390);
+  await expectNoAccessibilityViolations(page);
+  await action.selectOption("done");
+  await apply.click();
+  await expect(inbox.getByRole("alert")).toContainText("This list changed");
+  await expect(inbox.getByRole("link", { name: rows[0].title })).toBeVisible();
+  await expect(inbox.getByRole("link", { name: rows[1].title })).toBeVisible();
+  await inbox.getByRole("button", { name: "Refresh inbox" }).click();
+  await older.click();
+  await expect(inbox.getByRole("link", { name: rows[1].title })).toBeVisible();
+  await selectAll.click();
+  await action.selectOption("save");
+  await apply.click();
+  await expect(inbox.getByRole("alert")).toContainText("The response was lost");
+  await expect(selectAll).toBeDisabled();
+  await inbox.getByRole("button", { name: "Retry bulk action" }).click();
+  await expect(inbox.getByRole("button", { name: "Unsave" })).toHaveCount(2);
+  await expect(selectAll).not.toBeChecked();
+  await expect(inbox.getByLabel("Repository", { exact: true })).toBeFocused();
+
+  await selectAll.click();
+  await action.selectOption("done");
+  await apply.click();
+  await expect(inbox.getByText("No unread notifications.")).toBeVisible();
+  await inbox.getByRole("link", { name: "Done", exact: true }).click();
+  await older.click();
+  await expect(inbox.getByRole("link", { name: rows[1].title })).toBeVisible();
+  await selectAll.click();
+  await action.selectOption("restore");
+  await apply.click();
+  await expect(inbox.getByText("No completed notifications.")).toBeVisible();
+});

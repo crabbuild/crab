@@ -319,6 +319,45 @@ async fn native_browser_saves_completes_and_restores_an_inbox_conversation() {
     browser.run(&["wait", "--text", title]).await;
     assert_eq!(h.json(INBOX, &bob).await["items"][0]["saved"], true);
     assert_eq!(h.json(DONE, &bob).await["items"], json!([]));
+    let second_title = "Review a second notification";
+    h.write(
+        Method::POST,
+        "/api/repos/team/private/issues",
+        &alice,
+        json!({"request_id":Uuid::now_v7(),"title":second_title,"body":"@bob, one more."}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    h.deliver_notifications("team", "private").await;
+    browser.run(&["reload"]).await;
+    browser.run(&["wait", "--text", second_title]).await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "checkbox",
+            "click",
+            "--name",
+            "Select all loaded notifications",
+            "--exact",
+        ])
+        .await;
+    browser
+        .run(&[
+            "select",
+            "select[aria-label='Bulk notification action']",
+            "done",
+        ])
+        .await;
+    click("button", "Apply to selected").await;
+    browser
+        .run(&["wait", "--text", "No notifications yet."])
+        .await;
+    assert_eq!(
+        h.json(DONE, &bob).await["items"].as_array().unwrap().len(),
+        2
+    );
     drop(browser);
     h.close().await;
 }
