@@ -19,7 +19,7 @@ from cdn_qualification import (
     read_git_record, require, scope_parts, validate_sdk_hydration_workload, verify_sdk_candidate,
 )
 from run_cdn_git_workload import runner_platform, viewer_binding_sha256
-from run_cdn_sdk_workload import binding_for, observed_interval, split_observations
+from run_cdn_sdk_workload import binding_for, json_record, observed_interval, split_observations
 from run_cdn_transport_checks import approved_fixture, fixture_object_key, native_remote
 
 
@@ -36,7 +36,7 @@ def file_digest(path: Path) -> str:
         return hashlib.file_digest(data, "sha256").hexdigest()
 
 
-def child_evidence(lines: list[bytes], fixture: dict, key: str, cache: Path, approval: str) -> dict:
+def child_evidence(lines: list[bytes], fixture: dict, key: str, cache: Path, approval: str, arm: str) -> dict:
     expected = {
         "message": "CDN child captured read target",
         "origin_sha256": digest(fixture["native_origin"].encode()),
@@ -66,10 +66,16 @@ def child_evidence(lines: list[bytes], fixture: dict, key: str, cache: Path, app
             "hydration child did not confirm the approved projected view, binding, and isolated cache")
     responses = {}
     key_sha256 = digest(key.encode())
-    counts = measure(child_lines, fixture["scope"], expected_xorb_key=key_sha256, edge_responses=responses)
+    counts = measure(child_lines, fixture["scope"], expected_xorb_key=key_sha256, edge_responses=responses,
+                     local_xorb_only=arm == "warm_local")
     native = measure_native(child_lines, fixture["scope"])
-    if approval:
-        require(counts["observed_edge_gets"] > 0 and counts["verified_edge_payloads"] > 0,
+    if arm == "warm_local":
+        require(counts["local_payload_hits"] > 0
+                and all(counts[name] == 0 for name in PRODUCT_COUNTERS - {"local_payload_hits"}),
+                "SDK warm hydration requires verified local chunks with zero edge attempts")
+    elif arm == "edge":
+        require(counts["observed_edge_gets"] > 0 and counts["verified_edge_payloads"] > 0
+                and counts["local_payload_hits"] == 0,
                 "hydration child did not accept verified chunks from the approved CDN xorb")
     else:
         require(all(counts[name] == 0 for name in PRODUCT_COUNTERS)
@@ -79,9 +85,11 @@ def child_evidence(lines: list[bytes], fixture: dict, key: str, cache: Path, app
     return counts | {"reader": reader, "xorb_key_sha256": key_sha256, "native_traffic": native, "edge_responses": responses}
 
 
-def hydrate(args: argparse.Namespace) -> dict:
+def hydrate(args: argparse.Namespace) -> tuple[dict, dict | None]:
     require(matches(COMMIT, args.source_sha) and matches(RUN_NUMBER, args.run_id)
             and matches(RUN_NUMBER, args.run_attempt), "exact workflow run provenance is required")
+    repeat = args.warm_local_output is not None
+    require(not repeat or args.arm == "edge", "a warm local hydration requires its own edge primer")
     fixture = approved_fixture(args.fixture, args.configuration_sha256)
     edge, access, consumer, family, profile = scope_parts(fixture["scope"])
     require((access, consumer, family, profile) == ("private", "sdk", "xorb", "direct"),
@@ -102,7 +110,7 @@ def hydrate(args: argparse.Namespace) -> dict:
         "branch": "", "expected_oid": "", "expected_sha256": spec["payload_sha256"], "expected_bytes": spec["payload_bytes"],
         "binding": binding, "repeat_snapshot": False, "public_transition": False,
         "worktree": {"git": str(git), "crab": str(crab), "hydration": {
-            "remote": native_remote(fixture, edge), "pointer": pointer.decode("utf-8"),
+            "remote": native_remote(fixture, edge), "pointer": pointer.decode("utf-8"), "repeat": repeat,
         }},
     }
     env = {name: value for name, value in os.environ.items()
@@ -119,7 +127,7 @@ def hydrate(args: argparse.Namespace) -> dict:
             raise ValueError("SDK hydration workload timed out") from None
         end = time.time_ns() // 1_000_000
         require(result.returncode == 0, "SDK hydration failed to verify the hydrated file")
-        report = fields(decode(result.stdout), SDK_TIMING_FIELDS | {"payload", "build"}, "SDK hydration report")
+        report = fields(decode(result.stdout), SDK_TIMING_FIELDS | {"payload", "build", "warm_local"}, "SDK hydration report")
         payload = fields(report["payload"], {"sha256", "bytes"}, "hydrated file")
         require(payload["sha256"] == spec["payload_sha256"] and type(payload["bytes"]) is int
                 and payload["bytes"] == spec["payload_bytes"],
@@ -130,15 +138,24 @@ def hydrate(args: argparse.Namespace) -> dict:
         candidate = verify_sdk_candidate(build | {"binary_sha256": probe_digest}, args.source_sha, platform)
         require("local" in candidate["cargo_features"].split(","), "SDK hydration requires the local feature")
         timing = observed_interval({name: report[name] for name in SDK_TIMING_FIELDS}, start, end)
-        lines, _ = split_observations(result.stderr.splitlines(), False)
-        evidence = child_evidence(lines, fixture, key, cache, approval)
-    return timing | evidence | {
-        "schema": "crab.cdn-sdk-hydration/v1", "scope": fixture["scope"], "arm": args.arm,
-        "configuration_sha256": args.configuration_sha256, "workload_sha256": args.workload_sha256,
-        "source_sha": args.source_sha, "workflow_run_id": args.run_id, "workflow_run_attempt": args.run_attempt,
-        "platform": platform, "candidate": candidate, "crab_sha256": spec["crab_sha256"],
-        "pointer_sha256": spec["pointer_sha256"], "payload": payload,
-    }
+        lines, local_lines = split_observations(result.stderr.splitlines(), repeat)
+        context = {
+            "schema": "crab.cdn-sdk-hydration/v1", "scope": fixture["scope"],
+            "configuration_sha256": args.configuration_sha256, "workload_sha256": args.workload_sha256,
+            "source_sha": args.source_sha, "workflow_run_id": args.run_id, "workflow_run_attempt": args.run_attempt,
+            "platform": platform, "candidate": candidate, "crab_sha256": spec["crab_sha256"],
+            "pointer_sha256": spec["pointer_sha256"], "payload": payload,
+        }
+        primary = context | timing | child_evidence(lines, fixture, key, cache, approval, args.arm) | {"arm": args.arm}
+        local = None
+        if repeat:
+            local_timing = observed_interval(report["warm_local"], primary["finished_at_unix_ms"], end)
+            local = context | local_timing | child_evidence(local_lines, fixture, key, cache, approval, "warm_local") | {
+                "arm": "warm_local", "primer_sha256": digest(json_record(primary).encode()),
+            }
+        else:
+            require(report["warm_local"] is None, "unexpected SDK hydration repeat output")
+    return primary, local
 
 
 def main() -> int:
@@ -148,8 +165,14 @@ def main() -> int:
         parser.add_argument("--" + name, required=True, type=Path)
     for name in ("configuration-sha256", "workload-sha256", "source-sha", "run-id", "run-attempt"):
         parser.add_argument("--" + name, required=True)
+    parser.add_argument("--warm-local-output", type=Path)
+    args = parser.parse_args()
     try:
-        print(json.dumps(hydrate(parser.parse_args()), sort_keys=True))
+        primary, local = hydrate(args)
+        if local is not None:
+            with args.warm_local_output.open("x", encoding="utf-8", newline="\n") as stream:
+                stream.write(json_record(local))
+        sys.stdout.write(json_record(primary))
     except (OSError, ValueError):
         # A parser failure may involve fixture fields or child diagnostics.
         print("error: SDK hydration evidence could not be verified", file=sys.stderr)

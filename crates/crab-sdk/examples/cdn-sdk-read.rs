@@ -49,6 +49,8 @@ struct Worktree {
 struct Hydration {
     remote: String,
     pointer: String,
+    #[serde(default)]
+    repeat: bool,
 }
 
 #[derive(Deserialize)]
@@ -255,22 +257,42 @@ impl Request {
         )?;
         client.configure_local(scratch.path()).await?;
         let repository = client.open(OpenOptions::local(scratch.path())).await?;
+        let local = repository.local()?;
+        let path = scratch.path().join(PAYLOAD);
         let timing = Timing::start()?;
-        repository
-            .local()?
-            .hydrate(vec![PathBuf::from(PAYLOAD)])
-            .await?;
+        local.hydrate(vec![PathBuf::from(PAYLOAD)]).await?;
         let mut report = primary_finish(timing)?;
-        let mut file = std::fs::File::open(scratch.path().join(PAYLOAD))?
-            .take(pointer.size.checked_add(1).ok_or("invalid fixture size")?);
+        let payload = self.verified_hydrated_file(&path, pointer.size)?;
+        report["payload"] = payload;
+        report["warm_local"] = serde_json::Value::Null;
+        if hydration.repeat {
+            // Restore the tracked pointer so SDK hydration must reconstruct it
+            // again. Keep the same approved view and persistent cache root.
+            std::fs::write(&path, hydration.pointer.as_bytes())?;
+            tracing::debug!(target: "crab_cdn_probe::arm_boundary", parent: None, phase = "local_start");
+            let timing = Timing::start()?;
+            local.hydrate(vec![PathBuf::from(PAYLOAD)]).await?;
+            report["warm_local"] = timing.finish()?;
+            tracing::debug!(target: "crab_cdn_probe::arm_boundary", parent: None, phase = "local_finish");
+            self.verified_hydrated_file(&path, pointer.size)?;
+        }
+        Ok(report)
+    }
+
+    fn verified_hydrated_file(
+        &self,
+        path: &Path,
+        expected: u64,
+    ) -> Result<serde_json::Value, Failure> {
+        let mut file =
+            std::fs::File::open(path)?.take(expected.checked_add(1).ok_or("invalid fixture size")?);
         let mut digest = Sha256::new();
         let size = std::io::copy(&mut file, &mut digest)?;
         let sha256 = format!("{:x}", digest.finalize());
-        if size != pointer.size || sha256 != self.expected_sha256 {
+        if size != expected || sha256 != self.expected_sha256 {
             return Err("SDK hydration wrote different fixture bytes".into());
         }
-        report["payload"] = serde_json::json!({"sha256": sha256, "bytes": size});
-        Ok(report)
+        Ok(serde_json::json!({"sha256": sha256, "bytes": size}))
     }
 
     async fn worktree_report(

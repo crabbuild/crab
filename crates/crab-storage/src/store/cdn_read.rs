@@ -194,6 +194,16 @@ impl Store {
         }
     }
 
+    /// Report a verified xorb cache hit after authorizing the selected physical key.
+    pub fn observe_verified_xorb_cache_hit(&self, path: &Path) {
+        if let Some((route, CdnReadFamily::Xorb)) = self.cdn_route_for(path)
+            && let Some(policy) = route.policy()
+            && let Some(observation) = PayloadObservation::new(policy, CdnReadFamily::Xorb, None)
+        {
+            observation.record_local_xorb(path.as_ref());
+        }
+    }
+
     /// Read and verify one immutable unit, optionally using the scoped CDN route.
     ///
     /// Size and range must come from an authenticated descriptor. The verifier
@@ -385,6 +395,15 @@ impl CdnReadAttempt {
             && let Some(observation) = self.payload_observation()
         {
             observation.record_verified_xorb(self.path.as_ref());
+        }
+    }
+
+    /// Report verified xorb chunks supplied by native storage during a CDN-aware read.
+    pub fn observe_verified_origin_xorb(&self) {
+        if self.family == CdnReadFamily::Xorb
+            && let Some(observation) = self.payload_observation()
+        {
+            observation.record_origin_xorb(self.path.as_ref());
         }
     }
 

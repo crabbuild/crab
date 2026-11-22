@@ -178,7 +178,7 @@ fn duplicate_insertion_keeps_the_verified_original() {
 }
 
 #[tokio::test]
-async fn only_verified_xorb_chunks_count_as_edge_payload() {
+async fn verified_xorb_chunks_report_their_delivery_source() {
     use axum::{Router, body::Body, http::HeaderMap, response::Response};
     use crab_storage::cdn::{CdnAccess, CdnConsumer, CdnProfile, CdnRoute, CdnTransport};
     use crab_xet::xorb::{
@@ -197,13 +197,21 @@ async fn only_verified_xorb_chunks_count_as_edge_payload() {
     };
 
     #[derive(Clone, Default)]
-    struct Capture(Arc<Mutex<Vec<String>>>);
-    impl Visit for Capture {
+    struct Capture(Arc<Mutex<Vec<(String, String)>>>);
+
+    #[derive(Default)]
+    struct Payload {
+        source: String,
+        fingerprint: Option<String>,
+    }
+    impl Visit for Payload {
         fn record_debug(&mut self, _: &Field, _: &dyn std::fmt::Debug) {}
 
         fn record_str(&mut self, field: &Field, value: &str) {
-            if field.name() == "xorb_key_sha256" {
-                self.0.lock().unwrap().push(value.to_owned());
+            match field.name() {
+                "source" => self.source = value.to_owned(),
+                "xorb_key_sha256" => self.fingerprint = Some(value.to_owned()),
+                _ => {}
             }
         }
     }
@@ -220,7 +228,11 @@ async fn only_verified_xorb_chunks_count_as_edge_payload() {
         fn enter(&self, _: &Id) {}
         fn exit(&self, _: &Id) {}
         fn event(&self, event: &Event<'_>) {
-            event.record(&mut self.clone());
+            let mut payload = Payload::default();
+            event.record(&mut payload);
+            if let Some(fingerprint) = payload.fingerprint {
+                self.0.lock().unwrap().push((payload.source, fingerprint));
+            }
         }
     }
 
@@ -320,12 +332,16 @@ async fn only_verified_xorb_chunks_count_as_edge_payload() {
             .unwrap();
             assert_eq!(bytes, expected);
         }
-        let fingerprints = std::mem::take(&mut *capture.0.lock().unwrap());
-        assert_eq!(fingerprints.len(), usize::from(valid_edge));
+        let payloads = std::mem::take(&mut *capture.0.lock().unwrap());
+        assert_eq!(payloads.len(), 2);
+        assert_eq!(payloads[0].0, if valid_edge { "edge" } else { "origin" });
+        assert_eq!(payloads[1].0, "local");
+        assert_eq!(payloads[0].1, payloads[1].1);
         assert!(
-            fingerprints
+            payloads
                 .iter()
-                .all(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                .all(|(_, hash)| hash.len() == 64
+                    && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
         );
         server.abort();
     }

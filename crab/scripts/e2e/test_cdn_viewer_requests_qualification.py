@@ -171,6 +171,35 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
                         for private in (tag, host, project, rule, "192.0.2.1", "range-fill", "validation", "unrelated-origin"):
                             self.assertNotIn(private, retained)
 
+            config |= {"scope": "cloud-cdn/private/sdk/xorb/direct", "base_url": f"https://{host}/crab",
+                       "view_suffix": "/acl-views/v2/" + "2" * 64 + "/1-" + "3" * 64,
+                       "object_path": ".crab/xorbs/aa/" + "a" * 64}
+            hydration_config = examples.json_file(fixture_path, config)
+            key = COLLECT.fixture_object_key(config, "private", "xorb")
+            key_sha256 = hashlib.sha256(key.encode()).hexdigest()
+            hydration = {key: report[key] for key in examples.CDN.SDK_HYDRATION_READ_FIELDS & report.keys()} | {
+                "schema": "crab.cdn-sdk-hydration/v1", "scope": config["scope"], "xorb_key_sha256": key_sha256,
+                "configuration_sha256": hydration_config, "edge_responses": {fingerprint: response},
+                "workload_sha256": "1" * 64, "crab_sha256": "2" * 64, "pointer_sha256": "3" * 64,
+                "payload": {"sha256": "4" * 64, "bytes": 8},
+            }
+            hydration_digest = examples.json_file(client, hydration)
+            command[command.index(configuration)] = hydration_config
+            output.unlink()
+            for observed_key in (key[:-64] + "b" * 64, key):
+                request_uri = f"{config['base_url']}/{observed_key}"
+                examples.json_file(log, [viewer | {"httpRequest": request | {"requestUrl": request_uri}}])
+                result = subprocess.run(command, capture_output=True, text=True, check=False)
+                if observed_key != key:
+                    self.assertEqual(result.returncode, 1)
+                    self.assertIn("did not read the approved hydration xorb", result.stderr)
+                    self.assertFalse(output.exists())
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    proof = json.loads(output.read_bytes())
+                    self.assertEqual(proof["client_report_sha256"], hydration_digest)
+                    self.assertEqual(proof["records"][fingerprint]["key_sha256"], key_sha256)
+
     def test_front_door_matches_blob_reads_and_excludes_origin_shield_and_direct_reads(self):
         for access in ("private", "public"):
             with self.subTest(access=access), TemporaryDirectory() as temporary:

@@ -16,12 +16,13 @@ from urllib.parse import urlsplit
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cdn_qualification import (  # noqa: E402
-    CDN_PROVENANCE_FIELDS, GIT_FETCH_RECORD_LIMIT, PROVIDER_FOR_EDGE, SDK_GIT_READ_FIELDS, VIEWER_REQUEST_FILES,
-    decode, fields, is_direct_sdk_git_scope, matches, read_git_record, require, scope_parts, validate_git_fetch,
+    CDN_PROVENANCE_FIELDS, GIT_FETCH_RECORD_LIMIT, PROVIDER_FOR_EDGE, SDK_GIT_READ_FIELDS, SDK_HYDRATION_READ_FIELDS,
+    VIEWER_REQUEST_FILES, decode, fields, is_direct_sdk_git_scope, is_direct_sdk_hydration_scope, matches,
+    read_git_record, require, scope_parts, validate_git_fetch,
     verify_git_traffic, verify_viewer_requests,
 )
 from collect_front_door_deployment_policy import FRONT_DOOR_HOST, SUBSCRIPTION  # noqa: E402
-from run_cdn_transport_checks import approved_fixture, deployment_target, fixture_base, origin_bucket  # noqa: E402
+from run_cdn_transport_checks import approved_fixture, deployment_target, fixture_base, fixture_object_key, origin_bucket  # noqa: E402
 
 
 LOG_FIELDS = {b"x-edge-request-id", b"x-host-header", b"cs-method", b"cs-uri-stem", b"cs-protocol",
@@ -355,6 +356,9 @@ def cloud_cdn_logs(paths: list[Path], expected: dict, fixture: dict) -> dict:
                     "Cloud CDN log has invalid status, byte counts or log entry ID")
             record = {"status": status, "response_bytes": int(size), "cache_fill_bytes": int(fill),
                       "cache": cloud_cdn_cache_status(request, payload.get("statusDetails")), "origin_requests": {}}
+            if is_direct_sdk_hydration_scope(fixture["scope"]):
+                key = url.path.removeprefix(base.path.rstrip("/") + "/")
+                record["key_sha256"] = hashlib.sha256(key.encode()).hexdigest()
             require(fingerprint not in records or (records[fingerprint] == record and inserts[fingerprint] == insert_id),
                     "Cloud CDN exports disagree about one viewer request")
             records[fingerprint], inserts[fingerprint] = record, insert_id
@@ -417,6 +421,13 @@ def main() -> int:
             require(client["schema"] == "crab.cdn-sdk-git-read/v1" and client["arm"] == "edge",
                     "SDK viewer evidence requires a timed edge snapshot")
             verify_git_traffic(client, edge, "CDN benchmark SDK snapshot")
+        elif is_direct_sdk_hydration_scope(fixture["scope"]):
+            client = fields(candidate, SDK_HYDRATION_READ_FIELDS, "CDN benchmark SDK hydration")
+            key = fixture_object_key(fixture, "private", "xorb")
+            require(client["schema"] == "crab.cdn-sdk-hydration/v1" and client["arm"] == "edge"
+                    and client["xorb_key_sha256"] == hashlib.sha256(key.encode()).hexdigest(),
+                    "SDK viewer evidence requires a timed hydration of the approved xorb")
+            verify_git_traffic(client, edge, "CDN benchmark SDK hydration")
         else:
             client = validate_git_fetch(raw, provenance, candidate["arm"], "CDN benchmark fetch")
         require(client["all_edge_attempts"] > 0 and len(client["edge_responses"]) == client["all_edge_attempts"],

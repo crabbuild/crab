@@ -10,7 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "deploy/cdn"))
 from public_inventory import ExportError, native_placement, read_publication, validate_public_origins  # noqa: E402
@@ -170,6 +170,10 @@ SDK_PROBE_FIELDS = SDK_TIMING_FIELDS | {"commit", "payload", "build", "warm_loca
 SDK_GIT_READ_FIELDS = PRODUCT_COUNTERS | CDN_PROVENANCE_FIELDS | SDK_PAYLOAD_FIELDS | SDK_TIMING_FIELDS | {
     "schema", "arm", "platform", "candidate", "approval_sha256", "publication_sha256",
     "edge_responses", "native_traffic", "reader", "commit",
+}
+SDK_HYDRATION_READ_FIELDS = PRODUCT_COUNTERS | CDN_PROVENANCE_FIELDS | SDK_TIMING_FIELDS | {
+    "schema", "arm", "platform", "workload_sha256", "candidate", "crab_sha256", "pointer_sha256", "payload",
+    "reader", "xorb_key_sha256", "native_traffic", "edge_responses",
 }
 GIT_MODES = {"origin": "origin", "cold_edge": "edge", "warm_edge": "edge", "warm_local": "warm_local"}
 SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -1423,6 +1427,7 @@ def verify_sdk_git_read(raw: bytes, row: dict[str, Any], spec: dict[str, Any], m
 
 def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: str, edge: str) -> tuple[set[str], int, int]:
     keyed_origin = edge in ("cloudfront", "front-door")
+    xorb_key = client.get("xorb_key_sha256")
     proof_fields = {"schema", "client_report_sha256", "records"}
     if keyed_origin:
         proof_fields.add("origin_requests")
@@ -1437,11 +1442,12 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
     record_fields = {"status", "cache", "response_bytes"}
     if edge == "cloud-cdn":
         record_fields |= {"cache_fill_bytes", "origin_requests"}
-    if keyed_origin:
+    if keyed_origin or xorb_key is not None:
         record_fields.add("key_sha256")
     viewer_keys = set()
     logged_ids = set(records)
     origin_gets = child_fill_bytes = viewer_fill_bytes = 0
+    xorb_transfer = dict.fromkeys(("edge_hits", "edge_misses", "edge_unknown", "edge_bytes", "incomplete_edge_bytes"), 0)
     for request_id, record in records.items():
         row = fields(record, record_fields, "CDN viewer log record")
         response = expected[request_id]
@@ -1451,9 +1457,20 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
                 "CDN log status or response bytes disagree with the client")
         if response["complete"] and response["cache"] != "unknown":
             require(row["cache"] == response["cache"], "CDN log cache result disagrees with the completed response")
-        if keyed_origin:
+        if keyed_origin or xorb_key is not None:
             require(matches(SHA256, row["key_sha256"]), "invalid CDN object key fingerprint")
+            require(xorb_key is None or row["key_sha256"] == xorb_key,
+                    "CDN viewer request did not read the approved hydration xorb")
             viewer_keys.add(row["key_sha256"])
+        if xorb_key is not None:
+            if response["complete"]:
+                require(response["status"] in (200, 206), "completed hydration response did not return object bytes")
+                if response["bytes"]:
+                    metric = {"hit": "edge_hits", "miss": "edge_misses", "unknown": "edge_unknown"}[response["cache"]]
+                    xorb_transfer[metric] += 1
+                    xorb_transfer["edge_bytes"] += response["bytes"]
+            else:
+                xorb_transfer["incomplete_edge_bytes"] += response["bytes"]
         if edge == "cloud-cdn":
             require(type(row["cache_fill_bytes"]) is int and row["cache_fill_bytes"] >= 0,
                     "Cloud CDN log has invalid reported cache fill bytes")
@@ -1469,6 +1486,9 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
                 logged_ids.add(origin_id)
                 origin_gets += origin["method"] == "GET"
                 child_fill_bytes += origin["cache_fill_bytes"]
+    if xorb_key is not None:
+        require(client["edge_attempts"] == len(records) and all(client[key] == count for key, count in xorb_transfer.items()),
+                "SDK hydration transfer totals disagree with the logged responses")
     if keyed_origin:
         service, viewer, timestamp, precision = (
             ("S3", "CloudFront", "at_unix_s", 1000) if edge == "cloudfront"
@@ -1524,7 +1544,7 @@ def verify_git_native_ref(
 def verify_git_lifecycle(
     observations: dict[str, bytes], row: dict[str, Any], publication: dict[str, Any], publication_sha256: str,
     read_started: int, native_target: dict[str, str], retired_at: int, cleanup_at: int, origin_sha256: str,
-) -> None:
+) -> int:
     published, retired = (
         verify_git_native_ref(decode(observations[phase]), row, publication, publication_sha256, phase, origin_sha256)
         for phase in GIT_NATIVE_REF_FILES
@@ -1539,6 +1559,7 @@ def verify_git_lifecycle(
     require(all(before[key] == after[key] for key in ("repository_sha256", "epoch_sha256"))
             and all(before[key] != after[key] for key in ("transaction_id", "head_sha256", "revision_sha256")),
             "native ref retirement must commit a distinct tombstone in the same repository epoch")
+    return published["observed_at_unix_ms"]
 
 
 def verify_git_retirement(raw: bytes, row: dict[str, Any], publication_digest: str,
@@ -1577,16 +1598,64 @@ def validate_sdk_hydration_publication(raw: bytes, row: dict[str, Any]) -> dict[
     return validate_git_publication(raw, provenance)
 
 
-def collect_sdk_hydration_product(
-    inputs: Path, row: dict[str, Any], registration: dict[str, Any], rollback_raw: bytes, *,
+def verify_sdk_hydration_read(
+    raw: bytes, row: dict[str, Any], registration: dict[str, Any], arm: str,
+    spec: dict[str, Any], placement: dict[str, Any],
+) -> dict[str, Any]:
+    local = arm == "warm_local"
+    expected_fields = SDK_HYDRATION_READ_FIELDS | ({"primer_sha256"} if local else set())
+    read = fields(decode(raw), expected_fields, "SDK hydration record")
+    require(read["schema"] == "crab.cdn-sdk-hydration/v1" and read["arm"] == arm
+            and all(read[key] == row[key] for key in CDN_PROVENANCE_FIELDS | {"platform"})
+            and read["workload_sha256"] == registration["hydration_workload_sha256"]
+            and read["candidate"] == registration["sdk_candidate"]
+            and read["crab_sha256"] == spec["crab_sha256"] and read["pointer_sha256"] == spec["pointer_sha256"],
+            "SDK hydration used a different workflow, workload or executable")
+    require("local" in read["candidate"]["cargo_features"].split(","), "SDK hydration requires the local feature")
+    payload = fields(read["payload"], {"sha256", "bytes"}, "verified hydrated file")
+    require(type(payload["bytes"]) is int and payload == {"sha256": spec["payload_sha256"], "bytes": spec["payload_bytes"]},
+            "SDK hydration did not verify the approved file")
+    target = placement["views"]["target"]
+    reader = fields(read["reader"], CLI_NATIVE_FIELDS | {
+        "global_prefix_sha256", "binding_sha256", "approval_sha256", "cache_root_sha256", "local_cache_only",
+    }, "verified SDK hydration target")
+    require(reader["origin_sha256"] == placement["origin_sha256"]
+            and reader["prefix_sha256"] == target["physical_prefix_sha256"]
+            and read["xorb_key_sha256"] == target["key_sha256"]
+            and reader["global_prefix_sha256"] == spec["global_prefix_sha256"]
+            and matches(SHA256, reader["cache_root_sha256"])
+            and reader["local_cache_only"] is True,
+            "SDK hydration used a different projected view, xorb, or cache service")
+    approved = arm != "origin"
+    require(reader["binding_sha256"] == (registration["viewer_binding_sha256"] if approved else "")
+            and reader["approval_sha256"] == (registration["viewer_approval_sha256"] if approved else ""),
+            "SDK hydration did not use the required viewer approval")
+    verify_git_traffic(read, scope_parts(row["scope"])[0], "SDK hydration")
+    if local:
+        require(matches(SHA256, read["primer_sha256"]) and positive(read["local_payload_hits"])
+                and all(read[key] == 0 for key in PRODUCT_COUNTERS - {"local_payload_hits"}),
+                "SDK warm hydration requires verified local chunks with zero edge attempts")
+    elif approved:
+        require(all(positive(read[key]) for key in ("observed_edge_gets", "verified_edge_payloads", "edge_bytes"))
+                and read["local_payload_hits"] == 0, "SDK hydration accepted no verified edge xorb")
+    else:
+        native = read["native_traffic"]
+        require(all(read[key] == 0 for key in PRODUCT_COUNTERS)
+                and positive(native["get_responses"]) and positive(native["body_bytes"]),
+                "SDK hydration rollback requires native payload reads without edge or cache activity")
+    return read
+
+
+def collect_sdk_hydration_evidence(
+    directory: Path, row: dict[str, Any], registration: dict[str, Any], rollback_raw: bytes, *,
     placement: dict[str, Any], cleanup_at: int, native_origin_sha256: str,
     retain: Path | None = None, policy: Path | None = None,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, Any]]:
     require(deployment_component_digest(placement) == registration["scoped_view_sha256"]
             and placement["fixture_sha256"] == row["configuration_sha256"]
             and placement["origin_sha256"] == native_origin_sha256,
             "SDK hydration view differs from the approved fixture and native origin")
-    target = placement["views"]["target"]
+    inputs = directory / SDK_HYDRATION_DIR
     workload_raw = read_git_record(inputs / "workload.json")
     approval = registration["hydration_workload_sha256"]
     spec = validate_sdk_hydration_workload(workload_raw, approval, row["configuration_sha256"])
@@ -1599,52 +1668,14 @@ def collect_sdk_hydration_product(
     writer = verify_read_candidate(publication["candidate"], row["source_sha"], row["platform"], policy=policy)
     require(writer["binary_sha256"] == spec["crab_sha256"],
             "SDK hydration must use the approved Crab executable for the native publication and reads")
-    expected = {"sha256": spec["payload_sha256"], "bytes": spec["payload_bytes"]}
-    expected_fields = PRODUCT_COUNTERS | CDN_PROVENANCE_FIELDS | SDK_TIMING_FIELDS | {
-        "schema", "arm", "platform", "workload_sha256", "candidate", "crab_sha256", "pointer_sha256", "payload",
-        "reader", "xorb_key_sha256", "native_traffic", "edge_responses",
-    }
-    reader_fields = CLI_NATIVE_FIELDS | {
-        "global_prefix_sha256", "binding_sha256", "approval_sha256", "cache_root_sha256", "local_cache_only",
-    }
     edge_raw = read_git_record(inputs / "hydration.json", limit=GIT_FETCH_RECORD_LIMIT)
-    edge_provider = scope_parts(row["scope"])[0]
-    pair = []
-    for arm, raw in (("edge", edge_raw), ("origin", rollback_raw)):
-        read = fields(decode(raw), expected_fields, "SDK hydration record")
-        require(read["schema"] == "crab.cdn-sdk-hydration/v1" and read["arm"] == arm
-                and all(read[key] == row[key] for key in CDN_PROVENANCE_FIELDS | {"platform"})
-                and read["workload_sha256"] == approval and read["candidate"] == registration["sdk_candidate"]
-                and read["crab_sha256"] == spec["crab_sha256"] and read["pointer_sha256"] == spec["pointer_sha256"],
-                "SDK hydration used a different workflow, workload or executable")
-        require("local" in read["candidate"]["cargo_features"].split(","), "SDK hydration requires the local feature")
-        payload = fields(read["payload"], {"sha256", "bytes"}, "verified hydrated file")
-        require(type(payload["bytes"]) is int and payload == expected,
-                "SDK hydration did not verify the approved file")
-        reader = fields(read["reader"], reader_fields, "verified SDK hydration target")
-        require(reader["origin_sha256"] == native_origin_sha256
-                and reader["prefix_sha256"] == target["physical_prefix_sha256"]
-                and read["xorb_key_sha256"] == target["key_sha256"]
-                and reader["global_prefix_sha256"] == spec["global_prefix_sha256"]
-                and matches(SHA256, reader["cache_root_sha256"])
-                and reader["local_cache_only"] is True,
-                "SDK hydration used a different projected view, xorb, or cache service")
-        use_edge = arm == "edge"
-        require(reader["binding_sha256"] == (registration["viewer_binding_sha256"] if use_edge else "")
-                and reader["approval_sha256"] == (registration["viewer_approval_sha256"] if use_edge else ""),
-                "SDK hydration did not use the required viewer approval")
-        verify_git_traffic(read, edge_provider, "SDK hydration")
-        if use_edge:
-            require(all(positive(read[key]) for key in ("observed_edge_gets", "verified_edge_payloads", "edge_bytes"))
-                    and read["local_payload_hits"] == 0, "SDK hydration accepted no verified edge xorb")
-        else:
-            native = read["native_traffic"]
-            require(all(read[key] == 0 for key in PRODUCT_COUNTERS)
-                    and positive(native["get_responses"]) and positive(native["body_bytes"]),
-                    "SDK hydration rollback requires native payload reads without edge or cache activity")
-        pair.append(read)
-    edge, native = pair
-    require(edge["reader"]["cache_root_sha256"] != native["reader"]["cache_root_sha256"]
+
+    def verify_read(raw: bytes, arm: str) -> dict[str, Any]:
+        return verify_sdk_hydration_read(raw, row, registration, arm, spec, placement)
+
+    edge, native = verify_read(edge_raw, "edge"), verify_read(rollback_raw, "origin")
+    product_caches = {read["reader"]["cache_root_sha256"] for read in (edge, native)}
+    require(len(product_caches) == 2
             and edge["finished_at_unix_ms"] <= native["started_at_unix_ms"],
             "SDK hydration rollback must follow the edge read with the same view and a fresh cache")
     retirement_raw = read_git_record(inputs / "retirement.json")
@@ -1652,21 +1683,35 @@ def collect_sdk_hydration_product(
     observations = {phase: read_git_record(inputs / filename) for phase, filename in GIT_NATIVE_REF_FILES.items()}
     # The native ref canary sees the logical source; the SDK receives its independently approved projection.
     source = {"origin_sha256": placement["origin_sha256"], "prefix_sha256": placement["source_prefix_sha256"]}
-    verify_git_lifecycle(observations, row, publication, receipt, edge["started_at_unix_ms"], source,
-                         retired, cleanup_at, native_origin_sha256)
+    published = verify_git_lifecycle(observations, row, publication, receipt, edge["started_at_unix_ms"], source,
+                                     retired, cleanup_at, native_origin_sha256)
+
+    def verify_measurement(raw: bytes, arm: str) -> dict[str, Any]:
+        read = verify_read(raw, arm)
+        require(published <= read["started_at_unix_ms"] <= read["finished_at_unix_ms"] <= retired,
+                "SDK hydration benchmark ran outside the independently observed publication lifetime")
+        require(read["reader"]["cache_root_sha256"] not in product_caches,
+                "SDK hydration benchmark reused its lifecycle canary's local cache")
+        return read
+
+    performance = collect_git_performance(
+        directory / GIT_BENCHMARK_DIR, registration, row["platform"], row["workflow_run_id"], row["workflow_run_attempt"],
+        retain=retain / GIT_BENCHMARK_DIR if retain is not None else None, verify_hydration=verify_measurement,
+    )
     if retain is not None:
-        retain.mkdir()
+        product = retain / SDK_HYDRATION_DIR
+        product.mkdir()
         records = {"workload.json": workload_raw, "publication.json": publication_raw, "hydration.json": edge_raw,
                    "retirement.json": retirement_raw}
         records.update({filename: observations[phase] for phase, filename in GIT_NATIVE_REF_FILES.items()})
         for name, raw in records.items():
-            (retain / name).write_bytes(raw)
+            (product / name).write_bytes(raw)
     return {
-        "name": SDK_HYDRATION_ACTION, "expected_sha256": expected["sha256"], "observed_sha256": edge["payload"]["sha256"],
-        "expected_bytes": expected["bytes"], "observed_bytes": edge["payload"]["bytes"],
+        "name": SDK_HYDRATION_ACTION, "expected_sha256": spec["payload_sha256"], "observed_sha256": edge["payload"]["sha256"],
+        "expected_bytes": spec["payload_bytes"], "observed_bytes": edge["payload"]["bytes"],
         "native_writes": 1, "visible_new_ref": True, "fixture_cleanup_verified": True,
         "observed_edge_gets": edge["observed_edge_gets"], "verified_edge_payloads": edge["verified_edge_payloads"],
-    }
+    }, performance
 
 
 def collect_git_product_action(
@@ -1827,21 +1872,26 @@ def derive_sdk_public_transition(inputs: Path, row: dict[str, Any], spec: dict[s
 def collect_git_performance(
     inputs: Path, registration: dict[str, Any], platform: str, run_id: str, attempt: str,
     *, retain: Path | None = None, sdk_native: dict[str, str] | None = None,
+    verify_hydration: Callable[[bytes, str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     spec = benchmark_registration(registration)
     scope = spec["scope"]
+    hydration = is_direct_sdk_hydration_scope(scope)
+    require(hydration == (verify_hydration is not None), "SDK hydration benchmarks require verified publication and placement")
     sdk = is_direct_sdk_git_scope(scope)
-    require(sdk or (requires_cli_workload(scope) and spec["workload"] == cli_action_name(scope)),
-            "benchmark must register a scoped direct Git, capsule or LFS workload")
+    require(sdk or hydration or (requires_cli_workload(scope) and spec["workload"] == cli_action_name(scope)),
+            "benchmark must register a scoped direct Git, capsule, LFS or SDK hydration workload")
     if sdk:
         require(inputs.is_dir(), "direct SDK Git requires retained regional SDK benchmark records")
+    if hydration:
+        require(inputs.is_dir(), "direct SDK hydration requires retained regional SDK benchmark records")
     require(matches(COMMIT, spec["source_sha"]) and matches(SHA256, spec["configuration_sha256"])
             and matches(RUN_NUMBER, run_id) and matches(RUN_NUMBER, attempt) and matches(LABEL, platform),
             "invalid benchmark provenance")
     provider = PROVIDER_FOR_EDGE[scope.split("/", 1)[0]]
     provenance = {key: spec[key] for key in ("source_sha", "scope", "configuration_sha256")}
     provenance |= {"workflow_run_id": run_id, "workflow_run_attempt": attempt, "platform": platform}
-    if not sdk:
+    if not (sdk or hydration):
         provenance["candidate"] = spec["candidate"]
     seen = set()
     cache_roots = set()
@@ -1855,6 +1905,7 @@ def collect_git_performance(
             fixtures = set()
             windows = {}
             primer_digest = None
+            primer_cache = None
             for arm in ARMS:
                 slot = Path(location) / f"{index:04d}" / arm
                 label = f"{location} {index} {arm}"
@@ -1862,7 +1913,21 @@ def collect_git_performance(
                 digest = hashlib.sha256(client_raw).hexdigest()
                 require(digest not in seen, "a fetch was reused in another benchmark arm or pair")
                 seen.add(digest)
-                if sdk:
+                if verify_hydration is not None:
+                    client = verify_hydration(client_raw, GIT_MODES[arm])
+                    reader = client["reader"]
+                    cache_root = reader["cache_root_sha256"]
+                    if arm == "warm_local":
+                        require(client["primer_sha256"] == primer_digest and cache_root == primer_cache,
+                                f"{label} did not repeat its own warm edge hydration in the same cache")
+                    else:
+                        require(cache_root not in cache_roots, "SDK hydration benchmark arms reused a local cache root")
+                        cache_roots.add(cache_root)
+                    if arm == "warm_edge":
+                        primer_digest, primer_cache = digest, cache_root
+                    payload = (client["pointer_sha256"], client["payload"]["sha256"], client["xorb_key_sha256"])
+                    receipt = client["workload_sha256"]
+                elif sdk:
                     client = verify_sdk_git_read(client_raw, provenance, spec, GIT_MODES[arm])
                     reader = client["reader"]
                     require(sdk_native is None or all(reader[key] == sdk_native[key] for key in CLI_NATIVE_FIELDS),
@@ -1872,6 +1937,7 @@ def collect_git_performance(
                     if arm == "warm_local":
                         require(client["primer_sha256"] == primer_digest, f"{label} did not repeat its own warm edge snapshot")
                     payload = (client["commit"], client["sha256"], client["git_blob_oid_sha256"])
+                    receipt = client["publication_sha256"]
                 else:
                     client = validate_git_fetch(client_raw, provenance, GIT_MODES[arm], label)
                     reader = client["reader"]
@@ -1883,7 +1949,8 @@ def collect_git_performance(
                     require(cache_root not in cache_roots, "benchmark arms reused a local cache root")
                     cache_roots.add(cache_root)
                     payload = (client["publication_oid"], client["expected_sha256"])
-                fixtures.add((*payload, client["publication_sha256"], reader["origin_sha256"], reader["prefix_sha256"]))
+                    receipt = client["publication_sha256"]
+                fixtures.add((*payload, receipt, reader["origin_sha256"], reader["prefix_sha256"]))
                 windows[arm] = (client["started_at_unix_ms"], client["finished_at_unix_ms"])
                 viewer_log = None
                 cdn_origin_gets = cdn_fill_bytes = 0
@@ -1916,7 +1983,7 @@ def collect_git_performance(
                         f"{label} has no logged CloudFront fill from the approved S3 origin")
                 require(provider != "azure" or arm != "cold_edge" or positive(cdn_fill_bytes),
                         f"{label} has no logged Front Door fill from the approved Blob origin")
-                require(not sdk or provider != "gcs" or arm != "cold_edge" or positive(cdn_fill_bytes),
+                require(not (sdk or hydration) or provider != "gcs" or arm != "cold_edge" or positive(cdn_fill_bytes),
                         f"{label} has no logged Cloud CDN fill from the approved GCS origin")
                 require(incomplete <= measured["rejected_bytes"]
                         and measured["client_bytes"] >= native["body_bytes"] + measured["edge_bytes"] + incomplete,
@@ -2017,11 +2084,11 @@ def verify_cdn_report(
     if sdk_hydration:
         require(rollback is not None, "direct SDK hydration requires its native rollback")
         placement = decode(read_trace(directory / "traces" / f"{SCOPED_VIEW_CHECK}.json", SCOPED_VIEW_CHECK))["placement"]
-        product = collect_sdk_hydration_product(
-            directory / SDK_HYDRATION_DIR, row, registration, rollback, placement=placement,
+        product, measured = collect_sdk_hydration_evidence(
+            directory, row, registration, rollback, placement=placement,
             cleanup_at=cleanup_at, native_origin_sha256=native_origin_sha256, policy=policy,
         )
         require(row["product_action"] == product, "product action differs from the retained SDK hydration evidence")
-        require(policy is None, "SDK hydration promotion requires regional hydration evidence derived from individual runs")
+        require(row["performance"] == measured, "SDK hydration performance summary differs from the retained measurements")
     return {"status": "verified", "scope": scope, "platform": platform, "deployment": row["deployment"],
             "checks": checks, "distant_median_savings_lower_bound_ms": lower}

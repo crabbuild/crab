@@ -65,7 +65,7 @@ fn decode(line: &[u8]) -> Option<Value> {
             fields.len() == 8
                 && route(fields)
                 && value("family") == "xorb"
-                && value("source") == "edge"
+                && matches!(value("source"), "edge" | "local" | "origin")
                 && fingerprints(fields, &["xorb_key_sha256"])
         }
         _ => false,

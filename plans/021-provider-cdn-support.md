@@ -727,9 +727,12 @@ records, and the scope and cleanup observations. Release verification
 recomputes that result and requires both arms to use the same approved
 view and separate caches. The source pointer is published before the
 projected view is materialized, then the xorb workload pins that publication
-receipt. Promotion stays closed until regional SDK
-hydration summaries can be rebuilt from individual runs and independent
-provider measurements.
+receipt. SDK regional hydration pilots use four arms. The warm-local arm
+restores the tracked pointer and hydrates again with its own warm edge
+primer's cache. It verifies the exact reconstructed file and local xorb key
+with zero edge requests. Assembly and release verification rebuild the
+regional summary from the retained samples, require isolated cache roots for
+the other arms, and match viewer requests to the exact approved xorb.
 
 The protected workflow or its dedicated workers own producing these raw
 observations. The assembly and release jobs own rejecting missing, mismatched

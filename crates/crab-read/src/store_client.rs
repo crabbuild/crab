@@ -769,6 +769,11 @@ impl Client for StoreClient {
             .map_err(|error| self.map_read_error(error))?;
         if let Some(cache) = &self.chunk_cache
             && let Some(cached) = cache.read(xorb_hash, &chunk_ranges).await {
+            // Disk cache checks its stored data. Hydration still verifies the
+            // reconstructed file hash before publishing these decoded chunks.
+            if !cached.0.is_empty() {
+                self.store.origin().observe_verified_xorb_cache_hit(&xorb_path);
+            }
             return Ok(cached);
         }
         if let Some(availability) = &self.availability {

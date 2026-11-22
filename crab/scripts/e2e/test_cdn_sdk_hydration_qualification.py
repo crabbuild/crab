@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import run_cdn_sdk_hydration as HYDRATE
 from cdn_qualification import CLI_BUILD_FIELDS
-from run_cdn_sdk_workload import ARM_BOUNDARY
+from run_cdn_sdk_workload import ARM_BOUNDARY, json_record
 from test_cdn_qualification import COMMIT, json_file, sdk_candidate
 from test_cdn_transport_qualification import fixture
 
@@ -46,16 +46,18 @@ class SdkHydrationQualificationTests(unittest.TestCase):
             args = argparse.Namespace(fixture=root / "fixture.json", configuration_sha256=config_sha,
                                       workload=root / "workload.json", workload_sha256=workload, pointer=root / "pointer",
                                       git=root / "crab", crab=root / "crab", probe=root / "probe", private_reader=root / "reader",
-                                      source_sha=COMMIT, run_id="123", run_attempt="2", arm="edge")
+                                      source_sha=COMMIT, run_id="123", run_attempt="2", arm="edge", warm_local_output=None)
             candidate = sdk_candidate(scope, HYDRATE.runner_platform())
             report = {"build": {name: candidate[name] for name in CLI_BUILD_FIELDS}, "payload": payload,
-                      "started_at_unix_ms": 1001, "finished_at_unix_ms": 1005, "elapsed_ms": 4}
+                      "started_at_unix_ms": 1001, "finished_at_unix_ms": 1005, "elapsed_ms": 4, "warm_local": None}
             route = {"provider": "s3", "consumer": "sdk", "access": "private", "family": "xorb", "profile": "direct"}
 
             def invoke(_command, *, input, env, **_):
                 edge = args.arm == "edge"
+                repeat = args.warm_local_output is not None
                 request = json.loads(input)
                 self.assertEqual(request["worktree"]["hydration"]["pointer"], pointer.decode())
+                self.assertEqual(request["worktree"]["hydration"]["repeat"], repeat)
                 self.assertEqual(request["binding"]["approval_sha256"], approval if edge else None)
                 observations = [("crab_storage::native_read", {"message": "Native object store read",
                                  "provider": "s3", "method": "get", "status": 200, "bytes": 8})]
@@ -79,6 +81,15 @@ class SdkHydrationQualificationTests(unittest.TestCase):
                          for target, data in observations]
                 lines.append({"target": ARM_BOUNDARY, "fields": {"phase": "primary_finish"}})
                 value = report | ({"payload": payload | {"bytes": 99}} if fault == "wrong-file" else {})
+                if repeat:
+                    value["warm_local"] = {"started_at_unix_ms": 1006, "finished_at_unix_ms": 1009, "elapsed_ms": 3}
+                    lines.append({"target": ARM_BOUNDARY, "fields": {"phase": "local_start"}})
+                    lines.extend({"target": HYDRATE.CHILD, "fields": {"observation": json.dumps({"target": target, "fields": data})}}
+                                 for target, data in [observations[0], observations[-1], ("crab_storage::cdn::transfer", route | {
+                                     "message": "CDN verified xorb payload", "source": "origin" if fault == "local-origin" else "local",
+                                     "xorb_key_sha256": HYDRATE.digest(key.encode()),
+                                 })])
+                    lines.append({"target": ARM_BOUNDARY, "fields": {"phase": "local_finish"}})
                 return subprocess.CompletedProcess([], 0, json.dumps(value).encode(),
                                                    "\n".join(json.dumps(line) for line in lines).encode())
 
@@ -88,14 +99,24 @@ class SdkHydrationQualificationTests(unittest.TestCase):
                 ("edge", "wrong-key", "did not accept verified chunks"),
                 ("edge", "wrong-cache", "did not confirm the approved projected view"),
                 ("origin", "origin-edge", "zero edge attempts"),
+                ("edge", "local", ""),
+                ("edge", "local-origin", "outside its approved local cache"),
+                ("origin", "local", "requires its own edge primer"),
             ):
                 with self.subTest(arm=arm, fault=fault), patch.object(HYDRATE.subprocess, "run", side_effect=invoke), \
                         patch.object(HYDRATE.time, "time_ns", side_effect=(1_000_000_000, 1_010_000_000)):
                     args.arm = arm
+                    args.warm_local_output = root / "warm-local.json" if fault.startswith("local") else None
                     if not reason:
-                        result = HYDRATE.hydrate(args)
+                        result, local = HYDRATE.hydrate(args)
                         self.assertEqual((result["payload"], result["verified_edge_payloads"]),
                                          (payload, int(arm == "edge")))
+                        if fault == "local":
+                            self.assertEqual(local["primer_sha256"], HYDRATE.digest(json_record(result).encode()))
+                            self.assertEqual(local["reader"], result["reader"])
+                            self.assertEqual(local["local_payload_hits"], 1)
+                        else:
+                            self.assertIsNone(local)
                     else:
                         with self.assertRaisesRegex(ValueError, reason):
                             HYDRATE.hydrate(args)

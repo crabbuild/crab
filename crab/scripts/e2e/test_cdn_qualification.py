@@ -78,7 +78,8 @@ def sdk_candidate(scope: str, platform: str) -> dict:
     }
 
 
-def write_git_measurements(inputs: Path, registration: dict, platform: str, sdk_native: dict | None = None) -> None:
+def write_git_measurements(inputs: Path, registration: dict, platform: str, sdk_native: dict | None = None,
+                           hydration: dict | None = None) -> None:
     provider = CDN.PROVIDER_FOR_EDGE[registration["scope"].split("/", 1)[0]]
     sdk = CDN.is_direct_sdk_git_scope(registration["scope"])
     action = CDN.cli_action_name(registration["scope"])
@@ -91,6 +92,8 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, sdk_
                 directory = inputs / location / f"{index:04d}" / arm
                 directory.mkdir(parents=True, exist_ok=True)
                 started = 1_000_000 * (ordinal + 1) + index * 10_000 + sequence * 1_000
+                if hydration is not None:
+                    started += 100_000
                 edge = int(arm in ("cold_edge", "warm_edge"))
                 counters = dict.fromkeys(CDN.PRODUCT_COUNTERS, 0) | {
                     "verified_edge_payloads": edge, "edge_attempts": edge,
@@ -101,7 +104,7 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, sdk_
                     "source_sha": registration["source_sha"], "scope": registration["scope"],
                     "configuration_sha256": registration["configuration_sha256"],
                     "workflow_run_id": "123", "workflow_run_attempt": "2", "platform": platform,
-                    "candidate": registration["sdk_candidate" if sdk else "candidate"],
+                    "candidate": registration["sdk_candidate" if sdk or hydration is not None else "candidate"],
                     "reader": {
                         "binding_sha256": "" if arm == "origin" else registration["viewer_binding_sha256"],
                         "cache_root_sha256": hashlib.sha256(f"{location}/{index}/{arm}/cache".encode()).hexdigest(),
@@ -134,7 +137,24 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, sdk_
                     if provider == "gcs":
                         proof[request_id]["cache_fill_bytes"] = metrics["origin_fill_bytes"]
                         proof[request_id]["origin_requests"] = {}
-                if sdk:
+                    if hydration is not None:
+                        key_sha256 = hydration["xorb_key_sha256"]
+                        proof[request_id]["key_sha256"] = key_sha256
+                        for record in origin_requests.values():
+                            record["key_sha256"] = key_sha256
+                if hydration is not None:
+                    root = client["reader"]["cache_root_sha256"]
+                    read_fields = CDN.PRODUCT_COUNTERS | CDN.SDK_TIMING_FIELDS | {"arm", "edge_responses", "native_traffic"}
+                    client = hydration | {key: client[key] for key in read_fields}
+                    reader = hydration["reader"] | {"cache_root_sha256": root}
+                    if arm == "origin":
+                        reader |= {"binding_sha256": "", "approval_sha256": ""}
+                    if arm == "warm_local":
+                        primer = (directory.parent / "warm_edge/client.json").read_bytes()
+                        client["primer_sha256"] = hashlib.sha256(primer).hexdigest()
+                        reader["cache_root_sha256"] = json.loads(primer)["reader"]["cache_root_sha256"]
+                    client["reader"] = reader
+                elif sdk:
                     client["reader"].pop("cache_root_sha256")
                     client["reader"].update(sdk_native or {})
                     client = {key: value for key, value in client.items() if key in CDN.SDK_GIT_READ_FIELDS} | {
@@ -463,10 +483,16 @@ class CdnQualificationTests(unittest.TestCase):
         seed = {"scope": self.scope.replace("/xorb/", "/git/"), "configuration_sha256": "9" * 64}
         publication = json.loads(publication_path.read_bytes()) | seed
         receipt = json_file(publication_path, publication)
-        json_file(retirement_path, json.loads(retirement_path.read_bytes()) | seed | {"publication_sha256": receipt})
-        for filename in CDN.GIT_NATIVE_REF_FILES.values():
+        retired = 3_000_000
+        json_file(retirement_path, json.loads(retirement_path.read_bytes()) | seed | {
+            "publication_sha256": receipt, "retired_at_unix_ms": retired,
+        })
+        for phase, filename in CDN.GIT_NATIVE_REF_FILES.items():
             path = records / filename
-            json_file(path, json.loads(path.read_bytes()) | {"publication_sha256": receipt})
+            record = json.loads(path.read_bytes()) | {"publication_sha256": receipt}
+            if phase == "retired":
+                record |= {"started_at_unix_ms": retired + 1, "observed_at_unix_ms": retired + 2}
+            json_file(path, record)
         self.registration["hydration_workload_sha256"] = json_file(records / "workload.json", {
             "schema": "crab.cdn-sdk-hydration-workload/v1", "configuration_sha256": CONFIGURATION,
             "pointer_sha256": publication["sha256"], "payload_sha256": "c" * 64,
@@ -507,6 +533,8 @@ class CdnQualificationTests(unittest.TestCase):
             }
             if arm == "edge":
                 json_file(destination, evidence)
+                write_git_measurements(self.directory / CDN.GIT_BENCHMARK_DIR, self.registration,
+                                       self.report["platform"], hydration=evidence)
             else:
                 self.rollback_trace(evidence)
         self.report["product_action"].update(expected_sha256="c" * 64, observed_sha256="c" * 64,
@@ -1157,12 +1185,13 @@ class CdnQualificationTests(unittest.TestCase):
                 result = self.command("--cdn-release-policy", str(policy))
                 self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_sdk_hydration_requires_the_exact_lifecycle_and_rejects_generic_promotion(self) -> None:
+    def test_sdk_hydration_requires_the_exact_lifecycle(self) -> None:
         self.configure("s3", "private", "direct", consumer="sdk", family="xorb")
         self.assertEqual(self.command().returncode, 0)
         policy = self.directory / "policy.txt"
         policy.write_text(self.scope + "\n", encoding="utf-8")
-        self.rejected("promotion requires regional hydration evidence", "--cdn-release-policy", str(policy))
+        result = self.command("--cdn-release-policy", str(policy))
+        self.assertEqual(result.returncode, 0, result.stderr)
         records = self.directory / CDN.SDK_HYDRATION_DIR
         edge = records / "hydration.json"
         native = self.directory / "traces/rollback.json"
@@ -1173,7 +1202,7 @@ class CdnQualificationTests(unittest.TestCase):
             ({"reader": original["reader"] | {"binding_sha256": "5" * 64}}, "required viewer approval"),
             ({"reader": original["reader"] | {"global_prefix_sha256": "6" * 64}}, "different projected view"),
             ({"observed_edge_gets": 1, "edge_hits": 1, "edge_attempts": 1, "all_edge_attempts": 1}, "without edge or cache activity"),
-            ({"finished_at_unix_ms": PUBLIC_SEAL + 65}, "same published ref after rollback"),
+            ({"finished_at_unix_ms": 3_000_001}, "same published ref after rollback"),
         ):
             with self.subTest(changes=changes):
                 self.rollback_trace(original | changes)
@@ -1186,6 +1215,47 @@ class CdnQualificationTests(unittest.TestCase):
         publication.write_bytes(approved_publication)
         (records / CDN.GIT_NATIVE_REF_FILES["published"]).unlink()
         self.rejected(CDN.GIT_NATIVE_REF_FILES["published"])
+
+    def test_sdk_hydration_benchmarks_require_their_own_cache_and_provider_requests(self) -> None:
+        for provider in ("s3", "gcs", "azure"):
+            with self.subTest(provider=provider), TemporaryDirectory() as directory:
+                self.directory = Path(directory)
+                (self.directory / "traces").mkdir()
+                self.configure(provider, "private", "direct", consumer="sdk", family="xorb")
+                results = self.command()
+                self.assertEqual(results.returncode, 0, results.stderr)
+                pair = self.directory / CDN.GIT_BENCHMARK_DIR / "near/0001"
+                local = pair / "warm_local/client.json"
+                cold = pair / "cold_edge/client.json"
+                local_raw = local.read_bytes()
+                warm_read = json.loads(local_raw)
+                for change, error in (
+                    ({"primer_sha256": "a" * 64}, "did not repeat its own warm edge hydration"),
+                    ({"reader": warm_read["reader"] | {"cache_root_sha256": "a" * 64}}, "in the same cache"),
+                    ({"xorb_key_sha256": "0" * 64}, "different projected view"),
+                    ({"started_at_unix_ms": 3_000_001, "finished_at_unix_ms": 3_000_002}, "outside the independently observed publication lifetime"),
+                ):
+                    with self.subTest(change=change):
+                        json_file(local, warm_read | change)
+                        self.rejected(error)
+                local.write_bytes(local_raw)
+                cold_raw = cold.read_bytes()
+                cold_read = json.loads(cold_raw)
+                json_file(cold, cold_read | {"reader": cold_read["reader"] | {
+                    "cache_root_sha256": json.loads((pair / "origin/client.json").read_bytes())["reader"]["cache_root_sha256"],
+                }})
+                self.rejected("reused a local cache root")
+                cold.write_bytes(cold_raw)
+                log = cold.parent / CDN.VIEWER_REQUEST_FILES[provider]
+                original_proof = log.read_bytes()
+                proof = json.loads(original_proof)
+                next(iter(proof["records"].values()))["key_sha256"] = "0" * 64
+                json_file(log, proof)
+                self.rejected("did not read the approved hydration xorb")
+                proof = json.loads(original_proof)
+                proof["client_report_sha256"] = json_file(cold, cold_read | {"edge_hits": 1, "edge_misses": 0})
+                json_file(log, proof)
+                self.rejected("transfer totals disagree with the logged responses")
 
     def test_public_sdk_release_requires_ordinary_export_transition_calls(self) -> None:
         self.configure("gcs", "public", "direct", consumer="sdk")

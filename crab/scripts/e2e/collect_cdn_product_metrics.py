@@ -54,7 +54,8 @@ def measure_native(lines: Iterable[bytes], scope: str) -> dict[str, int]:
 
 def measure(lines: Iterable[bytes], scope: str, *, edge_responses: dict | None = None,
             expected_git_blob: str | None = None, expected_git_packs: set[str] | None = None,
-            verified_git_packs: set[str] | None = None, expected_xorb_key: str | None = None) -> dict[str, int]:
+            verified_git_packs: set[str] | None = None, expected_xorb_key: str | None = None,
+            local_xorb_only: bool = False) -> dict[str, int]:
     edge, access, consumer, family, profile = scope_parts(scope)
     selected = (PROVIDER_FOR_EDGE[edge], access, consumer, family, profile)
     metrics = dict.fromkeys(PRODUCT_COUNTERS, 0)
@@ -67,11 +68,17 @@ def measure(lines: Iterable[bytes], scope: str, *, edge_responses: dict | None =
         event = line.get("fields")
         if isinstance(event, dict) and event.get("message") == VERIFIED_XORB_EVENT:
             fields(event, VERIFIED_FIELDS | {"xorb_key_sha256"}, "CDN verified xorb event")
-            require(event["family"] == "xorb" and event["source"] == "edge"
+            source = event["source"]
+            require(event["family"] == "xorb" and source in ("edge", "local", "origin")
                     and matches(SHA256, event["xorb_key_sha256"]), "invalid verified CDN xorb key")
-            if (tuple(event[name] for name in ROUTE) == selected
-                    and (expected_xorb_key is None or event["xorb_key_sha256"] == expected_xorb_key)):
-                metrics["verified_edge_payloads"] += 1
+            exact_key = event["xorb_key_sha256"] == expected_xorb_key
+            same_route = tuple(event[name] for name in ROUTE) == selected
+            if local_xorb_only:
+                require(same_route and exact_key and source == "local",
+                        "SDK warm hydration read xorb chunks outside its approved local cache")
+            if same_route and (expected_xorb_key is None or exact_key) and source != "origin":
+                metric = "verified_edge_payloads" if source == "edge" else "local_payload_hits"
+                metrics[metric] += 1
             continue
         if isinstance(event, dict) and event.get("message") in (VERIFIED_GIT_EVENT, VERIFIED_LFS_EVENT):
             blob, pack = "git_blob_oid_sha256", "git_pack_blake3"

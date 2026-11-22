@@ -132,12 +132,18 @@ impl CachingStore {
         let key = XorbReadKey::new(*xorb_hash, ranges, install_full_xorb);
         if let Some(result) = key.as_ref().and_then(|key| self.xorb_reads.get(key)) {
             self.observe_cache_read(CacheSource::Memory, CacheReadOutcome::Hit, result.0.len());
+            if !result.0.is_empty() {
+                self.origin.observe_verified_xorb_cache_hit(path);
+            }
             return Ok(result);
         }
         let _fill_guard = self.xorb_reads.lock(xorb_hash).await;
         self.origin.check_cached_read(path).await?;
         if let Some(result) = key.as_ref().and_then(|key| self.xorb_reads.get(key)) {
             self.observe_cache_read(CacheSource::Memory, CacheReadOutcome::Hit, result.0.len());
+            if !result.0.is_empty() {
+                self.origin.observe_verified_xorb_cache_hit(path);
+            }
             return Ok(result);
         }
         if key.is_some() {
@@ -159,11 +165,17 @@ impl CachingStore {
                 Ok(Some(result)) => {
                     source.check_deadline()?;
                     self.observe_xorb_source(source, CacheReadOutcome::Hit, result.0.len());
-                    // Metadata alone and a native restart cannot prove edge delivery.
-                    if let XorbSource::Cdn(attempt) = source
-                        && !result.0.is_empty()
-                    {
-                        attempt.observe_verified_xorb();
+                    // Metadata alone cannot prove payload delivery. Keep native
+                    // restarts distinct so a local arm cannot claim their bytes.
+                    if !result.0.is_empty() {
+                        match source {
+                            XorbSource::Local => self.origin.observe_verified_xorb_cache_hit(path),
+                            XorbSource::Cdn(attempt) => attempt.observe_verified_xorb(),
+                            XorbSource::Origin(Some(attempt)) => {
+                                attempt.observe_verified_origin_xorb()
+                            }
+                            XorbSource::Service | XorbSource::Origin(None) => {}
+                        }
                     }
                     if let Some(key) = key {
                         self.xorb_reads.insert(key, &result);

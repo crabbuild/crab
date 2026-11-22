@@ -112,6 +112,14 @@ impl PayloadObservation {
         self.record("edge", PayloadIdentity::XorbKey(key));
     }
 
+    pub(crate) fn record_local_xorb(self, key: &str) {
+        self.record("local", PayloadIdentity::XorbKey(key));
+    }
+
+    pub(crate) fn record_origin_xorb(self, key: &str) {
+        self.record("origin", PayloadIdentity::XorbKey(key));
+    }
+
     /// Report a verified local payload hit on the selected CDN-enabled route.
     pub fn record_local(self) {
         self.record("local", PayloadIdentity::None);

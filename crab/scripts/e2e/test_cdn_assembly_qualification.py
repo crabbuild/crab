@@ -46,8 +46,9 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
                 (self.root / name).rename(row / name)
         if fixture.CDN.is_direct_sdk_hydration_scope(self.example.scope):
             observations.pop("product_action")
-            name = fixture.CDN.SDK_HYDRATION_DIR
-            (self.root / name).rename(row / name)
+            observations.pop("performance")
+            for name in (fixture.CDN.SDK_HYDRATION_DIR, fixture.CDN.GIT_BENCHMARK_DIR):
+                (self.root / name).rename(row / name)
         if access == "public":
             name = fixture.CDN.PUBLIC_EXPORT_DIR
             (self.root / name).rename(row / name)
@@ -119,6 +120,7 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
         row = self.output / self.row
         report = json.loads((row / "cdn-report.json").read_bytes())
         self.assertEqual(report["product_action"], self.example.report["product_action"])
+        self.assertEqual(report["performance"], self.example.report["performance"])
         product = row / fixture.CDN.SDK_HYDRATION_DIR
         self.assertEqual({entry.name for entry in product.iterdir()},
                          {"hydration.json", "workload.json", "publication.json", "retirement.json",

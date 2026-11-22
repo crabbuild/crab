@@ -16,8 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from cdn_qualification import (  # noqa: E402
     CDN_PROVENANCE_FIELDS, COMMIT, EXPIRY_RANGE_CHECK, GIT_BENCHMARK_DIR, GIT_PRODUCT_DIR, LABEL, PROVIDERS,
     PROVIDER_FOR_EDGE, PUBLIC_EXPORT_BEFORE, PUBLIC_EXPORT_CHECK, PUBLIC_EXPORT_DIR, PUBLIC_EXPORT_FILES,
-    PUBLIC_TRANSITION_CHECK, RUN_NUMBER, SCHEMA, SCOPED_VIEW_CHECK, SDK_HYDRATION_DIR, SHA256,
-    benchmark_registration, collect_git_performance, collect_git_product_action, collect_sdk_hydration_product,
+    PUBLIC_TRANSITION_CHECK, RUN_NUMBER, SCHEMA, SCOPED_VIEW_CHECK, SHA256,
+    benchmark_registration, collect_git_performance, collect_git_product_action, collect_sdk_hydration_evidence,
     collect_sdk_product_action, decode, derive_sdk_public_transition, fields,
     is_direct_sdk_git_scope, is_direct_sdk_hydration_scope, matches, read_trace, release_scopes, require,
     required_check_names, required_platform_rows, requires_cli_workload, scope_parts, verify_bundle_row,
@@ -121,10 +121,8 @@ def assemble_bundle(
             sdk_workload = is_direct_sdk_git_scope(scope)
             sdk_hydration = is_direct_sdk_hydration_scope(scope)
             expected = OBSERVATION_FIELDS.copy()
-            if cli_workload or sdk_workload:
+            if cli_workload or sdk_workload or sdk_hydration:
                 expected.difference_update({"product_action", "performance"})
-            if sdk_hydration:
-                expected.remove("product_action")
             measured = fields(
                 decode((inputs / row / "observations.json").read_bytes()),
                 expected, "CDN observations",
@@ -196,10 +194,10 @@ def assemble_bundle(
                 placement = decode(read_trace(destination / "traces" / f"{SCOPED_VIEW_CHECK}.json",
                                               SCOPED_VIEW_CHECK))["placement"]
                 rollback = read_trace(destination / "traces/rollback.json", "rollback")
-                measured["product_action"] = collect_sdk_hydration_product(
-                    inputs / row / SDK_HYDRATION_DIR, measured, spec, rollback, placement=placement,
+                measured["product_action"], measured["performance"] = collect_sdk_hydration_evidence(
+                    inputs / row, measured, spec, rollback, placement=placement,
                     cleanup_at=cleanup_at, native_origin_sha256=cleanup["targets"]["native"]["origin_sha256"],
-                    retain=destination / SDK_HYDRATION_DIR,
+                    retain=destination,
                 )
             if cli_workload or sdk_workload:
                 measured["performance"] = collect_git_performance(

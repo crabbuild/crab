@@ -1022,7 +1022,8 @@ separate `origin` rollback with the public binding withdrawn before retirement.
 ### Capture protected SDK hydration evidence
 
 Use a private direct SDK xorb fixture with an independently materialized view.
-Keep the ordinary Crab pointer for a file that requires the approved xorb.
+Keep the ordinary Crab pointer for a file reconstructed entirely from the
+single approved xorb.
 The workload JSON has schema `crab.cdn-sdk-hydration-workload/v1` and the
 fields `configuration_sha256`, `pointer_sha256`, `payload_sha256`,
 `payload_bytes`, `crab_sha256`, `publication_sha256`, and
@@ -1058,13 +1059,31 @@ origin and physical view, and the xorb chunk verification event. The origin
 arm withdraws viewer approval, keeps native issuer authorization, and
 requires zero edge attempts. Keep the edge record at
 `xorb-product/hydration.json` and the native record at `traces/rollback.json`.
-Retire the same ref after rollback with the native source fixture. Observe
-its tombstone with the xorb fixture before cleanup. Keep `workload.json`, `publication.json`,
-`retirement.json`, `provider-published.json`, and `provider-retired.json` in
-`xorb-product`. Assembly derives the product result from these records,
-the transport and scoped view observations, and the cleanup trace. Release
-promotion still requires regional metrics derived from individual SDK
-hydration runs.
+
+Collect the preregistered `origin`, `cold_edge`, `warm_edge`, and `warm_local`
+arms in each region before retiring the ref. Use separate invocations for
+origin, cold edge, and warm edge. Expire or invalidate only the fixture
+xorb between cold samples. Confirm a miss and fill in the provider logs.
+Keep the cold and warm CloudFront arms in disjoint S3 log seconds.
+[CloudFront invalidation](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/invalidation-specifying-objects.html) · [Cloud CDN invalidation](https://docs.cloud.google.com/cdn/docs/invalidating-cached-content) · [Front Door cache purge](https://learn.microsoft.com/azure/frontdoor/cache-purge)
+
+For `warm_edge`, add `--warm-local-output` pointing to the paired
+`warm_local/client.json`. The probe restores the pointer and invokes ordinary
+hydration again in the same worktree with the same cache. It checks the
+output file again and proves that the approved xorb chunks came from the
+local cache with zero edge requests. The record includes a digest of its
+warm edge primer. Use the `git-benchmarks/<location>/<pair>/<arm>/` layout,
+with `client.json` and independently measured `measurement.json` in every
+arm. Join the provider viewer and origin logs for both edge arms with
+`collect_cdn_viewer_requests.py`. Assembly and release verification bind those
+logs to the benchmark's exact xorb and rebuild the regional summary.
+
+Retire the same ref after rollback and the regional measurements with the
+native source fixture. Observe its tombstone with the xorb fixture before
+cleanup. Keep `workload.json`, `publication.json`, `retirement.json`,
+`provider-published.json`, and `provider-retired.json` in `xorb-product`.
+Assembly derives the product result from these records, the transport and
+scoped view observations, and the cleanup trace.
 
 ### Verify fixture cleanup
 
@@ -1272,11 +1291,12 @@ Each `observations.json` uses schema `crab.cdn-observations/v1` and records
 `source_sha`, `scope`, `configuration_sha256`, `workflow_run_id`,
 `workflow_run_attempt`, `platform`, `deployment`, and `fixture_prefix`.
 It also contains `check_results`, a map from required check names to measured
-boolean outcomes. For direct CLI Git and capsule scopes, assembly derives
-`product_action` from the files in `git-product/` plus the fixture cleanup
-check. It derives `performance` from `git-benchmarks/`. Supply the measured
-`product_action` and `performance` fields in `observations.json` for other
-scopes. Git and capsule scopes require
+boolean outcomes. For direct CLI Git, capsule, and LFS scopes and direct SDK
+Git and private xorb scopes, assembly derives `product_action` from the
+product records in `git-product/` or `xorb-product/` and the rollback and
+cleanup traces. It derives `performance` from `git-benchmarks/`. Supply the
+measured `product_action` and `performance` fields in `observations.json`
+for other scopes. Git and capsule scopes require
 `product_action.verified_edge_payloads` alongside the completed GET count.
 Each benchmark arm records `local_payload_hits`. The warm-local comparison
 requires a positive local payload hit and zero edge payload bytes.
@@ -1301,10 +1321,9 @@ Use a new output directory under an existing scratch directory. The assembler
 checks coverage for the compiled release policy, verifies each report and its
 traces, then exposes the artifact directory. It retains the approved benchmark
 file, the native provider reports, and the verified CDN reports and trace files.
-Direct CLI rows also retain the bounded, redacted native publication, fetch,
-and retirement records. Git and capsule rows retain their paired benchmark
-records too. Release verification checks their build identity and recomputes
-the summaries from the retained measurements.
+Direct CLI and SDK workload rows also retain the bounded, redacted product
+and paired benchmark records. Release verification checks their build
+identity and recomputes the summaries from the retained measurements.
 
 ### Release workflow
 

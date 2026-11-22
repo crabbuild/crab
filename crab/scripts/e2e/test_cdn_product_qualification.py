@@ -70,9 +70,16 @@ class CdnProductQualificationTests(unittest.TestCase):
         self.assertEqual(PRODUCT.measure(messages, scope, expected_xorb_key=key)["verified_edge_payloads"], 0)
         messages.append(verified(**xorb))
         self.assertEqual(PRODUCT.measure(messages, scope, expected_xorb_key=key)["verified_edge_payloads"], 1)
-        for overrides in ({"source": "local"}, {"xorb_key_sha256": "unredacted"}, {"family": "git"}):
+        local = verified(**(xorb | {"source": "local"}))
+        self.assertEqual(PRODUCT.measure([local], scope, expected_xorb_key=key, local_xorb_only=True)["local_payload_hits"], 1)
+        self.assertEqual(PRODUCT.measure([local], scope, expected_xorb_key=key)["verified_edge_payloads"], 0)
+        for overrides in ({"source": "unknown"}, {"xorb_key_sha256": "unredacted"}, {"family": "git"}):
             with self.assertRaisesRegex(ValueError, "invalid verified CDN xorb key"):
                 PRODUCT.measure([verified(**(xorb | overrides))], scope, expected_xorb_key=key)
+        for overrides in ({"source": "origin"}, {"consumer": "cli"}, {"xorb_key_sha256": "b" * 64}):
+            foreign = verified(**(xorb | {"source": "local"} | overrides))
+            with self.assertRaisesRegex(ValueError, "outside its approved local cache"):
+                PRODUCT.measure([local, foreign], scope, expected_xorb_key=key, local_xorb_only=True)
 
     def test_xorb_collector_requires_a_preregistered_physical_key(self):
         scope = "cloudfront/private/cli/xorb/direct"
