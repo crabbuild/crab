@@ -544,6 +544,16 @@ class CdnQualificationTests(unittest.TestCase):
         self.registration["publication_sha256"] = json_file(path, receipt)
         self.rejected("publication receipt must match the attested public export")
 
+    def test_public_release_rejects_a_reapproved_azure_export_on_the_source_account(self) -> None:
+        self.configure("azure", "public", "direct", consumer="sdk")
+        path = self.directory / CDN.PUBLIC_EXPORT_DIR / "publication.json"
+        receipt = json.loads(path.read_bytes())
+        receipt["export_origin"] = receipt["source_origin"].rsplit("/", 1)[0] + "/export"
+        placement = receipt["source_placement"]
+        receipt["export_placement"] = placement | {"resource": placement["resource"].rsplit("/", 1)[0] + "/export"}
+        self.registration["publication_sha256"] = json_file(path, receipt)
+        self.rejected("public CDN requires a separate export bucket or Azure storage account")
+
     def test_public_release_pins_observed_export_owner_and_location_even_with_reapproved_receipt(self) -> None:
         self.configure("s3", "public", "direct", consumer="sdk")
         path = self.directory / CDN.PUBLIC_EXPORT_DIR / "publication.json"

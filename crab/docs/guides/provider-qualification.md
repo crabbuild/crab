@@ -525,6 +525,10 @@ inputs. Use the publisher-reported `publication_sha256` in that row's
 benchmark registration. The assembler keeps both files in the release
 artifact. Use the dedicated qualification export's approved public inventory.
 
+Use separate buckets for S3 and GCS. Use a separate Azure storage account
+for the Front Door export so the export's anonymous access setting applies
+only to that account. [Azure anonymous access isolation](https://learn.microsoft.com/en-us/azure/storage/blobs/anonymous-read-access-overview)
+
 Set the public fixture's `source_placement` to the exact object from the
 approved inventory. The canary identity needs native placement metadata
 access on the source as well as the export. Grant source bucket location

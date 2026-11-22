@@ -204,7 +204,9 @@ bucket. Exercise a mismatched owner and a replica with a different region.
 
 Private is the default access mode for a mapping. Public requires explicit
 selection and a qualified public-only `export_origin` separate from the live
-`origin`. Both origins must be from the same cloud. Absent mapping means existing
+`origin`. Both origins must be from the same cloud. Azure exports use a
+separate storage account because enabling anonymous access is an account-level
+setting. Absent mapping means existing
 origin/cache behavior. A requested private mapping needs an existing trusted
 issuer and a valid capability before transmitting credentials or reading via
 CDN. Repositories cannot select an issuer, endpoint or public mode. Parse CDN

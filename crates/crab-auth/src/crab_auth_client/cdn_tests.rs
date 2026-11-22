@@ -12,7 +12,7 @@ fn public_exports_require_a_distinct_native_origin_in_the_same_cloud() {
         ("gs://models", "gs://models-export"),
         (
             "https://crabfixtures.blob.core.windows.net/models",
-            "https://crabfixtures.blob.core.windows.net/models-export",
+            "https://crabexport.blob.core.windows.net/models",
         ),
     ] {
         let deployment =
@@ -31,6 +31,17 @@ fn public_exports_require_a_distinct_native_origin_in_the_same_cloud() {
         };
         assert!(deployment.validate_public_export(foreign).is_err());
     }
+    let azure = CdnViewerDeployment::new(
+        "https://crabfixtures.blob.core.windows.net/models",
+        "org/models",
+        "https://edge.example.com",
+    )
+    .unwrap();
+    assert!(
+        azure
+            .validate_public_export("https://crabfixtures.blob.core.windows.net/models-export")
+            .is_err()
+    );
 }
 
 fn provider(cache: Arc<TokenCache>) -> CrabAuthProvider {

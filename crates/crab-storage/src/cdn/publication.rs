@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, io::Read as _};
 
+use crab_types::storage::public_cdn_export_is_isolated;
 use object_store::path::Path;
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
@@ -162,9 +163,9 @@ impl Publication {
             })?;
         if receipt.schema != "crab.cdn-export-publication.v1"
             || receipt.export_origin != export
-            || receipt.source_origin == export
             || !receipt.source_placement.matches(&receipt.source_origin)
             || !receipt.export_placement.matches(&receipt.export_origin)
+            || !public_cdn_export_is_isolated(&receipt.source_origin, export)
             || receipt.repository_prefix != layout.repo_prefix()
             || receipt.base_url != base
             || receipt.deployment.is_empty()

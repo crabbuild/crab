@@ -129,14 +129,28 @@ def viewer_url(value):
     return value
 
 
+def validate_public_origins(source, export):
+    source_scheme, _, source_address = source.partition("://")
+    export_scheme, _, export_address = export.partition("://")
+    if source_scheme == "https":
+        source_address = source_address.split("/", 1)[0]
+        export_address = export_address.split("/", 1)[0]
+    if (source_scheme not in ("s3", "gs", "https") or source_scheme != export_scheme
+            or source_address == export_address):
+        raise ExportError("public CDN requires a separate export bucket or Azure storage account in the source cloud")
+
+
 def publication_receipt(source, export, source_placement, export_placement, prefix, base_url,
                         deployment, inventory_sha256, objects):
+    source_placement = native_placement(source, source_placement)
+    export_placement = native_placement(export, export_placement)
+    validate_public_origins(source, export)
     return {
         "schema": PUBLICATION_SCHEMA,
         "source_origin": source,
-        "source_placement": native_placement(source, source_placement),
+        "source_placement": source_placement,
         "export_origin": export,
-        "export_placement": native_placement(export, export_placement),
+        "export_placement": export_placement,
         "repository_prefix": prefix,
         "base_url": base_url,
         "deployment": deployment,
@@ -151,9 +165,8 @@ def read_publication(directory, approved_sha256):
         raise ExportError("publication receipt differs from the preregistered SHA-256")
     exact_fields(receipt, "schema objects " + " ".join(PUBLICATION_BINDING_FIELDS))
     viewer_url(receipt["base_url"])
-    if (any(not isinstance(receipt[key], str) or not receipt[key]
-            for key in PUBLICATION_BINDING_FIELDS - {"source_placement", "export_placement"})
-            or receipt["export_origin"] == receipt["source_origin"]):
+    if any(not isinstance(receipt[key], str) or not receipt[key]
+           for key in PUBLICATION_BINDING_FIELDS - {"source_placement", "export_placement"}):
         raise ExportError("invalid public export binding")
     inventory_raw, inventory = read_document(directory / "inventory.json")
     source, source_placement, prefix, objects = parse_inventory(inventory, 2**64 - 1)

@@ -13,7 +13,7 @@ from tempfile import TemporaryDirectory
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "deploy/cdn"))
-from public_inventory import ExportError, native_placement, read_publication  # noqa: E402
+from public_inventory import ExportError, native_placement, read_publication, validate_public_origins  # noqa: E402
 
 
 SCHEMA = "crab.cdn-qualification"
@@ -281,12 +281,20 @@ def public_export_binding(
     fixture: dict[str, Any], deployment: str, inventory_sha256: str,
     source_placement: dict[str, str], export_placement: dict[str, str],
 ) -> dict[str, Any]:
+    require_isolated_public_origins(fixture)
     require(source_placement == fixture["source_placement"], "live source differs from the approved public placement")
     return {"source_origin": fixture["native_origin"], "source_placement": source_placement,
             "export_origin": fixture["export_origin"],
             "export_placement": checked_placement(fixture["export_origin"], export_placement),
             "repository_prefix": fixture["fixture_prefix"], "base_url": fixture["base_url"].rstrip("/"),
             "deployment": deployment, "inventory_sha256": inventory_sha256}
+
+
+def require_isolated_public_origins(fixture: dict[str, Any]) -> None:
+    try:
+        validate_public_origins(fixture["native_origin"], fixture["export_origin"])
+    except ExportError as error:
+        raise CdnEvidenceError(str(error)) from None
 
 
 def checked_placement(origin: str, placement: Any) -> dict[str, str]:

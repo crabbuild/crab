@@ -218,22 +218,30 @@ mod tests {
     #[tokio::test]
     async fn service_cdn_matches_the_resolved_native_origin_and_repository() {
         use crab_storage::{BucketIdentity, StorageProviderKind};
-        for (provider, origin) in [
-            (StorageProviderKind::S3, "s3://team-models"),
-            (StorageProviderKind::Gcs, "gs://team-models"),
+        for (provider, origin, export) in [
+            (
+                StorageProviderKind::S3,
+                "s3://team-models",
+                "s3://approved-export",
+            ),
+            (
+                StorageProviderKind::Gcs,
+                "gs://team-models",
+                "gs://approved-export",
+            ),
             (
                 StorageProviderKind::Azure,
                 "https://teamaccount.blob.core.windows.net/team-models",
+                "https://exportaccount.blob.core.windows.net/team-models",
             ),
         ] {
             let directory = tempfile::tempdir().unwrap();
             let hash = "a".repeat(64);
             let relative = format!("v2/history/aa/{hash}");
-            let export = origin.replace("team-models", "approved-export");
             let publication = crab_storage::cdn::write_publication_fixture(
                 directory.path().join("receipt.json"),
                 origin,
-                &export,
+                export,
                 "org/repo",
                 "https://downloads.example.com",
                 &relative,
@@ -246,7 +254,7 @@ mod tests {
                 .with_native_cdn_origin(Some(origin.into()));
             let mut settings = OperatorCdn {
                 origin: origin.into(),
-                export_origin: Some(export),
+                export_origin: Some(export.into()),
                 publication: Some(publication),
                 approval_sha256: None,
                 base_url: "https://downloads.example.com/".into(),
@@ -281,8 +289,10 @@ mod tests {
                 _ => "https://otheraccount.blob.core.windows.net/team-models",
             }
             .into();
-            settings.export_origin =
-                Some(settings.origin.replace("team-models", "approved-export"));
+            if provider != StorageProviderKind::Azure {
+                settings.export_origin =
+                    Some(settings.origin.replace("team-models", "approved-export"));
+            }
             assert!(matches!(
                 settings
                     .read_store(

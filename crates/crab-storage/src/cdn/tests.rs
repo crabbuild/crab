@@ -233,6 +233,53 @@ async fn public_export_approval_pins_digest_origin_and_viewer() {
 }
 
 #[tokio::test]
+async fn public_azure_receipt_requires_a_separate_storage_account() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = "https://fixtureacct.blob.core.windows.net/source";
+    let viewer = "https://downloads.example.com";
+    let target = [4; 32];
+    let origin = Store::new(Arc::new(InMemory::new()))
+        .with_target_identity(target)
+        .with_native_cdn_origin(Some(source.into()));
+    let relative = format!("v2/pack-layers/aa/{}", "a".repeat(64));
+    for (name, export, valid) in [
+        (
+            "same",
+            "https://fixtureacct.blob.core.windows.net/export",
+            false,
+        ),
+        (
+            "separate",
+            "https://exportacct.blob.core.windows.net/source",
+            true,
+        ),
+        ("different-provider", "s3://public-export", false),
+    ] {
+        let file = write_publication_fixture(
+            directory.path().join(format!("{name}.json")),
+            source,
+            export,
+            "org/repo",
+            viewer,
+            &relative,
+            6,
+        )
+        .unwrap();
+        let result = CdnRoute::new(
+            target,
+            "org/repo".into(),
+            None,
+            CdnAccess::Public,
+            CdnTransport::new(viewer).unwrap(),
+            Duration::from_secs(5),
+        )
+        .with_publication(&origin, &file, export)
+        .await;
+        assert_eq!(result.is_ok(), valid, "{name}");
+    }
+}
+
+#[tokio::test]
 async fn public_s3_activation_rejects_the_selected_store_in_another_region() {
     let directory = tempfile::tempdir().unwrap();
     let viewer = "https://downloads.example.com";

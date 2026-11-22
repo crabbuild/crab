@@ -355,7 +355,8 @@ class CdnTransportQualificationTests(unittest.TestCase):
         sample = fixture("front-door")
         with TemporaryDirectory() as temporary:
             path = Path(temporary) / "fixture.json"
-            for invalid in (sample["native_origin"], "gs://export-bucket"):
+            sibling = sample["native_origin"].rsplit("/", 1)[0] + "/export"
+            for invalid in (sample["native_origin"], sibling, "gs://export-bucket"):
                 with self.subTest(invalid=invalid):
                     raw = json.dumps(sample | {"export_origin": invalid}).encode()
                     path.write_bytes(raw)

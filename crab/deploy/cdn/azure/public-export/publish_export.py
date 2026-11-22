@@ -12,7 +12,8 @@ import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from public_inventory import (
-    CACHE_CONTROL, CONTENT_TYPE, ExportError, native_placement, publication_receipt, read_inventory, verify_body, viewer_url,
+    CACHE_CONTROL, CONTENT_TYPE, ExportError, native_placement, publication_receipt, read_inventory,
+    validate_public_origins, verify_body, viewer_url,
     write_publication,
 )
 
@@ -74,11 +75,12 @@ def find_export(options, source, source_placement, prefix, digest):
     values = {key: entry["value"] for key, entry in deployment["outputs"].items()}
     export = values["exportOrigin"]
     account, container = account_container(export)
-    if (values["liveSourceOrigin"] != source or account == account_container(source)[0]
+    if (values["liveSourceOrigin"] != source
             or values["sourceRepositoryPrefix"] != prefix
             or values["inventorySha256"] != digest
             or values["publicDeliveryEnabled"] is not False):
         raise ExportError("deployment must approve this inventory with public delivery disabled")
+    validate_public_origins(source, export)
 
     account_id = (
         f"/subscriptions/{options.subscription}/resourceGroups/{options.resource_group}/"

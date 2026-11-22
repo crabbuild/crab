@@ -169,6 +169,12 @@ class ExportTest(unittest.TestCase):
             publisher.publish(self.options)
         self.assertEqual(self.object_operations, 0)
 
+    def test_export_on_the_source_account_is_checked_before_any_blob_io(self):
+        self.host = "crabfixturelive.blob.core.windows.net"
+        with self.assertRaisesRegex(publisher.ExportError, "separate export bucket or Azure storage account"):
+            publisher.publish(self.options)
+        self.assertEqual(self.object_operations, 0)
+
     def test_changed_native_primary_location_is_checked_before_any_blob_io(self):
         self.source_location = "westus3"
         with self.assertRaisesRegex(publisher.ExportError, "approved placement"):

@@ -355,16 +355,19 @@ mod tests {
                     S3Options::new("models", "us-east-1", "test-id", "test-key").unwrap(),
                 ),
                 "s3://models",
+                "s3://approved-export",
             ),
             (
                 DirectStoreOptions::gcs(GcsOptions::new("models", "test-token").unwrap()),
                 "gs://models",
+                "gs://approved-export",
             ),
             (
                 DirectStoreOptions::azure(
                     AzureOptions::bearer("sdkfixture", "models", "test-token").unwrap(),
                 ),
                 "https://sdkfixture.blob.core.windows.net/models",
+                "https://sdkexport.blob.core.windows.net/models",
             ),
         ];
         let repo = RepositoryLocator::new("org/repo").unwrap();
@@ -375,13 +378,12 @@ mod tests {
         let path = ObjectPath::from(format!("org/repo/{relative}"));
         let sibling_path = ObjectPath::from(format!("org/repository/v2/history/aa/{hash}"));
         let global = ObjectPath::from(format!(".crab/xorbs/aa/{hash}"));
-        for (store, origin) in targets {
+        for (store, origin, export) in targets {
             let directory = tempfile::tempdir().unwrap();
-            let export = origin.replace("models", "approved-export");
             let publication = crab_storage::cdn::write_publication_fixture(
                 directory.path().join("receipt.json"),
                 origin,
-                &export,
+                export,
                 "org/repo",
                 "https://downloads.example.com",
                 &relative,
@@ -391,7 +393,7 @@ mod tests {
             let options = DirectCdnOptions::public_export(
                 origin,
                 "org/repo",
-                &export,
+                export,
                 "https://downloads.example.com/",
                 Some(publication),
             )

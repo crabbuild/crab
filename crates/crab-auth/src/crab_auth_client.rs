@@ -158,11 +158,12 @@ impl CdnViewerDeployment {
 
     /// Validate that public bytes are served from a distinct native export of the same cloud.
     pub fn validate_public_export(&self, export_origin: &str) -> Result<()> {
-        let source = native_cdn_identity(&self.origin).map(|(provider, _)| provider);
-        let export = native_cdn_identity(export_origin).map(|(provider, _)| provider);
-        if source.is_none() || source != export || self.origin == export_origin {
+        if native_cdn_identity(&self.origin).is_none()
+            || native_cdn_identity(export_origin).is_none()
+            || !crab_types::storage::public_cdn_export_is_isolated(&self.origin, export_origin)
+        {
             return Err(AuthError::InvalidCredentialResponse(
-                "public CDN requires a separate native export origin in the source cloud".into(),
+                "public CDN requires a separate export bucket or Azure storage account in the source cloud".into(),
             ));
         }
         Ok(())
