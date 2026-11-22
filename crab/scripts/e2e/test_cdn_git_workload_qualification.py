@@ -14,9 +14,10 @@ from shutil import copytree
 from tempfile import TemporaryDirectory
 
 import run_cdn_git_workload as WORKLOAD
-from cdn_qualification import GIT_FETCH_FIELDS, collect_git_product_action, lfs_object_path, verify_public_transition
+from cdn_qualification import CLI_BUILD_FIELDS, GIT_FETCH_FIELDS, collect_git_product_action, lfs_object_path, verify_public_transition
 from public_inventory import Object, SCHEMA, publication_receipt, read_publication
 from test_cdn_transport_qualification import PACK, fixture
+from test_cdn_qualification import cli_candidate
 
 
 @unittest.skipUnless(os.name == "posix", "the local fixture helper uses a Python shebang")
@@ -34,6 +35,12 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         self.fixture.write_bytes(raw)
         self.digest = hashlib.sha256(raw).hexdigest()
         self.helper = self.root / "git-remote-crab"
+        self.build_event = self.root / "build-event.json"
+        build = cli_candidate("cloudfront/private/cli/git/direct", WORKLOAD.runner_platform())
+        self.build_event.write_text(json.dumps({
+            "target": WORKLOAD.ORIGIN_TARGET, "fields": {key: build[key] for key in CLI_BUILD_FIELDS}
+            | {"message": WORKLOAD.ORIGIN_MESSAGE},
+        }))
         # Git still creates real packed objects and ref leases. The shim directs
         # its wire protocol to a disposable local origin and supplies trace input.
         self.helper.write_text(
@@ -56,8 +63,7 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
             "    payload.parent.mkdir(parents=True)\n"
             "    payload.write_bytes((origin / digest).read_bytes())\n"
             "    assert os.environ['CRAB_INTERNAL_CDN_QUALIFICATION_ORIGIN'] == 's3://fixture-bucket'\n"
-            "    print(json.dumps({'target':'crab::cdn::qualification', 'fields': {\n"
-            "        'message':'CDN qualification verified native origin'}}), file=sys.stderr)\n"
+            "    print((origin.parent / 'build-event.json').read_text(), file=sys.stderr)\n"
             "    evidence = origin.parent / 'public-export-events.json'\n"
             "    for event in json.loads(evidence.read_bytes()):\n"
             "        print(json.dumps(event), file=sys.stderr)\n"
@@ -80,8 +86,7 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
             "            sys.exit(2)\n"
             "        print(flush=True)\n"
             "        if not (origin.parent / 'legacy-helper').exists():\n"
-            "            print(json.dumps({'target':'crab::cdn::qualification', 'fields': {\n"
-            "                'message':'CDN qualification verified native origin'}}), file=sys.stderr, flush=True)\n"
+            "            print((origin.parent / 'build-event.json').read_text(), file=sys.stderr, flush=True)\n"
             "        evidence = origin.parent / 'public-export-events.json'\n"
             "        if command == 'git-upload-pack' and evidence.exists():\n"
             "            for event in json.loads(evidence.read_bytes()):\n"
@@ -109,10 +114,11 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         (self.root / "crab").symlink_to(self.helper.name)
 
     def call(self, action: str, *arguments: str, digest: str | None = None) -> subprocess.CompletedProcess[str]:
+        receipt = [] if action == "inspect" else ["--receipt", str(self.receipt)]
         return subprocess.run([
             sys.executable, "-B", str(Path(WORKLOAD.__file__)), action,
             "--fixture", str(self.fixture), "--configuration-sha256", digest or self.digest,
-            "--receipt", str(self.receipt), "--scratch", str(self.root), "--helper", str(self.helper),
+            *receipt, "--scratch", str(self.root), "--helper", str(self.helper),
             "--source-sha", "a" * 40, "--run-id", "123", "--run-attempt", "2",
             *arguments,
         ], capture_output=True, text=True, check=False)
@@ -123,8 +129,13 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         return json.loads(result.stdout)
 
     def test_publishes_fetches_and_retires_the_dedicated_ref(self) -> None:
+        inspected = self.run_phase("inspect")
+        self.assertFalse(self.receipt.exists())
         published = self.run_phase("publish")
         self.assertTrue(published["visible_new_ref"])
+        self.assertEqual(published["candidate"], inspected["candidate"])
+        self.assertFalse(published["candidate"]["qualification_feature"])
+        self.assertEqual(published["candidate"]["binary_sha256"], hashlib.sha256(self.helper.read_bytes()).hexdigest())
         fetched = self.run_phase("fetch")
         self.assertEqual(fetched.keys(), GIT_FETCH_FIELDS)
         self.assertEqual(fetched["observed_sha256"], fetched["expected_sha256"])
@@ -144,6 +155,27 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         measured = collect_git_product_action(records, fetched)
         self.assertEqual(measured["observed_sha256"], fetched["expected_sha256"])
         self.assertEqual(measured["verified_edge_payloads"], 1)
+
+    def test_rejects_a_different_compiled_source_before_writing(self) -> None:
+        event = json.loads(self.build_event.read_bytes())
+        event["fields"]["source_sha"] = "f" * 40
+        self.build_event.write_text(json.dumps(event))
+        rejected = self.call("publish")
+        self.assertEqual(rejected.returncode, 1, rejected.stdout)
+        self.assertIn("differs from the approved source", rejected.stderr)
+        self.assertFalse(self.receipt.exists())
+
+    def test_retirement_rejects_a_replaced_helper(self) -> None:
+        self.run_phase("publish")
+        raw = self.helper.read_bytes()
+        try:
+            self.helper.write_bytes(raw + b"\n")
+            rejected = self.call("retire")
+            self.assertEqual(rejected.returncode, 1, rejected.stdout)
+            self.assertIn("differs from the native publication binary", rejected.stderr)
+        finally:
+            self.helper.write_bytes(raw)
+        self.assertTrue(self.run_phase("retire")["ref_retired"])
         self.assertTrue(self.run_phase("retire")["ref_retired"])
 
     def test_a_byte_identical_fetch_from_origin_only_does_not_qualify(self) -> None:

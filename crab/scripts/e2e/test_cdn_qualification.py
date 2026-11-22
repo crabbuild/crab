@@ -57,6 +57,17 @@ def sample() -> dict[str, Any]:
     }
 
 
+def cli_candidate(scope: str, platform: str) -> dict:
+    system, arch = platform.split("-", 1)
+    target = {"darwin": "apple-darwin", "linux": "unknown-linux-gnu", "windows": "pc-windows-msvc"}[system]
+    return {
+        "source_sha": COMMIT, "target_triple": f"{arch}-{target}", "cargo_profile": "release",
+        "cargo_features": "default,tier",
+        "qualification_feature": False, "binary_sha256": hashlib.sha256(platform.encode()).hexdigest(),
+        "release_policy_sha256": hashlib.sha256(f"{scope}\n".encode()).hexdigest(),
+    }
+
+
 def write_git_measurements(inputs: Path, registration: dict, platform: str) -> None:
     provider = CDN.PROVIDER_FOR_EDGE[registration["scope"].split("/", 1)[0]]
     for ordinal, (location, region) in enumerate(registration["regions"].items()):
@@ -78,6 +89,7 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str) -> N
                     "source_sha": registration["source_sha"], "scope": registration["scope"],
                     "configuration_sha256": registration["configuration_sha256"],
                     "workflow_run_id": "123", "workflow_run_attempt": "2", "platform": platform,
+                    "candidate": registration["candidate"],
                     "publication_oid": oid, "expected_sha256": blob, "observed_sha256": blob,
                     "publication_sha256": publication_digest,
                     "expected_bytes": CDN.GIT_PAYLOAD_SIZE, "observed_bytes": CDN.GIT_PAYLOAD_SIZE,
@@ -120,6 +132,8 @@ class CdnQualificationTests(unittest.TestCase):
             "configuration_sha256": CONFIGURATION, "workload": "git-fetch", "samples": 30,
             "p95_budget_ms": 150, "cost_budget_microusd": 10, "regions": REGIONS, "deployment_policy_sha256": policy_digest,
         } | publication
+        if CDN.requires_cli_workload(self.scope):
+            self.registration["candidate"] = cli_candidate(self.scope, platform)
         if profile == "managed":
             self.registration["managed_issuer"] = {
                 "identity_sha256": "1" * 64, "version": "2026.11.22", "approval_sha256": "2" * 64,
@@ -254,12 +268,12 @@ class CdnQualificationTests(unittest.TestCase):
         receipt = json_file(records / "publication.json", provenance | {
             "schema": "crab.cdn-git-publication/v1", "ref": "refs/heads/crab-cdn-qualification-123-2-abcdefabcdef",
             "oid": fetch["publication_oid"], "sha256": fetch["expected_sha256"], "published": True,
-            "visible_at_unix_ms": fetch["started_at_unix_ms"] - 50,
+            "visible_at_unix_ms": fetch["started_at_unix_ms"] - 50, "candidate": fetch["candidate"],
         })
         json_file(records / "fetch.json", fetch | {"publication_sha256": receipt})
         json_file(records / "retirement.json", provenance | {
             "schema": "crab.cdn-git-retirement/v1", "publication_sha256": receipt, "ref_retired": True,
-            "retired_at_unix_ms": fetch["finished_at_unix_ms"] + 50,
+            "retired_at_unix_ms": fetch["finished_at_unix_ms"] + 50, "candidate": fetch["candidate"],
         })
         self.report["product_action"].update({key: fetch[key] for key in self.report["product_action"] if key in fetch})
 
@@ -480,6 +494,19 @@ class CdnQualificationTests(unittest.TestCase):
         policy.write_text(self.scope + "\n")
         result = self.command(*args)
         self.assertEqual(result.returncode, 0, result.stderr)
+        policy.write_bytes((self.scope + "\r\n").encode())
+        result = self.command(*args)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        original = self.registration["candidate"]
+        for change in ({"qualification_feature": True}, {"cargo_profile": "debug"}):
+            with self.subTest(change=change):
+                self.registration["candidate"] = original | change
+                self.rejected("requires the ordinary release build", *args)
+        self.registration["candidate"] = original | {"target_triple": "x86_64-unknown-linux-musl"}
+        self.rejected("requires the packaged CLI target triple", *args)
+        self.registration["candidate"] = original
+        policy.write_text("# Changed after the build\n" + self.scope + "\n")
+        self.rejected("did not embed the release checkout", *args)
         policy.write_text(self.scope + "\n" + self.scope + "\n")
         self.rejected("duplicate CDN release scope", *args)
 

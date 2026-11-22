@@ -20,17 +20,16 @@ from collect_cdn_product_metrics import ROUTE, ROUTE_FIELDS, TARGET, measure
 from run_cdn_transport_checks import approved_fixture, fixture_object_key, native_remote
 
 from cdn_qualification import (
-    COMMIT, GIT_OID, GIT_PAYLOAD_SIZE, PROVIDER_FOR_EDGE, RUN_NUMBER, cli_action_name, decode, deployment_component_digest,
+    CLI_BUILD_FIELDS, COMMIT, GIT_OID, GIT_PAYLOAD_SIZE, PROVIDER_FOR_EDGE, RUN_NUMBER, cli_action_name, decode, deployment_component_digest,
     fields, lfs_object_path, matches, read_git_record, require, requires_cli_lfs_workload, requires_cli_workload, scope_parts,
-    validate_git_publication,
-    verified_publication,
+    validate_git_publication, verified_publication, verify_cli_candidate,
 )
 from public_inventory import ExportError, read_document
 
 
 PAYLOAD = "cdn-qualification.bin"
 ORIGIN_TARGET = "crab::cdn::qualification"
-ORIGIN_EVENT = {"message": "CDN qualification verified native origin"}
+ORIGIN_MESSAGE = "CDN qualification verified native origin"
 PUBLIC_TRANSITION_TARGET = "crab_storage::cdn::public_transition"
 
 
@@ -47,18 +46,46 @@ def run_command(
     return result
 
 
-def confirm_origin(result: subprocess.CompletedProcess[bytes], label: str) -> None:
-    observations = (decode(line) for line in result.stderr.splitlines() if ORIGIN_TARGET.encode() in line)
-    require(any(isinstance(event, dict) and event.get("target") == ORIGIN_TARGET
-                and event.get("fields") == ORIGIN_EVENT for event in observations),
-            f"{label} did not confirm the approved native origin")
+def runner_platform() -> str:
+    system = "windows" if sys.platform == "win32" else sys.platform
+    machine = platform.machine().lower()
+    architecture = {"amd64": "x86_64", "arm64": "aarch64"}.get(machine, machine)
+    return f"{system}-{architecture}"
 
 
-def run_git(*args: str, root: Path, env: dict[str, str]) -> subprocess.CompletedProcess[bytes]:
+class OriginGuard:
+    def __init__(self, helper: Path, source: str, expected: dict | None) -> None:
+        with helper.open("rb") as binary:
+            self.binary_sha256 = hashlib.file_digest(binary, "sha256").hexdigest()
+        self.source = source
+        self.platform = runner_platform()
+        self.candidate = expected
+        if expected is not None:
+            require(expected["binary_sha256"] == self.binary_sha256, "the Git helper differs from the native publication binary")
+
+    def confirm(self, result: subprocess.CompletedProcess[bytes], label: str) -> None:
+        found = False
+        for line in result.stderr.splitlines():
+            if ORIGIN_TARGET.encode() not in line:
+                continue
+            event = decode(line)
+            if not isinstance(event, dict) or event.get("target") != ORIGIN_TARGET:
+                continue
+            record = fields(event.get("fields"), CLI_BUILD_FIELDS | {"message"}, "native origin observation")
+            require(record["message"] == ORIGIN_MESSAGE, f"{label} did not confirm the approved native origin")
+            candidate = {key: record[key] for key in CLI_BUILD_FIELDS} | {"binary_sha256": self.binary_sha256}
+            verify_cli_candidate(candidate, self.source, self.platform)
+            require(self.candidate is None or candidate == self.candidate, f"{label} ran a different CLI build")
+            self.candidate = candidate
+            found = True
+        require(found, f"{label} did not confirm the approved native origin")
+
+
+def run_git(*args: str, root: Path, env: dict[str, str], guard: OriginGuard | None = None) -> subprocess.CompletedProcess[bytes]:
     label = f"git {args[0]}"
     result = run_command(["git", *args], label, root, env)
-    if args[0] in {"ls-remote", "push", "fetch"}:
-        confirm_origin(result, label)
+    if guard is not None:
+        guard.confirm(result, label)
     return result
 
 
@@ -72,14 +99,14 @@ def companion_crab(helper: Path) -> Path:
     if not helper.samefile(candidate):
         with helper.open("rb") as git_helper, candidate.open("rb") as crab:
             require(hashlib.file_digest(git_helper, "sha256").digest() == hashlib.file_digest(crab, "sha256").digest(),
-                    "Crab and its Git helper must be from the same qualification build")
+                    "Crab and its Git helper must be from the same build")
     return candidate
 
 
 def git_environment(helper: Path, root: Path, native_origin: str) -> dict[str, str]:
     # Use the selected release helper and fresh Git and Crab object caches.
     require(helper.is_file() and helper.name in {"git-remote-crab", "git-remote-crab.exe"},
-            "select the qualification build's git-remote-crab executable")
+            "select the candidate's git-remote-crab executable")
     env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     return env | {
         "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
@@ -90,8 +117,8 @@ def git_environment(helper: Path, root: Path, native_origin: str) -> dict[str, s
     }
 
 
-def ref_tip(remote: str, ref: str, root: Path, env: dict[str, str]) -> str | None:
-    result = run_git("ls-remote", "--refs", remote, ref, root=root, env=env)
+def ref_tip(remote: str, ref: str, root: Path, env: dict[str, str], guard: OriginGuard) -> str | None:
+    result = run_git("ls-remote", "--refs", remote, ref, root=root, env=env, guard=guard)
     if not result.stdout:
         return None
     columns = result.stdout.strip().split(b"\t")
@@ -101,7 +128,10 @@ def ref_tip(remote: str, ref: str, root: Path, env: dict[str, str]) -> str | Non
     return oid
 
 
-def publish(remote: str, provenance: dict[str, str], receipt: Path, root: Path, env: dict[str, str], crab: Path | None) -> dict:
+def publish(
+    remote: str, provenance: dict[str, str], receipt: Path, root: Path, env: dict[str, str],
+    crab: Path | None, guard: OriginGuard,
+) -> dict:
     ref = f"refs/heads/crab-cdn-qualification-{provenance['workflow_run_id']}-{provenance['workflow_run_attempt']}-{uuid4().hex[:12]}"
     content = hashlib.shake_256(f"{provenance['configuration_sha256']}/{ref}".encode()).digest(GIT_PAYLOAD_SIZE)
     sha256 = hashlib.sha256(content).hexdigest()
@@ -119,14 +149,14 @@ def publish(remote: str, provenance: dict[str, str], receipt: Path, root: Path, 
     oid = run_git("rev-parse", "HEAD", root=root, env=env).stdout.strip().decode("ascii")
     require(matches(GIT_OID, oid), "writer did not create a valid fixture commit")
     # A read-only probe prevents an older helper that ignores the origin guard from writing.
-    require(ref_tip(remote, ref, root, env) is None, "the qualification ref already exists")
+    require(ref_tip(remote, ref, root, env, guard) is None, "the qualification ref already exists")
     record = provenance | {"schema": "crab.cdn-git-publication/v1", "ref": ref, "oid": oid,
-                           "sha256": sha256, "published": False, "visible_at_unix_ms": None}
+                           "sha256": sha256, "published": False, "visible_at_unix_ms": None, "candidate": guard.candidate}
     # Keep a receipt before sending the push so a timed-out publication can be retired.
     with receipt.open("x", encoding="utf-8") as file:
         json.dump(record, file, sort_keys=True)
-    run_git("push", f"--force-with-lease={ref}:", remote, f"HEAD:{ref}", root=root, env=env)
-    require(ref_tip(remote, ref, root, env) == oid, "new ref was not immediately visible after native push")
+    run_git("push", f"--force-with-lease={ref}:", remote, f"HEAD:{ref}", root=root, env=env, guard=guard)
+    require(ref_tip(remote, ref, root, env, guard) == oid, "new ref was not immediately visible after native push")
     record["published"] = True
     record["visible_at_unix_ms"] = time.time_ns() // 1_000_000
     with TemporaryDirectory(dir=receipt.parent, prefix=".crab-publish-") as staging:
@@ -224,23 +254,26 @@ def write_transition(proof: dict, record: dict, result: dict, output: Path, befo
         destination.write("\n")
 
 
-def fetch_once(remote: str, record: dict[str, Any], root: Path, env: dict[str, str], proof: dict | None, crab: Path | None) -> dict:
+def fetch_once(
+    remote: str, record: dict[str, Any], root: Path, env: dict[str, str], proof: dict | None,
+    crab: Path | None, guard: OriginGuard,
+) -> dict:
     require(record["published"], "fetch requires a confirmed native publication")
     mode = ("--bare",) if crab is None else ()
     run_git("init", *mode, "--template=", "--object-format=sha1", root=root, env=env)
     if crab is not None:
         run_git("remote", "add", "origin", remote, root=root, env=env)
-        run_git("fetch", "--no-tags", "--no-auto-maintenance", remote, record["ref"], root=root, env=env)
+        run_git("fetch", "--no-tags", "--no-auto-maintenance", remote, record["ref"], root=root, env=env, guard=guard)
         pointer = run_git("cat-file", "blob", f"FETCH_HEAD:{PAYLOAD}", root=root, env=env).stdout
         require(pointer == lfs_pointer(record["sha256"]), "native ref does not contain the expected LFS pointer")
     # Use a new cache and exact refspec so another fetched ref cannot supply the bytes.
     started_at = time.time_ns() // 1_000_000
     started = time.monotonic_ns()
     if crab is None:
-        run = run_git("fetch", "--no-tags", "--no-auto-maintenance", remote, record["ref"], root=root, env=env)
+        run = run_git("fetch", "--no-tags", "--no-auto-maintenance", remote, record["ref"], root=root, env=env, guard=guard)
     else:
         run = run_command([str(crab), "lfs", "fetch", "origin", record["oid"]], "crab lfs fetch", root, env)
-        confirm_origin(run, "crab lfs fetch")
+        guard.confirm(run, "crab lfs fetch")
     elapsed = max(1, (time.monotonic_ns() - started) // 1_000_000)
     finished_at = time.time_ns() // 1_000_000
     actual = run_git("rev-parse", "FETCH_HEAD", root=root, env=env).stdout.strip().decode("ascii")
@@ -256,16 +289,13 @@ def fetch_once(remote: str, record: dict[str, Any], root: Path, env: dict[str, s
     metrics = measure(lines, record["scope"])
     if proof is not None:
         verify_transition_events(lines, record["scope"], proof)
-    system = "windows" if sys.platform == "win32" else sys.platform
-    machine = platform.machine().lower()
-    architecture = {"amd64": "x86_64", "arm64": "aarch64"}.get(machine, machine)
     action = cli_action_name(record["scope"])
     return {
         "schema": f"crab.cdn-{action}/v1", "name": action, "expected_sha256": record["sha256"],
         "observed_sha256": observed, "expected_bytes": GIT_PAYLOAD_SIZE, "observed_bytes": len(blob),
         "native_writes": 1, "visible_new_ref": True, "elapsed_ms": elapsed,
         "publication_oid": record["oid"], "started_at_unix_ms": started_at, "finished_at_unix_ms": finished_at,
-        "platform": f"{system}-{architecture}",
+        "platform": guard.platform, "candidate": guard.candidate,
     } | metrics
 
 
@@ -274,21 +304,24 @@ def require_edge_fetch(result: dict) -> None:
     require(result["verified_edge_payloads"] > 0, "fetch did not accept a verified edge payload for the approved scope")
 
 
-def fetch(action: str, remote: str, record: dict[str, Any], root: Path, env: dict[str, str], proof: dict | None, crab: Path | None) -> dict:
+def fetch(
+    action: str, remote: str, record: dict[str, Any], root: Path, env: dict[str, str], proof: dict | None,
+    crab: Path | None, guard: OriginGuard,
+) -> dict:
     if action == "fetch-warm-local":
         require(crab is None, "warm-local pack measurement is specific to the Git workload")
         primer = root / "primer"
         primer.mkdir()
-        require_edge_fetch(fetch_once(remote, record, primer, env, None, crab))
+        require_edge_fetch(fetch_once(remote, record, primer, env, None, crab, guard))
         # The cache is shared, but the measured Git object database starts empty.
         measured = root / "measured"
         measured.mkdir()
-        result = fetch_once(remote, record, measured, env, None, crab)
+        result = fetch_once(remote, record, measured, env, None, crab, guard)
         require(result["edge_attempts"] == 0 and result["verified_edge_payloads"] == 0
                 and result["local_payload_hits"] > 0,
                 "warm-local fetch must use a verified local pack without an edge request for this scope")
         return result | {"arm": "warm_local"}
-    result = fetch_once(remote, record, root, env, proof, crab)
+    result = fetch_once(remote, record, root, env, proof, crab, guard)
     if action == "fetch-origin":
         require(result["all_edge_attempts"] == 0, "origin control observed edge traffic")
         return result | {"arm": "origin"}
@@ -296,24 +329,24 @@ def fetch(action: str, remote: str, record: dict[str, Any], root: Path, env: dic
     return result | {"arm": "edge"}
 
 
-def retire(remote: str, record: dict[str, Any], root: Path, env: dict[str, str]) -> dict:
+def retire(remote: str, record: dict[str, Any], root: Path, env: dict[str, str], guard: OriginGuard) -> dict:
     run_git("init", "--bare", "--template=", "--object-format=sha1", root=root, env=env)
-    tip = ref_tip(remote, record["ref"], root, env)
+    tip = ref_tip(remote, record["ref"], root, env, guard)
     if tip is not None:
         require(tip == record["oid"], "qualification ref changed after publication")
         ref = record["ref"]
-        run_git("push", f"--force-with-lease={ref}:{tip}", remote, f":{ref}", root=root, env=env)
-        require(ref_tip(remote, ref, root, env) is None, "qualification ref remains after retirement")
+        run_git("push", f"--force-with-lease={ref}:{tip}", remote, f":{ref}", root=root, env=env, guard=guard)
+        require(ref_tip(remote, ref, root, env, guard) is None, "qualification ref remains after retirement")
     return {"schema": "crab.cdn-git-retirement/v1", "ref_retired": True,
-            "retired_at_unix_ms": time.time_ns() // 1_000_000}
+            "retired_at_unix_ms": time.time_ns() // 1_000_000, "candidate": guard.candidate}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("publish", "fetch", "fetch-origin", "fetch-warm-local", "retire"))
+    parser.add_argument("action", choices=("inspect", "publish", "fetch", "fetch-origin", "fetch-warm-local", "retire"))
     parser.add_argument("--fixture", required=True, type=Path)
     parser.add_argument("--configuration-sha256", required=True)
-    parser.add_argument("--receipt", required=True, type=Path)
+    parser.add_argument("--receipt", type=Path, help="required for publication, fetch and retirement")
     parser.add_argument("--scratch", required=True, type=Path)
     parser.add_argument("--helper", required=True, type=Path)
     parser.add_argument("--source-sha", required=True)
@@ -327,6 +360,7 @@ def main() -> int:
     try:
         require(matches(COMMIT, args.source_sha) and matches(RUN_NUMBER, args.run_id)
                 and matches(RUN_NUMBER, args.run_attempt), "exact workflow run provenance is required")
+        require(args.action == "inspect" or args.receipt is not None, "this action requires a publication receipt path")
         fixture = approved_fixture(args.fixture, args.configuration_sha256)
         edge, _, _, _, _ = scope_parts(fixture["scope"])
         require(requires_cli_workload(fixture["scope"]), "workload requires a direct CLI Git, capsule or LFS scope")
@@ -339,17 +373,24 @@ def main() -> int:
         with TemporaryDirectory(prefix="crab-cdn-git-", dir=args.scratch) as temporary:
             root = Path(temporary).resolve()
             env = git_environment(args.helper, root, fixture["native_origin"])
-            if args.action == "publish":
+            if args.action in ("inspect", "publish"):
                 prepare_transition(args, fixture, None)
-                result = publish(remote, provenance, args.receipt, root, env, crab)
+                guard = OriginGuard(args.helper, args.source_sha, None)
+                if args.action == "inspect":
+                    run_git("init", "--bare", "--template=", "--object-format=sha1", root=root, env=env)
+                    ref_tip(remote, "refs/heads/crab-cdn-qualification-build-inspection", root, env, guard)
+                    result = {"candidate": guard.candidate, "platform": guard.platform}
+                else:
+                    result = publish(remote, provenance, args.receipt, root, env, crab, guard) | {"candidate": guard.candidate}
             else:
                 raw = read_git_record(args.receipt)
                 record = validate_git_publication(raw, provenance)
+                guard = OriginGuard(args.helper, args.source_sha, record["candidate"])
                 proof = prepare_transition(args, fixture, record)
                 if args.action == "retire":
-                    result = retire(remote, record, root, env)
+                    result = retire(remote, record, root, env, guard)
                 else:
-                    result = fetch(args.action, remote, record, root, env, proof, crab)
+                    result = fetch(args.action, remote, record, root, env, proof, crab, guard)
                     if proof is not None:
                         write_transition(proof, record, result, args.transition_output, args.before_transition)
                 result["publication_sha256"] = hashlib.sha256(raw).hexdigest()

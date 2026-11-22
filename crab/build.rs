@@ -90,6 +90,14 @@ fn main() {
 fn emit_build_metadata() {
     let target = std::env::var("TARGET").unwrap_or_else(|_| "unknown".into());
     println!("cargo:rustc-env=CRAB_BUILD_TARGET={target}");
+    let profile = std::env::var("PROFILE").unwrap_or_else(|_| "unknown".into());
+    println!("cargo:rustc-env=CRAB_BUILD_PROFILE={profile}");
+    let configured = std::env::var("CARGO_CFG_FEATURE").unwrap_or_default();
+    let mut features: Vec<_> = configured.split(',').collect();
+    features.sort_unstable();
+    println!("cargo:rustc-env=CRAB_BUILD_FEATURES={}", features.join(","));
+    let source_sha = git_sha(false).unwrap_or_else(|| "unknown".into());
+    println!("cargo:rustc-env=CRAB_BUILD_SOURCE_SHA={source_sha}");
 
     // Allow overriding the version via CRAB_BUILD_VERSION env var (e.g., from CI).
     // Falls back to CARGO_PKG_VERSION from Cargo.toml.
@@ -102,7 +110,7 @@ fn emit_build_metadata() {
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .or_else(git_short_sha)
+        .or_else(|| git_sha(true))
         .unwrap_or_else(|| {
             println!(
                 "cargo:warning=crab build.rs: could not resolve git sha, \
@@ -427,12 +435,14 @@ fn track_git_metadata() {
     }
 }
 
-/// Returns the short HEAD sha of the workspace, or `None` on any failure.
-fn git_short_sha() -> Option<String> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
-        .ok()?;
+/// Returns the HEAD sha of the workspace, or `None` on any failure.
+fn git_sha(short: bool) -> Option<String> {
+    let mut git = Command::new("git");
+    git.arg("rev-parse");
+    if short {
+        git.arg("--short");
+    }
+    let output = git.arg("HEAD").output().ok()?;
 
     if !output.status.success() {
         return None;

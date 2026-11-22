@@ -84,7 +84,7 @@ def load_canary_traces(root: Path, source: str, run_id: str, attempt: str) -> di
 def assemble_bundle(
     inputs: Path, output: Path, benchmarks_sha256: str, scopes: set[str],
     source: str, run_id: str, attempt: str,
-    *, native_reports: Path | None = None, transport_traces: Path | None = None,
+    *, native_reports: Path | None = None, transport_traces: Path | None = None, policy: Path | None = None,
 ) -> int:
     require(not output.exists() and not output.is_symlink(), "qualification artifact directory must be new")
     require(matches(COMMIT, source) and matches(RUN_NUMBER, run_id) and matches(RUN_NUMBER, attempt),
@@ -94,7 +94,8 @@ def assemble_bundle(
             "CDN benchmark registrations differ from the approved digest")
     registrations = decode(raw)
     require(isinstance(registrations, dict) and registrations, "CDN artifact needs benchmark registrations")
-    missing = required_platform_rows(scopes) - registrations.keys()
+    release_rows = required_platform_rows(scopes)
+    missing = release_rows - registrations.keys()
     require(not missing, f"missing required CDN platform registrations: {', '.join(sorted(missing))}")
     origin_inputs = inputs if native_reports is None else native_reports
     canaries = load_canary_traces(transport_traces, source, run_id, attempt) if transport_traces is not None else {}
@@ -159,7 +160,7 @@ def assemble_bundle(
                 (destination / "traces" / filename).write_bytes(trace)
                 checks[check] = {"passed": True, "trace_sha256": hashlib.sha256(trace).hexdigest()}
             if cli_workload:
-                product = collect_git_product_action(inputs / row / GIT_PRODUCT_DIR, measured,
+                product = collect_git_product_action(inputs / row / GIT_PRODUCT_DIR, measured | {"candidate": registration.get("candidate")},
                                                      retain=destination / GIT_PRODUCT_DIR)
                 measured["product_action"] = product | {"fixture_cleanup_verified": True}
             if git_workload:
@@ -177,7 +178,7 @@ def assemble_bundle(
             (destination / "cdn-report.json").write_text(
                 json.dumps(report, sort_keys=True) + "\n", encoding="utf-8",
             )
-            verify_bundle_row(stage, row, registration, source, run_id, attempt)
+            verify_bundle_row(stage, row, registration, source, run_id, attempt, policy=policy if row in release_rows else None)
         require(not output.exists() and not output.is_symlink(), "qualification artifact directory already exists")
         stage.rename(output)
     return len(registrations)
@@ -198,7 +199,7 @@ def main() -> int:
         count = assemble_bundle(
             args.inputs, args.output, args.benchmarks_sha256, release_scopes(POLICY),
             args.source_sha, args.run_id, args.run_attempt,
-            native_reports=args.native_reports, transport_traces=args.transport_traces,
+            native_reports=args.native_reports, transport_traces=args.transport_traces, policy=POLICY,
         )
     except subprocess.CalledProcessError:
         print("error: assembled CDN report did not pass verification", file=sys.stderr)

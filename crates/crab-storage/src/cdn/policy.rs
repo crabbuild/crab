@@ -1,8 +1,15 @@
 use crate::StorageProviderKind;
+use sha2::{Digest as _, Sha256};
 
 use super::qualification_enabled;
 
 const RELEASE_SCOPES: &str = include_str!("qualified-scopes.txt");
+
+/// Digest of the compiled policy with platform-independent line endings.
+#[must_use]
+pub fn release_policy_sha256() -> String {
+    format!("{:x}", Sha256::digest(RELEASE_SCOPES.replace("\r\n", "\n")))
+}
 
 /// Product read boundary that requested a CDN route.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

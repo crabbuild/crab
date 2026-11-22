@@ -119,8 +119,11 @@ GIT_PAYLOAD_SIZE = 256 * 1024
 GIT_OID = re.compile(r"[0-9a-f]{40}")
 GIT_TEST_REF = re.compile(r"refs/heads/crab-cdn-qualification-[1-9][0-9]{0,19}-[1-9][0-9]{0,19}-[0-9a-f]{12}")
 CDN_PROVENANCE_FIELDS = {"source_sha", "scope", "configuration_sha256", "workflow_run_id", "workflow_run_attempt"}
-GIT_PUBLICATION_FIELDS = CDN_PROVENANCE_FIELDS | {"schema", "ref", "oid", "sha256", "published", "visible_at_unix_ms"}
-GIT_RETIREMENT_FIELDS = CDN_PROVENANCE_FIELDS | {"schema", "publication_sha256", "ref_retired", "retired_at_unix_ms"}
+GIT_PUBLICATION_FIELDS = CDN_PROVENANCE_FIELDS | {"schema", "ref", "oid", "sha256", "published", "visible_at_unix_ms", "candidate"}
+GIT_RETIREMENT_FIELDS = CDN_PROVENANCE_FIELDS | {"schema", "publication_sha256", "ref_retired", "retired_at_unix_ms", "candidate"}
+CLI_BUILD_FIELDS = {"source_sha", "target_triple", "cargo_profile", "cargo_features", "qualification_feature", "release_policy_sha256"}
+CLI_CANDIDATE_FIELDS = CLI_BUILD_FIELDS | {"binary_sha256"}
+CLI_TARGET = re.compile(r"(aarch64|x86_64)-(apple-darwin|unknown-linux-(?:gnu|musl)|pc-windows-(?:msvc|gnu|gnullvm))")
 PRODUCT_COUNTERS = {
     "edge_attempts", "observed_edge_gets", "edge_bytes", "edge_hits", "edge_misses", "edge_unknown",
     "incomplete_edge_bytes", "edge_elapsed_ms_total", "verified_edge_payloads", "all_edge_attempts", "local_payload_hits",
@@ -131,7 +134,7 @@ GIT_MEASUREMENT_FIELDS = GIT_EXTERNAL_METRICS | {"schema", "client_report_sha256
 GIT_FETCH_FIELDS = PRODUCT_COUNTERS | CDN_PROVENANCE_FIELDS | {
     "schema", "name", "arm", "expected_sha256", "observed_sha256", "expected_bytes", "observed_bytes",
     "native_writes", "visible_new_ref", "elapsed_ms", "publication_oid", "started_at_unix_ms", "finished_at_unix_ms",
-    "platform", "publication_sha256",
+    "platform", "publication_sha256", "candidate",
 }
 GIT_MODES = {"origin": "origin", "cold_edge": "edge", "warm_edge": "edge", "warm_local": "warm_local"}
 SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -935,6 +938,9 @@ def benchmark_registration(registration: Any) -> dict[str, Any]:
     }
     require(isinstance(registration, dict) and isinstance(registration.get("scope"), str), "benchmark needs a CDN scope")
     _, access, _, _, profile = scope_parts(registration["scope"])
+    if requires_cli_workload(registration["scope"]):
+        expected.add("candidate")
+        verify_cli_candidate(registration.get("candidate"), registration.get("source_sha"))
     if access == "public":
         expected |= {"publication_sha256", "previous_publication_sha256", "historical_origin_sha256"}
         require(matches(SHA256, registration.get("publication_sha256")),
@@ -1027,6 +1033,36 @@ def lfs_object_path(digest: str) -> str:
     return f"lfs/objects/{digest[:2]}/{digest[2:4]}/{digest}"
 
 
+def verify_cli_candidate(
+    value: Any, source: str, platform: str | None = None, *, policy: Path | None = None,
+) -> dict[str, Any]:
+    candidate = fields(value, CLI_CANDIDATE_FIELDS, "CLI build identity")
+    triple = candidate["target_triple"]
+    raw_features = candidate["cargo_features"]
+    require(isinstance(raw_features, str), "CLI build features must be recorded")
+    features = raw_features.split(",") if raw_features else []
+    require(matches(COMMIT, source) and candidate["source_sha"] == source
+            and matches(SHA256, candidate["binary_sha256"]) and matches(SHA256, candidate["release_policy_sha256"])
+            and matches(CLI_TARGET, triple) and candidate["cargo_profile"] in ("debug", "release")
+            and type(candidate["qualification_feature"]) is bool
+            and all(matches(LABEL, feature) for feature in features) and features == sorted(set(features))
+            and ("provider-cdn-qualification" not in features or candidate["qualification_feature"]),
+            "CLI build identity is invalid or differs from the approved source")
+    arch, system = triple.split("-", 1)
+    os_label = {"apple": "darwin", "unknown": "linux", "pc": "windows"}[system.split("-", 1)[0]]
+    if platform is not None:
+        require(platform == f"{os_label}-{arch}", "CLI build target differs from the approved platform")
+    if policy is not None:
+        require(candidate["qualification_feature"] is False and candidate["cargo_profile"] == "release",
+                "CDN promotion requires the ordinary release build")
+        require(system in {"apple-darwin", "unknown-linux-gnu", "pc-windows-msvc"},
+                "CDN promotion requires the packaged CLI target triple")
+        compiled_policy = hashlib.sha256(policy.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+        require(candidate["release_policy_sha256"] == compiled_policy,
+                "CLI build did not embed the release checkout's CDN policy")
+    return candidate
+
+
 def read_git_record(path: Path) -> bytes:
     limit = 8 * 1024
     with path.open("rb") as record:
@@ -1045,6 +1081,7 @@ def validate_git_publication(raw: bytes, provenance: dict[str, Any]) -> dict[str
             and type(record["published"]) is bool
             and (positive(record["visible_at_unix_ms"]) if record["published"] else record["visible_at_unix_ms"] is None),
             "Git publication receipt does not match this qualification run")
+    verify_cli_candidate(record["candidate"], provenance["source_sha"], provenance.get("platform"))
     return record
 
 
@@ -1052,8 +1089,11 @@ def validate_git_fetch(raw: bytes, provenance: dict[str, Any], mode: str, label:
     action = cli_action_name(provenance["scope"])
     client = fields(decode(raw), GIT_FETCH_FIELDS, "redacted LFS fetch" if action == "lfs-fetch" else "redacted Git fetch")
     require(client["schema"] == f"crab.cdn-{action}/v1" and client["name"] == action
-            and client["arm"] == mode and all(client[key] == value for key, value in provenance.items()),
+            and client["arm"] == mode and all(client[key] == value for key, value in provenance.items() if key != "candidate"),
             f"{label} has mismatched Git fetch provenance")
+    verify_cli_candidate(client["candidate"], provenance["source_sha"], client["platform"])
+    if "candidate" in provenance:
+        require(client["candidate"] == provenance["candidate"], f"{label} did not run the registered CLI build")
     require(matches(GIT_OID, client["publication_oid"]) and matches(SHA256, client["publication_sha256"])
             and matches(SHA256, client["expected_sha256"]) and client["expected_sha256"] == client["observed_sha256"]
             and client["expected_bytes"] == client["observed_bytes"] == GIT_PAYLOAD_SIZE
@@ -1079,8 +1119,10 @@ def collect_git_product_action(
     publication = validate_git_publication(publication_raw, row)
     require(publication["published"], "Git product action requires a ref confirmed after native push")
     provenance = {key: row[key] for key in CDN_PROVENANCE_FIELDS}
+    require(publication["candidate"] == row["candidate"], "publication did not run the registered CLI build")
     fetch_raw = read_git_record(inputs / "fetch.json")
-    fetch = validate_git_fetch(fetch_raw, provenance | {"platform": row["platform"]}, "edge", "Git product action")
+    fetch = validate_git_fetch(fetch_raw, provenance | {"platform": row["platform"], "candidate": row["candidate"]},
+                               "edge", "Git product action")
     digest = hashlib.sha256(publication_raw).hexdigest()
     require(fetch["publication_sha256"] == digest and fetch["publication_oid"] == publication["oid"]
             and fetch["expected_sha256"] == publication["sha256"]
@@ -1091,6 +1133,7 @@ def collect_git_product_action(
     require(retirement["schema"] == "crab.cdn-git-retirement/v1"
             and all(retirement[key] == value for key, value in provenance.items())
             and retirement["publication_sha256"] == digest and retirement["ref_retired"] is True
+            and retirement["candidate"] == row["candidate"]
             and positive(retirement["retired_at_unix_ms"])
             and retirement["retired_at_unix_ms"] >= fetch["finished_at_unix_ms"],
             "Git product action requires retirement of the same published ref after the fetch")
@@ -1120,7 +1163,8 @@ def collect_git_performance(
             "invalid benchmark provenance")
     provider = PROVIDER_FOR_EDGE[scope.split("/", 1)[0]]
     provenance = {key: spec[key] for key in ("source_sha", "scope", "configuration_sha256")}
-    provenance |= {"workflow_run_id": run_id, "workflow_run_attempt": attempt, "platform": platform}
+    provenance |= {"workflow_run_id": run_id, "workflow_run_attempt": attempt, "platform": platform,
+                   "candidate": spec["candidate"]}
     seen = set()
     performance = {}
     for location, region in spec["regions"].items():
@@ -1181,7 +1225,7 @@ def collect_git_performance(
 def verify_cdn_report(
     report: Any, *, scope: str, configuration_sha256: str, platform: str, provider: str,
     verified_origin: dict[str, Any], origin_sha256: str, source_sha: str,
-    run_id: str, run_attempt: str, directory: Path, registration: Any,
+    run_id: str, run_attempt: str, directory: Path, registration: Any, policy: Path | None = None,
 ) -> dict[str, Any]:
     """Validate a report after the existing verifier has checked its origin report."""
     row = fields(report, {
@@ -1213,6 +1257,8 @@ def verify_cdn_report(
         registration.get(name) == row[name] for name in ("source_sha", "scope", "configuration_sha256")
     ), "benchmark registration does not match the release row")
 
+    if requires_cli_workload(scope):
+        verify_cli_candidate(registration.get("candidate"), source_sha, platform, policy=policy)
     lower = verify_performance(row["performance"], registration)
     verify_product_action(row["product_action"], family)
     require(row["product_action"]["name"] == registration["workload"],
@@ -1222,7 +1268,8 @@ def verify_cdn_report(
         measured = collect_git_performance(directory / GIT_BENCHMARK_DIR, registration, platform, run_id, run_attempt)
         require(measured == row["performance"], "Git performance summary differs from the retained measurements")
     if requires_cli_workload(scope):
-        product = collect_git_product_action(directory / GIT_PRODUCT_DIR, row, cleanup_at=cleanup_at)
+        product = collect_git_product_action(directory / GIT_PRODUCT_DIR, row | {"candidate": registration["candidate"]},
+                                             cleanup_at=cleanup_at)
         require(row["product_action"] == product | {"fixture_cleanup_verified": True},
                 "product action differs from the retained publication, fetch, and retirement evidence")
     return {"status": "verified", "scope": scope, "platform": platform, "deployment": row["deployment"],

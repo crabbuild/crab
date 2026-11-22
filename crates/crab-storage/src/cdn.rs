@@ -23,7 +23,9 @@ mod telemetry;
 pub use crab_types::storage::CdnPublicationFile;
 pub(crate) use placement::NativeAuthority;
 pub use placement::NativeCdnOrigin;
-pub use policy::{CdnConsumer, CdnPolicy, CdnProfile, CdnReadFamily, CdnVisibility};
+pub use policy::{
+    CdnConsumer, CdnPolicy, CdnProfile, CdnReadFamily, CdnVisibility, release_policy_sha256,
+};
 #[cfg(any(test, feature = "test-support"))]
 pub use publication::write_publication_fixture;
 pub use telemetry::PayloadObservation;

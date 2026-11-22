@@ -722,8 +722,8 @@ origin-fill evidence. [Front Door caching documentation](https://learn.microsoft
 
 ### Verify native publication and CDN Git fetch
 
-Use `crab/scripts/e2e/run_cdn_git_workload.py` for direct CLI Git and capsule
-scopes on an initialized test-only repository. Use the qualification build's
+Use `crab/scripts/e2e/run_cdn_git_workload.py` for direct CLI Git, capsule, and
+LFS scopes on an initialized test-only repository. Use the candidate's
 `git-remote-crab` and the same approved fixture JSON as the transport
 collector. `native_origin` identifies the S3 bucket, GCS bucket, or Azure
 account and container. Configure the writer and reader credentials for that
@@ -732,6 +732,23 @@ origin for the resolved repository, any selected read replica, and the store
 used for push. The workload requires the helper's confirmation in a read-only
 preflight before sending a push. Each phase uses a fresh scratch directory and
 cache.
+
+Run the command below with `inspect` in place of `publish` before preregistering
+the benchmark. Omit `--receipt` for inspection. It reads the exact native
+fixture and returns the executable SHA-256, compiled source SHA, target
+triple, Cargo profile and features, qualification feature state, and
+compiled CDN policy SHA-256 under `candidate`. The policy digest uses LF line
+endings on every platform. Register that object for each
+direct CLI row. The worker confirms the same identity on the native
+publication, fetches, and ref retirement. Every timed arm uses the registered
+binary for its platform. [Cargo build-script environment](https://doc.rust-lang.org/cargo/reference/environment-variables.html#environment-variables-cargo-sets-for-build-scripts)
+
+Promotion requires the packaged target triple, the ordinary release profile,
+the qualification feature disabled, and the exact release checkout's policy
+embedded. Restrict the
+ordinary candidate writer to the approved native target and test prefix.
+Retain provider observations for the publication and retirement in addition
+to the Git records.
 
 ```bash
 python3 -B crab/scripts/e2e/run_cdn_git_workload.py publish \
@@ -897,9 +914,10 @@ Use a new output directory under an existing scratch directory. The assembler
 checks coverage for the compiled release policy, verifies each report and its
 traces, then exposes the artifact directory. It retains the approved benchmark
 file, the native provider reports, and the verified CDN reports and trace files.
-Direct CLI Git and capsule rows also retain the bounded, redacted Git product
-and benchmark records. Release verification recomputes their summaries and
-requires an exact match to the assembled report.
+Direct CLI rows also retain the bounded, redacted native publication, fetch,
+and retirement records. Git and capsule rows retain their paired benchmark
+records too. Release verification checks their build identity and recomputes
+the summaries from the retained measurements.
 
 ### Release workflow
 

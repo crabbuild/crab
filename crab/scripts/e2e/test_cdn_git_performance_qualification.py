@@ -31,6 +31,7 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
             "workload": "git-fetch", "samples": 30, "p95_budget_ms": 150, "cost_budget_microusd": 10,
             "regions": REGIONS, "deployment_policy_sha256": "d" * 64,
         }
+        self.registration["candidate"] = fixture.cli_candidate(self.registration["scope"], PLATFORM)
         fixture.write_git_measurements(self.root, self.registration, PLATFORM)
 
     def collect(self) -> dict:
@@ -66,6 +67,12 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
     def test_rejects_a_client_measurement_from_a_different_release_platform(self) -> None:
         self.amend_client("near/0001/origin", platform="linux-aarch64")
         with self.assertRaisesRegex(ValueError, "mismatched Git fetch provenance"):
+            self.collect()
+
+    def test_rejects_a_different_binary_on_the_registered_platform_and_commit(self) -> None:
+        candidate = self.registration["candidate"] | {"binary_sha256": "f" * 64}
+        self.amend_client("distant/0001/warm_edge", candidate=candidate)
+        with self.assertRaisesRegex(ValueError, "did not run the registered CLI build"):
             self.collect()
 
     def test_rejects_the_same_client_result_reused_in_another_arm(self) -> None:

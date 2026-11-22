@@ -193,6 +193,7 @@ def main() -> int:
                 origin_sha256=hashlib.sha256(origin_bytes).hexdigest(), source_sha=args.source_sha,
                 run_id=args.run_id, run_attempt=args.run_attempt, directory=args.cdn_report.parent,
                 registration=decode(args.cdn_benchmark_registration.read_bytes()),
+                policy=args.cdn_release_policy,
             )
     except (OSError, UnicodeError, json.JSONDecodeError, EvidenceError, CdnEvidenceError) as error:
         print(f"error: {error}", file=sys.stderr)

@@ -478,15 +478,15 @@ ordinary build must demonstrate the promoted read and the origin behavior of
 adjacent unpromoted families. Block promotion when required evidence still
 depends on a generic trace or an externally supplied pass flag.
 
-The scripted Git workload currently requires the qualification feature's
-native-origin guard. Keep that guard for fixture builds. For the ordinary
-candidate run, use a dedicated writer restricted to the preregistered storage
-target and test prefix. Inspect the exact native target before the run and
-verify its publication and retirement receipts through the provider. Verify
-the selected replica and edge payload through redacted product or provider
-observations. Retain the binary digest, platform, build features and compiled
-scope inventory alongside the measurements so the release verifier can
-distinguish fixture and candidate results.
+The scripted Git workload guards the native origin in both fixture and
+ordinary builds. Its read-only inspection records the binary SHA-256,
+compiled commit, target, Cargo profile and features, qualification feature
+state, and digest of the embedded policy. Direct CLI product records and Git
+benchmark arms must match the registered build. Promotion rejects fixture
+builds and requires the exact checkout policy. For the ordinary candidate
+run, restrict the writer to the preregistered native target and test prefix.
+Retain independent provider evidence for publication and retirement, and
+verify the selected replica and edge payload through redacted observations.
 
 ### Required release evidence
 

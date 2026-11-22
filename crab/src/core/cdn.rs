@@ -22,18 +22,30 @@ pub(crate) fn qualification_origin() -> Result<Option<String>> {
     value
         .into_string()
         .ok()
-        .filter(|value| !value.is_empty() && crab_storage::cdn::qualification_enabled())
+        .filter(|value| !value.is_empty())
         .map(Some)
         .ok_or_else(|| CrabError::Configuration {
             key: CDN_QUALIFICATION_ORIGIN_ENV.to_owned(),
-            origin: "a CDN qualification build and approved native origin are required".to_owned(),
+            origin: "an approved native origin is required".to_owned(),
         })
 }
 
 pub(crate) fn verify_qualification_origin(store: &Store) -> Result<()> {
     if let Some(expected) = qualification_origin()? {
         require_cdn_qualification_origin(store.native_cdn_origin(), &expected)?;
-        tracing::debug!(target: "crab::cdn::qualification", "CDN qualification verified native origin");
+        // The guard may restrict an ordinary release build. Only the compiled
+        // release policy and Cargo feature can enable edge delivery.
+        tracing::debug!(
+            target: "crab::cdn::qualification",
+            parent: None,
+            source_sha = env!("CRAB_BUILD_SOURCE_SHA"),
+            target_triple = env!("CRAB_BUILD_TARGET"),
+            cargo_profile = env!("CRAB_BUILD_PROFILE"),
+            cargo_features = env!("CRAB_BUILD_FEATURES"),
+            qualification_feature = crab_storage::cdn::qualification_enabled(),
+            release_policy_sha256 = %crab_storage::cdn::release_policy_sha256(),
+            "CDN qualification verified native origin"
+        );
     }
     Ok(())
 }
