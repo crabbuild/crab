@@ -883,6 +883,11 @@ five-second local quiet window, the gateway runs the shared root-pinned Capsule
 checkpoint and verified physical pack maintenance. Foreground writers separately
 bound the frontier before appending, so continuous traffic does not depend on
 this idle pass or a v1 catalog scheduler.
+Admission counts retained physical runs after native compaction, using the
+stored 64-segment ceiling and the independent 1 GiB frontier-byte threshold.
+Captured cold state and successful publication receipts supply those exact
+counts. Rolled-up logical transactions therefore do not cause repeated full
+repository checkpoints while the physical frontier remains below its limits.
 
 When an attribute delta ancestry proves that a branch began empty and every
 commit came from the gateway, its checkpoint is also a complete materialized S3
