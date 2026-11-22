@@ -1166,6 +1166,34 @@ builds the transition trace from those records and verifies both retained
 inventories and their sealing order. Run the separate `origin` rollback
 with the public binding withdrawn before retirement.
 
+### Capture a desktop Git read
+
+Use the direct desktop Git fixture and the dedicated runner's normal user
+configuration in `~/.config/crab/config.toml`. Publish with
+`run_cdn_git_workload.py publish` and confirm the native ref with
+`collect_cdn_git_native_ref.py`. Preregister the SHA-256 of the exact native
+sidecar that will run in each arm.
+
+```sh
+python3 -B crab/scripts/e2e/run_cdn_desktop_workload.py edge \
+  --fixture "$fixture" --configuration-sha256 "$configuration_sha256" \
+  --receipt "$receipt" --sidecar "$sidecar" --sidecar-sha256 "$sidecar_sha256" \
+  --scratch "$scratch" --source-sha "$source_sha" \
+  --run-id "$run_id" --run-attempt "$run_attempt" \
+  --private-reader "$private_reader" > "$edge_record"
+```
+
+For a private fixture, use the same trusted issuer document as the SDK
+worker and set the runner's `[auth]` values to that identity. Set the matching
+`[[cdn]]` entry's `approval_sha256` for the edge arm and remove that field for
+the `origin` arm. For a public fixture, use `--export-approval` and pin its
+receipt with `cdn.publication` for the edge arm. Omit both for the origin arm.
+Keep the same sidecar, native origin, repository and commit for both reads.
+Each invocation starts a fresh cache and verifies the actual RPC payload and
+read target. Retain the redacted records and pass the edge record as `--client`
+to `collect_cdn_viewer_requests.py`. Desktop regional and release evidence
+still require separate qualification.
+
 ### Capture protected SDK hydration evidence
 
 Use a private direct SDK xorb fixture with an independently materialized view.

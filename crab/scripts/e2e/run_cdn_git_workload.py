@@ -22,8 +22,8 @@ from run_cdn_transport_checks import approved_fixture, fixture_base, fixture_obj
 from cdn_qualification import (
     CLI_BUILD_FIELDS, CLI_NATIVE_FIELDS, COMMIT, GIT_OID, GIT_PAYLOAD_SIZE, PROVIDER_FOR_EDGE, RUN_NUMBER, SHA256,
     cli_action_name, decode, deployment_component_digest,
-    fields, is_direct_sdk_git_scope, is_direct_service_scope, lfs_object_path, matches, read_git_record,
-    require, requires_cli_lfs_workload,
+    fields, is_direct_desktop_git_scope, is_direct_sdk_git_scope, is_direct_service_scope, lfs_object_path,
+    matches, read_git_record, require, requires_cli_lfs_workload,
     requires_cli_workload, scope_parts,
     validate_git_publication, verified_publication, verify_read_candidate,
 )
@@ -468,10 +468,10 @@ def main() -> int:
         scope = fixture["scope"]
         edge, access, _, family, _ = scope_parts(scope)
         service = is_direct_service_scope(scope)
+        native_publication = is_direct_sdk_git_scope(scope) or is_direct_desktop_git_scope(scope) or service
         require(requires_cli_workload(scope)
-                or (args.action in ("publish", "retire") and (is_direct_sdk_git_scope(scope) or service)
-                    and fixture["view_suffix"] == ""),
-                "workload needs a direct CLI scope or a native publication for a direct SDK or service scope")
+                or (native_publication and args.action in ("publish", "retire") and fixture["view_suffix"] == ""),
+                "workload needs a direct CLI scope or a native publication for a direct SDK, desktop, or service scope")
         content = None
         if args.hydration_pointer is not None or args.hydration_pointer_sha256 is not None:
             require(is_direct_sdk_git_scope(fixture["scope"]) and access == "private" and args.action == "publish"

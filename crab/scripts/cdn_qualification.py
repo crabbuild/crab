@@ -178,10 +178,12 @@ DIRECT_READ_TARGET_FIELDS = CLI_NATIVE_FIELDS | {"binding_sha256", "public_expor
 SDK_PAYLOAD_FIELDS = {"sha256", "bytes", "git_blob_oid_sha256"}
 SDK_TIMING_FIELDS = {"started_at_unix_ms", "finished_at_unix_ms", "elapsed_ms"}
 SDK_PROBE_FIELDS = SDK_TIMING_FIELDS | {"commit", "payload", "build", "warm_local"}
-SDK_GIT_READ_FIELDS = PRODUCT_COUNTERS | CDN_PROVENANCE_FIELDS | SDK_PAYLOAD_FIELDS | SDK_TIMING_FIELDS | {
-    "schema", "arm", "platform", "candidate", "approval_sha256", "publication_sha256",
+DIRECT_GIT_READ_FIELDS = PRODUCT_COUNTERS | CDN_PROVENANCE_FIELDS | SDK_PAYLOAD_FIELDS | SDK_TIMING_FIELDS | {
+    "schema", "arm", "platform", "approval_sha256", "publication_sha256",
     "edge_responses", "native_traffic", "reader", "commit",
 }
+SDK_GIT_READ_FIELDS = DIRECT_GIT_READ_FIELDS | {"candidate"}
+DESKTOP_GIT_READ_FIELDS = DIRECT_GIT_READ_FIELDS | {"binary_sha256", "cache_root_sha256"}
 SDK_HYDRATION_READ_FIELDS = PRODUCT_COUNTERS | CDN_PROVENANCE_FIELDS | SDK_TIMING_FIELDS | {
     "schema", "arm", "platform", "workload_sha256", "candidate", "crab_sha256", "pointer_sha256", "payload",
     "reader", "xorb_key_sha256", "native_traffic", "edge_responses",
@@ -1252,6 +1254,10 @@ def is_direct_sdk_git_scope(scope: str) -> bool:
     return scope_parts(scope)[2:] == ("sdk", "git", "direct")
 
 
+def is_direct_desktop_git_scope(scope: str) -> bool:
+    return scope_parts(scope)[2:] == ("desktop", "git", "direct")
+
+
 def is_direct_sdk_hydration_scope(scope: str) -> bool:
     return scope_parts(scope)[1:] == ("private", "sdk", "xorb", "direct")
 
@@ -1406,6 +1412,41 @@ def verify_git_traffic(client: dict[str, Any], edge: str, label: str) -> None:
                 f"{label} has an invalid CDN viewer response")
     require(client["edge_hits"] + client["edge_misses"] + client["edge_unknown"] == client["observed_edge_gets"]
             <= client["edge_attempts"] <= client["all_edge_attempts"], f"{label} has inconsistent edge counts")
+
+
+def validate_desktop_git_read(value: Any, scope: str, arm: str) -> dict[str, Any]:
+    edge, access, _, _, _ = scope_parts(scope)
+    client = fields(value, DESKTOP_GIT_READ_FIELDS, "desktop Git read")
+    require(is_direct_desktop_git_scope(scope) and client["scope"] == scope and arm in ("edge", "origin")
+            and client["schema"] == "crab.cdn-desktop-git-read/v1" and client["arm"] == arm
+            and matches(COMMIT, client["source_sha"]) and matches(LABEL, client["platform"])
+            and all(matches(RUN_NUMBER, client[key]) for key in ("workflow_run_id", "workflow_run_attempt")),
+            "desktop Git read has mismatched product or workflow provenance")
+    require(matches(GIT_OID, client["commit"]) and type(client["bytes"]) is int and client["bytes"] == GIT_PAYLOAD_SIZE
+            and all(matches(SHA256, client[key]) for key in (
+                "sha256", "git_blob_oid_sha256", "publication_sha256", "configuration_sha256",
+                "binary_sha256", "cache_root_sha256",
+            )), "desktop read did not verify the published Git payload")
+    reader = fields(client["reader"], DIRECT_READ_TARGET_FIELDS, "desktop read target")
+    require(all(matches(SHA256, reader[key]) for key in CLI_NATIVE_FIELDS), "invalid desktop native placement")
+    verify_git_traffic(client, edge, "desktop Git read")
+    if arm == "edge":
+        require(matches(SHA256, reader["binding_sha256"]) and matches(SHA256, client["approval_sha256"])
+                and reader["public_export_sha256"] == (client["approval_sha256"] if access == "public" else ""),
+                "desktop edge read requires the approved binding")
+        require(all(positive(client[key]) for key in ("observed_edge_gets", "verified_edge_payloads", "edge_bytes"))
+                and client["local_payload_hits"] == 0
+                # A fixture build may serve related immutable metadata through the edge.
+                # Git counters prove the payload; every request still needs a provider log join.
+                and client["all_edge_attempts"] == len(client["edge_responses"]),
+                "desktop edge read requires verified Git delivery and a fingerprint for every viewer attempt")
+    else:
+        native = client["native_traffic"]
+        require(reader["binding_sha256"] == reader["public_export_sha256"] == client["approval_sha256"] == ""
+                and all(client[key] == 0 for key in PRODUCT_COUNTERS)
+                and positive(native["get_responses"]) and positive(native["body_bytes"]),
+                "desktop origin control requires native payload reads without edge or cached payload activity")
+    return client
 
 
 def validate_service_read(value: Any, provenance: dict[str, Any], arm: str) -> dict[str, Any]:

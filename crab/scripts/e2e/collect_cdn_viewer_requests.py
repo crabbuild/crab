@@ -21,11 +21,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from cdn_qualification import (  # noqa: E402
     CDN_PROVENANCE_FIELDS, GIT_FETCH_RECORD_LIMIT, PROVIDER_FOR_EDGE,
     SDK_HYDRATION_READ_FIELDS, SDK_WORKTREE_VIEWER_FILES, VIEWER_REQUEST_FILES, decode, fields,
-    is_direct_sdk_git_scope, is_direct_sdk_hydration_scope, is_direct_service_scope, matches,
-    read_git_record, require, scope_parts, validate_git_fetch, validate_sdk_git_record, validate_service_read,
+    is_direct_desktop_git_scope, is_direct_sdk_git_scope, is_direct_sdk_hydration_scope, is_direct_service_scope, matches,
+    read_git_record, require, scope_parts, validate_desktop_git_read, validate_git_fetch, validate_sdk_git_record, validate_service_read,
     verify_git_traffic, verify_viewer_requests,
 )
 from collect_cdn_fixture_cleanup import bearer  # noqa: E402
+from cdn_viewer_issuer import issuer_settings  # noqa: E402
 from collect_azure_access_logs import azure_log_archives  # noqa: E402
 from collect_cloud_cdn_deployment_policy import PROJECT, RESOURCE  # noqa: E402
 from collect_front_door_deployment_policy import FRONT_DOOR, FRONT_DOOR_HOST, SUBSCRIPTION, arm_document  # noqa: E402
@@ -542,7 +543,13 @@ def main() -> int:
                 and candidate["configuration_sha256"] == args.configuration_sha256,
                 "CDN viewer evidence needs a fetch for the approved fixture")
         provenance = {key: candidate[key] for key in CDN_PROVENANCE_FIELDS | {"platform"}}
-        if is_direct_sdk_git_scope(fixture["scope"]):
+        if is_direct_desktop_git_scope(fixture["scope"]):
+            client = validate_desktop_git_read(candidate, fixture["scope"], "edge")
+            export = client["reader"]["public_export_sha256"]
+            require(client["reader"] == read_target_fingerprints(fixture, edge=True, export_sha256=export)
+                    and (access == "public" or client["approval_sha256"] == issuer_settings(fixture)[2]),
+                    "desktop viewer evidence requires the approved native target and CDN binding")
+        elif is_direct_sdk_git_scope(fixture["scope"]):
             action = next((action for action in SDK_WORKTREE_VIEWER_FILES
                            if candidate.get("schema") == f"crab.cdn-sdk-git-{action}/v1"), None)
             client = validate_sdk_git_record(candidate, access, "edge", worktree_action=action)

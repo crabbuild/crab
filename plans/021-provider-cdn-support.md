@@ -826,7 +826,13 @@ Desktop headless qualification can launch the ordinary sidecar with
 `--log-json` to collect the SDK target and provider transfer events from
 stderr alongside the existing RPC results on stdout. The packaged Linux
 runtime check exercises both outputs, including a byte read and repository
-close. Cloud-backed desktop read measurements and promotion remain open.
+close. `crab/scripts/e2e/run_cdn_desktop_workload.py` checks the registered
+sidecar digest and the worker's user binding before opening the remote through
+RPC. It reads the published commit in a fresh cache and verifies the returned
+bytes, captured native target, and edge request fingerprints. Its native arm
+checks that the same user binding has its viewer approval withdrawn. The
+provider log collector can join the desktop edge read to the actual responses.
+Cloud-backed runs, matching regional samples and release assembly remain open.
 
 The protected workflow or its dedicated workers own producing these raw
 observations. The assembly and release jobs own rejecting missing, mismatched

@@ -45,11 +45,11 @@ def verified_target(lines: list[bytes], fixture: dict, arm: str, approval: str) 
         if isinstance(event, dict) and event.get("target") == READ_TARGET:
             observations.append(event.get("fields"))
     require(observations == [expected | {"message": "SDK captured CDN read target"}],
-            "SDK snapshot did not confirm the approved native target, prefix and active CDN binding")
+            "SDK read did not confirm the approved native target, prefix and active CDN binding")
     return expected
 
 
-def binding_for(args: argparse.Namespace, fixture: dict) -> tuple[dict, str, dict | None]:
+def binding_for(args: argparse.Namespace, fixture: dict, transition_object: str | None = None) -> tuple[dict, str, dict | None]:
     access = scope_parts(fixture["scope"])[1]
     if access == "private":
         require(args.private_reader is not None and args.export_approval is None,
@@ -68,9 +68,9 @@ def binding_for(args: argparse.Namespace, fixture: dict) -> tuple[dict, str, dic
     if args.export_approval is not None:
         approval, objects, sealed_at = approved_public_export(args.export_approval, fixture)
         publication = {"path": str((args.export_approval / "publication.json").resolve()), "sha256": approval}
-        if args.transition_object is not None:
-            key = fixture_object_key(fixture | {"object_path": args.transition_object}, access, "git")
-            listed = any(obj.path == args.transition_object for obj in objects)
+        if transition_object is not None:
+            key = fixture_object_key(fixture | {"object_path": transition_object}, access, "git")
+            listed = any(obj.path == transition_object for obj in objects)
             require(listed == (args.arm == "edge"), "SDK transition object membership does not match the phase")
             transition = {"key_sha256": hashlib.sha256(key.encode()).hexdigest(), "receipt_sha256": approval,
                           "phase": "after" if listed else "before", "sealed_at_unix_ms": sealed_at}
@@ -133,7 +133,7 @@ def fetch(args: argparse.Namespace) -> tuple[dict, dict | None]:
             "SDK transition requires a public read with an active receipt")
     require(not install or (args.arm in ("edge", "origin") and not repeat and args.transition_object is None),
             "SDK clone and fetch require a standalone edge or origin arm")
-    binding, approval, transition = binding_for(args, fixture)
+    binding, approval, transition = binding_for(args, fixture, args.transition_object)
     if args.arm == "prior_export":
         require(transition is not None and transition["sealed_at_unix_ms"] <= publication["visible_at_unix_ms"],
                 "SDK prior public export must be sealed before the new native publication")
