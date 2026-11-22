@@ -1,63 +1,6 @@
 use super::*;
 use crate::cells::organization::{ChangeMember, ChangeOutcome, MemberChange, Role};
-use std::time::{Duration, Instant};
-
-struct Browser(String);
-impl Browser {
-    fn new(name: &str) -> Self {
-        Self(format!("crab-org-{name}-{}", Uuid::now_v7().simple()))
-    }
-    async fn run(&self, arguments: &[&str]) -> String {
-        let output = tokio::time::timeout(
-            Duration::from_secs(45),
-            tokio::process::Command::new("agent-browser")
-                .args(["--session", &self.0])
-                .args(arguments)
-                .kill_on_drop(true)
-                .output(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        if !output.status.success() {
-            let snapshot = tokio::process::Command::new("agent-browser")
-                .args(["--session", &self.0, "snapshot"])
-                .output()
-                .await
-                .unwrap();
-            panic!(
-                "{:?}: {}\n{}",
-                arguments,
-                String::from_utf8_lossy(&output.stderr),
-                String::from_utf8_lossy(&snapshot.stdout)
-            );
-        }
-        String::from_utf8(output.stdout).unwrap()
-    }
-}
-impl Drop for Browser {
-    fn drop(&mut self) {
-        // Failed qualification must close only its own browser, before fixture
-        // storage disappears. Bound cleanup even if its daemon stopped replying.
-        let Ok(mut child) = std::process::Command::new("agent-browser")
-            .args(["--session", &self.0, "close"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        else {
-            return;
-        };
-        let deadline = Instant::now() + Duration::from_secs(8);
-        while Instant::now() < deadline {
-            if child.try_wait().is_ok_and(|value| value.is_some()) {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        let _ = child.kill();
-        let _ = child.wait();
-    }
-}
+use crate::test_support::http::browser::Browser;
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires agent-browser and the built embedded UI; uses isolated real OIDC/native Cell fixtures"]

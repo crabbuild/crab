@@ -65,7 +65,7 @@ async fn set_repository_organization(
     {
         return Err(Error::Conflict);
     }
-    let teams = app::repository_team_access(&server, &input.organization, None).await?;
+    let teams = app::repository_team_access(&server, &input.organization, None, false).await?;
     if teams.teams.len() != input.organization.teams.len() {
         return Err(Error::Invalid(
             "Every grant must name a current team in the owning organization",

@@ -665,6 +665,7 @@ pub(crate) async fn repository_team_access(
     server: &Server,
     organization: &OrganizationAccess,
     actor: Option<uuid::Uuid>,
+    include_names: bool,
 ) -> Result<RepositoryTeamAccess> {
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
     query_output(
@@ -675,6 +676,7 @@ pub(crate) async fn repository_team_access(
                 RepositoryTeams {
                     actor,
                     teams: organization.teams.iter().map(|grant| grant.team).collect(),
+                    include_names,
                 },
             )
             .await,
@@ -725,7 +727,8 @@ pub(crate) async fn resolve_repository_membership(
         )
         .await?
         {
-            let membership = repository_team_access(server, organization, Some(actor)).await?;
+            let membership =
+                repository_team_access(server, organization, Some(actor), false).await?;
             access = if membership.owner {
                 Some(RepositoryAccess::Admin)
             } else {

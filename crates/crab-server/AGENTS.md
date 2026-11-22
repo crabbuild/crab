@@ -176,7 +176,8 @@ repository grants stay catalog-owned. Public sessions cannot bootstrap authority
 `auth/principal/` caps effective roles by credential scope.
 `app.rs` composes current native team and catalog grants for every request.
 `api/members/team_access.rs` authorizes team grant management for current
-organization owners. The native team membership read stays in `teams/`.
+organization owners. The native team membership and grant-name read stays in
+`teams/`. The owner editor lives in `packages/ui/src/features/settings/team-access.tsx`.
 `src/api/profiles/` exposes session-authenticated profile reads/edits without
 exposing authentication claims. `src/server/management/directory.rs` owns explicit
 private initialization; serving never creates its schema implicitly. HTTP authorization and
@@ -278,6 +279,8 @@ Read `crates/crab-server/build.rs` and `packages/ui/package.json` for embedding 
 `api::organizations::tests::browser` qualification requires `agent-browser` and
 built embedded UI assets; it drives two real OIDC sessions through invitation,
 consent and removal against isolated native Cells.
+`api::members::tests::team_access_browser` uses the same browser fixture to
+verify repository access before a grant, after saving it, and after revocation.
 
 `tests/qualify_cellar_kubernetes.py` runs the Helm chart, container SIGKILL,
 large-file transfer and complete-root restore on an explicitly selected

@@ -35,6 +35,18 @@ export type AccessUpdate = { expected_revision: number, members: Array<Repositor
 export type MembershipState = { revision: number, members: Array<RepositoryMember>, groups: Array<RepositoryGroup>, can_admin: boolean, groups_supported: boolean, };
 
 // prettier-ignore
+export type TeamGrant = { team: string, access: RepositoryAccess, };
+
+// prettier-ignore
+export type OrganizationAccess = { id: string, teams: Array<TeamGrant>, };
+
+// prettier-ignore
+export type TeamAccessState = { revision: number, organization: OrganizationAccess, team_names: { [key in string]: string }, };
+
+// prettier-ignore
+export type TeamAccessUpdate = { expected_revision: number, teams: Array<TeamGrant>, };
+
+// prettier-ignore
 export type RepositoryAssignee = { id: string, name: string, profile: ActorSummary | null, };
 
 // prettier-ignore

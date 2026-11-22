@@ -947,14 +947,20 @@ Read, Triage, or Write for up to 100 distinct live team UUIDs in the owning
 organization. The operator can replace grants for the existing owner using the
 same command. Transfer to another organization requires a separate operation.
 
-An organization owner with a browser session can read
-`GET /api/repos/{owner}/{name}/team-access` and replace the entire team grant
-list with `PUT` and `{expected_revision, teams}`. The mutation requires the
-session CSRF token and repository UUID header. Keep the returned revision for
-the next edit. A stale change returns 409. Grant changes use the catalog audit
-outbox. Repository admins without organization ownership cannot see or edit
-this list. The repository catalog response includes `organization_id` for
-visible organization-owned repositories in authenticated deployments.
+Organization owners can open **Settings → Team access** on the bound repository
+to find teams by name, add grants, change roles, and remove grants. **Save team
+access** applies the draft. When another administrator saves first, reload the
+grants and review the current list before retrying. Remove unavailable teams
+from the draft before saving. Their grants cease contributing access when the
+team is deleted.
+
+The browser reads `GET /api/repos/{owner}/{name}/team-access` and replaces the
+grant list with `PUT` and `{expected_revision, teams}`. Both responses include
+`team_names` keyed by the current team UUIDs. The mutation requires the session
+CSRF token and repository UUID header. A stale change returns 409. Grant changes
+use the catalog audit outbox. Repository admins without organization ownership
+cannot see or edit this list. Authenticated catalog responses include
+`organization_id` for visible organization-owned repositories.
 
 Each protected request resolves current organization and team membership.
 Effective access is the highest valid grant, subject to the Git token's ceiling.

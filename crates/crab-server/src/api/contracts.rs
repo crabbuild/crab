@@ -5,7 +5,7 @@ use ts_rs::{Config, TS};
 use super::{members, organizations, profiles};
 use crate::{
     auth::{SessionIdentity, SessionMode, SessionResponse},
-    catalog::AccessUpdate,
+    catalog::{AccessUpdate, OrganizationAccess, TeamGrant},
     cells::{directory, organization},
     config::{BranchProtection, RepositoryAccess, RepositoryGroup, RepositoryMember},
 };
@@ -26,6 +26,10 @@ fn typescript() -> String {
         RepositoryGroup::decl(&config),
         AccessUpdate::decl(&config),
         members::MembershipState::decl(&config),
+        TeamGrant::decl(&config),
+        OrganizationAccess::decl(&config),
+        members::team_access::TeamAccessState::decl(&config),
+        members::team_access::TeamAccessUpdate::decl(&config),
         members::roster::Candidate::decl(&config),
         directory::ActorProfile::decl(&config),
         directory::ActorSummary::decl(&config),
