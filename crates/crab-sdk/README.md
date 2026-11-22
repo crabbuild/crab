@@ -167,15 +167,17 @@ other repository prefixes follow the client's ordinary direct route.
 
 Use `provider-cdn-qualification` to exercise the HTTPS data path. Default SDK
 builds read from origin and preserve any private issuer's native authorization.
-Typed bindings cover native remote reads, SDK fetch and SDK clone. A direct CDN
-clone requires a Crab executable that advertises `direct-cdn-checkout-v1`.
-Git filters and `crab hydrate` use a temporary binding for the clone's exact
-storage target and view. Private clone subprocesses run without ambient
-cloud credential variables or the SDK's explicit storage credentials. The
-filters and hydration command verify the parent's principal fingerprint
-against the installed login before obtaining a grant. Delegated commands
-use the selected process environment without loading dotenv files. Other
-local tool invocations clear inherited checkout bindings.
+Typed bindings cover native remote reads, SDK fetch, and SDK clone. A direct
+CDN clone uses a Crab executable that advertises `direct-cdn-checkout-v1`.
+For checkout, pull, hydration, and content prefetch in an existing worktree,
+use an executable that advertises `direct-cdn-worktree-read-v1`. The worktree
+must declare the matching Crab content URL in `crab.toml` or its shared
+`.crab/local.toml`. Git filters and content commands receive a temporary
+binding for the captured storage target and view. Private children check
+the parent's principal fingerprint against the installed login before
+obtaining a grant. They run without ambient cloud credential variables or
+the SDK's explicit storage credentials. Delegated commands skip dotenv
+imports. Local tool invocations clear inherited checkout bindings.
 See the
 [provider CDN qualification plan](../../plans/021-provider-cdn-support.md).
 

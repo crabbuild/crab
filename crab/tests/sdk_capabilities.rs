@@ -94,3 +94,71 @@ fn sdk_capabilities_report_canonical_staging_format() {
 
     assert_eq!(capabilities["staging_format_version"], 1);
 }
+
+#[test]
+fn sdk_content_source_requires_explicit_worktree_configuration() {
+    let capabilities = crab_json(&["sdk-capabilities", "--json"]);
+    assert!(
+        capabilities["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|operation| operation == crab_remote::local::DIRECT_CDN_WORKTREE_READ)
+    );
+    let (directory, _, git) = git_forwarder();
+    let root = directory.path();
+    let run_git = |args: &[&str]| {
+        assert!(
+            Command::new(&git)
+                .args(args)
+                .current_dir(root)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    };
+    run_git(&["init", "--quiet", "--template="]);
+    run_git(&["remote", "add", "origin", "crab://bucket/git-only"]);
+    std::fs::write(
+        root.join(".env"),
+        "CRAB_CLONE_REMOTE_URL=crab://bucket/dotenv\n",
+    )
+    .unwrap();
+    let probe = || {
+        Command::new(env!("CARGO_BIN_EXE_crab"))
+            .args(["sdk-content-source"])
+            .current_dir(root)
+            .output()
+            .unwrap()
+    };
+    let source = || {
+        let output = probe();
+        assert!(output.status.success());
+        serde_json::from_slice::<Option<String>>(&output.stdout).unwrap()
+    };
+    assert_eq!(source(), None);
+    std::fs::create_dir(root.join(".crab")).unwrap();
+    std::fs::write(
+        root.join(".crab/local.toml"),
+        "[remote]\nurl = 'crab://bucket/local'\n",
+    )
+    .unwrap();
+    assert_eq!(source().as_deref(), Some("crab://bucket/local"));
+    std::fs::write(
+        root.join("crab.toml"),
+        "version = 1\n[remote]\nurl = 'crab://bucket/project'\n",
+    )
+    .unwrap();
+    assert_eq!(source().as_deref(), Some("crab://bucket/project"));
+
+    std::fs::write(
+        root.join("crab.toml"),
+        "[remote]\nurl = 'sample-sensitive-value\n",
+    )
+    .unwrap();
+    let invalid = probe();
+    assert!(!invalid.status.success());
+    assert!(!String::from_utf8_lossy(&invalid.stderr).contains("sample-sensitive-value"));
+    assert!(!String::from_utf8_lossy(&invalid.stdout).contains("sample-sensitive-value"));
+}

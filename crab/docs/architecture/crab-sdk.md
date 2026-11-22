@@ -478,6 +478,15 @@ No partial-clone promisor configuration is written in 1.0; see section 8.
 
 ### Stage, commit, status, checkout, and pull
 
+For a direct CDN-enabled client, worktree content reads delegate through the
+selected Crab executable. The worktree must explicitly configure the same Crab
+content URL in `crab.toml` or its shared `.crab/local.toml`. The committed
+project configuration takes precedence. Git-only operations without Crab
+filters and worktrees with a different content URL use their ordinary local
+execution path. A matching content operation captures authorization before
+starting the child. The child rechecks the worktree source and the captured
+storage target and view before opening storage.
+
 Stage extracts the current add pipeline, including publication intent, paged
 recipes, prepared payloads, Git index update and staged path-head reconciliation.
 It must preserve a user's hydrated file while placing its exact pointer in the

@@ -8381,7 +8381,7 @@ impl<'a> StoreResolver<'a> {
         &self,
         operation: &str,
     ) -> Result<(ReadStoreSelection, Option<ReadStoreSelection>)> {
-        if matches!(operation, "hydrate" | "smudge")
+        if matches!(operation, "hydrate" | "smudge" | "fetch-content")
             && let Some(checkout) = crate::auth::cdn_checkout::Checkout::load()?
         {
             reject_managed_qualification()?;

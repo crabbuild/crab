@@ -304,7 +304,9 @@ impl ClientState {
         let selected = self.resolve_repository(locator, cancel).await?;
         #[cfg(feature = "service")]
         if let Some(options) = &self.direct_cdn {
-            let resolved = options.resolve(selected, self.cdn_consumer, cancel).await?;
+            let resolved = options
+                .resolve(selected, self.cdn_consumer, "fetch", cancel)
+                .await?;
             if let Some(origin) = resolved.store.native_cdn_origin() {
                 use sha2::{Digest as _, Sha256};
 

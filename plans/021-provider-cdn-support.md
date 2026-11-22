@@ -20,15 +20,16 @@ reference issuer grants only the protected view's exact physical prefix.
 The CloudFront and Front Door templates support overlapping signing keys.
 The managed API client negotiates v2 direct read grants, and the managed
 resolver renews their native and repo-local viewer credentials together.
-Typed direct SDK bindings cover native remote reads, fetch, and clone.
-During clone, the SDK hands Git filters and `crab hydrate`
+Typed direct SDK bindings cover native remote reads, fetch, clone, and
+worktree content reads. Git filters, hydration, and content prefetch receive
 a temporary, nonsecret binding for the captured target, view, and private
-principal. Private clone children start without ambient cloud credential
-variables or explicit provider overrides. Only the checkout and hydration
-commands get the temporary file path. Delegated commands use the selected
-environment without loading dotenv files. The child checks the login and
-obtains its own private grant. Live cross-process provider qualification
-remains open.
+principal. In an existing worktree the SDK delegates only when the worktree
+explicitly configures the same content source. Git integration uses the
+binding for the configured Crab filters. The child checks the worktree
+source again before opening storage. Private delegated children run without
+ambient cloud credential variables, explicit provider overrides, or dotenv
+imports. The child checks the login and obtains its own private grant.
+Live cross-process provider qualification remains open.
 
 ### Open implementation and release gates
 

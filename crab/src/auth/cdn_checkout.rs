@@ -51,6 +51,13 @@ impl Checkout {
         if url.bucket != self.deployment.bucket || url.repo_path != self.deployment.source_repo {
             return Err(invalid("CDN checkout source repository changed"));
         }
+        if self.binding.require_configured_source {
+            let configured = Config::sdk_worktree_content_source(&self.binding.worktree)?;
+            let expected = format!("crab://{}/{}", url.bucket, url.repo_path);
+            if configured.as_deref() != Some(expected.as_str()) {
+                return Err(invalid("CDN worktree content source changed"));
+            }
+        }
         let operation = "hydrate";
         let deployment = self.deployment;
         let consumer = match self.binding.consumer {
@@ -209,13 +216,14 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn binding_is_limited_to_its_worktree_and_rejects_extra_fields() {
+    #[tokio::test]
+    async fn binding_is_limited_to_its_worktree_and_rejects_extra_fields() {
         let scratch = tempfile::tempdir().unwrap();
         let worktree = scratch.path().join("checkout");
         std::fs::create_dir(&worktree).unwrap();
         let binding = CdnCheckoutBinding {
             worktree: worktree.clone(),
+            require_configured_source: true,
             origin: "s3://origin-bucket".into(),
             export_origin: Some("s3://export-bucket".into()),
             publication: Some(crab_storage::cdn::CdnPublicationFile {
@@ -235,6 +243,27 @@ mod tests {
         let accepted = read_binding(file.path(), &worktree).unwrap();
         assert_eq!(accepted.source_url().repo_path, "team/models");
         assert!(read_binding(file.path(), scratch.path()).is_err());
+        assert!(
+            std::process::Command::new("git")
+                .current_dir(&worktree)
+                .args(["init", "--quiet", "--template="])
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::write(
+            worktree.join("crab.toml"),
+            "version = 1\n[remote]\nurl = 'crab://origin-bucket/team/sibling'\n",
+        )
+        .unwrap();
+        let source = accepted.source_url();
+        let result = accepted
+            .open(&Config::default(), &source, &CancellationToken::new())
+            .await;
+        assert!(
+            matches!(result, Err(CrabError::Configuration { origin, .. })
+            if origin == "CDN worktree content source changed")
+        );
 
         let mut unexpected = serde_json::to_value(binding).unwrap();
         unexpected["viewer_token"] = serde_json::Value::String("unused".into());

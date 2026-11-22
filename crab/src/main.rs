@@ -486,6 +486,9 @@ enum Cmd {
         #[arg(long, required = true)]
         json: bool,
     },
+    /// Return the explicit content source of the SDK's current worktree.
+    #[command(hide = true)]
+    SdkContentSource,
     /// List and install the self-contained skills shipped with Crab.
     #[command(subcommand)]
     Skills(crab::cmd::skills::SkillsCommand),
@@ -2241,6 +2244,7 @@ impl Cmd {
             Self::Release(command) => command.output_mode(),
             Self::Recover(command) => command.output_mode(),
             Self::Config(ConfigCmd::Get { json, .. }) => OutputMode::from_flags(*json, false),
+            Self::SdkContentSource => OutputMode::Json,
             Self::Replica(crab::cmd::replica::ReplicaCommand::Add(args)) => {
                 OutputMode::from_flags(args.json, false)
             }
@@ -2521,6 +2525,7 @@ impl Cmd {
             Self::FilterProcess => "filter-process",
             Self::Version { .. } => "version",
             Self::SdkCapabilities { .. } => "sdk-capabilities",
+            Self::SdkContentSource => "sdk-content-source",
             Self::Skills(crab::cmd::skills::SkillsCommand::List { .. }) => "skills.list",
             Self::Skills(crab::cmd::skills::SkillsCommand::Install(_)) => "skills.install",
             Self::Upgrade => "upgrade",
@@ -2665,7 +2670,10 @@ fn main() -> ExitCode {
     //
     // Each layer only fills in values not already set by a higher layer.
     // Silently ignored if no .env file exists at any layer.
-    load_env_layered();
+    // The internal source probe only reads explicit worktree configuration.
+    if std::env::args_os().nth(1).as_deref() != Some(OsStr::new("sdk-content-source")) {
+        load_env_layered();
+    }
 
     // Pre-scan argv for `--log-level <value>` so we can configure
     // tracing before clap (and the tokio runtime) are built. This
@@ -3285,6 +3293,13 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             key: "sdk-capabilities output".to_owned(),
             origin: "the versioned SDK handshake requires --json".to_owned(),
         }),
+        Some(Cmd::SdkContentSource) => {
+            let source = Config::sdk_worktree_content_source(&std::env::current_dir()?)?;
+            let encoded = serde_json::to_string(&source)
+                .map_err(|error| CrabError::Internal(error.to_string()))?;
+            println!("{encoded}");
+            Ok(ExitCode::SUCCESS)
+        }
         Some(Cmd::Skills(sub)) => {
             let _span = tracing::info_span!("skills").entered();
             crab::cmd::skills::run(sub)?;

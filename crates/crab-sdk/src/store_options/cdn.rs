@@ -17,8 +17,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{Error, ErrorKind, Result, client::ResolvedRepository};
 
-const READ_OPERATION: &str = "fetch";
-
 /// Trusted issuer used to authorize a private direct repository read.
 #[derive(Debug, Clone)]
 pub struct CdnIssuerOptions(CrabAuthClientConfig);
@@ -143,8 +141,22 @@ impl DirectCdnOptions {
         locator: &crate::RepositoryLocator,
         consumer: CdnConsumer,
     ) -> bool {
-        (self.edge_enabled(consumer) || self.uses_checkout_issuer())
+        self.can_delegate_checkout(consumer)
             && locator.direct_prefix().ok() == Some(self.deployment.source_repo.as_str())
+    }
+
+    #[cfg(feature = "local")]
+    pub(crate) fn can_delegate_checkout(&self, consumer: CdnConsumer) -> bool {
+        self.edge_enabled(consumer) || self.uses_checkout_issuer()
+    }
+
+    #[cfg(feature = "local")]
+    pub(crate) fn worktree_locator(&self, source: &str) -> Option<crate::RepositoryLocator> {
+        let (bucket, prefix) = source.strip_prefix("crab://")?.split_once('/')?;
+        if bucket != self.deployment.bucket || prefix != self.deployment.source_repo {
+            return None;
+        }
+        crate::RepositoryLocator::new(prefix).ok()
     }
 
     #[cfg(feature = "local")]
@@ -188,6 +200,7 @@ impl DirectCdnOptions {
             .ok_or_else(|| invalid("CDN checkout requires a resolved physical target"))?;
         Ok(crab_auth::cdn_checkout::CdnCheckoutBinding {
             worktree: worktree.to_path_buf(),
+            require_configured_source: false,
             origin: self.deployment.origin.clone(),
             export_origin: match &self.access {
                 Access::Public(export) => Some(export.clone()),
@@ -220,6 +233,7 @@ impl DirectCdnOptions {
         &self,
         mut selected: ResolvedRepository,
         consumer: CdnConsumer,
+        operation: &str,
         cancel: &CancellationToken,
     ) -> Result<ResolvedRepository> {
         if selected.managed || selected.prefix != self.deployment.source_repo {
@@ -287,14 +301,16 @@ impl DirectCdnOptions {
                 let resolution = tokio::select! {
                     biased;
                     () = cancel.cancelled() => return Err(Error::new(ErrorKind::Cancelled, "CDN authorization cancelled")),
-                    result = provider.resolve(&self.deployment.bucket, &selected.prefix, READ_OPERATION) => result
+                    result = provider.resolve(&self.deployment.bucket, &selected.prefix, operation) => result
                         .map_err(|source| Error::with_source(ErrorKind::Authentication, "CDN issuer rejected repository read", source))?,
                 };
                 #[cfg(feature = "local")]
                 {
                     selected.checkout_principal = provider.cdn_principal();
                 }
-                return self.bind_issuer_store(selected, provider, resolution, timeout, consumer);
+                return self.bind_issuer_store(
+                    selected, provider, resolution, timeout, consumer, operation,
+                );
             }
         }
         Ok(selected)
@@ -307,12 +323,13 @@ impl DirectCdnOptions {
         resolution: CredentialResolution,
         timeout: Duration,
         consumer: CdnConsumer,
+        operation: &str,
     ) -> Result<ResolvedRepository> {
         let store = crab_auth_store::cdn::build_direct_cdn_store(
             provider,
             self.deployment.bucket.clone(),
             self.deployment.source_repo.clone(),
-            READ_OPERATION.to_owned(),
+            operation.to_owned(),
             resolution,
             timeout,
             consumer,
@@ -414,7 +431,7 @@ mod tests {
                 .store
                 .with_native_cdn_origin(Some(origin.to_owned()));
             let selected = options
-                .resolve(selected, CdnConsumer::Sdk, &cancel)
+                .resolve(selected, CdnConsumer::Sdk, "fetch", &cancel)
                 .await
                 .unwrap();
             assert_eq!(
@@ -573,6 +590,7 @@ mod tests {
                 resolution,
                 Duration::from_secs(30),
                 CdnConsumer::Sdk,
+                "fetch",
             )
             .unwrap();
 

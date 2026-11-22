@@ -1825,6 +1825,40 @@ impl Config {
         Self::resolve_local_from_with_project(user_path, repo_path, Some(project_path))
     }
 
+    /// Identify a worktree's explicit content source for the local SDK tool protocol.
+    #[doc(hidden)]
+    pub fn sdk_worktree_content_source(repo_root: &Path) -> super::error::Result<Option<String>> {
+        let Some((local, project)) = repo_config_paths_for_root(repo_root) else {
+            return Ok(None);
+        };
+        // TOML parser errors can include the offending source line. The SDK
+        // captures subprocess diagnostics, so keep values out of this probe.
+        let invalid_source_config = |path: &Path| super::error::CrabError::Configuration {
+            key: "cannot read worktree content configuration".to_owned(),
+            origin: path.display().to_string(),
+        };
+        // User and environment defaults cannot associate an arbitrary worktree
+        // with a trusted SDK CDN binding.
+        let url = if project.try_exists()? {
+            Some(
+                crate::core::project_config::ProjectConfig::load(&project)
+                    .map_err(|_| invalid_source_config(&project))?
+                    .remote
+                    .url,
+            )
+        } else if local.try_exists()? {
+            read_toml_overlay(&local)
+                .map_err(|_| invalid_source_config(&local))?
+                .remote
+                .and_then(|remote| remote.url)
+        } else {
+            None
+        };
+        Ok(url
+            .and_then(|url| crate::git::url::CrabUrl::parse(&url).ok())
+            .map(|remote| format!("crab://{}/{}", remote.bucket, remote.repo_path)))
+    }
+
     /// Testable inner implementation that accepts explicit paths.
     #[cfg(test)]
     fn resolve_local_from(

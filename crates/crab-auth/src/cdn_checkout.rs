@@ -18,6 +18,9 @@ pub const MAX_BINDING_BYTES: usize = 16 * 1024;
 #[serde(deny_unknown_fields)]
 pub struct CdnCheckoutBinding {
     pub worktree: PathBuf,
+    /// Require the existing worktree to still declare the captured content source.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_configured_source: bool,
     pub origin: String,
     pub export_origin: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

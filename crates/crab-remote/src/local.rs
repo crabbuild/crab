@@ -26,6 +26,8 @@ pub const GIT_EXECUTABLE_ENV: &str = "CRAB_INTERNAL_GIT_EXECUTABLE";
 
 /// Optional operation-scoped direct CDN checkout protocol.
 pub const DIRECT_CDN_CHECKOUT: &str = "direct-cdn-checkout-v1";
+/// Optional protocol for delegating direct CDN reads in an existing worktree.
+pub const DIRECT_CDN_WORKTREE_READ: &str = "direct-cdn-worktree-read-v1";
 /// Path to the temporary binding supplied by one SDK checkout invocation.
 pub const DIRECT_CDN_CHECKOUT_BINDING_ENV: &str = "CRAB_INTERNAL_SDK_CDN_BINDING_FILE";
 
@@ -35,7 +37,7 @@ pub const CURRENT_CAPABILITIES_JSON: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     "\",\"product_build\":\"crab-remote/",
     env!("CARGO_PKG_VERSION"),
-    "\",\"local_workflow_protocol\":1,\"storage_format_version\":2,\"staging_format_version\":1,\"operations\":[\"clone\",\"fetch-content\",\"stage\",\"hydrate\",\"dehydrate\",\"filter-process\",\"remote-helper\",\"git-forward\",\"direct-cdn-checkout-v1\"]}"
+    "\",\"local_workflow_protocol\":1,\"storage_format_version\":2,\"staging_format_version\":1,\"operations\":[\"clone\",\"fetch-content\",\"stage\",\"hydrate\",\"dehydrate\",\"filter-process\",\"remote-helper\",\"git-forward\",\"direct-cdn-checkout-v1\",\"direct-cdn-worktree-read-v1\"]}"
 );
 
 /// Capabilities advertised by a Crab executable to a local SDK client.
@@ -91,6 +93,7 @@ impl ExecutableCapabilities {
                 "remote-helper",
                 "git-forward",
                 DIRECT_CDN_CHECKOUT,
+                DIRECT_CDN_WORKTREE_READ,
             ]
             .into_iter()
             .map(str::to_owned)

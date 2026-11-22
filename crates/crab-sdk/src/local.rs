@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 use crate::{Client, Error, ErrorKind, OperationOptions, RepositoryLocator, Result};
 
+#[path = "local/child_read.rs"]
+mod child_read;
 #[path = "local/edit.rs"]
 mod edit;
 pub use edit::{
