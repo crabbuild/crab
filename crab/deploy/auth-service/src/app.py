@@ -13,7 +13,7 @@ import secrets
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import structlog
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -414,6 +414,7 @@ class AuthResponse(BaseModel):
 class ViewRetentionRequest(ViewRetentionBinding):
     id_token: IdTokenField = Field(repr=False)
     repo_url: RepoUrlField
+    read_operation: Literal["mount", "fetch"]
     operation: RetentionAction
 
 
@@ -800,11 +801,11 @@ async def issue_credentials(
     view = None
     retained_until = None
     if body.retained_view is not None:
-        if body.operation.strip().lower() != "mount" or decision.permissions != ["read"]:
-            raise _retention_failure(403, "projected_mount_required")
         response.headers.update(NO_STORE_HEADERS)
         retained = body.retained_view
-        native, storage_scope = _retention_binding(body.repo_url, retained, claims, decision)
+        native, storage_scope = _retention_binding(
+            body.repo_url, retained, claims, decision, body.operation.strip().lower(),
+        )
         started = time.monotonic()
         verified = await _run_retention(native, {"action": "verify", "incarnation": retained.incarnation}, log)
         if not isinstance(verified, RetentionVerified) or verified.repo_prefix != storage_scope.repo_prefix:
@@ -916,13 +917,13 @@ async def retain_projected_view(
     log = logger.bind(action=operation.action)
     try:
         claims, decision = await _authorize_request(
-            id_token=body.id_token, repo_url=body.repo_url, operation="mount", request=request, log=log,
+            id_token=body.id_token, repo_url=body.repo_url, operation=body.read_operation, request=request, log=log,
         )
     except HTTPException as error:
         error.headers = dict(error.headers or {}) | NO_STORE_HEADERS
         raise
 
-    native, _ = _retention_binding(body.repo_url, body, claims, decision)
+    native, _ = _retention_binding(body.repo_url, body, claims, decision, body.read_operation)
     reply = await _run_retention(native, operation.model_dump(), log)
     expected = {"acquire": "acquired", "renew": "renewed", "release": "released"}[operation.action]
     if isinstance(reply, RetentionVerified) or reply.action != expected:
@@ -941,10 +942,11 @@ async def retain_projected_view(
 
 
 def _retention_binding(
-    repo_url: str, binding: ViewRetentionBinding, claims: TokenClaims, decision: PolicyDecision,
+    repo_url: str, binding: ViewRetentionBinding, claims: TokenClaims, decision: PolicyDecision, read_operation: str,
 ) -> tuple[dict[str, Any], StorageScope]:
-    if not claims.issuer or not claims.subject or not _requires_filtered_read_view(decision):
-        raise _retention_failure(403, "projected_mount_required")
+    if (read_operation not in {"mount", "fetch"} or decision.permissions != ["read"]
+        or not claims.issuer or not claims.subject or not _requires_filtered_read_view(decision)):
+        raise _retention_failure(403, "projected_read_required")
     parsed = parse_repo_url(repo_url)
     repo_url = f"crab://{parsed.bucket}/{parsed.prefix}"
     scope_hash = _read_scope_hash(
@@ -958,7 +960,7 @@ def _retention_binding(
     # Only the issuer derives ownership. Client-controlled nonces and native
     # revisions are insufficient to select another principal's claim.
     reader = hashlib.sha256(json.dumps([
-        "crab retention reader v1", claims.issuer, claims.subject, decision.provider,
+        "crab retention reader v1", claims.issuer, claims.subject, decision.provider, read_operation,
         repo_url, binding.view_prefix, binding.target, binding.reader_nonce,
     ], separators=(",", ":")).encode()).hexdigest()
     return {

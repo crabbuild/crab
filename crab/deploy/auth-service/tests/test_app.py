@@ -714,6 +714,7 @@ def retention_client(monkeypatch):
         "view_prefix": f"restricted/repo/acl-views/v2/{scope}/7-{'b' * 64}",
         "reader_nonce": "a" * 64,
         "target": "d" * 64,
+        "read_operation": "mount",
     }
     calls = []
     incarnation = "0" * 8 + "-0000-7000-8000-" + "0" * 12
@@ -774,20 +775,22 @@ def test_retention_keeps_one_reader_for_the_same_verified_issuer_and_subject(ret
     assert helper.calls == []  # Retention uses native view proofs without rebuilding a projection.
 
 
-def test_mount_credentials_keep_the_verified_projection_until_release(retention_client, monkeypatch):
+@pytest.mark.parametrize("read_operation", ["mount", "fetch"])
+def test_read_credentials_keep_the_verified_projection_until_release(retention_client, monkeypatch, read_operation):
     post, helper, calls = retention_client
-    acquired = post("acquire").json()
+    app_module._policy = retention_policy(["src/**"], ["mount", "fetch"])
+    acquired = post("acquire", read_operation=read_operation).json()
     provider = FakeProvider()
     monkeypatch.setattr(app_module, "get_provider", lambda name: provider)
     client = TestClient(app_module.app)
     request = {
-        "id_token": "token", "repo_url": "crab://bucket/restricted/repo", "operation": "mount",
+        "id_token": "token", "repo_url": "crab://bucket/restricted/repo", "operation": read_operation,
         "retained_view": {
             "view_prefix": acquired["repo_prefix"], "reader_nonce": "a" * 64, "target": "d" * 64,
             "incarnation": acquired["revision"]["incarnation"],
         },
     }
-    renewed = post("renew", acquired["revision"]).json()
+    renewed = post("renew", acquired["revision"], read_operation=read_operation).json()
     response = client.post("/v1/credentials", json=request)
     assert response.status_code == 200
     assert response.headers["Cache-Control"] == "no-store"
@@ -795,10 +798,14 @@ def test_mount_credentials_keep_the_verified_projection_until_release(retention_
     assert provider.calls[0]["repo_url"] == f"crab://bucket/{acquired['repo_prefix']}"
     assert calls[-1]["operation"] == {"action": "verify", "incarnation": acquired["revision"]["incarnation"]}
 
+    other = "fetch" if read_operation == "mount" else "mount"
+    assert post("renew", renewed["revision"], read_operation=other).status_code == 409
+    assert client.post("/v1/credentials", json=request | {"operation": other}).status_code == 409
+
     app_module._verifier = FakeVerifier(subject="different-principal")
     assert client.post("/v1/credentials", json=request).status_code == 409
     app_module._verifier = FakeVerifier()
-    assert post("release", renewed["revision"]).status_code == 200
+    assert post("release", renewed["revision"], read_operation=read_operation).status_code == 200
     assert client.post("/v1/credentials", json=request).status_code == 409
     assert helper.calls == []
     assert len(provider.calls) == 1
@@ -822,6 +829,12 @@ def test_retention_reevaluates_mount_policy_before_touching_a_claim(retention_cl
     app_module._policy = retention_policy(paths, operations)
     assert post("renew", acquired.json()["revision"]).status_code == 403
     assert len(calls) == 1
+
+
+def test_retention_fetch_claim_requires_fetch_policy(retention_client):
+    post, _, calls = retention_client
+    assert post("acquire", read_operation="fetch").status_code == 403
+    assert not calls
 
 
 def test_retention_rejects_client_selected_owner_and_unscoped_prefix(retention_client):

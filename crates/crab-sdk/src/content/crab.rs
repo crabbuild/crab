@@ -3,6 +3,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use bytes::Bytes;
+#[cfg(feature = "service")]
+use crab_coordination::read_retention_runtime::{ReadRetentionPin, RetainedRead};
 use crab_remote_git::OperationContext;
 use crab_storage::{Store, StoreLayout};
 use tokio::sync::{OnceCell, mpsc, oneshot};
@@ -51,6 +53,8 @@ pub(crate) struct ContentRuntime {
     cache: Option<ContentCache>,
     namespace: String,
     catalog: Arc<crab_metadata::capsule_protocol::PointerCatalogLookup>,
+    #[cfg(feature = "service")]
+    retention: Option<RetainedRead>,
     hydrator: OnceCell<crab_read::ShardHydrator>,
     local: OnceCell<Option<Arc<crab_cache::LocalCache>>>,
 }
@@ -96,6 +100,7 @@ impl ContentRuntime {
         layout: StoreLayout<Store>,
         namespace: &str,
         catalog: crab_metadata::capsule_protocol::PointerCatalogLookup,
+        #[cfg(feature = "service")] retention: Option<RetainedRead>,
     ) -> Self {
         let mut hash = blake3::Hasher::new();
         hash.update(namespace.as_bytes());
@@ -105,6 +110,8 @@ impl ContentRuntime {
             lfs_proofs: crab_lfs::LfsReadCache::default(),
             cache,
             catalog: Arc::new(catalog),
+            #[cfg(feature = "service")]
+            retention,
             namespace: hash.finalize().to_hex().to_string(),
             hydrator: OnceCell::new(),
             local: OnceCell::new(),
@@ -143,6 +150,8 @@ impl ContentRuntime {
                     )
                 })?;
                 let layout = self.layout.clone();
+                #[cfg(feature = "service")]
+                let retention = self.retention.clone();
                 // Cache initialization can touch disk; the tracked caller awaits this
                 // job rather than abandoning it when a public request is dropped.
                 tokio::task::spawn_blocking(move || {
@@ -154,13 +163,19 @@ impl ContentRuntime {
                     .map_err(|source| {
                         Error::with_source(ErrorKind::Io, "cannot initialize content cache", source)
                     })?;
-                    crab_read::ReadRuntimeBuilder::new(
+                    let hydrator = crab_read::ReadRuntimeBuilder::new(
                         store,
                         layout,
                         crab_remote_git::RuntimeOptions::default().max_origin_concurrency,
                     )
                     .build()
-                    .map_err(read_error)
+                    .map_err(read_error)?;
+                    #[cfg(feature = "service")]
+                    let hydrator = match retention {
+                        Some(retention) => hydrator.with_read_retention(retention),
+                        None => hydrator,
+                    };
+                    Ok(hydrator)
                 })
                 .await
                 .map_err(|source| {
@@ -190,6 +205,13 @@ impl ContentRuntime {
             ))
         })?;
         let range = options.byte_range(pointer.size).map_err(consumer_error)?;
+        #[cfg(feature = "service")]
+        let pin = self
+            .retention
+            .as_ref()
+            .map(RetainedRead::pin)
+            .transpose()
+            .map_err(|source| consumer_error(read_error(source.into())))?;
         let hydrator = self
             .hydrator()
             .await
@@ -210,6 +232,8 @@ impl ContentRuntime {
             send,
             cancellation: operation.cancellation().clone(),
             runtime: tokio::runtime::Handle::current(),
+            #[cfg(feature = "service")]
+            pin,
             store: self
                 .layout
                 .store()
@@ -276,6 +300,8 @@ struct ChannelWriter {
     cancellation: CancellationToken,
     runtime: tokio::runtime::Handle,
     store: Option<Store>,
+    #[cfg(feature = "service")]
+    pin: Option<Arc<ReadRetentionPin>>,
 }
 
 impl Write for ChannelWriter {
@@ -288,17 +314,36 @@ impl Write for ChannelWriter {
         // Xet invokes Write on its blocking writer. Cancellation must unblock
         // channel backpressure even when the consumer keeps its receiver alive.
         self.runtime.block_on(async {
+            let retention_lost = async {
+                #[cfg(feature = "service")]
+                if let Some(pin) = &self.pin {
+                    pin.cancellation().cancelled().await;
+                    return match pin.ensure_valid() {
+                        Err(error) => std::io::Error::other(crab_read::ReadError::from(error)),
+                        Ok(()) => cancelled_write(),
+                    };
+                }
+                std::future::pending::<std::io::Error>().await
+            };
+            tokio::pin!(retention_lost);
             let permit = tokio::select! {
                 biased;
                 () = self.cancellation.cancelled() => return Err(cancelled_write()),
+                error = &mut retention_lost => return Err(error),
                 result = self.send.reserve() => result.map_err(|_| cancelled_write())?,
             };
             if let Some(store) = &self.store {
                 tokio::select! {
                     biased;
                     () = self.cancellation.cancelled() => return Err(cancelled_write()),
+                    error = &mut retention_lost => return Err(error),
                     result = store.check_read_authority() => result.map_err(std::io::Error::other)?,
                 }
+            }
+            #[cfg(feature = "service")]
+            if let Some(pin) = &self.pin {
+                pin.ensure_valid()
+                    .map_err(|error| std::io::Error::other(crab_read::ReadError::from(error)))?;
             }
             permit.send(chunk);
             Ok::<(), std::io::Error>(())
@@ -351,6 +396,8 @@ mod tests {
             cancellation: cancellation.clone(),
             runtime: tokio::runtime::Handle::current(),
             store: None,
+            #[cfg(feature = "service")]
+            pin: None,
         };
         let (started, entered) = oneshot::channel();
         let job = tokio::task::spawn_blocking(move || {
@@ -368,6 +415,54 @@ mod tests {
             read_error(crab_read::ReadError::Io(error)).kind(),
             ErrorKind::Cancelled
         );
+        assert_eq!(receive.recv().await.unwrap().as_ref(), b"queued");
+        assert!(receive.recv().await.is_none());
+    }
+
+    #[cfg(feature = "service")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn projected_view_shutdown_drains_a_backpressured_sdk_writer() {
+        use crab_coordination::{
+            read_retention::{ReadRetentionLease, RetainedReadRoot},
+            read_retention_runtime::ReadRetentionSession,
+        };
+
+        let session = ReadRetentionSession::default();
+        let root = RetainedReadRoot::new("a".repeat(64), 1).unwrap();
+        let lease = ReadRetentionLease::create(
+            Arc::new(object_store::memory::InMemory::new()),
+            "repo/v2/readers/fixture/claim".into(),
+            root,
+        )
+        .await
+        .unwrap();
+        let retained = session.capture().unwrap().retain(lease).unwrap();
+        let (send, mut receive) = mpsc::channel(1);
+        send.send(Bytes::from_static(b"queued")).await.unwrap();
+        let (started, entered) = oneshot::channel();
+        let pin = retained.pin().unwrap();
+        let handle = tokio::runtime::Handle::current();
+        let job = tokio::task::spawn_blocking(move || {
+            let mut writer = ChannelWriter {
+                send,
+                cancellation: CancellationToken::new(),
+                runtime: handle,
+                store: None,
+                pin: Some(pin),
+            };
+            started.send(()).unwrap();
+            writer.write(b"blocked")
+        });
+        entered.await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), session.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+        let error = job.await.unwrap().unwrap_err();
+        assert!(matches!(
+            error.get_ref().and_then(|error| error.downcast_ref()),
+            Some(crab_read::ReadError::Retention(_))
+        ));
         assert_eq!(receive.recv().await.unwrap().as_ref(), b"queued");
         assert!(receive.recv().await.is_none());
     }

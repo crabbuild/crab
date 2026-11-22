@@ -25,8 +25,8 @@ use crate::protected_push::{
 use crate::token_cache::{CachedTokens, TokenCache};
 
 mod view_retention;
-use view_retention::{RetainedMount, RetainedViewProof};
-pub use view_retention::{ViewRetention, ViewRetentionLease};
+use view_retention::{RetainedView, RetainedViewProof};
+pub use view_retention::{ViewReadOperation, ViewRetention, ViewRetentionLease};
 
 /// Refresh window: credentials within 5 minutes of expiry trigger a refresh.
 const REFRESH_WINDOW: Duration = Duration::from_secs(300);
@@ -96,7 +96,7 @@ pub struct CrabAuthProvider {
     cdn: Vec<CdnViewerDeployment>,
     allow_viewer_grants: bool,
     cdn_principal: OnceLock<[u8; 32]>,
-    retained_mount: OnceLock<Arc<RetainedMount>>,
+    retained_view: OnceLock<Arc<RetainedView>>,
 }
 
 /// Trusted viewer deployment selected for one source repository.
@@ -242,7 +242,7 @@ impl CrabAuthProvider {
             cdn: Vec::new(),
             allow_viewer_grants: true,
             cdn_principal: OnceLock::new(),
-            retained_mount: OnceLock::new(),
+            retained_view: OnceLock::new(),
         })
     }
 
@@ -769,12 +769,13 @@ impl CredentialProvider for CrabAuthProvider {
         } else {
             None
         };
-        let principal_bound = bound_read || operation == "mount";
+        let retained_view = self.retained_view.get();
+        let principal_bound = bound_read || operation == "mount" || retained_view.is_some();
         let login = principal_bound
             .then(|| self.load_bound_login())
             .transpose()?;
 
-        {
+        if retained_view.is_none() {
             let guard = self.cached.read().await;
             if Self::is_cached_valid(guard.as_ref())
                 && let Some(c) = guard.as_ref()
@@ -793,13 +794,12 @@ impl CredentialProvider for CrabAuthProvider {
             None => self.cached_id_token()?,
         };
         let repo_url = format!("crab://{bucket}/{prefix}");
-        let retained_mount = self.retained_mount.get();
-        let lease = retained_mount
-            .map(|mount| mount.lease_for(&repo_url, operation))
+        let lease = retained_view
+            .map(|view| view.lease_for(&repo_url, operation))
             .transpose()?;
-        let proof = retained_mount
+        let proof = retained_view
             .zip(lease.as_ref())
-            .map(|(mount, lease)| mount.proof(lease));
+            .map(|(view, lease)| view.proof(lease));
         let (auth_resp, approval) = match self
             .call_endpoint(
                 &id_token,

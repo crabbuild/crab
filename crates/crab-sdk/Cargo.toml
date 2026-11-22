@@ -22,7 +22,7 @@ provider-cdn-qualification = ["service", "crab-storage/provider-cdn-qualificatio
 
 results = ["remote", "dep:crab-workflow", "dep:serde", "dep:serde_json"]
 
-files = ["remote", "crab-read/hydration", "crab-metadata/file-index-reader", "dep:crab-lfs", "dep:crab-git", "dep:futures-util", "dep:crab-cache", "dep:crab-cache-store", "dep:crab-types", "dep:tracing"]
+files = ["remote", "crab-read/hydration", "crab-metadata/file-index-reader", "crab-auth-store?/view-retention", "dep:crab-coordination", "dep:crab-lfs", "dep:crab-git", "dep:futures-util", "dep:crab-cache", "dep:crab-cache-store", "dep:crab-types", "dep:tracing"]
 
 [dependencies]
 crab-workflow = { workspace = true, optional = true }

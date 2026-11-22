@@ -589,6 +589,7 @@ fn direct_store(
             format!("crab://{}/{}", url.bucket, url.repo_path),
             scope.repo_prefix.clone(),
             blake3::Hash::from_bytes(*target).to_hex().to_string(),
+            crab_auth::crab_auth_client::ViewReadOperation::Mount,
         )?)
     } else {
         None

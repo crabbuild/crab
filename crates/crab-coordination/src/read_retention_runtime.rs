@@ -90,7 +90,8 @@ impl ReadRetentionSession {
     }
 
     /// Close admission, cancel reads, and await every admitted capture and release.
-    /// Cancellation of this wait does not interrupt cleanup.
+    /// Return the first unobserved failure after cleanup. Cancelling this wait
+    /// does not interrupt cleanup or consume the failure.
     pub async fn shutdown(&self) -> Result<()> {
         self.close();
         self.0.tasks.wait().await;
@@ -99,9 +100,9 @@ impl ReadRetentionSession {
             .failure
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
+            .take()
         {
-            Some(error) => Err(CoordinationError::ReadRetentionFailed(Arc::clone(error))),
+            Some(error) => Err(CoordinationError::ReadRetentionFailed(error)),
             None => Ok(()),
         }
     }
@@ -519,6 +520,7 @@ mod tests {
         assert!(matches!(error, CoordinationError::ReadRetentionFailed(_)));
         drop(pin);
         let error = session.shutdown().await.unwrap_err();
+        session.shutdown().await.unwrap();
         let mut source: &dyn std::error::Error = &error;
         let mut provider_error = false;
         loop {

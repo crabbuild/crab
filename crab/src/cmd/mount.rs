@@ -2348,17 +2348,10 @@ struct ProjectedMountGit {
 impl crate::vfs::MountCatalogCapture for CrabMountCatalogCapture {
     async fn capture(&self) -> crate::vfs::Result<std::sync::Arc<crab_read::ShardHydrator>> {
         let (catalog, retention) = if let Some(issuer) = &self.view_retention {
-            let admission = self
-                .retention
-                .capture()
-                .map_err(crab_read::ReadError::from)?;
-            let (digest, lease) = issuer
-                .acquire()
-                .await
-                .map_err(|error| crab_read::ReadError::from(issuer_retention_error(error)))?;
-            let retention = admission
-                .retain(IssuerRetention(lease))
-                .map_err(crab_read::ReadError::from)?;
+            let (digest, retention) =
+                crab_auth_store::view_retention::acquire(issuer, &self.retention)
+                    .await
+                    .map_err(crab_read::ReadError::from)?;
             let (catalog, view) = crab_read::load_retained_pointer_catalog(
                 &self.layout,
                 self.maximum,
@@ -2440,36 +2433,6 @@ impl crate::vfs::MountCatalogCapture for CrabMountCatalogCapture {
             .map_err(crab_read::ReadError::from)?;
         Ok(())
     }
-}
-
-#[cfg(any(feature = "fuse", feature = "nfs"))]
-struct IssuerRetention(crab_auth::crab_auth_client::ViewRetentionLease);
-
-#[cfg(any(feature = "fuse", feature = "nfs"))]
-#[async_trait::async_trait]
-impl crab_coordination::read_retention_runtime::RetentionOwner for IssuerRetention {
-    fn path(&self) -> &str {
-        self.0.view_prefix()
-    }
-
-    fn schedule(&self) -> crab_coordination::Result<(tokio::time::Instant, tokio::time::Instant)> {
-        Ok(self.0.schedule())
-    }
-
-    async fn renew(&mut self) -> crab_coordination::Result<()> {
-        self.0.renew().await.map_err(issuer_retention_error)
-    }
-
-    async fn release(self) -> crab_coordination::Result<()> {
-        self.0.release().await.map_err(issuer_retention_error)
-    }
-}
-
-#[cfg(any(feature = "fuse", feature = "nfs"))]
-fn issuer_retention_error(
-    error: crab_auth::error::AuthError,
-) -> crab_coordination::CoordinationError {
-    crab_coordination::CoordinationError::ReadRetentionIssuer(Box::new(error))
 }
 
 #[cfg(any(feature = "fuse", feature = "nfs"))]

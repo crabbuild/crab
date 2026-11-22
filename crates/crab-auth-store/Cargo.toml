@@ -34,11 +34,13 @@ managed-service = [
 ]
 azure-cdn-placement = ["crab-auth/azure-management", "dep:async-trait", "dep:reqwest"]
 operator-cdn = ["refreshing-store", "crab-auth/crab-auth-client", "azure-cdn-placement", "dep:serde"]
+view-retention = ["crab-auth/crab-auth-client", "dep:async-trait", "dep:crab-coordination", "dep:tokio"]
 
 [dependencies]
 async-trait = { workspace = true, optional = true }
 blake3 = { workspace = true, optional = true }
 crab-auth = { workspace = true }
+crab-coordination = { workspace = true, optional = true, features = ["object-store-lock"] }
 crab-git = { workspace = true, optional = true }
 crab-storage = { workspace = true }
 crab-types = { workspace = true }

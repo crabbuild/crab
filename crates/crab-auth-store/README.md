@@ -142,3 +142,7 @@ crab-auth-store = { workspace = true, features = ["refreshing-store"] }
 - Keep ref CAS and push serialization in
   [`crab-coordination`](../crab-coordination/README.md); a valid store does
   not by itself make a write safe.
+
+The `view-retention` feature registers Crab Auth's projected-view claim with
+the shared read session. The session renews and releases the issuer claim
+after all admitted read pins drain.

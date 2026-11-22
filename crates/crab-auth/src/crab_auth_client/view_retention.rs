@@ -11,17 +11,35 @@ const PATH: &str = "/v1/views/retention";
 const MAX_REPLY_BYTES: usize = 4096;
 const MAX_LIFETIME_MS: u64 = 150_000;
 
-/// Retention authority bound to the login and native target of a projected mount grant.
+/// Read policy that owns a projected-view claim.
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewReadOperation {
+    Mount,
+    Fetch,
+}
+
+impl ViewReadOperation {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Mount => "mount",
+            Self::Fetch => "fetch",
+        }
+    }
+}
+
+/// Retention authority bound to the login, read policy and native target of a projected grant.
 #[derive(Clone)]
 pub struct ViewRetention {
     provider: Arc<CrabAuthProvider>,
-    binding: Arc<RetainedMount>,
+    binding: Arc<RetainedView>,
 }
 
-pub(super) struct RetainedMount {
+pub(super) struct RetainedView {
     repo_url: String,
     view_prefix: String,
     target: String,
+    read_operation: ViewReadOperation,
     leases: Mutex<Vec<Weak<LeaseIdentity>>>,
 }
 
@@ -39,11 +57,11 @@ pub(super) struct RetainedViewProof<'a> {
     incarnation: &'a str,
 }
 
-impl RetainedMount {
+impl RetainedView {
     pub(super) fn lease_for(&self, repo_url: &str, operation: &str) -> Result<LeaseIdentity> {
-        if self.repo_url != repo_url || operation != "mount" {
+        if self.repo_url != repo_url || operation != self.read_operation.as_str() {
             return Err(AuthError::InvalidCrabAuthRequest(
-                "mount grant source changed".into(),
+                "projected read grant source or operation changed".into(),
             ));
         }
         let mut leases = self
@@ -61,7 +79,7 @@ impl RetainedMount {
             .cloned()
             .ok_or_else(|| {
                 AuthError::InvalidCrabAuthRequest(
-                    "mount grant requires an active retained view".into(),
+                    "projected read grant requires an active retained view".into(),
                 )
             })
     }
@@ -83,29 +101,31 @@ impl RetainedViewProof<'_> {
 }
 
 impl ViewRetention {
-    /// Bind a projected mount to the same issuer client that resolved its grant.
+    /// Bind a projected read to the same issuer client that resolved its grant.
     pub fn new(
         provider: Arc<CrabAuthProvider>,
         repo_url: String,
         view_prefix: String,
         target: String,
+        read_operation: ViewReadOperation,
     ) -> Result<Self> {
         if provider.cdn_principal().is_none() {
             return Err(AuthError::InvalidCrabAuthRequest(
-                "view retention requires a principal-bound mount grant".into(),
+                "view retention requires a principal-bound read grant".into(),
             ));
         }
-        let binding = Arc::new(RetainedMount {
+        let binding = Arc::new(RetainedView {
             repo_url,
             view_prefix,
             target,
+            read_operation,
             leases: Mutex::new(Vec::new()),
         });
         provider
-            .retained_mount
+            .retained_view
             .set(Arc::clone(&binding))
             .map_err(|_| {
-                AuthError::InvalidCrabAuthRequest("mount grant already has a bound view".into())
+                AuthError::InvalidCrabAuthRequest("read grant already has a bound view".into())
             })?;
         Ok(Self { provider, binding })
     }
@@ -190,6 +210,7 @@ impl ViewRetention {
             view_prefix: &self.binding.view_prefix,
             target: &self.binding.target,
             reader_nonce: nonce,
+            read_operation: self.binding.read_operation,
             operation,
         };
         let request_error = |source: reqwest::Error| AuthError::CrabAuthRequest {
@@ -311,6 +332,7 @@ struct Request<'a> {
     view_prefix: &'a str,
     target: &'a str,
     reader_nonce: &'a str,
+    read_operation: ViewReadOperation,
     operation: Action<'a>,
 }
 

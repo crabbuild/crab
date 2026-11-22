@@ -14,6 +14,8 @@ mod managed_repository;
 pub mod operator_cdn;
 #[cfg(feature = "refreshing-store")]
 pub mod refreshing_store;
+#[cfg(feature = "view-retention")]
+pub mod view_retention;
 
 use crab_auth::{AzureToken, CloudCredentials};
 #[cfg(feature = "refreshing-store")]

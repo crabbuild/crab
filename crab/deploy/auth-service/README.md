@@ -368,14 +368,14 @@ materialized filtered view. Clients must use the returned `repo_prefix` and
 `global_prefix`; the original repo prefix and bucket-level `.crab` globals are
 not readable with view credentials.
 
-### Retain a projected mount view
+### Retain a projected read view
 
 `POST /v1/views/retention` takes the same `id_token` and source `repo_url` as
 the credentials endpoint. The request also includes `view_prefix` from
 `storage_scope.repo_prefix`, a fresh `reader_nonce` of 32 random bytes encoded
 as lowercase hexadecimal, the `target` digest of the selected native storage
-transport (also 32 bytes encoded as lowercase hexadecimal), and an `operation`
-object.
+transport (also 32 bytes encoded as lowercase hexadecimal), `read_operation`
+set to `mount` or `fetch`, and an `operation` object.
 
 | `operation.action` | Additional operation field | Successful response |
 | --- | --- | --- |
@@ -384,8 +384,8 @@ object.
 | `release` | `revision` from the last acknowledged response | `released` |
 
 The caller keeps the same nonce, native target, and projected view for the
-life of the claim. Crab Auth checks the verified issuer, subject, and `mount`
-policy on every operation. The native helper compares the target against its
+life of the claim. Crab Auth checks the verified issuer, subject, and policy
+for the same `read_operation` on every request. The native helper compares the target against its
 resolved transport before accessing the claim and confirms that the source
 still matches the view on acquisition. Renewal keeps the exact admitted view
 while the same scope remains authorized, even if the source advances.
@@ -396,10 +396,10 @@ revision, or expiry. Drain outstanding reads before release. A `409` indicates
 that the helper could not acknowledge the requested view or revision. A `503`
 leaves its outcome uncertain. A subsequent `acquire` uses a fresh nonce.
 
-For storage credential renewal, a direct mount sends `retained_view` with its
-`mount` request to `/v1/credentials`. This object holds `view_prefix`, `target`,
+For storage credential renewal, send `retained_view` to `/v1/credentials`
+with the same `mount` or `fetch` operation. This object holds `view_prefix`, `target`,
 `reader_nonce`, and the `incarnation` returned by acquisition. The issuer
-evaluates the current mount policy and verifies that the exact native claim is
+evaluates the current read policy and verifies that the exact native claim is
 still active before issuing read-only credentials for the retained prefix. A
 lease renewal can advance its sequence while a credential request is in flight.
 The verified incarnation stays the same until that claim ends.

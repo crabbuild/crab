@@ -60,7 +60,7 @@ fn provider(cache: Arc<TokenCache>) -> CrabAuthProvider {
         cdn: Vec::new(),
         allow_viewer_grants: true,
         cdn_principal: OnceLock::new(),
-        retained_mount: OnceLock::new(),
+        retained_view: OnceLock::new(),
     }
 }
 
@@ -141,6 +141,15 @@ async fn credential_endpoint(
 
 #[tokio::test]
 async fn issuer_retention_uses_only_the_last_acknowledged_revision() {
+    for (operation, wire_operation) in [
+        (ViewReadOperation::Mount, "mount"),
+        (ViewReadOperation::Fetch, "fetch"),
+    ] {
+        check_retention_revision(operation, wire_operation).await;
+    }
+}
+
+async fn check_retention_revision(operation: ViewReadOperation, wire_operation: &'static str) {
     let dir = tempfile::tempdir().unwrap();
     let cache = Arc::new(TokenCache::test_cache(dir.path().to_path_buf()));
     let token = id_token("alice", 1);
@@ -152,11 +161,13 @@ async fn issuer_retention_uses_only_the_last_acknowledged_revision() {
         listener.local_addr().unwrap()
     );
     reader.load_bound_login().unwrap();
+    let reader = Arc::new(reader);
     let retention = ViewRetention::new(
-        Arc::new(reader),
+        reader.clone(),
         "crab://fixture/org/repo".into(),
         "org/repo/acl-views/v2/scope/view".into(),
         "ab".repeat(32),
+        operation,
     )
     .unwrap();
     let server = tokio::spawn(async move {
@@ -165,6 +176,9 @@ async fn issuer_retention_uses_only_the_last_acknowledged_revision() {
         let revision =
             |sequence| serde_json::json!({"incarnation": incarnation, "sequence": sequence});
         let view_prefix = "org/repo/acl-views/v2/scope/view";
+        let expiry = (time::OffsetDateTime::now_utc() + time::Duration::hours(1))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
         for (expected_action, expected_sequence, reply) in [
             (
                 "acquire",
@@ -172,6 +186,16 @@ async fn issuer_retention_uses_only_the_last_acknowledged_revision() {
                 serde_json::json!({
                     "action": "acquired", "repo_prefix": view_prefix, "view_state_digest": "d".repeat(64),
                     "revision": revision(0), "remaining_ms": 60_000,
+                }),
+            ),
+            (
+                "credentials",
+                None,
+                serde_json::json!({
+                    "provider": "gcp", "credentials": {"access_token": "fixture-native-token"},
+                    "permissions": ["read"], "expires_at": expiry,
+                    "storage_scope": {"repo_prefix": view_prefix, "global_prefix": format!("{view_prefix}/.crab"),
+                                      "source_repo": "org/repo", "scope_hash": "a".repeat(64)},
                 }),
             ),
             (
@@ -200,7 +224,13 @@ async fn issuer_retention_uses_only_the_last_acknowledged_revision() {
             while !header.ends_with("\r\n\r\n") {
                 assert_ne!(stream.read_line(&mut header).await.unwrap(), 0);
             }
-            assert!(header.starts_with("POST /issuer/v1/views/retention HTTP/1.1\r\n"));
+            let credentials = expected_action == "credentials";
+            let path = if credentials {
+                "/issuer/v1/credentials/"
+            } else {
+                "/issuer/v1/views/retention"
+            };
+            assert!(header.starts_with(&format!("POST {path} HTTP/1.1\r\n")));
             assert!(header.contains(&format!("authorization: Bearer {token}\r\n")));
             let size = header
                 .lines()
@@ -211,7 +241,12 @@ async fn issuer_retention_uses_only_the_last_acknowledged_revision() {
             let mut body = vec![0; size];
             stream.read_exact(&mut body).await.unwrap();
             let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
-            let current_nonce = request["reader_nonce"].as_str().unwrap();
+            let binding = if credentials {
+                &request["retained_view"]
+            } else {
+                &request
+            };
+            let current_nonce = binding["reader_nonce"].as_str().unwrap();
             assert_eq!(current_nonce.len(), 64);
             assert!(current_nonce.bytes().all(|byte| byte.is_ascii_hexdigit()));
             assert_eq!(
@@ -221,14 +256,20 @@ async fn issuer_retention_uses_only_the_last_acknowledged_revision() {
                 current_nonce
             );
             assert_eq!(request["repo_url"], "crab://fixture/org/repo");
-            assert_eq!(request["view_prefix"], view_prefix);
-            assert_eq!(request["target"], "ab".repeat(32));
+            assert_eq!(binding["view_prefix"], view_prefix);
+            assert_eq!(binding["target"], "ab".repeat(32));
             assert_eq!(request["id_token"], token);
-            assert_eq!(request["operation"]["action"], expected_action);
-            assert_eq!(
-                request["operation"]["revision"]["sequence"].as_u64(),
-                expected_sequence
-            );
+            if credentials {
+                assert_eq!(request["operation"], wire_operation);
+                assert_eq!(binding["incarnation"], incarnation);
+            } else {
+                assert_eq!(request["operation"]["action"], expected_action);
+                assert_eq!(request["read_operation"], wire_operation);
+                assert_eq!(
+                    request["operation"]["revision"]["sequence"].as_u64(),
+                    expected_sequence
+                );
+            }
             let reply = reply.to_string();
             let response = format!(
                 "HTTP/1.1 200 OK\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
@@ -244,6 +285,20 @@ async fn issuer_retention_uses_only_the_last_acknowledged_revision() {
     assert!(deadline <= tokio::time::Instant::now() + Duration::from_secs(60));
     assert!(deadline >= start + Duration::from_secs(60));
     assert_eq!(deadline - renewal, Duration::from_secs(20));
+    let wrong = if wire_operation == "fetch" {
+        "mount"
+    } else {
+        "fetch"
+    };
+    assert!(reader.resolve("fixture", "org/repo", wrong).await.is_err());
+    let refreshed = reader
+        .refresh_for("fixture", "org/repo", wire_operation)
+        .await
+        .unwrap();
+    assert_eq!(
+        refreshed.storage_scope.unwrap().repo_prefix,
+        lease.view_prefix()
+    );
     lease.renew().await.unwrap();
     assert!(matches!(
         lease.renew().await,

@@ -2669,6 +2669,7 @@ dependencies = [
  "blake3",
  "bytes",
  "crab-auth",
+ "crab-coordination",
  "crab-git",
  "crab-storage",
  "crab-types",

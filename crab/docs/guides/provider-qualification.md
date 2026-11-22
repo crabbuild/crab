@@ -1484,7 +1484,9 @@ for the approved file window.
 Run the same SDK worker with `--receipt` pointing to the native publication
 record in place of `--git` and `--crab`. The probe opens the remote snapshot,
 verifies the commit and Git pointer, and consumes `Snapshot::open_file`
-through successful EOF with the approved range. Run separate native, cold
+through successful EOF with the approved range. Deploy the issuer with support
+for `fetch` retention. The SDK compares the acknowledged claim digest with its
+capture and holds the claim through stream cleanup. Run separate native, cold
 edge, and warm edge invocations without `--warm-local-output`. Join each
 edge record to provider logs and compare xorb viewer bytes with xorb origin
 fill. The worker rejects whole xorb GETs and verifies fewer viewer bytes

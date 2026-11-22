@@ -7,6 +7,8 @@ use std::time::Duration;
 pub(crate) mod mutation;
 
 use bytes::Bytes;
+#[cfg(all(feature = "files", feature = "service"))]
+use crab_coordination::read_retention_runtime::{ReadRetentionSession, RetainedRead};
 use crab_remote_git::{
     NoopMetrics, OperationKind, RemoteGitRepository, RemoteGitRuntime, RepositoryIdentity,
     RepositoryOptions, RuntimeOptions,
@@ -64,6 +66,8 @@ impl ClientBuilder {
             namespace,
             #[cfg(feature = "files")]
             cache: self.cache,
+            #[cfg(all(feature = "files", feature = "service"))]
+            retention: ReadRetentionSession::default(),
             operations: Operations::default(),
             git: Arc::new(git),
             direct_store_configured,
@@ -92,6 +96,8 @@ impl ClientBuilder {
 pub(crate) struct ClientState {
     #[cfg(feature = "files")]
     cache: Option<crate::ContentCache>,
+    #[cfg(all(feature = "files", feature = "service"))]
+    retention: ReadRetentionSession,
     pub(crate) store: Store,
     pub(crate) direct_store_configured: bool,
     namespace: String,
@@ -117,6 +123,8 @@ pub(crate) struct ResolvedRepository {
     pub(crate) namespace: String,
     pub(crate) placement: u64,
     pub(crate) managed: bool,
+    #[cfg(all(feature = "files", feature = "service"))]
+    pub(crate) view_issuer: Option<(Arc<crab_auth::CrabAuthProvider>, String)>,
     #[cfg(all(feature = "local", feature = "service"))]
     pub(crate) checkout_principal: Option<[u8; 32]>,
 }
@@ -125,6 +133,8 @@ pub(crate) struct CapturedRepository {
     pub(crate) repository: RemoteGitRepository,
     pub(crate) resolved: ResolvedRepository,
     pub(crate) capsule: crab_read::capsule_protocol::CapsuleRepositoryView,
+    #[cfg(all(feature = "files", feature = "service"))]
+    retention: Option<RetainedRead>,
     // Local preparation shares construction admission. Long-lived repository
     // handles keep the plain resolved store, so an expired scope cannot poison them.
     #[cfg(feature = "local")]
@@ -150,6 +160,20 @@ impl ClientState {
         options: &OperationOptions,
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<CapturedRepository> {
+        if cancel.is_cancelled() {
+            return Err(Error::new(
+                ErrorKind::Cancelled,
+                "repository opening cancelled",
+            ));
+        }
+        #[cfg(all(feature = "files", feature = "service"))]
+        let retained = self.retain_projected_view(&resolved).await?;
+        #[cfg(all(feature = "files", feature = "service"))]
+        let pin = retained
+            .as_ref()
+            .map(|(_, retention)| retention.pin())
+            .transpose()
+            .map_err(retention_error)?;
         let layout = StoreLayout::new(resolved.store.clone(), resolved.prefix.clone());
         let identity = RepositoryIdentity::new(
             resolved.namespace.clone(),
@@ -193,6 +217,15 @@ impl ClientState {
             () = cancel.cancelled() => return Err(Error::new(ErrorKind::Cancelled, "repository opening cancelled")),
             result = capture => result.map_err(crate::remote_error::read_error)?,
         };
+        #[cfg(all(feature = "files", feature = "service"))]
+        if let Some((digest, _)) = &retained
+            && &capsule.state_digest() != digest
+        {
+            return Err(Error::new(
+                ErrorKind::Corruption,
+                "SDK capture differs from the issuer's retained view",
+            ));
+        }
         let owner = capsule
             .git_repository_from_store(
                 layout,
@@ -205,13 +238,57 @@ impl ClientState {
             )
             .await
             .map_err(crate::remote_error::read_error)?;
+        #[cfg(all(feature = "files", feature = "service"))]
+        if let Some(pin) = pin {
+            pin.ensure_valid().map_err(retention_error)?;
+        }
         Ok(CapturedRepository {
             repository: owner,
             resolved,
             capsule,
+            #[cfg(all(feature = "files", feature = "service"))]
+            retention: retained.map(|(_, retention)| retention),
             #[cfg(feature = "local")]
             read_store: captured_layout.store().clone(),
         })
+    }
+
+    #[cfg(all(feature = "files", feature = "service"))]
+    async fn retain_projected_view(
+        &self,
+        resolved: &ResolvedRepository,
+    ) -> Result<Option<(String, RetainedRead)>> {
+        use crab_auth::crab_auth_client::{ViewReadOperation, ViewRetention};
+
+        let (Some((issuer, source)), Some(scope)) =
+            (&resolved.view_issuer, resolved.store.storage_scope())
+        else {
+            return Ok(None);
+        };
+        let target = resolved.store.target_identity().ok_or_else(|| {
+            Error::new(
+                ErrorKind::Authentication,
+                "projected SDK view requires a native target",
+            )
+        })?;
+        let authority = ViewRetention::new(
+            Arc::clone(issuer),
+            source.clone(),
+            scope.repo_prefix.clone(),
+            blake3::Hash::from_bytes(*target).to_hex().to_string(),
+            ViewReadOperation::Fetch,
+        )
+        .map_err(|source| {
+            Error::with_source(
+                ErrorKind::Authentication,
+                "cannot bind the SDK projected view",
+                source,
+            )
+        })?;
+        crab_auth_store::view_retention::acquire(&authority, &self.retention)
+            .await
+            .map(Some)
+            .map_err(retention_error)
     }
 
     #[cfg(any(feature = "local", feature = "results"))]
@@ -275,6 +352,8 @@ impl ClientState {
                 ),
                 placement,
                 managed: true,
+                #[cfg(all(feature = "files", feature = "service"))]
+                view_issuer: None,
                 #[cfg(feature = "local")]
                 checkout_principal: None,
             });
@@ -291,6 +370,8 @@ impl ClientState {
             namespace: self.namespace.clone(),
             placement: 1,
             managed: false,
+            #[cfg(all(feature = "files", feature = "service"))]
+            view_issuer: None,
             #[cfg(all(feature = "local", feature = "service"))]
             checkout_principal: None,
         })
@@ -342,6 +423,8 @@ pub(crate) fn memory_local_client(local_tools: crate::LocalTools) -> Client {
         namespace: "memory-local-test".to_owned(),
         #[cfg(feature = "files")]
         cache: None,
+        #[cfg(all(feature = "files", feature = "service"))]
+        retention: ReadRetentionSession::default(),
         operations: Operations::default(),
         git: Arc::new(RemoteGitRuntime::default()),
         direct_store_configured: true,
@@ -406,6 +489,8 @@ impl Client {
             repository: owner,
             resolved,
             capsule,
+            #[cfg(all(feature = "files", feature = "service"))]
+            retention,
             #[cfg(feature = "local")]
                 read_store: _,
         } = self
@@ -429,6 +514,8 @@ impl Client {
                     maximum_catalog_bytes,
                 )
                 .map_err(crate::remote_error::read_error)?,
+            #[cfg(feature = "service")]
+            retention,
         ));
         #[cfg(not(feature = "files"))]
         let _ = capsule;
@@ -453,10 +540,22 @@ impl Client {
     pub async fn close(&self) -> Result<()> {
         self.0.operations.drain().await;
         self.0.git.shutdown().await;
+        #[cfg(all(feature = "files", feature = "service"))]
+        if let Err(cleanup) = self.0.retention.shutdown().await.map_err(retention_error) {
+            return Err(match self.0.operations.take_failure() {
+                Ok(()) => cleanup,
+                Err(error) => error.with_cleanup(cleanup),
+            });
+        }
         // Consume the diagnostic only after every asynchronous cleanup boundary,
         // so dropping this close future leaves it available to the next close.
         self.0.operations.take_failure()
     }
+}
+
+#[cfg(all(feature = "files", feature = "service"))]
+fn retention_error(source: crab_coordination::CoordinationError) -> Error {
+    crate::remote_error::read_error(source.into())
 }
 
 /// Options applied independently to one read.

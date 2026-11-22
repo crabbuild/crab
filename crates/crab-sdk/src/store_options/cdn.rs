@@ -313,9 +313,27 @@ impl DirectCdnOptions {
                 {
                     selected.checkout_principal = provider.cdn_principal();
                 }
-                return self.bind_issuer_store(
-                    selected, provider, resolution, timeout, consumer, operation,
-                );
+                let resolved = self.bind_issuer_store(
+                    selected,
+                    Arc::clone(&provider),
+                    resolution,
+                    timeout,
+                    consumer,
+                    operation,
+                )?;
+                #[cfg(feature = "files")]
+                let resolved = {
+                    let mut resolved = resolved;
+                    if resolved.store.storage_scope().is_some() {
+                        let source = format!(
+                            "crab://{}/{}",
+                            self.deployment.bucket, self.deployment.source_repo
+                        );
+                        resolved.view_issuer = Some((provider, source));
+                    }
+                    resolved
+                };
+                return Ok(resolved);
             }
         }
         Ok(selected)
