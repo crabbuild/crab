@@ -4,6 +4,7 @@ import { type Refs, type Repository } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
 import { DefaultBranchSettings } from "./general";
 import { MemberSettings } from "./members";
+import { MentionSettings } from "./mentions";
 import { BranchProtectionSettings } from "./protections";
 
 export function Settings({
@@ -18,7 +19,7 @@ export function Settings({
   repo: Repository;
   refs: Refs;
   csrf: string;
-  section: "general" | "branches" | "members";
+  section: "general" | "branches" | "members" | "mentions";
   identity: Session["user"];
   onDefaultChanged: () => void;
   onRepositoryChanged: () => void;
@@ -48,9 +49,18 @@ export function Settings({
         >
           Members
         </Link>
+        <Link
+          className={section === "mentions" ? "active" : ""}
+          aria-current={section === "mentions" ? "page" : undefined}
+          href={repoHref(repo, { view: "settings", section: "mentions" })}
+        >
+          Team mentions
+        </Link>
       </nav>
       {section === "members" ? (
         <MemberSettings repo={repo} csrf={csrf} identity={identity} />
+      ) : section === "mentions" ? (
+        <MentionSettings key={repo.id} repo={repo} csrf={csrf} />
       ) : section === "branches" ? (
         <BranchProtectionSettings
           repo={repo}

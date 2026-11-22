@@ -18,7 +18,7 @@ pub(crate) use preparation::{GetPreparation, Prepare, PrepareInput};
 pub(super) use preparation::{ensure_ready, initialize, membership_changed};
 pub(crate) use reads::{
     Candidates, Get, GetMembership, GetPolicy, List, ListInput, MemberCursor, MemberInput, Members,
-    Page, QueryCursor, Summary,
+    MentionMembers, MentionMembersInput, MentionRoster, Page, QueryCursor, Summary,
 };
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]

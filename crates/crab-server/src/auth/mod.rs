@@ -11,6 +11,7 @@ use git_tokens::{issue_git_token, revoke_git_tokens};
 #[cfg(test)]
 pub(crate) use http::{SessionIdentity, SessionMode, SessionResponse};
 use http::{callback, login, logout, session};
+pub(crate) use state::GroupEvidence;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::{AuthProvider, OidcConfig, RepositoryAccess};
@@ -32,6 +33,7 @@ use oidc::Client;
 type Key = [u8; 32];
 const FLOW_LIFETIME: Duration = Duration::from_secs(600);
 const SESSION_LIFETIME: Duration = Duration::from_secs(8 * 60 * 60);
+const GROUP_SESSION_LIFETIME: Duration = Duration::from_secs(15 * 60);
 const STATE_CAS_ATTEMPTS: usize = 8;
 
 #[derive(Debug, thiserror::Error)]

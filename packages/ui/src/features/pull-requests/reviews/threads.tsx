@@ -2,6 +2,7 @@ import { Editor } from "@/components/discussion/editor";
 import { Failure } from "@/components/discussion/failure";
 import { useSubmission } from "@/components/discussion/hooks";
 import { useMutation } from "@/components/discussion/mutations";
+import { useContributionFocus } from "@/components/discussion/permalink";
 import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
 import { ComparisonView } from "@/features/repository/diff";
@@ -10,7 +11,7 @@ import {
   type DiffReviewState,
   type InlineDiffThread,
 } from "@/features/repository/diff/model";
-import { endpoint, type Repository } from "@/lib/api";
+import { endpoint, useLocation, useRequest, type Repository } from "@/lib/api";
 import type { CodeThemes } from "@/lib/code-theme";
 import type { SelectedLineRange } from "@pierre/diffs";
 import { useMemo, useState } from "react";
@@ -63,6 +64,40 @@ export function PullReviewThreads({
     });
   const threads = usePagedRequest<PullReviewThread>(path);
   const outdatedThreads = usePagedRequest<PullReviewThread>(outdatedPath);
+  const location = useLocation();
+  const focus = /#(review-thread-([1-9]\d*))$/.exec(location);
+  const focusNumber = Number(focus?.[2]);
+  const currentMatch = threads.items.some(
+    (thread) => thread.number === focusNumber,
+  );
+  const outdatedMatch = outdatedThreads.items.some(
+    (thread) => thread.number === focusNumber,
+  );
+  // A permalink can target a thread beyond both initial pages.
+  const linkedThread = useRequest<PullReviewThread>(
+    Number.isSafeInteger(focusNumber) &&
+      !currentMatch &&
+      !outdatedMatch &&
+      !threads.loading &&
+      !outdatedThreads.loading
+      ? endpoint(repo, `pulls/${pull.number}/threads/${focusNumber}`)
+      : null,
+  );
+  const linkedOutdated = linkedThread.data
+    ? isOutdatedThread(linkedThread.data)
+    : false;
+  const currentItems =
+    linkedThread.data && !linkedOutdated
+      ? [linkedThread.data, ...threads.items]
+      : threads.items;
+  const outdatedItems =
+    linkedThread.data && linkedOutdated
+      ? [linkedThread.data, ...outdatedThreads.items]
+      : outdatedThreads.items;
+  useContributionFocus(
+    focus?.[1],
+    currentMatch || outdatedMatch || linkedThread.data !== undefined,
+  );
   const [selection, setSelection] = useState<ThreadSelection>();
   const [body, setBody] = useState("");
   const [suggestion, setSuggestion] = useState("");
@@ -226,6 +261,11 @@ export function PullReviewThreads({
         codeThemes={codeThemes}
         review={review}
       />
+      {linkedThread.error && (
+        <Failure
+          message={`Could not open the linked thread. ${linkedThread.error}`}
+        />
+      )}
       {selection && pull.state === "open" && !repo.archived && (
         <form
           className="panel discussion-form inline-review-form"
@@ -302,18 +342,20 @@ export function PullReviewThreads({
                 Refresh
               </Button>
             </div>
-            {threads.items.length ? (
-              threads.items.map((thread) => (
+            {currentItems.length ? (
+              currentItems.map((thread) => (
                 <ReviewThreadCard
                   key={thread.number}
                   repo={repo}
                   pull={pull}
                   thread={thread}
                   csrf={csrf}
+                  linked={thread.number === focusNumber}
                   onJumpToDiff={review.onDiffSelected}
                   refresh={() => {
                     threads.retry();
                     outdatedThreads.retry();
+                    linkedThread.retry();
                     refresh();
                   }}
                 />
@@ -329,25 +371,28 @@ export function PullReviewThreads({
           </div>
         )}
       </Result>
-      <details className="inline-review-outdated">
-        <summary>
-          Outdated conversations ({outdatedThreads.items.length})
-        </summary>
+      <details
+        className="inline-review-outdated"
+        open={outdatedMatch || linkedOutdated || undefined}
+      >
+        <summary>Outdated conversations ({outdatedItems.length})</summary>
         <Result state={outdatedThreads} timingLabel="Outdated review threads">
           {() =>
-            outdatedThreads.items.length ? (
+            outdatedItems.length ? (
               <div className="inline-review-list">
-                {outdatedThreads.items.map((thread) => (
+                {outdatedItems.map((thread) => (
                   <ReviewThreadCard
                     key={thread.number}
                     repo={repo}
                     pull={pull}
                     thread={thread}
                     csrf={csrf}
+                    linked={thread.number === focusNumber}
                     onJumpToDiff={review.onDiffSelected}
                     refresh={() => {
                       threads.retry();
                       outdatedThreads.retry();
+                      linkedThread.retry();
                       refresh();
                     }}
                   />

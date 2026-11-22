@@ -16,6 +16,7 @@ mod authors;
 mod composer;
 mod people;
 mod reviews;
+mod team_mentions;
 pub(super) async fn resolve_people(
     server: &Server,
     principal: &Principal,
@@ -32,6 +33,14 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .route(
             "/api/repos/{owner}/{name}/discussion-search/mentions",
             get(composer::mentions),
+        )
+        .route(
+            "/api/repos/{owner}/{name}/discussion-search/team-mentions",
+            get(team_mentions::complete),
+        )
+        .route(
+            "/api/repos/{owner}/{name}/mention-settings",
+            get(team_mentions::get_settings).put(team_mentions::put_settings),
         )
         .route(
             "/api/repos/{owner}/{name}/discussion-search/references",

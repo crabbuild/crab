@@ -641,6 +641,7 @@ pub(crate) fn repository(
 
 pub(crate) struct Membership {
     pub members: Vec<crate::RepositoryMember>,
+    pub groups: Vec<crate::RepositoryGroup>,
     pub principal: Principal,
 }
 
@@ -655,6 +656,7 @@ pub(crate) async fn membership(
         }
         return Ok(Membership {
             members: Vec::new(),
+            groups: Vec::new(),
             principal: principal.clone(),
         });
     }
@@ -680,6 +682,7 @@ pub(crate) async fn membership(
     }
     Ok(Membership {
         members: config.members,
+        groups: config.groups,
         principal,
     })
 }

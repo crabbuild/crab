@@ -469,11 +469,11 @@ export function RepositoryPage({
                     refs={data}
                     csrf={csrf}
                     section={
-                      route?.section === "branches"
-                        ? "branches"
-                        : route?.section === "members"
-                          ? "members"
-                          : "general"
+                      route?.section === "branches" ||
+                      route?.section === "members" ||
+                      route?.section === "mentions"
+                        ? route.section
+                        : "general"
                     }
                     identity={identity}
                     onDefaultChanged={refs.retry}

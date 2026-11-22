@@ -150,10 +150,12 @@ impl Mutation for CreatePullReview {
             pull: record.pull,
             number: record.number,
         };
-        crate::cells::repository::collaboration::attachments::claim(
+        crate::cells::repository::collaboration::body_written(
             context,
             target,
             &record.author,
+            record.version,
+            None,
             &record.body,
         )?;
         super::super::search::contributions::project(
@@ -199,7 +201,7 @@ impl Mutation for UpdatePullReview {
             return Ok(MutationResult::Rejected(UpdatePullReviewOutcome::Conflict));
         }
         let edited = record.body != input.body;
-        record.body = input.body;
+        let previous_comment = std::mem::replace(&mut record.body, input.body);
         record.version = next_version(record.version)?;
         record.updated_at_ms = timestamp(context.now_ms())?;
         context.sql(&SqlBatch { statements: vec![statement("UPDATE repository_pull_reviews SET body = ?, version = ?, updated_at_ms = ? WHERE pull_number = ? AND number = ? AND version = ?", vec![SqlValue::Text(record.body.clone()), integer(record.version)?, integer(record.updated_at_ms)?, integer(record.pull)?, integer(record.number)?, integer(input.version)?])] })?;
@@ -209,10 +211,12 @@ impl Mutation for UpdatePullReview {
                 pull: record.pull,
                 number: record.number,
             };
-            crate::cells::repository::collaboration::attachments::claim(
+            crate::cells::repository::collaboration::body_written(
                 context,
                 target,
                 &input.actor,
+                record.version,
+                Some(&previous_comment),
                 &record.body,
             )?;
             crate::cells::repository::search::contributions::edit(context, target, &record.body)?;

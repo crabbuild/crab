@@ -20,7 +20,10 @@ export function triggerAt(
   const lineStart = start === 0 ? 0 : value.lastIndexOf("\n", start - 1) + 1;
   const line = value.slice(lineStart, start);
   const command = /^ {0,3}\/(\w[\w-]{0,39}|)$/.exec(line);
-  const mention = /(?:^|[\s([{])@([a-z\d-]{0,39})$/i.exec(line);
+  const mention =
+    /(?:^|[\s([{])@([a-z\d-]{1,64}\/[a-z\d-]{0,64}|[a-z\d-]{0,39})$/i.exec(
+      line,
+    );
   const reference =
     /(?:^|[\s([{])(?:([A-Za-z\d_.-]{1,100})\/([A-Za-z\d_.-]{1,100}))?#((?:[\p{L}\p{N}_-][\p{L}\p{N}_ -]{0,79})?)$/u.exec(
       line,
@@ -178,12 +181,15 @@ export function stableReferenceHref(
 }
 
 export type Suggestion = Snippet & {
-  kind: "command" | "mention" | DiscussionReference["subject"]["kind"];
+  kind: "command" | "mention" | "team" | DiscussionReference["subject"]["kind"];
   state?: DiscussionReference["state"];
   cursor?: number;
 };
 
 type Scope = Pick<Repository, "id" | "owner" | "name">;
+type TeamOption = Pick<ActorSummary, "id" | "handle" | "name"> & {
+  organization: string;
+};
 
 export function useEditorSuggestions(
   repo: Scope | null,
@@ -192,14 +198,19 @@ export function useEditorSuggestions(
 ) {
   const kind = trigger?.kind;
   const query = trigger?.query ?? "";
+  const team = kind === "mention" && query.includes("/");
   const cross = kind === "reference" ? trigger?.repository : undefined;
   const target = cross ?? repo;
   const url =
     (kind === "mention" || kind === "reference") && target
-      ? endpoint(target, `discussion-search/${kind}s`, {
-          repository_id: cross ? undefined : repo?.id,
-          search: query,
-        })
+      ? endpoint(
+          target,
+          `discussion-search/${team ? "team-mentions" : `${kind}s`}`,
+          {
+            repository_id: cross ? undefined : repo?.id,
+            search: query,
+          },
+        )
       : null;
   const saved = kind === "command" && command === "saved-replies";
   const replies = useRequest<{
@@ -211,9 +222,9 @@ export function useEditorSuggestions(
     const timer = setTimeout(() => setRequested(url), 150);
     return () => clearTimeout(timer);
   }, [url]);
-  const resource = useRequest<ReferenceSearch | { items: ActorSummary[] }>(
-    url === requested ? url : null,
-  );
+  const resource = useRequest<
+    ReferenceSearch | { items: ActorSummary[] | TeamOption[] }
+  >(url === requested ? url : null);
   let items: Suggestion[] = [];
   if (saved) {
     items = (replies.data?.items ?? []).map(({ id, title, body }) => {
@@ -236,6 +247,16 @@ export function useEditorSuggestions(
               item.id.includes(term) || item.label.toLowerCase().includes(term),
           )
     ).map((item) => ({ ...item, kind: "command" }));
+  } else if (team && resource.data) {
+    items = (resource.data.items as TeamOption[]).map(
+      ({ id, organization, handle, name }) => ({
+        kind: "team",
+        id,
+        label: `@${handle}`,
+        description: name,
+        text: `[@${handle}](/-/organizations/${organization}?tab=teams&team=${id})`,
+      }),
+    );
   } else if (kind === "mention" && resource.data) {
     items = (resource.data.items as ActorSummary[]).map(
       ({ id, handle, name }) => ({

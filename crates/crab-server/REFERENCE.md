@@ -1494,7 +1494,9 @@ owner label does not acquire ownership.
 | Merge | `POST /api/repos/{owner}/{name}/pulls/{number}/merge` |
 | Label search choices | `GET /api/repos/{owner}/{name}/discussion-search/labels` |
 | Milestone search choices | `GET /api/repos/{owner}/{name}/discussion-search/milestones` |
-| Markdown suggestions | `GET /api/repos/{owner}/{name}/discussion-search/{mentions,references}` |
+| Markdown suggestions | `GET /api/repos/{owner}/{name}/discussion-search/{mentions,team-mentions,references}` |
+| Team mention settings | `GET/PUT /api/repos/{owner}/{name}/mention-settings` |
+| Account mention inbox | `GET /api/notifications`, `GET /api/notifications/unread`, `PUT /api/notifications/{id}/read` |
 | Stable discussion links | `GET /api/discussion-references/{repository_id}/{kind}/{number}` |
 | Discussion attachments | `POST /api/repos/{owner}/{name}/discussion-attachments`, `GET /api/discussion-attachments/{repository_id}/{id}` |
 | Labels | `GET/POST /api/repos/{owner}/{name}/labels`, `PATCH/DELETE /api/repos/{owner}/{name}/labels/{number}` |
@@ -1507,14 +1509,44 @@ owner label does not acquire ownership.
 
 Every route prefix is `/api/repos/{owner}/{name}`. Browser mutations require the session cookie, canonical `Origin`, and CSRF token.
 
-Mention suggestions require a matching `repository_id` UUID. Both suggestion endpoints
+Person mention suggestions require a matching `repository_id` UUID. Person and reference endpoints
 accept an optional `search` of up to 80 characters and return up to 12 items.
-Mentions search handles and display names of current repository members with
-Crab profiles. References search issue and pull request titles or number
+Mentions search handles and display names of repository collaborators with
+Crab profiles, including group-only collaborators with an unexpired, verified
+OIDC session. Group candidates must match current repository grants and
+suggestions expose only profile fields. Group candidate lookup is bounded,
+with exact handles ranked first. References search issue and pull request titles or number
 prefixes across all states. Empty searches return collaborators or recent work.
 Reference items carry an explicit issue or pull request kind because the two
 sequences can share a number. Both reads recheck repository access before
 returning results.
+
+Team suggestions use a matching `repository_id` and an optional `search` of up
+to 129 characters. They return up to 12 configured `@namespace/team` aliases
+for closed teams visible to the current organization member. Repository
+administrators can read or clear the binding. Saving a binding requires the
+current organization owner and its expected repository settings version.
+Each binding accepts up to 24 distinct team aliases. A binding grants no access.
+
+Discussion writes queue newly introduced mentions. Delivery checks repository
+grants and rechecks current team membership and visibility for team mentions.
+A recipient gets one notification per write, with a direct
+mention taking priority when both kinds apply. Plain handles resolve only if
+their current binding predates the write. Selecting a suggestion stores a
+stable Directory or team UUID. Delivery is capped at 20 distinct mentions
+per body version. When a repository has SSO group grants, addressed mentions
+for accounts without explicit access are retained separately. An offline
+recipient sees a retained notice when their signed-in session proves current
+repository read access.
+
+The account inbox returns up to 20 visible notices by default. Supply
+`limit` (1–50) and a returned `next` value as `before` for pagination.
+Each account retains up to 100 explicit-grant notices and up to 100 addressed
+notices for group-backed repositories. Source titles, links, and the unread
+indicator require current repository read access. The unread endpoint returns
+`{"unread":true}` when any accessible entry is unread. Mark a notice read
+with its `created_at_ms`. The request is idempotent.
+
 Reference lookups can resolve an independently authorized repository by name.
 The response supplies its UUID. With `exact=true`, only exact issue and pull
 numbers match. Selected cross-repository links persist the UUID and typed
@@ -1612,7 +1644,8 @@ the query. Public HTTP parameters cannot supply those bindings. Directory reads
 7/8 resolve at most 64 handles or return up to 20 public actor summaries from
 one indexed handle prefix. Read 8 returns `items` and `truncated`, rather than a
 bare array; update all native peers together. No older-output reader is supported.
-Integration-account author syntax, mentions and complete involvement predicates remain open.
+Integration-account author syntax, mention search predicates and complete
+involvement predicates remain open.
 
 The shared Author menu uses `GET .../discussion-search/authors` with `query` and
 `search`. It searches registered public usernames by prefix, ignoring ASCII case
@@ -2007,7 +2040,7 @@ participants per frame, replaces the empty derived table, and replays review
 and request sources in bounded frames. It preserves canonical records and
 submission receipts. Update serving peers and bundled UI together for the new
 native read and public DTO; see [reviewer status preparation](CELLAR.md#reviewer-status-preparation).
-Pending/dismissed reviews, team review requests, code-owner suggestions, and notifications
+Pending/dismissed reviews, team review requests, code-owner suggestions, and review-request notifications
 remain separate delivery work.
 
 ### Link related work
@@ -2406,7 +2439,7 @@ namespace and immutable asset bodies in backups. Restoring visible records
 without counters, claims, request ledgers,
 control and immutable roots loses numbering, ownership and retry guarantees.
 
-Discussion deletion, moderation, edit history, activity feeds, and notifications remain unimplemented. Native backup restore, cross-provider export, and complete product-root restore qualification remain pending.
+Discussion deletion, moderation, edit history, and broad activity feeds remain unimplemented. Native backup restore, cross-provider export, and complete product-root restore qualification remain pending.
 
 ## Commit statuses and required checks
 
@@ -2541,7 +2574,7 @@ The server is complete only when a real account can perform the workflow and obs
 | GitHub-quality design | Themes, responsive layouts, accessible controls, navigation, and loading/error behavior across workflows | In progress |
 | Team identity and authorization | OIDC, sessions, membership, permissions, isolation, revocation, CSRF, and administration | In progress; browser and CLI membership replacement are audited, and back-channel logout revokes delivered exact-identity sessions |
 | Git hosting | Authenticated fetch and push, exact branch/tag lifecycle, protection, publication, and independent-client proof | In progress; additional crash phases and coexistence qualification remain |
-| Collaboration | Durable issues, pulls, comments, reviews, labels, assignees, merge, checks, activity, and notifications | In progress; activity, moderation, history, and notifications remain |
+| Collaboration | Durable issues, pulls, comments, reviews, labels, assignees, merge, checks, activity, and notifications | Mention inbox available. Moderation, history, and other notification reasons remain |
 | Repository management | CLI create/adopt/list, archive, settings, search, import, and audited administration | In progress; browser creation/import and audit history remain |
 | Production operation | Durable concurrency, restart and crash recovery, backup restore, observability, upgrades, and operator guidance | Native process restart and owner handoff tested; native metrics and shutdown wiring implemented. Backup restore, crash matrices, upgrades, and provider qualification remain |
 | Quality gates | API, UI, accessibility, realistic repositories, security, package smoke, and measured performance | In progress |

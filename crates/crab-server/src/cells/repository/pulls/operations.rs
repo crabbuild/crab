@@ -106,10 +106,12 @@ impl Mutation for CreatePull {
         let target = Target::Pull {
             number: record.number,
         };
-        crate::cells::repository::collaboration::attachments::claim(
+        crate::cells::repository::collaboration::body_written(
             context,
             target,
             &record.author,
+            record.version,
+            None,
             &record.body,
         )?;
         activity::append(context, target, &record.author, Action::Created)?;
@@ -204,9 +206,9 @@ impl Mutation for UpdatePull {
         if let Some(value) = input.title {
             pull.title = value;
         }
-        if let Some(value) = input.body {
-            pull.body = value;
-        }
+        let previous_body = input
+            .body
+            .map(|body| std::mem::replace(&mut pull.body, body));
         if let Some(value) = input.state {
             pull.state = value;
         }
@@ -248,12 +250,16 @@ impl Mutation for UpdatePull {
             number: pull.number,
         };
         if edited {
-            crate::cells::repository::collaboration::attachments::claim(
-                context,
-                target,
-                &input.actor,
-                &pull.body,
-            )?;
+            if let Some(previous) = previous_body.as_deref() {
+                crate::cells::repository::collaboration::body_written(
+                    context,
+                    target,
+                    &input.actor,
+                    pull.version,
+                    Some(previous),
+                    &pull.body,
+                )?;
+            }
             activity::append(context, target, &input.actor, Action::Updated)?;
         }
         if was_closed != (pull.state != PullState::Open) {

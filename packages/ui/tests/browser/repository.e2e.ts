@@ -983,7 +983,10 @@ test("new issue Markdown toolbar formats selections and remains usable on mobile
     toolbar.getByRole("button", { name: "Add a task list", exact: true }),
   ).toBeVisible();
   await expect(
-    toolbar.getByRole("button", { name: "Mention a user", exact: true }),
+    toolbar.getByRole("button", {
+      name: "Mention a person or team",
+      exact: true,
+    }),
   ).toBeVisible();
 
   const description = editor.getByRole("textbox", {
@@ -1020,7 +1023,7 @@ test("new issue Markdown toolbar formats selections and remains usable on mobile
 
   await page.setViewportSize({ width: 320, height: 900 });
   await toolbar
-    .getByRole("button", { name: "Mention a user", exact: true })
+    .getByRole("button", { name: "Mention a person or team", exact: true })
     .focus();
   const bounds = await toolbar.boundingBox();
   expect(bounds).not.toBeNull();

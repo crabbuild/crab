@@ -5,16 +5,19 @@ use axum::{
     extract::{Path, Query, State},
     response::Redirect,
 };
+use futures_util::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
     api::members::roster,
     app::{self, Error, Result},
-    auth::Principal,
+    auth::{GroupEvidence, Principal},
     cells::{
         Address,
-        directory::{ActorSummary, LookupActors},
+        directory::{
+            ActorSummary, LookupActors, MentionCandidate, MentionCandidates, MentionSearch,
+        },
         repository::{
             collaboration::{SubjectKind, SubjectSummary},
             search::index::references::{FindReferences, ReferenceInput},
@@ -23,6 +26,8 @@ use crate::{
     repository::Repository,
     server::Server,
 };
+
+const MENTION_LIMIT: usize = 12;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -163,22 +168,91 @@ pub(super) async fn mentions(
                 .then_some((&key.subject, profile))
         }));
     }
+    let group_matches = group_mentions(&server, &initial, &search).await?;
     let current = app::membership(&server, &principal, &repo).await?;
-    let current: BTreeSet<_> = roster::members(&current)
+    let current_subjects: BTreeSet<_> = roster::members(&current)
         .into_iter()
         .map(|member| member.subject)
         .collect();
-    matches.retain(|(subject, _)| current.contains(*subject));
-    matches.sort_unstable_by(|(_, left), (_, right)| {
-        (!left.handle.starts_with(&search), &left.handle)
-            .cmp(&(!right.handle.starts_with(&search), &right.handle))
-    });
-    let items = matches
+    let mut profiles: Vec<_> = matches
         .into_iter()
-        .take(12)
-        .map(|(_, profile)| profile)
+        .filter_map(|(subject, actor)| current_subjects.contains(subject).then_some(actor))
+        .chain(
+            group_matches
+                .into_iter()
+                .filter_map(|(candidate, evidence)| {
+                    (current_subjects.contains(&candidate.subject)
+                        || evidence.can_read(&current.groups))
+                    .then_some(candidate.actor)
+                }),
+        )
+        .collect();
+    profiles.sort_unstable_by(|left, right| {
+        let rank =
+            |actor: &ActorSummary| (actor.handle != search, !actor.handle.starts_with(&search));
+        rank(left)
+            .cmp(&rank(right))
+            .then_with(|| left.handle.cmp(&right.handle))
+    });
+    let mut seen = BTreeSet::new();
+    let items = profiles
+        .into_iter()
+        .filter(|actor| seen.insert(actor.id))
+        .take(MENTION_LIMIT)
         .collect();
     Ok(Json(Suggestions { items }))
+}
+
+async fn group_mentions(
+    server: &Server,
+    membership: &app::Membership,
+    search: &str,
+) -> Result<Vec<(MentionCandidate, GroupEvidence)>> {
+    let Some(auth) = server.auth.as_ref().filter(|auth| auth.is_oidc()) else {
+        return Ok(Vec::new());
+    };
+    if membership.groups.is_empty() {
+        return Ok(Vec::new());
+    }
+    let cells = server.cells().ok_or(Error::CellUnavailable)?;
+    let candidates = app::query_output(
+        cells
+            .query::<MentionCandidates>(
+                Address::Directory,
+                None,
+                MentionSearch {
+                    issuer: auth.issuer().to_owned(),
+                    search: search.to_owned(),
+                },
+            )
+            .await,
+    )?;
+    let direct: BTreeSet<_> = membership
+        .members
+        .iter()
+        .map(|member| member.subject.as_str())
+        .collect();
+    let candidates: Vec<_> = candidates
+        .into_iter()
+        .filter(|candidate| !direct.contains(candidate.subject.as_str()))
+        .collect();
+    let groups = &membership.groups;
+    let mut checks = stream::iter(candidates)
+        .map(|candidate| async move {
+            let evidence = auth.mention_group(&candidate.subject, groups).await?;
+            Ok::<_, Error>(evidence.map(|proof| (candidate, proof)))
+        })
+        .buffered(6);
+    let mut matches = Vec::new();
+    while let Some(result) = checks.next().await {
+        if let Some(candidate) = result? {
+            matches.push(candidate);
+            if matches.len() == MENTION_LIMIT {
+                break;
+            }
+        }
+    }
+    Ok(matches)
 }
 
 #[cfg(test)]

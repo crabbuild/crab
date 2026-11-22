@@ -1,7 +1,9 @@
 use super::{
-    AuthError, AuthState, Authentication, Flow, IdentitySessionMarker, Key, STATE_CAS_ATTEMPTS,
-    Session, StoredFlow, StoredSession, VerifiedSession, hex_key, now_epoch,
+    AuthError, AuthState, Authentication, Flow, GROUP_SESSION_LIFETIME, IdentitySessionMarker, Key,
+    STATE_CAS_ATTEMPTS, Session, StoredFlow, StoredSession, VerifiedSession, hex_key, now_epoch,
+    principal::group_access,
 };
+use crate::RepositoryGroup;
 use bytes::Bytes;
 use crab_storage::StorageError;
 use futures_util::{FutureExt, StreamExt, future::Shared};
@@ -10,7 +12,66 @@ use openidconnect::{Nonce, PkceCodeVerifier};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+pub(crate) struct GroupEvidence(Arc<VerifiedSession>);
+
+impl GroupEvidence {
+    pub(crate) fn can_read(&self, grants: &[RepositoryGroup]) -> bool {
+        self.0.expires_at > now_epoch().unwrap_or(u64::MAX)
+            && group_access(&self.0.groups, grants).is_some()
+    }
+}
+
 impl Authentication {
+    pub(crate) async fn mention_group(
+        &self,
+        subject: &str,
+        grants: &[RepositoryGroup],
+    ) -> Result<Option<GroupEvidence>, StorageError> {
+        let issuer = self.issuer();
+        let state = &self.state;
+        let prefix = state.identity_sessions_prefix(issuer, subject);
+        let mut markers = state.store.list_stream(&prefix);
+        // Old markers can remain after browser expiry. Use metadata to skip
+        // stale records, leaving clock skew margin before verifying both objects.
+        let oldest = now_epoch()
+            .unwrap_or(0)
+            .saturating_sub(GROUP_SESSION_LIFETIME.as_secs() * 2);
+        while let Some(meta) = markers.next().await {
+            let meta = meta?;
+            if u64::try_from(meta.last_modified.timestamp()).is_ok_and(|time| time < oldest) {
+                continue;
+            }
+            let Some(digest) = meta
+                .location
+                .filename()
+                .and_then(|name| name.strip_suffix(".json"))
+            else {
+                continue;
+            };
+            let Ok(digest) = blake3::Hash::from_hex(digest) else {
+                continue;
+            };
+            let session_key = *digest.as_bytes();
+            if meta.location != state.identity_session_path(issuer, subject, &session_key) {
+                continue;
+            }
+            let Some(session) = state
+                .session_check(session_key, Some(meta.location))
+                .await
+                .await
+            else {
+                continue;
+            };
+            if session.identity.issuer == issuer && session.identity.subject == subject {
+                let evidence = GroupEvidence(session);
+                if evidence.can_read(grants) {
+                    return Ok(Some(evidence));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     pub(super) async fn store_flow(&self, state_key: Key, flow: Flow) -> Result<(), AuthError> {
         let state = &self.state;
         let record = StoredFlow {

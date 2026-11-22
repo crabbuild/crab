@@ -17,6 +17,7 @@ mod labels;
 mod links;
 mod members;
 mod milestones;
+mod notifications;
 mod organizations;
 mod profiles;
 mod projects;
@@ -461,6 +462,7 @@ pub(crate) async fn read(
 pub(crate) fn routes(server: Arc<Server>) -> axum::Router<Arc<Server>> {
     axum::Router::new()
         .merge(profiles::routes(Arc::clone(&server)))
+        .merge(notifications::routes(Arc::clone(&server)))
         .merge(organizations::routes(Arc::clone(&server)))
         .merge(members::routes())
         .merge(milestones::routes(Arc::clone(&server)))

@@ -2,7 +2,18 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::{GitToken, Identity, Session};
-use crate::{RepositoryAccess, RepositoryConfig};
+use crate::{RepositoryAccess, RepositoryConfig, RepositoryGroup};
+
+pub(super) fn group_access(
+    claims: &[String],
+    grants: &[RepositoryGroup],
+) -> Option<RepositoryAccess> {
+    grants
+        .iter()
+        .filter(|grant| claims.binary_search(&grant.group).is_ok())
+        .map(|grant| grant.access)
+        .max()
+}
 
 #[derive(Clone)]
 enum Credential {
@@ -142,12 +153,7 @@ impl Principal {
                 .iter()
                 .find(|member| member.subject == session.identity.subject)
                 .map(|member| member.access);
-            let group = config
-                .groups
-                .iter()
-                .filter(|grant| session.groups.binary_search(&grant.group).is_ok())
-                .map(|grant| grant.access)
-                .max();
+            let group = group_access(&session.groups, &config.groups);
             individual
                 .into_iter()
                 .chain(group)
