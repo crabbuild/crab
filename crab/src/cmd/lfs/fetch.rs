@@ -100,6 +100,17 @@ pub fn run_lfs_fetch(options: LfsFetchOptions, cancel: &CancellationToken) -> Re
         exc_filter.as_ref(),
         &ctx.local_lfs_dir,
         options.refetch,
+        |pointer| {
+            if !options.dry_run
+                && let Some(observation) = ctx
+                    .store
+                    .store()
+                    .cdn_attempt(&ctx.store.object_path_for(&pointer.oid))
+                    .and_then(|attempt| attempt.payload_observation())
+            {
+                observation.record_local();
+            }
+        },
     )?;
     check_cancelled(cancel)?;
 
@@ -248,6 +259,7 @@ fn plan_fetch_transfers(
     exclude: Option<&PatternFilter>,
     local_lfs_dir: &Path,
     refetch: bool,
+    mut verified_local: impl FnMut(&LfsPointer),
 ) -> Result<Vec<FetchTransfer>> {
     let mut transfers = Vec::new();
     let mut seen_sizes = HashMap::new();
@@ -274,6 +286,7 @@ fn plan_fetch_transfers(
         seen_sizes.insert(pointer.oid, pointer.size);
         let local_valid = crate::lfs::cache::is_valid(local_lfs_dir, &pointer.oid, pointer.size)?;
         if !refetch && local_valid {
+            verified_local(pointer);
             continue;
         }
         transfers.push(FetchTransfer {

@@ -22,8 +22,8 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
         self.root = example.directory
         self.output = self.root / "artifact"
 
-    def inputs(self, provider: str = "s3", consumer: str = "sdk", access: str = "private") -> str:
-        self.example.configure(provider, access, "direct", consumer=consumer)
+    def inputs(self, provider: str = "s3", consumer: str = "sdk", access: str = "private", *, family: str = "git") -> str:
+        self.example.configure(provider, access, "direct", consumer=consumer, family=family)
         report = self.example.report
         self.row = f"{report['scope']}/{report['platform']}"
         row = self.root / self.row
@@ -34,7 +34,7 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
         native.mkdir()
         (self.root / "report.json").rename(native / "report.json")
         observations = {key: report[key] for key in ASSEMBLE.OBSERVATION_FIELDS - {"check_results"}}
-        if fixture.CDN.requires_git_workload(self.example.scope):
+        if fixture.CDN.requires_cli_workload(self.example.scope):
             observations.pop("performance")
             observations.pop("product_action")
             for name in (fixture.CDN.GIT_PRODUCT_DIR, fixture.CDN.GIT_BENCHMARK_DIR):
@@ -171,6 +171,16 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             self.assemble(digest)
         self.assertFalse(self.output.exists())
+
+    def test_assembles_lfs_performance_from_the_timed_payload_fetches(self) -> None:
+        digest = self.inputs("azure", consumer="cli", family="lfs")
+        self.assertEqual(self.assemble(digest), 1)
+        row = self.output / self.row
+        report = json.loads((row / "cdn-report.json").read_bytes())
+        self.assertEqual(report["product_action"]["name"], "lfs-fetch")
+        self.assertEqual(report["performance"], self.example.report["performance"])
+        cached_client = row / fixture.CDN.GIT_BENCHMARK_DIR / "near/0001/warm_local/client.json"
+        self.assertEqual(json.loads(cached_client.read_bytes())["local_payload_hits"], 1)
 
     def test_cloudfront_viewer_records_are_preserved_with_measured_requests(self) -> None:
         digest = self.inputs("s3", consumer="cli")

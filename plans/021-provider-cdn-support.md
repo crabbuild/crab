@@ -562,15 +562,17 @@ and edge payload through redacted observations.
   egress, CDN requests and any gateway charges per successful action. Include
   the gateway's fixed deployment cost at the expected traffic volume. Use
   provider hit evidence and the same commit, repo and workload in every comparison.
-  The Git workload includes native-origin and warm-local controls for the
-  same publication receipt. The origin arm verifies the binding is disabled.
+  The direct CLI Git, capsule and LFS workloads include native-origin and
+  warm-local controls for the same publication receipt. The origin arm
+  verifies the binding is disabled.
   Each timed arm confirms its isolated local cache root, and qualification
   rejects a configured shared cache. The warm-local arm requires a verified
-  cache hit from a fresh Git client sharing the cache of its own edge primer.
-  `crab/scripts/e2e/collect_cdn_git_performance.py` binds each Git fetch to its
+  pack cache hit from a fresh Git client sharing the cache of its own edge
+  primer, or a SHA-256-verified LFS cache hit in the primed worktree.
+  `crab/scripts/e2e/collect_cdn_git_performance.py` binds each timed fetch to its
   measured provider and runner metrics, checks ordered same-publication pairs
   across two preregistered regions, and applies the release budgets. Assembly
-  retains the direct CLI Git and capsule measurement inputs. The release
+  retains the direct CLI Git, capsule and LFS measurement inputs. The release
   gate recomputes each summary and checks the complete platform matrix.
   CloudFront, Cloud CDN and Front Door measurements match timed fetches to
   provider logs using hashed viewer request IDs and retain the verified

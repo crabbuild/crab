@@ -80,7 +80,7 @@ impl PayloadObservation {
         }
     }
 
-    /// Report a verified local Git pack hit on the selected CDN-enabled payload route.
+    /// Report a verified local payload hit on the selected CDN-enabled route.
     pub fn record_local(self) {
         self.record("local");
     }

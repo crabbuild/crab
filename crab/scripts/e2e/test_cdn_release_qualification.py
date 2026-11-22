@@ -52,7 +52,7 @@ class CdnReleaseQualificationTests(unittest.TestCase):
             directory.mkdir(parents=True)
             (self.directory / "traces").rename(directory / "traces")
             (self.directory / "traces").mkdir()
-            if fixture.CDN.requires_git_workload(scope):
+            if fixture.CDN.requires_cli_workload(scope):
                 for name in (fixture.CDN.GIT_PRODUCT_DIR, fixture.CDN.GIT_BENCHMARK_DIR):
                     (self.directory / name).rename(directory / name)
             fixture.json_file(directory / "cdn-report.json", self.fixture.report)

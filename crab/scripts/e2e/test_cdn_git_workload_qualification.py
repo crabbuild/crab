@@ -82,16 +82,23 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
             "    pointer = subprocess.check_output(['git', 'cat-file', 'blob', sys.argv[4] + ':cdn-qualification.bin'])\n"
             "    digest = pointer.splitlines()[1].split(b':')[1].decode()\n"
             "    payload = Path('.git/lfs/objects') / digest[:2] / digest[2:4] / digest\n"
-            "    assert not payload.exists()\n"
-            "    payload.parent.mkdir(parents=True)\n"
-            "    payload.write_bytes((origin / digest).read_bytes())\n"
             "    print((origin.parent / 'build-event.json').read_text(), file=sys.stderr)\n"
             "    emit_read()\n"
             "    emit_native()\n"
-            "    for event in json.loads(evidence.read_bytes()):\n"
-            "        print(json.dumps(event), file=sys.stderr)\n"
+            "    policy = {'provider':'s3', 'access': approved['scope'].split('/')[1],\n"
+            "              'consumer':'cli', 'family':'lfs', 'profile':'direct'}\n"
+            "    if payload.exists():\n"
+            "        assert hashlib.sha256(payload.read_bytes()).hexdigest() == digest\n"
+            "        if not (origin.parent / 'unverified-local').exists():\n"
+            "            print(json.dumps({'target':'crab_storage::cdn::transfer', 'fields': policy | {\n"
+            "                'message':'CDN verified LFS payload', 'source':'local'}}), file=sys.stderr)\n"
+            "        sys.exit(0)\n"
+            "    payload.parent.mkdir(parents=True)\n"
+            "    payload.write_bytes((origin / digest).read_bytes())\n"
+            "    if evidence.exists():\n"
+            "        for event in json.loads(evidence.read_bytes()):\n"
+            "            print(json.dumps(event), file=sys.stderr)\n"
             "    if not (origin.parent / 'origin-only').exists():\n"
-            "        policy = {'provider':'s3', 'access':'public', 'consumer':'cli', 'family':'lfs', 'profile':'direct'}\n"
             "        print(json.dumps({'target':'crab_storage::cdn::transfer', 'fields': policy | {\n"
             "            'message':'CDN immutable GET', 'status':206, 'cache':'hit', 'range':True,\n"
             "            'bytes':payload.stat().st_size, 'complete':True, 'elapsed_ms':10, 'request_sha256':'e' * 64}}), file=sys.stderr)\n"
@@ -408,13 +415,29 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         self.run_phase("publish")
         missed = self.call("fetch-warm-local")
         self.assertEqual(missed.returncode, 1, missed.stdout)
-        self.assertIn("warm-local fetch must use a verified local pack", missed.stderr)
+        self.assertIn("warm-local fetch must use a verified local payload", missed.stderr)
         (self.root / "warm-cache").touch()
         warm = self.run_phase("fetch-warm-local")
         self.assertEqual(warm["arm"], "warm_local")
         self.assertEqual(warm["local_payload_hits"], 1)
         self.assertEqual(warm["edge_attempts"], 0)
         self.assertEqual(warm["observed_sha256"], warm["expected_sha256"])
+        self.assertTrue(self.run_phase("retire")["ref_retired"])
+
+    def test_warm_local_lfs_reruns_fetch_against_the_verified_primed_worktree(self) -> None:
+        config = fixture(access="private")
+        config |= {"scope": "cloudfront/private/cli/lfs/direct", "object_path": lfs_object_path(config["sha256"])}
+        raw = json.dumps(config).encode()
+        self.fixture.write_bytes(raw)
+        self.digest = hashlib.sha256(raw).hexdigest()
+        self.run_phase("publish")
+        warm = self.run_phase("fetch-warm-local")
+        self.assertEqual((warm["name"], warm["arm"], warm["local_payload_hits"], warm["all_edge_attempts"]),
+                         ("lfs-fetch", "warm_local", 1, 0))
+        (self.root / "unverified-local").touch()
+        missed = self.call("fetch-warm-local")
+        self.assertNotEqual(missed.returncode, 0)
+        self.assertIn("warm-local fetch must use a verified local payload", missed.stderr)
         self.assertTrue(self.run_phase("retire")["ref_retired"])
 
     def test_rejects_unapproved_fixture_or_another_runs_receipt(self) -> None:

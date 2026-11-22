@@ -157,7 +157,14 @@ fn all_fetch_rejects_corrupt_historical_blobs_and_conflicting_pointer_sizes() {
         let cancel = CancellationToken::new();
         let entries = collect_lfs_pointers(root, true, false, &[], &cancel).unwrap();
         assert!(matches!(
-            plan_fetch_transfers(&entries, None, None, &root.join("empty-cache"), false),
+            plan_fetch_transfers(
+                &entries,
+                None,
+                None,
+                &root.join("empty-cache"),
+                false,
+                |_| {}
+            ),
             Err(CrabError::LfsObjectCorrupt { .. })
         ));
         let large_blob = fixture_git(root, &["rev-parse", "HEAD:ordinary.bin"]);

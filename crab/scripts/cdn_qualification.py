@@ -1148,18 +1148,14 @@ def verify_performance(value: Any, registration: Any) -> int:
     return lower
 
 
-def requires_git_workload(scope: str) -> bool:
-    _, _, consumer, family, profile = scope_parts(scope)
-    return consumer == "cli" and family in {"git", "capsule"} and profile == "direct"
-
-
 def requires_cli_lfs_workload(scope: str) -> bool:
     _, _, consumer, family, profile = scope_parts(scope)
     return consumer == "cli" and family == "lfs" and profile == "direct"
 
 
 def requires_cli_workload(scope: str) -> bool:
-    return requires_git_workload(scope) or requires_cli_lfs_workload(scope)
+    _, _, consumer, family, profile = scope_parts(scope)
+    return consumer == "cli" and family in {"git", "capsule", "lfs"} and profile == "direct"
 
 
 def cli_action_name(scope: str) -> str:
@@ -1270,6 +1266,10 @@ def validate_git_fetch(raw: bytes, provenance: dict[str, Any], mode: str, label:
     if mode == "edge":
         require(positive(client["observed_edge_gets"]) and positive(client["verified_edge_payloads"]),
                 f"{label} accepted no verified edge payload")
+    if mode == "warm_local":
+        require(positive(client["local_payload_hits"]) and client["edge_attempts"] == client["verified_edge_payloads"] == 0
+                and (action != "lfs-fetch" or client["all_edge_attempts"] == 0),
+                f"{label} requires a verified local payload without an edge read for this scope")
     return client
 
 
@@ -1444,14 +1444,14 @@ def collect_git_product_action(
     )}
 
 
-def collect_git_performance(
+def collect_cli_performance(
     inputs: Path, registration: dict[str, Any], platform: str, run_id: str, attempt: str,
     *, retain: Path | None = None,
 ) -> dict[str, Any]:
     spec = benchmark_registration(registration)
     scope = spec["scope"]
-    require(isinstance(scope, str) and requires_git_workload(scope) and spec["workload"] == "git-fetch",
-            "benchmark must register the direct CLI Git workload")
+    require(requires_cli_workload(scope) and spec["workload"] == cli_action_name(scope),
+            "benchmark must register the scoped direct CLI fetch workload")
     require(matches(COMMIT, spec["source_sha"]) and matches(SHA256, spec["configuration_sha256"])
             and matches(RUN_NUMBER, run_id) and matches(RUN_NUMBER, attempt) and matches(LABEL, platform),
             "invalid benchmark provenance")
@@ -1475,7 +1475,7 @@ def collect_git_performance(
                 label = f"{location} {index} {arm}"
                 client_raw = read_git_record(inputs / slot / "client.json", limit=GIT_FETCH_RECORD_LIMIT)
                 digest = hashlib.sha256(client_raw).hexdigest()
-                require(digest not in seen, "a Git fetch was reused in another benchmark arm or pair")
+                require(digest not in seen, "a fetch was reused in another benchmark arm or pair")
                 seen.add(digest)
                 client = validate_git_fetch(client_raw, provenance, GIT_MODES[arm], label)
                 reader = client["reader"]
@@ -1487,8 +1487,6 @@ def collect_git_performance(
                 fixtures.add((client["publication_oid"], client["expected_sha256"], client["publication_sha256"],
                               reader["origin_sha256"], reader["prefix_sha256"]))
                 windows[arm] = (client["started_at_unix_ms"], client["finished_at_unix_ms"])
-                if arm == "warm_local":
-                    require(client["edge_attempts"] == 0, "warm-local control observed edge requests")
                 viewer_log = None
                 cdn_origin_gets = cdn_fill_bytes = 0
                 if provider in VIEWER_REQUEST_FILES and client["all_edge_attempts"]:
@@ -1509,7 +1507,7 @@ def collect_git_performance(
                 require(all(type(value) is int and value >= 0 for value in measured.values()),
                         f"{label} is missing measured metrics")
                 require(positive(measured["peak_memory_bytes"]) and positive(measured["peak_disk_bytes"]),
-                        f"{label} is missing Git memory or disk measurements")
+                        f"{label} is missing fetch memory or disk measurements")
                 incomplete = client["incomplete_edge_bytes"]
                 native = client["native_traffic"]
                 require(measured["origin_gets"] >= native["get_responses"] + cdn_origin_gets,
@@ -1531,7 +1529,7 @@ def collect_git_performance(
                     (destination / "measurement.json").write_bytes(external_raw)
                     if viewer_log is not None:
                         (destination / log_name).write_bytes(viewer_log)
-            require(len(fixtures) == 1, f"{location} {index} arms fetched different published Git fixtures")
+            require(len(fixtures) == 1, f"{location} {index} arms fetched different published fixtures")
             intervals = sorted(windows.values())
             require(intervals[0][0] >= previous_end
                     and all(left[1] <= right[0] for left, right in zip(intervals, intervals[1:])),
@@ -1592,10 +1590,9 @@ def verify_cdn_report(
     checks, cleanup_at, native_origin_sha256, rollback = verify_check_evidence(
         row, edge, access, profile, directory, registration=registration,
     )
-    if requires_git_workload(scope):
-        measured = collect_git_performance(directory / GIT_BENCHMARK_DIR, registration, platform, run_id, run_attempt)
-        require(measured == row["performance"], "Git performance summary differs from the retained measurements")
     if requires_cli_workload(scope):
+        measured = collect_cli_performance(directory / GIT_BENCHMARK_DIR, registration, platform, run_id, run_attempt)
+        require(measured == row["performance"], "CLI performance summary differs from the retained measurements")
         require(rollback is not None, "direct CLI qualification requires a product rollback fetch")
         registered_read = {key: registration[key] for key in ("candidate", "viewer_binding_sha256")}
         product = collect_git_product_action(

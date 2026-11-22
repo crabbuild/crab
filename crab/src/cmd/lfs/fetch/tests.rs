@@ -53,6 +53,7 @@ fn fetch_and_pull_resolve_each_path_override_independently() {
             exclude.as_ref(),
             cache.path(),
             false,
+            |_| {},
         )
         .unwrap();
         assert_eq!(
@@ -174,6 +175,7 @@ fn fetch_from_subdirectory_preserves_aliases_until_path_policy() {
         None,
         &root.join("empty-cache"),
         false,
+        |_| {},
     )
     .unwrap();
     assert_eq!(
@@ -418,9 +420,14 @@ fn plan_fetch_transfers_skips_local_without_refetch() {
     fs::write(local_path, b"local").unwrap();
     let entries = vec![("asset.bin".to_owned(), ptr)];
 
-    let transfers = plan_fetch_transfers(&entries, None, None, dir.path(), false).unwrap();
+    let mut verified = Vec::new();
+    let transfers = plan_fetch_transfers(&entries, None, None, dir.path(), false, |pointer| {
+        verified.push(pointer.oid);
+    })
+    .unwrap();
 
     assert!(transfers.is_empty());
+    assert_eq!(verified, vec![entries[0].1.oid]);
 }
 
 #[test]
@@ -432,7 +439,10 @@ fn plan_fetch_transfers_includes_local_with_refetch() {
     fs::write(local_path, b"local").unwrap();
     let entries = vec![("asset.bin".to_owned(), ptr)];
 
-    let transfers = plan_fetch_transfers(&entries, None, None, dir.path(), true).unwrap();
+    let transfers = plan_fetch_transfers(&entries, None, None, dir.path(), true, |_| {
+        panic!("a forced refetch cannot report a local payload hit");
+    })
+    .unwrap();
 
     assert_eq!(transfers.len(), 1);
 }
@@ -446,7 +456,7 @@ fn plan_fetch_transfers_deduplicates_by_oid() {
         ("b.bin".to_owned(), ptr.clone()),
     ];
 
-    let transfers = plan_fetch_transfers(&entries, None, None, dir.path(), false).unwrap();
+    let transfers = plan_fetch_transfers(&entries, None, None, dir.path(), false, |_| {}).unwrap();
 
     assert_eq!(transfers.len(), 1);
     assert_eq!(transfers[0].path, "a.bin");

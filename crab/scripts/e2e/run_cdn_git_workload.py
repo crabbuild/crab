@@ -298,15 +298,22 @@ def fetch_once(
 ) -> dict:
     require(record["published"], "fetch requires a confirmed native publication")
     cache = Path(env["CRAB_CACHE_DIR"])
-    require(cache.is_dir() if primed else not cache.exists(), "fetch needs the expected fresh or primed scratch cache")
+    lfs_payload = root / ".git" / lfs_object_path(record["sha256"])
+    if primed and crab is not None:
+        require(lfs_payload.is_file(), "warm-local LFS fetch needs the verified primer's cached object")
+    else:
+        require(cache.is_dir() if primed else not cache.exists(), "fetch needs the expected fresh or primed scratch cache")
     read = {"binding_sha256": binding, "cache_root_sha256": hashlib.sha256(env["CRAB_CACHE_DIR"].encode()).hexdigest()}
     target = decode(env[QUALIFICATION_TARGET_ENV].encode()) | {"read": read}
     env = env | {QUALIFICATION_TARGET_ENV: json.dumps(target)}
     mode = ("--bare",) if crab is None else ()
-    run_git("init", *mode, "--template=", "--object-format=sha1", root=root, env=env)
+    if not (primed and crab is not None):
+        run_git("init", *mode, "--template=", "--object-format=sha1", root=root, env=env)
     if crab is not None:
-        run_git("remote", "add", "origin", remote, root=root, env=env)
-        run_git("fetch", "--no-tags", "--no-auto-maintenance", remote, record["ref"], root=root, env=env, guard=guard)
+        if not primed:
+            run_git("remote", "add", "origin", remote, root=root, env=env)
+            run_git("fetch", "--no-tags", "--no-auto-maintenance", remote, record["ref"], root=root, env=env, guard=guard)
+            require(not lfs_payload.exists(), "LFS control needs an empty local payload cache")
         pointer = run_git("cat-file", "blob", f"FETCH_HEAD:{PAYLOAD}", root=root, env=env).stdout
         require(pointer == lfs_pointer(record["sha256"]), "native ref does not contain the expected LFS pointer")
     # Use a new cache and exact refspec so another fetched ref cannot supply the bytes.
@@ -324,7 +331,7 @@ def fetch_once(
     if crab is None:
         blob = run_git("cat-file", "blob", f"FETCH_HEAD:{PAYLOAD}", root=root, env=env).stdout
     else:
-        with (root / ".git" / lfs_object_path(record["sha256"])).open("rb") as payload:
+        with lfs_payload.open("rb") as payload:
             blob = payload.read(GIT_PAYLOAD_SIZE + 1)
     observed = hashlib.sha256(blob).hexdigest()
     require(len(blob) == GIT_PAYLOAD_SIZE and observed == record["sha256"], "fetched bytes differ from the writer payload")
@@ -355,17 +362,18 @@ def fetch(
     crab: Path | None, guard: NativeTargetGuard, approved_binding: str,
 ) -> dict:
     if action == "fetch-warm-local":
-        require(crab is None, "warm-local pack measurement is specific to the Git workload")
         primer = root / "primer"
         primer.mkdir()
         require_edge_fetch(fetch_once(remote, record, primer, env, None, crab, guard, approved_binding))
-        # The cache is shared, but the measured Git object database starts empty.
-        measured = root / "measured"
-        measured.mkdir()
+        # LFS stores verified payloads in the worktree's Git common directory.
+        # The Git pack benchmark still starts with a fresh object database.
+        measured = primer if crab is not None else root / "measured"
+        if crab is None:
+            measured.mkdir()
         result = fetch_once(remote, record, measured, env, None, crab, guard, approved_binding, primed=True)
         require(result["edge_attempts"] == 0 and result["verified_edge_payloads"] == 0
-                and result["local_payload_hits"] > 0,
-                "warm-local fetch must use a verified local pack without an edge request for this scope")
+                and result["local_payload_hits"] > 0 and (crab is None or result["all_edge_attempts"] == 0),
+                "warm-local fetch must use a verified local payload without an edge request for this scope")
         return result | {"arm": "warm_local"}
     binding = "" if action == "fetch-origin" and proof is None else approved_binding
     result = fetch_once(remote, record, root, env, proof, crab, guard, binding)

@@ -54,7 +54,7 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
         fixture.write_git_measurements(self.root, self.registration, PLATFORM)
 
     def collect(self) -> dict:
-        return fixture.CDN.collect_git_performance(self.root, self.registration, PLATFORM, RUN_ID, ATTEMPT)
+        return fixture.CDN.collect_cli_performance(self.root, self.registration, PLATFORM, RUN_ID, ATTEMPT)
 
     def amend_client(self, path: str, **changes: object) -> None:
         directory = self.root / path
@@ -84,7 +84,7 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
 
     def test_rejects_a_different_commit_with_the_same_content(self) -> None:
         self.amend_client("near/0001/warm_edge", publication_oid="b" * 40)
-        with self.assertRaisesRegex(ValueError, "fetched different published Git fixtures"):
+        with self.assertRaisesRegex(ValueError, "fetched different published fixtures"):
             self.collect()
 
     def test_rejects_a_client_measurement_from_a_different_release_platform(self) -> None:
@@ -260,7 +260,7 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
         self.amend_client("near/0001/origin", url="private-fixture-url")
         retained = self.root / "retained"
         with self.assertRaisesRegex(ValueError, "invalid fields in redacted Git fetch"):
-            fixture.CDN.collect_git_performance(
+            fixture.CDN.collect_cli_performance(
                 self.root, self.registration, PLATFORM, RUN_ID, ATTEMPT, retain=retained,
             )
         self.assertFalse(retained.exists())

@@ -66,7 +66,7 @@ def measure(lines: Iterable[bytes], scope: str, *, edge_responses: dict | None =
             fields(event, VERIFIED_FIELDS, "CDN verified payload event")
             source = event["source"]
             lfs = event["message"] == VERIFIED_LFS_EVENT
-            require(lfs == (event["family"] == "lfs") and source in (("edge",) if lfs else ("edge", "local")),
+            require(lfs == (event["family"] == "lfs") and source in ("edge", "local"),
                     "unknown verified payload source or family")
             if tuple(event[name] for name in ROUTE) == selected:
                 metric = "verified_edge_payloads" if source == "edge" else "local_payload_hits"

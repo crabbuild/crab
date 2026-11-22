@@ -873,10 +873,13 @@ export transition uses the previous active binding in its native-only phase
 and proves the approved CDN skips the unlisted object.
 `fetch-warm-local` primes a fresh Crab cache with a verified edge fetch,
 then measures a second fetch from an empty Git object database against that
-cache. It requires a verified local pack hit and zero edge requests for the
-registered scope. Native metadata and sidecar reads still run. The benchmark
-collector rejects a local cache root reused across any two measured arms.
-Join the results with provider request and fill measurements before assembly.
+cache. LFS keeps the primed worktree and runs a second `crab lfs fetch` for the
+same verified pointer. It verifies the SHA-256 and length of the local LFS
+object and records the local hit. Both controls require zero edge requests
+for the registered payload. Native metadata and sidecar reads still run.
+The benchmark collector rejects a local cache root reused across any two
+measured arms. Join the results with provider request and fill measurements
+before assembly.
 
 For the direct CLI rollback check, withdraw the CDN binding on the same
 worker after retaining the successful edge fetch. Keep the same native
@@ -934,12 +937,14 @@ empty result. The retained trace contains scope fingerprints and inventory
 outcomes. Retain CDN deployment and purge evidence under the deployment and
 rollback checks. [S3 version listing](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectVersions.html) · [GCS object listing](https://docs.cloud.google.com/storage/docs/json_api/v1/objects/list) · [Azure Blob listing](https://learn.microsoft.com/en-us/rest/api/storageservices/list-blobs)
 
-### Pair regional Git benchmark measurements
+### Pair regional CLI fetch measurements
 
-Collect one `client.json` from the Git workload for each timed arm and retain
-the provider and runner measurements for its reported fetch interval. Use this
-layout under `<scope>/<platform>/git-benchmarks/` for the preregistered number
-of pairs in each region. Each registration includes `regions`, an object with
+Collect one `client.json` from the scoped Git, capsule, or LFS workload for
+each timed arm and retain the provider and runner measurements for its
+reported fetch interval. Each pair uses the same published 256 KiB payload.
+Use this layout under `<scope>/<platform>/git-benchmarks/` for the preregistered number
+of pairs in each region. Set `workload` to `git-fetch` for Git or capsule
+scopes and `lfs-fetch` for LFS. Each registration includes `regions`, an object with
 the exact `near` and `distant` client region labels. Set them before approving
 the registration digest.
 
@@ -954,7 +959,9 @@ distant/0001/...
 
 Use the same publication receipt for all four arms in a pair. Measure cold edge
 before warm edge and warm local. The origin control can run at any point in
-the pair. Start the next pair after the previous pair finishes.
+the pair. Start the next pair after the previous pair finishes. The LFS timer
+starts after Git fetches and verifies the pointer, so the recorded interval
+measures LFS payload delivery and its native metadata reads.
 
 Each `measurement.json` uses schema `crab.cdn-git-measurement/v1` and
 contains `client_report_sha256`, `provider` (`s3`, `gcs`, or `azure`),

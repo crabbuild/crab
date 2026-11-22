@@ -73,6 +73,7 @@ def cli_candidate(scope: str, platform: str) -> dict:
 
 def write_git_measurements(inputs: Path, registration: dict, platform: str) -> None:
     provider = CDN.PROVIDER_FOR_EDGE[registration["scope"].split("/", 1)[0]]
+    action = CDN.cli_action_name(registration["scope"])
     for ordinal, (location, region) in enumerate(registration["regions"].items()):
         for index in range(1, registration["samples"] + 1):
             oid = hashlib.sha1(f"{location}/{index}".encode()).hexdigest()
@@ -88,7 +89,7 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str) -> N
                     "all_edge_attempts": edge, "observed_edge_gets": edge,
                 }
                 client = counters | {key: metrics[key] for key in CDN.GIT_CLIENT_METRICS} | {
-                    "schema": "crab.cdn-git-fetch/v1", "name": "git-fetch", "arm": CDN.GIT_MODES[arm],
+                    "schema": f"crab.cdn-{action}/v1", "name": action, "arm": CDN.GIT_MODES[arm],
                     "source_sha": registration["source_sha"], "scope": registration["scope"],
                     "configuration_sha256": registration["configuration_sha256"],
                     "workflow_run_id": "123", "workflow_run_attempt": "2", "platform": platform,
@@ -147,10 +148,10 @@ class CdnQualificationTests(unittest.TestCase):
         self.directory = Path(temp.name)
         (self.directory / "traces").mkdir()
 
-    def configure(self, provider: str, access: str, profile: str, *, consumer: str = "cli",
+    def configure(self, provider: str, access: str, profile: str, *, consumer: str = "cli", family: str = "git",
                   platform: str = "linux-x86_64") -> None:
         self.provider = provider
-        self.scope = f"{CDN.PROVIDERS[provider][0]}/{access}/{consumer}/git/{profile}"
+        self.scope = f"{CDN.PROVIDERS[provider][0]}/{access}/{consumer}/{family}/{profile}"
         self.origin = valid_report(provider)
         self.origin["service"] = CDN.PROVIDERS[provider][1]
         origin_digest = json_file(self.directory / "report.json", self.origin)
@@ -165,7 +166,7 @@ class CdnQualificationTests(unittest.TestCase):
         policy_digest = CDN.deployment_policy_digest(edge, access, self.policy_components)
         self.registration = {
             "schema": "crab.cdn-benchmark/v1", "source_sha": COMMIT, "scope": self.scope,
-            "configuration_sha256": CONFIGURATION, "workload": "git-fetch", "samples": 30,
+            "configuration_sha256": CONFIGURATION, "workload": CDN.cli_action_name(self.scope), "samples": 30,
             "p95_budget_ms": 150, "cost_budget_microusd": 10, "regions": REGIONS, "deployment_policy_sha256": policy_digest,
         } | publication
         if CDN.requires_cli_workload(self.scope):
@@ -182,7 +183,7 @@ class CdnQualificationTests(unittest.TestCase):
             "deployment": "fixture-a", "platform": platform,
             "fixture_prefix": FIXTURE_PREFIX, "checks": {},
             "product_action": {
-                "name": "git-fetch", "expected_sha256": "b" * 64, "observed_sha256": "b" * 64,
+                "name": self.registration["workload"], "expected_sha256": "b" * 64, "observed_sha256": "b" * 64,
                 "expected_bytes": 8, "observed_bytes": 8, "native_writes": 1, "observed_edge_gets": 1,
                 "visible_new_ref": True, "fixture_cleanup_verified": True, "verified_edge_payloads": 1,
             },
@@ -238,7 +239,7 @@ class CdnQualificationTests(unittest.TestCase):
                 continue
             else:
                 self.trace(check, observations.get(check, [edge_hit]))
-        if CDN.requires_git_workload(self.scope):
+        if CDN.requires_cli_workload(self.scope):
             write_git_measurements(self.directory / CDN.GIT_BENCHMARK_DIR, self.registration, platform)
             self.record_git_product()
         if access == "public":
@@ -437,7 +438,7 @@ class CdnQualificationTests(unittest.TestCase):
 
     def public_transition_trace(self) -> None:
         reference, visible, start, finish, attempts = "4" * 64, PUBLIC_SEAL - 40, PUBLIC_SEAL + 10, PUBLIC_SEAL + 30, 1
-        if CDN.requires_git_workload(self.scope):
+        if CDN.requires_cli_workload(self.scope):
             records = self.directory / CDN.GIT_PRODUCT_DIR
             publication = json.loads((records / "publication.json").read_bytes())
             fetch = json.loads((records / "fetch.json").read_bytes())
@@ -859,7 +860,7 @@ class CdnQualificationTests(unittest.TestCase):
     def test_rejects_a_valid_summary_that_does_not_match_retained_git_fetches(self) -> None:
         self.configure("s3", "private", "direct")
         self.report["performance"]["near"]["pairs"][0]["warm_edge"]["elapsed_ms"] += 1
-        self.rejected("Git performance summary differs from the retained measurements")
+        self.rejected("CLI performance summary differs from the retained measurements")
 
     def test_rejects_a_positive_product_summary_that_differs_from_the_fetch(self) -> None:
         self.configure("s3", "private", "direct")
