@@ -29,6 +29,7 @@ impl Authentication {
     ) -> Result<Option<GroupEvidence>, StorageError> {
         let issuer = self.issuer();
         let state = &self.state;
+        let account_path = state.account_path(issuer, subject);
         let prefix = state.identity_sessions_prefix(issuer, subject);
         let mut markers = state.store.list_stream(&prefix);
         // Old markers can remain after browser expiry. Use metadata to skip
@@ -56,7 +57,7 @@ impl Authentication {
                 continue;
             }
             let Some(session) = state
-                .session_check(session_key, Some(meta.location))
+                .session_check(session_key, Some((meta.location, account_path.clone())))
                 .await
                 .await
             else {
