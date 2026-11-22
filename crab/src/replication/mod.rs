@@ -6,7 +6,7 @@
 pub(crate) mod discovery;
 pub(crate) mod fetch;
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -23,10 +23,15 @@ use tokio_util::sync::CancellationToken;
 
 use crab_read::{
     ReadReplicaCandidate, ReadReplicaFallback, ReadReplicaProbeResult, ReadStoreChoice,
-    ReadStoreTarget, check_capsule_read_replica_readiness, select_read_store_choice,
+    ReadStoreTarget, check_capsule_read_replica_readiness, select_read_replicas,
+    select_read_store_choice,
 };
 pub use crab_read::{ReadRoutingPolicy, ReadSource, ReadinessCheckOptions};
 
+use crate::core::cdn::{
+    QualificationTarget, qualification_target, reject_managed_qualification,
+    verify_qualification_target,
+};
 use crate::core::config::Config;
 use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::git::url::{Cloud, CrabUrl, ObjectUrl, UrlForm};
@@ -8379,6 +8384,7 @@ impl<'a> StoreResolver<'a> {
         if matches!(operation, "hydrate" | "smudge")
             && let Some(checkout) = crate::auth::cdn_checkout::Checkout::load()?
         {
+            reject_managed_qualification()?;
             // The SDK has already selected the origin and captured the exact view.
             let resolved = checkout
                 .open(self.config, &self.primary_url, self.cancel)
@@ -8429,12 +8435,14 @@ impl<'a> StoreResolver<'a> {
             return Ok((primary, None));
         };
 
+        let qualification = qualification_target()?;
         let selection = select_read_store_with_replicas(
             Store::from_storage(primary.store.as_storage().clone().without_cdn_route()),
             &resolved.repository_prefix,
             replication.replicas.iter(),
             operation,
             policy,
+            qualification.as_ref(),
             build_replica_store,
         )
         .await?;
@@ -8514,6 +8522,7 @@ impl<'a> StoreResolver<'a> {
             }
         };
         let store = Store::from_storage(store);
+        verify_qualification_target(store.as_storage(), &repo_prefix)?;
         Ok((
             ReadStoreSelection {
                 router: StoreLayout::new(store.clone(), repo_prefix),
@@ -8586,6 +8595,7 @@ async fn select_read_store_with_replicas<'replicas, I, F>(
     replicas: I,
     operation: &str,
     policy: ReadRoutingPolicy,
+    qualification: Option<&QualificationTarget>,
     mut build_replica: F,
 ) -> Result<crab_read::ReadStoreSelection<Store, StoreLayout>>
 where
@@ -8602,12 +8612,36 @@ where
         return Ok(primary_selection);
     }
 
-    let replicas = replicas
+    let replicas: Vec<_> = replicas
         .into_iter()
-        .map(ReadReplicaCandidate::from_replica_config_ref);
+        .map(ReadReplicaCandidate::from_replica_config_ref)
+        .collect();
+    // A qualification run has one physical fixture. Check every eligible
+    // target before readiness can read metadata under a different prefix.
+    let qualified_replicas = qualification
+        .map(|target| {
+            select_read_replicas(replicas.clone(), &policy)?
+                .into_iter()
+                .map(|replica| {
+                    let (store, prefix) = build_replica(replica, primary_repo_path)?;
+                    target.verify(store.as_storage(), &prefix)?;
+                    Ok((replica.name.as_str(), (store, prefix)))
+                })
+                .collect::<Result<BTreeMap<_, _>>>()
+        })
+        .transpose()?;
     let readiness_options = readiness_check_options_from_env()?;
     let choice = select_read_store_choice(primary_selection, replicas, &policy, |replica| {
-        let built = build_replica(replica, primary_repo_path);
+        let built = match &qualified_replicas {
+            Some(qualified) => qualified
+                .get(replica.name.as_str())
+                .cloned()
+                .ok_or_else(|| CrabError::AuthFailed {
+                    path: "replica was not checked against the approved CDN qualification fixture"
+                        .into(),
+                }),
+            None => build_replica(replica, primary_repo_path),
+        };
         let primary_store = primary_store.clone();
         let primary_router = primary_router.clone();
 
@@ -13739,6 +13773,7 @@ mod tests {
                 replicas.iter(),
                 operation,
                 ReadRoutingPolicy::PreferLocal,
+                None,
                 |_, _| Ok((replica_store.clone(), "org/repo".to_owned())),
             )
             .await
@@ -13757,6 +13792,41 @@ mod tests {
                 .expect("read replica marker");
             assert_eq!(marker.as_ref(), b"replica");
         }
+    }
+
+    #[tokio::test]
+    async fn cdn_qualification_rejects_neighbor_replica_before_any_readiness_reads() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let approved = QualificationTarget {
+            origin: "s3://qualification-bucket".into(),
+            repository_prefix: "crab-cdn-qualification/current".into(),
+        };
+        let reads = Arc::new(AtomicUsize::new(0));
+        let store = || {
+            let count = Arc::clone(&reads);
+            Store::from_storage(
+                crab_storage::Store::new(Arc::new(InMemory::new()))
+                    .with_target_identity([1; 32])
+                    .with_native_cdn_origin(Some(approved.origin.clone()))
+                    .with_read_request_observer(Arc::new(move |_| {
+                        count.fetch_add(1, Ordering::Relaxed);
+                    })),
+            )
+        };
+        let candidates = [named_test_replica("neighbor")];
+        let result = select_read_store_with_replicas(
+            store(),
+            &approved.repository_prefix,
+            &candidates,
+            "fetch",
+            ReadRoutingPolicy::PreferLocal,
+            Some(&approved),
+            |_, _| Ok((store(), "crab-cdn-qualification/neighbor".into())),
+        )
+        .await;
+        assert!(matches!(result, Err(CrabError::AuthFailed { .. })));
+        assert_eq!(reads.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
@@ -13784,6 +13854,7 @@ mod tests {
                 replicas.iter(),
                 "hydrate",
                 policy,
+                None,
                 |_, _| panic!("primary policy must not build replica clients"),
             )
             .await
@@ -13834,6 +13905,7 @@ mod tests {
             replicas.iter(),
             "fetch",
             ReadRoutingPolicy::ReplicaName(west.name.clone()),
+            None,
             |replica, _| {
                 if replica.name == east.name {
                     Ok((east_store.clone(), "org/repo".to_owned()))
@@ -14125,6 +14197,7 @@ mod tests {
                 replicas.iter(),
                 operation,
                 ReadRoutingPolicy::PreferLocal,
+                None,
                 |_, _| Ok((replica_store.clone(), "org/repo".to_owned())),
             )
             .await
@@ -14177,6 +14250,7 @@ mod tests {
                 replicas.iter(),
                 operation,
                 ReadRoutingPolicy::PreferLocal,
+                None,
                 |replica, _| {
                     Err(CrabError::AuthFailed {
                         path: replica.url.clone(),
@@ -14238,6 +14312,7 @@ mod tests {
                 replicas.iter(),
                 operation,
                 ReadRoutingPolicy::PreferLocal,
+                None,
                 |_, _| Ok((replica_store.clone(), "org/repo".to_owned())),
             )
             .await

@@ -478,8 +478,10 @@ ordinary build must demonstrate the promoted read and the origin behavior of
 adjacent unpromoted families. Block promotion when required evidence still
 depends on a generic trace or an externally supplied pass flag.
 
-The scripted Git workload guards the native origin in both fixture and
-ordinary builds. Its read-only inspection records the binary SHA-256,
+The scripted Git workload guards the native origin and effective repository
+prefix in both fixture and ordinary builds. The guard runs before repository
+roots and replica readiness, and records origin and prefix digests. Its
+read-only inspection records the binary SHA-256,
 compiled commit, target, Cargo profile and features, qualification feature
 state, and digest of the embedded policy. Direct CLI product records and Git
 benchmark arms must match the registered build. Promotion rejects fixture

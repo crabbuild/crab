@@ -31,15 +31,20 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
                        check=True, capture_output=True)
         self.receipt = self.root / "receipt.json"
         self.fixture = self.root / "fixture.json"
-        raw = json.dumps(fixture(access="private")).encode()
+        approved = fixture(access="private")
+        raw = json.dumps(approved).encode()
         self.fixture.write_bytes(raw)
         self.digest = hashlib.sha256(raw).hexdigest()
         self.helper = self.root / "git-remote-crab"
         self.build_event = self.root / "build-event.json"
         build = cli_candidate("cloudfront/private/cli/git/direct", WORKLOAD.runner_platform())
         self.build_event.write_text(json.dumps({
-            "target": WORKLOAD.ORIGIN_TARGET, "fields": {key: build[key] for key in CLI_BUILD_FIELDS}
-            | {"message": WORKLOAD.ORIGIN_MESSAGE},
+            "target": WORKLOAD.QUALIFICATION_LOG, "fields": {key: build[key] for key in CLI_BUILD_FIELDS}
+            | {
+                "message": WORKLOAD.QUALIFICATION_MESSAGE,
+                "origin_sha256": hashlib.sha256(approved["native_origin"].encode()).hexdigest(),
+                "prefix_sha256": hashlib.sha256((approved["fixture_prefix"] + "/").encode()).hexdigest(),
+            },
         }))
         # Git still creates real packed objects and ref leases. The shim directs
         # its wire protocol to a disposable local origin and supplies trace input.
@@ -48,6 +53,9 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
             "import hashlib, json, os, subprocess, sys\n"
             "from pathlib import Path\n"
             "origin = Path(__file__).parent / 'origin.git'\n"
+            "approved = json.loads((origin.parent / 'fixture.json').read_bytes())\n"
+            "target = json.loads(os.environ['CRAB_INTERNAL_CDN_QUALIFICATION_TARGET'])\n"
+            "assert target == {'origin':approved['native_origin'], 'repository_prefix':approved['fixture_prefix']}\n"
             "if Path(sys.argv[0]).name == 'crab':\n"
             "    if sys.argv[1:3] == ['lfs', 'clean']:\n"
             "        data = sys.stdin.buffer.read()\n"
@@ -62,7 +70,6 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
             "    assert not payload.exists()\n"
             "    payload.parent.mkdir(parents=True)\n"
             "    payload.write_bytes((origin / digest).read_bytes())\n"
-            "    assert os.environ['CRAB_INTERNAL_CDN_QUALIFICATION_ORIGIN'] == 's3://fixture-bucket'\n"
             "    print((origin.parent / 'build-event.json').read_text(), file=sys.stderr)\n"
             "    evidence = origin.parent / 'public-export-events.json'\n"
             "    for event in json.loads(evidence.read_bytes()):\n"
@@ -81,9 +88,6 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
             "        print('connect\\n', flush=True)\n"
             "    elif line.startswith(b'connect '):\n"
             "        command = line.split()[1].decode()\n"
-            "        expected = os.environ['CRAB_INTERNAL_CDN_QUALIFICATION_ORIGIN']\n"
-            "        if expected != 's3://fixture-bucket':\n"
-            "            sys.exit(2)\n"
             "        print(flush=True)\n"
             "        if not (origin.parent / 'legacy-helper').exists():\n"
             "            print((origin.parent / 'build-event.json').read_text(), file=sys.stderr, flush=True)\n"
@@ -163,6 +167,15 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         rejected = self.call("publish")
         self.assertEqual(rejected.returncode, 1, rejected.stdout)
         self.assertIn("differs from the approved source", rejected.stderr)
+        self.assertFalse(self.receipt.exists())
+
+    def test_rejects_the_same_origin_with_a_neighbor_prefix_before_writing(self) -> None:
+        event = json.loads(self.build_event.read_bytes())
+        event["fields"]["prefix_sha256"] = hashlib.sha256(b"crab-cdn-qualification/neighbor/").hexdigest()
+        self.build_event.write_text(json.dumps(event))
+        rejected = self.call("publish")
+        self.assertEqual(rejected.returncode, 1, rejected.stdout)
+        self.assertIn("did not confirm the approved native origin and repository prefix", rejected.stderr)
         self.assertFalse(self.receipt.exists())
 
     def test_retirement_rejects_a_replaced_helper(self) -> None:

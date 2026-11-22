@@ -45,6 +45,7 @@ pub async fn build_repository_store(
             })
         }
         crab_git::RepositoryLocator::Managed(repository) => {
+            crate::core::cdn::reject_managed_qualification()?;
             let canonical_url = repository.canonical_url();
             let cache_dir = expand_token_cache_path(&config.auth.token_cache_path);
             let managed = ManagedRepositoryResolver::new(cache_dir)

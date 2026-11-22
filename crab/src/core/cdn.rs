@@ -9,30 +9,80 @@ use crab_storage::{
     cdn::{CdnAccess, CdnConsumer, CdnProfile, CdnPublicationFile, CdnRoute, CdnTransport},
 };
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use crate::core::config::{AuthConfig, AuthProvider};
 use crate::core::error::{CrabError, Result};
 
-const CDN_QUALIFICATION_ORIGIN_ENV: &str = "CRAB_INTERNAL_CDN_QUALIFICATION_ORIGIN";
+const QUALIFICATION_TARGET_ENV: &str = "CRAB_INTERNAL_CDN_QUALIFICATION_TARGET";
 
-pub(crate) fn qualification_origin() -> Result<Option<String>> {
-    let Some(value) = std::env::var_os(CDN_QUALIFICATION_ORIGIN_ENV) else {
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct QualificationTarget {
+    pub(crate) origin: String,
+    pub(crate) repository_prefix: String,
+}
+
+impl QualificationTarget {
+    pub(crate) fn verify(&self, store: &Store, prefix: &str) -> Result<()> {
+        let effective = store
+            .storage_scope()
+            .map_or(prefix, |scope| scope.repo_prefix.as_str());
+        self.require_exact(store.native_cdn_origin(), effective)?;
+        if store
+            .read_prefix_target_identity(&object_store::path::Path::from(effective))
+            .is_none()
+        {
+            return Err(CrabError::AuthFailed {
+                path: "the approved CDN qualification prefix does not have one native transport"
+                    .into(),
+            });
+        }
+        Ok(())
+    }
+
+    fn require_exact(&self, origin: Option<&str>, prefix: &str) -> Result<()> {
+        if origin != Some(self.origin.as_str()) || prefix != self.repository_prefix {
+            return Err(CrabError::AuthFailed {
+                path: "the resolved native origin or repository prefix differs from the approved CDN qualification fixture"
+                    .to_owned(),
+            });
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn qualification_target() -> Result<Option<QualificationTarget>> {
+    let Some(value) = std::env::var_os(QUALIFICATION_TARGET_ENV) else {
         return Ok(None);
     };
     value
-        .into_string()
-        .ok()
-        .filter(|value| !value.is_empty())
+        .to_str()
+        .filter(|value| value.len() <= 512)
+        .and_then(|value| serde_json::from_str::<QualificationTarget>(value).ok())
+        .filter(|target| !target.origin.is_empty() && !target.repository_prefix.is_empty())
         .map(Some)
         .ok_or_else(|| CrabError::Configuration {
-            key: CDN_QUALIFICATION_ORIGIN_ENV.to_owned(),
-            origin: "an approved native origin is required".to_owned(),
+            key: QUALIFICATION_TARGET_ENV.to_owned(),
+            origin: "an approved native origin and repository prefix are required".to_owned(),
         })
 }
 
-pub(crate) fn verify_qualification_origin(store: &Store) -> Result<()> {
-    if let Some(expected) = qualification_origin()? {
-        require_cdn_qualification_origin(store.native_cdn_origin(), &expected)?;
+pub(crate) fn reject_managed_qualification() -> Result<()> {
+    if qualification_target()?.is_some() {
+        return Err(CrabError::AuthFailed {
+            path: "the CDN qualification workload requires a direct repository".into(),
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn verify_qualification_target(store: &Store, prefix: &str) -> Result<()> {
+    if let Some(expected) = qualification_target()? {
+        expected.verify(store, prefix)?;
+        let origin_digest: [u8; 32] = Sha256::digest(&expected.origin).into();
+        let prefix_digest: [u8; 32] =
+            Sha256::digest(format!("{}/", expected.repository_prefix)).into();
         // The guard may restrict an ordinary release build. Only the compiled
         // release policy and Cargo feature can enable edge delivery.
         tracing::debug!(
@@ -44,18 +94,10 @@ pub(crate) fn verify_qualification_origin(store: &Store) -> Result<()> {
             cargo_features = env!("CRAB_BUILD_FEATURES"),
             qualification_feature = crab_storage::cdn::qualification_enabled(),
             release_policy_sha256 = %crab_storage::cdn::release_policy_sha256(),
-            "CDN qualification verified native origin"
+            origin_sha256 = %crab_git::lfs_pointer::hex_encode(&origin_digest),
+            prefix_sha256 = %crab_git::lfs_pointer::hex_encode(&prefix_digest),
+            "CDN qualification verified native target"
         );
-    }
-    Ok(())
-}
-
-fn require_cdn_qualification_origin(actual: Option<&str>, expected: &str) -> Result<()> {
-    if actual != Some(expected) {
-        return Err(CrabError::AuthFailed {
-            path: "the resolved native origin differs from the approved CDN qualification fixture"
-                .to_owned(),
-        });
     }
     Ok(())
 }
@@ -281,21 +323,63 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cdn_qualification_rejects_same_named_targets_and_custom_endpoints() {
-        let s3 = "s3://qualification-bucket";
-        let azure = "https://primaryacct.blob.core.windows.net/container";
-        assert!(require_cdn_qualification_origin(Some(s3), s3).is_ok());
-        assert!(require_cdn_qualification_origin(Some(azure), azure).is_ok());
-        for (actual, expected) in [
-            (Some("gs://qualification-bucket"), s3),
-            (
-                Some("https://otheraccount.blob.core.windows.net/container"),
-                azure,
-            ),
-            (None, s3),
+    fn cdn_qualification_requires_the_exact_native_origin_and_prefix() {
+        let prefix = "crab-cdn-qualification/approved";
+        for origin in [
+            "s3://qualification-bucket",
+            "gs://qualification-bucket",
+            "https://primaryacct.blob.core.windows.net/container",
         ] {
+            let expected = QualificationTarget {
+                origin: origin.into(),
+                repository_prefix: prefix.into(),
+            };
+            assert!(expected.require_exact(Some(origin), prefix).is_ok());
+            for (actual, path) in [
+                (Some(origin), "crab-cdn-qualification/approved-neighbor"),
+                (Some(origin), "crab-cdn-qualification/approved/view"),
+                (
+                    Some("https://otheracct.blob.core.windows.net/container"),
+                    prefix,
+                ),
+                (None, prefix),
+            ] {
+                assert!(matches!(
+                    expected.require_exact(actual, path),
+                    Err(CrabError::AuthFailed { .. })
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn cdn_qualification_uses_the_effective_view_and_checks_for_routed_reads() {
+        use std::sync::Arc;
+
+        use object_store::memory::InMemory;
+
+        let origin = "s3://qualification-bucket";
+        let prefix = "crab-cdn-qualification/approved";
+        let expected = QualificationTarget {
+            origin: origin.into(),
+            repository_prefix: prefix.into(),
+        };
+        let base = Store::new(Arc::new(InMemory::new()))
+            .with_target_identity([1; 32])
+            .with_native_cdn_origin(Some(origin.into()));
+        assert!(expected.verify(&base, prefix).is_ok());
+
+        let scoped = base.clone().with_storage_scope(crab_storage::StorageScope {
+            repo_prefix: format!("{prefix}/view"),
+            global_prefix: format!("{prefix}/view/.crab"),
+            source_repo: prefix.into(),
+            scope_hash: "a".repeat(64),
+        });
+        let routed =
+            base.with_read_routes(vec![(format!("{prefix}/v2"), Arc::new(InMemory::new()))]);
+        for store in [scoped, routed] {
             assert!(matches!(
-                require_cdn_qualification_origin(actual, expected),
+                expected.verify(&store, prefix),
                 Err(CrabError::AuthFailed { .. })
             ));
         }

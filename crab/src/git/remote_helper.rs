@@ -17,7 +17,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tracing::{Instrument, warn};
 
 use crate::audit::default_log_path;
-use crate::core::cdn::{qualification_origin, verify_qualification_origin};
+use crate::core::cdn::{qualification_target, verify_qualification_target};
 use crate::core::error::{CrabError, Result};
 use crate::core::metrics::{Metrics, MetricsSummary, persist_metrics_delta};
 use crate::core::output::{JsonlStream, OutputMode};
@@ -629,17 +629,6 @@ fn internal_bool_value(value: &str) -> bool {
     )
 }
 
-async fn select_qualification_checked_replica(
-    config: crate::core::config::Config,
-    url: crate::git::url::CrabUrl,
-    cancel: tokio_util::sync::CancellationToken,
-) -> Result<crate::replication::ReadStoreSelection> {
-    let selected = select_fetch_replica(config, url, cancel).await?;
-    // Return a terminal authorization error before any payload read or native fallback.
-    verify_qualification_origin(selected.store.as_storage())?;
-    Ok(selected)
-}
-
 /// Run the git remote helper protocol loop.
 ///
 /// Reads line-framed commands from stdin, batches them until a blank line,
@@ -741,12 +730,6 @@ pub async fn run_remote_helper(
         crab_git::RepositoryLocator::Managed(repository) => Some(repository.clone()),
         crab_git::RepositoryLocator::Direct(_) => None,
     };
-    if managed_repository.is_some() && qualification_origin()?.is_some() {
-        return Err(CrabError::AuthFailed {
-            path: "the CDN qualification workload requires a direct repository".to_owned(),
-        });
-    }
-
     let resolved = crate::auth::build_repository_store(
         &config,
         locator,
@@ -755,7 +738,6 @@ pub async fn run_remote_helper(
         &cancel,
     )
     .await?;
-    verify_qualification_origin(resolved.store.as_storage())?;
 
     // Protocol parsing and option handling do not depend on storage. Defer the
     // optional discovery read until Git requests repository data.
@@ -1575,7 +1557,7 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                     cache,
                     remote_url,
                     cancel,
-                    select_qualification_checked_replica,
+                    select_fetch_replica,
                 )
                 .await
             }
@@ -1662,6 +1644,20 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                     ));
                 }
                 let config = cache.config().clone();
+                // The guarded workload proves one native ref-head CAS.
+                // A delegated writer can publish beyond the resolved store.
+                let delegated_writer = config.auth.provider
+                    == crate::core::config::AuthProvider::CrabAuth
+                    || config
+                        .replication
+                        .as_ref()
+                        .is_some_and(|replication| replication.is_active_active());
+                if requires_repository && delegated_writer && qualification_target()?.is_some() {
+                    return Err(CrabError::AuthFailed {
+                        path: "the CDN qualification workload requires a single native writer"
+                            .into(),
+                    });
+                }
                 let mut push_config = PushConfig::from_config(&config);
                 let mut push_setup_error = if requires_repository {
                     configure_active_active_push_coordinator(
@@ -1778,7 +1774,7 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                                 key: "capsule-protocol push store".to_owned(),
                                 origin: "push requires a resolved object store".to_owned(),
                             })?;
-                    verify_qualification_origin(push_store.as_storage())?;
+                    verify_qualification_target(push_store.as_storage(), router.repo_prefix())?;
                     // Git owns stdout and negotiates quiet/progress per session.
                     // Keep the shared publisher's display on this caller's stderr.
                     push_config.progress = options.progress.then(|| {
@@ -2058,7 +2054,7 @@ async fn read_store_for_list_batch(
         config,
         for_push,
         cancel,
-        select_qualification_checked_replica,
+        select_fetch_replica,
     )
     .await
 }
@@ -2123,7 +2119,7 @@ async fn pinned_read_store_for_batch(
         remote_url,
         config,
         cancel,
-        select_qualification_checked_replica,
+        select_fetch_replica,
     )
     .await
 }

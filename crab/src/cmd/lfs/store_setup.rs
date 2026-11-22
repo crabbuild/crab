@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-use crate::core::cdn::verify_qualification_origin;
+use crate::core::cdn::{reject_managed_qualification, verify_qualification_target};
 use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::git::process::{self, MAX_CAPTURE_BYTES};
 use crate::lfs::config::LfsConfig;
@@ -71,6 +71,7 @@ pub(crate) async fn resolve_lfs_remote_context(
         if operation == "smudge"
             && let Some(checkout) = crate::auth::cdn_checkout::Checkout::load()?
         {
+            reject_managed_qualification()?;
             let source = checkout.source_url();
             let resolved = checkout.open(&config, &source, cancel).await?;
             let prefix = resolved.repository_prefix;
@@ -87,6 +88,7 @@ pub(crate) async fn resolve_lfs_remote_context(
         let locator = managed_resolver.classify(&url)?;
         Ok(match locator {
             crab_git::RepositoryLocator::Managed(repository) => {
+                reject_managed_qualification()?;
                 if !is_lfs_read_operation(operation) {
                     return Err(CrabError::LfsUnsupported {
                         command: operation.to_owned(),
@@ -111,11 +113,10 @@ pub(crate) async fn resolve_lfs_remote_context(
                 if is_lfs_read_operation(operation) {
                     let (selection, primary_fallback) =
                         resolver.read_store_with_primary_fallback(operation).await?;
-                    verify_qualification_origin(selection.store.as_storage())?;
                     let prefix = selection.router.repo_prefix().to_owned();
                     let store = if let Some(primary) = primary_fallback {
-                        verify_qualification_origin(primary.store.as_storage())?;
                         let primary_prefix = primary.router.repo_prefix().to_owned();
+                        verify_qualification_target(primary.store.as_storage(), &primary_prefix)?;
                         LfsObjectStore::new_with_primary_fallback(
                             selection.store.into_storage(),
                             &prefix,
@@ -128,7 +129,6 @@ pub(crate) async fn resolve_lfs_remote_context(
                     (Arc::new(store), prefix)
                 } else {
                     let selection = resolver.write_store(operation).await?;
-                    verify_qualification_origin(selection.store.as_storage())?;
                     let prefix = selection.router.repo_prefix().to_owned();
                     (
                         Arc::new(LfsObjectStore::new(selection.store.into_storage(), &prefix)),

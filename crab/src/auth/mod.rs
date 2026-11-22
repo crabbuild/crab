@@ -660,6 +660,7 @@ pub(crate) async fn open_repository_root(
     remote_url: &str,
 ) -> Result<crab_metadata::capsule_protocol::RootSnapshot> {
     let router = crate::storage::StoreLayout::new(store.clone(), repository_prefix.to_owned());
+    crate::core::cdn::verify_qualification_target(store.as_storage(), router.repo_prefix())?;
     let layout = crab_storage::StoreLayout::with_global_prefix(
         store.as_storage().clone(),
         router.repo_prefix().to_owned(),

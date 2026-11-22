@@ -727,11 +727,13 @@ LFS scopes on an initialized test-only repository. Use the candidate's
 `git-remote-crab` and the same approved fixture JSON as the transport
 collector. `native_origin` identifies the S3 bucket, GCS bucket, or Azure
 account and container. Configure the writer and reader credentials for that
-exact native target. The qualification helper verifies the actual native
-origin for the resolved repository, any selected read replica, and the store
-used for push. The workload requires the helper's confirmation in a read-only
-preflight before sending a push. Each phase uses a fresh scratch directory and
-cache.
+origin and the exact `fixture_prefix`. The helper checks the effective
+repository path, including any scoped view, before reading its root.
+Replica candidates covered by the read policy must pass the same check
+before readiness probes. Each product command reports the approved origin
+and prefix as digests. The workload requires this confirmation on a
+read-only preflight before sending a push. Each phase uses a fresh scratch
+directory and cache.
 
 Run the command below with `inspect` in place of `publish` before preregistering
 the benchmark. Omit `--receipt` for inspection. It reads the exact native
@@ -745,8 +747,10 @@ binary for its platform. [Cargo build-script environment](https://doc.rust-lang.
 
 Promotion requires the packaged target triple, the ordinary release profile,
 the qualification feature disabled, and the exact release checkout's policy
-embedded. Restrict the
-ordinary candidate writer to the approved native target and test prefix.
+embedded. Use native writer credentials restricted to the approved origin
+and prefix. The qualification workload publishes directly to one native
+store. Set up the reader separately when measuring a private CDN that uses
+Crab Auth viewer grants.
 Retain provider observations for the publication and retirement in addition
 to the Git records.
 
