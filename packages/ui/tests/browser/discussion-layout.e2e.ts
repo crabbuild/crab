@@ -123,6 +123,7 @@ test("discussion groups keep one frame on hover and row controls align with the 
       await expect(group).toHaveCSS("border-color", frame);
     }
     await comfortable.click();
+    await expect(checkbox).toHaveCSS("margin-top", "3.2px");
     await expectAlignment();
     await compact.click();
     await expectAlignment();

@@ -2454,12 +2454,35 @@ main {
 .issue-list-panel {
   overflow: hidden;
 }
+.discussion-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  background: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+.discussion-toolbar > * {
+  grid-area: 1 / 1;
+}
+.discussion-toolbar-selection {
+  display: flex;
+  align-items: center;
+  justify-self: start;
+  min-height: --spacing(10);
+  margin-block-start: --spacing(2);
+  margin-inline-start: --spacing(4);
+  z-index: 1;
+}
+.discussion-toolbar:has(> .discussion-toolbar-selection) .discussion-counts {
+  padding-inline-start: --spacing(9);
+}
 .issue-list-panel .issues-filters {
   min-height: 48px;
   margin: 0;
   padding: --spacing(2) --spacing(4);
-  background: var(--muted);
-  border-bottom: 1px solid var(--border);
+}
+.discussion-toolbar > .issues-filters[inert] {
+  visibility: hidden;
 }
 .issue-list {
   padding: 0;
@@ -2481,12 +2504,30 @@ main {
   font-size: var(--text-base);
   line-height: var(--discussion-title-line);
 }
-.discussion-row-checkbox,
+.discussion-row-checkbox {
+  /* The comfortable row needs a small optical lift from the line center. */
+  margin-block-start: min(
+    0.2rem,
+    calc((var(--discussion-title-line) - 1rem) / 2)
+  );
+}
+:where(
+  .discussion-toolbar-selection [data-slot="checkbox"],
+  .discussion-row-checkbox
+) {
+  transition-property: border-color;
+}
+@media (hover: hover) {
+  :where(
+      .discussion-toolbar-selection [data-slot="checkbox"],
+      .discussion-row-checkbox
+    ):enabled[data-state="unchecked"]:hover {
+    border-color: var(--input-hover);
+  }
+}
 .issue-list .discussion-row-status {
   /* Align with the first title line even when the title wraps. */
   margin-block-start: calc((var(--discussion-title-line) - 1rem) / 2);
-}
-.issue-list .discussion-row-status {
   width: 1rem;
   height: 1rem;
   padding: 0;

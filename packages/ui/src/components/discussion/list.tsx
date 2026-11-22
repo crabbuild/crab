@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useState } from "react";
 import {
   AlignJustifyIcon,
   Rows2Icon,
@@ -100,7 +100,7 @@ export function DiscussionListControls({
   loading,
   density,
   onDensityChange,
-  selection,
+  selecting,
 }: {
   repo: Repository;
   url: URL;
@@ -109,7 +109,7 @@ export function DiscussionListControls({
   loading: boolean;
   density: "comfortable" | "compact";
   onDensityChange: (density: "comfortable" | "compact") => void;
-  selection?: ReactNode;
+  selecting: boolean;
 }) {
   const filters = discussionFilters(url);
   const [sortOpen, setSortOpen] = useState(false);
@@ -125,9 +125,8 @@ export function DiscussionListControls({
   const change = (values: Partial<typeof filters>) =>
     navigate(repoHref(repo, { view, ...filters, ...values }));
   return (
-    <div className="issues-filters flex-wrap">
+    <div className="issues-filters flex-wrap" inert={selecting}>
       <div className="discussion-counts gap-3">
-        {selection}
         {!data ? (
           <span role="status" className="text-sm text-muted-foreground">
             {loading ? "Loading results…" : "Results unavailable"}
