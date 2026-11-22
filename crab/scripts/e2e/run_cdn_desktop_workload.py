@@ -9,6 +9,7 @@ import base64
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import time
 import tomllib
@@ -22,14 +23,25 @@ from run_cdn_sdk_workload import READ_TARGET, binding_for, json_record, verified
 from run_cdn_transport_checks import approved_fixture
 
 from cdn_qualification import (
-    COMMIT, GIT_PAYLOAD_SIZE, RUN_NUMBER, SHA256, decode, is_direct_desktop_git_scope, matches,
-    read_git_record, require, validate_desktop_git_read, validate_git_publication,
+    CLI_BUILD_FIELDS, COMMIT, GIT_PAYLOAD_SIZE, RUN_NUMBER, decode, fields, is_direct_desktop_git_scope, matches,
+    read_git_record, require, validate_desktop_git_read, validate_git_publication, verify_read_candidate,
 )
 from public_inventory import ExportError
 
 
 MAX_TRACE_BYTES = 8 * 1024 * 1024
 RPC_FRAME_LIMIT = 512 * 1024
+
+
+def sidecar_candidate(sidecar: Path, expected_digest: str, source: str, platform: str) -> dict:
+    with sidecar.open("rb") as executable:
+        digest = hashlib.file_digest(executable, "sha256").hexdigest()
+    require(digest == expected_digest, "desktop executable differs from the preregistered build digest")
+    result = subprocess.run([str(sidecar), "--cdn-build-info"], stdin=subprocess.DEVNULL,
+                            capture_output=True, timeout=15, check=False)
+    require(result.returncode == 0 and len(result.stdout) <= 4096, "could not inspect the desktop executable")
+    build = fields(decode(result.stdout), CLI_BUILD_FIELDS, "desktop sidecar build metadata")
+    return verify_read_candidate(build | {"binary_sha256": digest}, source, platform, consumer="desktop sidecar")
 
 
 def read_configuration(fixture: dict, binding: dict) -> None:
@@ -142,9 +154,8 @@ def fetch(args: argparse.Namespace) -> dict:
     require(publication["published"] and publication["visible_at_unix_ms"] <= time.time_ns() // 1_000_000,
             "desktop read requires a confirmed native publication")
     sidecar = args.sidecar.resolve(strict=True)
-    with sidecar.open("rb") as executable:
-        binary_sha256 = hashlib.file_digest(executable, "sha256").hexdigest()
-    require(binary_sha256 == args.sidecar_sha256, "desktop executable differs from the preregistered build digest")
+    platform = runner_platform()
+    candidate = sidecar_candidate(sidecar, args.sidecar_sha256, args.source_sha, platform)
     binding, approval, _ = binding_for(args, fixture)
     read_configuration(fixture, binding)
     identity = {"repo_id": "cdn-qualification"}
@@ -178,9 +189,9 @@ def fetch(args: argparse.Namespace) -> dict:
     responses: dict = {}
     counters = measure(lines, scope, edge_responses=responses, expected_git_blob=blob_sha256)
     client = provenance | timing | counters | {
-        "schema": "crab.cdn-desktop-git-read/v1", "arm": args.arm, "platform": runner_platform(),
+        "schema": "crab.cdn-desktop-git-read/v1", "arm": args.arm, "platform": platform,
         "publication_sha256": hashlib.sha256(raw).hexdigest(), "commit": publication["oid"], "sha256": payload_sha256,
-        "bytes": len(body), "git_blob_oid_sha256": blob_sha256, "binary_sha256": binary_sha256,
+        "bytes": len(body), "git_blob_oid_sha256": blob_sha256, "candidate": candidate,
         "cache_root_sha256": hashlib.sha256(os.fsencode(cache)).hexdigest(), "reader": reader, "approval_sha256": approval,
         "edge_responses": responses, "native_traffic": measure_native(lines, scope),
     }
@@ -203,8 +214,8 @@ def main() -> int:
     parser.add_argument("--export-approval", type=Path)
     try:
         result = fetch(parser.parse_args())
-    except TimeoutError:
-        print("error: desktop sidecar read timed out", file=sys.stderr)
+    except (TimeoutError, subprocess.TimeoutExpired):
+        print("error: desktop sidecar qualification timed out", file=sys.stderr)
         return 1
     except (ExportError, OSError, ValueError):
         print("error: desktop CDN read could not verify the fixture, sidecar or observations", file=sys.stderr)

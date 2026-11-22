@@ -1171,8 +1171,14 @@ with the public binding withdrawn before retirement.
 Use the direct desktop Git fixture and the dedicated runner's normal user
 configuration in `~/.config/crab/config.toml`. Publish with
 `run_cdn_git_workload.py publish` and confirm the native ref with
-`collect_cdn_git_native_ref.py`. Preregister the SHA-256 of the exact native
-sidecar that will run in each arm.
+`collect_cdn_git_native_ref.py`. Set `GIT_SHA` to the full commit of the
+sidecar's checkout when building locally. Hosted desktop builds set it from
+the checked-out ref. Run the exact sidecar with `--cdn-build-info` and
+preregister its binary SHA-256 alongside the compiled build metadata.
+The workload checks the executable digest, source commit, and host target
+before opening the remote. The record includes the Cargo profile, features,
+qualification feature state, and compiled policy digest.
+[Cargo build-script environment](https://doc.rust-lang.org/cargo/reference/environment-variables.html#environment-variables-cargo-sets-for-build-scripts)
 
 ```sh
 python3 -B crab/scripts/e2e/run_cdn_desktop_workload.py edge \

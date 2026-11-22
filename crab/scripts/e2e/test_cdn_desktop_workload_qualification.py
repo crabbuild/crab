@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import run_cdn_desktop_workload as desktop
 import collect_cdn_viewer_requests as viewer
-from cdn_qualification import PROVIDER_FOR_EDGE, validate_desktop_git_read
+from cdn_qualification import CLI_BUILD_FIELDS, PROVIDER_FOR_EDGE, validate_desktop_git_read
 from run_cdn_git_workload import read_target_fingerprints
 from test_cdn_qualification import COMMIT, cli_candidate, json_file
 from test_cdn_transport_qualification import fixture
@@ -39,9 +39,16 @@ class DesktopQualificationTests(unittest.TestCase):
             sidecar=sidecar, sidecar_sha256=hashlib.sha256(sidecar.read_bytes()).hexdigest(), scratch=self.root,
             source_sha=COMMIT, run_id="123", run_attempt="2", private_reader=reader, export_approval=None)
         self.oid = "a" * 40
+        self.stamp = {key: value for key, value in cli_candidate("cloudfront/private/desktop/git/direct",
+                      desktop.runner_platform()).items() if key in CLI_BUILD_FIELDS}
+        self.inspection = self.enterContext(patch.object(desktop.subprocess, "run", return_value=self.build_info(self.stamp)))
         home = patch.object(Path, "home", return_value=self.root)
         home.start()
         self.addCleanup(home.stop)
+
+    @staticmethod
+    def build_info(stamp: dict) -> desktop.subprocess.CompletedProcess:
+        return desktop.subprocess.CompletedProcess([], 0, json.dumps(stamp).encode(), b"")
 
     def configure(self, edge: str, arm: str) -> dict:
         self.args.arm = arm
@@ -130,6 +137,7 @@ assert not sys.stdin.read()
                         records[arm] = desktop.fetch(self.args)
                 routed, native = records["edge"], records["origin"]
                 self.assertEqual(routed["sha256"], native["sha256"])
+                self.assertEqual(routed["candidate"], self.stamp | {"binary_sha256": self.args.sidecar_sha256})
                 self.assertNotEqual(routed["cache_root_sha256"], native["cache_root_sha256"])
                 self.assertEqual((routed["observed_edge_gets"], set(routed["edge_responses"])), (1, {"c" * 64, "d" * 64}))
                 self.assertEqual(native["edge_responses"], {})
@@ -155,6 +163,16 @@ assert not sys.stdin.read()
             self.args.sidecar.write_bytes(b"different executable")
             with self.assertRaisesRegex(ValueError, "preregistered build digest"):
                 desktop.fetch(self.args)
+            launch.assert_not_called()
+
+    def test_mismatched_build_metadata_prevents_a_remote_read(self) -> None:
+        self.configure("cloudfront", "edge")
+        with patch.object(desktop, "run_sidecar") as launch:
+            self.inspection.return_value = self.build_info(self.stamp | {"source_sha": "f" * 40})
+            with self.assertRaisesRegex(ValueError, "differs from the approved source"):
+                desktop.fetch(self.args)
+            self.inspection.assert_called_once_with([str(self.args.sidecar), "--cdn-build-info"],
+                stdin=desktop.subprocess.DEVNULL, capture_output=True, timeout=15, check=False)
             launch.assert_not_called()
 
     def test_public_edge_requires_the_pinned_receipt_and_origin_requires_its_withdrawal(self) -> None:

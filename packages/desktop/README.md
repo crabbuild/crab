@@ -169,6 +169,9 @@ stderr emit one structured tracing event per line and keeps stdout available
 for the usual NDJSON-RPC frames. `CRAB_DESKTOP_LOG` selects tracing targets
 and levels. For CDN reads, include `crab_sdk::cdn::read_target=debug` and
 `crab_storage::cdn::transfer=debug` in the filter.
+The sidecar's `--cdn-build-info` command reports its compiled source, target,
+profile, features, and CDN policy without opening user settings. Set `GIT_SHA`
+to the full checkout commit before building a local qualification candidate.
 
 The desktop logo comes from `packages/web/crab.optimized.svg`. Run
 `npm run build:icons` after changing it; this requires `rsvg-convert` and uses

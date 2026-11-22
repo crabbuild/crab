@@ -183,7 +183,7 @@ DIRECT_GIT_READ_FIELDS = PRODUCT_COUNTERS | CDN_PROVENANCE_FIELDS | SDK_PAYLOAD_
     "edge_responses", "native_traffic", "reader", "commit",
 }
 SDK_GIT_READ_FIELDS = DIRECT_GIT_READ_FIELDS | {"candidate"}
-DESKTOP_GIT_READ_FIELDS = DIRECT_GIT_READ_FIELDS | {"binary_sha256", "cache_root_sha256"}
+DESKTOP_GIT_READ_FIELDS = DIRECT_GIT_READ_FIELDS | {"candidate", "cache_root_sha256"}
 SDK_HYDRATION_READ_FIELDS = PRODUCT_COUNTERS | CDN_PROVENANCE_FIELDS | SDK_TIMING_FIELDS | {
     "schema", "arm", "platform", "workload_sha256", "candidate", "crab_sha256", "pointer_sha256", "payload",
     "reader", "xorb_key_sha256", "native_traffic", "edge_responses",
@@ -1422,10 +1422,11 @@ def validate_desktop_git_read(value: Any, scope: str, arm: str) -> dict[str, Any
             and matches(COMMIT, client["source_sha"]) and matches(LABEL, client["platform"])
             and all(matches(RUN_NUMBER, client[key]) for key in ("workflow_run_id", "workflow_run_attempt")),
             "desktop Git read has mismatched product or workflow provenance")
+    verify_read_candidate(client["candidate"], client["source_sha"], client["platform"], consumer="desktop sidecar")
     require(matches(GIT_OID, client["commit"]) and type(client["bytes"]) is int and client["bytes"] == GIT_PAYLOAD_SIZE
             and all(matches(SHA256, client[key]) for key in (
                 "sha256", "git_blob_oid_sha256", "publication_sha256", "configuration_sha256",
-                "binary_sha256", "cache_root_sha256",
+                "cache_root_sha256",
             )), "desktop read did not verify the published Git payload")
     reader = fields(client["reader"], DIRECT_READ_TARGET_FIELDS, "desktop read target")
     require(all(matches(SHA256, reader[key]) for key in CLI_NATIVE_FIELDS), "invalid desktop native placement")

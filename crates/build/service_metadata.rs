@@ -1,7 +1,8 @@
 use std::env;
 
-pub fn emit() -> Result<(), env::VarError> {
-    println!("cargo::rerun-if-changed=../build/service_metadata.rs");
+pub fn emit(metadata_path: &str) -> Result<(), env::VarError> {
+    println!("cargo::rerun-if-changed=build.rs");
+    println!("cargo::rerun-if-changed={metadata_path}");
     println!("cargo::rerun-if-env-changed=GIT_SHA");
     let revision = env::var("GIT_SHA").unwrap_or_default();
     let source = if matches!(revision.len(), 40 | 64)
