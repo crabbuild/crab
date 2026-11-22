@@ -30,6 +30,7 @@ pub(crate) struct QualificationTarget {
 pub(crate) struct QualificationRead {
     binding_sha256: String,
     cache_root_sha256: String,
+    public_export_sha256: String,
 }
 
 impl QualificationRead {
@@ -42,6 +43,11 @@ impl QualificationRead {
         {
             return Err(CrabError::AuthFailed {
                 path: "the selected CDN binding or cache root differs from the approved qualification action".into(),
+            });
+        }
+        if self.public_export_sha256 != store.cdn_public_export_sha256().unwrap_or_default() {
+            return Err(CrabError::AuthFailed {
+                path: "the selected CDN public export approval differs from the approved qualification action".into(),
             });
         }
         Ok(())
@@ -115,6 +121,7 @@ pub(crate) fn verify_qualification_read(store: &Store) -> Result<()> {
             parent: None,
             binding_sha256 = read.binding_sha256.as_str(),
             cache_root_sha256 = read.cache_root_sha256.as_str(),
+            public_export_sha256 = read.public_export_sha256.as_str(),
             "CDN qualification verified read configuration"
         );
     }
@@ -416,6 +423,7 @@ mod tests {
         let origin = QualificationRead {
             binding_sha256: String::new(),
             cache_root_sha256: qualification_digest("scratch-cache"),
+            public_export_sha256: String::new(),
         };
         assert!(origin.verify(&native, cache).is_ok());
         let edge = native
@@ -432,6 +440,7 @@ mod tests {
         let expected = QualificationRead {
             binding_sha256: qualification_digest("public\nhttp://127.0.0.1:9876"),
             cache_root_sha256: origin.cache_root_sha256.clone(),
+            public_export_sha256: String::new(),
         };
         assert!(expected.verify(&edge, cache).is_ok());
         assert!(matches!(
@@ -444,6 +453,14 @@ mod tests {
         ));
         assert!(matches!(
             expected.verify(&edge, Path::new("ambient-cache")),
+            Err(CrabError::AuthFailed { .. })
+        ));
+        let approved = QualificationRead {
+            public_export_sha256: qualification_digest("approved public export"),
+            ..expected
+        };
+        assert!(matches!(
+            approved.verify(&edge, cache),
             Err(CrabError::AuthFailed { .. })
         ));
     }

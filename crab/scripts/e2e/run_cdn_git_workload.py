@@ -76,8 +76,11 @@ def verified_read(lines: list[bytes], expected: dict) -> dict:
         if not isinstance(event, dict) or event.get("target") != READ_LOG:
             continue
         observed = fields(event.get("fields"), expected.keys() | {"message"}, "read configuration observation")
-        require(observed["message"] == READ_MESSAGE and all(observed[key] == expected[key] for key in expected),
+        require(observed["message"] == READ_MESSAGE
+                and all(observed[key] == expected[key] for key in ("binding_sha256", "cache_root_sha256")),
                 "fetch selected a different CDN binding or local cache root")
+        require(observed["public_export_sha256"] == expected["public_export_sha256"],
+                "fetch selected a different CDN public export approval")
         found = True
     require(found, "fetch did not confirm its CDN binding and local cache root")
     return expected
@@ -227,14 +230,28 @@ def verify_transition_events(lines: list[bytes], scope: str, proof: dict) -> Non
     require(observations == expected, "fetch did not prove the selected object's public export transition")
 
 
-def prepare_transition(args: argparse.Namespace, fixture: dict, record: dict | None) -> dict | None:
-    enabled = any((args.transition_object, args.export_approval, args.transition_output, args.before_transition))
-    if not enabled:
-        return None
+def prepare_public_export(args: argparse.Namespace, fixture: dict, record: dict | None) -> tuple[str, dict | None]:
     _, access, _, family, _ = scope_parts(fixture["scope"])
-    require(record is not None and access == "public" and args.action in ("fetch", "fetch-origin")
-            and args.export_approval is not None and args.transition_output is not None,
-            "public transition requires a publication receipt, export approval and transition output on a public fetch")
+    transition = any((args.transition_object, args.transition_output, args.before_transition))
+    if transition:
+        require(record is not None and access == "public" and args.action in ("fetch", "fetch-origin")
+                and args.transition_output is not None,
+                "public transition requires a publication receipt and transition output on a public fetch")
+    approved = access == "public" and (transition or args.action in ("fetch", "fetch-warm-local"))
+    require((args.export_approval is not None) == approved,
+            "an export approval is required for a public edge fetch, warm-local fetch or transition")
+    if not approved:
+        return "", None
+    raw, _ = read_document(args.export_approval / "publication.json")
+    digest = hashlib.sha256(raw).hexdigest()
+    binding, objects, sealed_at = verified_publication(args.export_approval, digest)
+    require(binding["source_origin"] == fixture["native_origin"]
+            and binding["source_placement"] == fixture["source_placement"]
+            and binding["export_origin"] == fixture["export_origin"] and binding["repository_prefix"] == fixture["fixture_prefix"]
+            and binding["base_url"] == fixture["base_url"].rstrip("/"), "public export approval does not match the fixture")
+    require(sealed_at <= time.time_ns() // 1_000_000, "public export approval must be sealed before the fetch")
+    if not transition:
+        return digest, None
     path = args.transition_object
     if family == "lfs":
         expected = lfs_object_path(record["sha256"])
@@ -245,19 +262,12 @@ def prepare_transition(args: argparse.Namespace, fixture: dict, record: dict | N
     phase = "before" if args.action == "fetch-origin" else "after"
     require((args.before_transition is not None) == (phase == "after"), "the edge transition requires the native-only observation")
     key = fixture_object_key(fixture | {"object_path": path}, access, family)
-    raw, _ = read_document(args.export_approval / "publication.json")
-    digest = hashlib.sha256(raw).hexdigest()
-    binding, objects, sealed_at = verified_publication(args.export_approval, digest)
-    require(binding["source_origin"] == fixture["native_origin"]
-            and binding["source_placement"] == fixture["source_placement"]
-            and binding["export_origin"] == fixture["export_origin"] and binding["repository_prefix"] == fixture["fixture_prefix"]
-            and binding["base_url"] == fixture["base_url"].rstrip("/"), "public transition approval does not match the fixture")
     listed = any(obj.path == path for obj in objects)
     require(listed == (phase == "after"), "public transition object membership does not match the phase")
     require(not args.transition_output.exists() and not args.transition_output.is_symlink(),
             "public transition observation output must be new")
-    return {"phase": phase, "receipt_sha256": digest, "key_sha256": hashlib.sha256(key.encode()).hexdigest(),
-            "sealed_at_unix_ms": sealed_at}
+    return digest, {"phase": phase, "receipt_sha256": digest, "key_sha256": hashlib.sha256(key.encode()).hexdigest(),
+                    "sealed_at_unix_ms": sealed_at}
 
 
 def write_transition(proof: dict, record: dict, result: dict, output: Path, before: Path | None) -> None:
@@ -294,7 +304,7 @@ def write_transition(proof: dict, record: dict, result: dict, output: Path, befo
 
 def fetch_once(
     remote: str, record: dict[str, Any], root: Path, env: dict[str, str], proof: dict | None,
-    crab: Path | None, guard: NativeTargetGuard, binding: str, *, primed: bool = False,
+    crab: Path | None, guard: NativeTargetGuard, binding: str, public_export: str, *, primed: bool = False,
 ) -> dict:
     require(record["published"], "fetch requires a confirmed native publication")
     cache = Path(env["CRAB_CACHE_DIR"])
@@ -303,7 +313,8 @@ def fetch_once(
         require(lfs_payload.is_file(), "warm-local LFS fetch needs the verified primer's cached object")
     else:
         require(cache.is_dir() if primed else not cache.exists(), "fetch needs the expected fresh or primed scratch cache")
-    read = {"binding_sha256": binding, "cache_root_sha256": hashlib.sha256(env["CRAB_CACHE_DIR"].encode()).hexdigest()}
+    read = {"binding_sha256": binding, "cache_root_sha256": hashlib.sha256(env["CRAB_CACHE_DIR"].encode()).hexdigest(),
+            "public_export_sha256": public_export}
     target = decode(env[QUALIFICATION_TARGET_ENV].encode()) | {"read": read}
     env = env | {QUALIFICATION_TARGET_ENV: json.dumps(target)}
     mode = ("--bare",) if crab is None else ()
@@ -359,24 +370,24 @@ def require_edge_fetch(result: dict) -> None:
 
 def fetch(
     action: str, remote: str, record: dict[str, Any], root: Path, env: dict[str, str], proof: dict | None,
-    crab: Path | None, guard: NativeTargetGuard, approved_binding: str,
+    crab: Path | None, guard: NativeTargetGuard, approved_binding: str, public_export: str,
 ) -> dict:
     if action == "fetch-warm-local":
         primer = root / "primer"
         primer.mkdir()
-        require_edge_fetch(fetch_once(remote, record, primer, env, None, crab, guard, approved_binding))
+        require_edge_fetch(fetch_once(remote, record, primer, env, None, crab, guard, approved_binding, public_export))
         # LFS stores verified payloads in the worktree's Git common directory.
         # The Git pack benchmark still starts with a fresh object database.
         measured = primer if crab is not None else root / "measured"
         if crab is None:
             measured.mkdir()
-        result = fetch_once(remote, record, measured, env, None, crab, guard, approved_binding, primed=True)
+        result = fetch_once(remote, record, measured, env, None, crab, guard, approved_binding, public_export, primed=True)
         require(result["edge_attempts"] == 0 and result["verified_edge_payloads"] == 0
                 and result["local_payload_hits"] > 0 and (crab is None or result["all_edge_attempts"] == 0),
                 "warm-local fetch must use a verified local payload without an edge request for this scope")
         return result | {"arm": "warm_local"}
     binding = "" if action == "fetch-origin" and proof is None else approved_binding
-    result = fetch_once(remote, record, root, env, proof, crab, guard, binding)
+    result = fetch_once(remote, record, root, env, proof, crab, guard, binding, public_export)
     if action == "fetch-origin":
         require(result["all_edge_attempts"] == 0, "origin control observed edge traffic")
         return result | {"arm": "origin"}
@@ -431,7 +442,7 @@ def main() -> int:
             target = {"origin": fixture["native_origin"], "repository_prefix": fixture["fixture_prefix"]}
             env = git_environment(args.helper, root, target)
             if args.action in ("inspect", "publish"):
-                prepare_transition(args, fixture, None)
+                prepare_public_export(args, fixture, None)
                 guard = NativeTargetGuard(args.helper, args.source_sha, target, None)
                 if args.action == "inspect":
                     run_git("init", "--bare", "--template=", "--object-format=sha1", root=root, env=env)
@@ -444,11 +455,11 @@ def main() -> int:
                 raw = read_git_record(args.receipt)
                 record = validate_git_publication(raw, provenance)
                 guard = NativeTargetGuard(args.helper, args.source_sha, target, record["candidate"])
-                proof = prepare_transition(args, fixture, record)
+                public_export, proof = prepare_public_export(args, fixture, record)
                 if args.action == "retire":
                     result = retire(remote, record, root, env, guard)
                 else:
-                    result = fetch(args.action, remote, record, root, env, proof, crab, guard, approved_binding)
+                    result = fetch(args.action, remote, record, root, env, proof, crab, guard, approved_binding, public_export)
                     if proof is not None:
                         write_transition(proof, record, result, args.transition_output, args.before_transition)
                 result["publication_sha256"] = hashlib.sha256(raw).hexdigest()

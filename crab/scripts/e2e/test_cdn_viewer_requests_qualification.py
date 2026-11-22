@@ -168,6 +168,8 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
                 registration = {"scope": config["scope"], "source_sha": examples.COMMIT, "configuration_sha256": configuration,
                                 "regions": {"near": "near"}, "samples": 1, "viewer_binding_sha256": "e" * 64,
                                 "candidate": examples.cli_candidate(config["scope"], "linux-x86_64")}
+                if access == "public":
+                    registration["publication_sha256"] = "6" * 64
                 examples.write_git_measurements(root, registration, "linux-x86_64")
                 client = root / "near/0001/warm_edge/client.json"
                 report = json.loads(client.read_bytes())

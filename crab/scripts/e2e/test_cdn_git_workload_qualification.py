@@ -64,9 +64,12 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
             "    if (origin.parent / 'binding-off').exists():\n"
             "        binding = ''\n"
             "    cache = hashlib.sha256(os.environ['CRAB_CACHE_DIR'].encode()).hexdigest()\n"
+            "    approved_export = origin.parent / 'active-export-sha256'\n"
+            "    export = approved_export.read_text() if binding and approved_export.exists() else ''\n"
             "    print(json.dumps({'target':'crab::cdn::qualification_read', 'fields':{\n"
             "        'message':'CDN qualification verified read configuration',\n"
-            "        'binding_sha256':binding, 'cache_root_sha256':cache}}), file=sys.stderr, flush=True)\n"
+            "        'binding_sha256':binding, 'cache_root_sha256':cache, 'public_export_sha256':export}}),\n"
+            "        file=sys.stderr, flush=True)\n"
             "def emit_native():\n"
             "    print(json.dumps({'target':'crab_storage::native_read', 'fields':{\n"
             "        'message':'Native object store read', 'provider':'s3', 'method':'get',\n"
@@ -152,8 +155,8 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
             *arguments,
         ], capture_output=True, text=True, check=False)
 
-    def run_phase(self, action: str) -> dict:
-        result = self.call(action)
+    def run_phase(self, action: str, *arguments: str) -> dict:
+        result = self.call(action, *arguments)
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
 
@@ -310,6 +313,8 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
 
         old, new = self.root / "previous", self.root / "current"
         previous = seal(old, [prior])
+        active_export = self.root / "active-export-sha256"
+        active_export.write_text(previous)
         self.run_phase("publish")
         payload = json.loads(self.receipt.read_bytes())
         if family == "lfs":
@@ -333,6 +338,7 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
 
         (self.root / "origin-only").unlink()
         current = seal(new, [prior, added])
+        active_export.write_text(current)
         observe(current, "listed", "verified_edge")
         flags = (*selector, "--export-approval", str(new), "--transition-output", str(after), "--before-transition", str(before))
         if family == "lfs":
@@ -353,6 +359,18 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         self.assertEqual(retained["after"]["verified_edge_key_sha256"], key)
         self.assertEqual(retained["before"]["result_sha256"], fetched["observed_sha256"])
         self.assertEqual(retained["before"]["edge_attempts"], 0)
+        if family == "git":
+            missing = self.call("fetch")
+            self.assertIn("an export approval is required", missing.stderr)
+            active_export.write_text(previous)
+            stale = self.call("fetch", "--export-approval", str(new))
+            self.assertIn("different CDN public export approval", stale.stderr)
+            active_export.write_text(current)
+            edge = self.run_phase("fetch", "--export-approval", str(new))
+            self.assertEqual(edge["reader"]["public_export_sha256"], current)
+            (self.root / "warm-cache").touch()
+            warm = self.run_phase("fetch-warm-local", "--export-approval", str(new))
+            self.assertEqual(warm["reader"]["public_export_sha256"], current)
         (self.root / "binding-off").touch()
         (self.root / "origin-only").touch()
         rollback = self.run_phase("fetch-origin")
@@ -366,7 +384,7 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
             (records / "retirement.json").write_text(json.dumps(retired), encoding="utf-8")
             viewer = WORKLOAD.viewer_binding_sha256(sample)
             product = collect_git_product_action(records, fetched | {"viewer_binding_sha256": viewer},
-                                                 json.dumps(rollback).encode())
+                                                 json.dumps(rollback).encode(), public_export_sha256=current)
             self.assertEqual(product["name"], "lfs-fetch")
             export = self.root / "public-export"
             copytree(new, export)

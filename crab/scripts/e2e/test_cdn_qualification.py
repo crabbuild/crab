@@ -97,6 +97,7 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str) -> N
                     "reader": {
                         "binding_sha256": "" if arm == "origin" else registration["viewer_binding_sha256"],
                         "cache_root_sha256": hashlib.sha256(f"{location}/{index}/{arm}/cache".encode()).hexdigest(),
+                        "public_export_sha256": "" if arm == "origin" else registration.get("publication_sha256", ""),
                         "origin_sha256": "7" * 64, "prefix_sha256": "8" * 64,
                     },
                     "publication_oid": oid, "expected_sha256": blob, "observed_sha256": blob,
@@ -320,7 +321,7 @@ class CdnQualificationTests(unittest.TestCase):
             "publication_sha256": receipt, "arm": "origin", "edge_responses": {},
             "started_at_unix_ms": fetch["finished_at_unix_ms"] + 5,
             "finished_at_unix_ms": fetch["finished_at_unix_ms"] + 10,
-            "reader": fetch["reader"] | {"binding_sha256": "", "cache_root_sha256": "1" * 64},
+            "reader": fetch["reader"] | {"binding_sha256": "", "cache_root_sha256": "1" * 64, "public_export_sha256": ""},
         })
         json_file(records / "retirement.json", provenance | {
             "schema": "crab.cdn-git-retirement/v1", "publication_sha256": receipt, "ref_retired": True,
@@ -461,7 +462,8 @@ class CdnQualificationTests(unittest.TestCase):
         }
         if CDN.requires_cli_workload(self.scope):
             trace["after"]["reader"] = fetch["reader"]
-            trace["before"]["reader"] = fetch["reader"] | {"cache_root_sha256": "9" * 64}
+            trace["before"]["reader"] = fetch["reader"] | {"cache_root_sha256": "9" * 64,
+                                                         "public_export_sha256": self.registration["previous_publication_sha256"]}
         check = CDN.PUBLIC_TRANSITION_CHECK
         path = self.directory / "traces" / f"{check}.json"
         self.report["checks"][check] = {"passed": True, "trace_sha256": json_file(path, trace)}

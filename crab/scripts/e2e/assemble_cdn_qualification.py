@@ -159,7 +159,8 @@ def assemble_bundle(
                 registered_read = {key: registration.get(key) for key in ("candidate", "viewer_binding_sha256")}
                 rollback = read_trace(destination / "traces/rollback.json", "rollback")
                 product = collect_git_product_action(inputs / row / GIT_PRODUCT_DIR, measured | registered_read,
-                                                     rollback, retain=destination / GIT_PRODUCT_DIR)
+                                                     rollback, retain=destination / GIT_PRODUCT_DIR,
+                                                     public_export_sha256=registration.get("publication_sha256", ""))
                 measured["product_action"] = product | {"fixture_cleanup_verified": True}
                 measured["performance"] = collect_cli_performance(
                     inputs / row / GIT_BENCHMARK_DIR, registration, platform, run_id, attempt,

@@ -373,6 +373,7 @@ async fn public_export_admits_only_the_approved_key_and_object_size() {
     .await
     .unwrap();
     let store = store.with_cdn_route(route).unwrap();
+    assert_eq!(store.cdn_public_export_sha256(), Some(file.sha256));
     store
         .put_overwrite(&newer, Bytes::from_static(b"new ref"))
         .await

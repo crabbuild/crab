@@ -28,6 +28,8 @@ CDN transfer diagnostics retain SHA-256 request fingerprints for joining
 qualification fetches to provider logs. CloudFront and Front Door use
 response request IDs. The Cloud CDN measurement worker opts into a
 per-request User-Agent tag, which the backend bucket excludes from its cache key.
+The public export digest comes from the verified receipt attached to the
+selected route. Qualification compares it independently of the viewer URL.
 
 ## Why it exists
 

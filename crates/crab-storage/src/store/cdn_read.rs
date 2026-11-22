@@ -170,6 +170,16 @@ impl Store {
         })
     }
 
+    /// Report the verified public export receipt attached to the selected CDN route.
+    #[must_use]
+    pub fn cdn_public_export_sha256(&self) -> Option<String> {
+        self.cdn
+            .as_ref()?
+            .publication
+            .as_ref()
+            .map(|receipt| format!("{:x}", receipt.approval_digest))
+    }
+
     /// Read and verify one immutable unit, optionally using the scoped CDN route.
     ///
     /// Size and range must come from an authenticated descriptor. The verifier

@@ -566,9 +566,12 @@ and edge payload through redacted observations.
   warm-local controls for the same publication receipt. The origin arm
   verifies the binding is disabled.
   Each timed arm confirms its isolated local cache root, and qualification
-  rejects a configured shared cache. The warm-local arm requires a verified
-  pack cache hit from a fresh Git client sharing the cache of its own edge
-  primer, or a SHA-256-verified LFS cache hit in the primed worktree.
+  rejects a configured shared cache. Public edge and warm-local arms pin the
+  active sealed export receipt alongside the viewer URL. Stage their immutable
+  benchmark objects before sealing the preregistered receipt. The warm-local
+  arm requires a verified pack cache hit from a fresh Git client sharing the
+  cache of its own edge primer, or a SHA-256-verified LFS cache hit in the
+  primed worktree.
   `crab/scripts/e2e/collect_cdn_git_performance.py` binds each timed fetch to its
   measured provider and runner metrics, checks ordered same-publication pairs
   across two preregistered regions, and applies the release budgets. Assembly

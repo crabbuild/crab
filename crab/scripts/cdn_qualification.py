@@ -138,7 +138,7 @@ GIT_RETIREMENT_FIELDS = CDN_PROVENANCE_FIELDS | {"schema", "publication_sha256",
 CLI_BUILD_FIELDS = {"source_sha", "target_triple", "cargo_profile", "cargo_features", "qualification_feature", "release_policy_sha256"}
 CLI_CANDIDATE_FIELDS = CLI_BUILD_FIELDS | {"binary_sha256"}
 CLI_NATIVE_FIELDS = {"origin_sha256", "prefix_sha256"}
-CLI_READ_FIELDS = CLI_NATIVE_FIELDS | {"binding_sha256", "cache_root_sha256"}
+CLI_READ_FIELDS = CLI_NATIVE_FIELDS | {"binding_sha256", "cache_root_sha256", "public_export_sha256"}
 CLI_TARGET = re.compile(r"(aarch64|x86_64)-(apple-darwin|unknown-linux-(?:gnu|musl)|pc-windows-(?:msvc|gnu|gnullvm))")
 PRODUCT_COUNTERS = {
     "edge_attempts", "observed_edge_gets", "edge_bytes", "edge_hits", "edge_misses", "edge_unknown",
@@ -542,6 +542,8 @@ def verify_public_transition(
             require(reader["binding_sha256"] == registration["viewer_binding_sha256"]
                     and matches(SHA256, reader["cache_root_sha256"]),
                     "public transition must use the registered viewer binding and an isolated local cache")
+            require(reader["public_export_sha256"] == approval,
+                    "public transition reader did not use the approved export receipt")
     before, after = trace["before"], trace["after"]
     require(type(before["edge_attempts"]) is int and before["edge_attempts"] == 0 and before["verified_edge_key_sha256"] is None
             and positive(after["edge_attempts"]) and after["verified_edge_key_sha256"] == key,
@@ -1229,6 +1231,10 @@ def validate_git_fetch(raw: bytes, provenance: dict[str, Any], mode: str, label:
             and (matches(SHA256, reader["binding_sha256"])
                  or (mode == "origin" and reader["binding_sha256"] == "")),
             f"{label} has an invalid CDN binding, native target or local cache fingerprint")
+    edge, access, _, _, _ = scope_parts(provenance["scope"])
+    require(matches(SHA256, reader["public_export_sha256"]) if mode != "origin" and access == "public"
+            else reader["public_export_sha256"] == "",
+            f"{label} has an invalid public export approval")
     if "candidate" in provenance:
         require(client["candidate"] == provenance["candidate"], f"{label} did not run the registered CLI build")
     require(matches(GIT_OID, client["publication_oid"]) and matches(SHA256, client["publication_sha256"])
@@ -1246,7 +1252,7 @@ def validate_git_fetch(raw: bytes, provenance: dict[str, Any], mode: str, label:
             and (native["body_bytes"] == 0 or native["get_responses"] + native["head_responses"] > 0),
             f"{label} has invalid native object-store counters")
     responses = client["edge_responses"]
-    provider = PROVIDER_FOR_EDGE[scope_parts(provenance["scope"])[0]]
+    provider = PROVIDER_FOR_EDGE[edge]
     require(isinstance(responses, dict) and len(responses) <= min(1024, client["all_edge_attempts"])
             and (not responses or provider in VIEWER_REQUEST_FILES),
             f"{label} has invalid CDN viewer response evidence")
@@ -1375,7 +1381,7 @@ def verify_git_native_ref(
 
 def collect_git_product_action(
     inputs: Path, row: dict[str, Any], rollback_raw: bytes, *, retain: Path | None = None, cleanup_at: int | None = None,
-    native_origin_sha256: str | None = None,
+    native_origin_sha256: str | None = None, public_export_sha256: str = "",
 ) -> dict[str, Any]:
     publication_raw = read_git_record(inputs / "publication.json")
     publication = validate_git_publication(publication_raw, row)
@@ -1387,6 +1393,8 @@ def collect_git_product_action(
     fetch = validate_git_fetch(fetch_raw, fetch_provenance, "edge", "Git product action")
     require(fetch["reader"]["binding_sha256"] == row.get("viewer_binding_sha256"),
             "product fetch did not use the registered viewer binding")
+    require(fetch["reader"]["public_export_sha256"] == public_export_sha256,
+            "product fetch did not use the registered public export approval")
     digest = hashlib.sha256(publication_raw).hexdigest()
     require(fetch["publication_sha256"] == digest and fetch["publication_oid"] == publication["oid"]
             and fetch["expected_sha256"] == publication["sha256"]
@@ -1481,6 +1489,8 @@ def collect_cli_performance(
                 reader = client["reader"]
                 require(arm == "origin" or reader["binding_sha256"] == spec["viewer_binding_sha256"],
                         f"{label} did not use the required viewer configuration")
+                require(arm == "origin" or reader["public_export_sha256"] == spec.get("publication_sha256", ""),
+                        f"{label} did not use the registered public export approval")
                 cache_root = reader["cache_root_sha256"]
                 require(cache_root not in cache_roots, "benchmark arms reused a local cache root")
                 cache_roots.add(cache_root)
@@ -1597,7 +1607,7 @@ def verify_cdn_report(
         registered_read = {key: registration[key] for key in ("candidate", "viewer_binding_sha256")}
         product = collect_git_product_action(
             directory / GIT_PRODUCT_DIR, row | registered_read, rollback, cleanup_at=cleanup_at,
-            native_origin_sha256=native_origin_sha256,
+            native_origin_sha256=native_origin_sha256, public_export_sha256=registration.get("publication_sha256", ""),
         )
         require(row["product_action"] == product | {"fixture_cleanup_verified": True},
                 "product action differs from the retained publication, fetch, and retirement evidence")

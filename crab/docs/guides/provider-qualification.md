@@ -855,8 +855,11 @@ python3 -B crab/scripts/e2e/collect_cdn_git_native_ref.py "$phase" \
 
 Prepare any checkpoint, protected view, or public export required by the registered
 read family after publication. For public runs, add the export publisher's
-receipt and SHA-256 to the worker's trusted CDN binding before measuring
-the edge arm. The workload's own receipt records the native Git publication.
+receipt and SHA-256 to the worker's trusted CDN binding before measuring the
+edge arm. Supply the same receipt directory with `--export-approval` on public
+`fetch` and `fetch-warm-local` calls. Crab compares the loaded receipt digest
+with the worker's approved digest, even when the viewer endpoint is unchanged.
+The workload's separate receipt records the native Git publication.
 Then run `fetch` with the same arguments and
 the configured reader credentials. The workload verifies the advertised
 commit and blob SHA-256 and requires both a completed CDN GET and an
@@ -962,6 +965,13 @@ before warm edge and warm local. The origin control can run at any point in
 the pair. Start the next pair after the previous pair finishes. The LFS timer
 starts after Git fetches and verifies the pointer, so the recorded interval
 measures LFS payload delivery and its native metadata reads.
+
+For public benchmarks, stage the immutable objects for every benchmark pair
+before sealing the current export approval. Use that same approved export
+for the timed cold edge, warm edge, and warm-local arms. The release verifier
+checks its digest independently of the viewer URL and the native Git
+publication receipt. The origin control has the public binding withdrawn,
+so omit `--export-approval` for that arm.
 
 Each `measurement.json` uses schema `crab.cdn-git-measurement/v1` and
 contains `client_report_sha256`, `provider` (`s3`, `gcs`, or `azure`),

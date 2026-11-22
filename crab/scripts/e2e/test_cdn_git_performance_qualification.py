@@ -116,6 +116,20 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "observed no native payload transfer"):
             self.collect()
 
+    def test_public_benchmark_requires_the_registered_export_with_the_same_viewer(self) -> None:
+        scope = "cloudfront/public/cli/git/direct"
+        self.registration.pop("scoped_view_sha256")
+        self.registration.pop("cache_reuse_sha256")
+        self.registration.update(scope=scope, candidate=fixture.cli_candidate(scope, PLATFORM),
+                                 publication_sha256="6" * 64, previous_publication_sha256="7" * 64,
+                                 historical_origin_sha256="8" * 64)
+        fixture.write_git_measurements(self.root, self.registration, PLATFORM)
+        slot = "near/0001/warm_local"
+        reader = json.loads((self.root / slot / "client.json").read_bytes())["reader"]
+        self.amend_client(slot, reader=reader | {"public_export_sha256": self.registration["previous_publication_sha256"]})
+        with self.assertRaisesRegex(ValueError, "did not use the registered public export approval"):
+            self.collect()
+
     def test_runner_and_provider_metrics_must_cover_native_reads_during_an_edge_hit(self) -> None:
         report = self.root / "near/0001/warm_edge/measurement.json"
         external = json.loads(report.read_bytes())
