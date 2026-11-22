@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Join an ordinary Crab fetch to its provider's viewer access logs."""
+"""Join a timed Crab read to its provider's viewer access logs."""
 
 from __future__ import annotations
 
@@ -16,8 +16,9 @@ from urllib.parse import urlsplit
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cdn_qualification import (  # noqa: E402
-    CDN_PROVENANCE_FIELDS, GIT_FETCH_RECORD_LIMIT, PROVIDER_FOR_EDGE, VIEWER_REQUEST_FILES, decode, matches,
-    read_git_record, require, scope_parts, validate_git_fetch, verify_viewer_requests,
+    CDN_PROVENANCE_FIELDS, GIT_FETCH_RECORD_LIMIT, PROVIDER_FOR_EDGE, SDK_GIT_READ_FIELDS, VIEWER_REQUEST_FILES,
+    decode, fields, is_direct_sdk_git_scope, matches, read_git_record, require, scope_parts, validate_git_fetch,
+    verify_git_traffic, verify_viewer_requests,
 )
 from collect_front_door_deployment_policy import FRONT_DOOR_HOST, SUBSCRIPTION  # noqa: E402
 from run_cdn_transport_checks import approved_fixture, deployment_target, fixture_base, origin_bucket  # noqa: E402
@@ -411,7 +412,13 @@ def main() -> int:
                 and candidate["configuration_sha256"] == args.configuration_sha256,
                 "CDN viewer evidence needs a fetch for the approved fixture")
         provenance = {key: candidate[key] for key in CDN_PROVENANCE_FIELDS | {"platform"}}
-        client = validate_git_fetch(raw, provenance, candidate["arm"], "CDN benchmark fetch")
+        if is_direct_sdk_git_scope(fixture["scope"]):
+            client = fields(candidate, SDK_GIT_READ_FIELDS, "CDN benchmark SDK snapshot")
+            require(client["schema"] == "crab.cdn-sdk-git-read/v1" and client["arm"] == "edge",
+                    "SDK viewer evidence requires a timed edge snapshot")
+            verify_git_traffic(client, edge, "CDN benchmark SDK snapshot")
+        else:
+            client = validate_git_fetch(raw, provenance, candidate["arm"], "CDN benchmark fetch")
         require(client["all_edge_attempts"] > 0 and len(client["edge_responses"]) == client["all_edge_attempts"],
                 "the timed fetch lacks a CDN request fingerprint for each viewer attempt")
         loaders = {"cloudfront": cloudfront_logs, "cloud-cdn": cloud_cdn_logs, "front-door": front_door_logs}

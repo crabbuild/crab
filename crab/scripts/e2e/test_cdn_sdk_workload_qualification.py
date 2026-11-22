@@ -5,6 +5,7 @@ import hashlib
 import json
 import subprocess
 import unittest
+from itertools import cycle
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -45,13 +46,18 @@ class CdnSdkWorkloadQualificationTests(unittest.TestCase):
                            "token_cache_directory": str(root / "login")})
         self.args = argparse.Namespace(arm="edge", fixture=config_path, configuration_sha256=configuration,
                                        receipt=receipt, probe=probe, source_sha=COMMIT, run_id="123", run_attempt="2",
-                                       private_reader=reader, export_approval=None)
+                                       private_reader=reader, export_approval=None, warm_local_output=None)
         self.build = {key: value for key, value in sdk_candidate(scope, SDK.runner_platform()).items() if key in CLI_BUILD_FIELDS}
+        clock = patch.object(SDK.time, "time_ns", side_effect=cycle((1_000_000_000, 1_010_000_000)))
+        clock.start()
+        self.addCleanup(clock.stop)
 
     def observe(self, *, edge: bool, observed_blob: str = "e" * 64, reader: dict | None = None,
+                local_blob: str | None = None, local_uses_edge: bool = False,
                 **result: object) -> subprocess.CompletedProcess[bytes]:
-        report = {"commit": self.oid, "sha256": self.sha, "bytes": SDK.GIT_PAYLOAD_SIZE,
-                  "build": self.build, "git_blob_oid_sha256": "e" * 64} | result
+        report = {"commit": self.oid, "payload": {"sha256": self.sha, "bytes": SDK.GIT_PAYLOAD_SIZE,
+                  "git_blob_oid_sha256": "e" * 64}, "build": self.build, "warm_local": None,
+                  "started_at_unix_ms": 1001, "finished_at_unix_ms": 1005, "elapsed_ms": 4} | result
         native = {"target": "crab_storage::native_read", "fields": {
             "message": "Native object store read", "provider": "s3", "method": "get", "status": 200, "bytes": 8,
         }}
@@ -71,6 +77,18 @@ class CdnSdkWorkloadQualificationTests(unittest.TestCase):
             "public_export_sha256": "",
         } | (reader or {})}
         logs = [selected, native, transfer, verify] if edge else [selected, native]
+        logs.append({"target": SDK.ARM_BOUNDARY, "fields": {"phase": "primary_finish"}})
+        if local_blob is not None:
+            report["warm_local"] = {"started_at_unix_ms": 1006, "finished_at_unix_ms": 1008, "elapsed_ms": 2}
+            logs.extend([
+                {"target": SDK.ARM_BOUNDARY, "fields": {"phase": "local_start"}},
+                native,
+                verify | {"fields": verify["fields"] | {"source": "local", "git_blob_oid_sha256": local_blob}},
+            ])
+            if local_uses_edge:
+                logs.append(transfer)
+            logs.append({"target": SDK.ARM_BOUNDARY, "fields": {"phase": "local_finish"}})
+        logs.append(native)
         return subprocess.CompletedProcess([], 0, json.dumps(report).encode(),
                                            "\n".join(json.dumps(event) for event in logs).encode())
 
@@ -78,7 +96,8 @@ class CdnSdkWorkloadQualificationTests(unittest.TestCase):
         for arm in ("edge", "origin"):
             with self.subTest(arm=arm), patch.object(SDK.subprocess, "run", return_value=self.observe(edge=arm == "edge")) as run:
                 self.args.arm = arm
-                report = SDK.fetch(self.args)
+                report, local = SDK.fetch(self.args)
+                self.assertIsNone(local)
                 request = json.loads(run.call_args.kwargs["input"])
                 self.assertEqual(request["branch"], self.branch)
                 self.assertEqual(request["binding"]["endpoint"], self.issuer)
@@ -122,3 +141,23 @@ class CdnSdkWorkloadQualificationTests(unittest.TestCase):
                          self.approval)
         with self.assertRaisesRegex(ValueError, "did not confirm the approved native target"):
             SDK.verified_target(lines, self.config, "edge", "0" * 64)
+
+    def test_warm_local_record_wraps_only_the_repeat_of_its_own_verified_primer(self) -> None:
+        self.args.warm_local_output = self.args.probe.with_name("warm-local.json")
+        with patch.object(SDK.subprocess, "run", return_value=self.observe(edge=True, local_blob="e" * 64)) as run:
+            edge, local = SDK.fetch(self.args)
+        self.assertTrue(json.loads(run.call_args.kwargs["input"])["repeat_snapshot"])
+        self.assertEqual(local["primer_sha256"], hashlib.sha256(SDK.json_record(edge).encode()).hexdigest())
+        self.assertEqual((edge["verified_edge_payloads"], edge["local_payload_hits"]), (1, 0))
+        self.assertEqual(edge["native_traffic"]["get_responses"], 1)
+        self.assertEqual((local["all_edge_attempts"], local["local_payload_hits"]), (0, 1))
+        self.assertEqual((local["elapsed_ms"], local["native_traffic"]["get_responses"]), (2, 1))
+
+    def test_warm_local_rejects_an_unrelated_cached_blob_or_edge_activity(self) -> None:
+        self.args.warm_local_output = self.args.probe.with_name("warm-local.json")
+        for cached, edge_reads in (("d" * 64, False), ("e" * 64, True)):
+            with self.subTest(cached=cached, edge_reads=edge_reads), patch.object(
+                SDK.subprocess, "run", return_value=self.observe(edge=True, local_blob=cached, local_uses_edge=edge_reads),
+            ):
+                with self.assertRaisesRegex(ValueError, "verified in-memory Git blob without edge traffic"):
+                    SDK.fetch(self.args)

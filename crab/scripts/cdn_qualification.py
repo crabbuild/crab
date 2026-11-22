@@ -155,10 +155,12 @@ GIT_FETCH_FIELDS = PRODUCT_COUNTERS | CDN_PROVENANCE_FIELDS | {
 }
 SDK_GIT_ACTION = "sdk-git-snapshot"
 SDK_READ_FIELDS = CLI_NATIVE_FIELDS | {"binding_sha256", "public_export_sha256"}
-SDK_PROBE_FIELDS = {"commit", "sha256", "bytes", "git_blob_oid_sha256", "build"}
-SDK_GIT_READ_FIELDS = PRODUCT_COUNTERS | CDN_PROVENANCE_FIELDS | (SDK_PROBE_FIELDS - {"build"}) | {
-    "schema", "arm", "platform", "candidate", "approval_sha256", "publication_sha256", "started_at_unix_ms",
-    "finished_at_unix_ms", "elapsed_ms", "edge_responses", "native_traffic", "reader",
+SDK_PAYLOAD_FIELDS = {"sha256", "bytes", "git_blob_oid_sha256"}
+SDK_TIMING_FIELDS = {"started_at_unix_ms", "finished_at_unix_ms", "elapsed_ms"}
+SDK_PROBE_FIELDS = SDK_TIMING_FIELDS | {"commit", "payload", "build", "warm_local"}
+SDK_GIT_READ_FIELDS = PRODUCT_COUNTERS | CDN_PROVENANCE_FIELDS | SDK_PAYLOAD_FIELDS | SDK_TIMING_FIELDS | {
+    "schema", "arm", "platform", "candidate", "approval_sha256", "publication_sha256",
+    "edge_responses", "native_traffic", "reader", "commit",
 }
 GIT_MODES = {"origin": "origin", "cold_edge": "edge", "warm_edge": "edge", "warm_local": "warm_local"}
 SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -1313,7 +1315,9 @@ def verify_git_traffic(client: dict[str, Any], edge: str, label: str) -> None:
 
 
 def verify_sdk_git_read(raw: bytes, row: dict[str, Any], spec: dict[str, Any], mode: str) -> dict[str, Any]:
-    client = fields(decode(raw), SDK_GIT_READ_FIELDS, "redacted SDK Git snapshot")
+    local = mode == "warm_local"
+    expected_fields = SDK_GIT_READ_FIELDS | ({"primer_sha256"} if local else set())
+    client = fields(decode(raw), expected_fields, "redacted SDK Git snapshot")
     edge, access, _, _, _ = scope_parts(row["scope"])
     require(client["schema"] == "crab.cdn-sdk-git-read/v1" and client["arm"] == mode
             and all(client[key] == row[key] for key in CDN_PROVENANCE_FIELDS | {"platform"}),
@@ -1327,21 +1331,26 @@ def verify_sdk_git_read(raw: bytes, row: dict[str, Any], spec: dict[str, Any], m
     reader = fields(client["reader"], SDK_READ_FIELDS, "verified SDK read target")
     require(all(matches(SHA256, reader[key]) for key in CLI_NATIVE_FIELDS),
             "SDK snapshot has invalid native origin or prefix fingerprints")
-    expected_binding = spec["viewer_binding_sha256"] if mode == "edge" else ""
-    expected_export = spec["publication_sha256"] if mode == "edge" and access == "public" else ""
-    expected_approval = spec["viewer_approval_sha256"] if mode == "edge" and access == "private" else expected_export
+    expected_binding = spec["viewer_binding_sha256"] if mode != "origin" else ""
+    expected_export = spec["publication_sha256"] if mode != "origin" and access == "public" else ""
+    expected_approval = spec["viewer_approval_sha256"] if mode != "origin" and access == "private" else expected_export
     require(reader["binding_sha256"] == expected_binding and reader["public_export_sha256"] == expected_export
             and client["approval_sha256"] == expected_approval,
             "SDK snapshot did not use the required viewer binding and approval")
     verify_git_traffic(client, edge, "SDK snapshot")
-    if mode == "origin":
+    if local:
+        require(matches(SHA256, client["primer_sha256"]) and positive(client["local_payload_hits"])
+                and all(client[key] == 0 for key in PRODUCT_COUNTERS - {"local_payload_hits"}),
+                "SDK warm-local sample requires its primer and a verified cached blob without edge traffic")
+    elif mode == "origin":
         native = client["native_traffic"]
         require(all(client[key] == 0 for key in PRODUCT_COUNTERS)
                 and positive(native["get_responses"]) and positive(native["body_bytes"]),
                 "SDK rollback requires native payload reads without edge or cached payload activity")
     else:
         require(positive(client["observed_edge_gets"]) and positive(client["verified_edge_payloads"])
-                and positive(client["edge_bytes"]), "SDK snapshot accepted no verified edge Git payload")
+                and positive(client["edge_bytes"]) and client["local_payload_hits"] == 0,
+                "SDK snapshot requires a verified edge Git payload from a fresh client")
     return client
 
 
@@ -1568,21 +1577,25 @@ def collect_sdk_product_action(
     }
 
 
-def collect_cli_performance(
+def collect_git_performance(
     inputs: Path, registration: dict[str, Any], platform: str, run_id: str, attempt: str,
-    *, retain: Path | None = None,
+    *, retain: Path | None = None, sdk_native: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     spec = benchmark_registration(registration)
     scope = spec["scope"]
-    require(requires_cli_workload(scope) and spec["workload"] == cli_action_name(scope),
-            "benchmark must register the scoped direct CLI fetch workload")
+    sdk = is_direct_sdk_git_scope(scope)
+    require(sdk or (requires_cli_workload(scope) and spec["workload"] == cli_action_name(scope)),
+            "benchmark must register a scoped direct Git, capsule or LFS workload")
+    if sdk:
+        require(inputs.is_dir(), "direct SDK Git requires retained regional SDK benchmark records")
     require(matches(COMMIT, spec["source_sha"]) and matches(SHA256, spec["configuration_sha256"])
             and matches(RUN_NUMBER, run_id) and matches(RUN_NUMBER, attempt) and matches(LABEL, platform),
             "invalid benchmark provenance")
     provider = PROVIDER_FOR_EDGE[scope.split("/", 1)[0]]
     provenance = {key: spec[key] for key in ("source_sha", "scope", "configuration_sha256")}
-    provenance |= {"workflow_run_id": run_id, "workflow_run_attempt": attempt, "platform": platform,
-                   "candidate": spec["candidate"]}
+    provenance |= {"workflow_run_id": run_id, "workflow_run_attempt": attempt, "platform": platform}
+    if not sdk:
+        provenance["candidate"] = spec["candidate"]
     seen = set()
     cache_roots = set()
     provider_request_ids = set()
@@ -1594,6 +1607,7 @@ def collect_cli_performance(
             pair = {}
             fixtures = set()
             windows = {}
+            primer_digest = None
             for arm in ARMS:
                 slot = Path(location) / f"{index:04d}" / arm
                 label = f"{location} {index} {arm}"
@@ -1601,17 +1615,28 @@ def collect_cli_performance(
                 digest = hashlib.sha256(client_raw).hexdigest()
                 require(digest not in seen, "a fetch was reused in another benchmark arm or pair")
                 seen.add(digest)
-                client = validate_git_fetch(client_raw, provenance, GIT_MODES[arm], label)
-                reader = client["reader"]
-                require(arm == "origin" or reader["binding_sha256"] == spec["viewer_binding_sha256"],
-                        f"{label} did not use the required viewer configuration")
-                require(arm == "origin" or reader["public_export_sha256"] == spec.get("publication_sha256", ""),
-                        f"{label} did not use the registered public export approval")
-                cache_root = reader["cache_root_sha256"]
-                require(cache_root not in cache_roots, "benchmark arms reused a local cache root")
-                cache_roots.add(cache_root)
-                fixtures.add((client["publication_oid"], client["expected_sha256"], client["publication_sha256"],
-                              reader["origin_sha256"], reader["prefix_sha256"]))
+                if sdk:
+                    client = verify_sdk_git_read(client_raw, provenance, spec, GIT_MODES[arm])
+                    reader = client["reader"]
+                    require(sdk_native is None or all(reader[key] == sdk_native[key] for key in CLI_NATIVE_FIELDS),
+                            f"{label} changed the approved SDK native target")
+                    if arm == "warm_edge":
+                        primer_digest = digest
+                    if arm == "warm_local":
+                        require(client["primer_sha256"] == primer_digest, f"{label} did not repeat its own warm edge snapshot")
+                    payload = (client["commit"], client["sha256"], client["git_blob_oid_sha256"])
+                else:
+                    client = validate_git_fetch(client_raw, provenance, GIT_MODES[arm], label)
+                    reader = client["reader"]
+                    require(arm == "origin" or reader["binding_sha256"] == spec["viewer_binding_sha256"],
+                            f"{label} did not use the required viewer configuration")
+                    require(arm == "origin" or reader["public_export_sha256"] == spec.get("publication_sha256", ""),
+                            f"{label} did not use the registered public export approval")
+                    cache_root = reader["cache_root_sha256"]
+                    require(cache_root not in cache_roots, "benchmark arms reused a local cache root")
+                    cache_roots.add(cache_root)
+                    payload = (client["publication_oid"], client["expected_sha256"])
+                fixtures.add((*payload, client["publication_sha256"], reader["origin_sha256"], reader["prefix_sha256"]))
                 windows[arm] = (client["started_at_unix_ms"], client["finished_at_unix_ms"])
                 viewer_log = None
                 cdn_origin_gets = cdn_fill_bytes = 0
@@ -1632,7 +1657,7 @@ def collect_cli_performance(
                 measured.update({key: external[key] for key in GIT_EXTERNAL_METRICS})
                 require(all(type(value) is int and value >= 0 for value in measured.values()),
                         f"{label} is missing measured metrics")
-                require(positive(measured["peak_memory_bytes"]) and positive(measured["peak_disk_bytes"]),
+                require(positive(measured["peak_memory_bytes"]) and (sdk or positive(measured["peak_disk_bytes"])),
                         f"{label} is missing fetch memory or disk measurements")
                 incomplete = client["incomplete_edge_bytes"]
                 native = client["native_traffic"]
@@ -1644,6 +1669,8 @@ def collect_cli_performance(
                         f"{label} has no logged CloudFront fill from the approved S3 origin")
                 require(provider != "azure" or arm != "cold_edge" or positive(cdn_fill_bytes),
                         f"{label} has no logged Front Door fill from the approved Blob origin")
+                require(not sdk or provider != "gcs" or arm != "cold_edge" or positive(cdn_fill_bytes),
+                        f"{label} has no logged Cloud CDN fill from the approved GCS origin")
                 require(incomplete <= measured["rejected_bytes"]
                         and measured["client_bytes"] >= native["body_bytes"] + measured["edge_bytes"] + incomplete,
                         f"{label} undercounts observed client bytes")
@@ -1719,7 +1746,7 @@ def verify_cdn_report(
         row, edge, access, profile, directory, registration=registration,
     )
     if requires_cli_workload(scope):
-        measured = collect_cli_performance(directory / GIT_BENCHMARK_DIR, registration, platform, run_id, run_attempt)
+        measured = collect_git_performance(directory / GIT_BENCHMARK_DIR, registration, platform, run_id, run_attempt)
         require(measured == row["performance"], "CLI performance summary differs from the retained measurements")
         require(rollback is not None, "direct CLI qualification requires a product rollback fetch")
         registered_read = {key: registration[key] for key in ("candidate", "viewer_binding_sha256")}
@@ -1734,6 +1761,11 @@ def verify_cdn_report(
         product = collect_sdk_product_action(directory / GIT_PRODUCT_DIR, row, registration, rollback,
                                              cleanup_at=cleanup_at, native_origin_sha256=native_origin_sha256)
         require(row["product_action"] == product, "product action differs from the retained SDK snapshot evidence")
-        require(policy is None, "direct SDK Git promotion requires retained regional SDK benchmarks")
+        sdk_native = {"origin_sha256": native_origin_sha256,
+                      "prefix_sha256": hashlib.sha256(f"{row['fixture_prefix']}/".encode()).hexdigest()}
+        measured = collect_git_performance(directory / GIT_BENCHMARK_DIR, registration, platform, run_id, run_attempt,
+                                          sdk_native=sdk_native)
+        require(measured == row["performance"], "SDK performance summary differs from the retained measurements")
+        require(policy is None or access == "private", "public SDK Git promotion requires ordinary export transition reads")
     return {"status": "verified", "scope": scope, "platform": platform, "deployment": row["deployment"],
             "checks": checks, "distant_median_savings_lower_bound_ms": lower}

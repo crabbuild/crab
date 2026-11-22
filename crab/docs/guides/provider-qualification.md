@@ -961,8 +961,26 @@ Keep the edge record at `git-product/snapshot.json` and the origin record at
 `traces/rollback.json`. Retain `publication.json`, `retirement.json`,
 `provider-published.json` and `provider-retired.json` in `git-product`. The
 assembler derives `product_action` from these records, and the release
-verifier recomputes it. Release activation still requires measured regional
-SDK pairs and an SDK public export transition where applicable.
+verifier recomputes it.
+
+For each registered regional pair, start a fresh probe for `origin`,
+`cold_edge`, and `warm_edge`. The timed window covers repository open,
+snapshot capture, and reading and verifying the blob. For the warm edge
+command, pass `--warm-local-output` with the path to
+`git-benchmarks/<location>/<pair>/warm_local/client.json`. Redirect stdout
+from that same command to its `warm_edge/client.json`. The probe times a
+second call to the blob API on the pinned snapshot and retains a fingerprint
+of its warm edge record. This arm measures the verified in-memory blob
+cache. Native metadata reads still count if the repeat opens a catalog.
+
+Collect the provider viewer and cache-fill evidence for both edge arms
+with `collect_cdn_viewer_requests.py`. Keep the independently measured
+`measurement.json` beside each `client.json` and use
+`collect_cdn_git_performance.py` for the paired summary. An SDK probe can
+report zero measured disk bytes. The verifier checks all four reads used the
+same publication, blob, and approved native target. Assembly reconstructs
+the performance summary from these files. Public SDK rows also need
+ordinary before-and-after export transition reads for release activation.
 
 ### Verify fixture cleanup
 

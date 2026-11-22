@@ -85,6 +85,22 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
                                         "s3-origin-id", "fixture-principal", key, "fixture-bucket"):
                             self.assertNotIn(private, retained)
 
+            config["scope"] = "cloudfront/private/sdk/git/direct"
+            sdk_configuration = examples.json_file(fixture_path, config)
+            sdk_registration = registration | {
+                "scope": config["scope"], "configuration_sha256": sdk_configuration,
+                "sdk_candidate": examples.sdk_candidate(config["scope"], "linux-x86_64"),
+            }
+            examples.write_git_measurements(root, sdk_registration, "linux-x86_64")
+            snapshot = json.loads(client.read_bytes()) | {"edge_responses": {fingerprint: response}}
+            sdk_digest = examples.json_file(client, snapshot)
+            sdk_output = root / "sdk-cloudfront-requests.json"
+            command[command.index(configuration)] = sdk_configuration
+            command[command.index(str(output))] = str(sdk_output)
+            result = subprocess.run(command, capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(sdk_output.read_bytes())["client_report_sha256"], sdk_digest)
+
     def test_cloud_cdn_joins_range_fills_and_validations_to_the_tagged_viewer(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)

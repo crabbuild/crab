@@ -180,6 +180,20 @@ impl Store {
             .map(|receipt| format!("{:x}", receipt.approval_digest))
     }
 
+    /// Report a checksum-verified Git blob returned from an in-process cache.
+    pub fn observe_verified_git_cache_hit(&self, oid: &[u8]) {
+        let Some(route) = &self.cdn else {
+            return;
+        };
+        let family = CdnReadFamily::Git;
+        if (route.transport.is_loopback() || route.families.contains(&family))
+            && let Some(policy) = route.policy()
+            && let Some(observation) = PayloadObservation::new(policy, family, None)
+        {
+            observation.record_local_git_blob(oid);
+        }
+    }
+
     /// Read and verify one immutable unit, optionally using the scoped CDN route.
     ///
     /// Size and range must come from an authenticated descriptor. The verifier

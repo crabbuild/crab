@@ -17,14 +17,16 @@ from run_cdn_git_workload import approved_public_export, runner_platform, viewer
 from run_cdn_transport_checks import approved_fixture
 
 from cdn_qualification import (
-    COMMIT, GIT_PAYLOAD_SIZE, RUN_NUMBER, SDK_PROBE_FIELDS, SHA256, decode, fields, is_direct_sdk_git_scope, matches,
-    read_git_record, require, scope_parts, validate_git_publication, verify_sdk_candidate,
+    COMMIT, GIT_PAYLOAD_SIZE, PRODUCT_COUNTERS, RUN_NUMBER, SDK_PAYLOAD_FIELDS, SDK_PROBE_FIELDS, SDK_TIMING_FIELDS,
+    SHA256, decode, fields, is_direct_sdk_git_scope, matches, positive, read_git_record, require, scope_parts,
+    validate_git_publication, verify_sdk_candidate,
 )
 from public_inventory import ExportError
 
 
 PRIVATE_READER_FIELDS = {"oidc_issuer", "oidc_client_id", "token_cache_directory"}
 READ_TARGET = "crab_sdk::cdn::read_target"
+ARM_BOUNDARY = "crab_cdn_probe::arm_boundary"
 
 
 def verified_target(lines: list[bytes], fixture: dict, arm: str, approval: str) -> dict:
@@ -67,7 +69,38 @@ def binding_for(args: argparse.Namespace, fixture: dict) -> tuple[dict, str]:
     return {"access": access, "export_origin": fixture["export_origin"], "publication": publication}, approval
 
 
-def fetch(args: argparse.Namespace) -> dict:
+def split_observations(lines: list[bytes], repeat: bool) -> tuple[list[bytes], list[bytes]]:
+    markers = []
+    for index, line in enumerate(lines):
+        if ARM_BOUNDARY.encode() in line:
+            event = decode(line)
+            if isinstance(event, dict) and event.get("target") == ARM_BOUNDARY:
+                marker = fields(event.get("fields"), {"phase"}, "SDK measurement boundary")
+                markers.append((index, marker["phase"]))
+    phases = ["primary_finish"]
+    if repeat:
+        phases.extend(("local_start", "local_finish"))
+    require([phase for _, phase in markers] == phases, "SDK probe did not isolate each timed read")
+    primary_end, _ = markers[0]
+    if not repeat:
+        return lines[:primary_end], []
+    _, (start, _), (finish, _) = markers
+    return lines[:primary_end], lines[start + 1:finish]
+
+
+def observed_interval(value: dict, earliest: int, latest: int) -> dict:
+    timing = fields(value, SDK_TIMING_FIELDS, "SDK timing")
+    require(all(positive(point) for point in timing.values())
+            and earliest <= timing["started_at_unix_ms"] <= timing["finished_at_unix_ms"] <= latest,
+            "SDK probe returned an invalid or out-of-order measurement interval")
+    return timing
+
+
+def json_record(value: dict) -> str:
+    return json.dumps(value, sort_keys=True) + "\n"
+
+
+def fetch(args: argparse.Namespace) -> tuple[dict, dict | None]:
     require(matches(COMMIT, args.source_sha) and matches(RUN_NUMBER, args.run_id)
             and matches(RUN_NUMBER, args.run_attempt), "exact workflow run provenance is required")
     fixture = approved_fixture(args.fixture, args.configuration_sha256)
@@ -79,22 +112,22 @@ def fetch(args: argparse.Namespace) -> dict:
     raw = read_git_record(args.receipt)
     publication = validate_git_publication(raw, provenance)
     require(publication["published"], "SDK read requires a confirmed native publication")
+    repeat = args.warm_local_output is not None
+    require(not repeat or args.arm == "edge", "SDK warm-local reads must reuse an edge primer")
     binding, approval = binding_for(args, fixture)
     request = {"origin": fixture["native_origin"], "repository_prefix": fixture["fixture_prefix"],
                "base_url": fixture["base_url"], "branch": publication["ref"].removeprefix("refs/heads/"),
                "expected_oid": publication["oid"], "expected_sha256": publication["sha256"],
-               "expected_bytes": GIT_PAYLOAD_SIZE, "binding": binding}
+               "expected_bytes": GIT_PAYLOAD_SIZE, "binding": binding, "repeat_snapshot": repeat}
     probe = args.probe.resolve(strict=True)
     with probe.open("rb") as binary:
         probe_digest = hashlib.file_digest(binary, "sha256").hexdigest()
     started_at = time.time_ns() // 1_000_000
     require(publication["visible_at_unix_ms"] <= started_at, "SDK measurement started before native publication")
-    started = time.monotonic_ns()
     try:
         result = subprocess.run([str(probe)], input=json.dumps(request).encode(), capture_output=True, timeout=300, check=False)
     except subprocess.TimeoutExpired:
         raise ValueError("SDK snapshot read timed out") from None
-    elapsed = max(1, (time.monotonic_ns() - started) // 1_000_000)
     finished_at = time.time_ns() // 1_000_000
     require(result.returncode == 0, f"SDK snapshot read failed with exit {result.returncode}")
     observed = fields(decode(result.stdout), SDK_PROBE_FIELDS, "SDK snapshot result")
@@ -102,14 +135,16 @@ def fetch(args: argparse.Namespace) -> dict:
     build = observed.pop("build")
     require(isinstance(build, dict) and "binary_sha256" not in build, "invalid SDK snapshot build")
     candidate = verify_sdk_candidate(build | {"binary_sha256": probe_digest}, args.source_sha, platform)
-    require(observed["commit"] == publication["oid"] and observed["sha256"] == publication["sha256"]
-            and type(observed["bytes"]) is int and observed["bytes"] == GIT_PAYLOAD_SIZE
-            and matches(SHA256, observed["git_blob_oid_sha256"]),
+    payload = fields(observed["payload"], SDK_PAYLOAD_FIELDS, "SDK snapshot payload")
+    require(observed["commit"] == publication["oid"] and payload["sha256"] == publication["sha256"]
+            and type(payload["bytes"]) is int and payload["bytes"] == GIT_PAYLOAD_SIZE
+            and matches(SHA256, payload["git_blob_oid_sha256"]),
             "SDK snapshot did not verify the published Git payload")
-    lines = result.stderr.splitlines()
+    timing = observed_interval({key: observed[key] for key in SDK_TIMING_FIELDS}, started_at, finished_at)
+    lines, local_lines = split_observations(result.stderr.splitlines(), repeat)
     reader = verified_target(lines, fixture, args.arm, approval)
     responses = {}
-    counters = measure(lines, scope, edge_responses=responses, expected_git_blob=observed["git_blob_oid_sha256"])
+    counters = measure(lines, scope, edge_responses=responses, expected_git_blob=payload["git_blob_oid_sha256"])
     native = measure_native(lines, scope)
     if args.arm == "edge":
         require(counters["observed_edge_gets"] > 0 and counters["verified_edge_payloads"] > 0,
@@ -117,13 +152,25 @@ def fetch(args: argparse.Namespace) -> dict:
     else:
         require(counters["all_edge_attempts"] == 0 and native["get_responses"] > 0 and native["body_bytes"] > 0,
                 "SDK origin control requires native payload reads without edge activity")
-    return provenance | observed | counters | {
-        "schema": "crab.cdn-sdk-git-read/v1", "arm": args.arm, "platform": platform,
-        "candidate": candidate, "approval_sha256": approval,
-        "publication_sha256": hashlib.sha256(raw).hexdigest(), "started_at_unix_ms": started_at,
-        "finished_at_unix_ms": finished_at, "elapsed_ms": elapsed, "edge_responses": responses, "native_traffic": native,
-        "reader": reader,
+    context = provenance | payload | {
+        "schema": "crab.cdn-sdk-git-read/v1", "platform": platform, "candidate": candidate, "approval_sha256": approval,
+        "publication_sha256": hashlib.sha256(raw).hexdigest(), "reader": reader, "commit": observed["commit"],
     }
+    primary = context | timing | counters | {"arm": args.arm, "edge_responses": responses, "native_traffic": native}
+    local = None
+    if repeat:
+        local_timing = observed_interval(observed["warm_local"], primary["finished_at_unix_ms"], finished_at)
+        local_counts = measure(local_lines, scope, expected_git_blob=payload["git_blob_oid_sha256"])
+        require(positive(local_counts["local_payload_hits"])
+                and all(local_counts[key] == 0 for key in PRODUCT_COUNTERS - {"local_payload_hits"}),
+                "SDK repeat read requires the verified in-memory Git blob without edge traffic")
+        local = context | local_timing | local_counts | {
+            "arm": "warm_local", "edge_responses": {}, "native_traffic": measure_native(local_lines, scope),
+            "primer_sha256": hashlib.sha256(json_record(primary).encode()).hexdigest(),
+        }
+    else:
+        require(observed["warm_local"] is None, "unexpected SDK repeat output")
+    return primary, local
 
 
 def main() -> int:
@@ -138,9 +185,14 @@ def main() -> int:
     parser.add_argument("--run-attempt", required=True)
     parser.add_argument("--private-reader", type=Path)
     parser.add_argument("--export-approval", type=Path)
+    parser.add_argument("--warm-local-output", type=Path, help="write the timed repeat read of the same pinned SDK snapshot")
     args = parser.parse_args()
     try:
-        print(json.dumps(fetch(args), sort_keys=True))
+        primary, local = fetch(args)
+        if local is not None:
+            with args.warm_local_output.open("x", encoding="utf-8", newline="\n") as output:
+                output.write(json_record(local))
+        sys.stdout.buffer.write(json_record(primary).encode())
     except (ExportError, OSError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

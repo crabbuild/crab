@@ -70,7 +70,7 @@ def measure(lines: Iterable[bytes], scope: str, *, edge_responses: dict | None =
             lfs = event["message"] == VERIFIED_LFS_EVENT
             require(lfs == (event["family"] == "lfs") and source in ("edge", "local"),
                     "unknown verified payload source or family")
-            require(blob not in event or (not lfs and source == "edge" and matches(SHA256, event[blob])),
+            require(blob not in event or (event["family"] == "git" and matches(SHA256, event[blob])),
                     "invalid verified CDN Git blob fingerprint")
             if tuple(event[name] for name in ROUTE) == selected:
                 if expected_git_blob is not None and event.get(blob) != expected_git_blob:

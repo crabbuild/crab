@@ -78,8 +78,9 @@ def sdk_candidate(scope: str, platform: str) -> dict:
     }
 
 
-def write_git_measurements(inputs: Path, registration: dict, platform: str) -> None:
+def write_git_measurements(inputs: Path, registration: dict, platform: str, sdk_native: dict | None = None) -> None:
     provider = CDN.PROVIDER_FOR_EDGE[registration["scope"].split("/", 1)[0]]
+    sdk = CDN.is_direct_sdk_git_scope(registration["scope"])
     action = CDN.cli_action_name(registration["scope"])
     for ordinal, (location, region) in enumerate(registration["regions"].items()):
         for index in range(1, registration["samples"] + 1):
@@ -100,7 +101,7 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str) -> N
                     "source_sha": registration["source_sha"], "scope": registration["scope"],
                     "configuration_sha256": registration["configuration_sha256"],
                     "workflow_run_id": "123", "workflow_run_attempt": "2", "platform": platform,
-                    "candidate": registration["candidate"],
+                    "candidate": registration["sdk_candidate" if sdk else "candidate"],
                     "reader": {
                         "binding_sha256": "" if arm == "origin" else registration["viewer_binding_sha256"],
                         "cache_root_sha256": hashlib.sha256(f"{location}/{index}/{arm}/cache".encode()).hexdigest(),
@@ -133,6 +134,18 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str) -> N
                     if provider == "gcs":
                         proof[request_id]["cache_fill_bytes"] = metrics["origin_fill_bytes"]
                         proof[request_id]["origin_requests"] = {}
+                if sdk:
+                    client["reader"].pop("cache_root_sha256")
+                    client["reader"].update(sdk_native or {})
+                    client = {key: value for key, value in client.items() if key in CDN.SDK_GIT_READ_FIELDS} | {
+                        "schema": "crab.cdn-sdk-git-read/v1", "commit": oid, "sha256": blob,
+                        "git_blob_oid_sha256": hashlib.sha256(f"{blob}/git".encode()).hexdigest(),
+                        "bytes": CDN.GIT_PAYLOAD_SIZE, "approval_sha256": "" if arm == "origin" else registration.get(
+                            "viewer_approval_sha256", registration.get("publication_sha256", ""),
+                        ),
+                    }
+                    if arm == "warm_local":
+                        client["primer_sha256"] = hashlib.sha256((directory.parent / "warm_edge/client.json").read_bytes()).hexdigest()
                 digest = json_file(directory / "client.json", client)
                 if proof:
                     edge_name = CDN.PROVIDERS[provider][0]
@@ -258,6 +271,9 @@ class CdnQualificationTests(unittest.TestCase):
             self.record_git_product()
         elif sdk:
             self.record_sdk_product()
+            cleanup = json.loads((self.directory / "traces/cleanup.json").read_bytes())
+            native = {"origin_sha256": cleanup["targets"]["native"]["origin_sha256"], "prefix_sha256": cleanup["prefix_sha256"]}
+            write_git_measurements(self.directory / CDN.GIT_BENCHMARK_DIR, self.registration, platform, sdk_native=native)
         if access == "public":
             self.public_transition_trace()
 
@@ -1000,7 +1016,23 @@ class CdnQualificationTests(unittest.TestCase):
         self.assertEqual(self.command().returncode, 0)
         policy = self.directory / "qualified-scopes.txt"
         policy.write_text(self.scope + "\n", encoding="utf-8")
-        self.rejected("requires retained regional SDK benchmarks", "--cdn-release-policy", str(policy))
+        (self.directory / CDN.GIT_BENCHMARK_DIR).rename(self.directory / "benchmark-backup")
+        self.rejected("requires retained regional SDK benchmark records", "--cdn-release-policy", str(policy))
+
+    def test_private_sdk_release_accepts_regional_provider_records(self) -> None:
+        for provider in ("s3", "gcs", "azure"):
+            with self.subTest(provider=provider):
+                self.configure(provider, "private", "direct", consumer="sdk")
+                policy = self.directory / "qualified-scopes.txt"
+                policy.write_text(self.scope + "\n", encoding="utf-8")
+                result = self.command("--cdn-release-policy", str(policy))
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_public_sdk_release_requires_ordinary_export_transition_calls(self) -> None:
+        self.configure("gcs", "public", "direct", consumer="sdk")
+        policy = self.directory / "qualified-scopes.txt"
+        policy.write_text(self.scope + "\n", encoding="utf-8")
+        self.rejected("requires ordinary export transition reads", "--cdn-release-policy", str(policy))
 
     def test_sdk_rollback_requires_same_approved_build_and_blob_at_origin(self) -> None:
         self.configure("azure", "private", "direct", consumer="sdk")

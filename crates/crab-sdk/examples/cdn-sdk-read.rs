@@ -3,7 +3,9 @@
 use std::io::{Read as _, Write as _};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use crab_sdk::remote::Snapshot;
 use crab_sdk::storage::{CdnIssuerOptions, DirectCdnOptions, DirectStoreOptions};
 use crab_sdk::{Client, GitPath, ObjectId, OpenOptions, RepositoryLocator, Revision};
 use crab_storage::cdn::CdnPublicationFile;
@@ -26,6 +28,7 @@ struct Request {
     expected_sha256: String,
     expected_bytes: usize,
     binding: Binding,
+    repeat_snapshot: bool,
 }
 
 #[derive(Deserialize)]
@@ -94,6 +97,7 @@ impl Request {
     }
 
     async fn read(&self, client: &Client) -> Result<serde_json::Value, Failure> {
+        let timing = Timing::start()?;
         let locator = RepositoryLocator::new(&self.repository_prefix)?;
         let expected_oid = ObjectId::from_hex(&self.expected_oid)?;
         let repository = client.open(OpenOptions::remote(locator)).await?;
@@ -105,6 +109,25 @@ impl Request {
         if oid != expected_oid {
             return Err("SDK snapshot selected a different published commit".into());
         }
+        let payload = self.read_blob(&snapshot).await?;
+        let mut report = timing.finish()?;
+        tracing::debug!(target: "crab_cdn_probe::arm_boundary", parent: None, phase = "primary_finish");
+        report["commit"] = serde_json::json!(oid.to_string());
+        report["payload"] = payload.clone();
+        report["warm_local"] = serde_json::Value::Null;
+        if self.repeat_snapshot {
+            tracing::debug!(target: "crab_cdn_probe::arm_boundary", parent: None, phase = "local_start");
+            let timing = Timing::start()?;
+            if self.read_blob(&snapshot).await? != payload {
+                return Err("SDK cache returned a different fixture blob".into());
+            }
+            report["warm_local"] = timing.finish()?;
+            tracing::debug!(target: "crab_cdn_probe::arm_boundary", parent: None, phase = "local_finish");
+        }
+        Ok(report)
+    }
+
+    async fn read_blob(&self, snapshot: &Snapshot) -> Result<serde_json::Value, Failure> {
         let bytes = snapshot.read_blob(GitPath::new(PAYLOAD)?).await?;
         let sha256 = format!("{:x}", Sha256::digest(&bytes));
         if bytes.len() != self.expected_bytes || sha256 != self.expected_sha256 {
@@ -115,12 +138,40 @@ impl Request {
         git.update(&bytes);
         let blob = git.try_finalize()?;
         Ok(serde_json::json!({
-            "commit": oid.to_string(),
             "sha256": sha256,
             "bytes": bytes.len(),
             "git_blob_oid_sha256": format!("{:x}", Sha256::digest(blob.as_bytes())),
         }))
     }
+}
+
+struct Timing {
+    started_at: u64,
+    clock: Instant,
+}
+
+impl Timing {
+    fn start() -> Result<Self, Failure> {
+        Ok(Self {
+            started_at: unix_ms()?,
+            clock: Instant::now(),
+        })
+    }
+
+    fn finish(self) -> Result<serde_json::Value, Failure> {
+        let elapsed = u64::try_from(self.clock.elapsed().as_millis())?;
+        Ok(serde_json::json!({
+            "started_at_unix_ms": self.started_at,
+            "finished_at_unix_ms": unix_ms()?,
+            "elapsed_ms": elapsed.max(1),
+        }))
+    }
+}
+
+fn unix_ms() -> Result<u64, Failure> {
+    Ok(u64::try_from(
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
+    )?)
 }
 
 fn build_info() -> Result<serde_json::Value, Failure> {
@@ -149,7 +200,7 @@ async fn run() -> Result<(), Failure> {
     }
     tracing_subscriber::fmt()
         .with_env_filter(
-            "off,crab_sdk::cdn::read_target=debug,crab_storage::cdn::transfer=debug,crab_storage::native_read=debug,crab_storage::cdn::gcs_viewer_log=trace",
+            "off,crab_cdn_probe::arm_boundary=debug,crab_sdk::cdn::read_target=debug,crab_storage::cdn::transfer=debug,crab_storage::native_read=debug,crab_storage::cdn::gcs_viewer_log=trace",
         )
         .with_writer(std::io::stderr)
         .json()

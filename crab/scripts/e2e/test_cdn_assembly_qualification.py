@@ -41,8 +41,9 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
                 (self.root / name).rename(row / name)
         if fixture.CDN.is_direct_sdk_git_scope(self.example.scope):
             observations.pop("product_action")
-            name = fixture.CDN.GIT_PRODUCT_DIR
-            (self.root / name).rename(row / name)
+            observations.pop("performance")
+            for name in (fixture.CDN.GIT_PRODUCT_DIR, fixture.CDN.GIT_BENCHMARK_DIR):
+                (self.root / name).rename(row / name)
         if access == "public":
             name = fixture.CDN.PUBLIC_EXPORT_DIR
             (self.root / name).rename(row / name)
@@ -81,7 +82,7 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
         ], capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         row = self.output / self.row
-        expected = {"cdn-report.json", "traces", fixture.CDN.GIT_PRODUCT_DIR}
+        expected = {"cdn-report.json", "traces", fixture.CDN.GIT_PRODUCT_DIR, fixture.CDN.GIT_BENCHMARK_DIR}
         self.assertEqual({path.name for path in row.iterdir()}, expected)
         self.assertEqual({path.name for path in self.output.iterdir()}, {"benchmarks.json", "gcs", "cloud-cdn"})
         self.assertEqual((self.root / "benchmarks.json").read_bytes(), (self.output / "benchmarks.json").read_bytes())
@@ -96,10 +97,16 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
         self.assertEqual({path.name for path in sdk_product.iterdir()},
                          {"publication.json", "snapshot.json", "retirement.json", *fixture.CDN.GIT_NATIVE_REF_FILES.values()})
         self.assertEqual(report["product_action"], self.example.report["product_action"])
-        with self.assertRaises(subprocess.CalledProcessError):
+        self.assertEqual(
             release.RELEASE.verify_bundle(
                 self.output, policy, {self.example.scope}, fixture.COMMIT, "123", "2", digest,
-            )
+            ), 1,
+        )
+        retained = row / fixture.CDN.GIT_BENCHMARK_DIR / "near/0001/warm_local/client.json"
+        unknown = json.loads(retained.read_bytes()) | {"primer_sha256": "1" * 64}
+        fixture.json_file(retained, unknown)
+        with self.assertRaises(subprocess.CalledProcessError):
+            release.RELEASE.verify_bundle(self.output, policy, {self.example.scope}, fixture.COMMIT, "123", "2", digest)
 
     def test_sdk_requires_measured_snapshot_and_rejects_operator_supplied_product_summary(self) -> None:
         digest = self.inputs("gcs")

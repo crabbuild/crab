@@ -94,6 +94,10 @@ impl PayloadObservation {
         self.record("local", None);
     }
 
+    pub(crate) fn record_local_git_blob(self, oid: &[u8]) {
+        self.record("local", Some(oid));
+    }
+
     fn record(self, source: &'static str, oid: Option<&[u8]>) {
         let message = match self.family {
             CdnReadFamily::Lfs => "CDN verified LFS payload",

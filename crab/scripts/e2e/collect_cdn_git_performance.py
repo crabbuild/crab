@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Join paired CLI fetches and provider measurements into a CDN performance report."""
+"""Join paired product reads and provider measurements into a CDN performance report."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cdn_qualification import (  # noqa: E402
-    LABEL, benchmark_registration, collect_cli_performance, decode, matches, require, verify_performance,
+    LABEL, benchmark_registration, collect_git_performance, decode, matches, require, verify_performance,
 )
 
 
@@ -36,7 +36,7 @@ def main() -> int:
         registration = benchmark_registration(registrations[args.row])
         require(matches(LABEL, platform) and registration["scope"] == scope,
                 "benchmark registration does not match its approved row")
-        performance = collect_cli_performance(args.inputs, registration, platform, args.run_id, args.run_attempt)
+        performance = collect_git_performance(args.inputs, registration, platform, args.run_id, args.run_attempt)
         verify_performance(performance, registration)
     except (OSError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)

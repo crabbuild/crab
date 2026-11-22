@@ -479,6 +479,17 @@ mod tests {
                     vec![expected.as_slice()]
                 };
                 assert_eq!(payloads, wanted);
+                if matches!(read, Read::Point) && edge_bytes == Some(&valid) {
+                    let cached = reader
+                        .read_with_session(&session, oid, &budget, &cancel)
+                        .await
+                        .unwrap();
+                    assert_eq!(cached.data.as_ref(), expected);
+                    assert_eq!(
+                        observations.load(Ordering::Relaxed),
+                        expected_observations + 1
+                    );
+                }
             }
             let usage = budget.usage().await;
             assert_eq!(

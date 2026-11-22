@@ -690,10 +690,13 @@ verified blob delivered to the caller. The independent native ref collector
 also accepts the SDK fixture. Assembly and verification derive the product
 result from the registered SDK build, verified edge snapshot, ordinary
 native rollback, independently observed publication and tombstone, and
-fixture cleanup. The release policy gate rejects SDK Git rows until it can
-recompute the performance summary from regional SDK records. The protected
-worker still needs live runs, regional pairing and the SDK action records
-for public export transitions.
+fixture cleanup. Regional SDK inputs use a fresh probe for the native,
+cold edge and warm edge arms. The local arm repeats the blob read on the
+warm probe's pinned snapshot. It proves the exact checksum-verified cached
+blob and zero edge attempts. Assembly and release verification rebuild the
+paired summary from the SDK records and independent provider and runner
+measurements. The protected worker still needs live runs and the SDK action
+records for public export transitions.
 
 The protected workflow or its dedicated workers own producing these raw
 observations. The assembly and release jobs own rejecting missing, mismatched

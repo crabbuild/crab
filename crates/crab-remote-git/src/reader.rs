@@ -800,6 +800,10 @@ impl RemoteGitReader {
             .verified_cached_object(&key, self.limits.max_object_bytes, cancellation)
             .await?
         {
+            if object.kind == gix_object::Kind::Blob {
+                self.store
+                    .observe_verified_git_cache_hit(requested.as_bytes());
+            }
             return Ok(object.as_ref().clone());
         }
         if self.runtime.exact_miss_is_cached(&key).await {

@@ -54,7 +54,7 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
         fixture.write_git_measurements(self.root, self.registration, PLATFORM)
 
     def collect(self) -> dict:
-        return fixture.CDN.collect_cli_performance(self.root, self.registration, PLATFORM, RUN_ID, ATTEMPT)
+        return fixture.CDN.collect_git_performance(self.root, self.registration, PLATFORM, RUN_ID, ATTEMPT)
 
     def amend_client(self, path: str, **changes: object) -> None:
         directory = self.root / path
@@ -274,7 +274,7 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
         self.amend_client("near/0001/origin", url="private-fixture-url")
         retained = self.root / "retained"
         with self.assertRaisesRegex(ValueError, "invalid fields in redacted Git fetch"):
-            fixture.CDN.collect_cli_performance(
+            fixture.CDN.collect_git_performance(
                 self.root, self.registration, PLATFORM, RUN_ID, ATTEMPT, retain=retained,
             )
         self.assertFalse(retained.exists())
