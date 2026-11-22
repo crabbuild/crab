@@ -39,6 +39,7 @@ Live cross-process provider qualification remains open.
 | Transfer lifetime | Pack, LFS and xorb origin restarts now share the edge attempt's deadline. File downloads signal cancellation and drain local writes before returning. Qualify failed lease renewal, admission across real provider retries and denial during parallel ranges through the complete operations. |
 | Authorization refresh | The direct issuer serves negotiated credentials with `Cache-Control: no-store`. Its client bounds responses and redacts issuer bodies from errors. Negotiated CLI, SDK and desktop direct reads and managed v2 direct reads share one origin and viewer refresh per rejected generation, including cancellation and failure. Online cache reads recheck the grant and reject out-of-scope paths. Local cache-store tests exercise separation by physical target and view, and denial on a warm disk cache. Failed edge-grant renewal also denies online cache reads. Private direct and managed renewal bind the original OIDC issuer and subject. Refresh cache writes cannot overwrite a newer login or undo sign-out. Private checkout passes a principal fingerprint to children. Qualify live renewals, namespace isolation, and terminal denial across the product entry points. |
 | Reader coverage | Authenticated catalog pages, detached capsule controls, native layered payload windows, lazy Git index ranges, and catalog-bound shards can use the CDN. Layered Git point reads and coalesced object batches verify final object IDs after delta reconstruction and own the origin restart. Raw pack passthrough, recovery, consolidation and strict provenance checks use origin. Full LFS streams use bounded edge ranges and hold the final bytes until SHA-256 succeeds. Partial LFS streams use a verified local descriptor or the native version proof. Qualify each reader on live deployments. |
+| Projected-view mounts | Mount startup writes a capture descriptor and creates a renewable, version-conditional claim under the selected view's `v2/readers/<owner>/` before admitting file reads. The reference issuer grants projected-view readers native read access only across S3, GCS and Azure. Close that authorization gap, then collect file reads and teardown from an ordinary mount. The qualification guard checks the captured mount store, physical prefixes and local cache independently of the metadata clone. |
 | Deployment and release | The private CloudFront, Cloud CDN and Front Door fixtures cover repository-local reads and one projected view's Xet content in local policy tests. Public bindings require a distinct same-cloud export origin. All three providers have separate public Git and LFS export templates with public delivery disabled by default, plus publishers that verify an approved inventory and use create-only writes. Local tests exercise staged configuration, canonical viewer paths, destination binding, corrupt bytes and idempotent publishing. Desktop remote browsing passes the trusted user binding into the native SDK. Crab Server and the S3 gateway have opt-in `provider-cdn-qualification` builds with exact per-repository bindings for verified Git and full LFS reads. A loopback gateway test covers a cold pack-layer fetch with ETag, range and access checks, then observes full LFS reads at the edge and partial LFS reads at origin. Live qualification, publication beyond fixture-specific limits, SDK checkout and desktop qualification, managed issuer rollout, and provider and performance evidence remain open. |
 | Publication readiness | The AWS, GCP and Azure publishers seal a common `crab.cdn-export-publication.v1` receipt after verifying each destination object and rechecking the source and export resource identities and locations. Direct CLI, SDK and checkout, desktop, server and gateway bindings pin the operator's receipt digest. Public S3 and GCS activation verifies source placement once with the selected native credentials. Azure activation uses a read-only ARM identity to verify the selected account, container, primary location and endpoint. Storage sends only listed keys of the approved size to the edge. The release verifier checks the complete preregistered receipt and inventory against independently attested placement and the digest of the object actually read at the edge. Live publication transitions, historical native access checks and public performance qualification remain open. |
 | Qualification integrity | The transport canary observes wire behavior. Private cache reuse requires two preregistered OIDC subjects and Crab Auth policy identities, separately authenticated and authorized by the approved issuer. Key rotation binds ordered reads to deployed key IDs and signed expiration. Scoped-view evidence requires authorized reads of the target and native sibling on both sides of full and ranged CDN denials. Managed issuer rows require their specific v1 and v2 observations. Live observations and matching product and performance evidence for other consumers remain open. |
@@ -849,3 +850,31 @@ The protected workflow or its dedicated workers own producing these raw
 observations. The assembly and release jobs own rejecting missing, mismatched
 or semantically incomplete records. Until each affected check has both a live
 producer and a verifier, leave its scope out of `qualified-scopes.txt`.
+
+### Mounted reads in projected views
+
+Interactive and daemon mounts publish an immutable capture and a renewing
+claim to protect open readers against GC. The capture publisher and lease share
+the selected view's native store. A read-only mount still needs to create the
+descriptor and conditionally create, renew, and release the claim. The direct
+mount currently asks for `fetch` credentials, and the managed mount asks for
+`hydrate`. The reference direct issuer returns a scoped read grant. Its AWS
+session policy grants `GetObject`, its GCS access boundary grants Object Viewer,
+and Azure issues a read/list SAS. None can publish the capture or claim.
+The same native startup constraint applies when viewer approval is withdrawn.
+
+Resolve retention authority as part of mount admission, bound to the same
+principal, native placement, and materialized view. Bound mutation to one
+authorized owner directory under `v2/readers/`; keep the root, refs, payloads,
+source repository and sibling views inaccessible to that write capability.
+Preserve conditional creation and renewal, both GC barriers, and drain before
+release. Test denial or expiry during startup and renewal. A provider design
+must preserve the same boundary on S3, GCS and Azure before live collection.
+
+The qualification guard leaves the native target check active in the Git clone
+child and checks the expected viewer binding and projected content prefix in
+the mount's own read context before capture. The mounted-read worker still
+needs to join this trace to the mounted revision, byte-verified filesystem
+read, exact xorb request in provider logs, native rollback and clean unmount.
+Measure cold and warm edge phases with fresh mounts. Treat kernel-served
+repeat reads separately from reads verified by Crab's local chunk cache.

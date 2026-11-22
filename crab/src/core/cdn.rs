@@ -31,6 +31,8 @@ pub(crate) struct QualificationRead {
     binding_sha256: String,
     cache_root_sha256: String,
     public_export_sha256: String,
+    #[serde(default)]
+    mount_global_prefix_sha256: Option<String>,
 }
 
 impl QualificationRead {
@@ -70,6 +72,38 @@ impl QualificationTarget {
             });
         }
         Ok(())
+    }
+
+    #[cfg(any(feature = "fuse", feature = "nfs"))]
+    fn verify_mount<'a>(
+        &'a self,
+        layout: &crate::storage::StoreLayout,
+        cache_root: &std::path::Path,
+    ) -> Result<(&'a QualificationRead, String)> {
+        let store = layout.store().as_storage();
+        self.verify(store, layout.repo_prefix())?;
+        let global_prefix = layout.global_prefix();
+        let global_digest = qualification_digest(global_prefix);
+        let read = self.read.as_ref().ok_or_else(|| CrabError::AuthFailed {
+            path: "the CDN qualification mount requires an approved read configuration".into(),
+        })?;
+        if self.repository_prefix != layout.repo_prefix()
+            || read.mount_global_prefix_sha256.as_deref() != Some(global_digest.as_str())
+            || store
+                .storage_scope()
+                .map(|scope| scope.global_prefix.as_str())
+                != Some(global_prefix)
+            || store
+                .read_prefix_target_identity(&object_store::path::Path::from(global_prefix))
+                .is_none()
+        {
+            return Err(CrabError::AuthFailed {
+                path: "the mount content layout differs from the approved CDN qualification view"
+                    .into(),
+            });
+        }
+        read.verify(store, cache_root)?;
+        Ok((read, global_digest))
     }
 
     fn require_exact(&self, origin: Option<&str>, prefix: &str) -> Result<()> {
@@ -114,7 +148,12 @@ pub(crate) fn verify_qualification_cache(cache: &crate::core::config::CacheConfi
 }
 
 pub(crate) fn verify_qualification_read(store: &Store) -> Result<()> {
-    if let Some(read) = qualification_target()?.and_then(|target| target.read) {
+    // A remote mount still runs the native target guard in its Git child.
+    // The mount's Xet binding is checked by the mounted reader instead.
+    if let Some(read) = qualification_target()?
+        .and_then(|target| target.read)
+        .filter(|read| read.mount_global_prefix_sha256.is_none())
+    {
         read.verify(store, &crab_cache::default_cache_root())?;
         tracing::debug!(
             target: "crab::cdn::qualification_read",
@@ -125,6 +164,33 @@ pub(crate) fn verify_qualification_read(store: &Store) -> Result<()> {
             "CDN qualification verified read configuration"
         );
     }
+    Ok(())
+}
+
+#[cfg(any(feature = "fuse", feature = "nfs"))]
+pub(crate) fn verify_qualification_mount(layout: &crate::storage::StoreLayout) -> Result<()> {
+    let Some(expected) = qualification_target()? else {
+        return Ok(());
+    };
+    let (read, global_prefix_sha256) =
+        expected.verify_mount(layout, &crab_cache::default_cache_root())?;
+    tracing::debug!(
+        target: "crab::cdn::qualification_mount",
+        parent: None,
+        source_sha = env!("CRAB_BUILD_SOURCE_SHA"),
+        target_triple = env!("CRAB_BUILD_TARGET"),
+        cargo_profile = env!("CRAB_BUILD_PROFILE"),
+        cargo_features = env!("CRAB_BUILD_FEATURES"),
+        qualification_feature = crab_storage::cdn::qualification_enabled(),
+        release_policy_sha256 = %crab_storage::cdn::release_policy_sha256(),
+        origin_sha256 = %qualification_digest(&expected.origin),
+        prefix_sha256 = %qualification_digest(format!("{}/", layout.repo_prefix())),
+        global_prefix_sha256 = global_prefix_sha256.as_str(),
+        binding_sha256 = read.binding_sha256.as_str(),
+        cache_root_sha256 = read.cache_root_sha256.as_str(),
+        public_export_sha256 = read.public_export_sha256.as_str(),
+        "CDN qualification verified mount read configuration"
+    );
     Ok(())
 }
 
@@ -429,6 +495,7 @@ mod tests {
             binding_sha256: String::new(),
             cache_root_sha256: qualification_digest("scratch-cache"),
             public_export_sha256: String::new(),
+            mount_global_prefix_sha256: None,
         };
         assert!(origin.verify(&native, cache).is_ok());
         let edge = native
@@ -446,6 +513,7 @@ mod tests {
             binding_sha256: qualification_digest("public\nhttp://127.0.0.1:9876"),
             cache_root_sha256: origin.cache_root_sha256.clone(),
             public_export_sha256: String::new(),
+            mount_global_prefix_sha256: None,
         };
         assert!(expected.verify(&edge, cache).is_ok());
         assert!(matches!(
@@ -502,6 +570,67 @@ mod tests {
                 Err(CrabError::AuthFailed { .. })
             ));
         }
+    }
+
+    #[cfg(any(feature = "fuse", feature = "nfs"))]
+    #[test]
+    fn cdn_qualification_mount_requires_the_approved_projected_content_layout() {
+        use std::{path::Path, sync::Arc};
+
+        use object_store::memory::InMemory;
+
+        let origin = "s3://qualification-bucket";
+        let source = "crab-cdn-qualification/approved";
+        let prefix = format!("{source}/view");
+        let global = format!("{prefix}/.crab");
+        let cache = Path::new("scratch-cache");
+        let expected = QualificationTarget {
+            origin: origin.into(),
+            repository_prefix: prefix.clone(),
+            read: Some(QualificationRead {
+                binding_sha256: String::new(),
+                cache_root_sha256: qualification_digest("scratch-cache"),
+                public_export_sha256: String::new(),
+                mount_global_prefix_sha256: Some(qualification_digest(&global)),
+            }),
+        };
+        let base = Store::new(Arc::new(InMemory::new()))
+            .with_target_identity([1; 32])
+            .with_native_cdn_origin(Some(origin.into()));
+        let scoped = base.clone().with_storage_scope(crab_storage::StorageScope {
+            repo_prefix: prefix.clone(),
+            global_prefix: global.clone(),
+            source_repo: source.into(),
+            scope_hash: "a".repeat(64),
+        });
+        let layout = |store, repo: &str, global: &str| {
+            crate::storage::StoreLayout::with_global_prefix(
+                crate::storage::Store::from_storage(store),
+                repo.into(),
+                global.into(),
+            )
+        };
+        let approved = layout(scoped.clone(), &prefix, &global);
+        assert!(expected.verify_mount(&approved, cache).is_ok());
+
+        let routed = scoped
+            .clone()
+            .with_read_routes(vec![(format!("{global}/xorbs"), Arc::new(InMemory::new()))]);
+        for invalid in [
+            layout(scoped.clone(), source, &global),
+            layout(scoped, &prefix, crab_storage::GLOBAL_PREFIX),
+            layout(base, &prefix, &global),
+            layout(routed, &prefix, &global),
+        ] {
+            assert!(matches!(
+                expected.verify_mount(&invalid, cache),
+                Err(CrabError::AuthFailed { .. })
+            ));
+        }
+        assert!(matches!(
+            expected.verify_mount(&approved, Path::new("ambient-cache")),
+            Err(CrabError::AuthFailed { .. })
+        ));
     }
 
     #[test]

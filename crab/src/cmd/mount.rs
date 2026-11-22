@@ -2181,6 +2181,7 @@ async fn resolve_mount_read_context_from_remote_url(
     url: &str,
 ) -> Result<crate::vfs::MountReadContext> {
     let config = crate::core::config::Config::resolve_local()?;
+    crate::core::cdn::verify_qualification_cache(&config.cache)?;
     let cancel = tokio_util::sync::CancellationToken::new();
     let cache_dir = crab_auth::token_cache::expand_token_cache_path(&config.auth.token_cache_path);
     let resolver = crab_auth_store::ManagedRepositoryResolver::new(cache_dir);
@@ -2205,6 +2206,7 @@ async fn resolve_mount_read_context_from_remote_url(
             crate::storage::StoreLayout::new(resolved.store, resolved.repository_prefix)
         }
     };
+    crate::core::cdn::verify_qualification_mount(&layout)?;
     let restore_availability = crate::cmd::hydrate_restore::build_restore_availability(
         &config,
         layout.store(),
@@ -2701,6 +2703,11 @@ async fn resolve_mount_read_context_from_config(
         origin: "cannot locate repository root from .crab directory".into(),
     })?;
     if crate::core::project_config::ProjectConfig::load_for_repo(repo_root)?.is_none() {
+        if crate::core::cdn::qualification_target()?.is_some() {
+            return Err(CrabError::AuthFailed {
+                path: "the CDN qualification mount requires a configured repository".into(),
+            });
+        }
         return Ok(None);
     }
     let url_str = read_remote_url_from_crab_dir(crab_dir)?;
