@@ -254,7 +254,8 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
             unrelated = origin | {"jsonPayload": {"parentInsertId": "another-viewer"}, "insertId": "unrelated-origin"}
             log, output = root / "gcloud.json", root / "cloud-cdn-requests.json"
             command = [sys.executable, "-B", str(Path(COLLECT.__file__)), "--fixture", str(fixture_path), "--log", str(log),
-                       "--client", str(client), "--configuration-sha256", configuration, "--output", str(output)]
+                       "--client", str(client), "--configuration-sha256", configuration, "--output", str(output),
+                       "--require-origin-fill"]
             for entries, error in (
                 ([origin], "must cover each measured viewer attempt"),
                 ([viewer | {"resource": resource | {"labels": {"project_id": project, "forwarding_rule_name": "wrong"}}}],
@@ -266,6 +267,9 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
                  "origin request was logged outside the approved forwarding rule"),
                 ([viewer, origin, origin | {"httpRequest": origin["httpRequest"] | {"cacheFillBytes": "1999"}}],
                  "exports disagree about one origin request"),
+                ([viewer | {"httpRequest": request | {"cacheFillBytes": "0"}},
+                  origin | {"httpRequest": origin["httpRequest"] | {"status": 404}}],
+                 "no logged fill from the approved CDN origin"),
                 ([origin, unrelated, viewer, viewer, validation, origin], None),
             ):
                 with self.subTest(error=error):

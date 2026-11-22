@@ -610,9 +610,10 @@ and edge payload through redacted observations.
   signed reads from the approved S3 bucket using the viewer keys and timed
   window. Its cold arm requires a successful origin body response. The
   collector can wait for both AWS log streams before returning a cold proof.
-  Cloud CDN retains cache-fill bytes reported on its viewer log records and joins range-fill and
-  validation requests to the measured viewer using the provider's parent
-  log-entry ID. The benchmark checks external origin GETs and fill bytes
+  Cloud CDN retains cache-fill bytes on viewer log records and joins
+  range-fill and validation requests by the provider's parent log-entry ID.
+  Every Cloud CDN cold arm must show a successful fill linked to a completed
+  viewer response. The benchmark checks external origin GETs and fill bytes
   against these observations. Front Door separates viewer responses from
   origin-shield traffic and joins Blob reads to measured keys and time.
   Private rows match the profile's system-assigned identity. Public rows match

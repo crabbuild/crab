@@ -1374,6 +1374,9 @@ time to arrive. The benchmark requires external measurements to cover the
 logged origin GETs in addition to client-native GETs. The fill-byte minimum is
 the higher of the total from distinct origin records and the largest viewer
 record, since viewer and origin records can describe the same fill.
+Every cold arm must show positive fill bytes on a completed viewer response
+with payload bytes or on its associated successful origin GET. Error
+responses still count toward the reported byte floor.
 [Cloud CDN logging](https://docs.cloud.google.com/cdn/docs/logging) · [Backend bucket cache keys](https://docs.cloud.google.com/cdn/docs/caching#cache_keys)
 
 ```bash
@@ -1383,8 +1386,8 @@ gcloud logging read \
 ```
 
 Use `--log "$cloud_cdn_log" --output "$arm_directory/cloud-cdn-requests.json"`
-with the collector above. Keep raw Cloud Logging exports on the protected
-worker.
+with the collector above. Add `--require-origin-fill` for a cold arm.
+Keep raw Cloud Logging exports on the protected worker.
 
 For Front Door, enable Azure Monitor access logs on the approved profile and
 `StorageRead` logs on the approved account's `blobServices/default` resource.

@@ -10,7 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "deploy/cdn"))
 from public_inventory import ExportError, native_placement, read_publication, validate_public_origins  # noqa: E402
@@ -1555,7 +1555,14 @@ def verify_sdk_git_read(raw: bytes, row: dict[str, Any], spec: dict[str, Any], m
     return client
 
 
-def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: str, edge: str) -> tuple[set[str], int, int]:
+class ViewerRequestMetrics(NamedTuple):
+    request_ids: set[str]
+    origin_gets: int
+    fill_bytes: int
+    successful_fill: bool
+
+
+def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: str, edge: str) -> ViewerRequestMetrics:
     keyed_origin = edge in ("cloudfront", "front-door")
     xorb_key = client.get("xorb_key_sha256")
     lfs_key = client.get("lfs_key_sha256")
@@ -1582,10 +1589,12 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
     viewer_keys = set()
     logged_ids = set(records)
     origin_gets = child_fill_bytes = viewer_fill_bytes = 0
+    successful_fill = False
     observed_transfer = dict.fromkeys(("edge_hits", "edge_misses", "edge_unknown", "edge_bytes", "incomplete_edge_bytes"), 0)
     for request_id, record in records.items():
         row = fields(record, record_fields, "CDN viewer log record")
         response = expected[request_id]
+        served_payload = response["status"] in (200, 206) and response["complete"] and response["bytes"] > 0
         require(type(row["status"]) is int and row["status"] == response["status"]
                 and row["cache"] in ("hit", "miss", "unknown")
                 and type(row["response_bytes"]) is int and row["response_bytes"] >= response["bytes"],
@@ -1599,8 +1608,7 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
             require(lfs_key is None or row["key_sha256"] == lfs_key,
                     "CDN viewer request did not read the approved service LFS object")
             viewer_keys.add(row["key_sha256"])
-            if (row["key_sha256"] == transition_key and response["status"] in (200, 206)
-                    and response["complete"] and response["bytes"] > 0):
+            if row["key_sha256"] == transition_key and served_payload:
                 verified_transition = True
         if xorb_key is not None or service:
             if response["complete"]:
@@ -1615,6 +1623,7 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
             require(type(row["cache_fill_bytes"]) is int and row["cache_fill_bytes"] >= 0,
                     "Cloud CDN log has invalid reported cache fill bytes")
             viewer_fill_bytes = max(viewer_fill_bytes, row["cache_fill_bytes"])
+            successful_fill |= served_payload and positive(row["cache_fill_bytes"])
             children = row["origin_requests"]
             require(isinstance(children, dict), "invalid Cloud CDN origin requests")
             for origin_id, value in children.items():
@@ -1626,6 +1635,10 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
                 logged_ids.add(origin_id)
                 origin_gets += origin["method"] == "GET"
                 child_fill_bytes += origin["cache_fill_bytes"]
+                # Origin errors can contribute recorded bytes. Only a successful
+                # GET linked to completed viewer delivery proves a cold fill.
+                successful_fill |= (served_payload and origin["method"] == "GET" and origin["status"] in (200, 206)
+                                    and positive(origin["cache_fill_bytes"]))
     if xorb_key is not None or service:
         require(client["edge_attempts"] == len(records) and all(client[key] == count for key, count in observed_transfer.items()),
                 "CDN transfer totals disagree with the logged responses")
@@ -1651,9 +1664,10 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
             origin_gets += 1
             if origin["status"] in (200, 206):
                 child_fill_bytes += origin["response_body_bytes"]
+                successful_fill |= positive(origin["response_body_bytes"])
     # Collapsed traffic and separate range-fills can describe the same bytes
     # at both levels. Use the strongest floor without adding overlapping totals.
-    return logged_ids, origin_gets, max(viewer_fill_bytes, child_fill_bytes)
+    return ViewerRequestMetrics(logged_ids, origin_gets, max(viewer_fill_bytes, child_fill_bytes), successful_fill)
 
 
 def verify_product_viewer_requests(raw: bytes, client: dict[str, Any], client_raw: bytes, edge: str) -> set[str]:
@@ -2185,6 +2199,11 @@ def collect_git_performance(
             and matches(RUN_NUMBER, run_id) and matches(RUN_NUMBER, attempt) and matches(LABEL, platform),
             "invalid benchmark provenance")
     provider = PROVIDER_FOR_EDGE[scope.split("/", 1)[0]]
+    fill_source = {
+        "s3": "CloudFront fill from the approved S3 origin",
+        "gcs": "Cloud CDN fill from the approved GCS origin",
+        "azure": "Front Door fill from the approved Blob origin",
+    }[provider]
     provenance = {key: spec[key] for key in ("source_sha", "scope", "configuration_sha256")}
     provenance |= {"workflow_run_id": run_id, "workflow_run_attempt": attempt, "platform": platform}
     if cli_workload:
@@ -2236,10 +2255,10 @@ def collect_git_performance(
                                                     service_anchor, provenance, spec)
             service_instances.add(prior["service_instance_sha256"])
             _, _, export_ready_at = verified_publication(service_row / PUBLIC_EXPORT_DIR, spec["publication_sha256"])
-        provider_request_ids, _, _ = verify_viewer_requests(
+        provider_request_ids = verify_viewer_requests(
             decode(read_trace(product / PRODUCT_VIEWER_RECORD, "service viewer requests")), service_anchor,
             hashlib.sha256(edge_raw).hexdigest(), PROVIDERS[provider][0],
-        )
+        ).request_ids
     seen = set()
     performance = {}
     for location, region in spec["regions"].items():
@@ -2331,15 +2350,15 @@ def collect_git_performance(
                 fixtures.add((*payload, receipt, reader["origin_sha256"], reader["prefix_sha256"]))
                 windows[arm] = (client["started_at_unix_ms"], client["finished_at_unix_ms"])
                 viewer_log = None
-                cdn_origin_gets = cdn_fill_bytes = 0
+                traffic = ViewerRequestMetrics(set(), 0, 0, False)
                 if provider in VIEWER_REQUEST_FILES and client["all_edge_attempts"]:
                     log_name = VIEWER_REQUEST_FILES[provider]
                     viewer_log = read_git_record(inputs / slot / log_name, limit=GIT_FETCH_RECORD_LIMIT)
-                    request_ids, cdn_origin_gets, cdn_fill_bytes = verify_viewer_requests(
+                    traffic = verify_viewer_requests(
                         decode(viewer_log), client, digest, PROVIDERS[provider][0],
                     )
-                    require(provider_request_ids.isdisjoint(request_ids), "CDN log requests were reused across arms")
-                    provider_request_ids.update(request_ids)
+                    require(provider_request_ids.isdisjoint(traffic.request_ids), "CDN log requests were reused across arms")
+                    provider_request_ids.update(traffic.request_ids)
                 external_raw = read_git_record(inputs / slot / "measurement.json")
                 external = fields(decode(external_raw), GIT_MEASUREMENT_FIELDS, "benchmark measurement")
                 require(external["schema"] == "crab.cdn-git-measurement/v1" and external["provider"] == provider
@@ -2353,16 +2372,11 @@ def collect_git_performance(
                         f"{label} is missing fetch memory or disk measurements")
                 incomplete = client["incomplete_edge_bytes"]
                 native = client["native_traffic"]
-                require(measured["origin_gets"] >= native["get_responses"] + cdn_origin_gets,
+                require(measured["origin_gets"] >= native["get_responses"] + traffic.origin_gets,
                         f"{label} undercounts observed native GET responses or logged CDN origin GETs")
-                require(measured["origin_fill_bytes"] >= cdn_fill_bytes,
+                require(measured["origin_fill_bytes"] >= traffic.fill_bytes,
                         f"{label} undercounts logged CDN cache fill bytes")
-                require(provider != "s3" or arm != "cold_edge" or positive(cdn_fill_bytes),
-                        f"{label} has no logged CloudFront fill from the approved S3 origin")
-                require(provider != "azure" or arm != "cold_edge" or positive(cdn_fill_bytes),
-                        f"{label} has no logged Front Door fill from the approved Blob origin")
-                require(not (sdk or hydration or service) or provider != "gcs" or arm != "cold_edge" or positive(cdn_fill_bytes),
-                        f"{label} has no logged Cloud CDN fill from the approved GCS origin")
+                require(arm != "cold_edge" or traffic.successful_fill, f"{label} has no logged {fill_source}")
                 require(incomplete <= measured["rejected_bytes"]
                         and measured["client_bytes"] >= native["body_bytes"] + measured["edge_bytes"] + incomplete,
                         f"{label} undercounts observed client bytes")

@@ -183,21 +183,21 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
         row["origin_requests"] = {
             "a" * 64: {"method": "GET", "status": 206, "cache_fill_bytes": 10},
             "b" * 64: {"method": "GET", "status": 206, "cache_fill_bytes": 13},
-            "c" * 64: {"method": "HEAD", "status": 304, "cache_fill_bytes": 0},
+            "c" * 64: {"method": "GET", "status": 404, "cache_fill_bytes": 3},
         }
         fixture.json_file(log, proof)
         report = arm / "measurement.json"
         external = json.loads(report.read_bytes())
         for changes, expected in (
             ({}, "undercounts observed native GET responses or logged CDN origin GETs"),
-            ({"origin_gets": 3, "origin_fill_bytes": 22}, "undercounts logged CDN cache fill bytes"),
+            ({"origin_gets": 4, "origin_fill_bytes": 25}, "undercounts logged CDN cache fill bytes"),
         ):
             with self.subTest(changes=changes):
                 fixture.json_file(report, external | changes)
                 with self.assertRaisesRegex(ValueError, expected):
                     self.collect()
-        fixture.json_file(report, external | {"origin_gets": 3, "origin_fill_bytes": 23})
-        self.assertEqual(self.collect()["near"]["pairs"][0]["cold_edge"]["origin_fill_bytes"], 23)
+        fixture.json_file(report, external | {"origin_gets": 4, "origin_fill_bytes": 26})
+        self.assertEqual(self.collect()["near"]["pairs"][0]["cold_edge"]["origin_fill_bytes"], 26)
 
         warm_log = arm.with_name("warm_edge") / log.name
         warm = json.loads(warm_log.read_bytes())
@@ -205,6 +205,27 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
         fixture.json_file(warm_log, warm)
         with self.assertRaisesRegex(ValueError, "CDN log requests were reused across arms"):
             self.collect()
+
+    def test_cloud_cdn_cli_cold_arm_requires_a_successful_fill(self) -> None:
+        scope = "cloud-cdn/private/cli/git/direct"
+        self.registration.update(scope=scope, candidate=fixture.cli_candidate(scope, PLATFORM))
+        fixture.write_git_measurements(self.root, self.registration, PLATFORM)
+        arm = self.root / "near/0001/cold_edge"
+        log = arm / fixture.CDN.VIEWER_REQUEST_FILES["gcs"]
+        proof = json.loads(log.read_bytes())
+        row = next(iter(proof["records"].values()))
+        row["cache_fill_bytes"] = 0
+        report = arm / "measurement.json"
+        fixture.json_file(report, json.loads(report.read_bytes()) | {"origin_gets": 2})
+        for method, status, size in (("GET", 206, 0), ("GET", 404, 8), ("HEAD", 200, 8)):
+            with self.subTest(method=method, status=status, size=size):
+                row["origin_requests"] = {"a" * 64: {"method": method, "status": status, "cache_fill_bytes": size}}
+                fixture.json_file(log, proof)
+                with self.assertRaisesRegex(ValueError, "has no logged Cloud CDN fill"):
+                    self.collect()
+        row["origin_requests"] = {"a" * 64: {"method": "GET", "status": 206, "cache_fill_bytes": 8}}
+        fixture.json_file(log, proof)
+        self.assertEqual(self.collect()["near"]["pairs"][0]["cold_edge"]["origin_fill_bytes"], 8)
 
     def test_cloudfront_hashes_must_cover_the_timed_requests_and_agree_on_cache_status(self) -> None:
         path = self.root / "near/0001/cold_edge" / fixture.CDN.VIEWER_REQUEST_FILES["s3"]

@@ -407,8 +407,8 @@ def aws_viewer_evidence(fixture: dict, client: dict, digest: str, args: argparse
         if records.keys() == client["edge_responses"].keys():
             proof = {"schema": "crab.cloudfront-viewer-requests/v1", "client_report_sha256": digest,
                      "records": records, "origin_requests": origins}
-            _, _, fill = verify_viewer_requests(proof, client, digest, "cloudfront")
-            if fill > 0 or not args.require_origin_fill:
+            observed = verify_viewer_requests(proof, client, digest, "cloudfront")
+            if observed.successful_fill or not args.require_origin_fill:
                 return proof
             missing = "no logged CloudFront fill from the approved S3 origin"
         else:
@@ -502,8 +502,8 @@ def main() -> int:
             elif edge == "front-door":
                 proof["origin_requests"] = azure_blob_front_door_reads(args.azure_blob_log, args.azure_origin_authority,
                                                                       records, fixture, client)
-            _, _, fill = verify_viewer_requests(proof, client, digest, edge)
-            require(not args.require_origin_fill or fill > 0, "no logged fill from the approved CDN origin")
+            observed = verify_viewer_requests(proof, client, digest, edge)
+            require(not args.require_origin_fill or observed.successful_fill, "no logged fill from the approved CDN origin")
         with args.output.open("x", encoding="utf-8") as destination:
             destination.write(json.dumps(proof, sort_keys=True) + "\n")
     except (ValueError, OSError) as error:
