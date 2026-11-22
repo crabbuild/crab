@@ -41,26 +41,10 @@ impl Read for RepositoryTeamsForActor {
                 bypass_teams: Vec::new(),
             });
         }
-        ensure_ready(context)?;
-        let rows = context.query(
-            &format!(
-                "SELECT m.team, t.visibility = 'closed' FROM organization_team_members m
-                 JOIN organization_teams t ON t.id=m.team
-                 JOIN organization_members o ON o.actor=m.actor
-                 JOIN organization_membership_epochs e ON e.actor=o.actor
-                 WHERE m.actor=? AND t.deleted_at_ms IS NULL AND {ACTIVE_MEMBERSHIP}
-                 ORDER BY m.team LIMIT ?"
-            ),
-            &[
-                blob(input.actor),
-                SqlValue::Integer((MAX_TEAM_ACCESS_ROWS + 1) as i64),
-            ],
-        )?;
-        enforce_row_budget(rows.rows.len())?;
         let mut teams = Vec::new();
         let mut bypass_teams = Vec::new();
-        for row in &rows.rows {
-            let [team, visible] = row.as_slice() else {
+        for row in active_team_rows(context, input.actor, false)? {
+            let [team, visible, _] = row.as_slice() else {
                 return Err(Error::Invalid("invalid repository team membership"));
             };
             let team = uuid(team)?;
@@ -74,6 +58,66 @@ impl Read for RepositoryTeamsForActor {
             teams,
             bypass_teams,
         })
+    }
+}
+
+fn active_team_rows(
+    context: &Transaction<'_>,
+    actor: Uuid,
+    include_names: bool,
+) -> Result<Vec<Vec<SqlValue>>> {
+    ensure_ready(context)?;
+    let rows = context.query(
+        &format!(
+            "SELECT m.team, t.visibility = 'closed', CASE WHEN ?2 THEN t.name END
+             FROM organization_team_members m
+             JOIN organization_teams t ON t.id=m.team
+             JOIN organization_members o ON o.actor=m.actor
+             JOIN organization_membership_epochs e ON e.actor=o.actor
+             WHERE m.actor=?1 AND t.deleted_at_ms IS NULL AND {ACTIVE_MEMBERSHIP}
+             ORDER BY m.team LIMIT ?3"
+        ),
+        &[
+            blob(actor),
+            SqlValue::Integer(i64::from(include_names)),
+            SqlValue::Integer((MAX_TEAM_ACCESS_ROWS + 1) as i64),
+        ],
+    )?;
+    enforce_row_budget(rows.rows.len())?;
+    Ok(rows.rows)
+}
+
+#[derive(Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MemberRepositoryRoles {
+    pub(crate) owner: bool,
+    pub(crate) teams: BTreeMap<Uuid, String>,
+}
+
+pub(crate) struct InspectMemberRepositoryRoles;
+
+impl Read for InspectMemberRepositoryRoles {
+    const CLASS: &'static str = super::super::CLASS;
+    const ID: u32 = 48;
+    type Input = super::super::MemberKey;
+    type Output = Option<MemberRepositoryRoles>;
+
+    fn execute(context: &mut Transaction<'_>, input: Self::Input) -> Result<Self::Output> {
+        actor(input.member)?;
+        let Some(target) = member(context, input.member)?.filter(|member| member.active) else {
+            return Ok(None);
+        };
+        let teams = active_team_rows(context, input.member, true)?
+            .iter()
+            .map(|row| match row.as_slice() {
+                [team, _, name] => Ok((uuid(team)?, text(name)?)),
+                _ => Err(Error::Invalid("invalid repository team membership")),
+            })
+            .collect::<Result<_>>()?;
+        Ok(Some(MemberRepositoryRoles {
+            owner: target.role == OrganizationRole::Owner,
+            teams,
+        }))
     }
 }
 

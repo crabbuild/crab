@@ -11,6 +11,7 @@ use reqwest::Method;
 
 mod codeowners;
 mod repositories;
+mod repository_access;
 
 #[tokio::test]
 async fn invitations_require_consent_and_current_qualified_authority_without_repository_grants() {

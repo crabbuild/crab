@@ -86,6 +86,18 @@ export type OrganizationMembership = { actor: string, role: OrganizationRole, ve
 export type OrganizationMembers = { can_manage: boolean, items: Array<OrganizationMembership>, next: string | null, revision: number, };
 
 // prettier-ignore
+export type MemberAccessAccount = "active" | "suspended" | "provider_unavailable";
+
+// prettier-ignore
+export type MemberAccessTeam = { id: string, name: string, access: RepositoryAccess, };
+
+// prettier-ignore
+export type AccessRepository = { id: string, owner: string, name: string, access: RepositoryAccess | null, direct: RepositoryAccess | null, teams: Array<MemberAccessTeam>, organization_owner: boolean, sso_group_ceiling: RepositoryAccess | null, inherited_from: string | null, };
+
+// prettier-ignore
+export type MemberRepositoryAccess = { account: MemberAccessAccount, items: Array<AccessRepository>, next: string | null, };
+
+// prettier-ignore
 export type InvitationOffer = { invitation: Invitation, profile: ActorSummary | null, };
 
 // prettier-ignore

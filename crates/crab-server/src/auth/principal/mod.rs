@@ -2,7 +2,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::{GitToken, Identity, Session};
-use crate::{RepositoryAccess, RepositoryConfig, RepositoryGroup};
+use crate::{RepositoryAccess, RepositoryConfig, RepositoryGroup, RepositoryMember};
 
 pub(super) fn group_access(
     claims: &[String],
@@ -251,11 +251,7 @@ impl Principal {
             if identity.issuer != issuer {
                 return None;
             }
-            let individual = config
-                .members
-                .iter()
-                .find(|member| member.subject == identity.subject)
-                .map(|member| member.access);
+            let individual = RepositoryMember::access_for(&config.members, &identity.subject);
             let group = group_access(groups, &config.groups);
             individual
                 .into_iter()

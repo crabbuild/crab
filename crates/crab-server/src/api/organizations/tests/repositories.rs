@@ -39,7 +39,8 @@ async fn private_fork_recovers_git_publication_and_uses_live_source_permissions(
         .mark_cell_ready(h.server.repositories.values()[0].id)
         .await
         .unwrap();
-    let (organization, _, _) = crate::test_support::http::organizations::bootstrap(&h).await;
+    let (organization, owner_actor, _) =
+        crate::test_support::http::organizations::bootstrap(&h).await;
     let alice = h.login().await;
     *h.provider.mode.lock().await = "member".into();
     let bob = h.login().await;
@@ -131,6 +132,21 @@ async fn private_fork_recovers_git_publication_and_uses_live_source_permissions(
         .await
         .unwrap();
     assert_eq!(replay["state"], "succeeded");
+    let grants = h
+        .json(
+            &format!("{org}/members/{owner_actor}/repository-access"),
+            &alice,
+        )
+        .await;
+    let fork_grant = grants["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|repo| repo["name"] == "library-fork")
+        .unwrap();
+    assert_eq!(fork_grant["inherited_from"], "library");
+    assert_eq!(fork_grant["access"], "admin");
+
     let listed = format!("/api/repos?organization={organization}");
     let visible = h.json(&listed, &bob).await;
     let repo = visible["repositories"]

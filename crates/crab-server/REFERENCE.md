@@ -1354,6 +1354,24 @@ Upgrade all serving peers before binding repositories. Unbound catalog rows
 retain their existing serialization. Old peers reject the new catalog field
 and cannot run the organization authorization read.
 
+### Inspect an organization member’s repository access
+
+Open the organization’s **People** page and select **View repository access**
+for a current member. Organization owners can see the member's highest
+configured role from direct grants, active teams, and organization ownership.
+Fork rows identify the source of the grants. The view shows separately when
+sign-in is blocked for the account. Where a signed SSO claim could add access,
+the row shows the highest configured SSO role. Git credentials can have a
+lower scope than the account's role.
+
+`GET /api/organizations/{id}/members/{actor}/repository-access` returns
+`{account, items, next}`. Pass its opaque `next` as `after` to continue.
+`limit` accepts 1–50 and defaults to 30. The continuation binds the requesting
+owner, inspected member, catalog revision, current teams and account
+suspension version. Reload from the first page after a change. The response
+omits private provider identities and group names. Upgrade Organization Cell
+peers together so every owner supports the new read.
+
 ### Configure protected branches
 
 A repository can define at most 100 exact branch rules:

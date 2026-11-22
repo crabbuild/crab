@@ -209,7 +209,7 @@ criticality and adoption dependencies.
 | --- | --- | --- |
 | P0 | Qualify the protected PR path with one live GitHub App. Exercise stock Git and the browser from branch update through review, exact-commit CI and protected merge. | With a deployed App and object store, prove that a revoked reviewer, an old head, and a wrong check provider cannot satisfy policy. Force a lost publication reply and peer handoff, then fetch the intended merge with stock Git. [Required check behavior](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks) |
 | P0 | Qualify enterprise operations on the first supported deployment. Cover authenticated ingress, least-privilege storage access, revocation, backup and restore, and rollback. | Restore an isolated repository and its access records on a fresh deployment. Prove the old browser and Git credentials are denied across replicas after deprovisioning, and measure recovery time and data loss against the operator's targets. [Enterprise qualification](../crates/crab-server/CELLAR.md) |
-| P1 | Add organization-facing access administration, centrally managed automation identities, IdP provisioning and team sync, and unified audit search and export. Start from existing OIDC, team grants, account suspension, and repository deploy tokens. | An administrator provisions or disables a user via one IdP and sees effective repository access and the audit decision. Test group reconciliation, duplicate requests, service credential revocation, and administrator-only export. [SCIM provisioning](https://docs.github.com/en/enterprise-cloud@latest/admin/managing-iam/provisioning-user-accounts-with-scim) · [Enterprise audit](https://docs.github.com/en/enterprise-cloud@latest/admin/concepts/security-and-compliance/audit-log-for-an-enterprise) |
+| P1 | Extend owner-facing access administration beyond the People page’s per-member repository grant view. Add managed automation identities, IdP provisioning and team sync, and unified audit search and export. | An administrator provisions or disables a user via one IdP and sees effective repository access and the audit decision. Test group reconciliation, duplicate requests, service credential revocation, and administrator-only export. [SCIM provisioning](https://docs.github.com/en/enterprise-cloud@latest/admin/managing-iam/provisioning-user-accounts-with-scim) · [Enterprise audit](https://docs.github.com/en/enterprise-cloud@latest/admin/concepts/security-and-compliance/audit-log-for-an-enterprise) |
 | P1 | Scale the daily review and discovery paths. Extend permission-aware workspace search to symbol definitions and richer qualifiers. Qualify the indexed code and path search and large-diff review on a representative corpus. | A contributor can find a symbol across readable repositories and navigate to a pinned line. Revoking access removes hits immediately, including from continuations. Measure search and diff latency on a representative corpus. [Code search syntax](https://docs.github.com/en/search-github/github-code-search/understanding-github-code-search-syntax) |
 | P2 | Add enterprise security findings and stronger governance. Start with SARIF ingestion tied to exact commits, then add secret push protection, required commit signatures, and policy-managed exceptions. | An authorized scanner publishes a bounded result for an exact commit. The PR shows new findings, the configured protection gates publication, and an allowed exception appears in audit. [SARIF ingestion](https://docs.github.com/en/code-security/how-tos/find-and-fix-code-vulnerabilities/integrate-with-existing-tools/upload-sarif-file) |
 | P3 | Scope hosted runners, package registries, Pages, Wikis, and broader API compatibility separately. | Each program has an explicit isolation, authorization, retention, and availability contract. |
@@ -250,6 +250,20 @@ Prove one private repository from an author’s browser and stock Git through a 
 - Define enforcement coverage for deployments with direct object-storage writers. A mandatory hosted ruleset needs mediated writes and tested storage IAM. Verify browser writes, Git HTTP and any protected CLI paths claimed by the deployment. `crates/crab-server/REFERENCE.md:920`, `crates/crab-server/REFERENCE.md:2523`.
 
 ## Verification and release claims
+
+- Owner-facing member access inspection passed the production UI build,
+  generated contract check, 20 native tests, 120 UI unit tests and four
+  organization Playwright cases. Native HTTP and embedded Chromium showed
+  the role and its sources, then refreshed after the team grant disappeared.
+  The native tests verified inherited fork grants, an invalidated continuation,
+  owner-only access, suspension and denied Git write token issuance after
+  team removal.
+
+- The standalone macOS server with persistent indexing passed the isolated
+  RustFS SIGKILL and full-root recovery gate. The fixture verified hashes
+  and metadata for 364 restored objects and checked Git refs and application
+  state after restoring into an empty cache. Deployment-provider and live IdP
+  qualification remain open.
 
 - The persistent default-tree search index passed standalone server and
   production UI builds, six focused native tests, 120 UI unit tests, and

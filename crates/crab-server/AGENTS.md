@@ -161,6 +161,10 @@ and applies the same group grant rule against the latest repository ACL.
 `catalog/` owns atomic complete ACL edits and the audit outbox; `api/members/`
 and `packages/ui/src/features/settings/groups.tsx` compose access administration. SSO groups do
 not grant native Organization or team authority. Tests stay with these owners.
+`api/organizations/repository_access.rs` composes an owner-only member
+grant inspection from a catalog revision and the Organization Cell's current
+team memberships. Its native read shares the same team-epoch predicate as
+repository authorization. The public view omits provider identity and claims.
 `api/catalog.rs` composes personal and organization repository creation using
 the durable catalog reservation and shared Git and Cell initializer.
 `cells/organization/repositories.rs` records owner-authorized submissions.

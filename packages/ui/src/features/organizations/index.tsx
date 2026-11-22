@@ -30,6 +30,7 @@ import { Teams } from "./teams";
 import type { Commands } from "./teams/commands";
 import { Invitations } from "./invitations";
 import { OrganizationRepositories } from "./repositories";
+import { MemberAccess } from "./repository-access";
 import { OrganizationRulesets } from "@/features/settings/rulesets";
 export { OrganizationInvitation } from "./invitations";
 
@@ -147,6 +148,7 @@ export function OrganizationPage({
               />
             ) : tab === "people" ? (
               <People
+                id={id}
                 endpoint={endpoint}
                 csrf={csrf}
                 onChanged={(message) => {
@@ -179,10 +181,12 @@ export function OrganizationPage({
   );
 }
 function People({
+  id,
   endpoint,
   csrf,
   onChanged,
 }: {
+  id: string;
   endpoint: string;
   csrf: string;
   onChanged: (message: string) => void;
@@ -211,6 +215,7 @@ function People({
                 <MemberRow
                   key={`${member.actor}:${member.version}`}
                   member={member}
+                  organization={id}
                   canManage={data.can_manage}
                   endpoint={endpoint}
                   csrf={csrf}
@@ -245,12 +250,14 @@ function People({
 }
 function MemberRow({
   member,
+  organization,
   canManage,
   endpoint,
   csrf,
   onChanged,
 }: {
   member: OrganizationMembership;
+  organization: string;
   canManage: boolean;
   endpoint: string;
   csrf: string;
@@ -286,6 +293,11 @@ function MemberRow({
         <div className="flex flex-wrap items-center gap-2">
           {canManage ? (
             <>
+              <MemberAccess
+                organization={organization}
+                actor={member.actor}
+                name={member.profile?.name ?? member.actor}
+              />
               <FieldSelect
                 label={`Role for ${name}`}
                 value={role}

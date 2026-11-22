@@ -182,6 +182,15 @@ pub struct RepositoryMember {
     pub access: RepositoryAccess,
 }
 
+impl RepositoryMember {
+    pub(crate) fn access_for(members: &[Self], subject: &str) -> Option<RepositoryAccess> {
+        members
+            .iter()
+            .find(|member| member.subject == subject)
+            .map(|member| member.access)
+    }
+}
+
 /// An exact signed OIDC group identifier's repository permission.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, serde::Serialize)]
 #[serde(deny_unknown_fields)]

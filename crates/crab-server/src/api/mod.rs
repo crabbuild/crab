@@ -277,12 +277,7 @@ pub(crate) async fn read(
             .into_response();
     };
     let Ok(admission) = read_admission::acquire(&server, action) else {
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            [("retry-after", "1")],
-            Json(json!({"error": {"code":"busy", "message":"The server is busy. Retry shortly"}})),
-        )
-            .into_response();
+        return read_admission::busy();
     };
     let cancellation = server.cancellation.child_token();
     let _cancel_on_drop = cancellation.clone().drop_guard();

@@ -22,7 +22,8 @@ mod reads;
 pub(crate) mod repositories;
 pub(crate) mod rulesets;
 use teams::repository_access::{
-    CodeOwnerTeams, RepositoryTeamNames, RepositoryTeamRoster, RepositoryTeamsForActor,
+    CodeOwnerTeams, InspectMemberRepositoryRoles, RepositoryTeamNames, RepositoryTeamRoster,
+    RepositoryTeamsForActor,
 };
 pub(crate) mod teams;
 pub(crate) use commands::{
@@ -308,7 +309,14 @@ pub(in crate::cells) fn authorize(
             false,
         ) => return Ok(()),
         (GetOrganization::ID | ListMembers::ID, false) => false,
-        (GetMember::ID | ListActivity::ID | ListInvitations::ID | rulesets::Get::ID, false)
+        (
+            GetMember::ID
+            | ListActivity::ID
+            | ListInvitations::ID
+            | rulesets::Get::ID
+            | InspectMemberRepositoryRoles::ID,
+            false,
+        )
         | (
             Bootstrap::ID
             | Edit::ID
@@ -385,6 +393,9 @@ pub(in crate::cells) fn dispatch_read(
         RepositoryTeamRoster::ID => invoke_read::<RepositoryTeamRoster>(context, input),
         RepositoryTeamNames::ID => invoke_read::<RepositoryTeamNames>(context, input),
         CodeOwnerTeams::ID => invoke_read::<CodeOwnerTeams>(context, input),
+        InspectMemberRepositoryRoles::ID => {
+            invoke_read::<InspectMemberRepositoryRoles>(context, input)
+        }
         rulesets::Get::ID => invoke_read::<rulesets::Get>(context, input),
         rulesets::Applicable::ID => invoke_read::<rulesets::Applicable>(context, input),
         repositories::Owners::ID => invoke_read::<repositories::Owners>(context, input),
