@@ -25,8 +25,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from cdn_qualification import (  # noqa: E402
     COMMIT, EDGE_ROUTE_QUERY_PROBES, EXPIRY_CHECKS, EXPIRY_FULL_CHECK, EXPIRY_RANGE_CHECK, EXPIRY_SETTLE_SECONDS,
     MAX_VIEWER_GRANT_SECONDS, PREFIX, PROVIDERS, PROVIDER_FOR_EDGE, PUBLIC_EXPORT_CHECK,
-    RUN_NUMBER, SHA256, checked_placement, decode, edge_head_denials, edge_route_probe_names, fields, matches, require, scope_parts,
-    require_isolated_public_origins, verify_expiry_full_window, verify_expiry_range_window,
+    RUN_NUMBER, SHA256, UNRELATED_VIEWER_CHECK, checked_placement, decode, edge_head_denials, edge_route_probe_names,
+    fields, matches, require, scope_parts, require_isolated_public_origins,
+    verify_expiry_full_window, verify_expiry_range_window, verify_unrelated_viewer_denial,
 )
 
 
@@ -240,6 +241,10 @@ def viewer_expiry(edge: str, viewer: dict[str, str]) -> int:
     return viewer_policy(edge, viewer)[0]
 
 
+def viewer_grant_fingerprint(viewer: dict[str, str]) -> str:
+    return hashlib.sha256(json.dumps(viewer, sort_keys=True).encode()).hexdigest()
+
+
 @contextmanager
 def https_response(
     base: SplitResult, method: str, target: str, headers: dict[str, str], check: str, *, body: bytes | None = None,
@@ -437,13 +442,28 @@ def collect_edge_route_policy(
     return probes
 
 
-def read_unrelated_control(
-    base: SplitResult, edge: str, repo: str, viewer: dict[str, str], control: dict[str, Any],
-) -> dict[str, Any]:
-    observed, body = request_sample(base, edge, f"{repo}/{control['object_path']}", viewer,
-                                    size=control["size"], check="unrelated viewer control", wanted=200)
-    require(hashlib.sha256(body).hexdigest() == control["sha256"], "unrelated viewer control differs from the approved bytes")
-    return observed
+def unrelated_viewer_samples(
+    base: SplitResult, edge: str, repo: str, target: str, target_size: int,
+    control: dict[str, Any], viewer: dict[str, str], expires_at: int,
+) -> list[dict[str, Any]]:
+    control_key = f"{repo}/{control['object_path']}"
+    grant = {"viewer_expires_at_unix": expires_at, "viewer_grant_sha256": viewer_grant_fingerprint(viewer)}
+    samples = []
+    for key, size, wanted, offset in (
+        (control_key, control["size"], 200, None),
+        (target, target_size, None, None),
+        (target, target_size, None, 0),
+        (control_key, control["size"], 200, None),
+    ):
+        started = time.time_ns() // 1_000
+        row, body = request_sample(base, edge, key, viewer, size=size, check=UNRELATED_VIEWER_CHECK,
+                                   wanted=wanted, range_offset=offset)
+        finished = time.time_ns() // 1_000
+        digest = hashlib.sha256(body).hexdigest() if wanted is not None else None
+        require(digest is None or digest == control["sha256"], "unrelated viewer control differs from the approved bytes")
+        samples.append(row | grant | {"body_sha256": digest, "range_offset": offset,
+                                      "started_at_unix_us": started, "finished_at_unix_us": finished})
+    return samples
 
 
 def parallel_range_samples(
@@ -512,6 +532,13 @@ def collect(
     if unrelated_viewer is not None:
         require(access == "private" and "unrelated_control" in fixture and unrelated_viewer != viewer,
                 "unrelated viewer check requires a separate private grant and approved control object")
+        from cdn_viewer_issuer import verify_viewer_scope
+
+        control = fixture["unrelated_control"]
+        prefix = f"{repo}/{fixture_object_prefix(control, IMMUTABLE_ROOTS)}/"
+        unrelated_expires_at = verify_viewer_scope(
+            edge, unrelated_viewer, fixture["native_origin"], base.geturl().rstrip("/"), repo, prefix,
+        )
 
     full, body = request_sample(base, edge, scope_key, viewer, size=size, check="exact_get", wanted=200)
     observed_digest = hashlib.sha256(body).hexdigest()
@@ -539,14 +566,11 @@ def collect(
         confirmed = warm_full_read(base, edge, scope_key, viewer, body)
         traces[check] = [warm, anonymous, anonymous_range, confirmed]
         if unrelated_viewer is not None:
-            check = "warm_unrelated_principal_denied"
-            control = fixture["unrelated_control"]
-            before = read_unrelated_control(base, edge, repo, unrelated_viewer, control)
-            denied, _ = request_sample(base, edge, scope_key, unrelated_viewer, size=size, check=check)
-            denied_range, _ = request_sample(base, edge, scope_key, unrelated_viewer, size=size, check=check, range_offset=0)
-            after = read_unrelated_control(base, edge, repo, unrelated_viewer, control)
-            warm_after = warm_full_read(base, edge, scope_key, viewer, body)
-            traces[check] = [confirmed, before, denied, denied_range, after, warm_after]
+            controls = unrelated_viewer_samples(base, edge, repo, scope_key, size, control,
+                                                unrelated_viewer, unrelated_expires_at)
+            samples = [confirmed, *controls, warm_full_read(base, edge, scope_key, viewer, body)]
+            verify_unrelated_viewer_denial(samples)
+            traces[UNRELATED_VIEWER_CHECK] = samples
         if expires_at is not None:
             traces.update(collect_expiry_window(fixture, edge, family, viewer, expires_at, operator_binding=operator_binding))
     return traces | collect_origin_access(fixture, edge, access, scope_key, body,
@@ -649,7 +673,7 @@ def main() -> int:
         if expires_at is not None:
             expiry_metadata = {
                 "viewer_expires_at_unix": expires_at,
-                "viewer_grant_sha256": hashlib.sha256(json.dumps(expiry_viewer, sort_keys=True).encode()).hexdigest(),
+                "viewer_grant_sha256": viewer_grant_fingerprint(expiry_viewer),
             }
         policy = attest_fixture(fixture, edge, access) if args.attest_deployment else None
         provenance = {

@@ -15,9 +15,9 @@ import run_cdn_transport_checks as TRANSPORT
 from cdn_deployment_policy_cli import PrivateBinding
 from cdn_qualification import deployment_component_digest
 from test_cdn_transport_qualification import (
-    BLOB_SIGNATURE, BODY, DIGEST, GCS_SIGNATURE, PACK, S3_SIGNATURE, fixture, response, route_responses,
+    BLOB_SIGNATURE, BODY, DIGEST, GCS_SIGNATURE, PACK, S3_SIGNATURE, fixture, response, route_responses, scoped_credential,
 )
-from test_cdn_viewer_issuer_qualification import NOW, credential
+from test_cdn_viewer_issuer_qualification import NOW
 
 
 REPO = "Models/Video_v2/inference.v1"
@@ -58,7 +58,7 @@ class PrivateCdnBindingTests(unittest.TestCase):
         native = root / "native-url"
         native.write_text(f"{base}/{key}?{signature}")
         self.viewer = root / "viewer"
-        self.viewer.write_text(credential(edge, self.config, f"{repo}/v2/pack-layers/", NOW + 180))
+        self.viewer.write_text(scoped_credential(edge, self.config, f"{repo}/v2/pack-layers/", NOW + 180))
         self.approval = root / "approved.json"
         self.transport_args = ["--output", str(self.approval), "--deployment-policy-sha256",
                                self.policy["deployment_policy_sha256"], "--viewer-file", str(self.viewer),
@@ -120,7 +120,7 @@ class PrivateCdnBindingTests(unittest.TestCase):
                 changed = self.policy | {"deployment_policy_sha256": "f" * 64}
                 first, last = self.policy, self.policy
                 if failure == "misbound-viewer":
-                    self.viewer.write_text(credential("cloudfront", self.config, "other/path/v2/pack-layers/", NOW + 180))
+                    self.viewer.write_text(scoped_credential("cloudfront", self.config, "other/path/v2/pack-layers/", NOW + 180))
                 elif failure == "wrong-policy":
                     first = changed
                 elif failure == "changed-policy":

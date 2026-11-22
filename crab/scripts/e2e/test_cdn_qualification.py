@@ -345,7 +345,7 @@ class CdnQualificationTests(unittest.TestCase):
             ), edge_hit],
             "warm_anonymous_viewer_denied": [edge_hit, edge_deny, edge_deny, edge_hit],
             "warm_expired_viewer_denied": [edge_hit, edge_deny],
-            "warm_unrelated_principal_denied": [edge_hit, control, edge_deny, edge_deny, control, edge_hit],
+            CDN.UNRELATED_VIEWER_CHECK: [edge_hit, control, edge_deny, edge_deny, control, edge_hit],
             CDN.EXPIRY_RANGE_CHECK: expiry_rows(edge_hit | {"status": 206, "bytes": 1}, edge_deny),
             "private_origin_denied": [origin_deny],
             "live_origin_denied": [origin_deny],
@@ -836,6 +836,15 @@ class CdnQualificationTests(unittest.TestCase):
             requests = [
                 {"started_at_unix_us": started, "finished_at_unix_us": started + 100} | row
                 for started, row in zip((EXPIRY * 1_000_000 - 2000, (EXPIRY + 2) * 1_000_000 + 1000), requests)
+            ]
+        if check == CDN.UNRELATED_VIEWER_CHECK:
+            requests = [
+                ({
+                    "viewer_expires_at_unix": EXPIRY, "viewer_grant_sha256": "b" * 64,
+                    "started_at_unix_us": 1000 + index * 100, "finished_at_unix_us": 1050 + index * 100,
+                    "body_sha256": "e" * 64 if index in (1, 4) else None,
+                    "range_offset": 0 if index == 3 else None,
+                } if 1 <= index <= 4 else {}) | row for index, row in enumerate(requests)
             ]
         trace = {key: self.report[key] for key in (
             "source_sha", "scope", "configuration_sha256", "workflow_run_id", "workflow_run_attempt",
@@ -1801,7 +1810,7 @@ class CdnQualificationTests(unittest.TestCase):
         self.configure("azure", "private", "direct")
         hit, deny = self.request("edge", 200, "hit"), self.request("edge", 403)
         control = self.request("edge", 200) | {"key_sha256": "0" * 64}
-        key = "warm_unrelated_principal_denied"
+        key = CDN.UNRELATED_VIEWER_CHECK
         self.trace(key, [hit, deny])
         self.rejected("unrelated viewer denial requires six edge observations")
         self.trace(key, [hit, control, deny, deny, deny | {"key_sha256": control["key_sha256"]}, hit])
@@ -1810,6 +1819,22 @@ class CdnQualificationTests(unittest.TestCase):
         self.rejected("unrelated viewer must read the same distinct control object before and after denial")
         self.trace(key, [hit, control, deny, hit | {"status": 206, "bytes": 1}, control, hit])
         self.rejected("unrelated viewer must be denied a full and ranged GET of the warm target")
+
+    def test_unrelated_denials_require_the_same_live_grant_and_a_real_range(self) -> None:
+        self.configure("s3", "private", "direct")
+        key = CDN.UNRELATED_VIEWER_CHECK
+        observed = json.loads((self.directory / "traces" / f"{key}.json").read_bytes())["requests"]
+        for index, tamper, reason in (
+            (3, {"range_offset": None}, "full GET and an exact single-byte range"),
+            (3, {"viewer_grant_sha256": "c" * 64}, "same signed grant"),
+            (4, {"finished_at_unix_us": EXPIRY * 1_000_000}, "finish before the signed grant expires"),
+            (4, {"body_sha256": "d" * 64}, "identical control bytes"),
+        ):
+            with self.subTest(tamper=tamper):
+                requests = observed.copy()
+                requests[index] = requests[index] | tamper
+                self.trace(key, requests)
+                self.rejected(reason)
 
     def test_different_object_cannot_supply_the_warm_denial_observation(self) -> None:
         self.configure("azure", "private", "direct")

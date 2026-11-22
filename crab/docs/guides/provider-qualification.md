@@ -226,11 +226,14 @@ control's `object_path`, `size`, and `sha256` as for the target. Choose an
 immutable key under a separate viewer-grant prefix in the same repository or
 protected view, such as an LFS object for a Git pack fixture. Publish both
 objects and pass `--unrelated-viewer-file` with a grant scoped to the control's
-prefix, issued to a principal that lacks access to the target. Retain the grant
-provenance without its credential. The collector uses the same grant to read
-and verify the control before and after denied full and ranged GETs on the warm target.
-It also verifies an authorized full cache hit on the target before and after
-the denials.
+exact prefix, issued to a principal that lacks access to the target. Use a
+live grant with at most 15 minutes remaining. The collector validates the
+signed scope and uses the same grant to verify the control bytes before and
+after two denials on the warm target, one for a full GET and one for a
+single-byte range. It also verifies an authorized full cache hit on the
+target before and after the denials. The trace retains the control body digest,
+grant fingerprint, signed expiry, request intervals, and range offset. All
+four control-grant probes must finish before the signed expiry.
 
 For public and private delivery, the collector verifies the full SHA-256 and
 compares a one-byte range. On the same warm key, it requires a denial for HEAD

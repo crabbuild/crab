@@ -17,7 +17,7 @@ import cdn_deployment_policy_cli as DEPLOYMENT
 import cdn_viewer_issuer as ISSUER
 import collect_cdn_cache_reuse as REUSE
 import run_cdn_transport_checks as TRANSPORT
-from test_cdn_transport_qualification import BODY, fixture, response
+from test_cdn_transport_qualification import BODY, fixture, response, scoped_credential
 
 
 NOW = 1_800_000_000
@@ -44,20 +44,6 @@ def settings(edge, *, protected=False):
     return config
 
 
-def credential(edge, config, prefix, expires):
-    resource = f"{config['base_url']}/{prefix}"
-    if edge == "cloudfront":
-        policy = {"Statement": [{"Resource": resource + "*", "Condition": {"DateLessThan": {"AWS:EpochTime": expires}}}]}
-        cookie = base64.b64encode(json.dumps(policy).encode()).decode().translate(str.maketrans("+=/", "-_~"))
-        return f"CloudFront-Policy={cookie}; CloudFront-Signature=fixture-signature; CloudFront-Key-Pair-Id=fixture"
-    if edge == "cloud-cdn":
-        policy = base64.urlsafe_b64encode(resource.encode()).decode()
-        return f"Cloud-CDN-Cookie=URLPrefix={policy}:Expires={expires}:KeyName=fixture:Signature=fixture-signature"
-    payload = encoded({"iss": config["base_url"], "aud": config["base_url"], "prefix": prefix, "exp": expires,
-                       "sub": config["fixture_prefix"] + config["view_suffix"], "origin": config["native_origin"]})
-    return f"header.{payload}.fixture-signature"
-
-
 def issue_reply(edge, config, *, expires_in=180):
     provider, cdn = ISSUER.PROVIDERS[edge]
     repo = config["fixture_prefix"] + config["view_suffix"]
@@ -68,7 +54,7 @@ def issue_reply(edge, config, *, expires_in=180):
              "permissions": ["read"], "expires_at": datetime.fromtimestamp(NOW + 300, timezone.utc).isoformat(),
              "cdn": {"provider": cdn, "origin": config["native_origin"], "base_url": config["base_url"],
                      "repo_prefix": repo, "expires_at": expires,
-                     "grants": [{"prefix": prefix, "credential": credential(edge, config, prefix, expires)}]}}
+                     "grants": [{"prefix": prefix, "credential": scoped_credential(edge, config, prefix, expires)}]}}
     if config["view_suffix"]:
         reply["cdn"]["global_prefix"] = repo + "/.crab"
         reply["storage_scope"] = {"repo_prefix": repo, "global_prefix": repo + "/.crab",
@@ -304,7 +290,7 @@ class CdnViewerIssuerQualificationTests(TestCase):
                     reply = issue_reply(edge, config)
                     grant = reply["cdn"]["grants"][0]
                     if mismatch == "signed-prefix":
-                        grant["credential"] = credential(edge, config, grant["prefix"].replace("xorbs", "shards"), NOW + 180)
+                        grant["credential"] = scoped_credential(edge, config, grant["prefix"].replace("xorbs", "shards"), NOW + 180)
                     elif mismatch == "native-target":
                         reply["cdn"]["origin"] = "wrong-origin"
                     elif mismatch == "protected-view":

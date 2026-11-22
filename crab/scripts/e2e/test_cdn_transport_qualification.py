@@ -89,6 +89,22 @@ def expiring_viewer(edge: str, expiry: int) -> dict[str, str]:
     return {"Authorization": f"Bearer header.{payload}.fixture-secret"}
 
 
+def scoped_credential(edge: str, config: dict, prefix: str, expires: int) -> str:
+    base = config["base_url"]
+    resource = f"{base}/{prefix}"
+    if edge == "cloudfront":
+        policy = {"Statement": [{"Resource": resource + "*", "Condition": {"DateLessThan": {"AWS:EpochTime": expires}}}]}
+        cookie = base64.b64encode(json.dumps(policy).encode()).decode().translate(str.maketrans("+=/", "-_~"))
+        return f"CloudFront-Policy={cookie}; CloudFront-Signature=fixture-signature; CloudFront-Key-Pair-Id=fixture"
+    if edge == "cloud-cdn":
+        policy = base64.urlsafe_b64encode(resource.encode()).decode()
+        return f"Cloud-CDN-Cookie=URLPrefix={policy}:Expires={expires}:KeyName=fixture:Signature=fixture-signature"
+    claims = {"iss": base, "aud": base, "prefix": prefix, "exp": expires,
+              "sub": config["fixture_prefix"] + config["view_suffix"], "origin": config["native_origin"]}
+    payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+    return f"header.{payload}.fixture-signature"
+
+
 class CdnTransportQualificationTests(unittest.TestCase):
     def setUp(self) -> None:
         ctx = patch.object(TRANSPORT.http.client, "HTTPSConnection")
@@ -580,10 +596,13 @@ class CdnTransportQualificationTests(unittest.TestCase):
         ]
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
-            raw = json.dumps(fixture("front-door", "private") | {"unrelated_control": CONTROL}).encode()
+            config = fixture("front-door", "private") | {"unrelated_control": CONTROL}
+            raw = json.dumps(config).encode()
             (root / "fixture.json").write_bytes(raw)
             (root / "token").write_text("fixture-secret\n", encoding="utf-8")
-            (root / "unrelated").write_text("unrelated-secret\n", encoding="utf-8")
+            expiry = int(time.time()) + 120
+            unrelated_credential = scoped_credential("front-door", config, f"{REPO}/lfs/objects/", expiry)
+            (root / "unrelated").write_text(unrelated_credential + "\n", encoding="utf-8")
             signed = root / "signed-url"
             signed.write_text(f"https://fixtureacct.blob.core.windows.net/container/{REPO}/{PACK}?{BLOB_SIGNATURE}")
             digest = hashlib.sha256(raw).hexdigest()
@@ -608,7 +627,7 @@ class CdnTransportQualificationTests(unittest.TestCase):
             for item in (root / "traces").iterdir():
                 text = item.read_text(encoding="utf-8")
                 self.assertNotIn("fixture-secret", text)
-                self.assertNotIn("unrelated-secret", text)
+                self.assertNotIn(unrelated_credential, text)
                 self.assertNotIn("test-signature", text)
                 self.assertNotIn("fixture.example.com", text)
                 self.assertNotIn("fixtureacct.blob.core.windows.net", text)
@@ -626,9 +645,11 @@ class CdnTransportQualificationTests(unittest.TestCase):
             self.assertEqual(headers["Authorization"], "Bearer fixture-secret")
             observed = json.loads((root / "traces" / "warm_unrelated_principal_denied.json").read_bytes())["requests"]
             self.assertEqual([row["status"] for row in observed], [200, 200, 403, 403, 200, 200])
+            self.assertEqual({row["viewer_expires_at_unix"] for row in observed[1:5]}, {expiry})
+            self.assertEqual([row["body_sha256"] for row in observed[1:5]], [CONTROL_DIGEST, None, None, CONTROL_DIGEST])
             control_path, target = f"/crab/{REPO}/{CONTROL['object_path']}", f"/crab/{REPO}/{PACK}"
             unrelated = [call for call in self.connection.request.call_args_list
-                         if call.kwargs["headers"].get("Authorization") == "Bearer unrelated-secret"]
+                         if call.kwargs["headers"].get("Authorization") == f"Bearer {unrelated_credential}"]
             self.assertEqual([call.args for call in unrelated], [("GET", path) for path in
                                                                 (control_path, target, target, control_path)])
             self.assertEqual([call.kwargs["headers"].get("Range") for call in unrelated], [None, None, "bytes=0-0", None])
@@ -641,6 +662,19 @@ class CdnTransportQualificationTests(unittest.TestCase):
         sample = primary | {"object_path": history, "unrelated_control": same_prefix}
         with self.assertRaisesRegex(ValueError, "disjoint immutable grant prefix"):
             TRANSPORT.fixture_repository_prefix(sample, "private", "capsule")
+
+    def test_unrelated_grant_must_be_live_and_scoped_to_the_control_before_reading(self) -> None:
+        for edge in TRANSPORT.PROVIDER_FOR_EDGE:
+            config = fixture(edge, "private") | {"unrelated_control": CONTROL}
+            now = int(time.time())
+            for prefix, expiry, reason in (
+                (f"{REPO}/v2/pack-layers/", now + 120, "signed viewer policy differs"),
+                (f"{REPO}/lfs/objects/", now - 1, "must be live and short-lived"),
+            ):
+                grant = TRANSPORT.private_viewer_headers(edge, scoped_credential(edge, config, prefix, expiry))
+                with self.subTest(edge=edge, reason=reason), self.assertRaisesRegex(ValueError, reason):
+                    TRANSPORT.collect(config, edge, "private", "git", {"Cookie": "primary"}, None, unrelated_viewer=grant)
+        self.client.assert_not_called()
 
     def test_attestation_brackets_the_transport_in_one_output_directory(self) -> None:
         import collect_cloudfront_deployment_policy
@@ -750,7 +784,8 @@ class CdnTransportQualificationTests(unittest.TestCase):
         )
         base = TRANSPORT.fixture_base("https://fixture.example.com/crab")
         with self.assertRaisesRegex(ValueError, "unrelated viewer control differs from the approved bytes"):
-            TRANSPORT.read_unrelated_control(base, "cloudfront", REPO, {"Cookie": "test-viewer"}, CONTROL)
+            TRANSPORT.unrelated_viewer_samples(base, "cloudfront", REPO, f"{REPO}/{PACK}", len(BODY),
+                                               CONTROL, {"Cookie": "test-viewer"}, int(time.time()) + 120)
 
 
 if __name__ == "__main__":

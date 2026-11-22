@@ -71,10 +71,12 @@ EXPIRY_CHECKS = {EXPIRY_FULL_CHECK, EXPIRY_RANGE_CHECK}
 EXPIRY_TIMING_FIELDS = {"started_at_unix_us", "finished_at_unix_us"}
 EXPIRY_GRANT_FIELDS = {"viewer_expires_at_unix", "viewer_grant_sha256"}
 EXPIRY_SETTLE_SECONDS = 2
+UNRELATED_VIEWER_CHECK = "warm_unrelated_principal_denied"
+UNRELATED_REQUEST_FIELDS = EXPIRY_GRANT_FIELDS | EXPIRY_TIMING_FIELDS | {"range_offset", "body_sha256"}
 WARM_DENIAL_CHECKS = {
     "warm_anonymous_viewer_denied",
     EXPIRY_FULL_CHECK,
-    "warm_unrelated_principal_denied",
+    UNRELATED_VIEWER_CHECK,
 }
 PRIVATE_CHECKS = WARM_DENIAL_CHECKS | {
     "private_origin_denied",
@@ -812,8 +814,11 @@ def verify_check_evidence(
             request_fields.update(EXPIRY_TIMING_FIELDS)
         if name == EXPIRY_RANGE_CHECK:
             request_fields.add("range_offset")
-        for value in requests:
-            request = fields(value, request_fields, f"{name} request")
+        for index, value in enumerate(requests):
+            expected = request_fields
+            if name == UNRELATED_VIEWER_CHECK and 1 <= index <= 4:
+                expected = request_fields | UNRELATED_REQUEST_FIELDS
+            request = fields(value, expected, f"{name} request")
             require(request["source"] in ("edge", "origin")
                     and request["cache"] in ("hit", "miss", "unknown")
                     and type(request["status"]) is int and 100 <= request["status"] <= 599
@@ -967,7 +972,7 @@ def verify_trace_observations(name: str, requests: list[dict[str, Any]]) -> None
 
 
 def verify_warm_denial(name: str, requests: list[dict[str, Any]]) -> None:
-    if name == "warm_unrelated_principal_denied":
+    if name == UNRELATED_VIEWER_CHECK:
         verify_unrelated_viewer_denial(requests)
         return
     anonymous = name == "warm_anonymous_viewer_denied"
@@ -1000,6 +1005,27 @@ def verify_unrelated_viewer_denial(requests: list[dict[str, Any]]) -> None:
     require(control_key != key and all(row["status"] == 200 and row["bytes"] == control_size > 0
                                       and row["key_sha256"] == control_key for row in (control_before, control_after)),
             "unrelated viewer must read the same distinct control object before and after denial")
+    digest = control_before["body_sha256"]
+    require(matches(SHA256, digest) and control_after["body_sha256"] == digest
+            and all(row["body_sha256"] is None for row in (denied, denied_range)),
+            "unrelated viewer must verify identical control bytes on both reads")
+    observations = requests[1:5]
+    require(type(denied_range["range_offset"]) is int and denied_range["range_offset"] == 0
+            and all(row["range_offset"] is None for row in (control_before, denied, control_after)),
+            "unrelated viewer denials must include a full GET and an exact single-byte range")
+    expires = control_before["viewer_expires_at_unix"]
+    grant = control_before["viewer_grant_sha256"]
+    require(positive(expires) and matches(SHA256, grant)
+            and all(type(row["viewer_expires_at_unix"]) is int and row["viewer_expires_at_unix"] == expires
+                    and row["viewer_grant_sha256"] == grant for row in observations),
+            "unrelated viewer must use the same signed grant for both controls and both denials")
+    previous_finish = 0
+    for row in observations:
+        started, finished = row["started_at_unix_us"], row["finished_at_unix_us"]
+        require(positive(started) and positive(finished)
+                and previous_finish <= started < finished < expires * 1_000_000,
+                "unrelated viewer probes must be ordered and finish before the signed grant expires")
+        previous_finish = finished
 
 
 def verify_scoped_view(value: Any, report: dict[str, Any], approved: str) -> None:

@@ -659,7 +659,11 @@ and edge payload through redacted observations.
   An unrelated viewer must also be denied full and ranged GETs of that warm
   object. Its grant must read a separate, approved control object before and
   after the denials. The control uses a disjoint grant prefix on the same
-  endpoint, so an expired or invalid credential cannot supply the evidence.
+  endpoint. Validate the exact signed control prefix before sending requests.
+  Retain the control body digest, one grant fingerprint and signed expiration,
+  and ordered request intervals for both controls and both denials. The
+  denial pair includes one full GET and one single-byte range, and the four
+  requests must finish within the grant lifetime.
   The transport expiry probe verifies a full cache hit and two overlapping
   range reads with the approved bytes before the signed expiry. It replays
   them with the same grant after expiry and requires all three denials. The
