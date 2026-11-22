@@ -516,6 +516,7 @@ or container in the same cloud. Set `publication` with the absolute receipt
 origin = "s3://team-repos"
 base_url = "https://downloads.example.com"
 access = "private"
+approval_sha256 = "<reviewed private-binding receipt SHA-256>"
 
 [repositories.cdn.issuer]
 endpoint = "https://auth.example.com/v1/credentials"
@@ -525,7 +526,8 @@ token_cache_directory = "/var/lib/crab/gateway/issuer-tokens"
 ```
 
 Use the gateway process's installed Crab Auth login for that deployment. The
-issuer must authorize the exact full repository. The gateway applies its own
+issuer must authorize the exact full repository and pin the same private
+approval digest. The gateway applies its own
 client permissions before serving verified Git reads or full LFS downloads
 through the CDN. Partial LFS requests keep their native version proof. Control
 reads, writes and shared bucket-global reads use the native store. Gateway

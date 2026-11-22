@@ -382,7 +382,19 @@ mod tests {
                     .for_consumer(CdnConsumer::Cli, CdnProfile::Direct),
                 )
                 .unwrap();
-            let runtime = Arc::new(RemoteGitRuntime::default());
+            // Keep the verified base cache while making origin ranges exact.
+            // A speculative pack window could otherwise satisfy the fallback
+            // without a distinct on-wire request for the corrupt edge entry.
+            let runtime = Arc::new(
+                RemoteGitRuntime::new(
+                    crate::RuntimeOptions {
+                        max_object_cache_bytes: crate::runtime::PACK_WINDOW_BYTES as usize - 1,
+                        ..Default::default()
+                    },
+                    Arc::new(crate::NoopMetrics),
+                )
+                .unwrap(),
+            );
             let reader = Arc::new(
                 RemoteGitReader::from_pinned_with_preferred_pack_indexes(
                     store,

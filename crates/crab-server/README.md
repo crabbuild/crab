@@ -431,6 +431,7 @@ root from `storage.url`. For example, a server rooted at
 origin = "gs://team-repos"
 base_url = "https://downloads.example.com"
 access = "private"
+approval_sha256 = "<reviewed private-binding receipt SHA-256>"
 
 [storage.cdn."repositories/org/models".issuer]
 endpoint = "https://auth.example.com/v1/credentials"
@@ -440,7 +441,8 @@ token_cache_directory = "/var/lib/crab/server/issuer-tokens"
 ```
 
 Use an installed Crab Auth login for the server process that authorizes
-the exact full repository and deployment. Explicit `access = "public"`
+the exact full repository and deployment. Pin the same private approval
+digest in the issuer. Explicit `access = "public"`
 requires `export_origin` for a separate approved bucket or container in the
 same cloud. To accelerate a public binding, add `publication` with the
 absolute receipt `path` and publisher-reported `sha256`. Unlisted objects
