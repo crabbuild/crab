@@ -1,5 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { AtSignIcon, BellIcon, GitPullRequestIcon } from "lucide-react";
+import {
+  AtSignIcon,
+  BellIcon,
+  GitPullRequestIcon,
+  UserRoundIcon,
+} from "lucide-react";
 import { useMutation } from "@/components/discussion/mutations";
 import { RelativeTime } from "@/components/discussion/time";
 import { Link } from "@/components/navigation/link";
@@ -19,13 +24,38 @@ function titleOf(repo: Pick<Address, "owner" | "name">) {
   return `${repo.owner}/${repo.name}`;
 }
 
+const reasons = {
+  assigned: {
+    label: "Assignments",
+    message: "assigned you",
+    icon: UserRoundIcon,
+  },
+  review_requested: {
+    label: "Review requests",
+    message: "requested your review",
+    icon: GitPullRequestIcon,
+  },
+  mention: { label: "Mentions", message: "mentioned you", icon: AtSignIcon },
+  team_mention: {
+    label: "Team mentions",
+    message: "mentioned your team",
+    icon: AtSignIcon,
+  },
+};
+
+type Reason = keyof typeof reasons;
+
+function isReason(value: string | null): value is Reason {
+  return value !== null && Object.hasOwn(reasons, value);
+}
+
 type Notice = {
   id: string;
   repository: Pick<Address, "owner" | "name">;
   title: string;
   href: string;
   sender: string;
-  reason: "mention" | "team_mention" | "review_requested";
+  reason: Reason;
   read: boolean;
   created_at_ms: number;
 };
@@ -75,10 +105,11 @@ export function NotificationLink({ current }: { current: boolean }) {
   );
 }
 
-function inboxHref(unread: boolean, repository: string) {
+function inboxHref(unread: boolean, repository: string, reason: Reason | "") {
   const query = new URLSearchParams();
   if (!unread) query.set("tab", "all");
   if (repository) query.set("repository", repository);
+  if (reason) query.set("reason", reason);
   return `/-/notifications${query.size ? `?${query}` : ""}`;
 }
 
@@ -93,6 +124,8 @@ export function Notifications({
 }) {
   const unread = url.searchParams.get("tab") !== "all";
   const repository = url.searchParams.get("repository") ?? "";
+  const selectedReason = url.searchParams.get("reason");
+  const reason = isReason(selectedReason) ? selectedReason : "";
   return (
     <section
       className="mx-auto grid max-w-4xl gap-5 px-4 py-6 sm:px-8"
@@ -110,7 +143,7 @@ export function Notifications({
               variant={unread === isUnread ? "secondary" : "ghost"}
             >
               <Link
-                href={inboxHref(isUnread, repository)}
+                href={inboxHref(isUnread, repository, reason)}
                 aria-current={unread === isUnread ? "page" : undefined}
               >
                 {isUnread ? "Unread" : "All"}
@@ -120,15 +153,16 @@ export function Notifications({
         </nav>
       </div>
       {repository && (
-        <Link className="w-fit underline" href={inboxHref(unread, "")}>
+        <Link className="w-fit underline" href={inboxHref(unread, "", reason)}>
           Clear repository filter
         </Link>
       )}
       <NotificationList
-        key={inboxHref(unread, repository)}
+        key={inboxHref(unread, repository, reason)}
         csrf={csrf}
         unread={unread}
         repository={repository}
+        reason={reason}
         repositories={repositories}
       />
     </section>
@@ -139,11 +173,13 @@ function NotificationList({
   csrf,
   unread,
   repository,
+  reason,
   repositories,
 }: {
   csrf: string;
   unread: boolean;
   repository: string;
+  reason: Reason | "";
   repositories: Address[];
 }) {
   const [cursor, setCursor] = useState<string>();
@@ -152,6 +188,7 @@ function NotificationList({
   const [announcement, setAnnouncement] = useState("");
   const filters = new URLSearchParams({ unread: String(unread) });
   if (repository) filters.set("repository", repository);
+  if (reason) filters.set("reason", reason);
   const initial = useRequest<InboxPage>(`/api/notifications?${filters}`);
   if (cursor) filters.set("before", cursor);
   const page = useRequest<InboxPage>(
@@ -177,7 +214,7 @@ function NotificationList({
                 id="inbox-repository"
                 value={repository}
                 onChange={(event) =>
-                  navigate(inboxHref(unread, event.target.value))
+                  navigate(inboxHref(unread, event.target.value, reason))
                 }
               >
                 <NativeSelectOption value="">
@@ -186,6 +223,26 @@ function NotificationList({
                 {repositories.map((repo) => (
                   <NativeSelectOption key={repo.id} value={repo.id}>
                     {titleOf(repo)}
+                  </NativeSelectOption>
+                ))}
+              </NativeSelect>
+              <label htmlFor="inbox-reason" className="text-sm font-medium">
+                Reason
+              </label>
+              <NativeSelect
+                id="inbox-reason"
+                value={reason}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  navigate(
+                    inboxHref(unread, repository, isReason(value) ? value : ""),
+                  );
+                }}
+              >
+                <NativeSelectOption value="">All reasons</NativeSelectOption>
+                {Object.entries(reasons).map(([value, { label }]) => (
+                  <NativeSelectOption key={value} value={value}>
+                    {label}
                   </NativeSelectOption>
                 ))}
               </NativeSelect>
@@ -262,8 +319,7 @@ function NotificationRow({
   onMarked: (read: boolean) => void;
 }) {
   const mutation = useMutation(csrf, null);
-  const review = item.reason === "review_requested";
-  const Icon = review ? GitPullRequestIcon : AtSignIcon;
+  const { icon: Icon, message } = reasons[item.reason];
   return (
     <li
       className={`grid grid-cols-[auto_1fr] items-start gap-3 px-3 py-4 sm:grid-cols-[auto_1fr_auto] sm:px-4${read ? "" : " bg-muted/50"}`}
@@ -280,13 +336,7 @@ function NotificationRow({
           {item.title}
         </Link>
         <p className="text-muted-foreground">
-          {item.sender}{" "}
-          {review
-            ? "requested your review"
-            : item.reason === "team_mention"
-              ? "mentioned your team"
-              : "mentioned you"}{" "}
-          <span aria-hidden="true">·</span>{" "}
+          {item.sender} {message} <span aria-hidden="true">·</span>{" "}
           <RelativeTime value={item.created_at_ms} />
         </p>
         {mutation.error && <p role="alert">{mutation.error}</p>}

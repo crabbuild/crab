@@ -2547,17 +2547,22 @@ and its source path. Missing file paths and inaccessible repositories return
 ### Read the notification inbox
 
 Signed-in users open **Notifications** from the global header. The inbox has
-Unread and All views, a repository filter, and links to the relevant issue,
+Unread and All views, repository and reason filters, and links to the relevant issue,
 pull request, comment, review, or inline conversation.
 
-Individual and team review requests, Markdown `@handle` mentions, and configured
-closed-team mentions enqueue a notification with the source activity. The server
-delivers it to the recipient's private Directory inbox using current repository
-access. Retried delivery preserves read state. Pending review comments enqueue
-mentions only when the reviewer publishes the review.
+Assignments, individual and team review requests, Markdown `@handle` mentions,
+and configured closed-team mentions enqueue a notification with the source
+activity. The server checks current repository access before displaying it in
+the recipient's private inbox. Retried delivery preserves read state. Pending
+review comments enqueue mentions when the reviewer publishes the review.
+
+A newly added assignee on an issue or pull request receives an assignment
+notification. Creation, individual edits, and bulk edits use the same rule.
+Unchanged assignees, removals, and self-assignment leave the inbox unchanged.
 
 `GET /api/notifications` accepts `repository` (repository UUID), `unread`
-(default false), `limit` (1–50, default 20), and the `before` cursor from `next`.
+(default false), `reason` (`assigned`, `review_requested`, `mention`, or
+`team_mention`), `limit` (1–50, default 20), and the `before` cursor from `next`.
 `PUT /api/notifications/{id}/read` accepts `{"created_at_ms":<timestamp in ms>}`
 and optional `read:false` to mark an entry unread. The CSRF-protected write
 sets private read state and can be retried after a lost response. The inbox

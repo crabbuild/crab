@@ -133,6 +133,14 @@ impl Mutation for CreateIssue {
             &record.body,
         )?;
         activity::append(context, target, &record.author, Action::Created)?;
+        collaboration::mentions::assigned(
+            context,
+            target,
+            &record.author,
+            record.version,
+            &[],
+            &record.assignees,
+        )?;
         creation::assign_milestone(
             context,
             Subject {
@@ -403,9 +411,9 @@ impl UpdateIssue {
         if let Some(value) = input.label_ids {
             issue.label_ids = value;
         }
-        if let Some(value) = input.assignees {
-            issue.assignees = value;
-        }
+        let previous_assignees = input
+            .assignees
+            .map(|value| std::mem::replace(&mut issue.assignees, value));
         issue.version = issue
             .version
             .checked_add(1)
@@ -456,6 +464,16 @@ impl UpdateIssue {
         let target = Target::Issue {
             number: issue.number,
         };
+        if let Some(previous) = previous_assignees {
+            collaboration::mentions::assigned(
+                context,
+                target,
+                &input.actor,
+                issue.version,
+                &previous,
+                &issue.assignees,
+            )?;
+        }
         if edited {
             if let Some(previous) = previous_body.as_deref() {
                 crate::cells::repository::collaboration::body_written(

@@ -8,7 +8,7 @@ use crate::cells::{
     Error, Result,
     application::{Mutation, MutationResult, Read, Transaction},
     directory::{IdentityKey, validate_handle},
-    repository::{self, RepositoryAuthor, timestamp, validate_number},
+    repository::{self, RepositoryAuthor, assignments::Assignee, timestamp, validate_number},
 };
 
 use super::{
@@ -40,6 +40,8 @@ pub(crate) struct Event {
     pub current: Vec<Mention>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reviewers: Vec<IdentityKey>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assignees: Vec<Uuid>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -125,6 +127,7 @@ pub(in crate::cells::repository) fn record(
         previous: previous.into_iter().collect(),
         current: current.into_iter().collect(),
         reviewers: Vec::new(),
+        assignees: Vec::new(),
     };
     context.put_document(&key(event.id, event.created_at_ms), &event)
 }
@@ -157,10 +160,47 @@ pub(in crate::cells::repository) fn review_requested(
             previous: Vec::new(),
             current: Vec::new(),
             reviewers: reviewers.to_vec(),
+            assignees: Vec::new(),
         };
         context.put_document(&key(event.id, event.created_at_ms), &event)?;
     }
     Ok(())
+}
+
+pub(in crate::cells::repository) fn assigned(
+    context: &Transaction<'_>,
+    target: Target,
+    actor: &RepositoryAuthor,
+    version: u64,
+    previous: &[Assignee],
+    current: &[Assignee],
+) -> Result<()> {
+    // Native assignment records are sorted by Directory ID. Name changes
+    // and users retained by an assignment replacement do not notify again.
+    let assignees: Vec<_> = current
+        .iter()
+        .map(|assignee| assignee.id)
+        .filter(|id| {
+            previous
+                .binary_search_by_key(id, |assignee| assignee.id)
+                .is_err()
+        })
+        .collect();
+    if assignees.is_empty() {
+        return Ok(());
+    }
+    let event = Event {
+        id: Uuid::now_v7(),
+        target,
+        version,
+        actor: actor.clone(),
+        created_at_ms: timestamp(context.now_ms())?,
+        previous: Vec::new(),
+        current: Vec::new(),
+        reviewers: Vec::new(),
+        assignees,
+    };
+    context.put_document(&key(event.id, event.created_at_ms), &event)
 }
 
 fn mentions(body: &str, settings: &Settings) -> Option<BTreeSet<Mention>> {

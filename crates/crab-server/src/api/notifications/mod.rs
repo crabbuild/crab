@@ -46,6 +46,7 @@ struct Parameters {
     limit: Option<u8>,
     repository: Option<Uuid>,
     unread: Option<bool>,
+    reason: Option<Reason>,
 }
 
 #[derive(Serialize)]
@@ -118,6 +119,7 @@ async fn list(
             .repository
             .is_some_and(|id| id != entry.notice.repository)
             || (params.unread == Some(true) && entry.read)
+            || params.reason.is_some_and(|reason| reason != entry.reason)
         {
             continue;
         }
@@ -354,7 +356,7 @@ async fn mark_read(
 }
 
 #[cfg(test)]
-mod review_tests;
+mod delivery_tests;
 
 #[cfg(test)]
 mod tests {

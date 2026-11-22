@@ -306,17 +306,17 @@ repository publication remain separate work.
 
 ## Repository collaboration
 
-Discussion writes store newly added mentions and individual and team review
-requests in a durable Repository outbox alongside the source activity. The
-server drains each bounded page after commit. It resolves addressed Directory
-accounts, applies current repository grants, and pages current closed-team
-members for team mentions.
+Discussion writes store newly added mentions, review requests, and assignments
+in a durable Repository outbox alongside the source activity. Assignments use
+stable Directory actor IDs from the committed change. The server drains each
+bounded page after commit, applies current repository grants, and pages current
+closed-team members for team mentions.
 Deduplicated delivery writes to private, bounded Directory inboxes before
 acknowledging the Repository event. Separate bounded retention protects
 explicit grants from being displaced by pending SSO group notices. Retries
 preserve read state. The inbox rechecks the current signed-in account and
 repository access before disclosing unread state, titles, or links. Team
-bindings, queued mentions, and inbox entries use native document records and
+bindings, queued events, and inbox entries use native document records and
 require no SQL preparation.
 
 Discussion author enrichment uses the bounded native `LookupActors` read (Directory

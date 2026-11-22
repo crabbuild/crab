@@ -147,6 +147,14 @@ fn write_pull(
         &record.body,
     )?;
     activity::append(context, target, &record.author, Action::Created)?;
+    collaboration::mentions::assigned(
+        context,
+        target,
+        &record.author,
+        record.version,
+        &[],
+        &record.assignees,
+    )?;
     creation::assign_milestone(
         context,
         Subject {
@@ -254,9 +262,9 @@ impl Mutation for UpdatePull {
         if let Some(value) = input.label_ids {
             pull.label_ids = value;
         }
-        if let Some(value) = input.assignees {
-            pull.assignees = value;
-        }
+        let previous_assignees = input
+            .assignees
+            .map(|value| std::mem::replace(&mut pull.assignees, value));
         pull.version = pull
             .version
             .checked_add(1)
@@ -288,6 +296,16 @@ impl Mutation for UpdatePull {
         let target = Target::Pull {
             number: pull.number,
         };
+        if let Some(previous) = previous_assignees {
+            collaboration::mentions::assigned(
+                context,
+                target,
+                &input.actor,
+                pull.version,
+                &previous,
+                &pull.assignees,
+            )?;
+        }
         if edited {
             if let Some(previous) = previous_body.as_deref() {
                 crate::cells::repository::collaboration::body_written(

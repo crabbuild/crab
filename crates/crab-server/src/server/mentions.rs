@@ -218,7 +218,20 @@ async fn deliver(
         issuer: event.actor.issuer.clone(),
         subject: event.actor.subject.clone(),
     };
-    let mut recipients = if event.reviewers.is_empty() {
+    let mut recipients = if !event.assignees.is_empty() {
+        let sender = account_ids(client, std::slice::from_ref(&sender_key))
+            .await?
+            .into_iter()
+            .next()
+            .flatten();
+        event
+            .assignees
+            .iter()
+            .copied()
+            .filter(|id| Some(*id) != sender)
+            .map(|id| (id, Reason::Assigned))
+            .collect()
+    } else if event.reviewers.is_empty() {
         let (handles, sender) = tokio::try_join!(
             raw_handles(client, event),
             account_ids(client, std::slice::from_ref(&sender_key)),

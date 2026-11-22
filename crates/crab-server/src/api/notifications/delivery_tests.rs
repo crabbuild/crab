@@ -209,3 +209,145 @@ async fn inbox_delivers_a_review_request_and_mention_to_the_current_member() {
         .unwrap();
     h.close().await;
 }
+
+#[tokio::test]
+async fn assignment_notices_track_committed_additions_and_current_access() {
+    const ROOT: &str = "/api/repos/team/private";
+    const INBOX: &str = "/api/notifications?reason=assigned";
+    let h = Harness::new(false).await;
+    let alice = h.login().await;
+    let alice_id = h.assignee_id(&alice, "Alice").await;
+    let bob_id = h.assignee_id(&alice, "Bob").await;
+    *h.provider.mode.lock().await = "member".into();
+    let bob = h.login().await;
+    let issue = json!({
+        "request_id":Uuid::now_v7(),"title":"Assigned issue","body":"",
+        "metadata":{"assignee_ids":[alice_id,bob_id]}
+    });
+    for _ in 0..2 {
+        h.write(
+            Method::POST,
+            &format!("{ROOT}/issues"),
+            &alice,
+            issue.clone(),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+    }
+
+    let token: Value = h
+        .write(
+            Method::POST,
+            "/api/git-token",
+            &alice,
+            json!({"owner":"team","repository":"private","access":"write"}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let mut remote = url::Url::parse(&format!("{}/git/team/private.git", h.origin)).unwrap();
+    remote.set_username("crab").unwrap();
+    remote.set_password(token["token"].as_str()).unwrap();
+    let source = tempfile::tempdir().unwrap();
+    git::push_review_branches(source.path(), remote.as_str()).await;
+    h.write(
+        Method::POST,
+        &format!("{ROOT}/pulls"),
+        &alice,
+        json!({"request_id":Uuid::now_v7(),"title":"Assigned change","body":"",
+            "base_ref":"refs/heads/main","head_ref":"refs/heads/feature",
+            "metadata":{"assignee_ids":[bob_id]}}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+
+    // Retaining Bob must not notify again. Removing him and applying the
+    // same bulk action to both discussion kinds must notify once per item.
+    h.write(
+        Method::PATCH,
+        &format!("{ROOT}/issues/1"),
+        &alice,
+        json!({"version":1,"assignee_ids":[bob_id]}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    for (resource, version) in [("issues", 2), ("pulls", 1)] {
+        h.write(
+            Method::PATCH,
+            &format!("{ROOT}/{resource}/1"),
+            &alice,
+            json!({"version":version,"assignee_ids":[]}),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+    }
+    let repository = h.server.repositories.values()[0].id;
+    let items = h
+        .json(
+            &format!(
+                "{ROOT}/discussions/selection?repository_id={repository}&items=issue:1:3,pull:1:2"
+            ),
+            &alice,
+        )
+        .await["items"]
+        .clone();
+    let bulk = json!({"repository_id":repository,"request_id":Uuid::now_v7(),"items":items,
+        "action":{"kind":"assignees","add":[bob_id],"remove":[]}});
+    for _ in 0..2 {
+        let result: Value = h
+            .write(
+                Method::POST,
+                &format!("{ROOT}/discussions/bulk"),
+                &alice,
+                bulk.clone(),
+            )
+            .await
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(result["count"], 2);
+    }
+    h.deliver_notifications("team", "private").await;
+    h.deliver_notifications("team", "private").await;
+
+    let page = h.json(INBOX, &bob).await;
+    let mut hrefs: Vec<_> = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| {
+            assert_eq!(item["sender"], "Alice");
+            assert_eq!(item["reason"], "assigned");
+            item["href"].as_str().unwrap()
+        })
+        .collect();
+    hrefs.sort_unstable();
+    let issue = format!("/team/private/issues/1?repository_id={repository}");
+    let pull = format!("/team/private/pull/1?repository_id={repository}");
+    assert_eq!(hrefs, [&issue, &issue, &pull, &pull]);
+    assert_eq!(h.json(INBOX, &alice).await["items"], json!([]));
+    assert_eq!(
+        h.json("/api/notifications?reason=mention", &bob).await["items"],
+        json!([])
+    );
+
+    let mut writer = h.server.repositories.values()[0].config.members[0].clone();
+    writer.access = RepositoryAccess::Admin;
+    h.server
+        .catalog()
+        .unwrap()
+        .set_members("team", "private", vec![writer], true)
+        .await
+        .unwrap();
+    assert_eq!(h.json(INBOX, &bob).await["items"], json!([]));
+    h.close().await;
+}

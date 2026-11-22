@@ -49,6 +49,16 @@ test("notifications preserve unread state and open the exact review reply", asyn
       title: "Library issue",
       reason: "mention",
     },
+    {
+      repository,
+      sender: actor.name,
+      id: "notice-2",
+      href: "/team/project/issues/3",
+      created_at_ms: 1_699_999_900_000,
+      read: false,
+      title: "Assigned issue",
+      reason: "assigned",
+    },
   ];
   let failPage = true;
   let loseReadReply = true;
@@ -74,6 +84,7 @@ test("notifications preserve unread state and open the exact review reply", asyn
       const query = new URL(route.request().url()).searchParams;
       const selected = query.get("repository");
       const cursor = query.get("before");
+      const reason = query.get("reason");
       if (cursor && failPage) {
         failPage = false;
         return route.fulfill({
@@ -84,6 +95,7 @@ test("notifications preserve unread state and open the exact review reply", asyn
       const items = notices.filter(
         (item) =>
           (!selected || selected === item.repository.id) &&
+          (!reason || reason === item.reason) &&
           (query.get("unread") === "false" || !item.read),
       );
       const start = cursor ? 1 : 0;
@@ -139,7 +151,17 @@ test("notifications preserve unread state and open the exact review reply", asyn
   ).toBeVisible();
   const review = page.getByRole("link", { name: "Review the README" });
   await expect(review).toHaveAttribute("href", "/team/project/pull/1");
+  const reason = page.getByLabel("Reason", { exact: true });
+  await reason.selectOption("assigned");
+  await expect(page.getByText("Alice assigned you")).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "Assigned issue" }),
+  ).toHaveAttribute("href", "/team/project/issues/3");
+  await expect(review).toHaveCount(0);
+  await page.reload();
+  await expect(reason).toHaveValue("assigned");
   await expectNoAccessibilityViolations(page);
+  await reason.selectOption("");
   await page.getByRole("button", { name: "Load older notifications" }).click();
   await expect(page.getByRole("alert")).toContainText("Inbox unavailable");
   await expect(review).toBeVisible();

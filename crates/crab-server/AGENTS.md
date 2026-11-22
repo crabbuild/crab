@@ -75,8 +75,8 @@ including after removal of an exact branch override.
 Linear candidates carry source comparison metadata on their tip. Git receive
 owns the reserved ref and leases the target, prospective parent, and PR head.
 `api/integrations/` binds signed workflow reports to the current candidate.
-`collaboration/mentions.rs` queues mentions and review requests atomically
-with the source activity. `server/mentions.rs` expands current eligible
+`collaboration/mentions.rs` queues mentions, review requests, and assignments
+in the native transaction that writes the source activity. `server/mentions.rs` expands current eligible
 recipients and delivers to the Directory inbox before acknowledging the event.
 `api/notifications/` rechecks access before exposing source links or titles.
 `cells/repository/integrations.rs` owns GitHub Actions connections, delivery
