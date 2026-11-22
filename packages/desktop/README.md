@@ -164,6 +164,12 @@ then exercises the real CLI and sidecar repository writes/reads on AlmaLinux 8,
 Debian 12, and Amazon Linux 2023. This gate covers the GNU native payload;
 Alpine/musl and Electron/native Node modules need separate qualification.
 
+Launch the sidecar with `--log-json` for headless qualification. This makes
+stderr emit one structured tracing event per line and keeps stdout available
+for the usual NDJSON-RPC frames. `CRAB_DESKTOP_LOG` selects tracing targets
+and levels. For CDN reads, include `crab_sdk::cdn::read_target=debug` and
+`crab_storage::cdn::transfer=debug` in the filter.
+
 The desktop logo comes from `packages/web/crab.optimized.svg`. Run
 `npm run build:icons` after changing it; this requires `rsvg-convert` and uses
 macOS `iconutil` to regenerate the checked-in `.icns` file.

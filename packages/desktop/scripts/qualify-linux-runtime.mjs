@@ -16,6 +16,9 @@ const requests = [
   { method: "open_local", params: { repo_id: "abi-proof", path: "/proof" }, accepts: result => result.repo_id === "abi-proof" },
   { method: "write_text", params: { repo_id: "abi-proof", path: "proof.txt", content }, accepts: result => result.written === true && result.size === content.length },
   { method: "read_text", params: { repo_id: "abi-proof", path: "proof.txt" }, accepts: result => result.text === content && result.truncated === false },
+  { method: "read_bytes", params: { repo_id: "abi-proof", path: "proof.txt" },
+    accepts: result => result.bytes_b64 === Buffer.from(content).toString("base64") && result.size === content.length && result.truncated === false },
+  { method: "close", params: { repo_id: "abi-proof" }, accepts: result => result.closed === "abi-proof" },
 ];
 
 for (const [image, install] of [
@@ -32,10 +35,11 @@ test "$(/runtime/crab-desktop-agent --version)" = "crab-desktop-agent $CRAB_RUNT
 mkdir /proof
 git init --quiet --template= --initial-branch=main /proof
 printf '%s\\n' 'Starting the sidecar' >&2
-exec /runtime/crab-desktop-agent`;
+exec /runtime/crab-desktop-agent --log-json`;
   const args = ["run", "--init", "--platform", platform, "--name", name, "--interactive",
     "--volume", `${directory}:/runtime:ro`, "--env", `CRAB_RUNTIME_VERSION=${runtime.version}`,
-    "--env", "CRAB_BIN=/runtime/crab", "--env", "GIT_CONFIG_NOSYSTEM=1", "--env", "GIT_CONFIG_GLOBAL=/dev/null",
+    "--env", "CRAB_BIN=/runtime/crab", "--env", "CRAB_DESKTOP_LOG=info",
+    "--env", "GIT_CONFIG_NOSYSTEM=1", "--env", "GIT_CONFIG_GLOBAL=/dev/null",
     image, "/bin/sh", "-ceu", script];
   let operationError;
   try {
@@ -44,6 +48,7 @@ exec /runtime/crab-desktop-agent`;
       let failure;
       let diagnostics = "";
       let completed = 0;
+      let structuredStartup = false;
       let escalation;
       const stop = error => {
         failure ??= error;
@@ -57,6 +62,16 @@ exec /runtime/crab-desktop-agent`;
       child.on("error", stop);
       child.stdin.on("error", stop);
       child.stderr.on("data", bytes => { diagnostics = (diagnostics + bytes.toString()).slice(-64 * 1024); });
+      const logLines = createInterface({ input: child.stderr });
+      logLines.on("line", line => {
+        if (!line.includes("crab-desktop-agent starting")) return;
+        try {
+          const event = JSON.parse(line);
+          if (event.fields?.message !== "crab-desktop-agent starting" || event.fields.version !== runtime.version
+              || event.target !== "crab_desktop_agent") throw new Error("unexpected startup log fields");
+          structuredStartup = true;
+        } catch (error) { stop(error); }
+      });
       const lines = createInterface({ input: child.stdout });
       const send = () => child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: completed + 1, method: requests[completed].method, params: requests[completed].params }) + "\n");
       lines.on("line", line => {
@@ -71,7 +86,8 @@ exec /runtime/crab-desktop-agent`;
         } catch (error) { stop(error); }
       });
       child.once("close", code => {
-        clearTimeout(deadline); clearTimeout(escalation); lines.close();
+        clearTimeout(deadline); clearTimeout(escalation); lines.close(); logLines.close();
+        if (!structuredStartup) failure ??= new Error("sidecar did not emit its JSON startup record");
         if (failure || code !== 0 || completed !== requests.length) reject(new Error(`${image}: qualification failed (${name})\n${diagnostics}`, { cause: failure }));
         else resolve();
       });

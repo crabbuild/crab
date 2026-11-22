@@ -41,13 +41,13 @@ Live cross-process provider qualification remains open.
 | Reader coverage | Authenticated catalog pages, detached capsule controls, native layered payload windows, lazy Git index ranges, and catalog-bound shards can use the CDN. Layered Git point reads and coalesced object batches verify final object IDs after delta reconstruction and own the origin restart. Raw pack passthrough, recovery, consolidation and strict provenance checks use origin. Full LFS streams use bounded edge ranges and hold the final bytes until SHA-256 succeeds. Partial LFS streams use a verified local descriptor or the native version proof. Qualify each reader on live deployments. |
 | Deployment and release | The private CloudFront, Cloud CDN and Front Door fixtures cover repository-local reads and one projected view's Xet content in local policy tests. Public bindings require a distinct same-cloud export origin. All three providers have separate public Git and LFS export templates with public delivery disabled by default, plus publishers that verify an approved inventory and use create-only writes. Local tests exercise staged configuration, canonical viewer paths, destination binding, corrupt bytes and idempotent publishing. Desktop remote browsing passes the trusted user binding into the native SDK. Crab Server and the S3 gateway have opt-in `provider-cdn-qualification` builds with exact per-repository bindings for verified Git and full LFS reads. A loopback gateway test covers a cold pack-layer fetch with ETag, range and access checks, then observes full LFS reads at the edge and partial LFS reads at origin. Live qualification, publication beyond fixture-specific limits, SDK checkout and desktop qualification, managed issuer rollout, and provider and performance evidence remain open. |
 | Publication readiness | The AWS, GCP and Azure publishers seal a common `crab.cdn-export-publication.v1` receipt after verifying each destination object and rechecking the source and export resource identities and locations. Direct CLI, SDK and checkout, desktop, server and gateway bindings pin the operator's receipt digest. Public S3 and GCS activation verifies source placement once with the selected native credentials. Azure activation uses a read-only ARM identity to verify the selected account, container, primary location and endpoint. Storage sends only listed keys of the approved size to the edge. The release verifier checks the complete preregistered receipt and inventory against independently attested placement and the digest of the object actually read at the edge. Live publication transitions, historical native access checks and public performance qualification remain open. |
+| Qualification integrity | The transport canary observes wire behavior. Private cache reuse requires two preregistered OIDC subjects and Crab Auth policy identities, separately authenticated and authorized by the approved issuer. Key rotation binds ordered reads to deployed key IDs and signed expiration. Scoped-view evidence requires authorized reads of the target and native sibling on both sides of full and ranged CDN denials. Managed issuer rows require their specific v1 and v2 observations. Live observations and matching product and performance evidence for other consumers remain open. |
 
 For public Azure activation, the opt-in auth module obtains a sensitive ARM
 authorization header through the workspace Azure Identity SDK. The auth-store
 adapter supplies the header only when receipt verification selects Azure.
 `crab-storage` checks the resource documents and binds the approved placement
 to the selected Blob endpoint. [Azure Resource Manager authentication](https://learn.microsoft.com/azure/azure-resource-manager/management/manage-resources-rest)
-| Qualification integrity | The transport canary observes wire behavior. Private cache reuse requires two preregistered OIDC subjects and Crab Auth policy identities, separately authenticated and authorized by the approved issuer. Key rotation binds ordered reads to deployed key IDs and signed expiration. Scoped-view evidence requires authorized reads of the target and native sibling on both sides of full and ranged CDN denials. Managed issuer rows require their specific v1 and v2 observations. Live observations and matching product and performance evidence for other consumers remain open. |
 
 The reference issuer's repository-local origin credentials and viewer grants
 cover the repository prefix. Shared bucket-global Xet objects can contain
@@ -489,6 +489,15 @@ ordinary build must demonstrate the promoted read and the origin behavior of
 adjacent unpromoted families. Block promotion when required evidence still
 depends on a generic trace or an externally supplied pass flag.
 
+Start with the dedicated S3 repository and CloudFront distribution. Configure
+`provider-qualification-s3` for the native contract job and
+`provider-cdn-qualification-s3` for the read-only CDN inspector. Restrict both
+GitHub environments to trusted refs. Use a fixture-scoped writer for the
+product workload and a dedicated Crab Auth issuer for the independently
+authorized viewers. Register the approved deployment and benchmark before
+gathering release samples in both a near-origin and a distant region.
+[Hosted canary setup](../crab/docs/guides/provider-qualification.md#run-the-hosted-transport-canary)
+
 The AWS qualification fixtures can use the companion
 `crab/deploy/cdn/aws/qualification-logs.yaml` stack for viewer and origin
 logs in `us-east-1`. It selects the exact CloudFront fields needed by the
@@ -812,6 +821,12 @@ the exact verified local LFS key, its opened cache root, and zero edge
 requests. The regional verifier rejects cache-root reuse by fresh arms
 and requires the local repeat to match its own edge primer's root. Live
 regional measurements remain open.
+
+Desktop headless qualification can launch the ordinary sidecar with
+`--log-json` to collect the SDK target and provider transfer events from
+stderr alongside the existing RPC results on stdout. The packaged Linux
+runtime check exercises both outputs, including a byte read and repository
+close. Cloud-backed desktop read measurements and promotion remain open.
 
 The protected workflow or its dedicated workers own producing these raw
 observations. The assembly and release jobs own rejecting missing, mismatched
