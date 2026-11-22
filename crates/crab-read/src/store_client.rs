@@ -5,7 +5,7 @@ use std::sync::{Arc, RwLock};
 
 use bytes::Bytes;
 use crab_cache::CacheKey;
-use crab_cache_store::CachingStore;
+use crab_cache_store::{CachingStore, XorbReadMode};
 use crab_metadata::file_index_lookup::{
     FileIndexLookupSession, ShardLocation, SharedFileIndexLookup,
 };
@@ -68,7 +68,7 @@ pub struct StoreClient {
     failures: Option<Arc<crate::error::OperationFailures>>,
     cancellation: CancellationToken,
     chunk_cache: Option<term_cache::TermCache>,
-    selective_xorb_reads: bool,
+    xorb_read_mode: XorbReadMode,
     // Xet tasks may outlive the caller future. Its shared client keeps the
     // admitted read pinned until the last source worker exits.
     _retention: Option<Arc<crab_coordination::read_retention_runtime::ReadRetentionPin>>,
@@ -93,7 +93,7 @@ impl StoreClient {
             failures: None,
             cancellation: CancellationToken::new(),
             chunk_cache: None,
-            selective_xorb_reads: false,
+            xorb_read_mode: XorbReadMode::Whole,
             _retention: None,
         }
     }
@@ -163,10 +163,8 @@ impl StoreClient {
         self
     }
 
-    pub(crate) fn with_selective_xorb_reads(mut self) -> Self {
-        // Whole-file hydration avoids storing a second complete xorb beside its
-        // output. Range hydration opts in so cold reads fetch only needed payload.
-        self.selective_xorb_reads = true;
+    pub(crate) fn with_xorb_read_mode(mut self, mode: XorbReadMode) -> Self {
+        self.xorb_read_mode = mode;
         self
     }
 
@@ -786,15 +784,9 @@ impl Client for StoreClient {
             .iter()
             .map(|range| (range.start, range.end))
             .collect::<Vec<_>>();
-        let decoded = if self.selective_xorb_reads {
-            self.store
-                .get_xorb_chunks(&xorb_path, &xorb_hash, &ranges)
-                .await
-        } else {
-            self.store
-                .get_xorb_chunks_without_install(&xorb_path, &xorb_hash, &ranges)
-                .await
-        }
+        let decoded = self.store
+            .get_xorb_chunks_with_mode(&xorb_path, &xorb_hash, &ranges, self.xorb_read_mode)
+            .await
             .map_err(ReadError::from)
             .map_err(|error| self.map_read_error(error))?;
         // Keep cache publication within the download and decoded-buffer admission.

@@ -15,7 +15,7 @@ mod stream;
 use buffer::ReconstructionBuffer;
 pub use stream::ReconstructionStream;
 
-use crab_cache_store::CachingStore;
+use crab_cache_store::{CachingStore, XorbReadMode};
 use crab_types::pointer::Pointer;
 use crab_xet::hash::MerkleHash;
 use xet_client::cas_client::adaptive_concurrency::AdaptiveConcurrencyController;
@@ -349,7 +349,7 @@ impl ShardHydrator {
         let file_hash = MerkleHash::from(ptr.file_hash);
         let client = self
             .store_client_for_pointer(ptr, None)
-            .with_selective_xorb_reads();
+            .with_xorb_read_mode(XorbReadMode::Selective);
         let cancel = CancellationToken::new();
         let _cancel_on_drop = cancel.clone().drop_guard();
         let (_, bytes_written) = self
@@ -480,9 +480,15 @@ impl ShardHydrator {
             .as_ref()
             .map_or(ptr.size, |range| range.end - range.start);
         let full = range.is_none();
+        let mode = if full {
+            XorbReadMode::Whole
+        } else {
+            XorbReadMode::SelectiveCdn
+        };
         let file_hash = MerkleHash::from(ptr.file_hash);
         let client = self
             .store_client_for_pointer(ptr, file_index_lookup)
+            .with_xorb_read_mode(mode)
             .with_read_retention(pin)
             .with_cancellation(cancel.clone());
         if full {
@@ -528,8 +534,6 @@ impl ShardHydrator {
         end: u64,
     ) -> Result<Vec<u8>> {
         let ptr = Pointer::parse(pointer_bytes)?;
-        // VFS windows retain decoded Xet ranges and expect one non-installing
-        // whole-xorb source read. The path API opts into selective origin reads.
         let (start, end) = checked_range(ptr.size, start, end, "reconstruct_range_from_pointer")?;
         if start >= end {
             return Ok(Vec::new());
@@ -1789,6 +1793,153 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn sparse_range_stream_verifies_only_the_needed_xorb_bytes_from_cdn() {
+        use crab_storage::cdn::{
+            CdnAccess, CdnCredential, CdnCredentials, CdnReadFamily, CdnRoute, CdnTransport,
+        };
+        use crab_xet::xorb::{
+            format::FOOTER_SIZE,
+            parser::{XorbParser, xorb_metadata_region},
+        };
+        use futures_util::TryStreamExt as _;
+        use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path};
+        use std::time::Duration;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        struct XorbGrant(Path);
+
+        #[async_trait::async_trait]
+        impl CdnCredentials for XorbGrant {
+            async fn credential(
+                &self,
+                path: &Path,
+                rejected: Option<u64>,
+            ) -> crab_storage::Result<Option<CdnCredential>> {
+                Ok((path == &self.0 && rejected.is_none())
+                    .then(|| CdnCredential::bearer(0, "fixture-viewer".into())))
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let native = Arc::new(InMemory::new());
+        let target = [17; 32];
+        let (fixture, pointer, original) = reconstruction_fixture_with_origin(
+            &directory.path().join("seed"),
+            false,
+            crab_storage::Store::new(native.clone()).with_target_identity(target),
+        )
+        .await;
+        let lookup = capture_fixture_catalog(&fixture, &pointer).await;
+        let xorb = native
+            .list(Some(&Path::from(".crab/xorbs")))
+            .try_next()
+            .await
+            .unwrap()
+            .unwrap();
+        let body = native
+            .get(&xorb.location)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        let size = body.len();
+        let footer = size - FOOTER_SIZE..size;
+        let metadata = xorb_metadata_region(size, &body[footer.clone()]).unwrap();
+        let parsed = XorbParser::parse(body.clone()).unwrap();
+        let first = parsed.chunk_meta(0).unwrap();
+        let first_start = first.offset as usize;
+        let payload = first_start..first_start + first.compressed_len as usize;
+        const RANGE_CAP: usize = 64;
+        let mut expected = [
+            footer,
+            metadata.offset..metadata.offset + metadata.len,
+            payload,
+        ]
+        .into_iter()
+        .flat_map(|range| {
+            (range.start..range.end)
+                .step_by(RANGE_CAP)
+                .map(move |start| (start, (start + RANGE_CAP).min(range.end) - 1))
+        })
+        .collect::<Vec<_>>();
+        expected.sort_unstable();
+        assert!(
+            expected
+                .iter()
+                .map(|(start, end)| end - start + 1)
+                .sum::<usize>()
+                < size
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let transport = CdnTransport::loopback_fixture(listener.local_addr().unwrap()).unwrap();
+        let path = xorb.location;
+        let route = CdnRoute::new(
+            target,
+            "runtime-test".into(),
+            Some(".crab".into()),
+            CdnAccess::Private(Arc::new(XorbGrant(path.clone()))),
+            transport,
+            Duration::from_secs(10),
+        )
+        .with_loopback_read_limits(
+            CdnReadFamily::Xorb,
+            &format!("{size} {size} {RANGE_CAP} 10000"),
+        )
+        .unwrap();
+        let origin = crab_storage::Store::new(Arc::new(RejectFullXorbReads { inner: native }))
+            .with_target_identity(target)
+            .with_cdn_route(route)
+            .unwrap();
+        let requests = expected.len();
+        let edge = tokio::spawn(async move {
+            let mut observed = Vec::new();
+            for _ in 0..requests {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(socket);
+                let mut request = String::new();
+                while !request.ends_with("\r\n\r\n") {
+                    assert_ne!(stream.read_line(&mut request).await.unwrap(), 0);
+                }
+                assert!(request.starts_with(&format!("GET /{path} HTTP/1.1\r\n")));
+                let request = request.to_ascii_lowercase();
+                assert!(request.contains("authorization: bearer fixture-viewer\r\n"));
+                let (start, end) = request
+                    .lines()
+                    .find_map(|line| line.strip_prefix("range: bytes="))
+                    .unwrap()
+                    .split_once('-')
+                    .unwrap();
+                let (start, end): (usize, usize) = (start.parse().unwrap(), end.parse().unwrap());
+                let response = format!(
+                    "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{size}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    end - start + 1
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+                stream.write_all(&body[start..=end]).await.unwrap();
+                observed.push((start, end));
+            }
+            observed.sort_unstable();
+            assert_eq!(observed, expected);
+        });
+        let hydrator = runtime_with_origin(&directory.path().join("cache"), 1024 * 1024, origin)
+            .with_file_index_lookup(lookup.clone());
+        let result = hydrator
+            .reconstruct_range_stream(&pointer, 1024..8192)
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(result.concat(), original[1024..8192]);
+        tokio::time::timeout(Duration::from_secs(2), edge)
+            .await
+            .unwrap()
+            .unwrap();
+        lookup.close().await.unwrap();
     }
 
     #[tokio::test]

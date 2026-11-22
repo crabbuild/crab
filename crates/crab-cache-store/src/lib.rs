@@ -52,6 +52,7 @@ mod shard_read;
 mod xorb_read;
 use observation::NoopCacheObserver;
 pub use observation::{CacheObserver, CacheReadObservation, CacheReadOutcome, CacheSource};
+pub use xorb_read::XorbReadMode;
 use xorb_read::XorbReadState;
 
 /// Result alias for cache/storage adapter operations.

@@ -315,6 +315,10 @@ temporary disk and file offsets. Select origin upfront when the provider's
 supported object/range sizes or the caller's verifier cannot serve the request.
 LFS streams and file-backed reads can split an authenticated object into
 requests within the qualified range size and the transport's buffer limit.
+SDK and mount range hydration can use authenticated compressed xorb spans
+from the edge. Keep the selected source through footer, metadata and payload
+verification. Qualify sparse access and provider fill amplification separately
+from complete hydration.
 Record each qualified profile's full-object, range and duration limits and
 enforce them before sending the first edge request. Reuse trusted descriptor
 sizes to avoid an extra origin HEAD per object.

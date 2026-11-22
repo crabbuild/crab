@@ -62,7 +62,12 @@ async fn delayed_decode_failure_preserves_a_healthy_refill() {
 }
 
 fn key(id: u64) -> XorbReadKey {
-    XorbReadKey::new(MerkleHash::from([id, 0, 0, 0]), &[(0, 1)], false).unwrap()
+    XorbReadKey::new(
+        MerkleHash::from([id, 0, 0, 0]),
+        &[(0, 1)],
+        XorbReadMode::Whole,
+    )
+    .unwrap()
 }
 
 #[test]
@@ -82,7 +87,7 @@ fn retained_slice_does_not_pin_the_complete_xorb() {
 fn charge_includes_both_range_keys_and_offsets() {
     let state = XorbReadState::new();
     let ranges = vec![(0, 1); 1024];
-    let key = XorbReadKey::new(MerkleHash::default(), &ranges, false).unwrap();
+    let key = XorbReadKey::new(MerkleHash::default(), &ranges, XorbReadMode::Whole).unwrap();
     let value = (Bytes::from_static(b"abc"), vec![0, 3]);
     state.insert(key, &value);
 
@@ -254,7 +259,14 @@ async fn verified_xorb_chunks_report_their_delivery_source() {
     corrupt[0] ^= 1;
     let corrupt = Bytes::from(corrupt);
 
-    for (selective, valid_edge) in [(false, true), (false, false), (true, true), (true, false)] {
+    for (mode, valid_edge) in [
+        XorbReadMode::Whole,
+        XorbReadMode::Selective,
+        XorbReadMode::SelectiveCdn,
+    ]
+    .into_iter()
+    .flat_map(|mode| [(mode, true), (mode, false)])
+    {
         let (edge, native) = if valid_edge {
             (xorb.bytes.clone(), corrupt.clone())
         } else {
@@ -328,7 +340,7 @@ async fn verified_xorb_chunks_report_their_delivery_source() {
         let store =
             CachingStore::new_with_local_cache(origin, crate::CacheConfig::default(), local)
                 .unwrap();
-        if selective {
+        if mode == XorbReadMode::Selective {
             assert_eq!(
                 store
                     .xorb_chunk_metadata(&path, &xorb.hash)
@@ -341,14 +353,10 @@ async fn verified_xorb_chunks_report_their_delivery_source() {
         }
         let range = [(0, 1)];
         for _ in 0..2 {
-            let (bytes, _) = if selective {
-                store.get_xorb_chunks(&path, &xorb.hash, &range).await
-            } else {
-                store
-                    .get_xorb_chunks_without_install(&path, &xorb.hash, &range)
-                    .await
-            }
-            .unwrap();
+            let (bytes, _) = store
+                .get_xorb_chunks_with_mode(&path, &xorb.hash, &range, mode)
+                .await
+                .unwrap();
             assert_eq!(bytes, expected);
         }
         let payloads = std::mem::take(&mut *capture.0.lock().unwrap());

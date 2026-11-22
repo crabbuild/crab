@@ -3,7 +3,7 @@ use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use crab_cache::CacheError;
 use crab_storage::{StorageError, store::CdnReadAttempt};
 use crab_xet::hash::MerkleHash;
@@ -11,6 +11,7 @@ use crab_xet::xorb::format::{ChunkMeta, FOOTER_SIZE, MAX_XORB_SIZE};
 use crab_xet::xorb::parser::{
     XorbParser, decode_chunk_range_bytes, xorb_chunks_from_metadata, xorb_metadata_region,
 };
+use futures_util::StreamExt as _;
 use object_store::path::Path;
 
 use crate::{CacheReadOutcome, CacheSource, CacheStoreError, CachingStore, Result};
@@ -18,6 +19,17 @@ use crate::{CacheReadOutcome, CacheSource, CacheStoreError, CachingStore, Result
 const XORB_READ_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 const XORB_READ_CACHE_MAX_ENTRIES: usize = 4096;
 const XORB_READ_LOCK_STRIPES: usize = 256;
+
+/// Select how a reconstruction fetches and retains an xorb.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub enum XorbReadMode {
+    /// Verify a complete xorb without installing it.
+    Whole,
+    /// Read selectively and retain a verified full xorb for high coverage.
+    Selective,
+    /// Read selectively at the edge and keep other sources on the whole-object path.
+    SelectiveCdn,
+}
 
 #[derive(Clone, Copy)]
 enum XorbSource<'a> {
@@ -73,7 +85,8 @@ impl CachingStore {
         xorb_hash: &MerkleHash,
         ranges: &[(u32, u32)],
     ) -> Result<(Bytes, Vec<u32>)> {
-        self.read_xorb_chunks(path, xorb_hash, ranges, true).await
+        self.get_xorb_chunks_with_mode(path, xorb_hash, ranges, XorbReadMode::Selective)
+            .await
     }
 
     /// Read verified chunks from a complete body without installing a full-xorb copy.
@@ -83,7 +96,8 @@ impl CachingStore {
         xorb_hash: &MerkleHash,
         ranges: &[(u32, u32)],
     ) -> Result<(Bytes, Vec<u32>)> {
-        self.read_xorb_chunks(path, xorb_hash, ranges, false).await
+        self.get_xorb_chunks_with_mode(path, xorb_hash, ranges, XorbReadMode::Whole)
+            .await
     }
 
     /// Read bounded, hash-verified xorb metadata with the same repair policy as hydration.
@@ -100,7 +114,7 @@ impl CachingStore {
             .chain(edge.as_ref().map(XorbSource::Cdn))
             .chain([XorbSource::Origin(edge.as_ref())])
         {
-            match self.xorb_read_plan(path, xorb_hash, source).await {
+            match self.xorb_read_plan(path, xorb_hash, source, None).await {
                 Ok(Some(plan)) => {
                     source.check_deadline()?;
                     self.observe_xorb_source(source, CacheReadOutcome::Hit, 0);
@@ -120,18 +134,19 @@ impl CachingStore {
         .into())
     }
 
-    async fn read_xorb_chunks(
+    /// Read authenticated xorb chunks using the caller's transfer and retention policy.
+    pub async fn get_xorb_chunks_with_mode(
         &self,
         path: &Path,
         xorb_hash: &MerkleHash,
         ranges: &[(u32, u32)],
-        install_full_xorb: bool,
+        mode: XorbReadMode,
     ) -> Result<(Bytes, Vec<u32>)> {
         if ranges.is_empty() {
             return Ok((Bytes::new(), vec![0]));
         }
         self.origin.check_cached_read(path).await?;
-        let key = XorbReadKey::new(*xorb_hash, ranges, install_full_xorb);
+        let key = XorbReadKey::new(*xorb_hash, ranges, mode);
         if let Some(result) = key.as_ref().and_then(|key| self.xorb_reads.get(key)) {
             self.observe_cache_read(CacheSource::Memory, CacheReadOutcome::Hit, result.0.len());
             if !result.0.is_empty() {
@@ -161,7 +176,7 @@ impl CachingStore {
             .chain([XorbSource::Origin(edge.as_ref())])
         {
             match self
-                .xorb_chunks_from_source(path, xorb_hash, ranges, source, install_full_xorb)
+                .xorb_chunks_from_source(path, xorb_hash, ranges, source, mode)
                 .await
             {
                 Ok(Some(result)) => {
@@ -260,22 +275,48 @@ impl CachingStore {
         xorb_hash: &MerkleHash,
         ranges: &[(u32, u32)],
         source: XorbSource<'_>,
-        install_full_xorb: bool,
+        mode: XorbReadMode,
     ) -> Result<Option<(Bytes, Vec<u32>)>> {
-        if !install_full_xorb {
+        let install = mode == XorbReadMode::Selective;
+        if !matches!(
+            (mode, source),
+            (XorbReadMode::Selective, _) | (XorbReadMode::SelectiveCdn, XorbSource::Cdn(_))
+        ) {
             return self
                 .complete_xorb_ranges(path, xorb_hash, ranges, source, None, false)
                 .await;
         }
-        let Some(plan) = self.xorb_read_plan(path, xorb_hash, source).await? else {
+        let object_len = if let XorbSource::Cdn(edge) = source {
+            let size = source.read_origin(self.origin.head(path)).await?.size;
+            Self::validate_xorb_size(path, size)?;
+            if edge.range_chunk_bytes(size).is_none() {
+                // A full-only policy can still serve this xorb. Select that
+                // form before requesting any viewer credential for a range.
+                return self
+                    .complete_xorb_ranges(path, xorb_hash, ranges, source, Some(size), install)
+                    .await;
+            }
+            Some(size)
+        } else {
+            None
+        };
+        let Some(plan) = self
+            .xorb_read_plan(path, xorb_hash, source, object_len)
+            .await?
+        else {
             return Ok(None);
         };
         let requested_bytes = requested_payload_bytes(&plan.chunks, ranges)?;
-        if ranges_cover_all_chunks(plan.chunks.len(), ranges)
-            || requested_bytes.saturating_mul(2) >= plan.payload_len
+        let full_admitted = match (source, plan.object_len) {
+            (XorbSource::Cdn(edge), Some(size)) => edge.admits(size, None),
+            _ => true,
+        };
+        if full_admitted
+            && (ranges_cover_all_chunks(plan.chunks.len(), ranges)
+                || requested_bytes.saturating_mul(2) >= plan.payload_len)
         {
             return self
-                .complete_xorb_ranges(path, xorb_hash, ranges, source, plan.object_len, true)
+                .complete_xorb_ranges(path, xorb_hash, ranges, source, plan.object_len, install)
                 .await;
         }
 
@@ -392,6 +433,7 @@ impl CachingStore {
         path: &Path,
         xorb_hash: &MerkleHash,
         source: XorbSource<'_>,
+        object_len: Option<u64>,
     ) -> Result<Option<XorbReadPlan>> {
         let object_len = match source {
             XorbSource::Local => {
@@ -411,9 +453,10 @@ impl CachingStore {
                 };
                 head.size
             }
-            XorbSource::Cdn(_) | XorbSource::Origin(_) => {
-                source.read_origin(self.origin.head(path)).await?.size
-            }
+            XorbSource::Cdn(_) | XorbSource::Origin(_) => match object_len {
+                Some(size) => size,
+                None => source.read_origin(self.origin.head(path)).await?.size,
+            },
         };
         Self::validate_xorb_size(path, object_len)?;
         let footer_start = object_len - FOOTER_SIZE as u64;
@@ -481,7 +524,21 @@ impl CachingStore {
                 let size = object_len.ok_or_else(|| {
                     StorageError::Internal("CDN xorb range needs captured size".into())
                 })?;
-                Ok(edge.get(size, Some(range)).await?)
+                if edge.admits(size, Some(range.end - range.start)) {
+                    return Ok(edge.get(size, Some(range)).await?);
+                }
+                let batches = edge.range_batches(size, range)?;
+                tokio::pin!(batches);
+                let mut payload = BytesMut::new();
+                while let Some(batch) = batches.next().await {
+                    let Some(chunks) = batch? else {
+                        return Ok(None);
+                    };
+                    for bytes in chunks {
+                        payload.extend_from_slice(&bytes);
+                    }
+                }
+                Ok(Some(payload.freeze()))
             }
             XorbSource::Origin(_) => Ok(Some(
                 source
@@ -506,7 +563,7 @@ impl CachingStore {
 struct XorbReadKey {
     xorb_hash: MerkleHash,
     ranges: Vec<(u32, u32)>,
-    install_full_xorb: bool,
+    mode: XorbReadMode,
 }
 
 impl XorbReadKey {
@@ -522,7 +579,7 @@ impl XorbReadKey {
             .saturating_add(std::mem::size_of::<CachedXorbRead>())
     }
 
-    fn new(xorb_hash: MerkleHash, ranges: &[(u32, u32)], install_full_xorb: bool) -> Option<Self> {
+    fn new(xorb_hash: MerkleHash, ranges: &[(u32, u32)], mode: XorbReadMode) -> Option<Self> {
         // The map and eviction queue each retain a key. Skip this optional
         // result cache before cloning a range list that cannot fit its budget.
         let charge = ranges
@@ -538,7 +595,7 @@ impl XorbReadKey {
         Some(Self {
             xorb_hash,
             ranges: owned,
-            install_full_xorb,
+            mode,
         })
     }
 }
@@ -622,8 +679,7 @@ impl XorbReadState {
         {
             return;
         }
-        let Some(queued_key) = XorbReadKey::new(key.xorb_hash, &key.ranges, key.install_full_xorb)
-        else {
+        let Some(queued_key) = XorbReadKey::new(key.xorb_hash, &key.ranges, key.mode) else {
             return;
         };
         let charge = key.retained_charge(

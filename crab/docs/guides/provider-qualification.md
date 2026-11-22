@@ -902,7 +902,10 @@ discarded edge batch reports no verified payloads. For xorb evidence, pass
 including the projected view's prefix and without a leading slash. The
 xorb reader reports this fingerprint after it verifies nonempty requested
 chunks from the edge. Retain the action's separately verified output bytes
-or digest with the transfer evidence. The sum of parallel
+or digest with the transfer evidence. For sparse SDK and mount reads, verify
+the requested xorb spans and correlate the metadata and payload requests
+with the provider logs. Record the provider's cache-fill bytes separately
+from the bytes Crab consumes. The sum of parallel
 transfer times differs from elapsed action time. Front Door's response
 header describes the first 8 MB chunk, so Crab records an unknown cache
 disposition for larger objects. Use provider logs for their cache and
