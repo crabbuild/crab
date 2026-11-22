@@ -32,7 +32,7 @@ impl Authentication {
         let prefix = state.identity_sessions_prefix(issuer, subject);
         let mut markers = state.store.list_stream(&prefix);
         // Old markers can remain after browser expiry. Use metadata to skip
-        // stale records, leaving clock skew margin before verifying both objects.
+        // stale records, leaving clock skew margin before verifying each session.
         let oldest = now_epoch()
             .unwrap_or(0)
             .saturating_sub(GROUP_SESSION_LIFETIME.as_secs() * 2);
@@ -52,14 +52,11 @@ impl Authentication {
                 continue;
             };
             let session_key = *digest.as_bytes();
-            if meta.location != state.identity_session_path(issuer, subject, &session_key) {
+            let paths = state.session_authority_paths(issuer, subject, &session_key);
+            if meta.location != paths.0 {
                 continue;
             }
-            let Some(session) = state
-                .session_check(session_key, Some(meta.location))
-                .await
-                .await
-            else {
+            let Some(session) = state.session_check(session_key, Some(paths)).await.await else {
                 continue;
             };
             if session.identity.issuer == issuer && session.identity.subject == subject {
@@ -210,12 +207,10 @@ impl Authentication {
         required_git_token: Option<Key>,
     ) -> Option<Arc<Session>> {
         let state = &self.state;
-        let cached_paths = self
-            .sessions
-            .lock()
-            .await
-            .get(&session_key)
-            .map(|session| state.session_authority_paths(session_key, &session.identity));
+        let cached_paths = self.sessions.lock().await.get(&session_key).map(|session| {
+            let identity = &session.identity;
+            state.session_authority_paths(&identity.issuer, &identity.subject, &session_key)
+        });
         let read = state.session_check(session_key, cached_paths).await;
         let checked = read.await?;
         // Revocation commits on the parent. Token storage cleanup can finish later.
@@ -429,7 +424,8 @@ impl AuthState {
         // session marker and account revision before any grant is admitted.
         let (record, cached) = tokio::join!(record, cached);
         let record: StoredSession = serde_json::from_slice(&record.ok()?.0).ok()?;
-        let paths = self.session_authority_paths(session_key, &record.identity);
+        let identity = &record.identity;
+        let paths = self.session_authority_paths(&identity.issuer, &identity.subject, &session_key);
         let (marker, account) = if cached_paths.as_ref() == Some(&paths) {
             cached?
         } else {
@@ -456,12 +452,13 @@ impl AuthState {
 
     fn session_authority_paths(
         &self,
-        session_key: Key,
-        identity: &super::Identity,
+        issuer: &str,
+        subject: &str,
+        session_key: &Key,
     ) -> (ObjectPath, ObjectPath) {
         (
-            self.identity_session_path(&identity.issuer, &identity.subject, &session_key),
-            self.account_path(&identity.issuer, &identity.subject),
+            self.identity_session_path(issuer, subject, session_key),
+            self.account_path(issuer, subject),
         )
     }
 
