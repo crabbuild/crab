@@ -270,6 +270,7 @@ pub(in crate::cells) fn dispatch_read(
         mention_settings::Get::ID => invoke_read::<mention_settings::Get>(context, input),
         watches::Get::ID => invoke_read::<watches::Get>(context, input),
         watches::GetThread::ID => invoke_read::<watches::GetThread>(context, input),
+        watches::ListDiscussions::ID => invoke_read::<watches::ListDiscussions>(context, input),
         watches::InboxVisibility::ID => invoke_read::<watches::InboxVisibility>(context, input),
         watches::PublishedReleases::ID => invoke_read::<watches::PublishedReleases>(context, input),
         watches::ReleaseWatchers::ID => invoke_read::<watches::ReleaseWatchers>(context, input),

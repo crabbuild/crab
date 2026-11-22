@@ -1851,6 +1851,7 @@ owner label does not acquire ownership.
 | Account notification inbox | `GET /api/notifications`, `GET /api/notifications/unread`, `PUT /api/notifications/{id}/state`, `POST /api/notifications/bulk`, `POST /api/notifications/unsubscribe` |
 | Watched repositories | `GET /api/notifications/watched`, `POST /api/notifications/watched/unwatch` |
 | Repository notification preference | `GET /api/repos/{owner}/{name}/subscription`, `PUT /api/repos/{owner}/{name}/subscription` |
+| Discussion subscriptions | `GET /api/notifications/subscriptions` |
 | Discussion notification preference | `GET` and `PUT /api/repos/{owner}/{name}/issues/{number}/subscription` or `/pulls/{number}/subscription` |
 | Stable discussion links | `GET /api/discussion-references/{repository_id}/{kind}/{number}` |
 | Discussion attachments | `POST /api/repos/{owner}/{name}/discussion-attachments`, `GET /api/discussion-attachments/{repository_id}/{id}` |
@@ -2662,6 +2663,22 @@ ownership and read access and edits each repository independently. Newer
 watch or mute settings survive. Retry an unconfirmed item with its original
 version to recover a possible completed write. The browser splits larger
 selections into bounded requests.
+
+Open **Subscriptions** from the notification inbox to manage discussions you
+follow, including those with no inbox activity. Filter by repository or by
+issue and pull request type. Each row shows the discussion state, current
+follow choice, and whether the repository is muted. Use **Notification settings**
+on a row to change which updates you receive or stop following it.
+
+`GET /api/notifications/subscriptions` accepts optional `repository` (UUID)
+and `kind` (`issue` or `pull`) filters. It returns `items` with the current
+repository address, typed subject, title, state, versioned preference, and
+repository mute flag. Results follow catalog order, then issue and pull request
+numbers within each repository. Pass `next` as `after` to continue with the
+same filters. A page can be empty with more discussions to scan. The server
+checks repository grants before reading preferences and refreshes them before
+returning titles or continuation positions. Edits use the existing
+discussion subscription endpoints.
 
 Use **Notification settings** in the issue or pull request sidebar for a private
 override. Each discussion starts with the repository setting (`inherit`).

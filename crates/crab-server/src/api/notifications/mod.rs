@@ -34,6 +34,7 @@ use crate::{
     server::Server,
 };
 
+mod discussions;
 mod state;
 mod subscriptions;
 mod unsubscribe;
@@ -44,6 +45,7 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .route("/api/notifications", get(list))
         .route("/api/notifications/unread", get(unread))
         .route("/api/notifications/watched", get(watched::list))
+        .route("/api/notifications/subscriptions", get(discussions::list))
         .route("/api/notifications/{id}/state", put(state::single))
         .route(
             "/api/repos/{owner}/{name}/subscription",

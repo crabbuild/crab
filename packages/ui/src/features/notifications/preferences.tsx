@@ -41,6 +41,12 @@ export type RepositoryPreference = {
   releases?: boolean;
 };
 
+export type DiscussionPreference = Preference<keyof typeof discussionModes>;
+
+export function discussionModeLabel(mode: DiscussionPreference["mode"]) {
+  return discussionModes[mode];
+}
+
 type Preference<Mode extends string> = {
   mode: Mode;
   version: number;
@@ -88,24 +94,44 @@ export function DiscussionWatch({
   csrf: string;
   subject: string;
 }) {
-  const title = subject.startsWith("issues/")
-    ? "Issue notifications"
-    : "Pull request notifications";
   return (
     <section>
       <header>
         <strong>Notifications</strong>
       </header>
-      <NotificationPreference
-        repo={repo}
-        csrf={csrf}
-        path={endpoint(repo, `${subject}/subscription`)}
-        modes={discussionModes}
-        label="Notification settings"
-        title={title}
-        description="You follow future activity when you participate, receive a mention, or are assigned. Repository mute still applies."
-      />
+      <DiscussionWatchButton repo={repo} csrf={csrf} subject={subject} />
     </section>
+  );
+}
+
+export function DiscussionWatchButton({
+  repo,
+  csrf,
+  subject,
+  label,
+  onSaved,
+}: {
+  repo: Address;
+  csrf: string;
+  subject: string;
+  label?: string;
+  onSaved?: (preference: DiscussionPreference) => void;
+}) {
+  const title = subject.startsWith("issues/")
+    ? "Issue notifications"
+    : "Pull request notifications";
+  return (
+    <NotificationPreference
+      repo={repo}
+      csrf={csrf}
+      path={endpoint(repo, `${subject}/subscription`)}
+      modes={discussionModes}
+      label="Notification settings"
+      triggerLabel={label}
+      onSaved={onSaved}
+      title={title}
+      description="You follow future activity when you participate, receive a mention, or are assigned. Repository mute still applies."
+    />
   );
 }
 

@@ -196,9 +196,14 @@ export function Notifications({
             ))}
         </nav>
       </div>
-      <Button asChild variant="outline" size="sm" className="w-fit">
-        <Link href="/-/notifications/watched">Watched repositories</Link>
-      </Button>
+      <div className="flex flex-wrap gap-2">
+        <Button asChild variant="outline" size="sm">
+          <Link href="/-/notifications/subscriptions">Subscriptions</Link>
+        </Button>
+        <Button asChild variant="outline" size="sm">
+          <Link href="/-/notifications/watched">Watched repositories</Link>
+        </Button>
+      </div>
       {repository && (
         <Link className="w-fit underline" href={inboxHref(view, "", reason)}>
           Clear repository filter

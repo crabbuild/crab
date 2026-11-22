@@ -17,7 +17,7 @@ pub(crate) async fn serve(request: Request) -> Response {
     let components: Vec<_> = path.trim_end_matches('/').split('/').collect();
     let account_route = match components.as_slice() {
         ["-", "profile" | "notifications"]
-        | ["-", "notifications", "watched"]
+        | ["-", "notifications", "watched" | "subscriptions"]
         | ["-", "settings", "saved-replies"] => true,
         ["-", "users" | "organizations", id]
         | ["-", "organizations", id, "invitation" | "projects"] => {
@@ -139,6 +139,7 @@ mod tests {
             ("/-/settings/saved-replies", StatusCode::OK),
             ("/-/notifications", StatusCode::OK),
             ("/-/notifications/watched", StatusCode::OK),
+            ("/-/notifications/subscriptions", StatusCode::OK),
             (
                 "/-/users/01900000-0000-7000-8000-000000000001",
                 StatusCode::OK,

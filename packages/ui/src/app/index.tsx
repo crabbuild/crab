@@ -21,6 +21,7 @@ import { GitAccess } from "@/features/git-access";
 import { GitImport } from "@/features/imports";
 import { CreateRepository } from "@/features/repository/create";
 import { NotificationLink, Notifications } from "@/features/notifications";
+import { DiscussionSubscriptions } from "@/features/notifications/subscriptions";
 import { WatchedRepositories } from "@/features/notifications/watched";
 import { gitOwnerSuggestion } from "@/features/imports/source";
 import {
@@ -125,7 +126,8 @@ export function App() {
   const url = new URL(location, window.location.origin);
   const inbox = url.pathname === "/-/notifications";
   const watched = url.pathname === "/-/notifications/watched";
-  const notifications = inbox || watched;
+  const subscriptions = url.pathname === "/-/notifications/subscriptions";
+  const notifications = inbox || watched || subscriptions;
   const savedReplies = url.pathname === "/-/settings/saved-replies";
   const profileSettings = url.pathname === "/-/profile" || savedReplies;
   const actorId =
@@ -166,7 +168,7 @@ export function App() {
   const [gitAccessOpen, setGitAccessOpen] = useState(false);
   const catalog = useRequest<{ repositories: Repository[] }>(
     session.data?.authenticated &&
-      (url.pathname === "/" || inbox || gitAccessOpen)
+      (url.pathname === "/" || inbox || subscriptions || gitAccessOpen)
       ? "/api/repos"
       : null,
   );
@@ -211,14 +213,16 @@ export function App() {
   useEffect(() => {
     document.title = repo
       ? `${repo.owner}/${repo.name} · Crab`
-      : watched
-        ? "Watched repositories · Crab"
-        : inbox
-          ? "Notifications · Crab"
-          : projectWorkspace
-            ? "Projects · Crab"
-            : "Repositories · Crab";
-  }, [repo, watched, inbox, projectWorkspace]);
+      : subscriptions
+        ? "Subscriptions · Crab"
+        : watched
+          ? "Watched repositories · Crab"
+          : inbox
+            ? "Notifications · Crab"
+            : projectWorkspace
+              ? "Projects · Crab"
+              : "Repositories · Crab";
+  }, [repo, watched, inbox, subscriptions, projectWorkspace]);
   useEffect(() => {
     if (!importedRepository || !catalog.data) return;
     if (
@@ -410,6 +414,13 @@ export function App() {
                     : "Continue to sign in"}
                 </Button>
               </div>
+            ) : subscriptions ? (
+              <DiscussionSubscriptions
+                key={teamAccount}
+                csrf={session.data.csrf ?? ""}
+                repositories={catalog.data?.repositories ?? []}
+                url={url}
+              />
             ) : watched ? (
               <WatchedRepositories
                 key={teamAccount}

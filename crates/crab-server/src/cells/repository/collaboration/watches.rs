@@ -10,6 +10,9 @@ use crate::cells::{
     repository::CLASS,
 };
 
+mod discussions;
+pub(crate) use discussions::{DiscussionQuery, ListDiscussions};
+
 mod inbox;
 pub(crate) use inbox::{
     Dismiss, DismissItem, DismissSelection, InboxActivity, InboxVisibility, InboxVisibilityInput,
