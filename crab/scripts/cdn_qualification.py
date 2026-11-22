@@ -102,6 +102,8 @@ SDK_HYDRATION_ACTION = "sdk-xorb-hydration"
 MOUNT_XORB_ACTION = "mount-xorb-read"
 MOUNT_XORB_RANGE_WORKLOAD = "crab.cdn-mount-xorb-range-workload/v1"
 MOUNT_XORB_RANGE_READ = "crab.cdn-mount-xorb-range-read/v1"
+SDK_XORB_RANGE_WORKLOAD = "crab.cdn-sdk-xorb-range-workload/v1"
+SDK_XORB_RANGE_READ = "crab.cdn-sdk-xorb-range-read/v1"
 XORB_PRODUCT_DIR = "xorb-product"
 XORB_WORKLOAD_FIELDS = {
     "schema", "configuration_sha256", "pointer_sha256", "payload_sha256", "payload_bytes", "crab_sha256",
@@ -1871,7 +1873,7 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
     require(proof["schema"] == f"crab.{edge}-viewer-requests/v1" and proof["client_report_sha256"] == client_digest,
             "CDN viewer evidence differs from the measured fetch")
     expected = client["edge_responses"]
-    sparse_xorb = client.get("schema") == MOUNT_XORB_RANGE_READ
+    sparse_xorb = client.get("schema") in (MOUNT_XORB_RANGE_READ, SDK_XORB_RANGE_READ)
     records = proof["records"]
     require(isinstance(records, dict) and records.keys() == expected.keys()
             and len(records) == client["all_edge_attempts"],
@@ -2131,10 +2133,13 @@ def validate_xorb_workload(raw: bytes, approval: str, configuration: str, *, mou
     expected = XORB_WORKLOAD_FIELDS | ({"mounted_oid"} if mount else set())
     value = decode(raw)
     schema = "crab.cdn-mount-xorb-workload/v1" if mount else "crab.cdn-sdk-hydration-workload/v1"
-    sparse = mount and allow_sparse and isinstance(value, dict) and value.get("schema") == MOUNT_XORB_RANGE_WORKLOAD
+    sparse_schema = MOUNT_XORB_RANGE_WORKLOAD if mount else SDK_XORB_RANGE_WORKLOAD
+    sparse = allow_sparse and isinstance(value, dict) and value.get("schema") == sparse_schema
     if sparse:
         expected.add("read_range")
-        schema = MOUNT_XORB_RANGE_WORKLOAD
+        if not mount:
+            expected |= {"projected_oid", "sdk_sha256"}
+        schema = sparse_schema
     spec = fields(value, expected, "xorb read workload")
     require(spec["schema"] == schema
             and spec["configuration_sha256"] == configuration
@@ -2145,7 +2150,8 @@ def validate_xorb_workload(raw: bytes, approval: str, configuration: str, *, mou
             "invalid approved xorb read workload")
     if sparse:
         window = fields(spec["read_range"], {"offset", "bytes", "sha256"}, "approved xorb file range")
-        require(type(window["offset"]) is int and window["offset"] >= 0
+        require((mount or (matches(GIT_OID, spec["projected_oid"]) and matches(SHA256, spec["sdk_sha256"])))
+                and type(window["offset"]) is int and window["offset"] >= 0
                 and positive(window["bytes"]) and window["bytes"] < spec["payload_bytes"]
                 and window["offset"] + window["bytes"] <= spec["payload_bytes"]
                 and matches(SHA256, window["sha256"]), "invalid approved xorb file range")
@@ -2161,7 +2167,7 @@ def verify_sparse_xorb_traffic(read: dict[str, Any], object_bytes: int) -> None:
             and read["all_edge_attempts"] == len(read["edge_responses"])
             and positive(read["verified_edge_payloads"]) and read["local_payload_hits"] == 0
             and all(response["range"] and response["complete"] and response["object_bytes"] == object_bytes
-                    for response in transfers), "sparse mount must verify xorb ranges totaling less than the approved object")
+                    for response in transfers), "sparse read must verify xorb ranges totaling less than the approved object")
 
 
 def validate_xorb_publication(raw: bytes, row: dict[str, Any]) -> dict[str, Any]:
@@ -2184,12 +2190,14 @@ def verify_xorb_read(
     expected_fields = MOUNT_XORB_READ_FIELDS if mount else SDK_HYDRATION_READ_FIELDS
     if window is not None:
         expected_fields = expected_fields | {"range_offset"}
+        if not mount:
+            expected_fields.add("commit")
     read = fields(decode(raw), expected_fields | ({"primer_sha256"} if local else set()), "xorb read record")
     schema = "crab.cdn-mount-xorb-read/v1" if mount else "crab.cdn-sdk-hydration/v1"
     if window is not None:
-        schema = MOUNT_XORB_RANGE_READ
-        require(mount and not local and type(read["range_offset"]) is int and read["range_offset"] == window["offset"],
-                "sparse mount read must match the approved file offset")
+        schema = MOUNT_XORB_RANGE_READ if mount else SDK_XORB_RANGE_READ
+        require(not local and type(read["range_offset"]) is int and read["range_offset"] == window["offset"],
+                "sparse xorb read must match the approved file offset")
     require(read["schema"] == schema and read["arm"] == arm
             and all(read[key] == row[key] for key in CDN_PROVENANCE_FIELDS | {"platform"})
             and read["workload_sha256"] == registration["hydration_workload_sha256"]
@@ -2203,6 +2211,9 @@ def verify_xorb_read(
                 "mount read requires the approved projected Git commit and clean NFS detach")
     else:
         require("local" in read["candidate"]["cargo_features"].split(","), "SDK hydration requires the local feature")
+        if window is not None:
+            require(read["candidate"]["binary_sha256"] == spec["sdk_sha256"] and read["commit"] == spec["projected_oid"],
+                    "sparse SDK read requires the approved SDK executable and projected commit")
     payload = fields(read["payload"], {"sha256", "bytes"}, "verified hydrated file")
     expected_payload = ({"sha256": window["sha256"], "bytes": window["bytes"]} if window is not None
                         else {"sha256": spec["payload_sha256"], "bytes": spec["payload_bytes"]})

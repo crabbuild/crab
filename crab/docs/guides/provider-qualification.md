@@ -1472,6 +1472,25 @@ and viewer records in `xorb-product`.
 Assembly derives the product result from these records, the transport and
 scoped view observations, and the cleanup trace.
 
+#### Measure sparse reads through the SDK
+
+For a sparse pilot, keep the published source ref and approved projected view
+live until all samples finish. Use a separate workload with schema
+`crab.cdn-sdk-xorb-range-workload/v1`. Keep the full file length and digest,
+and add `projected_oid` for the exact projected Git commit, `sdk_sha256` for
+the SDK probe executable, and `read_range` with `offset`, `bytes`, and `sha256`
+for the approved file window.
+
+Run the same SDK worker with `--receipt` pointing to the native publication
+record in place of `--git` and `--crab`. The probe opens the remote snapshot,
+verifies the commit and Git pointer, and consumes `Snapshot::open_file`
+through successful EOF with the approved range. Run separate native, cold
+edge, and warm edge invocations without `--warm-local-output`. Join each
+edge record to provider logs and compare xorb viewer bytes with xorb origin
+fill. The worker rejects whole xorb GETs and verifies fewer viewer bytes
+than the approved xorb size. Retain these pilot records alongside the
+complete hydration evidence used for release qualification.
+
 ### Capture projected NFS mount evidence
 
 Use a `private/mount/xorb/direct` fixture and the same native publication,

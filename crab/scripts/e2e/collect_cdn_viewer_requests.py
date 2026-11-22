@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cdn_qualification import (  # noqa: E402
     CDN_PROVENANCE_FIELDS, GIT_FETCH_RECORD_LIMIT, GIT_OID, MOUNT_XORB_RANGE_READ, MOUNT_XORB_READ_FIELDS, PROVIDER_FOR_EDGE,
-    SDK_HYDRATION_READ_FIELDS, SDK_WORKTREE_VIEWER_FILES, VIEWER_REQUEST_FILES, cli_payload_bytes, decode, fields,
+    SDK_HYDRATION_READ_FIELDS, SDK_WORKTREE_VIEWER_FILES, SDK_XORB_RANGE_READ, VIEWER_REQUEST_FILES, cli_payload_bytes, decode, fields,
     is_direct_desktop_git_scope, is_direct_mount_xorb_scope, is_direct_sdk_git_scope, is_direct_service_scope,
     is_direct_xorb_read_scope, matches,
     read_git_record, require, scope_parts, validate_desktop_git_read, validate_git_fetch, validate_sdk_git_record, validate_service_read,
@@ -557,15 +557,19 @@ def main() -> int:
             verify_git_traffic(client, edge, "CDN SDK Git action")
         elif is_direct_xorb_read_scope(fixture["scope"]):
             mount = is_direct_mount_xorb_scope(fixture["scope"])
-            sparse = mount and candidate.get("schema") == MOUNT_XORB_RANGE_READ
+            sparse_schema = MOUNT_XORB_RANGE_READ if mount else SDK_XORB_RANGE_READ
+            sparse = candidate.get("schema") == sparse_schema
             expected = MOUNT_XORB_READ_FIELDS if mount else SDK_HYDRATION_READ_FIELDS
             if sparse:
                 expected = expected | {"range_offset"}
+                if not mount:
+                    expected.add("commit")
             client = fields(candidate, expected, "CDN benchmark xorb read")
             key = fixture_object_key(fixture, "private", "xorb")
             schema = "crab.cdn-mount-xorb-read/v1" if mount else "crab.cdn-sdk-hydration/v1"
             if sparse:
-                schema = MOUNT_XORB_RANGE_READ
+                schema = sparse_schema
+                require(mount or matches(GIT_OID, client["commit"]), "SDK range evidence requires a verified Git revision")
             require(client["schema"] == schema and client["arm"] == "edge"
                     and client["xorb_key_sha256"] == hashlib.sha256(key.encode()).hexdigest(),
                     "viewer evidence requires a timed read of the approved xorb")

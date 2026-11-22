@@ -6,8 +6,9 @@ use std::process::Command;
 use std::process::ExitCode;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use crab_sdk::operation::ReadOptions;
 use crab_sdk::remote::Snapshot;
-use crab_sdk::storage::{CdnIssuerOptions, DirectCdnOptions, DirectStoreOptions};
+use crab_sdk::storage::{CdnIssuerOptions, ContentCache, DirectCdnOptions, DirectStoreOptions};
 use crab_sdk::{Client, GitPath, ObjectId, OpenOptions, RepositoryLocator, Revision};
 use crab_storage::cdn::CdnPublicationFile;
 use serde::Deserialize;
@@ -33,6 +34,17 @@ struct Request {
     public_transition: bool,
     #[serde(default)]
     worktree: Option<Worktree>,
+    #[serde(default)]
+    xorb_range: Option<XorbRange>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct XorbRange {
+    offset: u64,
+    file_bytes: u64,
+    pointer_sha256: String,
+    cache_root: PathBuf,
 }
 
 #[derive(Deserialize)]
@@ -131,7 +143,10 @@ impl Request {
         if oid != expected_oid {
             return Err("SDK snapshot selected a different published commit".into());
         }
-        let payload = self.read_blob(&snapshot).await?;
+        let payload = match &self.xorb_range {
+            Some(window) => self.read_xorb_range(&snapshot, window).await?,
+            None => self.read_blob(&snapshot).await?,
+        };
         let mut report = primary_finish(timing)?;
         report["commit"] = serde_json::json!(oid.to_string());
         report["payload"] = payload.clone();
@@ -145,12 +160,58 @@ impl Request {
             report["warm_local"] = timing.finish()?;
             tracing::debug!(target: "crab_cdn_probe::arm_boundary", parent: None, phase = "local_finish");
         }
+        if let Some(window) = &self.xorb_range {
+            report["range_offset"] = serde_json::json!(window.offset);
+            report["cache_root_sha256"] = serde_json::json!(format!(
+                "{:x}",
+                Sha256::digest(window.cache_root.as_os_str().as_encoded_bytes())
+            ));
+        }
         Ok(report)
     }
 
     async fn read_blob(&self, snapshot: &Snapshot) -> Result<serde_json::Value, Failure> {
         let bytes = snapshot.read_blob(GitPath::new(PAYLOAD)?).await?;
         self.verified_payload(&bytes).map(|(payload, _)| payload)
+    }
+
+    async fn read_xorb_range(
+        &self,
+        snapshot: &Snapshot,
+        window: &XorbRange,
+    ) -> Result<serde_json::Value, Failure> {
+        let path = GitPath::new(PAYLOAD)?;
+        let blob = snapshot.read_blob(path.clone()).await?;
+        let pointer = crab_types::pointer::Pointer::parse(&blob)?;
+        if pointer.size != window.file_bytes
+            || format!("{:x}", Sha256::digest(&blob)) != window.pointer_sha256
+        {
+            return Err("SDK snapshot did not contain the approved Crab pointer".into());
+        }
+        let length = self.expected_bytes as u64;
+        let end = window
+            .offset
+            .checked_add(length)
+            .filter(|end| length > 0 && length < pointer.size && *end <= pointer.size)
+            .ok_or("SDK stream requires a proper file subrange")?;
+        let options = ReadOptions::default().with_range(window.offset..end)?;
+        let mut stream = snapshot.open_file(path).with_options(options).await?;
+        let mut hasher = Sha256::new();
+        let mut bytes = 0u64;
+        while let Some(chunk) = stream.next().await? {
+            bytes += chunk.len() as u64;
+            if bytes > length {
+                stream.close().await?;
+                return Err("SDK stream exceeded the approved file subrange".into());
+            }
+            hasher.update(&chunk);
+        }
+        stream.close().await?;
+        let sha256 = format!("{:x}", hasher.finalize());
+        if bytes != length || sha256 != self.expected_sha256 {
+            return Err("SDK stream returned different fixture bytes".into());
+        }
+        Ok(serde_json::json!({"sha256": sha256, "bytes": bytes}))
     }
 
     fn verified_payload(
@@ -473,6 +534,14 @@ async fn run() -> Result<(), Failure> {
     let mut filter = String::from(
         "off,crab_cdn_probe::arm_boundary=debug,crab_sdk::cdn::read_target=debug,crab_storage::cdn::transfer=debug,crab_storage::native_read=debug,crab_storage::cdn::gcs_viewer_log=trace",
     );
+    if request.xorb_range.is_some()
+        && (request.worktree.is_some()
+            || request.repeat_snapshot
+            || request.public_transition
+            || !matches!(&request.binding, Binding::Private { .. }))
+    {
+        return Err("SDK xorb range requires one private remote snapshot".into());
+    }
     if request.public_transition {
         filter.push_str(",crab_storage::cdn::public_transition=debug");
     }
@@ -493,6 +562,11 @@ async fn run() -> Result<(), Failure> {
     let builder = Client::builder()
         .direct_store(request.store()?)
         .direct_cdn(request.cdn()?);
+    let builder = if let Some(window) = &request.xorb_range {
+        builder.content_cache(ContentCache::new(&window.cache_root, 64 * 1024 * 1024)?)
+    } else {
+        builder
+    };
     let builder = if let Some(tools) = &request.worktree {
         builder.local(crab_sdk::local::Options::new(crab_sdk::local::Tools::new(
             &tools.git,
@@ -587,6 +661,7 @@ esac
                 &git,
                 &Hydration {
                     remote: "crab-sdk:fixture".to_owned(),
+                    repeat: false,
                     pointer: format!(
                         "version https://crab.build/spec/v1\nfile-hash {}\nsize {}\n",
                         "a".repeat(64),
