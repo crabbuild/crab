@@ -54,7 +54,7 @@ def sample(provider: str) -> dict[str, Any]:
     return {
         "origin": metrics | {"elapsed_ms": 300, "client_bytes": 8},
         "cold_edge": metrics | {"elapsed_ms": 420, "edge_misses": 1, "origin_fill_bytes": 8, "edge_bytes": 8,
-                                "origin_gets": 2 if provider == "s3" else 1},
+                                "origin_gets": 2 if provider in ("s3", "azure") else 1},
         "warm_edge": metrics | {"elapsed_ms": 120, "edge_hits": 1, "edge_bytes": 8},
         "warm_local": metrics | {"elapsed_ms": 6, "local_payload_hits": 1},
     }
@@ -113,13 +113,14 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str) -> N
                     client["edge_responses"][request_id] = {"status": 206, "cache": cache, "bytes": metrics["edge_bytes"],
                                                            "complete": True}
                     proof[request_id] = {"status": 206, "response_bytes": 800, "cache": cache}
-                    if provider == "s3":
+                    if provider in ("s3", "azure"):
                         key_sha256 = hashlib.sha256(f"{location}/{index}/key".encode()).hexdigest()
                         proof[request_id]["key_sha256"] = key_sha256
                         if arm == "cold_edge":
                             origin_id = hashlib.sha256(f"{location}/{index}/origin".encode()).hexdigest()
-                            origin_requests[origin_id] = {"key_sha256": key_sha256, "at_unix_s": started // 1000,
-                                                          "status": 206, "response_body_bytes": metrics["origin_fill_bytes"]}
+                            time = {"at_unix_s": started // 1000} if provider == "s3" else {"at_unix_ms": started}
+                            origin_requests[origin_id] = {"key_sha256": key_sha256, "status": 206,
+                                                          "response_body_bytes": metrics["origin_fill_bytes"]} | time
                     if provider == "gcs":
                         proof[request_id]["cache_fill_bytes"] = metrics["origin_fill_bytes"]
                         proof[request_id]["origin_requests"] = {}
@@ -129,7 +130,7 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str) -> N
                     evidence = {
                         "schema": f"crab.{edge_name}-viewer-requests/v1", "client_report_sha256": digest, "records": proof,
                     }
-                    if provider == "s3":
+                    if provider in ("s3", "azure"):
                         evidence["origin_requests"] = origin_requests
                     json_file(directory / CDN.VIEWER_REQUEST_FILES[provider], evidence)
                 external = {key: metrics[key] for key in CDN.GIT_EXTERNAL_METRICS} | {

@@ -155,7 +155,7 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
                         for private in (tag, host, project, rule, "192.0.2.1", "range-fill", "validation", "unrelated-origin"):
                             self.assertNotIn(private, retained)
 
-    def test_front_door_matches_the_viewer_row_and_excludes_its_origin_shield_row(self):
+    def test_front_door_matches_blob_reads_and_excludes_origin_shield_and_direct_reads(self):
         for access in ("private", "public"):
             with self.subTest(access=access), TemporaryDirectory() as temporary:
                 root = Path(temporary)
@@ -182,17 +182,49 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
                               "httpMethod": "GET", "cacheStatus": "REMOTE_HIT", "clientIp": "192.0.2.1"}
                 viewer = {"category": "FrontdoorAccessLog", "resourceId": resource, "properties": properties}
                 shield = viewer | {"properties": properties | {"isReceivedFromClient": False, "cacheStatus": "MISS", "responseBytes": 900}}
+                selected_origin = config["native_origin" if access == "private" else "export_origin"]
+                account = selected_origin.split("//", 1)[1].split(".", 1)[0]
+                blob_resource = (f"/subscriptions/{deployment['subscription']}/resourceGroups/test/providers/Microsoft.Storage/"
+                                 f"storageAccounts/{account}/blobServices/default")
+                principal, correlation = "7abb6400-a5b4-4fed-a638-fcd011a29292", "77777777-0000-1111-2222-333333333333"
+                key = f"{config['fixture_prefix']}/{PACK}"
+                at = report["started_at_unix_ms"] + 1
+                timestamp = datetime.fromtimestamp(at / 1000, timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "1234Z")
+                blob = {"category": "StorageRead", "resourceId": blob_resource, "operationName": "GetBlob",
+                        "uri": f"{selected_origin}/{key}", "statusCode": 206, "correlationId": correlation, "time": timestamp,
+                        "properties": {"responseBodySize": 1024}, "callerIpAddress": "[2001:db8::1]:12345"}
+                if access == "private":
+                    authority = {"id": resource, "identity": {"type": "SystemAssigned", "principalId": principal}}
+                    blob["identity"] = {"type": "OAuth", "requester": {"objectId": principal}}
+                    direct = blob | {"identity": {"type": "OAuth", "requester": {"objectId": "other"}}}
+                    bad_authority = authority | {"id": resource + "-other"}
+                    authority_error = "needs the approved Front Door profile's system-assigned identity"
+                else:
+                    authority = {"cloud": "Public", "values": [{"name": "AzureFrontDoor.Backend",
+                                                                 "properties": {"addressPrefixes": ["2001:db8::/64"]}}]}
+                    blob["identity"] = {"type": "Anonymous"}
+                    direct = blob | {"callerIpAddress": "[2001:db9::1]:12345"}
+                    bad_authority = authority | {"cloud": "AzureGovernment"}
+                    authority_error = "expected Azure Public service tags"
                 archive, output = root / "PT1H.json", root / "front-door-requests.json"
+                origin_log, origin_authority = root / "storage-read.json", root / "origin-authority.json"
                 command = [sys.executable, "-B", str(Path(COLLECT.__file__)), "--fixture", str(fixture_path), "--log", str(archive),
-                           "--client", str(client), "--configuration-sha256", configuration, "--output", str(output)]
-                for entries, error in (
-                    ([shield], "must cover each measured viewer attempt"),
-                    ([viewer | {"resourceId": resource + "-other"}], "outside the approved profile or repository prefix"),
-                    ([viewer | {"properties": properties | {"cacheStatus": "PARTIAL_HIT"}}], "cache result disagrees"),
-                    ([shield, viewer], None),
+                           "--client", str(client), "--configuration-sha256", configuration, "--output", str(output),
+                           "--azure-blob-log", str(origin_log), "--azure-origin-authority", str(origin_authority)]
+                for entries, blobs, selected, error in (
+                    ([shield], [blob], authority, "must cover each measured viewer attempt"),
+                    ([viewer | {"resourceId": resource + "-other"}], [blob], authority, "outside the approved profile or repository prefix"),
+                    ([viewer | {"properties": properties | {"cacheStatus": "PARTIAL_HIT"}}], [blob], authority, "cache result disagrees"),
+                    ([viewer], [blob], bad_authority, authority_error),
+                    ([viewer], [blob, blob | {"properties": {"responseBodySize": 999}}], authority,
+                     "Azure Blob log exports disagree about one origin request"),
+                    ([shield, viewer], [blob, direct, blob | {"resourceId": blob_resource + "2"},
+                                       blob | {"time": "1970-01-01T00:00:01.0000000Z"}, blob], authority, None),
                 ):
                     with self.subTest(error=error):
                         examples.json_file(archive, {"records": entries})
+                        examples.json_file(origin_log, {"records": blobs})
+                        examples.json_file(origin_authority, selected)
                         result = subprocess.run(command, capture_output=True, text=True, check=False)
                         if error is not None:
                             self.assertEqual(result.returncode, 1)
@@ -201,9 +233,14 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
                         else:
                             self.assertEqual(result.returncode, 0, result.stderr)
                             retained = output.read_text(encoding="utf-8")
+                            key_hash = hashlib.sha256(key.encode()).hexdigest()
                             self.assertEqual(json.loads(retained), {
                                 "schema": "crab.front-door-viewer-requests/v1", "client_report_sha256": digest,
-                                "records": {request_id: {"status": 206, "response_bytes": 620, "cache": "hit"}},
+                                "records": {request_id: {"status": 206, "response_bytes": 620, "cache": "hit", "key_sha256": key_hash}},
+                                "origin_requests": {hashlib.sha256(correlation.encode()).hexdigest(): {
+                                    "key_sha256": key_hash, "at_unix_ms": at, "status": 206, "response_body_bytes": 1024,
+                                }},
                             })
-                            for private in (reference, resource, host, "192.0.2.1"):
+                            for private in (reference, resource, host, "192.0.2.1", "2001:db8::1", principal,
+                                            blob_resource, key, correlation):
                                 self.assertNotIn(private, retained)

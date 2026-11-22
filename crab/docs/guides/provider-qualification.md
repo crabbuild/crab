@@ -1021,14 +1021,41 @@ Use `--log "$cloud_cdn_log" --output "$arm_directory/cloud-cdn-requests.json"`
 with the collector above. Keep raw Cloud Logging exports on the protected
 worker.
 
-For Front Door, use the same collector with the approved Azure fixture, the
-Azure Monitor `PT1H.json` access log archive for that Front Door profile, and
-`front-door-requests.json` as the output. The private path forwards through
-APIM before Front Door and removes the `/crab` prefix. The collector matches
-the Front Door tracking reference and resource profile and excludes duplicate
-traffic from origin-shield logs. [Front Door access logs](https://learn.microsoft.com/en-us/azure/frontdoor/front-door-diagnostics) · [Azure Monitor resource logs](https://learn.microsoft.com/en-us/azure/azure-monitor/essentials/resource-logs)
+For Front Door, enable Azure Monitor access logs on the approved profile and
+`StorageRead` logs on the approved account's `blobServices/default` resource.
+The private path forwards through APIM and removes the `/crab` prefix.
+The collector matches the Front Door tracking reference and resource profile
+and excludes duplicate traffic from origin-shield logs. It joins Blob GETs to
+the viewer object keys and measurement window. The cold arm needs a successful
+Blob response with body bytes. Use distinct fixture publications and keep
+other traffic to those keys outside the measurement window.
+[Front Door access logs](https://learn.microsoft.com/en-us/azure/frontdoor/front-door-diagnostics) · [Blob resource log format](https://learn.microsoft.com/en-us/azure/storage/blobs/monitor-blob-storage-reference#resource-logs)
 
-Repeat `--log` or `--s3-origin-log` for additional files. Every viewer attempt needs a matching
+For private delivery, capture the approved profile's system-assigned identity
+for comparison against the Blob log requester's OAuth object ID.
+
+```bash
+az afd profile show --subscription "$subscription" --resource-group "$resource_group" \
+  --profile-name "$profile" --output json > "$azure_origin_authority"
+```
+
+For public delivery, use Microsoft's current Azure Public service-tags JSON
+as `azure_origin_authority`. The collector requires anonymous reads of the
+dedicated export container from addresses in `AzureFrontDoor.Backend`. The
+fixture's isolated keys and time window establish which benchmark arm to
+credit. Keep the authority and both raw archives on the protected worker.
+[Azure Front Door managed identity](https://learn.microsoft.com/en-us/azure/frontdoor/origin-authentication-with-managed-identities) · [Azure Public service tags](https://www.microsoft.com/en-us/download/details.aspx?id=56519)
+
+```bash
+python3 -B crab/scripts/e2e/collect_cdn_viewer_requests.py \
+  --fixture "$approved_fixture_json" \
+  --configuration-sha256 "$approved_configuration_sha256" \
+  --client "$arm_directory/client.json" --log "$front_door_access_archive" \
+  --azure-blob-log "$blob_storage_read_archive" --azure-origin-authority "$azure_origin_authority" \
+  --output "$arm_directory/front-door-requests.json"
+```
+
+Repeat `--log`, `--s3-origin-log`, or `--azure-blob-log` for additional files. Every viewer attempt needs a matching
 access log record for its hashed request ID. Missing logs,
 conflicting records, or disagreements with the client's status or cache
 classification fail the check. Viewer response bytes include HTTP overhead

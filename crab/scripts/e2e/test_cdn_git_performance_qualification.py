@@ -207,6 +207,25 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "CloudFront edge arms must use disjoint S3 log seconds"):
             self.collect()
 
+    def test_front_door_cold_arm_requires_blob_origin_bytes_within_its_measured_window(self) -> None:
+        scope = "front-door/private/cli/git/direct"
+        self.registration.update(scope=scope, candidate=fixture.cli_candidate(scope, PLATFORM))
+        fixture.write_git_measurements(self.root, self.registration, PLATFORM)
+        arm = self.root / "near/0001/cold_edge"
+        log = arm / fixture.CDN.VIEWER_REQUEST_FILES["azure"]
+        proof = json.loads(log.read_bytes())
+        request_id, request = next(iter(proof["origin_requests"].items()))
+        for change, expected in (
+            ({"at_unix_ms": request["at_unix_ms"] - 1}, "does not match the timed Front Door request"),
+            ({"status": 0}, "has no logged Front Door fill"),
+        ):
+            with self.subTest(change=change):
+                fixture.json_file(log, proof | {"origin_requests": {request_id: request | change}})
+                with self.assertRaisesRegex(ValueError, expected):
+                    self.collect()
+        fixture.json_file(log, proof)
+        self.assertEqual(self.collect()["near"]["pairs"][0]["cold_edge"]["origin_gets"], 2)
+
     def test_rejects_reusing_a_local_cache_across_arms(self) -> None:
         client = json.loads((self.root / "near/0001/cold_edge/client.json").read_bytes())
         self.amend_client("near/0001/warm_edge", reader=client["reader"])

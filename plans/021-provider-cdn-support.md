@@ -581,7 +581,10 @@ and edge payload through redacted observations.
   validation requests to the measured viewer using the provider's parent
   log-entry ID. The benchmark checks external origin GETs and fill bytes
   against these observations. Front Door separates viewer responses from
-  origin-shield traffic before measuring egress.
+  origin-shield traffic and joins Blob reads to measured keys and time.
+  Private rows match the profile's system-assigned identity. Public rows match
+  anonymous reads of a dedicated export from the Front Door backend service tag.
+  The cold arm requires a successful Blob response with body bytes.
   Each timed fetch records redacted native HTTPS GET and HEAD response counts
   and consumed body bytes. The origin control must observe a native GET with
   payload bytes, and external totals must cover the observed GETs and combined

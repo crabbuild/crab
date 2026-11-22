@@ -5,10 +5,11 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import ipaddress
 import json
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -35,6 +36,7 @@ S3_CLOUDFRONT_READ = re.compile(
     rb'"GET (?P<path>/[^" ]+) HTTP/[^" ]+" (?P<status>[1-5][0-9]{2}) \S+ (?P<bytes>-|[0-9]{1,20}) '
     rb'\S+ \S+ \S+ (?:"[^"]*"|-) "Amazon CloudFront" \S+ \S+ SigV4 \S+ AuthHeader (?P<host>\S+)(?: .*)?'
 )
+AZURE_BLOB_TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?Z")
 
 
 def cloudfront_logs(paths: list[Path], expected: dict, fixture: dict) -> dict:
@@ -116,11 +118,16 @@ def s3_cloudfront_reads(paths: list[Path], viewers: dict, fixture: dict, client:
     return records
 
 
-def front_door_logs(paths: list[Path], expected: dict, fixture: dict) -> dict:
+def front_door_resources(fixture: dict) -> tuple[str, str]:
     deployment = deployment_target(fixture, "front-door")
     subscription, group, profile = (deployment[key] for key in ("subscription", "resource_group", "profile"))
     require(matches(SUBSCRIPTION, subscription), "Front Door viewer evidence needs the approved Azure subscription")
-    resource = f"/subscriptions/{subscription}/resourceGroups/{group}/providers/Microsoft.Cdn/profiles/{profile}".lower()
+    group_id = f"/subscriptions/{subscription}/resourceGroups/{group}".lower()
+    return group_id, f"{group_id}/providers/microsoft.cdn/profiles/{profile.lower()}"
+
+
+def front_door_logs(paths: list[Path], expected: dict, fixture: dict) -> dict:
+    _, resource = front_door_resources(fixture)
     _, access, _, _, _ = scope_parts(fixture["scope"])
     base = fixture_base(fixture["base_url"])
     prefix = f"/{fixture['fixture_prefix']}{fixture['view_suffix']}/"
@@ -159,10 +166,125 @@ def front_door_logs(paths: list[Path], expected: dict, fixture: dict) -> dict:
             cache = props.get("cacheStatus")
             require(re.fullmatch(r"[1-5][0-9]{2}", status) and re.fullmatch(r"[0-9]{1,20}", size) and isinstance(cache, str),
                     "Front Door log has invalid HTTP status, response size or cache status")
-            record = {"status": int(status), "response_bytes": int(size), "cache": AZURE_CACHE_STATUS.get(cache, "unknown")}
+            record = {"status": int(status), "response_bytes": int(size), "cache": AZURE_CACHE_STATUS.get(cache, "unknown"),
+                      "key_sha256": hashlib.sha256(url.path[1:].encode()).hexdigest()}
             require(fingerprint not in records or records[fingerprint] == record,
                     "Front Door exports disagree about one viewer request")
             records[fingerprint] = record
+    return records
+
+
+def azure_backend_networks(authority: dict) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+    tags = authority.get("values")
+    require(authority.get("cloud") == "Public" and isinstance(tags, list), "expected Azure Public service tags")
+    backend = [tag.get("properties") for tag in tags if isinstance(tag, dict) and tag.get("name") == "AzureFrontDoor.Backend"]
+    require(len(backend) == 1 and isinstance(backend[0], dict), "Azure Public tags need the Front Door backend tag")
+    prefixes = backend[0].get("addressPrefixes")
+    require(isinstance(prefixes, list) and bool(prefixes) and all(isinstance(prefix, str) and "/" in prefix for prefix in prefixes),
+            "missing Azure Front Door backend CIDRs")
+    try:
+        networks = [ipaddress.ip_network(prefix) for prefix in prefixes]
+    except ValueError:
+        raise ValueError("invalid Azure Front Door backend CIDRs") from None
+    require(all(network.prefixlen > 0 for network in networks), "invalid Azure Front Door backend CIDRs")
+    return networks
+
+
+def azure_backend_ip(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        host, _, port = value.rpartition(":")
+        require(re.fullmatch(r"[0-9]{1,5}", port) and 0 < int(port) <= 65535, "invalid Azure Blob caller port")
+        if host.startswith("[") and host.endswith("]"):
+            host = host[1:-1]
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            raise ValueError("invalid Azure Blob caller address") from None
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        return address.ipv4_mapped
+    return address
+
+
+def azure_blob_front_door_reads(paths: list[Path], authority_path: Path, viewers: dict, fixture: dict, client: dict) -> dict:
+    _, access, _, _, _ = scope_parts(fixture["scope"])
+    group, profile = front_door_resources(fixture)
+    native_origin = fixture["export_origin"] if access == "public" else fixture["native_origin"]
+    origin = fixture_base(native_origin)
+    account = origin.netloc.split(".", 1)[0]
+    resource = f"{group}/providers/microsoft.storage/storageaccounts/{account}/blobservices/default"
+    root = origin.path.rstrip("/") + "/"
+    authority = read_json_log(authority_path)
+    require(isinstance(authority, dict), "expected Azure origin authority JSON")
+    if access == "private":
+        identity = authority.get("identity")
+        require(str(authority.get("id", "")).lower() == profile and isinstance(identity, dict)
+                and identity.get("type") == "SystemAssigned" and matches(SUBSCRIPTION, identity.get("principalId")),
+                "Azure origin authority needs the approved Front Door profile's system-assigned identity")
+        principal = identity["principalId"].lower()
+    else:
+        networks = azure_backend_networks(authority)
+    keys = {row["key_sha256"] for row in viewers.values()}
+    start, finish = (client[key] for key in ("started_at_unix_ms", "finished_at_unix_ms"))
+    records = {}
+    for path in paths:
+        archive = read_json_log(path)
+        require(isinstance(archive, dict) and isinstance(archive.get("records"), list),
+                "expected an Azure Monitor Blob resource log archive with records")
+        for row in archive["records"]:
+            require(isinstance(row, dict), "invalid Azure Monitor Blob record")
+            if (str(row.get("resourceId", "")).lower() != resource or row.get("category") != "StorageRead"
+                    or row.get("operationName") != "GetBlob"):
+                continue
+            uri = row.get("uri")
+            require(isinstance(uri, str), "Azure Blob origin log needs a request URL")
+            url = urlsplit(uri)
+            if not url.path.startswith(root):
+                continue
+            key = hashlib.sha256(url.path[len(root):].encode()).hexdigest()
+            if key not in keys:
+                continue
+            identity = row.get("identity")
+            auth = identity.get("type") if isinstance(identity, dict) else None
+            if access == "private":
+                requester = identity.get("requester") if auth == "OAuth" else None
+                if not isinstance(requester, dict) or str(requester.get("objectId", "")).lower() != principal:
+                    continue
+            else:
+                caller = row.get("callerIpAddress")
+                if auth != "Anonymous" or not isinstance(caller, str):
+                    continue
+                address = azure_backend_ip(caller)
+                if not any(address in net for net in networks):
+                    continue
+            timestamp = row.get("time")
+            require(matches(AZURE_BLOB_TIME, timestamp), "invalid Azure Blob origin timestamp")
+            try:
+                received = datetime.fromisoformat(timestamp.removesuffix("Z") + "+00:00")
+            except ValueError:
+                raise ValueError("invalid Azure Blob origin timestamp") from None
+            at = (received - datetime(1970, 1, 1, tzinfo=timezone.utc)) // timedelta(milliseconds=1)
+            if not start <= at <= finish:
+                continue
+            require(url.scheme == "https" and url.netloc in (origin.netloc, f"{origin.netloc}:443")
+                    and not url.query and not url.fragment,
+                    "Front Door origin read was logged outside the approved Blob endpoint")
+            status, request_id = str(row.get("statusCode")), row.get("correlationId")
+            props = row.get("properties")
+            require(isinstance(props, dict) and matches(SUBSCRIPTION, request_id)
+                    and (re.fullmatch(r"[1-5][0-9]{2}", status) or status == "Unknown"),
+                    "Azure Blob origin log has invalid status, properties or correlation ID")
+            size = props.get("responseBodySize")
+            if size is None and status not in ("200", "206"):
+                size = 0
+            require(type(size) is int and size >= 0, "invalid Azure Blob origin byte count")
+            observation = {"key_sha256": key, "at_unix_ms": at, "status": 0 if status == "Unknown" else int(status),
+                           "response_body_bytes": size}
+            fingerprint = hashlib.sha256(request_id.lower().encode()).hexdigest()
+            require(fingerprint not in records or records[fingerprint] == observation,
+                    "Azure Blob log exports disagree about one origin request")
+            records[fingerprint] = observation
     return records
 
 
@@ -268,6 +390,10 @@ def main() -> int:
                         help="CloudFront W3C access log, Cloud Logging JSON export or Azure Monitor Front Door archive")
     parser.add_argument("--s3-origin-log", action="append", type=Path, default=[],
                         help="plain-text S3 server access log from the approved CloudFront origin")
+    parser.add_argument("--azure-blob-log", action="append", type=Path, default=[],
+                        help="Azure Monitor StorageRead archive from the approved Blob origin")
+    parser.add_argument("--azure-origin-authority", type=Path,
+                        help="ARM Front Door profile JSON for private rows, Azure Public service tags JSON for public rows")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     try:
@@ -276,6 +402,8 @@ def main() -> int:
         require(PROVIDER_FOR_EDGE[edge] in VIEWER_REQUEST_FILES, "no viewer log collector is defined for this CDN fixture")
         require(bool(args.s3_origin_log) == (edge == "cloudfront"),
                 "CloudFront viewer evidence requires S3 origin access logs")
+        require(bool(args.azure_blob_log) == bool(args.azure_origin_authority) == (edge == "front-door"),
+                "Front Door viewer evidence requires Blob origin logs and Azure origin authority")
         raw = read_git_record(args.client, limit=GIT_FETCH_RECORD_LIMIT)
         candidate = decode(raw)
         require(isinstance(candidate, dict) and CDN_PROVENANCE_FIELDS | {"arm", "platform"} <= candidate.keys()
@@ -292,6 +420,9 @@ def main() -> int:
         proof = {"schema": f"crab.{edge}-viewer-requests/v1", "client_report_sha256": digest, "records": records}
         if edge == "cloudfront":
             proof["origin_requests"] = s3_cloudfront_reads(args.s3_origin_log, records, fixture, client)
+        if edge == "front-door":
+            proof["origin_requests"] = azure_blob_front_door_reads(args.azure_blob_log, args.azure_origin_authority,
+                                                                  records, fixture, client)
         verify_viewer_requests(proof, client, digest, edge)
         with args.output.open("x", encoding="utf-8") as destination:
             destination.write(json.dumps(proof, sort_keys=True) + "\n")
