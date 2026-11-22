@@ -95,8 +95,9 @@ PUBLIC_EXPORT_DIR = "public-export"
 PUBLIC_EXPORT_BEFORE = "before"
 PUBLIC_EXPORT_FILES = ("inventory.json", "publication.json")
 SDK_HYDRATION_ACTION = "sdk-xorb-hydration"
-SDK_HYDRATION_DIR = "xorb-product"
-SDK_HYDRATION_WORKLOAD_FIELDS = {
+MOUNT_XORB_ACTION = "mount-xorb-read"
+XORB_PRODUCT_DIR = "xorb-product"
+XORB_WORKLOAD_FIELDS = {
     "schema", "configuration_sha256", "pointer_sha256", "payload_sha256", "payload_bytes", "crab_sha256",
     "global_prefix_sha256", "publication_sha256",
 }
@@ -190,6 +191,7 @@ SDK_HYDRATION_READ_FIELDS = PRODUCT_COUNTERS | CDN_PROVENANCE_FIELDS | SDK_TIMIN
     "schema", "arm", "platform", "workload_sha256", "candidate", "crab_sha256", "pointer_sha256", "payload",
     "reader", "xorb_key_sha256", "native_traffic", "edge_responses",
 }
+MOUNT_XORB_READ_FIELDS = SDK_HYDRATION_READ_FIELDS | {"mounted_oid", "unmounted"}
 SERVICE_READ_FIELDS = PRODUCT_COUNTERS | CDN_PROVENANCE_FIELDS | SDK_TIMING_FIELDS | {
     "schema", "arm", "platform", "workload_sha256", "publication_sha256", "commit", "payload_sha256",
     "payload_bytes", "etag_sha256", "git_blob_oid_sha256", "lfs_key_sha256", "reader", "native_traffic", "edge_responses",
@@ -752,7 +754,7 @@ def verify_check_evidence(
             f"trace digest mismatch: {name}",
         )
         if name == "rollback" and (requires_cli_workload(report["scope"]) or is_direct_sdk_git_scope(report["scope"])
-                                   or is_direct_sdk_hydration_scope(report["scope"])
+                                   or is_direct_xorb_read_scope(report["scope"])
                                    or requires_desktop_workload(report["scope"], registration.get("workload"))
                                    or is_direct_service_scope(report["scope"])):
             rollback = raw
@@ -848,12 +850,12 @@ def verify_check_evidence(
                     and row["bytes"] == full_sizes.get(row["key_sha256"], 0) > 0}
     require(any(row["key_sha256"] in native_reads for row in fixture_reads[origin_denial]),
             "anonymous origin denial needs a verified native read of the same complete edge object")
-    if is_direct_sdk_hydration_scope(report["scope"]):
+    if is_direct_xorb_read_scope(report["scope"]):
         target = scoped_placement["views"]["target"]
         require(scoped_placement["fixture_sha256"] == report["configuration_sha256"]
                 and scoped_placement["deployment_policy_sha256"] == deployment_policy_sha256
                 and target["key_sha256"] in native_reads and full_sizes[target["key_sha256"]] == target["bytes"],
-                "SDK hydration needs independently verified transport and scope evidence for the same xorb")
+                "xorb reads need independently verified transport and scope evidence for the same xorb")
     if access == "public":
         export = fixture_reads["export_origin_access"]
         if edge == "cloudfront":
@@ -1084,12 +1086,12 @@ def ordered_full_reads(
     return False
 
 
-def verify_product_action(value: Any, family: str, *, sdk_hydration: bool = False) -> None:
+def verify_product_action(value: Any, family: str, *, xorb_read: bool = False) -> None:
     required = {
         "name", "expected_sha256", "observed_sha256", "expected_bytes", "observed_bytes",
         "native_writes", "observed_edge_gets", "visible_new_ref", "fixture_cleanup_verified",
     }
-    verified_payload_required = family in {"git", "capsule", "lfs"} or sdk_hydration
+    verified_payload_required = family in {"git", "capsule", "lfs"} or xorb_read
     if verified_payload_required:
         required.add("verified_edge_payloads")
     action = fields(value, required, "product action")
@@ -1159,14 +1161,18 @@ def benchmark_registration(registration: Any) -> dict[str, Any]:
             expected.add("viewer_approval_sha256")
             require(matches(SHA256, registration.get("viewer_approval_sha256")),
                     "private desktop benchmark needs the approved issuer binding")
-    if is_direct_sdk_hydration_scope(registration["scope"]):
-        expected.update(("sdk_candidate", "viewer_binding_sha256", "viewer_approval_sha256",
+    if is_direct_xorb_read_scope(registration["scope"]):
+        mount = is_direct_mount_xorb_scope(registration["scope"])
+        expected.update(("candidate" if mount else "sdk_candidate", "viewer_binding_sha256", "viewer_approval_sha256",
                          "hydration_workload_sha256"))
-        verify_sdk_candidate(registration.get("sdk_candidate"), registration.get("source_sha"))
-        require(registration.get("workload") == SDK_HYDRATION_ACTION
+        if mount:
+            verify_read_candidate(registration.get("candidate"), registration.get("source_sha"))
+        else:
+            verify_sdk_candidate(registration.get("sdk_candidate"), registration.get("source_sha"))
+        require(registration.get("workload") == (MOUNT_XORB_ACTION if mount else SDK_HYDRATION_ACTION)
                 and all(matches(SHA256, registration.get(key)) for key in
                         ("viewer_binding_sha256", "viewer_approval_sha256", "hydration_workload_sha256")),
-                "SDK hydration benchmark needs the approved workload and viewer binding")
+                "xorb read benchmark needs the approved workload and viewer binding")
     if is_direct_service_scope(registration["scope"]):
         expected.update(("service_workload", "viewer_binding_sha256", "service_candidate"))
         verify_service_candidate(registration.get("service_candidate"), registration.get("source_sha"))
@@ -1283,6 +1289,13 @@ def requires_desktop_workload(scope: str, workload: Any) -> bool:
 def is_direct_sdk_hydration_scope(scope: str) -> bool:
     return scope_parts(scope)[1:] == ("private", "sdk", "xorb", "direct")
 
+
+def is_direct_mount_xorb_scope(scope: str) -> bool:
+    return scope_parts(scope)[1:] == ("private", "mount", "xorb", "direct")
+
+
+def is_direct_xorb_read_scope(scope: str) -> bool:
+    return is_direct_sdk_hydration_scope(scope) or is_direct_mount_xorb_scope(scope)
 
 def is_direct_service_scope(scope: str) -> bool:
     _, _, consumer, family, profile = scope_parts(scope)
@@ -1912,78 +1925,89 @@ def collect_service_product_action(
     return result
 
 
-def validate_sdk_hydration_workload(raw: bytes, approval: str, configuration: str) -> dict[str, Any]:
+def validate_xorb_workload(raw: bytes, approval: str, configuration: str, *, mount: bool = False) -> dict[str, Any]:
     require(matches(SHA256, approval) and hashlib.sha256(raw).hexdigest() == approval,
             "hydration workload differs from the approved digest")
-    spec = fields(decode(raw), SDK_HYDRATION_WORKLOAD_FIELDS, "SDK hydration workload")
-    require(spec["schema"] == "crab.cdn-sdk-hydration-workload/v1"
+    expected = XORB_WORKLOAD_FIELDS | ({"mounted_oid"} if mount else set())
+    spec = fields(decode(raw), expected, "xorb read workload")
+    schema = "crab.cdn-mount-xorb-workload/v1" if mount else "crab.cdn-sdk-hydration-workload/v1"
+    require(spec["schema"] == schema
             and spec["configuration_sha256"] == configuration
+            and (not mount or matches(GIT_OID, spec["mounted_oid"]))
             and all(matches(SHA256, spec[name]) for name in
                     ("pointer_sha256", "payload_sha256", "crab_sha256", "global_prefix_sha256", "publication_sha256"))
             and positive(spec["payload_bytes"]) and spec["payload_bytes"] <= 512 * 1024 * 1024,
-            "invalid approved SDK hydration workload")
+            "invalid approved xorb read workload")
     return spec
 
 
-def validate_sdk_hydration_publication(raw: bytes, row: dict[str, Any]) -> dict[str, Any]:
+def validate_xorb_publication(raw: bytes, row: dict[str, Any]) -> dict[str, Any]:
     # The writer publishes before the projected view exists. The view fixture
     # therefore gets its own approval after publication.
-    value = fields(decode(raw), GIT_PUBLICATION_FIELDS, "native SDK hydration publication")
+    value = fields(decode(raw), GIT_PUBLICATION_FIELDS, "native xorb workload publication")
     edge = scope_parts(row["scope"])[0]
-    require(matches(SHA256, value["configuration_sha256"]), "SDK hydration publication needs its source fixture digest")
+    require(matches(SHA256, value["configuration_sha256"]), "xorb workload publication needs its source fixture digest")
     provenance = row | {"scope": f"{edge}/private/sdk/git/direct", "configuration_sha256": value["configuration_sha256"]}
     return validate_git_publication(raw, provenance)
 
 
-def verify_sdk_hydration_read(
+def verify_xorb_read(
     raw: bytes, row: dict[str, Any], registration: dict[str, Any], arm: str,
     spec: dict[str, Any], placement: dict[str, Any],
 ) -> dict[str, Any]:
     local = arm == "warm_local"
-    expected_fields = SDK_HYDRATION_READ_FIELDS | ({"primer_sha256"} if local else set())
-    read = fields(decode(raw), expected_fields, "SDK hydration record")
-    require(read["schema"] == "crab.cdn-sdk-hydration/v1" and read["arm"] == arm
+    mount = is_direct_mount_xorb_scope(row["scope"])
+    expected_fields = MOUNT_XORB_READ_FIELDS if mount else SDK_HYDRATION_READ_FIELDS
+    read = fields(decode(raw), expected_fields | ({"primer_sha256"} if local else set()), "xorb read record")
+    schema = "crab.cdn-mount-xorb-read/v1" if mount else "crab.cdn-sdk-hydration/v1"
+    require(read["schema"] == schema and read["arm"] == arm
             and all(read[key] == row[key] for key in CDN_PROVENANCE_FIELDS | {"platform"})
             and read["workload_sha256"] == registration["hydration_workload_sha256"]
-            and read["candidate"] == registration["sdk_candidate"]
+            and read["candidate"] == registration["candidate" if mount else "sdk_candidate"]
             and read["crab_sha256"] == spec["crab_sha256"] and read["pointer_sha256"] == spec["pointer_sha256"],
-            "SDK hydration used a different workflow, workload or executable")
-    require("local" in read["candidate"]["cargo_features"].split(","), "SDK hydration requires the local feature")
+            "xorb read used a different workflow, workload or executable")
+    if mount:
+        require(read["mounted_oid"] == spec["mounted_oid"] and read["unmounted"] is True
+                and read["candidate"]["binary_sha256"] == spec["crab_sha256"]
+                and "nfs" in read["candidate"]["cargo_features"].split(","),
+                "mount read requires the approved projected Git commit and clean NFS detach")
+    else:
+        require("local" in read["candidate"]["cargo_features"].split(","), "SDK hydration requires the local feature")
     payload = fields(read["payload"], {"sha256", "bytes"}, "verified hydrated file")
     require(type(payload["bytes"]) is int and payload == {"sha256": spec["payload_sha256"], "bytes": spec["payload_bytes"]},
-            "SDK hydration did not verify the approved file")
+            "xorb read did not verify the approved file")
     target = placement["views"]["target"]
     reader = fields(read["reader"], CLI_NATIVE_FIELDS | {
         "global_prefix_sha256", "binding_sha256", "approval_sha256", "cache_root_sha256", "local_cache_only",
-    }, "verified SDK hydration target")
+    }, "verified xorb read target")
     require(reader["origin_sha256"] == placement["origin_sha256"]
             and reader["prefix_sha256"] == target["physical_prefix_sha256"]
             and read["xorb_key_sha256"] == target["key_sha256"]
             and reader["global_prefix_sha256"] == spec["global_prefix_sha256"]
             and matches(SHA256, reader["cache_root_sha256"])
             and reader["local_cache_only"] is True,
-            "SDK hydration used a different projected view, xorb, or cache service")
+            "xorb read used a different projected view, xorb, or cache service")
     approved = arm != "origin"
     require(reader["binding_sha256"] == (registration["viewer_binding_sha256"] if approved else "")
             and reader["approval_sha256"] == (registration["viewer_approval_sha256"] if approved else ""),
-            "SDK hydration did not use the required viewer approval")
-    verify_git_traffic(read, scope_parts(row["scope"])[0], "SDK hydration")
+            "xorb read did not use the required viewer approval")
+    verify_git_traffic(read, scope_parts(row["scope"])[0], "xorb read")
     if local:
         require(matches(SHA256, read["primer_sha256"]) and positive(read["local_payload_hits"])
                 and all(read[key] == 0 for key in PRODUCT_COUNTERS - {"local_payload_hits"}),
-                "SDK warm hydration requires verified local chunks with zero edge attempts")
+                "warm hydration requires verified local chunks with zero edge attempts")
     elif approved:
         require(all(positive(read[key]) for key in ("observed_edge_gets", "verified_edge_payloads", "edge_bytes"))
-                and read["local_payload_hits"] == 0, "SDK hydration accepted no verified edge xorb")
+                and read["local_payload_hits"] == 0, "xorb read accepted no verified edge xorb")
     else:
         native = read["native_traffic"]
         require(all(read[key] == 0 for key in PRODUCT_COUNTERS)
                 and positive(native["get_responses"]) and positive(native["body_bytes"]),
-                "SDK hydration rollback requires native payload reads without edge or cache activity")
+                "xorb read rollback requires native payload reads without edge or cache activity")
     return read
 
 
-def collect_sdk_hydration_evidence(
+def collect_xorb_read_evidence(
     directory: Path, row: dict[str, Any], registration: dict[str, Any], rollback_raw: bytes, *,
     placement: dict[str, Any], cleanup_at: int, native_origin_sha256: str,
     retain: Path | None = None, policy: Path | None = None,
@@ -1991,34 +2015,36 @@ def collect_sdk_hydration_evidence(
     require(deployment_component_digest(placement) == registration["scoped_view_sha256"]
             and placement["fixture_sha256"] == row["configuration_sha256"]
             and placement["origin_sha256"] == native_origin_sha256,
-            "SDK hydration view differs from the approved fixture and native origin")
-    inputs = directory / SDK_HYDRATION_DIR
+            "xorb read view differs from the approved fixture and native origin")
+    inputs = directory / XORB_PRODUCT_DIR
+    mount = is_direct_mount_xorb_scope(row["scope"])
     workload_raw = read_git_record(inputs / "workload.json")
     approval = registration["hydration_workload_sha256"]
-    spec = validate_sdk_hydration_workload(workload_raw, approval, row["configuration_sha256"])
+    spec = validate_xorb_workload(workload_raw, approval, row["configuration_sha256"], mount=mount)
     publication_raw = read_git_record(inputs / "publication.json")
     receipt = hashlib.sha256(publication_raw).hexdigest()
-    publication = validate_sdk_hydration_publication(publication_raw, row)
+    publication = validate_xorb_publication(publication_raw, row)
     require(receipt == spec["publication_sha256"] and publication["published"]
             and publication["sha256"] == spec["pointer_sha256"],
-            "SDK hydration requires independent native publication of the approved pointer")
+            "xorb read requires independent native publication of the approved pointer")
     writer = verify_read_candidate(publication["candidate"], row["source_sha"], row["platform"], policy=policy)
     require(writer["binary_sha256"] == spec["crab_sha256"],
-            "SDK hydration must use the approved Crab executable for the native publication and reads")
-    edge_raw = read_git_record(inputs / "hydration.json", limit=GIT_FETCH_RECORD_LIMIT)
+            "xorb read must use the approved Crab executable for the native publication and reads")
+    read_name = "mount.json" if mount else "hydration.json"
+    edge_raw = read_git_record(inputs / read_name, limit=GIT_FETCH_RECORD_LIMIT)
 
     def verify_read(raw: bytes, arm: str) -> dict[str, Any]:
-        return verify_sdk_hydration_read(raw, row, registration, arm, spec, placement)
+        return verify_xorb_read(raw, row, registration, arm, spec, placement)
 
     edge, native = verify_read(edge_raw, "edge"), verify_read(rollback_raw, "origin")
     product_caches = {read["reader"]["cache_root_sha256"] for read in (edge, native)}
     require(len(product_caches) == 2
             and edge["finished_at_unix_ms"] <= native["started_at_unix_ms"],
-            "SDK hydration rollback must follow the edge read with the same view and a fresh cache")
+            "xorb read rollback must follow the edge read with the same view and a fresh cache")
     retirement_raw = read_git_record(inputs / "retirement.json")
     retired = verify_git_retirement(retirement_raw, publication, receipt, writer, native["finished_at_unix_ms"])
     observations = {phase: read_git_record(inputs / filename) for phase, filename in GIT_NATIVE_REF_FILES.items()}
-    # The native ref canary sees the logical source; the SDK receives its independently approved projection.
+    # The native ref canary sees the logical source; the workload reads its independently approved projection.
     source = {"origin_sha256": placement["origin_sha256"], "prefix_sha256": placement["source_prefix_sha256"]}
     published = verify_git_lifecycle(observations, row, publication, receipt, edge["started_at_unix_ms"], source,
                                      retired, cleanup_at, native_origin_sha256)
@@ -2028,26 +2054,27 @@ def collect_sdk_hydration_evidence(
     def verify_measurement(raw: bytes, arm: str) -> dict[str, Any]:
         read = verify_read(raw, arm)
         require(published <= read["started_at_unix_ms"] <= read["finished_at_unix_ms"] <= retired,
-                "SDK hydration benchmark ran outside the independently observed publication lifetime")
+                "xorb read benchmark ran outside the independently observed publication lifetime")
         require(read["reader"]["cache_root_sha256"] not in product_caches,
-                "SDK hydration benchmark reused its lifecycle canary's local cache")
+                "xorb read benchmark reused its lifecycle canary's local cache")
         return read
 
     performance = collect_git_performance(
         directory / GIT_BENCHMARK_DIR, registration, row["platform"], row["workflow_run_id"], row["workflow_run_attempt"],
-        retain=retain / GIT_BENCHMARK_DIR if retain is not None else None, verify_hydration=verify_measurement,
+        retain=retain / GIT_BENCHMARK_DIR if retain is not None else None, verify_xorb=verify_measurement,
         product_request_ids=product_request_ids,
     )
     if retain is not None:
-        product = retain / SDK_HYDRATION_DIR
+        product = retain / XORB_PRODUCT_DIR
         product.mkdir()
-        records = {"workload.json": workload_raw, "publication.json": publication_raw, "hydration.json": edge_raw,
+        records = {"workload.json": workload_raw, "publication.json": publication_raw, read_name: edge_raw,
                    "retirement.json": retirement_raw, PRODUCT_VIEWER_RECORD: viewer_raw}
         records.update({filename: observations[phase] for phase, filename in GIT_NATIVE_REF_FILES.items()})
         for name, raw in records.items():
             (product / name).write_bytes(raw)
     return {
-        "name": SDK_HYDRATION_ACTION, "expected_sha256": spec["payload_sha256"], "observed_sha256": edge["payload"]["sha256"],
+        "name": MOUNT_XORB_ACTION if mount else SDK_HYDRATION_ACTION,
+        "expected_sha256": spec["payload_sha256"], "observed_sha256": edge["payload"]["sha256"],
         "expected_bytes": spec["payload_bytes"], "observed_bytes": edge["payload"]["bytes"],
         "native_writes": 1, "visible_new_ref": True, "fixture_cleanup_verified": True,
         "observed_edge_gets": edge["observed_edge_gets"], "verified_edge_payloads": edge["verified_edge_payloads"],
@@ -2337,14 +2364,14 @@ def derive_service_public_transition(inputs: Path, row: dict[str, Any], spec: di
 def collect_git_performance(
     inputs: Path, registration: dict[str, Any], platform: str, run_id: str, attempt: str,
     *, retain: Path | None = None, native_target: dict[str, str] | None = None,
-    verify_hydration: Callable[[bytes, str], dict[str, Any]] | None = None,
+    verify_xorb: Callable[[bytes, str], dict[str, Any]] | None = None,
     service_row: Path | None = None, product_request_ids: set[str] | None = None,
     desktop_product: DesktopProductEvidence | None = None,
 ) -> dict[str, Any]:
     spec = benchmark_registration(registration)
     scope = spec["scope"]
-    hydration = is_direct_sdk_hydration_scope(scope)
-    require(hydration == (verify_hydration is not None), "SDK hydration benchmarks require verified publication and placement")
+    hydration = is_direct_xorb_read_scope(scope)
+    require(hydration == (verify_xorb is not None), "xorb read benchmarks require verified publication and placement")
     sdk = is_direct_sdk_git_scope(scope)
     desktop = requires_desktop_workload(scope, spec["workload"])
     service = is_direct_service_scope(scope)
@@ -2355,7 +2382,7 @@ def collect_git_performance(
     if sdk:
         require(inputs.is_dir(), "direct SDK Git requires retained regional SDK benchmark records")
     if hydration:
-        require(inputs.is_dir(), "direct SDK hydration requires retained regional SDK benchmark records")
+        require(inputs.is_dir(), "direct xorb reads require retained regional benchmark records")
     require(matches(COMMIT, spec["source_sha"]) and matches(SHA256, spec["configuration_sha256"])
             and matches(RUN_NUMBER, run_id) and matches(RUN_NUMBER, attempt) and matches(LABEL, platform),
             "invalid benchmark provenance")
@@ -2446,8 +2473,8 @@ def collect_git_performance(
                 digest = hashlib.sha256(client_raw).hexdigest()
                 require(digest not in seen, "a fetch was reused in another benchmark arm or pair")
                 seen.add(digest)
-                if verify_hydration is not None:
-                    client = verify_hydration(client_raw, GIT_MODES[arm])
+                if verify_xorb is not None:
+                    client = verify_xorb(client_raw, GIT_MODES[arm])
                     reader = client["reader"]
                     cache_root = reader["cache_root_sha256"]
                     if arm == "warm_local":
@@ -2661,22 +2688,23 @@ def verify_cdn_report(
 
     cli_workload = requires_cli_workload(scope)
     sdk_git = is_direct_sdk_git_scope(scope)
-    sdk_hydration = is_direct_sdk_hydration_scope(scope)
+    mount = is_direct_mount_xorb_scope(scope)
+    xorb_read = is_direct_xorb_read_scope(scope)
     desktop = requires_desktop_workload(scope, registration.get("workload"))
     service = is_direct_service_scope(scope)
-    require(policy is None or cli_workload or sdk_git or sdk_hydration or desktop or service,
+    require(policy is None or cli_workload or sdk_git or xorb_read or desktop or service,
             "CDN promotion requires a product-specific workload and per-run regional evidence verifier")
-    if cli_workload or desktop:
+    if cli_workload or desktop or mount:
         verify_read_candidate(registration.get("candidate"), source_sha, platform, policy=policy)
     if desktop:
         verify_read_candidate(registration.get("desktop_candidate"), source_sha, platform,
                               policy=policy, consumer="desktop sidecar")
-    if sdk_git or sdk_hydration:
+    if sdk_git or is_direct_sdk_hydration_scope(scope):
         verify_sdk_candidate(registration.get("sdk_candidate"), source_sha, platform, policy=policy)
     if service:
         verify_service_candidate(registration.get("service_candidate"), source_sha, platform, policy=policy)
     lower = verify_performance(row["performance"], registration)
-    verify_product_action(row["product_action"], family, sdk_hydration=sdk_hydration)
+    verify_product_action(row["product_action"], family, xorb_read=xorb_read)
     require(row["product_action"]["name"] == registration["workload"],
             "product action does not match the registered workload")
     checks, cleanup_at, native_origin_sha256, rollback = verify_check_evidence(
@@ -2705,15 +2733,15 @@ def verify_cdn_report(
         measured = collect_git_performance(directory / GIT_BENCHMARK_DIR, registration, platform, run_id, run_attempt,
                                           native_target=native_target, product_request_ids=request_ids)
         require(measured == row["performance"], "SDK performance summary differs from the retained measurements")
-    if sdk_hydration:
-        require(rollback is not None, "direct SDK hydration requires its native rollback")
+    if xorb_read:
+        require(rollback is not None, "direct xorb reads require their native rollback")
         placement = decode(read_trace(directory / "traces" / f"{SCOPED_VIEW_CHECK}.json", SCOPED_VIEW_CHECK))["placement"]
-        product, measured = collect_sdk_hydration_evidence(
+        product, measured = collect_xorb_read_evidence(
             directory, row, registration, rollback, placement=placement,
             cleanup_at=cleanup_at, native_origin_sha256=native_origin_sha256, policy=policy,
         )
-        require(row["product_action"] == product, "product action differs from the retained SDK hydration evidence")
-        require(row["performance"] == measured, "SDK hydration performance summary differs from the retained measurements")
+        require(row["product_action"] == product, "product action differs from the retained xorb read evidence")
+        require(row["performance"] == measured, "xorb read performance summary differs from the retained measurements")
     if desktop:
         require(rollback is not None, "direct desktop qualification requires an ordinary desktop rollback read")
         product = collect_desktop_product_action(directory / GIT_PRODUCT_DIR, row, registration, rollback,

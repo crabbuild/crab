@@ -42,10 +42,10 @@ class CdnReleaseQualificationTests(unittest.TestCase):
             "head_repository": {"full_name": REPOSITORY},
         }
 
-    def bundle(self, consumer: str, *platforms: str, provider: str = "s3") -> str:
+    def bundle(self, consumer: str, *platforms: str, provider: str = "s3", family: str = "git") -> str:
         registrations = {}
         for platform in platforms:
-            self.fixture.configure(provider, "private", "direct", consumer=consumer, platform=platform)
+            self.fixture.configure(provider, "private", "direct", consumer=consumer, platform=platform, family=family)
             scope = self.fixture.scope
             row = f"{scope}/{platform}"
             directory = self.directory / row
@@ -54,6 +54,9 @@ class CdnReleaseQualificationTests(unittest.TestCase):
             (self.directory / "traces").mkdir()
             if fixture.CDN.requires_cli_workload(scope) or fixture.CDN.is_direct_sdk_git_scope(scope):
                 for name in (fixture.CDN.GIT_PRODUCT_DIR, fixture.CDN.GIT_BENCHMARK_DIR):
+                    (self.directory / name).rename(directory / name)
+            if fixture.CDN.is_direct_xorb_read_scope(scope):
+                for name in (fixture.CDN.XORB_PRODUCT_DIR, fixture.CDN.GIT_BENCHMARK_DIR):
                     (self.directory / name).rename(directory / name)
             fixture.json_file(directory / "cdn-report.json", self.fixture.report)
             registrations[row] = self.fixture.registration
@@ -69,6 +72,13 @@ class CdnReleaseQualificationTests(unittest.TestCase):
             RUN_ID, ATTEMPT, digest,
         )
         self.assertEqual(count, 6)
+
+    def test_complete_mount_xorb_bundle_verifies_every_release_platform(self) -> None:
+        digest = self.bundle("mount", *fixture.CDN.CLI_PLATFORMS, family="xorb")
+        self.assertEqual(RELEASE.verify_bundle(
+            self.directory, self.policy, RELEASE.release_scopes(self.policy), fixture.COMMIT,
+            RUN_ID, ATTEMPT, digest,
+        ), len(fixture.CDN.CLI_PLATFORMS))
 
     def test_cloud_cdn_and_front_door_use_their_matching_native_reports(self) -> None:
         for provider in ("gcs", "azure"):

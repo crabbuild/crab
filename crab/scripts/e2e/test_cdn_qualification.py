@@ -294,9 +294,14 @@ class CdnQualificationTests(unittest.TestCase):
             self.registration["candidate"] = cli_candidate(self.scope, platform)
             self.registration["viewer_binding_sha256"] = "e" * 64
         sdk = CDN.is_direct_sdk_git_scope(self.scope)
-        hydration = CDN.is_direct_sdk_hydration_scope(self.scope)
+        hydration = CDN.is_direct_xorb_read_scope(self.scope)
+        mount = CDN.is_direct_mount_xorb_scope(self.scope)
         service = CDN.is_direct_service_scope(self.scope)
-        if sdk or hydration:
+        if mount:
+            self.registration.update(workload=CDN.MOUNT_XORB_ACTION, viewer_binding_sha256="e" * 64,
+                                     viewer_approval_sha256="d" * 64,
+                                     candidate=cli_candidate(self.scope, platform) | {"cargo_features": "default,nfs,tier"})
+        elif sdk or hydration:
             self.registration.update(workload=CDN.SDK_HYDRATION_ACTION if hydration else CDN.SDK_GIT_ACTION,
                                      sdk_candidate=sdk_candidate(self.scope, platform),
                                      viewer_binding_sha256="e" * 64)
@@ -378,7 +383,7 @@ class CdnQualificationTests(unittest.TestCase):
             else:
                 self.record_git_product()
         elif hydration:
-            self.record_sdk_hydration()
+            self.record_xorb_read()
         elif service:
             self.record_service_product()
         if access == "public":
@@ -608,7 +613,8 @@ class CdnQualificationTests(unittest.TestCase):
         ref = "refs/heads/crab-cdn-qualification-123-2-abcdefabcdef"
         cleanup = json.loads((self.directory / "traces/cleanup.json").read_bytes())
         reader = {"origin_sha256": cleanup["targets"]["native"]["origin_sha256"], "prefix_sha256": cleanup["prefix_sha256"]}
-        writer = cli_candidate(self.scope, platform)
+        mount = CDN.is_direct_mount_xorb_scope(self.scope)
+        writer = self.registration["candidate"] if mount else cli_candidate(self.scope, platform)
         oid, payload = "a" * 40, "b" * 64
         receipt = json_file(records / "publication.json", provenance | {
             "schema": "crab.cdn-git-publication/v1", "ref": ref, "oid": oid, "sha256": payload, "published": True,
@@ -616,7 +622,7 @@ class CdnQualificationTests(unittest.TestCase):
         })
         base = provenance | dict.fromkeys(CDN.PRODUCT_COUNTERS, 0) | {
             "schema": f"crab.cdn-{'desktop' if desktop else 'sdk'}-git-read/v1", "platform": platform,
-            "candidate": self.registration["desktop_candidate" if desktop else "sdk_candidate"],
+            "candidate": self.registration["candidate" if mount else "desktop_candidate" if desktop else "sdk_candidate"],
             "commit": oid, "sha256": payload, "bytes": CDN.GIT_PAYLOAD_SIZE, "git_blob_oid_sha256": "4" * 64,
             "publication_sha256": receipt, "elapsed_ms": 10, "edge_responses": {},
             "native_traffic": {"get_responses": 1, "head_responses": 0, "body_bytes": 5},
@@ -688,15 +694,17 @@ class CdnQualificationTests(unittest.TestCase):
             })
         self.report["product_action"].update(expected_bytes=CDN.GIT_PAYLOAD_SIZE, observed_bytes=CDN.GIT_PAYLOAD_SIZE)
 
-    def record_sdk_hydration(self) -> None:
+    def record_xorb_read(self) -> None:
         self.record_git_blob_product()
-        records, traces = self.directory / CDN.SDK_HYDRATION_DIR, self.directory / "traces"
+        mount = CDN.is_direct_mount_xorb_scope(self.scope)
+        mounted = {"mounted_oid": "f" * 40} if mount else {}
+        records, traces = self.directory / CDN.XORB_PRODUCT_DIR, self.directory / "traces"
         source = self.directory / CDN.GIT_PRODUCT_DIR
         records.mkdir()
         for name in ("publication.json", "retirement.json", *CDN.GIT_NATIVE_REF_FILES.values()):
             (source / name).rename(records / name)
         publication_path, retirement_path = (records / name for name in ("publication.json", "retirement.json"))
-        seed = {"scope": self.scope.replace("/xorb/", "/git/"), "configuration_sha256": "9" * 64}
+        seed = {"scope": self.scope.split("/", 1)[0] + "/private/sdk/git/direct", "configuration_sha256": "9" * 64}
         publication = json.loads(publication_path.read_bytes()) | seed
         receipt = json_file(publication_path, publication)
         retired = 3_000_000
@@ -710,12 +718,13 @@ class CdnQualificationTests(unittest.TestCase):
                 record |= {"started_at_unix_ms": retired + 1, "observed_at_unix_ms": retired + 2}
             json_file(path, record)
         self.registration["hydration_workload_sha256"] = json_file(records / "workload.json", {
-            "schema": "crab.cdn-sdk-hydration-workload/v1", "configuration_sha256": CONFIGURATION,
+            "schema": "crab.cdn-mount-xorb-workload/v1" if mount else "crab.cdn-sdk-hydration-workload/v1",
+            "configuration_sha256": CONFIGURATION,
             "pointer_sha256": publication["sha256"], "payload_sha256": "c" * 64,
             "payload_bytes": 1024, "crab_sha256": publication["candidate"]["binary_sha256"],
             "global_prefix_sha256": "5" * 64,
             "publication_sha256": receipt,
-        })
+        } | mounted)
         control = json.loads((traces / f"{CDN.SCOPED_VIEW_CHECK}.json").read_bytes())
         cleanup = json.loads((traces / "cleanup.json").read_bytes())
         origin = cleanup["targets"]["native"]["origin_sha256"]
@@ -730,7 +739,7 @@ class CdnQualificationTests(unittest.TestCase):
         self.registration["scoped_view_sha256"] = CDN.deployment_component_digest(placement)
         self.scoped_view_trace(control)
         for arm, raw_path, destination, marker in (
-            ("edge", source / "snapshot.json", records / "hydration.json", "1"),
+            ("edge", source / "snapshot.json", records / ("mount.json" if mount else "hydration.json"), "1"),
             ("origin", traces / "rollback.json", traces / "rollback.json", "2"),
         ):
             raw = json.loads(raw_path.read_bytes())
@@ -743,10 +752,11 @@ class CdnQualificationTests(unittest.TestCase):
                 name: raw[name] for name in CDN.CDN_PROVENANCE_FIELDS | CDN.PRODUCT_COUNTERS | CDN.SDK_TIMING_FIELDS
                 | {"platform", "arm", "candidate", "native_traffic", "edge_responses"}
             } | {
-                "schema": "crab.cdn-sdk-hydration/v1", "workload_sha256": self.registration["hydration_workload_sha256"],
+                "schema": "crab.cdn-mount-xorb-read/v1" if mount else "crab.cdn-sdk-hydration/v1",
+                "workload_sha256": self.registration["hydration_workload_sha256"],
                 "crab_sha256": publication["candidate"]["binary_sha256"], "pointer_sha256": publication["sha256"],
                 "payload": {"sha256": "c" * 64, "bytes": 1024}, "xorb_key_sha256": self.object_key, "reader": reader,
-            }
+            } | (mounted | {"unmounted": True} if mount else {})
             if arm == "edge":
                 json_file(destination, evidence)
                 write_product_viewer_proof(destination, self.object_key)
@@ -1489,7 +1499,7 @@ class CdnQualificationTests(unittest.TestCase):
     def test_sdk_regional_pair_cannot_reuse_a_product_request(self) -> None:
         for family, product, action in (
             ("git", CDN.GIT_PRODUCT_DIR, "snapshot.json"),
-            ("xorb", CDN.SDK_HYDRATION_DIR, "hydration.json"),
+            ("xorb", CDN.XORB_PRODUCT_DIR, "hydration.json"),
         ):
             with self.subTest(family=family), TemporaryDirectory() as directory:
                 self.directory = Path(directory)
@@ -1509,7 +1519,7 @@ class CdnQualificationTests(unittest.TestCase):
 
     def test_sdk_hydration_product_proof_must_identify_the_approved_xorb(self) -> None:
         self.configure("gcs", "private", "direct", consumer="sdk", family="xorb")
-        path = self.directory / CDN.SDK_HYDRATION_DIR / CDN.PRODUCT_VIEWER_RECORD
+        path = self.directory / CDN.XORB_PRODUCT_DIR / CDN.PRODUCT_VIEWER_RECORD
         proof = json.loads(path.read_bytes())
         next(iter(proof["records"].values()))["key_sha256"] = "0" * 64
         json_file(path, proof)
@@ -1522,7 +1532,7 @@ class CdnQualificationTests(unittest.TestCase):
         policy.write_text(self.scope + "\n", encoding="utf-8")
         result = self.command("--cdn-release-policy", str(policy))
         self.assertEqual(result.returncode, 0, result.stderr)
-        records = self.directory / CDN.SDK_HYDRATION_DIR
+        records = self.directory / CDN.XORB_PRODUCT_DIR
         edge = records / "hydration.json"
         native = self.directory / "traces/rollback.json"
         original = json.loads(native.read_bytes())

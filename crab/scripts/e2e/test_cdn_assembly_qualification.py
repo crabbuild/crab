@@ -47,10 +47,10 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
             observations.pop("performance")
             for name in (fixture.CDN.GIT_PRODUCT_DIR, fixture.CDN.GIT_BENCHMARK_DIR):
                 (self.root / name).rename(row / name)
-        if fixture.CDN.is_direct_sdk_hydration_scope(self.example.scope):
+        if fixture.CDN.is_direct_xorb_read_scope(self.example.scope):
             observations.pop("product_action")
             observations.pop("performance")
-            for name in (fixture.CDN.SDK_HYDRATION_DIR, fixture.CDN.GIT_BENCHMARK_DIR):
+            for name in (fixture.CDN.XORB_PRODUCT_DIR, fixture.CDN.GIT_BENCHMARK_DIR):
                 (self.root / name).rename(row / name)
         if fixture.CDN.is_direct_service_scope(self.example.scope):
             observations.pop("product_action")
@@ -125,7 +125,7 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
 
     def test_sdk_hydration_assembly_derives_product_from_the_native_lifecycle_and_pair(self) -> None:
         digest = self.inputs("s3", family="xorb")
-        relative = Path(self.row) / fixture.CDN.SDK_HYDRATION_DIR / fixture.CDN.PRODUCT_VIEWER_RECORD
+        relative = Path(self.row) / fixture.CDN.XORB_PRODUCT_DIR / fixture.CDN.PRODUCT_VIEWER_RECORD
         proof = (self.root / relative).read_bytes()
         (self.root / relative).unlink()
         with self.assertRaisesRegex(FileNotFoundError, fixture.CDN.PRODUCT_VIEWER_RECORD):
@@ -138,7 +138,7 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
         report = json.loads((row / "cdn-report.json").read_bytes())
         self.assertEqual(report["product_action"], self.example.report["product_action"])
         self.assertEqual(report["performance"], self.example.report["performance"])
-        product = row / fixture.CDN.SDK_HYDRATION_DIR
+        product = row / fixture.CDN.XORB_PRODUCT_DIR
         self.assertEqual({entry.name for entry in product.iterdir()},
                          {"hydration.json", "workload.json", "publication.json", "retirement.json",
                           fixture.CDN.PRODUCT_VIEWER_RECORD, *fixture.CDN.GIT_NATIVE_REF_FILES.values()})
@@ -149,6 +149,21 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
         fixture.json_file(edge, original | {"xorb_key_sha256": "0" * 64})
         with self.assertRaises(subprocess.CalledProcessError):
             fixture.CDN.verify_bundle_row(self.output, self.row, self.example.registration, fixture.COMMIT, "123", "2")
+
+    def test_mount_assembly_rechecks_physical_view_live_revision_and_detach(self) -> None:
+        digest = self.inputs("azure", consumer="mount", family="xorb")
+        self.assertEqual(self.assemble(digest), 1)
+        row = self.output / self.row
+        retained = row / fixture.CDN.XORB_PRODUCT_DIR / "mount.json"
+        self.assertTrue(retained.is_file())
+        report = json.loads((row / "cdn-report.json").read_bytes())
+        self.assertEqual(report["product_action"]["name"], fixture.CDN.MOUNT_XORB_ACTION)
+        fixture.CDN.verify_bundle_row(self.output, self.row, self.example.registration, fixture.COMMIT, "123", "2")
+        original = json.loads(retained.read_bytes())
+        for change in ({"unmounted": False}, {"mounted_oid": "a" * 40}):
+            fixture.json_file(retained, original | change)
+            with self.assertRaises(subprocess.CalledProcessError):
+                fixture.CDN.verify_bundle_row(self.output, self.row, self.example.registration, fixture.COMMIT, "123", "2")
 
     def test_sdk_requires_measured_snapshot_and_rejects_operator_supplied_product_summary(self) -> None:
         digest = self.inputs("gcs")

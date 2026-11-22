@@ -16,8 +16,8 @@ from run_cdn_transport_checks import approved_fixture
 
 from cdn_qualification import (
     COMMIT, GIT_NATIVE_REF_FILES, RUN_NUMBER, decode, is_direct_desktop_git_scope, is_direct_sdk_git_scope,
-    is_direct_sdk_hydration_scope, is_direct_service_scope, matches, read_git_record,
-    require, requires_cli_workload, validate_git_publication, validate_sdk_hydration_publication, verify_git_native_ref,
+    is_direct_xorb_read_scope, is_direct_service_scope, matches, read_git_record,
+    require, requires_cli_workload, validate_git_publication, validate_xorb_publication, verify_git_native_ref,
 )
 
 
@@ -41,14 +41,14 @@ def main() -> int:
         scope = fixture["scope"]
         native_publication = is_direct_sdk_git_scope(scope) or is_direct_desktop_git_scope(scope) or is_direct_service_scope(scope)
         require(requires_cli_workload(scope) or (native_publication and fixture["view_suffix"] == "")
-                or is_direct_sdk_hydration_scope(scope),
+                or is_direct_xorb_read_scope(scope),
                 "native ref observation needs a supported direct CLI, SDK, desktop, or service publication workload")
         provenance = {
             "scope": fixture["scope"], "configuration_sha256": args.configuration_sha256, "source_sha": args.source_sha,
             "workflow_run_id": args.run_id, "workflow_run_attempt": args.run_attempt, "platform": runner_platform(),
         }
         raw = read_git_record(args.publication)
-        publication = (validate_sdk_hydration_publication(raw, provenance) if is_direct_sdk_hydration_scope(scope)
+        publication = (validate_xorb_publication(raw, provenance) if is_direct_xorb_read_scope(scope)
                        else validate_git_publication(raw, provenance))
         require(publication["published"], "native observation requires a confirmed test publication")
         digest = hashlib.sha256(raw).hexdigest()

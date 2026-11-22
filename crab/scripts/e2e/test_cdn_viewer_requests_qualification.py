@@ -22,6 +22,41 @@ from test_cdn_transport_qualification import PACK, fixture
 
 
 class CdnViewerRequestQualificationTests(unittest.TestCase):
+    def test_mount_record_joins_the_exact_projected_xorb_request(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            example = examples.CdnQualificationTests()
+            example.setUp()
+            self.addCleanup(example.doCleanups)
+            example.configure("s3", "private", "direct", consumer="mount", family="xorb")
+            config = fixture(access="private") | {
+                "scope": example.scope, "view_suffix": f"/acl-views/v2/{'b' * 64}/7-{'c' * 64}",
+                "object_path": ".crab/xorbs/aa/" + "a" * 64,
+            }
+            key = config["fixture_prefix"] + config["view_suffix"] + "/" + config["object_path"]
+            fixture_path = root / "fixture.json"
+            configuration = examples.json_file(fixture_path, config)
+            record = json.loads((example.directory / examples.CDN.XORB_PRODUCT_DIR / "mount.json").read_bytes())
+            request_id = "mount-viewer-request"
+            record.update(configuration_sha256=configuration, xorb_key_sha256=hashlib.sha256(key.encode()).hexdigest(),
+                          edge_responses={hashlib.sha256(request_id.encode()).hexdigest():
+                                          next(iter(record["edge_responses"].values()))})
+            client, logs, origins, output = (root / name for name in ("mount.json", "viewer.log", "s3.log", "proof.json"))
+            examples.json_file(client, record)
+            origins.touch()
+            arguments = ["collect", "--fixture", str(fixture_path), "--client", str(client),
+                         "--configuration-sha256", configuration, "--output", str(output), "--log", str(logs),
+                         "--s3-origin-log", str(origins)]
+            header = ("#Fields: x-edge-request-id x-host-header cs-method cs-uri-stem cs-protocol "
+                      "sc-status sc-bytes x-edge-response-result-type\n")
+            wrong_key = key.rsplit("/xorbs/", 1)[0] + "/xorbs/bb/" + "b" * 64
+            with patch.object(sys, "argv", arguments), redirect_stderr(StringIO()):
+                for observed, expected in ((wrong_key, 1), (key, 0)):
+                    logs.write_text(header + f"{request_id}\tfixture.example.com\tGET\t/crab/{observed}\thttps\t206\t128\tHit\n")
+                    self.assertEqual(COLLECT.main(), expected)
+                proof = json.loads(output.read_bytes())
+                self.assertEqual(next(iter(proof["records"].values()))["key_sha256"], record["xorb_key_sha256"])
+
     def test_cloudfront_companion_waits_for_timed_viewer_and_origin_logs(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)

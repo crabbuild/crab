@@ -899,10 +899,13 @@ original claim was released on unmount. Managed mounts request `hydrate` under
 the managed grant contract. Managed issuer retention, deployed direct issuer
 access, and live provider proof remain open.
 
-The qualification guard leaves the native target check active in the Git clone
-child and checks the expected viewer binding and projected content prefix in
-the mount's own read context before capture. The mounted-read worker still
-needs to join this trace to the mounted revision, byte-verified filesystem
-read, exact xorb request in provider logs, native rollback and clean unmount.
-Measure cold and warm edge phases with fresh mounts. Treat kernel-served
-repeat reads separately from reads verified by Crab's local chunk cache.
+The qualification guard checks the native target in the Git clone child and
+the viewer binding and projected content prefix in the mount's own read
+context. `run_cdn_mount_workload.py` checks the live NFS session's projected
+Git revision, the Xet pointer in that commit, mounted file bytes, and clean
+detach. Assembly and release verification require the exact xorb request in
+provider logs, rollback through a fresh native mount, independently observed
+publication and cleanup, and regional benchmarks. The warm local arm remounts
+with a fresh Git cache and requires verified Crab chunk-cache hits with zero
+edge attempts. Live provider runs and measurements on the packaged platform
+matrix remain open.

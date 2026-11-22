@@ -16,7 +16,7 @@ from pathlib import Path
 from collect_cdn_product_metrics import PRODUCT_COUNTERS, measure, measure_native
 from cdn_qualification import (
     COMMIT, RUN_NUMBER, SDK_TIMING_FIELDS, decode, fields, matches,
-    read_git_record, require, scope_parts, validate_sdk_hydration_workload, verify_sdk_candidate,
+    read_git_record, require, scope_parts, validate_xorb_workload, verify_sdk_candidate,
 )
 from run_cdn_git_workload import runner_platform, viewer_binding_sha256
 from run_cdn_sdk_workload import binding_for, json_record, observed_interval, split_observations
@@ -95,7 +95,7 @@ def hydrate(args: argparse.Namespace) -> tuple[dict, dict | None]:
     require((access, consumer, family, profile) == ("private", "sdk", "xorb", "direct"),
             "SDK hydration requires a private direct SDK xorb fixture")
     key = fixture_object_key(fixture, access, family)
-    spec = validate_sdk_hydration_workload(read_git_record(args.workload), args.workload_sha256, args.configuration_sha256)
+    spec = validate_xorb_workload(read_git_record(args.workload), args.workload_sha256, args.configuration_sha256)
     require(spec["global_prefix_sha256"] == digest(key.rsplit("/xorbs/", 1)[0].encode()),
             "hydration workload has a different projected global prefix")
     pointer = read_git_record(args.pointer, limit=4096)

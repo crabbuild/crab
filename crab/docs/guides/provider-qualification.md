@@ -1312,6 +1312,41 @@ and viewer records in `xorb-product`.
 Assembly derives the product result from these records, the transport and
 scoped view observations, and the cleanup trace.
 
+### Capture projected NFS mount evidence
+
+Use a `private/mount/xorb/direct` fixture and the same native publication,
+independent ref observations, exact scoped-view xorb, and cleanup lifecycle
+as SDK hydration. Include `cdn-qualification.bin` in the filtered paths.
+Preregister `mount-xorb-read`, the packaged Crab `candidate`, the viewer
+binding and approval digests, and `hydration_workload_sha256`. Use schema
+`crab.cdn-mount-xorb-workload/v1` with the hydration workload fields above
+and `mounted_oid`, the exact Git commit in the approved projected view.
+
+The dedicated worker needs the ordinary native NFS prerequisites and a
+Crab Auth login authorized for `mount` and Git metadata reads of that view.
+Pass the issuer and absolute token cache path in the same format as
+`--private-reader` for SDK hydration. Use scratch outside a Git or Crab
+repository. On Windows, pass `--drive X:` with an unused measurement drive.
+
+```bash
+python3 -B crab/scripts/e2e/run_cdn_mount_workload.py edge \
+  --fixture "$approved_fixture_json" --configuration-sha256 "$approved_configuration_sha256" \
+  --workload "$mount_workload" --workload-sha256 "$approved_workload_sha256" \
+  --receipt "$native_publication" --helper "$git_remote_crab" --scratch "$scratch" \
+  --private-reader "$mount_reader_settings" \
+  --source-sha "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" > "$mount_edge"
+```
+
+Compare a fresh `origin` mount of that commit with the viewer binding
+withdrawn. Keep `xorb-product/mount.json`, `traces/rollback.json`, and the
+exact xorb join at `xorb-product/viewer-requests.json`. Use the same regional
+layout as SDK hydration. For `warm_edge`, pass `--warm-local-output` for
+the paired fresh mount. Its Git metadata and kernel mount are new, and it
+reuses the primer's Crab cache. The worker requires verified local chunk
+hits and zero edge attempts for that arm. The timer covers startup, the
+filesystem read, and clean detach. The xorb transfer counters cover the
+filesystem read after the live commit and pointer checks.
+
 ### Verify fixture cleanup
 
 After retiring the test ref and completing fixture cleanup, collect

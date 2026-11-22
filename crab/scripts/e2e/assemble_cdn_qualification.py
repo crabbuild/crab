@@ -18,9 +18,9 @@ from cdn_qualification import (  # noqa: E402
     PROVIDER_FOR_EDGE, PUBLIC_EXPORT_BEFORE, PUBLIC_EXPORT_CHECK, PUBLIC_EXPORT_DIR, PUBLIC_EXPORT_FILES,
     PUBLIC_TRANSITION_CHECK, RUN_NUMBER, SCHEMA, SCOPED_VIEW_CHECK, SERVICE_PRODUCT_DIR, SHA256,
     benchmark_registration, collect_desktop_product_action, collect_git_performance, collect_git_product_action,
-    collect_sdk_hydration_evidence, collect_sdk_product_action, collect_service_product_action, decode,
+    collect_xorb_read_evidence, collect_sdk_product_action, collect_service_product_action, decode,
     derive_git_blob_public_transition, derive_service_public_transition, fields,
-    is_direct_sdk_git_scope, is_direct_sdk_hydration_scope, is_direct_service_scope,
+    is_direct_sdk_git_scope, is_direct_xorb_read_scope, is_direct_service_scope,
     matches, read_trace, release_scopes, require,
     required_check_names, required_platform_rows, requires_cli_workload, requires_desktop_workload, scope_parts, verify_bundle_row,
     verify_cleanup_trace, verify_deployment_policy_trace,
@@ -121,13 +121,13 @@ def assemble_bundle(
 
             cli_workload = requires_cli_workload(scope)
             sdk_workload = is_direct_sdk_git_scope(scope)
-            sdk_hydration = is_direct_sdk_hydration_scope(scope)
+            xorb_read = is_direct_xorb_read_scope(scope)
             require(isinstance(registration, dict) and matches(SHA256, registration.get("configuration_sha256")),
                     f"invalid CDN configuration digest for {row}")
             desktop = requires_desktop_workload(scope, registration.get("workload"))
             service = is_direct_service_scope(scope)
             expected = OBSERVATION_FIELDS.copy()
-            if cli_workload or sdk_workload or sdk_hydration or desktop or service:
+            if cli_workload or sdk_workload or xorb_read or desktop or service:
                 expected.difference_update({"product_action", "performance"})
             measured = fields(
                 decode((inputs / row / "observations.json").read_bytes()),
@@ -135,7 +135,7 @@ def assemble_bundle(
             )
             require(measured["schema"] == "crab.cdn-observations/v1", "invalid CDN observations schema")
             names = required_check_names(access, profile)
-            spec = benchmark_registration(registration) if sdk_workload or sdk_hydration or desktop or service else registration
+            spec = benchmark_registration(registration) if sdk_workload or xorb_read or desktop or service else registration
             canary = canaries.get((scope, registration["configuration_sha256"]), {})
             outcomes = measured.pop("check_results")
             require(isinstance(outcomes, dict) and names - canary.keys() <= outcomes.keys() <= names,
@@ -179,7 +179,7 @@ def assemble_bundle(
             native_target = None
             product_request_ids = None
             desktop_product = None
-            if cli_workload or sdk_workload or sdk_hydration or desktop or service:
+            if cli_workload or sdk_workload or xorb_read or desktop or service:
                 cleanup = decode(read_trace(destination / "traces/cleanup.json", "cleanup"))
                 cleanup_at = verify_cleanup_trace(cleanup, measured, edge, access)
                 origin = cleanup["targets"]["native"]["origin_sha256"]
@@ -200,10 +200,10 @@ def assemble_bundle(
                     cleanup_at=cleanup_at, native_origin_sha256=origin,
                     retain=destination / GIT_PRODUCT_DIR,
                 )
-            elif sdk_hydration:
+            elif xorb_read:
                 placement = decode(read_trace(destination / "traces" / f"{SCOPED_VIEW_CHECK}.json",
                                               SCOPED_VIEW_CHECK))["placement"]
-                measured["product_action"], measured["performance"] = collect_sdk_hydration_evidence(
+                measured["product_action"], measured["performance"] = collect_xorb_read_evidence(
                     inputs / row, measured, spec, rollback, placement=placement,
                     cleanup_at=cleanup_at, native_origin_sha256=origin,
                     retain=destination,
