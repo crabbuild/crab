@@ -140,6 +140,11 @@ impl ContentRuntime {
             .map(Option::as_ref)
     }
 
+    #[cfg(feature = "service")]
+    pub(crate) fn retained_view(&self) -> Option<RetainedRead> {
+        self.retention.clone()
+    }
+
     async fn hydrator(&self) -> Result<&crab_read::ShardHydrator> {
         self.hydrator
             .get_or_try_init(|| async {

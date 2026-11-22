@@ -22,8 +22,9 @@ const OUTPUT_CHUNK_BYTES: usize = 64 * 1024;
 
 /// Verified logical file bytes with tracked cleanup and bounded delivery.
 ///
-/// Observe EOF or close explicitly to receive finalization errors. Ordinary
-/// Git objects are decoded within the owner's per-object memory bound.
+/// Observe EOF or close explicitly to receive finalization errors. Losing a
+/// projected view's retention claim stops delivery, including queued chunks.
+/// Ordinary Git objects are decoded within the owner's per-object memory bound.
 pub struct ContentStream(StreamReceiver<Bytes>);
 
 impl ContentStream {
@@ -46,7 +47,7 @@ impl ContentStream {
     ///
     /// Closing early does not verify unread bytes; observe successful EOF before
     /// claiming full-file integrity.
-    pub async fn close(self) -> Result<()> {
+    pub async fn close(mut self) -> Result<()> {
         self.0.close().await
     }
 }
@@ -61,6 +62,8 @@ pub(crate) async fn open(
 ) -> Result<ContentStream> {
     let (send, entries) = mpsc::channel(1);
     let (ready, started) = oneshot::channel();
+    #[cfg(all(feature = "files", feature = "service"))]
+    let retention = runtime.retained_view();
     let mut task = operations.start(options.operation.clone(), move |cancel| async move {
         let path = crab_remote_git::GitPath::new(path.as_bytes().to_vec()).map_err(remote_error)?;
         let operation = options
@@ -148,6 +151,8 @@ pub(crate) async fn open(
         id,
         entries,
         task: Some(task),
+        #[cfg(all(feature = "files", feature = "service"))]
+        retention,
     }))
 }
 

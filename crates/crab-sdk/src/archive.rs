@@ -31,6 +31,8 @@ pub enum ArchiveEvent {
 }
 
 /// Bounded archive frames sharing one operation budget and cleanup lifetime.
+///
+/// Losing a projected view's retention claim stops delivery of queued frames.
 pub struct ArchiveStream(StreamReceiver<ArchiveEvent>);
 
 impl ArchiveStream {
@@ -55,7 +57,7 @@ impl ArchiveStream {
     /// Stop traversal and drain cleanup without verifying unread content.
     ///
     /// Returns finalization failures not already observed through `next`.
-    pub async fn close(self) -> Result<()> {
+    pub async fn close(mut self) -> Result<()> {
         self.0.close().await
     }
 }
@@ -71,6 +73,8 @@ pub(crate) async fn open(
 ) -> Result<ArchiveStream> {
     let (send, entries) = mpsc::channel(1);
     let (ready, started) = oneshot::channel();
+    #[cfg(all(feature = "files", feature = "service"))]
+    let retention = runtime.retained_view();
     let mut task = operations.start(options.operation.clone(), move |cancel| async move {
         let operation = options
             .operation
@@ -162,6 +166,8 @@ pub(crate) async fn open(
         id,
         entries,
         task: Some(task),
+        #[cfg(all(feature = "files", feature = "service"))]
+        retention,
     }))
 }
 
