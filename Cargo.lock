@@ -3307,6 +3307,7 @@ dependencies = [
  "bytes",
  "crab-cache",
  "crab-cache-store",
+ "crab-coordination",
  "crab-git",
  "crab-lfs",
  "crab-metadata",

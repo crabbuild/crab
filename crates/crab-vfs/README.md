@@ -24,8 +24,10 @@ payload must pass complete SHA-256 and exact-size verification; only absence
 selects the captured remote store. Git storage configuration is resolved before
 native callbacks start, including common-directory and existing storage overrides.
 Remote streams must reach verified EOF before their bytes enter the immutable
-window cache. COW streams these same windows to owned backing storage. Shared
-shutdown drains admitted LFS verification jobs before releasing cache ownership.
+window cache. Cached Xet and LFS windows are keyed by bound native target and
+scope, and delivery checks the current grant and retained catalog claim. COW
+streams these same windows to owned backing storage. Shared shutdown drains
+admitted LFS verification jobs before releasing cache ownership.
 
 LFS extensions require a smudge implementation and are rejected explicitly.
 Cold local windows reuse session-owned block proofs after complete initial

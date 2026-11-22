@@ -135,6 +135,23 @@ pub struct ShardHydrator {
 
 impl ShardHydrator {
     #[cfg(feature = "local-staging")]
+    pub(crate) fn authorized_cache_namespace(&self) -> Option<[u8; 32]> {
+        self.router.store().authorized_cache_namespace().copied()
+    }
+
+    #[cfg(feature = "local-staging")]
+    pub(crate) async fn check_read_authority(&self, cancel: &CancellationToken) -> Result<()> {
+        crate::read_retention::read(self.retention.as_ref(), cancel, |_, cancel| async move {
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => Err(ReadError::Cancelled),
+                result = self.router.store().check_read_authority() => result.map_err(Into::into),
+            }
+        })
+        .await
+    }
+
+    #[cfg(feature = "local-staging")]
     pub(crate) async fn read_lfs_range(
         &self,
         pointer: &crab_git::LfsPointer,
