@@ -21,6 +21,16 @@ pub struct Config {
     pub auth: Option<OidcConfig>,
     pub github_actions: Option<GitHubActionsConfig>,
     pub notification_email: Option<NotificationEmailConfig>,
+    #[serde(default)]
+    pub outbound_webhooks: Vec<WebhookDestination>,
+}
+
+/// Operator-approved outbound receiver for one repository UUID.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebhookDestination {
+    pub repository: uuid::Uuid,
+    pub url: Url,
 }
 
 /// Explicit sender and credentials for the notification email provider.
@@ -222,6 +232,29 @@ impl Config {
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
+        if !self.outbound_webhooks.is_empty() {
+            let mut repositories = HashSet::new();
+            if !self
+                .auth
+                .as_ref()
+                .is_some_and(|auth| auth.state_key_file.is_some())
+                || !self.outbound_webhooks.iter().all(|hook| {
+                    !hook.repository.is_nil()
+                        && repositories.insert(hook.repository)
+                        && hook.url.as_str().len() <= 1024
+                        && hook.url.scheme() == "https"
+                        && hook.url.host().is_some()
+                        && hook.url.username().is_empty()
+                        && hook.url.password().is_none()
+                        && hook.url.query().is_none()
+                        && hook.url.fragment().is_none()
+                })
+            {
+                return Err(Error::Config(
+                    "outbound webhooks require a shared auth state key and one HTTPS receiver without credentials, query, or fragment per repository",
+                ));
+            }
+        }
         if let Some(actions) = &self.github_actions {
             if actions.app_id == 0 || actions.private_key_file.as_os_str().is_empty() {
                 return Err(Error::Config(

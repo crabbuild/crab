@@ -146,6 +146,7 @@ impl Mutation for Retarget {
             head_oid: change.head_oid,
         };
         save_snapshot(context, pull.number, &snapshot)?;
+        pull.retargeted_base = Some(snapshot);
         let previous = std::mem::replace(&mut pull.base_ref, change.base_ref);
         pull.version = revision;
         pull.updated_at_ms = now;
@@ -160,6 +161,7 @@ impl Mutation for Retarget {
                 to: pull.base_ref.clone(),
             },
         )?;
+        webhooks::pull(context, &pull, webhooks::PullAction::Edited)?;
         if !pull.draft {
             review_requests::automatic::apply(
                 context,

@@ -32,6 +32,7 @@ pub use config::{
     AuthProvider, BranchProtection, CellDurabilityMode, CellsConfig, Config, GitHubActionsBinding,
     GitHubActionsConfig, GitHubConfig, ImportConfig, NotificationEmailConfig, OidcConfig,
     RepositoryAccess, RepositoryConfig, RepositoryGroup, RepositoryMember, StorageConfig,
+    WebhookDestination,
 };
 pub use server::serve;
 pub use server::storage::probe_storage;

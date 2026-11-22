@@ -52,7 +52,7 @@ impl Mutation for Switch {
         if context.document::<bool>(&receipt)?.is_some() {
             return Ok(Success(true));
         }
-        let Some(pull) = load_pull(context, input.number)? else {
+        let Some(mut pull) = load_pull(context, input.number)? else {
             return Ok(Rejected(false));
         };
         if pull.version != input.version
@@ -80,15 +80,15 @@ impl Mutation for Switch {
             "UPDATE repository_pulls SET head_ref=?,version=?,updated_at_ms=? WHERE number=? AND version=?",
             &[SqlValue::Text(input.new_ref.clone()), integer(revision)?, integer(now)?, integer(pull.number)?, integer(pull.version)?],
         )?;
-        base::save_snapshot(
-            context,
-            pull.number,
-            &base::Snapshot {
-                revision,
-                base_oid: input.base_oid,
-                head_oid: input.new_oid,
-            },
-        )?;
+        let snapshot = base::Snapshot {
+            revision,
+            base_oid: input.base_oid,
+            head_oid: input.new_oid,
+        };
+        base::save_snapshot(context, pull.number, &snapshot)?;
+        pull.retargeted_base = Some(snapshot);
+        let previous = std::mem::replace(&mut pull.head_ref, input.new_ref);
+        pull.version = revision;
         activity::append(
             context,
             Target::Pull {
@@ -96,10 +96,11 @@ impl Mutation for Switch {
             },
             &input.actor,
             Action::HeadChanged {
-                from: pull.head_ref,
-                to: input.new_ref,
+                from: previous,
+                to: pull.head_ref.clone(),
             },
         )?;
+        webhooks::pull(context, &pull, webhooks::PullAction::Synchronize)?;
         context.put_document(&receipt, &true)?;
         advance_revision(context)?;
         Ok(Success(true))

@@ -139,6 +139,7 @@ fn write_pull(
         number: record.number,
     };
     let source = activity::append(context, target, &record.author, Action::Created)?;
+    webhooks::pull(context, &record, webhooks::PullAction::Opened)?;
     crate::cells::repository::collaboration::body_written(context, &source, None, &record.body)?;
     collaboration::mentions::assigned(context, &source, &[], &record.assignees)?;
     creation::assign_milestone(
@@ -198,6 +199,11 @@ impl Mutation for UpdatePull {
             return Ok(MutationResult::Rejected(UpdatePullOutcome::NotFound));
         };
         let was_state = pull.state;
+        let content_changed = input
+            .title
+            .as_ref()
+            .is_some_and(|value| value != &pull.title)
+            || input.body.as_ref().is_some_and(|value| value != &pull.body);
         let was_closed = pull.state != PullState::Open;
         let edited = input
             .title
@@ -303,6 +309,14 @@ impl Mutation for UpdatePull {
                 Action::Closed
             };
             activity::append(context, target, &input.actor, action)?;
+            let event = if pull.state == PullState::Open {
+                webhooks::PullAction::Reopened
+            } else {
+                webhooks::PullAction::Closed
+            };
+            webhooks::pull(context, &pull, event)?;
+        } else if content_changed {
+            webhooks::pull(context, &pull, webhooks::PullAction::Edited)?;
         }
         Ok(MutationResult::Success(UpdatePullOutcome::Updated(
             Box::new(pull),

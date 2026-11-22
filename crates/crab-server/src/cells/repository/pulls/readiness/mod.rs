@@ -116,6 +116,12 @@ impl Mutation for SetPullReadiness {
             &input.actor,
             action,
         )?;
+        let event = if draft {
+            webhooks::PullAction::ConvertedToDraft
+        } else {
+            webhooks::PullAction::ReadyForReview
+        };
+        webhooks::pull(context, &pull, event)?;
         if !draft {
             review_requests::automatic::apply(
                 context,

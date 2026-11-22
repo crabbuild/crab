@@ -25,6 +25,7 @@ pub(crate) use checks::{
     ListCheckRuns, ListCheckRunsInput, UpdateCheckRun, UpdateCheckRunInput, UpdateCheckRunOutcome,
 };
 pub(crate) mod integrations;
+pub(crate) mod webhooks;
 pub(crate) use issues::{ListComments, UpdateComment, UpdateIssue};
 pub(crate) use labels::{CreateLabel, DeleteLabel, ListLabels, UpdateLabel};
 pub(crate) use pulls::auto_merge as pull_auto_merge;

@@ -223,6 +223,7 @@ impl Harness {
             None,
             None,
             None,
+            None,
         )
         .await
     }
@@ -246,6 +247,7 @@ impl Harness {
             Some(file.path().to_owned()),
             github_actions,
             None,
+            None,
         )
         .await;
         harness.initialize_directory().await;
@@ -254,7 +256,27 @@ impl Harness {
 
     pub(crate) async fn with_notification_email(github: bool, endpoint: Url) -> Self {
         let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
-        let harness = Self::configured(github, github, store, "", None, None, Some(endpoint)).await;
+        let harness =
+            Self::configured(github, github, store, "", None, None, Some(endpoint), None).await;
+        harness.initialize_directory().await;
+        harness
+    }
+
+    pub(crate) async fn with_webhook_receiver(endpoint: Url) -> Self {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), [42_u8; 32]).unwrap();
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let harness = Self::configured(
+            false,
+            false,
+            store,
+            "",
+            Some(file.path().to_owned()),
+            None,
+            None,
+            Some(endpoint),
+        )
+        .await;
         harness.initialize_directory().await;
         harness
     }
@@ -267,6 +289,7 @@ impl Harness {
         state_key_file: Option<std::path::PathBuf>,
         github_actions: Option<TestGitHubActions>,
         email_endpoint: Option<Url>,
+        webhook_endpoint: Option<Url>,
     ) -> Self {
         let (provider, provider_task) = start_provider(0).await;
         provider.confidential.store(confidential, Ordering::SeqCst);
@@ -393,6 +416,13 @@ impl Harness {
             server.cursor_key = [7; 32];
             server.auth = Some(auth);
             server.github_actions = github_actions.map(|configure| configure(record.id));
+            server.webhook_sender = webhook_endpoint.map(|url| {
+                crate::server::webhooks::Sender::new(&[crate::WebhookDestination {
+                    repository: record.id,
+                    url,
+                }])
+                .unwrap()
+            });
             server.email = email_endpoint.map(|endpoint| {
                 crate::server::email::Sender::with_endpoint(
                     "crab@example.test".into(),

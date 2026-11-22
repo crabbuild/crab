@@ -90,6 +90,10 @@ admission. `api/integrations/`
 owns signed GitHub deliveries, operator-bound workflow dispatch, and scoped Git
 checkout. Dispatch reservations and run binding live in
 `cells/repository/integrations/dispatches.rs`.
+`cells/repository/webhooks.rs` owns outbound subscriptions, leased deliveries,
+and bounded completed history. `server/webhooks.rs` signs and sends only to
+the approved receiver. Native Git reserves before publication and recovers
+through the immutable plan receipt. PR mutations queue in their Cell transaction.
 Private `cells prepare-review-state` installs the empty feature relation on
 existing repositories, without rewriting reviews or receipts. `reviews/pending.rs`
 owns private drafts and atomic review publication through the existing review

@@ -1129,6 +1129,18 @@ async fn commit_authorized(
         };
         crate::api::authorize_branch_update(server, entry, branch, &update.name).await?;
     }
+    if matches!(mutation.publication, Publication::NativePush)
+        && principal.import_grant().is_none()
+        && let Some(plan) = plan_id
+        && server
+            .webhook_sender
+            .as_ref()
+            .is_some_and(|sender| sender.target(entry.id).is_some())
+    {
+        // Reserve before publication so a process loss after the ref CAS
+        // cannot lose the event. Delivery requires the exact plan receipt.
+        crate::server::webhooks::reserve_push(server, entry, plan).await?;
+    }
     let outcome = artifacts
         .commit(plan_id, TTL, cancel)
         .await

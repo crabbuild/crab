@@ -425,6 +425,7 @@ async fn archived_mutation_response(
     if (matches!(action, "members" | "team-access" | "subscription") && segments.next().is_none())
         || discussion_preference
         || path == format!("/api/repos/{owner}/{name}/settings/integrations")
+        || path == format!("/api/repos/{owner}/{name}/settings/webhooks")
     {
         return None;
     }

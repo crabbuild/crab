@@ -30,6 +30,9 @@ use crate::{
 
 pub(super) mod dispatch;
 mod github;
+mod outbound;
+#[cfg(test)]
+mod outbound_tests;
 pub(crate) use dispatch::ci_git_path;
 pub(crate) use github::GitHubActions;
 
@@ -51,6 +54,7 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
             post(deliver).layer(DefaultBodyLimit::max(1024 * 1024)),
         )
         .merge(dispatch::routes())
+        .merge(outbound::routes())
         .route_layer(middleware::from_fn_with_state(server, app::admit))
 }
 

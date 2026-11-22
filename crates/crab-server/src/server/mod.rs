@@ -25,6 +25,7 @@ pub(crate) mod management;
 pub(crate) mod mentions;
 pub(crate) mod repository_route;
 pub(crate) mod storage;
+pub(crate) mod webhooks;
 
 pub(crate) const MAX_RELEASE_ASSET_BYTES: u64 = 512 * 1024 * 1024;
 pub(crate) const MAX_BLOB_BYTES: u64 = 256 * 1024 * 1024;
@@ -55,6 +56,7 @@ pub(crate) struct Server {
     pub(crate) receives: tokio_util::task::TaskTracker,
     pub(crate) auth: Option<Authentication>,
     pub(crate) github_actions: Option<crate::api::GitHubActions>,
+    pub(crate) webhook_sender: Option<webhooks::Sender>,
     pub(crate) email: Option<email::Sender>,
     pub(crate) git_import: Option<git_import::ImportContext>,
     pub(crate) catalog: Option<CatalogStore>,
@@ -92,6 +94,7 @@ impl Server {
             receives: tokio_util::task::TaskTracker::new(),
             auth: None,
             github_actions: None,
+            webhook_sender: None,
             email: None,
             git_import: None,
             catalog: None,
@@ -245,6 +248,9 @@ pub async fn serve(config: Config) -> Result<()> {
         .zip(config.auth.as_ref())
         .map(|(settings, auth)| email::Sender::new(settings, &auth.public_url))
         .transpose()?;
+    let webhook_sender = (!config.outbound_webhooks.is_empty())
+        .then(|| webhooks::Sender::new(&config.outbound_webhooks))
+        .transpose()?;
     let github_actions = config
         .github_actions
         .as_ref()
@@ -363,6 +369,7 @@ pub async fn serve(config: Config) -> Result<()> {
         receives: tokio_util::task::TaskTracker::new(),
         auth,
         github_actions,
+        webhook_sender,
         email,
         git_import: Some(git_import::ImportContext::new(&config, public_address)),
         catalog: Some(catalog),
@@ -426,6 +433,9 @@ pub async fn serve(config: Config) -> Result<()> {
                   background.spawn(background::sweep_notification_filing(server.clone()));
                   if server.email.is_some() {
                       background.spawn(email::run(server.clone()));
+                  }
+                  if server.webhook_sender.is_some() {
+                      background.spawn(webhooks::run(server.clone()));
                   }
                   let integrity = server.clone();
                   background.spawn(async move { crate::integrity::run(integrity).await; Ok(()) });

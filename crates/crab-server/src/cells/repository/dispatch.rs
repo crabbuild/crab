@@ -202,6 +202,11 @@ pub(in crate::cells) fn dispatch_mutation(
         viewed::SetViewedFile::ID => invoke_mutation::<viewed::SetViewedFile>(context, input),
         pending_reviews::Change::ID => invoke_mutation::<pending_reviews::Change>(context, input),
         pending_reviews::Submit::ID => invoke_mutation::<pending_reviews::Submit>(context, input),
+        webhooks::QueuePush::ID => invoke_mutation::<webhooks::QueuePush>(context, input),
+        webhooks::Configure::ID => invoke_mutation::<webhooks::Configure>(context, input),
+        webhooks::Claim::ID => invoke_mutation::<webhooks::Claim>(context, input),
+        webhooks::Finish::ID => invoke_mutation::<webhooks::Finish>(context, input),
+        webhooks::Retry::ID => invoke_mutation::<webhooks::Retry>(context, input),
         integrations::Edit::ID => invoke_mutation::<integrations::Edit>(context, input),
         integrations::Record::ID => invoke_mutation::<integrations::Record>(context, input),
         integrations::dispatches::Reserve::ID => {
@@ -412,6 +417,9 @@ pub(in crate::cells) fn dispatch_read(
         <GetPull as Read>::ID => invoke_read::<GetPull>(context, input),
         viewed::GetViewedFiles::ID => invoke_read::<viewed::GetViewedFiles>(context, input),
         pending_reviews::Get::ID => invoke_read::<pending_reviews::Get>(context, input),
+        webhooks::View::ID => invoke_read::<webhooks::View>(context, input),
+        webhooks::HasWork::ID => invoke_read::<webhooks::HasWork>(context, input),
+        webhooks::Current::ID => invoke_read::<webhooks::Current>(context, input),
         integrations::List::ID => invoke_read::<integrations::List>(context, input),
         integrations::dispatches::Get::ID => {
             invoke_read::<integrations::dispatches::Get>(context, input)

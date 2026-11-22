@@ -603,6 +603,7 @@ export function RepositoryPage({
                       route?.section === "branches" ||
                       route?.section === "members" ||
                       route?.section === "integrations" ||
+                      route?.section === "webhooks" ||
                       route?.section === "rulesets" ||
                       route?.section === "mentions" ||
                       route?.section === "team-access"

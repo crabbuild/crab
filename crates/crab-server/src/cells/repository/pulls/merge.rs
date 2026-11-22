@@ -227,6 +227,7 @@ impl Mutation for TransitionPullMerge {
                 number: pull.number,
             };
             activity::append(context, target, &merge.author, Action::Merged)?;
+            webhooks::pull(context, &pull, webhooks::PullAction::Closed)?;
             links::complete_closure(context, pull.number, merge.request_id, &merge.author)?;
         }
         Ok(MutationResult::Success(

@@ -3594,6 +3594,55 @@ Each output can contain:
 
 Encoded output can contain at most 192 KiB. Requests can contain at most 256 KiB. A commit retains at most 100 runs. Lists default to 30 and accept 1 to 50 with an exclusive `before` cursor.
 
+### Send repository webhooks
+
+Add one approved receiver per repository UUID in the server configuration. Set
+`auth.state_key_file` to the same file on every serving peer. The destination
+must use HTTPS with no URL credentials, query, or fragment. The sender verifies
+TLS and does not follow redirects.
+
+```toml
+[[outbound_webhooks]]
+repository = "01900000-0000-7000-8000-000000000101"
+url = "https://ci.example.test/events"
+```
+
+A repository administrator opens **Settings → Webhooks**, chooses **Git pushes**
+and/or **Pull requests**, and copies the signing secret to the receiver. The
+browser can only enable the exact endpoint assigned by the operator. Saving
+again creates a new secret and cancels outstanding deliveries for the former
+subscription. Removing or changing the configured endpoint stops delivery to
+that endpoint as peers take up the new configuration. Roll out consistent
+receiver assignments across the fleet before enabling subscriptions.
+
+Crab POSTs a JSON object with `repository` (the stable UUID), `delivery` (the
+delivery UUID), `occurred_at_ms`, and `data`. `X-Crab-Event` is `push` or
+`pull_request`. `X-Crab-Delivery` is the delivery UUID. Verify the raw bytes
+with the configured secret and `X-Hub-Signature-256` (`sha256=` plus the
+hex-encoded HMAC-SHA256), then deduplicate by delivery UUID before processing.
+[Webhook signature guidance](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries)
+
+- `push` contains `data.updates` for one committed smart HTTP Git transaction.
+  Each update contains `ref`, `before`, and `after`. Creation and deletion use
+  `null` for the missing side. Native pushes publish branch and tag changes.
+- `pull_request` contains `data.action`, PR number, title, draft state, version,
+  base and head refs and SHAs, `head_repository`, and `merge_commit`. Actions
+  include `opened`, `edited`, `closed`, `reopened`, `ready_for_review`, and
+  `converted_to_draft`, and `synchronize` for a native PR head switch. A base
+  retarget uses `edited`. A merged PR uses `closed` with `merge_commit`. The
+  non-merge SHAs describe the PR's recorded comparison. Use push events to
+  observe subsequent branch-tip changes.
+
+Publication and delivery are separate. The worker sends a Git event only after
+resolving its committed plan receipt. An unconfirmed plan is cancelled after
+an hour. Delivery retries reuse the UUID and payload. A 2xx response confirms
+delivery. Other responses and connection failures retry after 10 and 20
+seconds, then remain visible as failed. **Recent deliveries** shows up to 50
+entries and the last ten HTTP outcomes per entry. An administrator can redeliver
+completed deliveries for the current subscription. Disabling a webhook prevents
+new delivery attempts and cannot recall a request that already reached the
+receiver.
+
 ### Connect GitHub Actions
 
 Crab accepts GitHub.com workflow-run deliveries from a private GitHub App.

@@ -50,6 +50,7 @@ impl Host {
             auth: None,
             github_actions: None,
             notification_email: None,
+            outbound_webhooks: vec![],
         };
         let transport = crate::peer::PeerTransport::start(&tls).await.unwrap();
         let work = tokio_util::task::TaskTracker::new();

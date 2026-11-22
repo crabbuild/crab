@@ -9,6 +9,7 @@ import { BranchProtectionSettings } from "./protections";
 import { IntegrationSettings } from "./integrations";
 import { RepositoryRulesets } from "./rulesets";
 import { RepositoryTeamSettings } from "./team-access";
+import { OutboundWebhooks } from "./webhooks";
 
 export function Settings({
   repo,
@@ -27,6 +28,7 @@ export function Settings({
     | "branches"
     | "members"
     | "integrations"
+    | "webhooks"
     | "rulesets"
     | "mentions"
     | "team-access";
@@ -80,6 +82,13 @@ export function Settings({
         >
           Integrations
         </Link>
+        <Link
+          className={section === "webhooks" ? "active" : ""}
+          aria-current={section === "webhooks" ? "page" : undefined}
+          href={repoHref(repo, { view: "settings", section: "webhooks" })}
+        >
+          Webhooks
+        </Link>
         {ownership.data?.role === "owner" && (
           <Link
             className={teamSection ? "active" : ""}
@@ -101,6 +110,8 @@ export function Settings({
         <RepositoryRulesets key={repo.id} repo={repo} csrf={csrf} />
       ) : section === "integrations" ? (
         <IntegrationSettings key={repo.id} repo={repo} csrf={csrf} />
+      ) : section === "webhooks" ? (
+        <OutboundWebhooks key={repo.id} repo={repo} csrf={csrf} />
       ) : teamSection ? (
         organization ? (
           <RepositoryTeamSettings
