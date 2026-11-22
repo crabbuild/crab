@@ -16,6 +16,10 @@ from cdn_qualification import (
 )
 
 
+class PolicyDeploymentPending(CdnEvidenceError):
+    """The provider explicitly reports that deployment is in progress."""
+
+
 @dataclass(frozen=True)
 class PrivateBinding:
     deployment: str

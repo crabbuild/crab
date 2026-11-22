@@ -918,6 +918,7 @@ class CdnQualificationTests(unittest.TestCase):
             "viewer-key-ids": CDN.deployment_component_digest(["replacement", "retired"]),
             CDN.ROTATING_POLICY[edge]: "9" * 64,
         }
+        self.registration["rotation_overlap_policy_sha256"] = CDN.deployment_policy_digest(edge, "private", overlap)
         trace = {key: self.report[key] for key in CDN.CDN_PROVENANCE_FIELDS} | {
             "schema": "crab.cdn-key-rotation/v1",
             "grants": {role: {"key_id": role, "expires_at_unix": EXPIRY} for role in ("retired", "replacement")},
@@ -1021,6 +1022,8 @@ class CdnQualificationTests(unittest.TestCase):
              "rotation policy must attest the expected deployed key IDs"),
             (lambda trace: trace["policies"]["overlap"]["components"].update({"bucket-policy": "a" * 64}),
              "deployment changed outside viewer signing controls"),
+            (lambda trace: trace["policies"]["overlap"]["components"].update({CDN.ROTATING_POLICY["cloudfront"]: "a" * 64}),
+             "rotation overlap policy differs from the preregistered deployment"),
             (lambda trace: trace["requests"][4].update(read="full"), "rotation probes must match the deployed phase"),
             (lambda trace: trace["requests"][-1].update(cache="miss"), "complete warm object"),
             (lambda trace: [row.update(key_sha256="0" * 64) for row in trace["requests"]],

@@ -12,7 +12,9 @@ from tempfile import TemporaryDirectory
 from textwrap import dedent
 from typing import Any
 
-from cdn_deployment_policy_cli import PolicyObservation, PrivateBinding, collect_deployment_policy, deployment_parser
+from cdn_deployment_policy_cli import (
+    PolicyDeploymentPending, PolicyObservation, PrivateBinding, collect_deployment_policy, deployment_parser,
+)
 from run_cdn_transport_checks import FAMILY_ROOTS, S3_REGION, origin_bucket
 
 from cdn_qualification import (
@@ -60,6 +62,8 @@ def cloudfront_id(value: Any) -> str:
 
 def verify_distribution(distribution: dict, bucket: str, region: str) -> tuple[dict, dict]:
     config = distribution["DistributionConfig"]
+    if config["Enabled"] is True and distribution["Status"] == "InProgress":
+        raise PolicyDeploymentPending("CloudFront distribution deployment is in progress")
     require(distribution["Status"] == "Deployed" and config["Enabled"] is True,
             "CloudFront distribution must be deployed and enabled")
     require(not any(aws_items(config, name) for name in ("Aliases", "OriginGroups", "CacheBehaviors"))
@@ -125,6 +129,18 @@ def viewer_controls(cloudfront, behavior: dict, access: str) -> dict[str, Any]:
     return {"key_group": trusted, "public_keys": public_keys, "response_headers": headers}
 
 
+def verify_active_keys(distribution: dict, behavior: dict, expected_keys: dict) -> None:
+    configured = aws_items(behavior, "TrustedKeyGroups")
+    groups = aws_items(distribution, "ActiveTrustedKeyGroups")
+    require(distribution.get("ActiveTrustedKeyGroups", {}).get("Enabled") is True
+            and [group["KeyGroupId"] for group in groups] == configured,
+            "CloudFront active key group differs from the approved route")
+    active_keys = aws_items(groups[0], "KeyPairIds")
+    # The key group can report the new configuration before the distribution can use it.
+    if sorted(active_keys) != sorted(expected_keys):
+        raise PolicyDeploymentPending("CloudFront active viewer keys are still propagating")
+
+
 def verify_bucket_policy(policy: dict, bucket: str, prefix: str, protected: bool, arn: str, access: str) -> None:
     statements = policy["Statement"]
     families = set().union(*(FAMILY_ROOTS[name] for name in ("capsule", "git", "lfs"))) - {"v2/history/source-roots"}
@@ -186,6 +202,8 @@ def collect(fixture: dict, distribution_id: str, profile: str | None, region: st
     cache = cloudfront("get-cache-policy-config", "--id", cloudfront_id(behavior.get("CachePolicyId")))["CachePolicyConfig"]
     verify_cache(cache)
     viewer = viewer_controls(cloudfront, behavior, access)
+    if access == "private":
+        verify_active_keys(distribution, behavior, viewer["public_keys"])
 
     functions = aws_items(behavior, "FunctionAssociations")
     require(len(functions) == 1 and functions[0]["EventType"] == "viewer-request", "CloudFront needs one viewer-request function")
@@ -233,8 +251,13 @@ def collect(fixture: dict, distribution_id: str, profile: str | None, region: st
     else:
         private_binding = PrivateBinding(arn, placement["resource"], location)
     current = cloudfront("get-distribution", *request)
-    require(current["ETag"] == observed["ETag"] and current["Distribution"]["Status"] == "Deployed",
+    current_distribution = current["Distribution"]
+    if current_distribution["Status"] == "InProgress" and current_distribution["DistributionConfig"]["Enabled"] is True:
+        raise PolicyDeploymentPending("CloudFront distribution deployment is in progress")
+    require(current["ETag"] == observed["ETag"] and current_distribution["Status"] == "Deployed",
             "CloudFront distribution changed during attestation")
+    if access == "private":
+        verify_active_keys(current_distribution, behavior, viewer["public_keys"])
     components = {name: deployment_component_digest(value) for name, value in {
         "distribution": {"id": distribution_id, "arn": arn, "hostname": hostname, "config": distribution["DistributionConfig"]},
         "origin-access-control": oac, "cache-policy": cache, "viewer-controls": viewer,

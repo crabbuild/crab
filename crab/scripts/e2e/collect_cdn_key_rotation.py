@@ -8,24 +8,24 @@ import base64
 import hashlib
 import json
 import re
-import select
 import sys
 import time
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from cdn_deployment_policy_cli import attest_fixture
-from run_cdn_transport_checks import approved_fixture, fixture_base, fixture_object_key, request_sample, viewer_expiry, viewer_headers
+from cdn_deployment_policy_cli import PolicyDeploymentPending, attest_fixture, observe_deployment_policy
+from cdn_viewer_issuer import verify_viewer_scope
+from run_cdn_transport_checks import (
+    FAMILY_ROOTS, approved_fixture, fixture_base, fixture_object_prefix, fixture_repository_prefix, request_sample, viewer_headers,
+)
 
 from cdn_qualification import (
-    COMMIT, KEY_ROTATION_CHECK, MAX_ROTATION_GRANT_SECONDS, RUN_NUMBER, SHA256, VIEWER_KEY_ID, CdnEvidenceError,
+    COMMIT, KEY_ROTATION_CHECK, RUN_NUMBER, SHA256, VIEWER_KEY_ID, CdnEvidenceError,
     decode, deployment_component_digest, matches, require, scope_parts, verify_key_rotation,
 )
 
 
-def grant_metadata(edge: str, viewer: dict[str, str]) -> dict[str, Any]:
-    expires = viewer_expiry(edge, viewer)
+def viewer_key_id(edge: str, viewer: dict[str, str]) -> str:
     try:
         if edge == "cloudfront":
             cookies = [part.strip() for part in viewer["Cookie"].split(";")]
@@ -40,34 +40,52 @@ def grant_metadata(edge: str, viewer: dict[str, str]) -> dict[str, Any]:
         require(len(key_ids) == 1 and matches(VIEWER_KEY_ID, key_ids[0]), "rotation needs an unambiguous viewer key ID")
     except (ValueError, KeyError, TypeError, RecursionError):
         raise CdnEvidenceError("rotation needs an unambiguous viewer key ID") from None
-    return {"key_id": key_ids[0], "expires_at_unix": expires}
+    return key_ids[0]
 
 
 def now_us() -> int:
     return time.time_ns() // 1000
 
 
+def wait_for_retirement(fixture: dict, edge: str, overlap_digest: str, expires_at: int) -> dict[str, str]:
+    print("Overlap verified. Retire the old viewer key while the collector checks the deployed policy.",
+          file=sys.stderr, flush=True)
+    final_digest = fixture["deployment_policy_sha256"]
+    while time.time() < expires_at:
+        try:
+            policy = observe_deployment_policy(fixture, edge, "private")
+        except PolicyDeploymentPending:
+            pass
+        else:
+            digest = policy["deployment_policy_sha256"]
+            if digest == final_digest and time.time() < expires_at:
+                return policy["components"]
+            require(digest in (overlap_digest, final_digest), "rotation observed a policy outside the approved transition")
+        time.sleep(max(0, min(5, expires_at - time.time())))
+    raise CdnEvidenceError("viewer grant expired before the approved retired policy was observed")
+
+
 def collect_rotation(
-    fixture: dict, provenance: dict[str, str], overlap_digest: str, retired: dict[str, str],
-    replacement: dict[str, str], await_retirement: Callable[[int], None],
+    fixture: dict, provenance: dict[str, str], overlap_digest: str, retired: dict[str, str], replacement: dict[str, str],
 ) -> dict:
     edge, access, _, family, _ = scope_parts(fixture["scope"])
     require(access == "private", "viewer key rotation requires a private CDN fixture")
     base = fixture_base(fixture["base_url"])
-    key = fixture_object_key(fixture, access, family)
+    repo = fixture_repository_prefix(fixture, access, family)
+    prefix = f"{repo}/{fixture_object_prefix(fixture, FAMILY_ROOTS[family])}/"
+    key = f"{repo}/{fixture['object_path']}"
     viewers = {"retired": retired, "replacement": replacement}
-    grants = {role: grant_metadata(edge, viewer) for role, viewer in viewers.items()}
+    grants = {role: {
+        "key_id": viewer_key_id(edge, viewer),
+        "expires_at_unix": verify_viewer_scope(edge, viewer, fixture["native_origin"], base.geturl().rstrip("/"), repo, prefix),
+    } for role, viewer in viewers.items()}
     old_id, new_id = (grants[role]["key_id"] for role in viewers)
     require(old_id != new_id, "rotation requires two distinct viewer keys")
-    expires = [grant["expires_at_unix"] for grant in grants.values()]
-    now = time.time()
-    require(now < min(expires) <= max(expires) <= now + MAX_ROTATION_GRANT_SECONDS,
-            "rotation requires live short-lived viewer grants")
+    expires_at = min(grant["expires_at_unix"] for grant in grants.values())
     policies = {}
     requests = []
 
-    def snapshot(phase: str, digest: str, keys: list[str]) -> None:
-        components = attest_fixture(fixture | {"deployment_policy_sha256": digest}, edge, access)["components"]
+    def snapshot(phase: str, components: dict[str, str], keys: list[str]) -> None:
         require(components["viewer-key-ids"] == deployment_component_digest(sorted(keys)),
                 "rotation policy does not have the expected viewer keys")
         policies[phase] = {"observed_at_unix_us": now_us(), "components": components}
@@ -84,30 +102,23 @@ def collect_rotation(
         requests.append(row | {"phase": phase, "signer": signer, "read": "range" if ranged else "full",
                                "started_at_unix_us": started, "finished_at_unix_us": finished})
 
-    snapshot("overlap", overlap_digest, [old_id, new_id])
+    overlap = attest_fixture(fixture | {"deployment_policy_sha256": overlap_digest}, edge, access)
+    snapshot("overlap", overlap["components"], [old_id, new_id])
     probe("overlap", "retired")
     probe("overlap", "replacement")
-    await_retirement(min(expires))
     final_digest = fixture["deployment_policy_sha256"]
-    snapshot("retired", final_digest, [new_id])
+    retired_components = wait_for_retirement(fixture, edge, overlap_digest, expires_at)
+    snapshot("retired", retired_components, [new_id])
     probe("retired", "replacement")
     probe("retired", "retired", denied=True)
     probe("retired", "retired", denied=True, ranged=True)
     probe("retired", "replacement")
-    snapshot("confirmed", final_digest, [new_id])
+    confirmed = attest_fixture(fixture, edge, access)
+    snapshot("confirmed", confirmed["components"], [new_id])
     trace = provenance | {"schema": "crab.cdn-key-rotation/v1", "grants": grants,
                           "policies": policies, "requests": requests}
-    verify_key_rotation(trace, provenance, edge, final_digest)
+    verify_key_rotation(trace, provenance, edge, final_digest, overlap_digest)
     return trace
-
-
-def await_operator(expiry: int) -> None:
-    remaining = expiry - time.time()
-    require(remaining > 0, "viewer grant expired before rotation retirement")
-    print("Overlap verified. Retire the old viewer key and press Enter when the deployment is ready.",
-          file=sys.stderr, flush=True)
-    ready, _, _ = select.select([sys.stdin], [], [], remaining)
-    require(bool(ready) and sys.stdin.readline() == "\n", "rotation was not confirmed before the viewer grant expired")
 
 
 def main() -> int:
@@ -135,7 +146,7 @@ def main() -> int:
                       "workflow_run_id": args.run_id, "workflow_run_attempt": args.run_attempt}
         trace = collect_rotation(fixture, provenance, args.overlap_policy_sha256,
                                  viewer_headers(edge, access, args.retired_viewer_file),
-                                 viewer_headers(edge, access, args.replacement_viewer_file), await_operator)
+                                 viewer_headers(edge, access, args.replacement_viewer_file))
         with args.output.open("x", encoding="utf-8") as output:
             output.write(json.dumps(trace, sort_keys=True) + "\n")
     except CdnEvidenceError as error:

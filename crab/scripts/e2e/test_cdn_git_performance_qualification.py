@@ -49,6 +49,7 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
             "viewer_binding_sha256": "e" * 64,
             "scoped_view_sha256": "c" * 64,
             "cache_reuse_sha256": "b" * 64,
+            "rotation_overlap_policy_sha256": "a" * 64,
         }
         self.registration["candidate"] = fixture.cli_candidate(self.registration["scope"], PLATFORM)
         fixture.write_git_measurements(self.root, self.registration, PLATFORM)
@@ -150,6 +151,7 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
         scope = "cloudfront/public/cli/git/direct"
         self.registration.pop("scoped_view_sha256")
         self.registration.pop("cache_reuse_sha256")
+        self.registration.pop("rotation_overlap_policy_sha256")
         self.registration.update(scope=scope, candidate=fixture.cli_candidate(scope, PLATFORM),
                                  publication_sha256="6" * 64, previous_publication_sha256="7" * 64,
                                  historical_origin_sha256="8" * 64)
@@ -351,6 +353,7 @@ class DesktopGitPerformanceQualificationTests(unittest.TestCase):
             "samples": 30, "p95_budget_ms": 150, "cost_budget_microusd": 10, "regions": REGIONS,
             "deployment_policy_sha256": "d" * 64, "viewer_binding_sha256": "e" * 64,
             "viewer_approval_sha256": "9" * 64, "scoped_view_sha256": "c" * 64, "cache_reuse_sha256": "b" * 64,
+            "rotation_overlap_policy_sha256": "a" * 64,
             "candidate": writer, "desktop_candidate": writer | {"cargo_features": "", "binary_sha256": "a" * 64},
             "desktop_native_target": {"origin_sha256": "7" * 64, "prefix_sha256": "8" * 64},
         }

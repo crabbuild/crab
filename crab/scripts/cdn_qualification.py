@@ -53,7 +53,6 @@ SCOPED_VIEW_FIELDS = {"scope_sha256", "generation_sha256", "physical_prefix_sha2
                       "key_sha256", "body_sha256", "bytes"}
 MANAGED_ISSUER_CHECK = "managed_v2_issuer"
 MANAGED_ISSUER_FIELDS = {"identity_sha256", "version", "approval_sha256"}
-MAX_ROTATION_GRANT_SECONDS = 900
 MAX_VIEWER_GRANT_SECONDS = 900
 VIEWER_KEY_ID = re.compile(r"[A-Za-z0-9_-]{1,90}")
 ROTATING_POLICY = {"cloudfront": "viewer-controls", "cloud-cdn": "backend-cache", "front-door": "viewer-policy"}
@@ -397,7 +396,9 @@ def verify_deployment_policy_trace(value: Any, report: dict[str, Any], edge: str
             "observed deployment policy differs from the approved policy")
 
 
-def verify_key_rotation(value: Any, report: dict[str, Any], edge: str, approved_policy: str) -> tuple[str, int]:
+def verify_key_rotation(
+    value: Any, report: dict[str, Any], edge: str, approved_policy: str, approved_overlap: str,
+) -> tuple[str, int]:
     trace = fields(value, CDN_PROVENANCE_FIELDS | {"schema", "grants", "policies", "requests"},
                    "viewer key rotation trace")
     require(trace["schema"] == "crab.cdn-key-rotation/v1"
@@ -425,12 +426,15 @@ def verify_key_rotation(value: Any, report: dict[str, Any], edge: str, approved_
                 "rotation policy must attest the expected deployed key IDs")
         if phase != "overlap":
             require(digest == approved_policy, "rotated policy differs from the approved deployment")
+        else:
+            overlap_digest = digest
     overlap_start = policies["overlap"]["observed_at_unix_us"]
-    require(all(grant["expires_at_unix"] * 1_000_000 - overlap_start <= MAX_ROTATION_GRANT_SECONDS * 1_000_000
+    require(all(grant["expires_at_unix"] * 1_000_000 - overlap_start <= MAX_VIEWER_GRANT_SECONDS * 1_000_000
                 for grant in grants.values()), "rotation requires short-lived viewer grants")
     for component in deployment_component_names(edge, "private") - {ROTATING_POLICY[edge], "viewer-key-ids"}:
         require(policies["overlap"]["components"][component] == policies["retired"]["components"][component],
                 "deployment changed outside viewer signing controls during rotation")
+    require(overlap_digest == approved_overlap, "rotation overlap policy differs from the preregistered deployment")
 
     requests = trace["requests"]
     expected = [
@@ -775,7 +779,8 @@ def verify_check_evidence(
             policy = decoded
             continue
         if name == KEY_ROTATION_CHECK:
-            rotation_key = verify_key_rotation(decoded, report, edge, deployment_policy_sha256)
+            rotation_key = verify_key_rotation(decoded, report, edge, deployment_policy_sha256,
+                                               registration["rotation_overlap_policy_sha256"])
             continue
         if name == CACHE_REUSE_CHECK:
             cache_reuse_key = verify_cache_reuse(decoded, report, registration["cache_reuse_sha256"])
@@ -1257,11 +1262,14 @@ def benchmark_registration(registration: Any) -> dict[str, Any]:
         require(matches(SHA256, registration.get("historical_origin_sha256")),
                 "public benchmark needs approved native history")
     else:
-        expected.update(("scoped_view_sha256", "cache_reuse_sha256"))
+        expected.update(("scoped_view_sha256", "cache_reuse_sha256", "rotation_overlap_policy_sha256"))
         require(matches(SHA256, registration.get("scoped_view_sha256")),
                 "private benchmark needs the approved scoped view control digest")
         require(matches(SHA256, registration.get("cache_reuse_sha256")),
                 "private benchmark needs the approved cache reuse authority digest")
+        overlap = registration.get("rotation_overlap_policy_sha256")
+        require(matches(SHA256, overlap) and overlap != registration.get("deployment_policy_sha256"),
+                "private benchmark needs a distinct approved rotation overlap policy digest")
     if profile == "managed":
         expected.add("managed_issuer")
         issuer = fields(registration.get("managed_issuer"), MANAGED_ISSUER_FIELDS, "registered production issuer")

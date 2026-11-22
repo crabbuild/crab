@@ -89,20 +89,21 @@ def expiring_viewer(edge: str, expiry: int) -> dict[str, str]:
     return {"Authorization": f"Bearer header.{payload}.fixture-secret"}
 
 
-def scoped_credential(edge: str, config: dict, prefix: str, expires: int) -> str:
+def scoped_credential(edge: str, config: dict, prefix: str, expires: int, *, key_id: str = "fixture") -> str:
     base = config["base_url"]
     resource = f"{base}/{prefix}"
     if edge == "cloudfront":
         policy = {"Statement": [{"Resource": resource + "*", "Condition": {"DateLessThan": {"AWS:EpochTime": expires}}}]}
         cookie = base64.b64encode(json.dumps(policy).encode()).decode().translate(str.maketrans("+=/", "-_~"))
-        return f"CloudFront-Policy={cookie}; CloudFront-Signature=fixture-signature; CloudFront-Key-Pair-Id=fixture"
+        return f"CloudFront-Policy={cookie}; CloudFront-Signature=fixture-signature; CloudFront-Key-Pair-Id={key_id}"
     if edge == "cloud-cdn":
         policy = base64.urlsafe_b64encode(resource.encode()).decode()
-        return f"Cloud-CDN-Cookie=URLPrefix={policy}:Expires={expires}:KeyName=fixture:Signature=fixture-signature"
+        return f"Cloud-CDN-Cookie=URLPrefix={policy}:Expires={expires}:KeyName={key_id}:Signature=fixture-signature"
     claims = {"iss": base, "aud": base, "prefix": prefix, "exp": expires,
               "sub": config["fixture_prefix"] + config["view_suffix"], "origin": config["native_origin"]}
     payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
-    return f"header.{payload}.fixture-signature"
+    header = base64.urlsafe_b64encode(json.dumps({"kid": key_id}).encode()).decode().rstrip("=")
+    return f"{header}.{payload}.fixture-signature"
 
 
 class CdnTransportQualificationTests(unittest.TestCase):
@@ -191,16 +192,11 @@ class CdnTransportQualificationTests(unittest.TestCase):
             with self.subTest(edge=edge):
                 config = fixture(edge, "private")
                 provenance = dict.fromkeys(CDN_PROVENANCE_FIELDS, "test") | {"scope": config["scope"]}
-                retired = expiring_viewer(edge, expiry)
-                if edge == "front-door":
-                    payload = retired["Authorization"].split(".")[1]
-                    retired, replacement = (
-                        {"Authorization": f"Bearer {base64.urlsafe_b64encode(json.dumps({'kid': key}).encode()).decode().rstrip('=')}"
-                                          f".{payload}.fixture-secret"}
-                        for key in ("test", "new")
-                    )
-                else:
-                    replacement = {"Cookie": retired["Cookie"].replace("=test", "=new")}
+                retired, replacement = (
+                    TRANSPORT.private_viewer_headers(edge, scoped_credential(
+                        edge, config, f"{REPO}/v2/pack-layers/", expiry, key_id=key,
+                    )) for key in ("test", "new")
+                )
                 before = dict.fromkeys(deployment_component_names(edge, "private"), "e" * 64)
                 before["viewer-key-ids"] = deployment_component_digest(["new", "test"])
                 after = before | {"viewer-key-ids": deployment_component_digest(["new"])}
@@ -209,20 +205,45 @@ class CdnTransportQualificationTests(unittest.TestCase):
                 warm = response(200, BODY, Cache_Control="private, no-store", **{header: hit})
                 self.connection.getresponse.side_effect = [warm, warm, warm, response(403), response(403), warm]
                 self.connection.request.reset_mock()
-                retire = Mock()
                 with (patch.object(ROTATION.time, "time", return_value=1),
                       patch.object(ROTATION, "now_us", side_effect=range(1, 16)),
+                      patch.object(ROTATION.time, "sleep") as sleep,
+                      patch.object(ROTATION, "observe_deployment_policy", side_effect=[
+                          {"deployment_policy_sha256": overlap_digest, "components": before},
+                          ROTATION.PolicyDeploymentPending("deployment pending"),
+                          {"deployment_policy_sha256": config["deployment_policy_sha256"], "components": after},
+                      ]),
                       patch.object(ROTATION, "attest_fixture", side_effect=[
-                          {"components": before}, {"components": after}, {"components": after},
-                      ]) as attest):
-                    trace = ROTATION.collect_rotation(config, provenance, overlap_digest, retired, replacement, retire)
-                retire.assert_called_once_with(expiry)
+                          {"components": before}, {"components": after},
+                      ]) as attest, redirect_stderr(StringIO())):
+                    trace = ROTATION.collect_rotation(config, provenance, overlap_digest, retired, replacement)
+                self.assertEqual(sleep.call_count, 2)
                 self.assertEqual([call.args[0]["deployment_policy_sha256"] for call in attest.call_args_list],
-                                 [overlap_digest, config["deployment_policy_sha256"], config["deployment_policy_sha256"]])
+                                 [overlap_digest, config["deployment_policy_sha256"]])
                 requests = [call.kwargs["headers"] for call in self.connection.request.call_args_list]
                 self.assertEqual(requests[0], requests[3])
                 self.assertEqual(requests[4], requests[3] | {"Range": "bytes=0-0"})
-                self.assertNotIn("fixture-secret", json.dumps(trace))
+                self.assertNotIn("fixture-signature", json.dumps(trace))
+
+    def test_rotation_rejects_unapproved_intermediate_policy(self) -> None:
+        config = fixture("cloudfront", "private")
+        with (patch.object(ROTATION.time, "time", return_value=100),
+              patch.object(ROTATION, "observe_deployment_policy", return_value={"deployment_policy_sha256": "f" * 64}),
+              patch.object(ROTATION.time, "sleep") as sleep, redirect_stderr(StringIO()),
+              self.assertRaisesRegex(ValueError, "outside the approved transition")):
+            ROTATION.wait_for_retirement(config, "cloudfront", "e" * 64, 102)
+        sleep.assert_not_called()
+
+    def test_rotation_stops_when_the_grant_expires_before_retirement(self) -> None:
+        config = fixture("cloudfront", "private")
+        overlap = "e" * 64
+        with (patch.object(ROTATION.time, "time", side_effect=[100, 100, 102]),
+              patch.object(ROTATION, "observe_deployment_policy", return_value={"deployment_policy_sha256": overlap}) as get,
+              patch.object(ROTATION.time, "sleep") as sleep, redirect_stderr(StringIO()),
+              self.assertRaisesRegex(ValueError, "expired before the approved retired policy")):
+            ROTATION.wait_for_retirement(config, "cloudfront", overlap, 102)
+        get.assert_called_once()
+        sleep.assert_called_once_with(2)
 
     def test_all_provider_cache_headers_are_normalized_and_denial_bodies_are_untouched(self) -> None:
         providers = {

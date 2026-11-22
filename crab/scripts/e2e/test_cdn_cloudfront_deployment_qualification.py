@@ -2,6 +2,7 @@
 
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
+from itertools import repeat
 import hashlib
 import json
 from pathlib import Path
@@ -73,6 +74,8 @@ class CloudFrontDeploymentQualificationTests(unittest.TestCase):
                         "Action": ["s3:DeleteObject", "s3:DeleteObjectVersion"]},
             ))
         self.etags = iter(("deployed", "deployed"))
+        self.active_keys = repeat(["key-id"] if access == "private" else [])
+        self.distribution_status = "Deployed"
         self.location = REGION
         self.source_location = None
         self.public_block = {key: True for key in ("BlockPublicAcls", "IgnorePublicAcls", "BlockPublicPolicy", "RestrictPublicBuckets")}
@@ -88,8 +91,12 @@ class CloudFrontDeploymentQualificationTests(unittest.TestCase):
             self.assertEqual(arguments, ("--bucket", self.bucket, "--expected-bucket-owner", ACCOUNT))
         if operation == "get-distribution":
             self.assertEqual(arguments, ("--id", ID))
-            return {"ETag": next(self.etags), "Distribution": {"ARN": ARN, "Id": ID, "Status": "Deployed",
-                                                               "DomainName": HOST, "DistributionConfig": self.config}}
+            keys = next(self.active_keys)
+            groups = items({"KeyGroupId": "key-group", "KeyPairIds": items(*keys)}) if keys else items()
+            return {"ETag": next(self.etags), "Distribution": {
+                "ARN": ARN, "Id": ID, "Status": self.distribution_status, "DomainName": HOST, "DistributionConfig": self.config,
+                "ActiveTrustedKeyGroups": groups | {"Enabled": bool(keys)},
+            }}
         if operation == "get-function":
             self.assertEqual(arguments[:-1], ("--name", "fixture", "--stage", "LIVE"))
             Path(arguments[-1]).write_bytes(self.source + b"\n")
@@ -165,6 +172,18 @@ class CloudFrontDeploymentQualificationTests(unittest.TestCase):
                     self.etags = iter(("deployed", "changed"))
                 with self.assertRaisesRegex(ValueError, reason):
                     self.collect()
+
+    def test_rotation_waits_until_the_configured_keys_are_active_on_both_reads(self):
+        for snapshots in ((["key-id", "retired"], ["key-id"]), (["key-id"], ["key-id", "retired"])):
+            with self.subTest(snapshots=snapshots):
+                self.configure()
+                self.active_keys = iter(snapshots)
+                with self.assertRaisesRegex(COLLECTOR.PolicyDeploymentPending, "active viewer keys are still propagating"):
+                    self.collect()
+        self.configure()
+        self.distribution_status = "InProgress"
+        with self.assertRaisesRegex(COLLECTOR.PolicyDeploymentPending, "deployment is in progress"):
+            self.collect()
 
     def test_public_source_region_mismatch_cannot_attest(self):
         self.configure("public")

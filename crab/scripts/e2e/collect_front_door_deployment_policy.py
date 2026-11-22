@@ -12,7 +12,9 @@ from typing import Any
 from urllib.parse import urlencode, urlsplit
 from xml.etree import ElementTree
 
-from cdn_deployment_policy_cli import PolicyObservation, PrivateBinding, collect_deployment_policy, deployment_parser
+from cdn_deployment_policy_cli import (
+    PolicyDeploymentPending, PolicyObservation, PrivateBinding, collect_deployment_policy, deployment_parser,
+)
 from collect_cdn_fixture_cleanup import api_body, bearer
 from run_cdn_transport_checks import origin_bucket
 
@@ -57,8 +59,13 @@ def resource(value: dict[str, Any], expected_id: str) -> dict[str, Any]:
 
 def deployed(value: dict[str, Any]) -> None:
     props = value["properties"]
-    require(props["provisioningState"] == "Succeeded" and props.get("deploymentStatus", "Succeeded") == "Succeeded",
-            "Azure fixture resource must be provisioned and deployed")
+    provisioning = props["provisioningState"]
+    deployment = props.get("deploymentStatus", "Succeeded")
+    if provisioning == deployment == "Succeeded":
+        return
+    if provisioning in ("Succeeded", "Updating") and deployment in ("NotStarted", "InProgress", "Succeeded"):
+        raise PolicyDeploymentPending("Azure fixture deployment is in progress")
+    raise CdnEvidenceError("Azure fixture resource must be provisioned and deployed")
 
 
 def one_resource(entries: list[dict[str, Any]], expected_id: str, error: str) -> dict[str, Any]:

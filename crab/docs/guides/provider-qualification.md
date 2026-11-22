@@ -765,20 +765,22 @@ contains digests and status codes. [S3 version reads](https://docs.aws.amazon.co
 
 ### Verify viewer signing-key retirement
 
-On the protected Linux measurement worker, register the policy digest for
-the final deployment with only the replacement key trusted. Inspect and
-approve the overlap digest separately while the same deployment trusts both
-keys. Policy snapshots now include a digest of the sorted viewer key IDs.
-Recollect any earlier snapshot and approve its updated digest before use.
+In the private benchmark registration, record `deployment_policy_sha256`
+for the deployment with only the replacement key trusted. Record
+`rotation_overlap_policy_sha256` for the same deployment while it trusts both
+keys. Use this approved overlap digest when starting the collector on the
+protected measurement worker.
 
 Issue two short-lived credentials for the same fixture object, one per key.
 The collector accepts grants with up to 900 seconds remaining.
 Keep the files private and use the current provider's read-only inspection
 identity. Start the collector during overlap. After both credentials return
-the approved bytes, the collector prompts the operator to retire the old
-key. Confirm only after the provider has deployed the change. If the provider
-cannot complete this transition while the old grant is live, the profile
-stays unqualified.
+the approved bytes, the collector tells the operator to retire the old key.
+It checks the deployed policy until the approved retired state is observed
+or either grant expires. CloudFront attestation also requires the
+distribution's active viewer keys to match the configured key group. The
+profile stays unqualified if the edge probes cannot finish within both
+signed lifetimes. [CloudFront active trusted keys](https://docs.aws.amazon.com/cloudfront/latest/APIReference/API_ActiveTrustedKeyGroups.html)
 
 ```bash
 python3 -B crab/scripts/e2e/collect_cdn_key_rotation.py \
@@ -795,11 +797,10 @@ python3 -B crab/scripts/e2e/collect_cdn_key_rotation.py \
 The collector confirms a full cache hit with the replacement key before and
 after denying both a full GET and a one-byte range with the old grant. It
 attests the retired policy on both sides of these probes. The release verifier
-checks the same object against the ordinary transport trace, confirms that the
-old grant was still within its signed lifetime, and rejects a generic pass
-trace. The rotation command reads policy and object bytes. Provider changes
-are performed by the operator, and the output contains only redacted
-observations. [CloudFront key rotation](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-trusted-signers.html) · [Cloud CDN key retirement](https://docs.cloud.google.com/cdn/docs/using-signed-cookies) · [APIM signer policy](https://learn.microsoft.com/en-us/azure/api-management/validate-jwt-policy)
+checks both registered policy digests, the object against the ordinary
+transport trace, and the signed lifetime of each tested grant. The operator
+performs the provider change while the collector reads policy and object
+bytes and retains redacted observations. [CloudFront key rotation](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-trusted-signers.html) · [Cloud CDN key retirement](https://docs.cloud.google.com/cdn/docs/using-signed-cookies) · [APIM signer policy](https://learn.microsoft.com/en-us/azure/api-management/validate-jwt-policy)
 
 ### Measure CDN transfers during product actions
 
@@ -1738,7 +1739,8 @@ cloudfront/private/cli/git/direct/linux-x86_64/git-benchmarks/<location>/<pair>/
 Use `gcs/report.json` and `azure/report.json` for the corresponding native
 provider reports. Each scope and platform has its own supplement and traces.
 The `benchmarks.json` object maps `<scope>/<platform>` to its preregistered
-`crab.cdn-benchmark/v1` record, including `deployment_policy_sha256`. Public
+`crab.cdn-benchmark/v1` record, including `deployment_policy_sha256`. Private
+rows also require `rotation_overlap_policy_sha256`. Public
 rows also require `publication_sha256` and retain
 `<scope>/<platform>/public-export/{inventory,publication}.json`. Approve
 the SHA-256 of that exact file before

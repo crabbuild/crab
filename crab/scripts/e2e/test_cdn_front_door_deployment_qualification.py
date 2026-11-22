@@ -181,6 +181,19 @@ class FrontDoorDeploymentQualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must inherit the reviewed viewer policy"):
             self.collect()
 
+    def test_rotation_wait_distinguishes_deployment_progress_from_failure(self):
+        for provisioning, deployment in (("Updating", "NotStarted"), ("Succeeded", "InProgress")):
+            with self.subTest(provisioning=provisioning, deployment=deployment):
+                self.configure()
+                self.route["properties"].update(provisioningState=provisioning, deploymentStatus=deployment)
+                with self.assertRaisesRegex(COLLECTOR.PolicyDeploymentPending, "deployment is in progress"):
+                    self.collect()
+        self.configure()
+        self.route["properties"]["deploymentStatus"] = "Failed"
+        with self.assertRaisesRegex(ValueError, "must be provisioned and deployed") as failed:
+            self.collect()
+        self.assertNotIsInstance(failed.exception, COLLECTOR.PolicyDeploymentPending)
+
     def test_private_waf_must_match_socket_address_without_widening(self):
         for field, value, error in (
             ("matchVariable", "RemoteAddr", "differs from the approved socket"),
