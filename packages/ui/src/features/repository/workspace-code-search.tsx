@@ -25,6 +25,9 @@ type SearchPage = {
   }[];
   scanned: number;
   skipped: number;
+  indexed_repositories: number;
+  scanning_repositories: number;
+  limited_repositories: number;
   next: string | null;
 };
 
@@ -163,13 +166,40 @@ function WorkspaceResults({ search }: { search: string }) {
         </Button>
       )}
       <Result state={state} timingLabel="Workspace code search">
-        {({ groups, scanned, skipped, next }) => (
+        {({
+          groups,
+          scanned,
+          skipped,
+          next,
+          indexed_repositories,
+          scanning_repositories,
+          limited_repositories,
+        }) => (
           <>
             <p role="status" className="text-sm text-muted-foreground">
               {scanned} {scanned === 1 ? "path" : "paths"} scanned on this page
               {skipped > 0 &&
                 ` · ${skipped} files skipped (large, binary, or stored separately)`}
             </p>
+            <ul
+              className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground"
+              aria-label="Search index status"
+            >
+              {indexed_repositories > 0 && (
+                <li>Index used for {repositoryCount(indexed_repositories)}</li>
+              )}
+              {scanning_repositories > 0 && (
+                <li>
+                  On-demand scan for {repositoryCount(scanning_repositories)}
+                </li>
+              )}
+              {limited_repositories > 0 && (
+                <li>
+                  Index size limit reached for{" "}
+                  {repositoryCount(limited_repositories)}
+                </li>
+              )}
+            </ul>
             {groups.length === 0 && (
               <p>{next ? "No matches on this page." : "No further matches."}</p>
             )}
@@ -214,4 +244,8 @@ function WorkspaceResults({ search }: { search: string }) {
       </Result>
     </section>
   );
+}
+
+function repositoryCount(count: number) {
+  return `${count} ${count === 1 ? "repository" : "repositories"}`;
 }

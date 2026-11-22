@@ -388,6 +388,11 @@ async fn native_browser_finds_code_across_repositories_and_opens_the_exact_line(
         )
         .await;
     }
+    for repo in h.server.repositories.values() {
+        code_index::reconcile(&h.server, &repo, &h.server.cancellation)
+            .await
+            .unwrap();
+    }
     let browser = crate::test_support::http::browser::Browser::new("workspace-code-search");
     browser.run(&["open", &h.origin]).await;
     browser
@@ -424,6 +429,9 @@ async fn native_browser_finds_code_across_repositories_and_opens_the_exact_line(
         ])
         .await;
     browser.run(&["wait", "--text", "private.rs"]).await;
+    browser
+        .run(&["wait", "--text", "Index used for 2 repositories"])
+        .await;
     let link = format!("a[href*='/blob/{head}/library.rs'][href$='#L2']");
     browser.run(&["wait", &link]).await;
     browser.run(&["click", &link]).await;
@@ -431,5 +439,105 @@ async fn native_browser_finds_code_across_repositories_and_opens_the_exact_line(
         .run(&["wait", "--url", &format!("**/blob/{head}/library.rs**#L2")])
         .await;
     drop(browser);
+    h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn persistent_code_index_prunes_a_sparse_search_and_refreshes_after_publication() {
+    let h = Harness::new(false).await;
+    let alice = h.login().await;
+    let (source, remote, head) = searchable_repository(
+        &h,
+        &alice,
+        "team",
+        "private",
+        (0..512)
+            .map(|i| {
+                (
+                    format!("src/part-{i:03}.rs"),
+                    "let ordinary = 2026;\n".into(),
+                )
+            })
+            .chain([
+                (
+                    "src/special.rs".into(),
+                    "let message = \"Kelvin\";\n".into(),
+                ),
+                (
+                    "src/target.rs".into(),
+                    "let stable_unique_search_target = 42;\n".into(),
+                ),
+            ]),
+    )
+    .await;
+    let repo = h.server.repositories.values()[0].clone();
+    let query = "/api/code-search?q=stable_unique_search_target&directory=src";
+    let fallback = h.json(query, &alice).await;
+    assert_eq!(fallback["scanning_repositories"], 1);
+    assert_eq!(fallback["scanned"], 32);
+    assert!(fallback["next"].is_string());
+
+    let before = std::time::Instant::now();
+    code_index::reconcile(&h.server, &repo, &h.server.cancellation)
+        .await
+        .unwrap();
+    let build_elapsed = before.elapsed();
+    let before = std::time::Instant::now();
+    let page = h.json(query, &alice).await;
+    eprintln!(
+        "indexed 514 paths in {build_elapsed:?}; sparse search completed in {:?}",
+        before.elapsed()
+    );
+    assert_eq!(page["scanned"], 514);
+    assert_eq!(page["verified"], 2);
+    assert_eq!(page["groups"][0]["commit"], head);
+    assert_eq!(page["groups"][0]["files"][0]["path"], "src/target.rs");
+    assert_eq!(page["indexed_repositories"], 1);
+    assert_eq!(page["next"], Value::Null);
+
+    let unicode = h.json("/api/code-search?q=kelvin", &alice).await;
+    assert_eq!(
+        unicode["groups"][0]["files"][0]["lines"][0]["matched"],
+        "Kelvin"
+    );
+    assert_eq!(unicode["indexed_repositories"], 1);
+    let short = h.json("/api/code-search?q=42&directory=src", &alice).await;
+    assert_eq!(short["verified"], 32);
+    assert!(short["next"].is_string());
+
+    let catalog = h.json("/api/repos?owner=team&name=private", &alice).await;
+    h.write(
+        Method::PUT,
+        "/api/repos/team/private/settings/branch-protections",
+        &alice,
+        json!({"expected_version":catalog["repositories"][0]["protection_version"],"rules":[]}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    std::fs::write(
+        source.path().join("src/target.rs"),
+        "let replacement_needle = 41;\n",
+    )
+    .unwrap();
+    git::success(source.path(), &["commit", "-am", "Change indexed text"]).await;
+    let replacement = git::success(source.path(), &["rev-parse", "HEAD"]).await;
+    push_workspace_fixture(source.path(), &remote).await;
+    let stale = h.json(query, &alice).await;
+    assert_eq!(stale["scanning_repositories"], 1);
+    assert_eq!(stale["groups"], json!([]));
+
+    code_index::reconcile(&h.server, &repo, &h.server.cancellation)
+        .await
+        .unwrap();
+    let latest = h
+        .json("/api/code-search?q=replacement_needle", &alice)
+        .await;
+    assert_eq!(latest["groups"][0]["commit"], replacement);
+    assert_eq!(latest["groups"][0]["files"][0]["path"], "src/target.rs");
+    assert_eq!(latest["indexed_repositories"], 1);
+    let absent = h.json(query, &alice).await;
+    assert_eq!(absent["groups"], json!([]));
+    assert_eq!(absent["next"], Value::Null);
     h.close().await;
 }

@@ -34,6 +34,10 @@ struct Results {
     groups: Vec<Group>,
     scanned: usize,
     skipped: usize,
+    verified: usize,
+    indexed_repositories: usize,
+    scanning_repositories: usize,
+    limited_repositories: usize,
     next: Option<String>,
 }
 
@@ -140,6 +144,7 @@ async fn search_page(
             paths: PATHS_PER_REPOSITORY,
             results: left,
             duration: Duration::from_secs(6),
+            use_index: true,
         };
         let scan = match scan_repository(server, repo, pattern, window, cancel).await {
             Ok(scan) => scan,
@@ -155,6 +160,12 @@ async fn search_page(
             }
             Err(error) => return Err(error.into_response()),
         };
+        match scan.acceleration {
+            Acceleration::Indexed => results.indexed_repositories += 1,
+            Acceleration::Scanning => results.scanning_repositories += 1,
+            Acceleration::Limited => results.limited_repositories += 1,
+        }
+        results.verified += scan.verified;
         results.scanned += scan.result.scanned;
         results.skipped += scan.result.skipped;
         if !scan.result.items.is_empty() {

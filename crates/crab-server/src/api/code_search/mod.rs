@@ -1,5 +1,10 @@
 use super::{ApiError, display_path, encode_hex, query, read_admission};
-use crate::{app, auth::Principal, repository::Repository, server::Server};
+use crate::{
+    app,
+    auth::Principal,
+    repository::{Repository, code_index},
+    server::Server,
+};
 use axum::{
     Extension, Json,
     extract::{Path, Query, State},
@@ -9,8 +14,8 @@ use axum::{
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
 use crab_remote_git::{
-    ContentClassification, EntryKind, Error, GitPath, OperationContext, OperationKind,
-    RemoteGitSnapshot, Revision, TreeListingItem, TreeListingRequest,
+    EntryKind, Error, GitPath, OperationContext, OperationKind, RemoteGitSnapshot, Revision,
+    TreeListingItem, TreeListingRequest,
 };
 use gix_hash::ObjectId;
 use regex::{Regex, RegexBuilder};
@@ -19,11 +24,11 @@ use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+mod indexed;
 pub(super) mod workspace;
 
 const PAGE_ENTRIES: usize = 128;
 const FILE_READ_BATCH: usize = 8;
-const MAX_FILE_BYTES: u64 = 256 * 1024;
 const MAX_MATCH_LINES: usize = 6;
 const MAX_CURSOR_PATH: usize = 8 * 1024;
 const CURSOR_HEADER: usize = 20 + 32;
@@ -108,6 +113,7 @@ pub(super) async fn search(
             paths: PAGE_ENTRIES,
             results: limit,
             duration: Duration::from_secs(20),
+            use_index: false,
         },
         &cancellation,
     )
@@ -145,6 +151,8 @@ struct Pattern {
     matcher: Regex,
     directory: GitPath,
     paths_only: bool,
+    case_sensitive: bool,
+    mask: Option<code_index::Mask>,
 }
 
 impl Pattern {
@@ -172,6 +180,8 @@ impl Pattern {
             matcher,
             directory,
             paths_only,
+            case_sensitive,
+            mask: code_index::Mask::query(terms, case_sensitive),
         })
     }
 }
@@ -182,12 +192,21 @@ struct Window<'a> {
     paths: usize,
     results: usize,
     duration: Duration,
+    use_index: bool,
 }
 
 struct Scan {
     commit: ObjectId,
     result: Page,
     after: Option<GitPath>,
+    acceleration: Acceleration,
+    verified: usize,
+}
+
+enum Acceleration {
+    Indexed,
+    Scanning,
+    Limited,
 }
 
 async fn scan_repository(
@@ -219,7 +238,22 @@ async fn scan_repository(
         .await?;
     let found = async {
         let snapshot = repository.snapshot(&revision, &operation).await?;
-        inspect(&snapshot, pattern, &window, &operation).await
+        let mut acceleration = Acceleration::Scanning;
+        if window.use_index {
+            match code_index::load(server, repo, snapshot.root_tree_oid()).await {
+                Ok(Some(index)) => {
+                    if let Some(rows) = &index.rows {
+                        return indexed::inspect(rows, &snapshot, pattern, &window, &operation).await;
+                    }
+                    acceleration = Acceleration::Limited;
+                }
+                Ok(None) => (),
+                Err(error) => tracing::debug!(repository_id = %repo.id, ?error, "Code search index could not be read"),
+            }
+        }
+        let mut scan = inspect(&snapshot, pattern, &window, &operation).await?;
+        scan.acceleration = acceleration;
+        Ok(scan)
     }
     .await;
     Ok(operation.finish(found).await?)
@@ -267,6 +301,7 @@ async fn inspect(
         next: None,
     };
     let mut examined = 0;
+    let mut verified = 0;
     'scan: for batch in entries.chunks(FILE_READ_BATCH) {
         let found = futures_util::future::try_join_all(batch.iter().map(|item| async move {
             match item {
@@ -293,6 +328,9 @@ async fn inspect(
             }
         }))
         .await?;
+        if !pattern.paths_only {
+            verified += found.len();
+        }
         for found in found {
             examined += 1;
             result.scanned += 1;
@@ -309,6 +347,8 @@ async fn inspect(
     Ok(Scan {
         commit: snapshot.commit_oid(),
         result,
+        acceleration: Acceleration::Scanning,
+        verified,
         after: if listings.has_more || examined < entries.len() {
             entries
                 .get(examined.saturating_sub(1))
@@ -326,16 +366,7 @@ async fn file_matches(
     matcher: &Regex,
     operation: &OperationContext,
 ) -> crab_remote_git::Result<Inspection> {
-    let metadata = operation.read_object_metadata(entry.oid).await?;
-    if metadata.size > MAX_FILE_BYTES {
-        return Ok(Inspection::Skipped);
-    }
-    let blob = snapshot.read_blob(&entry.path, operation).await?;
-    if blob.metadata.classification != ContentClassification::OrdinaryGit || blob.bytes.contains(&0)
-    {
-        return Ok(Inspection::Skipped);
-    }
-    let Ok(text) = std::str::from_utf8(&blob.bytes) else {
+    let Some(text) = code_index::text(snapshot, &entry.path, entry.oid, operation).await? else {
         return Ok(Inspection::Skipped);
     };
     let mut hits = text.lines().enumerate().filter_map(|(index, line)| {

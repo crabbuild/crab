@@ -46,6 +46,7 @@ pub(crate) struct Server {
     pub(crate) shutdown_mode: tokio::sync::watch::Sender<cellar::sdk::ShutdownMode>,
     pub(crate) options: RepositoryOptions,
     pub(crate) cursor_key: [u8; 32],
+    pub(crate) code_indexes: crate::repository::code_index::Cache,
     pub(crate) admission: Arc<Semaphore>,
     pub(crate) bulk_reads: Arc<Semaphore>,
     pub(crate) transfer_admission: TransferAdmission,
@@ -84,6 +85,7 @@ impl Server {
             shutdown_mode: tokio::sync::watch::channel(cellar::sdk::ShutdownMode::Preserve).0,
             options: RepositoryOptions::default(),
             cursor_key: [0; 32],
+            code_indexes: Default::default(),
             admission: Arc::new(Semaphore::new(READ_ADMISSION_CAPACITY)),
             bulk_reads: Arc::new(Semaphore::new(BULK_READ_CAPACITY)),
             transfer_admission,
@@ -355,6 +357,7 @@ pub async fn serve(config: Config) -> Result<()> {
         options,
         #[cfg(test)]
         cell_test_runtime: None,
+        code_indexes: Default::default(),
         cursor_key: auth
             .as_ref()
             .map(Authentication::cursor_key)
@@ -425,6 +428,7 @@ pub async fn serve(config: Config) -> Result<()> {
                   background.spawn(async move { background::refresh_catalog(refresh).await; Ok(()) });
                   let projection = server.clone();
                   background.spawn(async move { background::sweep_projections(projection).await });
+                  background.spawn(crate::repository::code_index::run(server.clone()));
                   background.spawn(crate::api::auto_merge::run(server.clone()));
                   let attachments = server.clone();
                   background.spawn(async move { crate::api::discussion_attachments::sweep(attachments).await; Ok(()) });

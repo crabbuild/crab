@@ -30,6 +30,9 @@ test("workspace search clears old results when access changes between pages", as
         json: {
           scanned: revoked ? 0 : 32,
           skipped: 0,
+          indexed_repositories: revoked ? 0 : 1,
+          scanning_repositories: revoked ? 0 : 1,
+          limited_repositories: 0,
           next: revoked ? null : "signed-page",
           groups: revoked
             ? []
@@ -68,6 +71,10 @@ test("workspace search clears old results when access changes between pages", as
     "href",
     `/team/private/blob/${commit}/src/manifest.toml?repository_id=${repository}`,
   );
+  await expect(results.getByText("Index used for 1 repository")).toBeVisible();
+  await expect(
+    results.getByText("On-demand scan for 1 repository"),
+  ).toBeVisible();
   await results.getByRole("button", { name: "Scan next page" }).click();
   await expect(match).toHaveCount(0);
   await expect(results.getByRole("alert")).toContainText("This list changed");

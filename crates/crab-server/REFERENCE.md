@@ -581,20 +581,30 @@ and matching line.
 
 `GET /api/code-search` takes `q`, optional `organization` UUID and
 `directory`, `kind=content|path` (default `content`), `case_sensitive`,
-and `cursor`. It returns `{groups, scanned, skipped, next}`. Groups carry
-`id`, `owner`, `name`, `commit`, and matching `files`. Path matches
-have no excerpts and use the Git tree without fetching file bodies. Each
-page examines up to four repositories, 32 paths per repository, and 20
-matching files. Follow `next` with the same parameters to scan further,
-including after a page with zero matches. A repository in progress keeps
+and `cursor`. It returns `groups`, `scanned` paths, `skipped` files,
+`verified` content candidates checked against Git, and `next`. Groups carry
+`id`, `owner`, `name`, `commit`, and matching `files`. Path matches use
+the Git tree and have no excerpts. Each page examines up to four repositories
+and returns up to 20 matching files. A Git scan considers up to 32 paths per
+repository. An indexed content search can consider all indexed paths and checks
+up to 32 content candidates per repository. Follow `next` with the same
+parameters, including after an empty page. A repository in progress keeps
 the same commit until its scan finishes.
+
+The server builds a default-branch index in the background and keeps one
+published artifact per repository in object storage. It contains paths and
+trigram filters. An index answers only for its exact Git tree. Crab checks
+returned paths and text against Git and reuses unchanged blob filters after
+an update. Short literals and Unicode case-folding cases that the filter
+cannot rule out remain candidates. The page reports `indexed_repositories`,
+`scanning_repositories`, and `limited_repositories`. Crab scans Git while a
+matching index is unavailable or exceeds the artifact or memory limit.
 
 Search considers current readable repositories and checks them again before
 returning excerpts or a cursor. A continuation binds the account, filters,
 and readable repository set. A grant or address change in that scope returns
-HTTP 409, and **Start over** opens a new search. This is an on-demand search.
-Persistent content and symbol indexes and large-catalog performance
-qualification remain separate work.
+HTTP 409, and **Start over** opens a new search. Persistent symbol definitions
+and large-catalog performance qualification remain open.
 
 ### Create a repository in the browser
 
