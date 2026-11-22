@@ -3,6 +3,8 @@
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+mod repository_grants;
+
 use crate::cells::{application::MutationIdentity, repository::*};
 use cellar::{
     bucket::Bucket,

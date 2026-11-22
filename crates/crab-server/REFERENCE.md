@@ -917,6 +917,57 @@ catalog once and indexes grants by UUID. There is no permission cache that waits
 for the routing refresh interval. Explicit local-operator mode bypasses these
 member lookups.
 
+### Assign a repository to an organization
+
+Create or adopt the repository and bootstrap the owning organization. An
+operator binds the existing repository through private management. Use
+`repository list` for the catalog `version` and repository `id`, and use the
+organization UUID returned by bootstrap.
+
+```sh
+crab-server --config server.toml repository set-organization \
+  --owner team --name project --input-file access.json
+```
+
+```json
+{
+  "repository_id": "10000000-0000-4000-8000-000000000001",
+  "expected_revision": 42,
+  "organization": {
+    "id": "10000000-0000-4000-8000-000000000002",
+    "teams": [{"team":"10000000-0000-4000-8000-000000000003","access":"write"}]
+  }
+}
+```
+
+Use an empty `teams` array to bind ownership before granting access. The binding
+preserves the repository UUID, path, and existing individual and signed-group
+grants. Organization owners get repository Admin access. Team grants accept
+Read, Triage, or Write for up to 100 distinct live team UUIDs in the owning
+organization. The operator can replace grants for the existing owner using the
+same command. Transfer to another organization requires a separate operation.
+
+An organization owner with a browser session can read
+`GET /api/repos/{owner}/{name}/team-access` and replace the entire team grant
+list with `PUT` and `{expected_revision, teams}`. The mutation requires the
+session CSRF token and repository UUID header. Keep the returned revision for
+the next edit. A stale change returns 409. Grant changes use the catalog audit
+outbox. Repository admins without organization ownership cannot see or edit
+this list. The repository catalog response includes `organization_id` for
+visible organization-owned repositories in authenticated deployments.
+
+Each protected request resolves current organization and team membership.
+Effective access is the highest valid grant, subject to the Git token's ceiling.
+Removal from a team revokes its contribution on the next request, including
+requests with existing Git and LFS credentials. A separate individual, SSO
+group, or team grant can still confer access. Publication retains its late
+checks. Ordering a removal atomically with an in-flight publication remains a
+separate cross-authority guarantee.
+
+Upgrade all serving peers before binding repositories. Unbound catalog rows
+retain their existing serialization. Old peers reject the new catalog field
+and cannot run the organization authorization read.
+
 ### Configure protected branches
 
 A repository can define at most 100 exact branch rules:
@@ -1586,10 +1637,9 @@ browser uses that capability for state controls. PR `can_manage` controls state
 while `can_merge` still requires code write permission. Role edits use the
 existing revisioned membership catalog and audit chain. Detail capabilities and
 edit admission read durable membership instead of inferring it from a public
-profile or delayed routing snapshot. Rechecks across awaited reads are not an
-atomic cross-authority fence: the planned native grant cutover remains required.
-Maintain, owner/organization/team grants, complete moderation and required-review
-permission parity remain delivery work.
+profile or delayed routing snapshot. Atomic ordering between grant changes and
+in-flight operations remains separate work, along with Maintain, team-backed
+review rosters, complete moderation, and required-review permission parity.
 
 Native issue/PR edit inputs carry `can_triage` instead of their earlier coarse
 management flag. Update fleet peers together before assigning the new role.
@@ -2654,7 +2704,8 @@ unknown fields. Repository Git tokens cannot access these account features.
 Native authorization precedes receipt replay and mutations; last-owner guards,
 invitation decisions, membership tombstones and audit append are transactional.
 
-Organization authority grants no catalog repository access. Registered-account
+Organization ownership grants Admin access to explicitly bound repositories.
+Registered-account
 invitations currently use manually shared acceptance links; email delivery,
 owner-name discovery, nested teams, owner registry and cross-authority repository/project
 fencing remain unfinished. See `CELLAR.md` for preparation, expiry and coordinated
@@ -2688,8 +2739,8 @@ submission controller lives above application routing, so lost acknowledgements
 can recover after navigation or organization removal without retargeting the
 write. New native/HTTP tests live beside their team owners; responsive,
 accessibility, conflict and recovery scenarios live in
-`packages/ui/tests/browser/teams.e2e.ts`. Native team authority does not yet bind
-repository permissions or PR review requests; hierarchy, autocomplete and Projects
+`packages/ui/tests/browser/teams.e2e.ts`. Repository access uses the explicit
+catalog binding described above. Team-based PR review requests and nested teams
 remain separate work.
 
 Current team qualification: 13 native/HTTP team checks, all 476 native regressions

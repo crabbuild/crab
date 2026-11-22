@@ -276,6 +276,11 @@ pub(in crate::cells) fn authorize(
     mutation: bool,
     input: &Value,
 ) -> Result<()> {
+    // Repository authorization and private binding use a typed, bounded read.
+    // The private result contains only matching team IDs and the current owner bit.
+    if !mutation && operation == teams::GetRepositoryTeamAccess::ID {
+        return Ok(());
+    }
     if projects::handles(operation, mutation) {
         return projects::authorize(context, operation, mutation, input);
     }
@@ -334,6 +339,9 @@ pub(in crate::cells) fn dispatch_read(
     input: Value,
 ) -> Result<Value> {
     match operation {
+        teams::GetRepositoryTeamAccess::ID => {
+            invoke_read::<teams::GetRepositoryTeamAccess>(context, input)
+        }
         projects::GetPreparation::ID => invoke_read::<projects::GetPreparation>(context, input),
         projects::GetHistory::ID => invoke_read::<projects::GetHistory>(context, input),
         projects::List::ID => invoke_read::<projects::List>(context, input),

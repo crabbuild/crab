@@ -292,8 +292,14 @@ The UI uses shadcn components and existing Geist/Vercel tokens.
 
 Repository administrators and organization owners can bind explicit aliases
 for closed teams. The private Organization mention read checks sender access,
-team visibility, and current membership epochs. Team review requests, nested
-membership, and team-owned repository or project grants remain separate work.
+team visibility, and current membership epochs.
+
+Repository team grants are catalog-owned alongside the organization binding.
+The native owner read checks live team UUIDs and current organization membership
+epochs. This lets HTTP replicas query one authority for current membership even
+when the team's owner is on another node. The read performs no schema changes.
+Team review requests, nested teams, project grants, and atomic ordering between
+team removals and repository publication remain separate work.
 
 ## Repository collaboration
 
@@ -387,8 +393,8 @@ Native list output adds `review_requested_from_me`. Author, reviewer and comment
 names now share one ordered `people` binding collection, one Directory snapshot,
 digest encoding and validation. Public HTTP cannot supply bindings.
 Update peers together; there is no old list-shape reader or source-scan fallback.
-Team requests, mention search relationships and native grant authority remain separate
-delivery work. Review-status predicates are described below.
+Team review requests and mention search relationships remain separate work.
+Review-status predicates are described below.
 
 ## Reviewer status preparation
 

@@ -172,6 +172,11 @@ Directory enrichment and browser routes. Explicit first-owner bootstrap belongs
 to `server/management/organizations.rs` and `cells bootstrap-organization`.
 Membership checks run inside the shared native transaction before receipt replay;
 repository grants stay catalog-owned. Public sessions cannot bootstrap authority.
+`catalog/` binds repository and organization UUIDs and audits grant replacements.
+`auth/principal/` caps effective roles by credential scope.
+`app.rs` composes current native team and catalog grants for every request.
+`api/members/team_access.rs` authorizes team grant management for current
+organization owners. The native team membership read stays in `teams/`.
 `src/api/profiles/` exposes session-authenticated profile reads/edits without
 exposing authentication claims. `src/server/management/directory.rs` owns explicit
 private initialization; serving never creates its schema implicitly. HTTP authorization and

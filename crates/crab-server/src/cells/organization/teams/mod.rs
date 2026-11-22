@@ -11,6 +11,7 @@ mod access;
 mod commands;
 mod preparation;
 mod reads;
+mod repository_access;
 pub(super) use access::{authorize, handles};
 pub(crate) use commands::{Cancel, Change, Command, Outcome, Request};
 pub use preparation::OrganizationTeamState;
@@ -19,6 +20,9 @@ pub(super) use preparation::{ensure_ready, initialize, membership_changed};
 pub(crate) use reads::{
     Candidates, Get, GetMembership, GetPolicy, List, ListInput, MemberCursor, MemberInput, Members,
     MentionMembers, MentionMembersInput, MentionRoster, Page, QueryCursor, Summary,
+};
+pub(crate) use repository_access::{
+    GetRepositoryTeamAccess, RepositoryTeamAccess, RepositoryTeams,
 };
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
