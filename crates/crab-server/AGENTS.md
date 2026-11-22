@@ -176,8 +176,9 @@ delivers the durable outbox to `cells/directory/notifications.rs`.
 `collaboration/watches.rs` owns private repository and discussion preferences
 and their active watcher indexes. Activity writes enroll participants under
 their qualified identity before scheduling delivery. Watch outbox events carry
-the activity number and advance by bounded
-pages after Directory delivery. `api/notifications/` checks repository access
+the activity number and advance by bounded pages after Directory delivery.
+The mention outbox pins enrollment sources to committed activity and gates
+later watch pages until the inbox delivery and follow commit. `api/notifications/` checks repository access
 and mute state when reading inbox entries.
 
 The native runtime lives in `src/cells/runtime.rs`; `src/cells/client.rs` owns

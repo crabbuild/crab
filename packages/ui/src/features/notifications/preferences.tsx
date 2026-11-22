@@ -79,7 +79,7 @@ export function DiscussionWatch({
         modes={discussionModes}
         label="Notification settings"
         title={title}
-        description="Creating an issue or pull request, posting a comment or review, or changing its state follows future activity. Repository mute still applies."
+        description="You follow future activity when you participate, receive a mention, or are assigned. Repository mute still applies."
       />
     </section>
   );

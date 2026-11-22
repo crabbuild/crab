@@ -4,10 +4,12 @@ use std::{
     time::Duration,
 };
 
+use futures_util::{StreamExt, TryStreamExt, stream};
 use uuid::Uuid;
 
 use super::Server;
 use crate::{
+    RepositoryGroup,
     app::{self, Error, Result},
     catalog::MembershipSnapshot,
     cells::{
@@ -22,7 +24,9 @@ use crate::{
         organization::teams::{MentionMembers, MentionMembersInput, MentionRoster, Page},
         repository::collaboration::{
             mention_settings::{self, Settings},
-            mentions::{Acknowledge, Event, EventKey, Mention, Pending},
+            mentions::{
+                Acknowledge, Enroll, Enrollment, Event, EventKey, FollowSource, Mention, Pending,
+            },
             watches,
         },
     },
@@ -110,7 +114,7 @@ struct DeliveryScope {
     subjects: BTreeSet<String>,
     direct: BTreeSet<Uuid>,
     revision: u64,
-    group_access: bool,
+    groups: Vec<RepositoryGroup>,
 }
 
 async fn team_members(
@@ -216,7 +220,7 @@ impl DeliveryScope {
         } else if self.subjects.contains(&actor.subject) {
             Some(Access::Direct)
         } else {
-            self.group_access.then_some(Access::Group)
+            (!self.groups.is_empty()).then_some(Access::Group)
         }
     }
 
@@ -300,6 +304,55 @@ async fn watched_recipients(
         .collect()
 }
 
+enum Progress {
+    Ready(Option<watches::Key>),
+    WaitingForFollow,
+}
+
+async fn enroll(
+    server: &Server,
+    repo: &Repository,
+    client: &CellClient,
+    scope: &DeliveryScope,
+    source: FollowSource,
+    candidates: Vec<(Recipient, IdentityKey)>,
+) -> Result<()> {
+    let Some(auth) = server.auth.as_ref() else {
+        return Ok(());
+    };
+    // Group notices can be queued for offline readers. A durable follow
+    // requires current signed access evidence for those same accounts.
+    let enrolled: Vec<Option<IdentityKey>> = stream::iter(candidates)
+        .map(|(candidate, identity)| async move {
+            if candidate.access == Access::Direct
+                || auth
+                    .mention_group(&identity.subject, &scope.groups)
+                    .await?
+                    .is_some()
+            {
+                Ok::<_, Error>(Some(identity))
+            } else {
+                Ok(None)
+            }
+        })
+        .buffer_unordered(6)
+        .try_collect()
+        .await?;
+    let recipients: Vec<_> = enrolled.into_iter().flatten().collect();
+    if !recipients.is_empty() && scope.current(server, repo).await? {
+        app::command_output(
+            client
+                .command::<Enroll>(
+                    Address::Repository(repo.id),
+                    app::mutation_identity()?,
+                    Enrollment { source, recipients },
+                )
+                .await,
+        )?;
+    }
+    Ok(())
+}
+
 async fn deliver(
     server: &Server,
     repo: &Repository,
@@ -307,7 +360,7 @@ async fn deliver(
     scope: &DeliveryScope,
     settings: &Settings,
     event: &Event,
-) -> Result<Option<watches::Key>> {
+) -> Result<Progress> {
     let notice = Notice {
         id: event.id,
         repository: repo.id,
@@ -316,7 +369,7 @@ async fn deliver(
         sender: event.actor.name.clone(),
     };
     if let Some(watch) = event.watch {
-        let page = app::query_output(
+        let Some(page) = app::query_output(
             client
                 .query::<watches::ListWatchers>(
                     Address::Repository(repo.id),
@@ -328,7 +381,10 @@ async fn deliver(
                     },
                 )
                 .await,
-        )?;
+        )?
+        else {
+            return Ok(Progress::WaitingForFollow);
+        };
         let candidates: Vec<_> = page
             .recipients
             .into_iter()
@@ -342,7 +398,7 @@ async fn deliver(
             )
             .await?;
         }
-        return Ok(page.next);
+        return Ok(Progress::Ready(page.next));
     }
     let sender_key = IdentityKey {
         issuer: event.actor.issuer.clone(),
@@ -373,7 +429,7 @@ async fn deliver(
             event,
             settings,
             sender,
-            (!scope.group_access).then_some(candidates.as_slice()),
+            scope.groups.is_empty().then_some(candidates.as_slice()),
         )
         .await?;
         let previous = expand(&event.previous, &handles, &teams);
@@ -389,7 +445,7 @@ async fn deliver(
             .collect()
     };
     if recipients.is_empty() || !scope.current(server, repo).await? {
-        return Ok(None);
+        return Ok(Progress::Ready(None));
     }
     let recipients: Vec<_> = recipients.into_iter().collect();
     for batch in recipients.chunks(MAX_RECIPIENTS) {
@@ -426,7 +482,7 @@ async fn deliver(
         }
         let unmuted = app::query_output(
             client
-                .query::<watches::Unmuted>(Address::Repository(repo.id), None, qualified)
+                .query::<watches::Unmuted>(Address::Repository(repo.id), None, qualified.clone())
                 .await,
         )?;
         if unmuted.len() != candidates.len() {
@@ -434,14 +490,23 @@ async fn deliver(
                 "Notification preference lookup returned an invalid count",
             ));
         }
-        let recipients = candidates
+        let recipients: Vec<_> = candidates
             .into_iter()
+            .zip(qualified)
             .zip(unmuted)
             .filter_map(|(candidate, enabled)| enabled.then_some(candidate))
             .collect();
-        publish(client, &notice, recipients).await?;
+        publish(
+            client,
+            &notice,
+            recipients.iter().map(|(recipient, _)| *recipient).collect(),
+        )
+        .await?;
+        if let Some(source) = event.follow {
+            enroll(server, repo, client, scope, source, recipients).await?;
+        }
     }
-    Ok(None)
+    Ok(Progress::Ready(None))
 }
 
 pub(crate) async fn drain_repository(server: &Server, repo: &Repository) -> Result<()> {
@@ -480,7 +545,11 @@ pub(crate) async fn drain_repository(server: &Server, repo: &Repository) -> Resu
                 subjects: identities.into_iter().map(|actor| actor.subject).collect(),
                 direct: ids.into_iter().flatten().collect(),
                 revision: snapshot.revision,
-                group_access: auth.is_oidc() && !snapshot.groups.is_empty(),
+                groups: if auth.is_oidc() {
+                    snapshot.groups.clone()
+                } else {
+                    Vec::new()
+                },
             })
         }
         _ => None,
@@ -491,12 +560,15 @@ pub(crate) async fn drain_repository(server: &Server, repo: &Repository) -> Resu
             .await,
     )?;
     for event in events {
-        let next = if let Some(scope) = &roster
-            && (!scope.subjects.is_empty() || scope.group_access)
+        let progress = if let Some(scope) = &roster
+            && (!scope.subjects.is_empty() || !scope.groups.is_empty())
         {
             deliver(server, repo, &cell.client, scope, &settings, &event).await?
         } else {
-            None
+            Progress::Ready(None)
+        };
+        let Progress::Ready(next) = progress else {
+            continue;
         };
         app::command_output(
             cell.client
@@ -508,6 +580,7 @@ pub(crate) async fn drain_repository(server: &Server, repo: &Repository) -> Resu
                         created_at_ms: event.created_at_ms,
                         watch: event.watch,
                         next,
+                        follow: event.follow,
                     },
                 )
                 .await,

@@ -94,12 +94,15 @@ async fn inbox_delivers_a_review_request_and_mention_to_the_current_member() {
         "/api/notifications?unread=true&before={}",
         page["next"].as_str().unwrap()
     );
-    let mentions = h.json(&next, &bob).await;
-    assert_eq!(mentions["next"], Value::Null);
-    assert_eq!(mentions["items"].as_array().unwrap().len(), 1);
-    assert_eq!(mentions["items"][0]["reason"], "mention");
+    let remaining = h.json(&next, &bob).await;
+    assert_eq!(remaining["next"], Value::Null);
+    let [update, mention] = remaining["items"].as_array().unwrap().as_slice() else {
+        panic!("the issue edit and original mention should remain on one page")
+    };
+    assert_eq!(update["reason"], "subscribed");
+    assert_eq!(mention["reason"], "mention");
     assert!(
-        mentions["items"][0]["href"]
+        mention["href"]
             .as_str()
             .unwrap()
             .starts_with("/team/private/issues/1?repository_id=")
@@ -130,7 +133,7 @@ async fn inbox_delivers_a_review_request_and_mention_to_the_current_member() {
             .as_array()
             .unwrap()
             .len(),
-        2
+        3
     );
     assert_eq!(
         h.http
@@ -152,7 +155,7 @@ async fn inbox_delivers_a_review_request_and_mention_to_the_current_member() {
     }
     assert_eq!(
         h.json("/api/notifications?unread=true", &bob).await["items"],
-        mentions["items"]
+        remaining["items"]
     );
     let all = format!("/api/notifications?unread=false&repository={id}");
     assert_eq!(h.json(&all, &bob).await["items"][0]["read"], true);
@@ -170,7 +173,7 @@ async fn inbox_delivers_a_review_request_and_mention_to_the_current_member() {
             .as_array()
             .unwrap()
             .len(),
-        2
+        3
     );
 
     h.server

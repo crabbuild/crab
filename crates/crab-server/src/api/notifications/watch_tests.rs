@@ -5,7 +5,14 @@ use uuid::Uuid;
 
 use crate::{
     RepositoryAccess, RepositoryMember, app,
-    cells::{directory::IdentityKey, repository::collaboration::watches},
+    cells::{
+        Address,
+        directory::{
+            IdentityKey,
+            notifications::{Access, Deliver, Delivery, Notice, Reason, Recipient},
+        },
+        repository::collaboration::{mentions::Pending, watches},
+    },
     test_support::{git, http::Harness},
 };
 
@@ -233,7 +240,7 @@ async fn watch_fanout_advances_over_ineligible_pages() {
 }
 
 #[tokio::test]
-async fn discussion_preferences_override_repository_watch_without_suppressing_mentions() {
+async fn discussion_preferences_override_repository_watch_and_mentions_restore_following() {
     let h = Harness::new(false).await;
     let alice = h.login().await;
     let first = format!("{ROOT}/issues/1");
@@ -346,7 +353,11 @@ async fn discussion_preferences_override_repository_watch_without_suppressing_me
         1
     );
 
-    choose("inherit", 3).await.error_for_status().unwrap();
+    assert_eq!(
+        h.json(&preference, &bob).await,
+        json!({"mode":"follow","version":4})
+    );
+    choose("inherit", 4).await.error_for_status().unwrap();
     comment(&first, "Back to the repository setting").await;
     h.deliver_notifications("team", "private").await;
     assert_eq!(
@@ -440,5 +451,211 @@ async fn participation_follows_before_delivery_and_fences_a_newer_choice() {
     );
     h.deliver_notifications("team", "private").await;
     assert_eq!(h.json(WATCHED, &bob).await, replayed);
+    h.close().await;
+}
+
+#[tokio::test]
+async fn a_reply_waits_for_the_mention_that_subscribes_its_recipient() {
+    let h = Harness::new(false).await;
+    let alice = h.login().await;
+    *h.provider.mode.lock().await = "member".into();
+    let bob = h.login().await;
+    let profile: Value = h
+        .write(
+            Method::POST,
+            "/api/profile",
+            &bob,
+            json!({"request_id":Uuid::now_v7(),"handle":"bob","name":"Bob"}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    // Occupy the first follow page with earlier unresolved handles.
+    for number in 0..16 {
+        h.write(
+            Method::POST,
+            &format!("{ROOT}/issues"),
+            &alice,
+            json!({"request_id":Uuid::now_v7(),"title":format!("Earlier issue {number}"),"body":"@unregistered"}),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+    }
+    h.write(
+        Method::POST,
+        &format!("{ROOT}/issues"),
+        &alice,
+        json!({"request_id":Uuid::now_v7(),"title":"Mentioned on this issue","body":"Please check this @bob."}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    h.write(
+        Method::POST,
+        &format!("{ROOT}/issues/17/comments"),
+        &alice,
+        json!({"request_id":Uuid::now_v7(),"body":"A reply before the mention worker."}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+
+    let preference = format!("{ROOT}/issues/17/subscription");
+    h.deliver_notifications("team", "private").await;
+    assert_eq!(
+        h.json(&preference, &bob).await,
+        json!({"mode":"inherit","version":0})
+    );
+    assert_eq!(h.json(WATCHED, &bob).await["items"], json!([]));
+
+    // Directory can commit delivery before the worker finishes enrollment.
+    // Replay that partial outcome and keep the user's existing read state.
+    let repo = &h.server.repositories.values()[0];
+    let cell = app::repository_cell(&h.server, repo).unwrap();
+    let events = cell
+        .client
+        .query::<Pending>(&cell.target, None, ())
+        .await
+        .unwrap()
+        .output;
+    let source = events.iter().find(|event| event.follow.is_some()).unwrap();
+    let notice = Notice {
+        id: source.id,
+        repository: repo.id,
+        target: source.target,
+        created_at_ms: source.created_at_ms,
+        sender: source.actor.name.clone(),
+    };
+    cell.client
+        .command::<Deliver>(
+            Address::Directory,
+            app::mutation_identity().unwrap(),
+            Delivery {
+                notice: notice.clone(),
+                recipients: vec![Recipient {
+                    actor: serde_json::from_value(profile["id"].clone()).unwrap(),
+                    reason: Reason::Mention,
+                    access: Access::Direct,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+    h.write(
+        Method::PUT,
+        &format!("/api/notifications/{}/read", notice.id),
+        &bob,
+        json!({"created_at_ms":notice.created_at_ms}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+
+    h.deliver_notifications("team", "private").await;
+    assert_eq!(
+        h.json(&preference, &bob).await,
+        json!({"mode":"follow","version":1})
+    );
+    let inbox = h.json("/api/notifications", &bob).await;
+    let items = inbox["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0]["reason"], "subscribed");
+    assert!(
+        items[0]["href"]
+            .as_str()
+            .unwrap()
+            .ends_with("#issuecomment-1")
+    );
+    assert_eq!(items[1]["reason"], "mention");
+    assert_eq!(items[1]["read"], true);
+    h.deliver_notifications("team", "private").await;
+    assert_eq!(h.json("/api/notifications", &bob).await, inbox);
+    h.close().await;
+}
+
+#[tokio::test]
+async fn a_newer_unsubscribe_survives_assignment_delivery_and_reassignment_follows() {
+    let h = Harness::new(false).await;
+    let alice = h.login().await;
+    let bob_id = h.assignee_id(&alice, "Bob").await;
+    *h.provider.mode.lock().await = "member".into();
+    let bob = h.login().await;
+    issue(
+        &h,
+        &alice,
+        "Assigned to this discussion",
+        Some(bob_id.clone()),
+    )
+    .await;
+
+    let preference = format!("{ROOT}/issues/1/subscription");
+    h.write(
+        Method::PUT,
+        &preference,
+        &bob,
+        json!({"mode":"unsubscribed","version":0}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    h.deliver_notifications("team", "private").await;
+    assert_eq!(
+        h.json(&preference, &bob).await,
+        json!({"mode":"unsubscribed","version":1})
+    );
+    let assigned = "/api/notifications?reason=assigned";
+    assert_eq!(
+        h.json(assigned, &bob).await["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let path = format!("{ROOT}/issues/1");
+    for (version, assignees) in [(1, json!([])), (2, json!([bob_id]))] {
+        h.write(
+            Method::PATCH,
+            &path,
+            &alice,
+            json!({"version":version,"assignee_ids":assignees}),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+    }
+    h.write(
+        Method::POST,
+        &format!("{path}/comments"),
+        &alice,
+        json!({"request_id":Uuid::now_v7(),"body":"Reply after reassigning."}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    h.deliver_notifications("team", "private").await;
+    assert_eq!(
+        h.json(&preference, &bob).await,
+        json!({"mode":"follow","version":2})
+    );
+    let watched = h.json(WATCHED, &bob).await;
+    assert_eq!(watched["items"].as_array().unwrap().len(), 1);
+    assert!(
+        watched["items"][0]["href"]
+            .as_str()
+            .unwrap()
+            .ends_with("#issuecomment-1")
+    );
+    assert_eq!(
+        h.json(assigned, &bob).await["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
     h.close().await;
 }

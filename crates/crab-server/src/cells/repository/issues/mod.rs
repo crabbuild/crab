@@ -124,23 +124,14 @@ impl Mutation for CreateIssue {
         let target = Target::Issue {
             number: record.number,
         };
+        let source = activity::append(context, target, &record.author, Action::Created)?;
         crate::cells::repository::collaboration::body_written(
             context,
-            target,
-            &record.author,
-            record.version,
+            &source,
             None,
             &record.body,
         )?;
-        activity::append(context, target, &record.author, Action::Created)?;
-        collaboration::mentions::assigned(
-            context,
-            target,
-            &record.author,
-            record.version,
-            &[],
-            &record.assignees,
-        )?;
+        collaboration::mentions::assigned(context, &source, &[], &record.assignees)?;
         creation::assign_milestone(
             context,
             Subject {
@@ -273,16 +264,9 @@ pub(in crate::cells::repository) fn append_comment(
         issue: record.issue,
         number: record.number,
     };
-    crate::cells::repository::collaboration::body_written(
-        context,
-        target,
-        &record.author,
-        record.version,
-        None,
-        &record.body,
-    )?;
     search::contributions::project(context, target, &record.author, &record.body)?;
-    activity::append(context, target, &record.author, Action::Created)?;
+    let source = activity::append(context, target, &record.author, Action::Created)?;
+    crate::cells::repository::collaboration::body_written(context, &source, None, &record.body)?;
     Ok(record)
 }
 
@@ -464,28 +448,19 @@ impl UpdateIssue {
         let target = Target::Issue {
             number: issue.number,
         };
-        if let Some(previous) = previous_assignees {
-            collaboration::mentions::assigned(
-                context,
-                target,
-                &input.actor,
-                issue.version,
-                &previous,
-                &issue.assignees,
-            )?;
-        }
         if edited {
+            let source = activity::append(context, target, &input.actor, Action::Updated)?;
+            if let Some(previous) = previous_assignees {
+                collaboration::mentions::assigned(context, &source, &previous, &issue.assignees)?;
+            }
             if let Some(previous) = previous_body.as_deref() {
                 crate::cells::repository::collaboration::body_written(
                     context,
-                    target,
-                    &input.actor,
-                    issue.version,
+                    &source,
                     Some(previous),
                     &issue.body,
                 )?;
             }
-            activity::append(context, target, &input.actor, Action::Updated)?;
         }
         if was_closed != (issue.state != 0) {
             let action = if issue.state == 0 {
@@ -622,16 +597,14 @@ impl Mutation for UpdateComment {
                 issue: comment.issue,
                 number: comment.number,
             };
+            search::contributions::edit(context, target, &comment.body)?;
+            let source = activity::append(context, target, &input.actor, Action::Updated)?;
             crate::cells::repository::collaboration::body_written(
                 context,
-                target,
-                &input.actor,
-                comment.version,
+                &source,
                 Some(&previous_comment),
                 &comment.body,
             )?;
-            search::contributions::edit(context, target, &comment.body)?;
-            activity::append(context, target, &input.actor, Action::Updated)?;
         }
         Ok(MutationResult::Success(UpdateCommentOutcome::Updated(
             comment,

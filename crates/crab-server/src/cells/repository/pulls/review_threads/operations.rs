@@ -116,21 +116,19 @@ impl Mutation for CreatePullReviewThread {
             pull: record.pull,
             number: record.number,
         };
-        crate::cells::repository::collaboration::body_written(
-            context,
-            target,
-            &record.author,
-            record.version,
-            None,
-            &record.body,
-        )?;
         crate::cells::repository::search::contributions::project(
             context,
             target,
             &record.author,
             &record.body,
         )?;
-        activity::append(context, target, &record.author, Action::Created)?;
+        let source = activity::append(context, target, &record.author, Action::Created)?;
+        crate::cells::repository::collaboration::body_written(
+            context,
+            &source,
+            None,
+            &record.body,
+        )?;
         Ok(MutationResult::Success(
             CreatePullReviewThreadOutcome::Created(Box::new(record)),
         ))
@@ -242,18 +240,16 @@ impl Mutation for UpdatePullReviewThread {
             number: record.number,
         };
         if edited {
+            let source = activity::append(context, target, &input.actor, Action::Updated)?;
             if let Some(previous) = previous_body.as_deref() {
                 crate::cells::repository::collaboration::body_written(
                     context,
-                    target,
-                    &input.actor,
-                    record.version,
+                    &source,
                     Some(previous),
                     &record.body,
                 )?;
             }
             crate::cells::repository::search::contributions::edit(context, target, &record.body)?;
-            activity::append(context, target, &input.actor, Action::Updated)?;
         }
         if was_resolved != record.resolved {
             let action = if record.resolved {
@@ -368,21 +364,19 @@ impl Mutation for CreatePullReviewReply {
             thread: record.thread,
             number: record.number,
         };
-        crate::cells::repository::collaboration::body_written(
-            context,
-            target,
-            &record.author,
-            record.version,
-            None,
-            &record.body,
-        )?;
         crate::cells::repository::search::contributions::project(
             context,
             target,
             &record.author,
             &record.body,
         )?;
-        activity::append(context, target, &record.author, Action::Created)?;
+        let source = activity::append(context, target, &record.author, Action::Created)?;
+        crate::cells::repository::collaboration::body_written(
+            context,
+            &source,
+            None,
+            &record.body,
+        )?;
         Ok(MutationResult::Success(
             CreatePullReviewReplyOutcome::Created(record),
         ))
@@ -452,16 +446,14 @@ impl Mutation for UpdatePullReviewReply {
                 thread: record.thread,
                 number: record.number,
             };
+            crate::cells::repository::search::contributions::edit(context, target, &record.body)?;
+            let source = activity::append(context, target, &input.actor, Action::Updated)?;
             crate::cells::repository::collaboration::body_written(
                 context,
-                target,
-                &input.actor,
-                record.version,
+                &source,
                 Some(&previous_comment),
                 &record.body,
             )?;
-            crate::cells::repository::search::contributions::edit(context, target, &record.body)?;
-            activity::append(context, target, &input.actor, Action::Updated)?;
         }
         Ok(MutationResult::Success(
             UpdatePullReviewReplyOutcome::Updated(record),

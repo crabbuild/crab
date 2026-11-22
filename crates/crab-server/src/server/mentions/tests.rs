@@ -108,12 +108,15 @@ async fn committed_mentions_deliver_once_and_inbox_hides_revoked_repository() {
     .error_for_status()
     .unwrap();
     super::drain_repository(&h.server, repo).await.unwrap();
-    let inbox = h.json(INBOX, &bob).await;
+    let mentions = format!("{INBOX}?reason=mention");
+    let inbox = h.json(&mentions, &bob).await;
     let [current] = inbox["items"].as_array().unwrap().as_slice() else {
-        panic!("replay and equivalent mention spellings must not add a notice")
+        panic!("replay and equivalent mention spellings must not add a mention")
     };
     assert_eq!(current["id"], notice["id"]);
     assert_eq!(current["read"], true);
+    let updates = h.json(&format!("{INBOX}?reason=subscribed"), &bob).await;
+    assert_eq!(updates["items"].as_array().unwrap().len(), 1);
     assert_eq!(h.json(INBOX, &alice).await["items"], json!([]));
 
     let mut members = repo.config.members.clone();
@@ -245,6 +248,13 @@ async fn team_notifications(group_only: bool) {
         let item = items.iter().find(|item| item["title"] == title).unwrap();
         assert_eq!(item["reason"], reason);
     }
+    let preference = format!("{ISSUES}/1/subscription");
+    let expected = if group_only {
+        json!({"mode":"inherit","version":0})
+    } else {
+        json!({"mode":"follow","version":1})
+    };
+    assert_eq!(h.json(&preference, &bob).await, expected);
     assert_eq!(h.json(INBOX, &alice).await["items"], json!([]));
     if group_only {
         assert_eq!(h.json(UNREAD, &bob).await, json!({"unread":true}));
@@ -259,6 +269,15 @@ async fn team_notifications(group_only: bool) {
         .error_for_status()
         .unwrap();
         assert_eq!(h.json(INBOX, &bob).await["items"][0]["read"], true);
+        issue(
+            &h, &alice,
+            json!({"request_id":Uuid::now_v7(),"title":"Signed access","body":"@bob can you confirm?"}),
+        ).await;
+        super::drain_repository(&h.server, repo).await.unwrap();
+        assert_eq!(
+            h.json(&format!("{ISSUES}/4/subscription"), &bob).await,
+            json!({"mode":"follow","version":1})
+        );
         h.provider.claims.lock().await.remove("groups");
         let without_claim = h.login().await;
         assert_eq!(

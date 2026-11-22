@@ -23,9 +23,7 @@ pub(crate) use target::Target;
 
 pub(in crate::cells::repository) fn body_written(
     context: &Transaction<'_>,
-    target: Target,
-    actor: &super::RepositoryAuthor,
-    version: u64,
+    source: &activity::Event,
     previous: Option<&str>,
     body: &str,
 ) -> crate::cells::Result<()> {
@@ -33,8 +31,8 @@ pub(in crate::cells::repository) fn body_written(
         return Ok(());
     }
     // Body side effects commit with the same native write and its receipt.
-    attachments::claim(context, target, actor, body)?;
-    mentions::record(context, target, actor, version, previous, body)
+    attachments::claim(context, source.target, &source.actor, body)?;
+    mentions::record(context, source, previous, body)
 }
 
 const PREFIX: &str = "collaboration/v1";

@@ -49,6 +49,7 @@ pub(in crate::cells) fn dispatch_mutation(
         attachments::Expire::ID => invoke_mutation::<attachments::Expire>(context, input),
         attachments::Collect::ID => invoke_mutation::<attachments::Collect>(context, input),
         mentions::Acknowledge::ID => invoke_mutation::<mentions::Acknowledge>(context, input),
+        mentions::Enroll::ID => invoke_mutation::<mentions::Enroll>(context, input),
         mention_settings::Set::ID => invoke_mutation::<mention_settings::Set>(context, input),
         watches::Set::ID => invoke_mutation::<watches::Set>(context, input),
         watches::SetThread::ID => invoke_mutation::<watches::SetThread>(context, input),

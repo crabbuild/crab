@@ -8,16 +8,17 @@ use crate::cells::{
     Error, Result,
     application::{Mutation, MutationResult, Read, Transaction},
     directory::{IdentityKey, validate_handle},
-    repository::{self, RepositoryAuthor, assignments::Assignee, timestamp, validate_number},
+    repository::{self, RepositoryAuthor, assignments::Assignee},
 };
 
 use super::{
-    Target,
+    Subject, Target, activity,
     mention_settings::{self, Settings},
     watches,
 };
 
 const OUTBOX: &str = "collaboration/v1/mentions/outbox/";
+const FOLLOW_OUTBOX: &str = "collaboration/v2/watches/follow-outbox/";
 const MAX_MENTIONS: usize = 20;
 const BATCH: usize = 32;
 
@@ -45,6 +46,61 @@ pub(crate) struct Event {
     pub assignees: Vec<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watch: Option<Watch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow: Option<FollowSource>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FollowSource {
+    pub activity: u64,
+    pub event: Uuid,
+}
+
+impl FollowSource {
+    fn key(self) -> String {
+        format!(
+            "{FOLLOW_OUTBOX}{:016x}/{:032x}",
+            !self.activity,
+            !self.event.as_u128()
+        )
+    }
+
+    fn pending(self, subject: Subject) -> String {
+        format!(
+            "{}{:016x}/{:032x}",
+            pending_prefix(subject),
+            !self.activity,
+            !self.event.as_u128()
+        )
+    }
+}
+
+fn pending_prefix(subject: Subject) -> String {
+    format!(
+        "collaboration/v2/watches/discussions/{}/pending-follows/",
+        subject.key()
+    )
+}
+
+pub(super) fn earlier_follow(
+    context: &Transaction<'_>,
+    subject: Subject,
+    activity: u64,
+) -> Result<bool> {
+    // An unresolved source only fences events after its activation cutoff.
+    Ok(context
+        .documents::<u64>(&pending_prefix(subject), None, 1)?
+        .first()
+        .is_some_and(|(_, cutoff)| *cutoff < activity))
+}
+
+fn enqueue_follow(context: &Transaction<'_>, event: Event) -> Result<()> {
+    let source = event
+        .follow
+        .ok_or(Error::Invalid("Notification follow source is missing"))?;
+    context.put_document(&source.key(), &event)?;
+    context.put_document(&source.pending(event.target.subject()), &source.activity)
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -62,6 +118,8 @@ pub(crate) struct EventKey {
     pub watch: Option<Watch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next: Option<watches::Key>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow: Option<FollowSource>,
 }
 
 fn key(id: Uuid, created_at_ms: u64) -> String {
@@ -78,11 +136,18 @@ impl Read for Pending {
     type Output = Vec<Event>;
 
     fn execute(context: &mut Transaction<'_>, (): ()) -> Result<Vec<Event>> {
-        context
-            .documents::<Event>(OUTBOX, None, BATCH)?
+        // Reserve capacity for both queues. A blocked watch page must
+        // never keep its unresolved source outside the worker's next page.
+        let follows = context.documents::<Event>(FOLLOW_OUTBOX, None, BATCH / 2)?;
+        let others = context.documents::<Event>(OUTBOX, None, BATCH - follows.len())?;
+        follows
             .into_iter()
+            .chain(others)
             .map(|(stored_key, event)| {
-                if stored_key != key(event.id, event.created_at_ms) {
+                let expected = event
+                    .follow
+                    .map_or_else(|| key(event.id, event.created_at_ms), FollowSource::key);
+                if stored_key != expected {
                     return Err(Error::Invalid(
                         "Mention event key does not match its record",
                     ));
@@ -101,6 +166,13 @@ impl Mutation for Acknowledge {
     type Output = ();
 
     fn execute(context: &mut Transaction<'_>, input: EventKey) -> Result<MutationResult<()>> {
+        if let Some(follow) = input.follow {
+            if let Some(event) = context.document::<Event>(&follow.key())? {
+                context.delete_document(&follow.pending(event.target.subject()))?;
+                context.delete_document(&follow.key())?;
+            }
+            return Ok(MutationResult::Success(()));
+        }
         let key = key(input.id, input.created_at_ms);
         if let Some(expected) = input.watch {
             let Some(mut event) = context.document::<Event>(&key)? else {
@@ -124,9 +196,7 @@ impl Mutation for Acknowledge {
 
 pub(in crate::cells::repository) fn record(
     context: &Transaction<'_>,
-    target: Target,
-    actor: &RepositoryAuthor,
-    version: u64,
+    source: &activity::Event,
     previous: Option<&str>,
     body: &str,
 ) -> Result<()> {
@@ -145,21 +215,26 @@ pub(in crate::cells::repository) fn record(
     if current.difference(&previous).next().is_none() {
         return Ok(());
     }
-    target.validate()?;
-    validate_number(version)?;
-    let event = Event {
-        id: Uuid::now_v7(),
-        target,
-        version,
-        actor: actor.clone(),
-        created_at_ms: timestamp(context.now_ms())?,
-        previous: previous.into_iter().collect(),
-        current: current.into_iter().collect(),
-        reviewers: Vec::new(),
-        assignees: Vec::new(),
-        watch: None,
-    };
-    context.put_document(&key(event.id, event.created_at_ms), &event)
+    let event = Uuid::now_v7();
+    enqueue_follow(
+        context,
+        Event {
+            id: event,
+            target: source.target,
+            version: source.number,
+            actor: source.actor.clone(),
+            created_at_ms: source.created_at,
+            previous: previous.into_iter().collect(),
+            current: current.into_iter().collect(),
+            reviewers: Vec::new(),
+            assignees: Vec::new(),
+            watch: None,
+            follow: Some(FollowSource {
+                activity: source.number,
+                event,
+            }),
+        },
+    )
 }
 
 pub(in crate::cells::repository) fn review_requested(
@@ -192,6 +267,7 @@ pub(in crate::cells::repository) fn review_requested(
             reviewers: reviewers.to_vec(),
             assignees: Vec::new(),
             watch: None,
+            follow: None,
         };
         context.put_document(&key(event.id, event.created_at_ms), &event)?;
     }
@@ -200,9 +276,7 @@ pub(in crate::cells::repository) fn review_requested(
 
 pub(in crate::cells::repository) fn assigned(
     context: &Transaction<'_>,
-    target: Target,
-    actor: &RepositoryAuthor,
-    version: u64,
+    source: &activity::Event,
     previous: &[Assignee],
     current: &[Assignee],
 ) -> Result<()> {
@@ -220,23 +294,67 @@ pub(in crate::cells::repository) fn assigned(
     if assignees.is_empty() {
         return Ok(());
     }
-    let event = Event {
-        id: Uuid::now_v7(),
-        target,
-        version,
-        actor: actor.clone(),
-        created_at_ms: timestamp(context.now_ms())?,
-        previous: Vec::new(),
-        current: Vec::new(),
-        reviewers: Vec::new(),
-        assignees,
-        watch: None,
-    };
-    context.put_document(&key(event.id, event.created_at_ms), &event)
+    let event = Uuid::now_v7();
+    enqueue_follow(
+        context,
+        Event {
+            id: event,
+            target: source.target,
+            version: source.number,
+            actor: source.actor.clone(),
+            created_at_ms: source.created_at,
+            previous: Vec::new(),
+            current: Vec::new(),
+            reviewers: Vec::new(),
+            assignees,
+            watch: None,
+            follow: Some(FollowSource {
+                activity: source.number,
+                event,
+            }),
+        },
+    )
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Enrollment {
+    pub source: FollowSource,
+    pub recipients: Vec<IdentityKey>,
+}
+
+pub(crate) struct Enroll;
+impl Mutation for Enroll {
+    const CLASS: &'static str = repository::CLASS;
+    const ID: u32 = 420;
+    type Input = Enrollment;
+    type Output = ();
+
+    fn execute(context: &mut Transaction<'_>, input: Enrollment) -> Result<MutationResult<()>> {
+        if input.recipients.len() > crate::cells::directory::notifications::MAX_RECIPIENTS {
+            return Err(Error::Invalid("Notification follow batch is too large"));
+        }
+        if let Some(event) = context.document::<Event>(&input.source.key())? {
+            let source =
+                activity::event(context, input.source.activity, Some(event.target.subject()))?
+                    .ok_or(Error::Invalid("Notification follow activity is missing"))?;
+            if event.follow != Some(input.source) || source.target != event.target {
+                return Err(Error::Invalid(
+                    "Notification follow source does not match activity",
+                ));
+            }
+            for actor in &input.recipients {
+                watches::follow_recipient(context, &source, actor)?;
+            }
+        }
+        Ok(MutationResult::Success(()))
+    }
 }
 
 pub(super) fn watched(context: &Transaction<'_>, source: &super::activity::Event) -> Result<()> {
-    if !watches::active(context, source)? {
+    if !watches::active(context, source)?
+        && !earlier_follow(context, source.target.subject(), source.number)?
+    {
         return Ok(());
     }
     let event = Event {
@@ -250,6 +368,7 @@ pub(super) fn watched(context: &Transaction<'_>, source: &super::activity::Event
         reviewers: Vec::new(),
         assignees: Vec::new(),
         watch: Some(Watch::default()),
+        follow: None,
     };
     context.put_document(&key(event.id, event.created_at_ms), &event)
 }

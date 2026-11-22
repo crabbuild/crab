@@ -339,6 +339,15 @@ sequence as the cutoff. The outbox resolves qualified watchers to Directory
 accounts after checking repository access. Direct activity uses the same
 repository mute rules.
 
+A new mention or assignment stores an enrollment source with the committed
+activity and indexes the pending source under its typed discussion. Workers
+deliver the direct notice and apply the follow before acknowledging the
+source. Later watch pages wait for earlier sources on their own discussion.
+A reserved share of the outbox page lets the source advance even if watch
+delivery is waiting. Enrollment uses the existing Directory event identity
+for delivery and the source activity number for preference ordering. A newer
+manual choice wins and replay keeps the existing Directory read state.
+
 Discussion author enrichment uses the bounded native `LookupActors` read (Directory
 operation 6). It resolves qualified private keys into public UUID/handle/name
 summaries in one snapshot, with no repository record or schema change. Directory

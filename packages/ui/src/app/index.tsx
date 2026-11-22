@@ -280,7 +280,7 @@ export function App() {
                 codeTheme={codeTheme}
                 setCodeTheme={selectCodeTheme}
               />
-              {session.data?.authenticated && (
+              {session.data?.user && (
                 <NotificationLink current={notifications} />
               )}
               {session.data?.authenticated && (

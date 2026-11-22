@@ -138,23 +138,9 @@ fn write_pull(
     let target = Target::Pull {
         number: record.number,
     };
-    crate::cells::repository::collaboration::body_written(
-        context,
-        target,
-        &record.author,
-        record.version,
-        None,
-        &record.body,
-    )?;
-    activity::append(context, target, &record.author, Action::Created)?;
-    collaboration::mentions::assigned(
-        context,
-        target,
-        &record.author,
-        record.version,
-        &[],
-        &record.assignees,
-    )?;
+    let source = activity::append(context, target, &record.author, Action::Created)?;
+    crate::cells::repository::collaboration::body_written(context, &source, None, &record.body)?;
+    collaboration::mentions::assigned(context, &source, &[], &record.assignees)?;
     creation::assign_milestone(
         context,
         Subject {
@@ -296,28 +282,19 @@ impl Mutation for UpdatePull {
         let target = Target::Pull {
             number: pull.number,
         };
-        if let Some(previous) = previous_assignees {
-            collaboration::mentions::assigned(
-                context,
-                target,
-                &input.actor,
-                pull.version,
-                &previous,
-                &pull.assignees,
-            )?;
-        }
         if edited {
+            let source = activity::append(context, target, &input.actor, Action::Updated)?;
+            if let Some(previous) = previous_assignees {
+                collaboration::mentions::assigned(context, &source, &previous, &pull.assignees)?;
+            }
             if let Some(previous) = previous_body.as_deref() {
                 crate::cells::repository::collaboration::body_written(
                     context,
-                    target,
-                    &input.actor,
-                    pull.version,
+                    &source,
                     Some(previous),
                     &pull.body,
                 )?;
             }
-            activity::append(context, target, &input.actor, Action::Updated)?;
         }
         if was_closed != (pull.state != PullState::Open) {
             let action = if pull.state == PullState::Open {

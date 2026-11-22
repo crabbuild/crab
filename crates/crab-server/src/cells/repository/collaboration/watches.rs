@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::{Subject, SubjectKind, activity, next_version};
+use super::{Subject, SubjectKind, activity, mentions, next_version};
 use crate::cells::{
     Error, Result,
     application::{Mutation, MutationResult, Read, Transaction},
@@ -174,6 +174,8 @@ pub(crate) struct ThreadPreference {
 struct ThreadSubscription {
     preference: ThreadPreference,
     after: u64,
+    #[serde(default)]
+    choice_after: u64,
 }
 
 fn thread_key(subject: Subject, actor: Key) -> String {
@@ -238,20 +240,30 @@ pub(super) fn participate(context: &Transaction<'_>, source: &activity::Event) -
         issuer: source.actor.issuer.clone(),
         subject: source.actor.subject.clone(),
     };
-    let key = identity_key(&actor)?;
+    follow_recipient(context, source, &actor)
+}
+
+pub(super) fn follow_recipient(
+    context: &Transaction<'_>,
+    source: &activity::Event,
+    actor: &IdentityKey,
+) -> Result<()> {
+    let key = identity_key(actor)?;
     if subscription(context, key)?.preference.mode == Mode::Muted {
         return Ok(());
     }
     let subject = source.target.subject();
     let mut current = thread_subscription(context, subject, key)?;
-    if current.preference.mode != ThreadMode::Follow {
-        // Use the committed participation sequence so neither replay nor a
-        // delivery backlog can move the follow before its actual trigger.
+    // A mention can be processed after the reader makes a newer choice.
+    // The source sequence, rather than delivery time, decides which wins.
+    if current.preference.mode != ThreadMode::Follow
+        && current.after.max(current.choice_after) < source.number
+    {
         current.after = source.number;
         save_thread(
             context,
             subject,
-            &actor,
+            actor,
             key,
             &mut current,
             ThreadMode::Follow,
@@ -327,8 +339,9 @@ impl Mutation for SetThread {
         }
         // Narrowing an existing follow keeps already selected state changes.
         // Other transitions start at the current activity boundary.
+        current.choice_after = activity::latest(context)?;
         if (current.preference.mode, mode) != (ThreadMode::Follow, ThreadMode::StateChanges) {
-            current.after = activity::latest(context)?;
+            current.after = current.choice_after;
         }
         let saved = save_thread(
             context,
@@ -381,9 +394,12 @@ impl Read for ListWatchers {
     const CLASS: &'static str = CLASS;
     const ID: u32 = 417;
     type Input = Query;
-    type Output = WatchPage;
+    type Output = Option<WatchPage>;
 
-    fn execute(context: &mut Transaction<'_>, input: Query) -> Result<WatchPage> {
+    fn execute(context: &mut Transaction<'_>, input: Query) -> Result<Self::Output> {
+        if mentions::earlier_follow(context, input.subject, input.activity)? {
+            return Ok(None);
+        }
         let event = activity::event(context, input.activity, Some(input.subject))?
             .ok_or(Error::Invalid("Watch activity is missing"))?;
         let state_changed = matches!(
@@ -436,10 +452,10 @@ impl Read for ListWatchers {
         }
         // Advance over the scanned keys, including late subscriptions that do
         // not qualify for the event. A filtered page can still have successors.
-        Ok(WatchPage {
+        Ok(Some(WatchPage {
             recipients,
             next: last.filter(|_| more),
-        })
+        }))
     }
 }
 
