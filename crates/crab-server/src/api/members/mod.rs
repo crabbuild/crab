@@ -1,5 +1,5 @@
 pub(in crate::api) mod roster;
-mod team_access;
+pub(super) mod team_access;
 
 use std::sync::Arc;
 

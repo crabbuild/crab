@@ -24,6 +24,7 @@ use crate::{
 };
 
 pub(in crate::api) mod attribution;
+mod saved_replies;
 
 #[derive(Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -36,6 +37,13 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .route("/api/profile", get(own).post(create).patch(edit))
         .route("/api/actors/{id}", get(actor))
         .layer(axum::extract::DefaultBodyLimit::max(2048))
+        .route("/api/profile/saved-replies", get(saved_replies::list))
+        .route(
+            "/api/profile/saved-replies/{id}",
+            axum::routing::put(saved_replies::put)
+                .delete(saved_replies::delete)
+                .layer(axum::extract::DefaultBodyLimit::max(12 * 1024)),
+        )
         .route_layer(middleware::from_fn_with_state(server, app::admit))
 }
 

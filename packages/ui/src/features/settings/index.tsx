@@ -1,12 +1,14 @@
 import { Link } from "@/components/navigation/link";
-import type { Session } from "@/lib/contracts";
-import { type Refs, type Repository } from "@/lib/api";
+import type { OrganizationView, Session } from "@/lib/contracts";
+import { useRequest, type Refs, type Repository } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
 import { DefaultBranchSettings } from "./general";
 import { MemberSettings } from "./members";
+import { MentionSettings } from "./mentions";
 import { BranchProtectionSettings } from "./protections";
 import { IntegrationSettings } from "./integrations";
 import { RepositoryRulesets } from "./rulesets";
+import { RepositoryTeamSettings } from "./team-access";
 
 export function Settings({
   repo,
@@ -20,11 +22,25 @@ export function Settings({
   repo: Repository;
   refs: Refs;
   csrf: string;
-  section: "general" | "branches" | "members" | "integrations" | "rulesets";
+  section:
+    | "general"
+    | "branches"
+    | "members"
+    | "integrations"
+    | "rulesets"
+    | "mentions"
+    | "team-access";
   identity: Session["user"];
   onDefaultChanged: () => void;
   onRepositoryChanged: () => void;
 }) {
+  const organization = identity ? repo.organization_id : undefined;
+  const ownership = useRequest<OrganizationView>(
+    organization
+      ? `/api/organizations/${encodeURIComponent(organization)}`
+      : null,
+  );
+  const teamSection = section === "team-access";
   return (
     <div className="settings-layout">
       <nav className="settings-nav" aria-label="Repository settings">
@@ -64,11 +80,39 @@ export function Settings({
         >
           Integrations
         </Link>
+        {ownership.data?.role === "owner" && (
+          <Link
+            className={teamSection ? "active" : ""}
+            aria-current={teamSection ? "page" : undefined}
+            href={repoHref(repo, { view: "settings", section: "team-access" })}
+          >
+            Team access
+          </Link>
+        )}
+        <Link
+          className={section === "mentions" ? "active" : ""}
+          aria-current={section === "mentions" ? "page" : undefined}
+          href={repoHref(repo, { view: "settings", section: "mentions" })}
+        >
+          Team mentions
+        </Link>
       </nav>
       {section === "rulesets" ? (
         <RepositoryRulesets key={repo.id} repo={repo} csrf={csrf} />
       ) : section === "integrations" ? (
         <IntegrationSettings key={repo.id} repo={repo} csrf={csrf} />
+      ) : teamSection ? (
+        organization ? (
+          <RepositoryTeamSettings
+            repo={repo}
+            organization={organization}
+            csrf={csrf}
+          />
+        ) : (
+          <div className="notice error" role="alert">
+            <p>Team access settings are unavailable.</p>
+          </div>
+        )
       ) : section === "members" ? (
         repo.forked_from ? (
           <div className="notice">
@@ -85,6 +129,8 @@ export function Settings({
         ) : (
           <MemberSettings repo={repo} csrf={csrf} identity={identity} />
         )
+      ) : section === "mentions" ? (
+        <MentionSettings key={repo.id} repo={repo} csrf={csrf} />
       ) : section === "branches" ? (
         <BranchProtectionSettings
           repo={repo}

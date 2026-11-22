@@ -448,14 +448,14 @@ export function RepositoryPage({
       </div>
       {overview &&
         repo.can_fork &&
-        repo.organization &&
+        repo.organization_id &&
         identity &&
         !repo.archived && (
           <div className="flex justify-end px-4 py-2">
             <GitImport
               key={`${identity.issuer}:${identity.subject}:${repo.id}`}
               account={JSON.stringify([identity.issuer, identity.subject])}
-              organization={{ id: repo.organization, name: repo.owner }}
+              organization={{ id: repo.organization_id, name: repo.owner }}
               fork={repo}
               csrf={csrf}
               onImported={(repository) => {
@@ -598,15 +598,14 @@ export function RepositoryPage({
                     refs={data}
                     csrf={csrf}
                     section={
-                      route?.section === "branches"
-                        ? "branches"
-                        : route?.section === "members"
-                          ? "members"
-                          : route?.section === "integrations"
-                            ? "integrations"
-                            : route?.section === "rulesets"
-                              ? "rulesets"
-                              : "general"
+                      route?.section === "branches" ||
+                      route?.section === "members" ||
+                      route?.section === "integrations" ||
+                      route?.section === "rulesets" ||
+                      route?.section === "mentions" ||
+                      route?.section === "team-access"
+                        ? route.section
+                        : "general"
                     }
                     identity={identity}
                     onDefaultChanged={refs.retry}

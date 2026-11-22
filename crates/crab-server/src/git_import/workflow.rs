@@ -142,7 +142,7 @@ async fn import_repository(
         if record.id != id
             || record.owner != request.owner
             || record.name != request.name
-            || record.organization != organization.map(|owner| owner.id)
+            || record.organization_id() != organization.map(|owner| owner.id)
             || record.forked_from != request.fork_source
         {
             return Err(ImportError::Catalog(crate::catalog::CatalogError::Conflict));
@@ -411,7 +411,7 @@ async fn validate_destination_policy(
     let record = document
         .repositories
         .iter()
-        .find(|row| row.id == id && row.organization == Some(owner.id))
+        .find(|row| row.id == id && row.organization_id() == Some(owner.id))
         .ok_or(ImportError::DestinationChanged)?;
     let repository = crate::repository::catalog::materialize_record(catalog, record)
         .await

@@ -23,7 +23,6 @@ export interface GitImportJob {
 }
 
 export interface Repository {
-  organization?: string;
   forked_from?: { id: string; owner: string; name: string };
   can_fork?: boolean;
   id: string;
@@ -32,6 +31,7 @@ export interface Repository {
   description: string;
   access: "read" | "write";
   can_admin: boolean;
+  organization_id?: string;
   archive_version: number;
   archived: boolean;
   protection_version: number;
@@ -226,7 +226,19 @@ export async function request<T>(
   signal: AbortSignal,
 ): Promise<{ data: T; timing: Timing }> {
   if (signal.aborted) return Promise.reject(abortReason(signal));
-  const key = requestKey(url);
+  // Stable cross-repository links carry their UUID through the server
+  // redirect. Keep reads bound even if the name changes during page loading.
+  const page = typeof window !== "undefined" ? window.location : undefined;
+  const expected =
+    page && new URLSearchParams(page.search).get("repository_id");
+  const [, owner, name] = page?.pathname.split("/") ?? [];
+  const requested =
+    owner && name && url.startsWith(`/api/repos/${owner}/${name}/`)
+      ? expected
+      : null;
+  const key = requested
+    ? JSON.stringify([requestKey(url), requested])
+    : requestKey(url);
   let shared = inFlightRequests.get(key);
   if (shared?.controller.signal.aborted) {
     inFlightRequests.delete(key);
@@ -238,7 +250,10 @@ export async function request<T>(
       const start = performance.now();
       const response = await fetch(url, {
         signal: controller.signal,
-        headers: { Accept: "application/json" },
+        headers: {
+          Accept: "application/json",
+          ...(requested ? { "X-Crab-Repository-Id": requested } : {}),
+        },
       });
       const body = await parseResponse<unknown>(response);
       return {

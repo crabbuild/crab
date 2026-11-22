@@ -1,351 +1,296 @@
-import { useState, type FormEvent } from "react";
-import { Failure } from "@/components/discussion/failure";
-import { useMutation } from "@/components/discussion/mutations";
+import { useState } from "react";
+import { UsersIcon } from "lucide-react";
+import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import {
+  NativeSelect,
+  NativeSelectOption,
+} from "@/components/ui/native-select";
 import { endpoint, useRequest, type Repository } from "@/lib/api";
-import type { RepositoryMember, TeamListing } from "@/lib/contracts";
+import type {
+  TeamAccessState,
+  TeamAccessUpdate,
+  TeamGrant,
+} from "@/lib/contracts";
+import { teamHref } from "../organizations/teams/model";
+import { TeamPicker } from "./team-picker";
 
-type Role = RepositoryMember["access"];
+const roles = [
+  { value: "read", label: "Read" },
+  { value: "triage", label: "Triage" },
+  { value: "write", label: "Write" },
+] as const;
 
-const roles: Record<Role, string> = {
-  read: "Read",
-  triage: "Triage",
-  write: "Write",
-  admin: "Admin",
-};
-
-interface TeamGrant {
-  team: string;
-  name: string | null;
-  access: Role;
-}
-
-interface TeamAccessState {
-  revision: number;
-  grants: TeamGrant[];
-}
-
-type Edit = {
-  team: string;
-  access: Role;
-  name: string | null;
-  revision: number;
-  remove: boolean;
-};
-
-export function TeamAccessSettings({
+export function RepositoryTeamSettings({
   repo,
+  organization,
   csrf,
-  onChanged,
 }: {
-  repo: Repository & { organization: string };
+  repo: Repository;
+  organization: string;
   csrf: string;
-  onChanged: (expectedRevision: number, revision: number) => void;
 }) {
-  const url = endpoint(repo, "settings/team-access");
-  const request = useRequest<TeamAccessState>(url);
+  const url = endpoint(repo, "team-access");
+  const state = useRequest<TeamAccessState>(url);
   return (
-    <section className="settings-section" aria-labelledby="team-access-heading">
-      <header>
+    <section className="settings-content" aria-labelledby="team-access-title">
+      <div className="settings-title">
         <div>
-          <h3 id="team-access-heading">Team access</h3>
-          <p>Grant repository access to teams in this organization.</p>
+          <h2 id="team-access-title">Team access</h2>
+          <p>
+            Give teams in the owning organization access to this repository.
+          </p>
         </div>
-      </header>
-      <Result state={request} timingLabel="Repository team access">
-        {(state) => (
-          <TeamAccessForm
-            repo={repo}
-            csrf={csrf}
-            state={state}
-            onChanged={onChanged}
-            reload={request.retry}
-          />
-        )}
+      </div>
+      <Result state={state} timingLabel="Repository team access">
+        {(data) =>
+          data.organization.id === organization ? (
+            <GrantEditor
+              initial={data}
+              url={url}
+              repositoryId={repo.id}
+              csrf={csrf}
+              reload={state.retry}
+            />
+          ) : (
+            <p role="alert">Repository ownership changed. Reload the page.</p>
+          )
+        }
       </Result>
     </section>
   );
 }
 
-function TeamAccessForm({
-  repo,
+function GrantEditor({
+  initial,
+  url,
+  repositoryId,
   csrf,
-  state,
-  onChanged,
   reload,
 }: {
-  repo: Repository & { organization: string };
+  initial: TeamAccessState;
+  url: string;
+  repositoryId: string;
   csrf: string;
-  state: TeamAccessState;
-  onChanged: (expectedRevision: number, revision: number) => void;
   reload: () => void;
 }) {
-  const mutation = useMutation(csrf, repo);
-  const [draft, setDraft] = useState<Edit>();
-  const [adding, setAdding] = useState(false);
-
-  function open(grant: TeamGrant, remove: boolean) {
-    mutation.reset();
-    setAdding(false);
-    setDraft({ ...grant, revision: state.revision, remove });
-  }
-
-  function close() {
-    mutation.reset();
-    setAdding(false);
-    setDraft(undefined);
-  }
-
-  async function save(event: FormEvent) {
-    event.preventDefault();
-    if (!draft || draft.revision !== state.revision) return;
-    const body = draft.remove
-      ? { expected_revision: draft.revision }
-      : { expected_revision: draft.revision, access: draft.access };
-    const completed = await mutation.run<{ revision: number }>(
-      endpoint(repo, `settings/team-access/${encodeURIComponent(draft.team)}`),
-      draft.remove ? "DELETE" : "PUT",
-      body,
+  const [state, setState] = useState(initial);
+  const [draft, setDraft] = useState(state.organization.teams);
+  const [names, setNames] = useState(state.team_names);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string>();
+  const [reloadNeeded, setReloadNeeded] = useState(false);
+  const original = state.organization.teams;
+  const selected = new Set(draft.map((grant) => grant.team));
+  const changed =
+    draft.length !== original.length ||
+    original.some(
+      (grant) =>
+        !draft.some(
+          (item) => item.team === grant.team && item.access === grant.access,
+        ),
     );
-    if (completed) {
-      onChanged(draft.revision, completed.revision);
-      close();
-      reload();
+  const unavailable = draft.some((grant) => !names[grant.team]);
+  const locked = saving || reloadNeeded;
+  const organization = state.organization.id;
+
+  function edit(next: TeamGrant[]) {
+    setDraft(next);
+    setSaved(false);
+    setError(undefined);
+  }
+
+  async function save() {
+    if (locked || !changed || unavailable) return;
+    setSaving(true);
+    setSaved(false);
+    setError(undefined);
+    try {
+      const update: TeamAccessUpdate = {
+        expected_revision: state.revision,
+        teams: draft,
+      };
+      const response = await fetch(url, {
+        method: "PUT",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "X-CSRF-Token": csrf,
+          "X-Crab-Repository-Id": repositoryId,
+        },
+        body: JSON.stringify(update),
+      });
+      if (response.status === 401)
+        window.dispatchEvent(new Event("crab-session-expired"));
+      if (
+        response.status === 409 ||
+        response.status === 404 ||
+        response.status === 403
+      ) {
+        setReloadNeeded(true);
+        setError(
+          response.status === 409
+            ? "Repository access changed while you were editing. Reload to review the latest grants."
+            : "Your access to these settings changed. Reload to check your permissions.",
+        );
+        return;
+      }
+      const body = await response.json();
+      if (!response.ok) {
+        setError(body?.error?.message ?? "Team access could not be saved.");
+        return;
+      }
+      const current: TeamAccessState = body;
+      setState(current);
+      setDraft(current.organization.teams);
+      setNames(current.team_names);
+      setSaved(true);
+    } catch {
+      setError(
+        "Couldn’t confirm that team access was saved. Try again or reload the grants.",
+      );
+    } finally {
+      setSaving(false);
     }
   }
 
-  const stale = draft !== undefined && draft.revision !== state.revision;
   return (
-    <div className="grid gap-3 p-4">
-      {state.grants.length ? (
-        <ul className="grid divide-y rounded-md border">
-          {state.grants.map((grant) => (
-            <li
-              key={grant.team}
-              className="flex flex-wrap items-center justify-between gap-2 p-3"
-            >
-              <div className="min-w-0">
-                <strong className="break-words">
-                  {grant.name ?? "Deleted team"}
-                </strong>
-                <p className="text-sm text-muted-foreground">
-                  {roles[grant.access]}
-                </p>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {grant.name && (
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    disabled={mutation.pending}
-                    onClick={() => open(grant, false)}
-                    aria-label={`Change access for ${grant.name}`}
-                  >
-                    Change role
-                  </Button>
-                )}
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <p className="max-w-prose text-muted-foreground">
+          Members get their highest role across team, individual, and SSO group
+          grants.
+        </p>
+        <TeamPicker
+          organization={organization}
+          selected={selected}
+          disabled={locked || draft.length >= 100}
+          onSelect={(team) => {
+            setNames({ ...names, [team.id]: team.name });
+            edit([...draft, { team: team.id, access: "read" }]);
+          }}
+        />
+      </div>
+      {draft.length ? (
+        <ul
+          aria-label="Repository team grants"
+          className="m-0 list-none divide-y rounded-lg border p-0"
+        >
+          {draft.map((grant) => {
+            const name = names[grant.team];
+            const label = name ?? `Unavailable team ${grant.team}`;
+            return (
+              <li
+                key={grant.team}
+                className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 p-3 sm:grid-cols-[minmax(0,1fr)_auto_auto] sm:gap-4"
+              >
+                <div className="col-span-2 flex min-w-0 items-center gap-2 wrap-anywhere sm:col-span-1">
+                  <UsersIcon
+                    aria-hidden="true"
+                    className="size-4 shrink-0 text-muted-foreground"
+                  />
+                  {name ? (
+                    <Link
+                      href={teamHref(organization, grant.team)}
+                      className="min-w-0 font-medium"
+                    >
+                      {name}
+                    </Link>
+                  ) : (
+                    <span className="min-w-0 text-muted-foreground">
+                      {label}
+                    </span>
+                  )}
+                </div>
+                <NativeSelect
+                  aria-label={`Role for ${label}`}
+                  className="w-28"
+                  disabled={locked || !name}
+                  value={grant.access}
+                  onChange={(event) => {
+                    const role = roles.find(
+                      (item) => item.value === event.target.value,
+                    );
+                    if (role)
+                      edit(
+                        draft.map((item) =>
+                          item.team === grant.team
+                            ? { ...item, access: role.value }
+                            : item,
+                        ),
+                      );
+                  }}
+                >
+                  {roles.map(({ value, label }) => (
+                    <NativeSelectOption key={value} value={value}>
+                      {label}
+                    </NativeSelectOption>
+                  ))}
+                </NativeSelect>
                 <Button
-                  type="button"
-                  size="sm"
                   variant="outline"
-                  disabled={mutation.pending}
-                  onClick={() => open(grant, true)}
-                  aria-label={`Remove access for ${grant.name ?? "deleted team"}`}
+                  className="justify-self-end"
+                  aria-label={`Remove ${label}`}
+                  disabled={locked}
+                  onClick={() =>
+                    edit(draft.filter((item) => item.team !== grant.team))
+                  }
                 >
                   Remove
                 </Button>
-              </div>
-            </li>
-          ))}
+              </li>
+            );
+          })}
         </ul>
       ) : (
-        <p className="text-sm text-muted-foreground">
-          No team grants are visible.
+        <p className="rounded-lg border p-4 text-muted-foreground">
+          No teams have access through a team grant.
         </p>
       )}
-      {!draft && !adding && (
+      {unavailable && (
+        <p role="status">Remove grants for unavailable teams before saving.</p>
+      )}
+      <details className="text-muted-foreground">
+        <summary className="w-fit cursor-pointer">
+          What can each role do?
+        </summary>
+        <dl className="mt-2 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1">
+          <dt className="font-medium">Read</dt>
+          <dd>View and clone the repository.</dd>
+          <dt className="font-medium">Triage</dt>
+          <dd>Manage issues and pull requests without pushing code.</dd>
+          <dt className="font-medium">Write</dt>
+          <dd>Push changes and collaborate on the repository.</dd>
+        </dl>
+      </details>
+      {error && (
+        <div className="notice error" role="alert">
+          <p>{error}</p>
+          <Button variant="outline" onClick={reload}>
+            Reload grants
+          </Button>
+        </div>
+      )}
+      {saved && <p role="status">Team access saved.</p>}
+      <div className="flex flex-wrap items-center gap-2">
         <Button
-          type="button"
-          variant="outline"
-          className="justify-self-start"
-          onClick={() => {
-            setAdding(true);
-          }}
+          disabled={locked || !changed || unavailable}
+          onClick={() => void save()}
         >
-          Add team
+          {saving ? "Saving…" : "Save team access"}
         </Button>
-      )}
-      {adding && (
-        <TeamPicker
-          organization={repo.organization}
-          assigned={state.grants}
-          onCancel={close}
-          onChoose={(team) => open(team, false)}
-        />
-      )}
-      {draft && (
-        <form
-          className="grid gap-3 rounded-md border p-3"
-          onSubmit={(event) => void save(event)}
-        >
-          <h4 className="font-semibold">
-            {draft.remove ? "Remove access" : "Set access"} for{" "}
-            {draft.name ?? "deleted team"}
-          </h4>
-          {!draft.remove && (
-            <label className="flex flex-col gap-1">
-              Repository role
-              <select
-                className="w-fit rounded-md border px-2 py-1"
-                value={draft.access}
-                disabled={mutation.pending}
-                onChange={(event) =>
-                  setDraft({ ...draft, access: event.target.value as Role })
-                }
-              >
-                {Object.entries(roles).map(([value, label]) => (
-                  <option key={value} value={value}>
-                    {label}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
-          {stale && (
-            <p role="alert">
-              Repository access changed. Reopen this edit to use the latest
-              access list.
-            </p>
-          )}
-          <Failure message={mutation.error} />
-          <div className="flex flex-wrap gap-2">
-            <Button
-              type="submit"
-              disabled={mutation.pending || stale}
-              variant={draft.remove ? "destructive" : "default"}
-            >
-              {mutation.pending
-                ? "Saving…"
-                : draft.remove
-                  ? "Remove team access"
-                  : "Save team role"}
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              disabled={mutation.pending}
-              onClick={close}
-            >
-              Cancel
-            </Button>
-            {mutation.error && (
-              <Button type="button" variant="outline" onClick={reload}>
-                Reload team access
-              </Button>
-            )}
-          </div>
-        </form>
-      )}
-    </div>
-  );
-}
-
-function TeamPicker({
-  organization,
-  assigned,
-  onChoose,
-  onCancel,
-}: {
-  organization: string;
-  assigned: TeamGrant[];
-  onChoose: (team: TeamGrant) => void;
-  onCancel: () => void;
-}) {
-  const [query, setQuery] = useState("");
-  const [search, setSearch] = useState("");
-  const [after, setAfter] = useState<string>();
-  const params = new URLSearchParams({ search });
-  if (after) params.set("after", after);
-  const teams = useRequest<TeamListing>(
-    `/api/organizations/${encodeURIComponent(organization)}/teams?${params}`,
-  );
-  return (
-    <div className="grid gap-3 rounded-md border p-3">
-      <form
-        className="flex flex-wrap items-end gap-2"
-        onSubmit={(event) => {
-          event.preventDefault();
-          setAfter(undefined);
-          setSearch(query.trim());
-        }}
-      >
-        <label className="grid min-w-0 flex-1 gap-1">
-          Find a team
-          <Input
-            type="search"
-            value={query}
-            maxLength={100}
-            onChange={(event) => setQuery(event.target.value)}
-          />
-        </label>
-        <Button type="submit" variant="outline">
-          Search teams
-        </Button>
-        <Button type="button" variant="ghost" onClick={onCancel}>
-          Cancel
-        </Button>
-      </form>
-      <Result state={teams} timingLabel="Available organization teams">
-        {({ items, next }) => (
-          <div className="grid gap-2">
-            {items.length ? (
-              <ul className="grid divide-y">
-                {items.map(({ team }) => (
-                  <li
-                    key={team.id}
-                    className="flex flex-wrap items-center justify-between gap-2 py-2"
-                  >
-                    <span className="min-w-0 break-words">{team.name}</span>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      aria-label={`Choose ${team.name}`}
-                      disabled={assigned.some(
-                        (grant) => grant.team === team.id,
-                      )}
-                      onClick={() =>
-                        onChoose({
-                          team: team.id,
-                          name: team.name,
-                          access: "read",
-                        })
-                      }
-                    >
-                      Choose
-                    </Button>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p>No teams match this search.</p>
-            )}
-            {next && (
-              <Button
-                type="button"
-                variant="outline"
-                className="justify-self-start"
-                onClick={() => setAfter(next)}
-              >
-                Next teams
-              </Button>
-            )}
-          </div>
+        {changed && !reloadNeeded && (
+          <Button
+            variant="outline"
+            disabled={saving}
+            onClick={() => edit(original)}
+          >
+            Discard changes
+          </Button>
         )}
-      </Result>
+      </div>
     </div>
   );
 }

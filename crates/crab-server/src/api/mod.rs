@@ -1,11 +1,13 @@
 mod activity;
 mod archive;
+pub(crate) mod asset_transfer;
 mod assignees;
 mod branches;
 mod catalog;
 mod checks;
 mod contents;
 mod conversation;
+pub(crate) mod discussion_attachments;
 mod discussion_bulk;
 mod discussion_creation;
 mod discussion_search;
@@ -16,6 +18,7 @@ mod labels;
 mod links;
 mod members;
 mod milestones;
+mod notifications;
 mod organizations;
 mod profiles;
 mod projects;
@@ -31,9 +34,7 @@ mod write;
 mod contracts;
 
 mod code_search;
-mod inbox;
 mod integrations;
-mod mentions;
 mod query;
 mod read_admission;
 mod representation;
@@ -531,15 +532,16 @@ pub(crate) async fn read(
 pub(crate) fn routes(server: Arc<Server>) -> axum::Router<Arc<Server>> {
     axum::Router::new()
         .merge(profiles::routes(Arc::clone(&server)))
+        .merge(notifications::routes(Arc::clone(&server)))
         .merge(organizations::routes(Arc::clone(&server)))
         .merge(members::routes())
         .merge(milestones::routes(Arc::clone(&server)))
         .merge(activity::routes(Arc::clone(&server)))
-        .merge(inbox::routes(Arc::clone(&server)))
         .merge(integrations::routes(Arc::clone(&server)))
         .merge(conversation::routes(Arc::clone(&server)))
         .merge(discussion_state::routes(Arc::clone(&server)))
         .merge(discussion_bulk::routes(Arc::clone(&server)))
+        .merge(discussion_attachments::routes())
         .merge(links::routes(Arc::clone(&server)))
         .merge(projects::routes(Arc::clone(&server)))
         .merge(results::routes(Arc::clone(&server)))

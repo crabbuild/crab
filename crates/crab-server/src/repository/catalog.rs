@@ -181,7 +181,7 @@ pub(crate) async fn materialize_record(
             record.placement_generation,
         )?,
     );
-    repository.organization = record.organization;
+    repository.organization = record.organization_id();
     repository.forked_from = record.forked_from;
     Ok(repository)
 }

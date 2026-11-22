@@ -227,6 +227,28 @@ State navigation and filter menus use joined buttons, with horizontal scrolling
 for filters on narrow screens. Personal navigation uses a pencil for authored
 work and a person for assignments. Shared Markdown editors retain their header
 and minimum body height across Write/Preview, including the wrapped mobile toolbar.
+Type `/` on a new line for alerts, fenced code, details, tables, task lists,
+dividers, and emoji. In a repository, `@` searches collaborators, including
+SSO group members with a current verified session, and `#` searches issues and
+pull requests by number or title. Arrow keys move through suggestions,
+Enter or Tab inserts one, and Escape dismisses the menu. Choosing a collaborator
+or work item inserts a Markdown link that stays clickable in Preview and after
+submission. Pasting an HTTP or HTTPS URL over selected text turns that text into
+a link.
+Use `/saved-replies` to insert an account snippet from **Account settings →
+Saved replies**. A `%cursor%` marker places the caret within the inserted text.
+Type `owner/repo#` to search a different repository. Pick the issue or pull
+request to save a stable link. When posting plain cross-repository shorthand,
+Crab binds it to a stable link if the author can see exactly one matching item.
+Plain shorthand displayed in older text resolves under the reader’s access.
+Issue, pull request, comment, and review composers support selecting, pasting
+or dropping files. Upload entries can be retried or removed while editing.
+Type `@org/team` to suggest a team from the repository's configured aliases.
+Repository administrators can set these up with an organization owner under
+**Settings → Team mentions**. The bell highlights unread mentions and opens
+the account's private inbox. Group-backed repositories appear when the current
+SSO session grants access. Open a discussion from its notification or mark the
+notification read.
 
 Use the primitive APIs directly: buttons contain icons with `data-icon`, inputs
 with addons use `InputGroup`, menus compose their groups/items, and forms use

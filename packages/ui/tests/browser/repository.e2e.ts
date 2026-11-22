@@ -997,7 +997,10 @@ test("new issue Markdown toolbar formats selections and remains usable on mobile
     toolbar.getByRole("button", { name: "Add a task list", exact: true }),
   ).toBeVisible();
   await expect(
-    toolbar.getByRole("button", { name: "Mention a user", exact: true }),
+    toolbar.getByRole("button", {
+      name: "Mention a person or team",
+      exact: true,
+    }),
   ).toBeVisible();
 
   const description = editor.getByRole("textbox", {
@@ -1034,7 +1037,7 @@ test("new issue Markdown toolbar formats selections and remains usable on mobile
 
   await page.setViewportSize({ width: 320, height: 900 });
   await toolbar
-    .getByRole("button", { name: "Mention a user", exact: true })
+    .getByRole("button", { name: "Mention a person or team", exact: true })
     .focus();
   const bounds = await toolbar.boundingBox();
   expect(bounds).not.toBeNull();
@@ -2846,6 +2849,47 @@ test("file tree controls align the branch picker and place collapse after search
   await expect(page.locator("#repository-tree-search")).toBeFocused();
 });
 
+test("a short file leaves the tree usable after reopening and resizing", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 1100 });
+  const text = "# Short file\n";
+  await routePreviewFiles(page, {
+    "README.md": { text, bytes: strToU8(text) },
+  });
+  await page.goto("/team/project/blob/main/README.md");
+  await expect(
+    page.getByRole("region", { name: "File README.md" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Close file tree" }).click();
+  await page.getByRole("button", { name: "Open file tree" }).click();
+
+  const sidebar = page.locator(".tree-sidebar");
+  const footer = page.locator(".site-footer");
+  for (const height of [1100, 1280]) {
+    await page.setViewportSize({ width: 1280, height });
+    await expect
+      .poll(async () => {
+        const pane = (await sidebar.boundingBox())!;
+        const bottom = (await footer.boundingBox())!;
+        return Math.max(
+          Math.abs(pane.y + pane.height - bottom.y),
+          Math.abs(bottom.y + bottom.height - height),
+        );
+      })
+      .toBeLessThanOrEqual(1);
+  }
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(sidebar.locator(".repository-tree")).toHaveCSS(
+    "height",
+    "300px",
+  );
+  await sidebar.getByRole("combobox", { name: "Go to file" }).fill("readme");
+  await expect(
+    sidebar.getByRole("option", { name: "README.md" }),
+  ).toBeInViewport();
+});
+
 test("file tree scrolls independently while its resize grip stays viewport-centered", async ({
   page,
 }) => {
@@ -2972,7 +3016,7 @@ test("file tree and content panes resize with pointer and keyboard controls", as
   await expect(separator).toHaveAttribute("aria-valuenow", "240");
   await separator.press("ArrowRight");
   await expect(separator).toHaveAttribute("aria-valuenow", "264");
-  await separator.dblclick();
+  await separator.locator(".pane-resizer-target").dblclick();
   await expect(separator).toHaveAttribute("aria-valuenow", "320");
 
   await page.setViewportSize({ width: 600, height: 900 });

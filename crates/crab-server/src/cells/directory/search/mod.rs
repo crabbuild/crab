@@ -81,5 +81,69 @@ impl Read for CompleteHandles {
     }
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MentionSearch {
+    pub issuer: String,
+    pub search: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MentionCandidate {
+    pub subject: String,
+    pub actor: ActorSummary,
+}
+
+pub(crate) struct MentionCandidates;
+impl Read for MentionCandidates {
+    const CLASS: &'static str = super::CLASS;
+    const ID: u32 = 22;
+    type Input = MentionSearch;
+    type Output = Vec<MentionCandidate>;
+
+    fn execute(context: &mut Transaction<'_>, input: Self::Input) -> Result<Self::Output> {
+        if input.issuer.is_empty()
+            || input.issuer.chars().count() > 4096
+            || input.issuer.chars().any(char::is_control)
+            || input.search.chars().count() > 240
+            || input.search.chars().any(char::is_control)
+        {
+            return Err(Error::Invalid("Mention candidate search is invalid"));
+        }
+        // Authorizing each possible group member requires a durable session
+        // read. Rank exact and prefix handles before broad display-name hits.
+        let rows = context.query(
+            "SELECT a.subject, p.id, p.handle, p.name FROM profiles p JOIN accounts a ON a.id = p.id
+             WHERE a.issuer = ?1 AND (instr(p.handle, ?2) > 0 OR instr(lower(p.name), ?2) > 0)
+             ORDER BY (p.handle = ?2) DESC, (substr(p.handle, 1, length(?2)) = ?2) DESC, p.handle
+             LIMIT 64",
+            &[SqlValue::Text(input.issuer), SqlValue::Text(input.search)],
+        )?;
+        rows.rows
+            .iter()
+            .map(|row| {
+                let [
+                    SqlValue::Text(subject),
+                    SqlValue::Blob(id),
+                    SqlValue::Text(handle),
+                    SqlValue::Text(name),
+                ] = row.as_slice()
+                else {
+                    return Err(Error::Invalid("Mention profile is invalid"));
+                };
+                Ok(MentionCandidate {
+                    subject: subject.clone(),
+                    actor: ActorSummary {
+                        id: Uuid::from_slice(id).map_err(Error::sdk)?,
+                        handle: handle.clone(),
+                        name: name.clone(),
+                    },
+                })
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests;

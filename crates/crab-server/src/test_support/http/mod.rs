@@ -1,3 +1,4 @@
+pub(crate) mod browser;
 pub(crate) mod organizations;
 use crate::{
     RepositoryConfig,
@@ -64,6 +65,17 @@ pub(crate) async fn github_workflow_delivery(
 }
 
 impl Harness {
+    pub(crate) async fn deliver_notifications(&self, owner: &str, name: &str) {
+        let repo = self
+            .server
+            .repositories
+            .get(&(owner.into(), name.into()))
+            .unwrap();
+        crate::server::mentions::drain_repository(&self.server, &repo)
+            .await
+            .unwrap();
+    }
+
     pub(crate) async fn add_repository(&self, name: &str) {
         let primary = self
             .server

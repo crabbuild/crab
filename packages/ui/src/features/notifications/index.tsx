@@ -1,7 +1,5 @@
-import { useRef, useState } from "react";
-import { AtSignIcon, GitPullRequestIcon } from "lucide-react";
-import { Author, type DiscussionAuthor } from "@/components/discussion/author";
-import type { Target } from "@/components/discussion/conversation/model";
+import { useEffect, useRef, useState } from "react";
+import { AtSignIcon, BellIcon, GitPullRequestIcon } from "lucide-react";
 import { useMutation } from "@/components/discussion/mutations";
 import { RelativeTime } from "@/components/discussion/time";
 import { Link } from "@/components/navigation/link";
@@ -12,78 +10,87 @@ import {
   NativeSelectOption,
 } from "@/components/ui/native-select";
 import { navigate, useRequest } from "@/lib/api";
-import { repoHref } from "@/lib/repository-route";
 
-interface Address {
-  id: string;
-  owner: string;
-  name: string;
-}
+type Address = { id: string; owner: string; name: string };
 
-interface Notification {
-  repository: Address;
-  event: number;
-  at: number;
-  target: Target;
-  title: string;
-  actor: DiscussionAuthor;
-  reason: "review_requested" | "mention";
-  read: boolean;
-}
+type InboxPage = { items: Notice[]; next: string | null };
 
-interface InboxPage {
-  items: Notification[];
-  next: string | null;
-  repositories: Address[];
-  scope_required: boolean;
-}
-
-function titleOf(repo: Address) {
+function titleOf(repo: Pick<Address, "owner" | "name">) {
   return `${repo.owner}/${repo.name}`;
 }
 
-function discussionHref({ repository, target }: Notification) {
-  switch (target.kind) {
-    case "issue":
-      return repoHref(repository, {
-        view: "issues",
-        issue: String(target.number),
-      });
-    case "issue_comment":
-      return `${repoHref(repository, { view: "issues", issue: String(target.issue) })}#issuecomment-${target.number}`;
-    case "pull":
-      return repoHref(repository, {
-        view: "pulls",
-        pull: String(target.number),
-      });
-    case "pull_comment":
-    case "pull_review": {
-      const hash =
-        target.kind === "pull_comment" ? "issuecomment" : "pullrequestreview";
-      return `${repoHref(repository, { view: "pulls", pull: String(target.pull) })}#${hash}-${target.number}`;
+type Notice = {
+  id: string;
+  repository: Pick<Address, "owner" | "name">;
+  title: string;
+  href: string;
+  sender: string;
+  reason: "mention" | "team_mention" | "review_requested";
+  read: boolean;
+  created_at_ms: number;
+};
+
+const INBOX_CHANGED = "crab-inbox-changed";
+
+export function NotificationLink({ current }: { current: boolean }) {
+  const { data, error, retry } = useRequest<{ unread: boolean }>(
+    "/api/notifications/unread",
+  );
+  const [unread, setUnread] = useState(false);
+  useEffect(() => {
+    if (data) setUnread(data.unread);
+    if (error) setUnread(false);
+  }, [data, error]);
+  useEffect(() => {
+    function refresh() {
+      if (!document.hidden) retry();
     }
-    case "pull_thread":
-    case "pull_reply":
-      return repoHref(repository, {
-        view: "pulls",
-        pull: String(target.pull),
-        pull_tab: "files",
-        thread: String(
-          target.kind === "pull_reply" ? target.thread : target.number,
-        ),
-        reply: target.kind === "pull_reply" ? String(target.number) : undefined,
-      });
-  }
+    const timer = window.setInterval(refresh, 30_000);
+    document.addEventListener("visibilitychange", refresh);
+    window.addEventListener(INBOX_CHANGED, refresh);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refresh);
+      window.removeEventListener(INBOX_CHANGED, refresh);
+    };
+  }, [retry]);
+  const label = unread ? "Notifications, unread" : "Notifications";
+  return (
+    <Button variant="ghost" size="icon-lg" className="relative" asChild>
+      <Link
+        href="/-/notifications"
+        aria-label={label}
+        aria-current={current ? "page" : undefined}
+        title={label}
+      >
+        <BellIcon aria-hidden="true" />
+        {unread && (
+          <span
+            className="absolute top-1 right-1 size-2 rounded-full bg-primary"
+            aria-hidden="true"
+          />
+        )}
+      </Link>
+    </Button>
+  );
 }
 
 function inboxHref(unread: boolean, repository: string) {
   const query = new URLSearchParams();
   if (!unread) query.set("tab", "all");
   if (repository) query.set("repository", repository);
-  return `/-/inbox${query.size ? `?${query}` : ""}`;
+  return `/-/notifications${query.size ? `?${query}` : ""}`;
 }
 
-export function Inbox({ csrf, url }: { csrf: string; url: URL }) {
+export function Notifications({
+  csrf,
+  url,
+  repositories,
+}: {
+  csrf: string;
+  url: URL;
+  repositories: Address[];
+}) {
   const unread = url.searchParams.get("tab") !== "all";
   const repository = url.searchParams.get("repository") ?? "";
   return (
@@ -117,34 +124,39 @@ export function Inbox({ csrf, url }: { csrf: string; url: URL }) {
           Clear repository filter
         </Link>
       )}
-      <Notifications
+      <NotificationList
         key={inboxHref(unread, repository)}
         csrf={csrf}
         unread={unread}
         repository={repository}
+        repositories={repositories}
       />
     </section>
   );
 }
 
-function Notifications({
+function NotificationList({
   csrf,
   unread,
   repository,
+  repositories,
 }: {
   csrf: string;
   unread: boolean;
   repository: string;
+  repositories: Address[];
 }) {
   const [cursor, setCursor] = useState<string>();
-  const [older, setOlder] = useState<Notification[]>([]);
+  const [older, setOlder] = useState<Notice[]>([]);
   const [marked, setMarked] = useState<Record<string, boolean>>({});
   const [announcement, setAnnouncement] = useState("");
   const filters = new URLSearchParams({ unread: String(unread) });
   if (repository) filters.set("repository", repository);
-  const initial = useRequest<InboxPage>(`/api/inbox?${filters}`);
-  if (cursor) filters.set("cursor", cursor);
-  const page = useRequest<InboxPage>(cursor ? `/api/inbox?${filters}` : null);
+  const initial = useRequest<InboxPage>(`/api/notifications?${filters}`);
+  if (cursor) filters.set("before", cursor);
+  const page = useRequest<InboxPage>(
+    cursor ? `/api/notifications?${filters}` : null,
+  );
   const repositoryFilter = useRef<HTMLSelectElement>(null);
   return (
     <Result state={initial} timingLabel="Notification inbox">
@@ -152,7 +164,7 @@ function Notifications({
         const items = [...first.items, ...older, ...(page.data?.items ?? [])];
         const next = (cursor ? page.data : first)?.next;
         const visible = items.filter(
-          (item) => !unread || !(marked[itemKey(item)] ?? item.read),
+          (item) => !unread || !(marked[item.id] ?? item.read),
         );
         return (
           <div className="grid gap-4">
@@ -171,7 +183,7 @@ function Notifications({
                 <NativeSelectOption value="">
                   All repositories
                 </NativeSelectOption>
-                {first.repositories.map((repo) => (
+                {repositories.map((repo) => (
                   <NativeSelectOption key={repo.id} value={repo.id}>
                     {titleOf(repo)}
                   </NativeSelectOption>
@@ -188,9 +200,9 @@ function Notifications({
               >
                 {visible.map((item) => (
                   <NotificationRow
-                    key={itemKey(item)}
+                    key={item.id}
                     item={item}
-                    read={marked[itemKey(item)] ?? item.read}
+                    read={marked[item.id] ?? item.read}
                     csrf={csrf}
                     onMarked={(read) => {
                       if (unread && read) repositoryFilter.current?.focus();
@@ -199,7 +211,7 @@ function Notifications({
                       );
                       setMarked((current) => ({
                         ...current,
-                        [itemKey(item)]: read,
+                        [item.id]: read,
                       }));
                     }}
                   />
@@ -207,11 +219,7 @@ function Notifications({
               </ul>
             ) : (
               <p className="rounded-lg border px-4 py-8 text-center text-muted-foreground">
-                {first.scope_required
-                  ? "Choose a repository to view its notifications."
-                  : unread
-                    ? "No unread notifications."
-                    : "No notifications yet."}
+                {unread ? "No unread notifications." : "No notifications yet."}
               </p>
             )}
             {page.error && (
@@ -242,17 +250,13 @@ function Notifications({
   );
 }
 
-function itemKey(item: Notification) {
-  return `${item.repository.id}:${item.event}`;
-}
-
 function NotificationRow({
   item,
   read,
   csrf,
   onMarked,
 }: {
-  item: Notification;
+  item: Notice;
   read: boolean;
   csrf: string;
   onMarked: (read: boolean) => void;
@@ -270,15 +274,20 @@ function NotificationRow({
           {titleOf(item.repository)}
         </p>
         <Link
-          href={discussionHref(item)}
+          href={item.href}
           className="break-words font-semibold hover:underline"
         >
           {item.title}
         </Link>
         <p className="text-muted-foreground">
-          <Author author={item.actor} />{" "}
-          {review ? "requested your review" : "mentioned you"}{" "}
-          <span aria-hidden="true">·</span> <RelativeTime value={item.at} />
+          {item.sender}{" "}
+          {review
+            ? "requested your review"
+            : item.reason === "team_mention"
+              ? "mentioned your team"
+              : "mentioned you"}{" "}
+          <span aria-hidden="true">·</span>{" "}
+          <RelativeTime value={item.created_at_ms} />
         </p>
         {mutation.error && <p role="alert">{mutation.error}</p>}
       </div>
@@ -288,12 +297,15 @@ function NotificationRow({
         size="sm"
         disabled={mutation.pending}
         onClick={async () => {
-          const result = await mutation.run<{ read: boolean }>(
-            `/api/inbox/${item.repository.id}/${item.event}`,
-            "PATCH",
-            { at: item.at, read: !read },
+          const result = await mutation.run<null>(
+            `/api/notifications/${item.id}/read`,
+            "PUT",
+            { created_at_ms: item.created_at_ms, read: !read },
           );
-          if (result) onMarked(result.read);
+          if (result !== undefined) {
+            onMarked(!read);
+            window.dispatchEvent(new Event(INBOX_CHANGED));
+          }
         }}
       >
         {read ? "Mark as unread" : "Mark as read"}

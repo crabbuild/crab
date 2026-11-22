@@ -194,6 +194,13 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
         {
             authorization_error = Some(app::Error::RepositoryChanged.into_response());
         }
+        if browser_repository
+            && !unsafe_method
+            && request.headers().contains_key("x-crab-repository-id")
+            && requested_repository != Some(repository.id)
+        {
+            authorization_error = Some(app::Error::NotFound.into_response());
+        }
     }
     if browser_repository && unsafe_method {
         // Membership can resolve a case-insensitive catalog name independently
@@ -329,11 +336,7 @@ async fn archived_mutation_response(
     let action = segments.next()?;
     // Membership belongs to the catalog, including archived repositories. Its
     // handler must authorize against that revision before any Cell response.
-    if (action == "members" && segments.next().is_none())
-        || (action == "settings"
-            && segments.next() == Some("team-access")
-            && segments.next().is_some()
-            && segments.next().is_none())
+    if (matches!(action, "members" | "team-access") && segments.next().is_none())
         || path == format!("/api/repos/{owner}/{name}/settings/integrations")
     {
         return None;

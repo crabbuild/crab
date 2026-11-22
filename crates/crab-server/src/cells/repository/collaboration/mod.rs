@@ -5,18 +5,36 @@ use serde::{Deserialize, Serialize};
 use super::{SqlBatch, SqlValue, Transaction, integer, statement, validate_number};
 
 pub(crate) mod activity;
+pub(crate) mod attachments;
 pub(crate) mod bulk;
 pub(crate) mod conversation;
 pub(crate) mod creation;
 pub(crate) mod lifecycle;
 pub(crate) mod links;
+pub(crate) mod mention_settings;
+pub(crate) mod mentions;
 pub(crate) mod milestones;
-pub(crate) mod notifications;
 pub(crate) mod reactions;
 pub(crate) mod state;
 pub(crate) mod submissions;
 mod target;
 pub(crate) use target::Target;
+
+pub(in crate::cells::repository) fn body_written(
+    context: &Transaction<'_>,
+    target: Target,
+    actor: &super::RepositoryAuthor,
+    version: u64,
+    previous: Option<&str>,
+    body: &str,
+) -> crate::cells::Result<()> {
+    if previous == Some(body) {
+        return Ok(());
+    }
+    // Body side effects commit with the same native write and its receipt.
+    attachments::claim(context, target, actor, body)?;
+    mentions::record(context, target, actor, version, previous, body)
+}
 
 const PREFIX: &str = "collaboration/v1";
 

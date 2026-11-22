@@ -18,6 +18,8 @@ and migration limitations.
 2. `crates/crab-server/src/server/mod.rs` — `serve`: process composition and ordered shutdown; `src/server/http/mod.rs` composes routes and `src/repository/mod.rs` owns pinned reads and maintenance.
 3. `crates/crab-server/src/app.rs` — `admit / repository`: request repository/principal boundary and error mapping.
 4. `crates/crab-server/src/auth/mod.rs` — `Authentication`: identity and configuration; `auth/principal/` owns credentials and UUID-bound current grants; `auth/state.rs` owns durable sessions, `auth/http/mod.rs` owns login/session endpoints, and `auth/transport.rs` bounds provider requests.
+   `auth/accounts.rs` owns durable suspension revisions, with mutations exposed
+   only through private `server/management/accounts.rs` and the `accounts` CLI.
 5. `crates/crab-server/src/git/receive/mod.rs` — `receive / publish_objects`: bounded native receive and publication orchestration.
 
 Trace one path: `crates/crab-server/src/main.rs` → `src/cli/mod.rs` → `serve` in
@@ -73,10 +75,10 @@ including after removal of an exact branch override.
 Linear candidates carry source comparison metadata on their tip. Git receive
 owns the reserved ref and leases the target, prospective parent, and PR head.
 `api/integrations/` binds signed workflow reports to the current candidate.
-`collaboration/notifications.rs` owns private recipient state and delivery in the
-source activity transaction. `api/mentions.rs` resolves public handles against
-the current repository roster. `api/inbox/` pages only currently accessible
-repository Cells and sets read state for the authenticated recipient.
+`collaboration/mentions.rs` queues mentions and review requests atomically
+with the source activity. `server/mentions.rs` expands current eligible
+recipients and delivers to the Directory inbox before acknowledging the event.
+`api/notifications/` rechecks access before exposing source links or titles.
 `cells/repository/integrations.rs` owns GitHub Actions connections, delivery
 receipts and workflow attempt ordering. It reads active providers and their
 exact-commit results from one snapshot for merge admission. `api/integrations/`
@@ -140,6 +142,8 @@ and owns the bulk HTTP contract.
 `auth/oidc/` owns verified signed group claims and their bounds; group-backed
 sessions have a fifteen-minute ceiling. `auth/principal/` resolves individual/group
 role union against current repository ACLs and intersects Git token scope.
+Mention autocomplete probes durable sessions for qualified profile candidates
+and applies the same group grant rule against the latest repository ACL.
 `catalog/` owns atomic complete ACL edits and the audit outbox; `api/members/`
 and `packages/ui/src/features/settings/groups.tsx` compose access administration. SSO groups do
 not grant native Organization or team authority. Tests stay with these owners.
@@ -166,6 +170,10 @@ shared discussion-index lifecycle. `api/conversation/` enriches these native
 windows with public authors, reactions and selected-head review freshness.
 `links/` owns versioned issue/PR relationships and both subject indexes; its
 single activity event is indexed into both timelines.
+`collaboration/mentions.rs` records Markdown mentions with the source body.
+`collaboration/mention_settings.rs` owns versioned aliases. `server/mentions.rs`
+delivers the durable outbox to `cells/directory/notifications.rs`.
+`api/notifications/` rechecks repository access when reading inbox entries.
 
 The native runtime lives in `src/cells/runtime.rs`; `src/cells/client.rs` owns
 the authority-checked `CellClient` and target-bound read receipts.
@@ -197,6 +205,15 @@ before native reads and composes public choices with final membership checks.
 Directory read for lists, details and conversation responses; handlers recheck
 durable membership afterward. `api/issues/view.rs` owns issue/comment JSON
 presentation.
+`cells/directory/saved_replies.rs` owns account-private versioned snippets.
+Its HTTP handlers derive the account from the browser session.
+`cells/repository/collaboration/attachments.rs` owns draft reservations,
+claims in the discussion transaction, and sealed cleanup records.
+`api/discussion_attachments/` owns current grants, bounded transfers,
+and expiry collection. It shares staging and hashing with release assets
+through `api/asset_transfer.rs`.
+`api/discussion_search/composer.rs` resolves cross-repository references
+against the target grant and opens UUID-bound typed links.
 `cells/organization/` owns native organization metadata, membership tombstones,
 versioned invitation decisions, indexed roster pages and transactional audit.
 `cells/organization/teams/` owns standalone teams, current-incarnation direct
@@ -207,10 +224,14 @@ and revision-checked profile enrichment. Existing organizations require private
 `api/organizations/` owns account-to-actor resolution, late permission checks after
 Directory enrichment and browser routes. Explicit first-owner bootstrap belongs
 to `server/management/organizations.rs` and `cells bootstrap-organization`.
-Membership checks run inside the shared native transaction before receipt replay.
-Explicit repository grants stay catalog-owned. Organization Admin inheritance
-comes from the current Organization Cell. Public sessions cannot bootstrap
-authority.
+Membership checks run inside the shared native transaction before receipt replay;
+repository grants stay catalog-owned. Public sessions cannot bootstrap authority.
+`catalog/` binds repository and organization UUIDs and audits grant replacements.
+`auth/principal/` caps effective roles by credential scope.
+`app.rs` composes current native team and catalog grants for every request.
+`api/members/team_access.rs` authorizes team grant management for current
+organization owners. The native team membership and grant-name read stays in
+`teams/`. The owner editor lives in `packages/ui/src/features/settings/team-access.tsx`.
 `src/api/profiles/` exposes session-authenticated profile reads/edits without
 exposing authentication claims. `src/server/management/directory.rs` owns explicit
 private initialization; serving never creates its schema implicitly. HTTP authorization and
@@ -317,6 +338,8 @@ Read `crates/crab-server/build.rs` and `packages/ui/package.json` for embedding 
 `api::organizations::tests::browser` qualification requires `agent-browser` and
 built embedded UI assets; it drives two real OIDC sessions through invitation,
 consent and removal against isolated native Cells.
+`api::members::tests::team_access_browser` uses the same browser fixture to
+verify repository access before a grant, after saving it, and after revocation.
 
 `tests/qualify_cellar_kubernetes.py` runs the Helm chart, container SIGKILL,
 large-file transfer and complete-root restore on an explicitly selected

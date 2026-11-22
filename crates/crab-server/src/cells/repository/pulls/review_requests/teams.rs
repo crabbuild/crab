@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    catalog::MAX_REPOSITORY_TEAMS,
+    catalog::MAX_TEAM_GRANTS,
     cells::{Error, Result},
 };
 use uuid::Uuid;
@@ -95,7 +95,7 @@ impl Mutation for SetTeamReviewRequest {
         }
         requests.retain(|entry| entry.team != input.team);
         if requested {
-            if requests.len() >= MAX_REPOSITORY_TEAMS {
+            if requests.len() >= MAX_TEAM_GRANTS {
                 return Ok(MutationResult::Rejected(Limit));
             }
             requests.push(TeamRequest {
@@ -132,17 +132,15 @@ impl Mutation for SetTeamReviewRequest {
             }
             recipients.sort_unstable();
             recipients.dedup();
-            for subject in recipients {
-                let issuer = &input.actor.issuer;
-                if subject == input.actor.subject
-                    || (pull.author.issuer == *issuer && pull.author.subject == subject)
-                {
-                    continue;
-                }
-                crate::cells::repository::collaboration::notifications::review_requested(
-                    context, issuer, &subject, &event,
-                )?;
-            }
+            let issuer = &input.actor.issuer;
+            crate::cells::repository::collaboration::mentions::review_requested(
+                context,
+                &event,
+                issuer,
+                recipients.into_iter().filter(|subject| {
+                    pull.author.issuer != *issuer || pull.author.subject != *subject
+                }),
+            )?;
         }
         advance_revision(context)?;
         Ok(MutationResult::Success(Applied))
@@ -158,7 +156,7 @@ pub(in crate::cells::repository::pulls) fn fulfill_teams(
     if teams.is_empty() || same_author(&review.author, &pull.author) {
         return Ok(false);
     }
-    if teams.len() > MAX_REPOSITORY_TEAMS || teams.iter().any(Uuid::is_nil) {
+    if teams.len() > MAX_TEAM_GRANTS || teams.iter().any(Uuid::is_nil) {
         return Err(Error::Invalid("invalid review team membership"));
     }
     let mut requests = load_teams(context, pull.number)?;

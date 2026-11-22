@@ -1,7 +1,9 @@
 use super::{
-    AuthError, AuthState, Authentication, Flow, IdentitySessionMarker, Key, STATE_CAS_ATTEMPTS,
-    Session, StoredFlow, StoredSession, VerifiedSession, hex_key, now_epoch,
+    AuthError, AuthState, Authentication, Flow, GROUP_SESSION_LIFETIME, IdentitySessionMarker, Key,
+    STATE_CAS_ATTEMPTS, Session, StoredFlow, StoredSession, VerifiedSession, hex_key, now_epoch,
+    principal::group_access,
 };
+use crate::RepositoryGroup;
 use bytes::Bytes;
 use crab_storage::StorageError;
 use futures_util::{FutureExt, StreamExt, future::Shared};
@@ -10,7 +12,67 @@ use openidconnect::{Nonce, PkceCodeVerifier};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+pub(crate) struct GroupEvidence(Arc<VerifiedSession>);
+
+impl GroupEvidence {
+    pub(crate) fn can_read(&self, grants: &[RepositoryGroup]) -> bool {
+        self.0.expires_at > now_epoch().unwrap_or(u64::MAX)
+            && group_access(&self.0.groups, grants).is_some()
+    }
+}
+
 impl Authentication {
+    pub(crate) async fn mention_group(
+        &self,
+        subject: &str,
+        grants: &[RepositoryGroup],
+    ) -> Result<Option<GroupEvidence>, StorageError> {
+        let issuer = self.issuer();
+        let state = &self.state;
+        let account_path = state.account_path(issuer, subject);
+        let prefix = state.identity_sessions_prefix(issuer, subject);
+        let mut markers = state.store.list_stream(&prefix);
+        // Old markers can remain after browser expiry. Use metadata to skip
+        // stale records, leaving clock skew margin before verifying both objects.
+        let oldest = now_epoch()
+            .unwrap_or(0)
+            .saturating_sub(GROUP_SESSION_LIFETIME.as_secs() * 2);
+        while let Some(meta) = markers.next().await {
+            let meta = meta?;
+            if u64::try_from(meta.last_modified.timestamp()).is_ok_and(|time| time < oldest) {
+                continue;
+            }
+            let Some(digest) = meta
+                .location
+                .filename()
+                .and_then(|name| name.strip_suffix(".json"))
+            else {
+                continue;
+            };
+            let Ok(digest) = blake3::Hash::from_hex(digest) else {
+                continue;
+            };
+            let session_key = *digest.as_bytes();
+            if meta.location != state.identity_session_path(issuer, subject, &session_key) {
+                continue;
+            }
+            let Some(session) = state
+                .session_check(session_key, Some((meta.location, account_path.clone())))
+                .await
+                .await
+            else {
+                continue;
+            };
+            if session.identity.issuer == issuer && session.identity.subject == subject {
+                let evidence = GroupEvidence(session);
+                if evidence.can_read(grants) {
+                    return Ok(Some(evidence));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     pub(super) async fn store_flow(&self, state_key: Key, flow: Flow) -> Result<(), AuthError> {
         let state = &self.state;
         let record = StoredFlow {
@@ -67,8 +129,15 @@ impl Authentication {
 
     pub(super) async fn store_session(&self, session: Arc<Session>) -> Result<(), AuthError> {
         let state = &self.state;
+        let account = state
+            .account_state(&session.identity.issuer, &session.identity.subject)
+            .await?;
+        if account.suspended {
+            return Err(AuthError::Suspended);
+        }
         let record = StoredSession {
             identity: session.identity.clone(),
+            account_revision: account.revision,
             groups: session.groups.clone(),
             csrf: session.csrf.clone(),
             expires_at: session.expires_at,
@@ -118,6 +187,10 @@ impl Authentication {
             {
                 return Err(AuthError::Invalid);
             }
+            // A suspension may have committed while the session was being written.
+            if state.account_state(&marker.issuer, &marker.subject).await? != account {
+                return Err(AuthError::Suspended);
+            }
             Ok(())
         }
         .await;
@@ -129,16 +202,27 @@ impl Authentication {
     }
 
     pub(super) async fn load_session(&self, session_key: Key) -> Option<Arc<Session>> {
+        self.load_session_scoped(session_key, None).await
+    }
+
+    pub(super) async fn load_session_scoped(
+        &self,
+        session_key: Key,
+        required_git_token: Option<Key>,
+    ) -> Option<Arc<Session>> {
         let state = &self.state;
-        let cached_marker_path = self.sessions.lock().await.get(&session_key).map(|session| {
-            state.identity_session_path(
-                &session.identity.issuer,
-                &session.identity.subject,
-                &session_key,
-            )
-        });
-        let read = state.session_check(session_key, cached_marker_path).await;
+        let cached_paths = self
+            .sessions
+            .lock()
+            .await
+            .get(&session_key)
+            .map(|session| state.session_authority_paths(session_key, &session.identity));
+        let read = state.session_check(session_key, cached_paths).await;
         let checked = read.await?;
+        // Revocation commits on the parent. Token storage cleanup can finish later.
+        if required_git_token.is_some_and(|token| !checked.git_tokens.contains(&token)) {
+            return None;
+        }
         let session = Arc::new(Session {
             identity: checked.identity.clone(),
             groups: checked.groups.clone(),
@@ -301,7 +385,7 @@ impl AuthState {
     async fn session_check(
         &self,
         session_key: Key,
-        cached_marker_path: Option<ObjectPath>,
+        cached_paths: Option<(ObjectPath, ObjectPath)>,
     ) -> Shared<super::SessionCheck> {
         let mut pending = self.pending_checks.lock().await;
         if let Some(read) = pending.get(&session_key).and_then(|read| read.upgrade()) {
@@ -320,7 +404,7 @@ impl AuthState {
             if registered {
                 state.pending_checks.lock().await.remove(&session_key);
             }
-            state.verify_session(session_key, cached_marker_path).await
+            state.verify_session(session_key, cached_paths).await
         }
         .boxed()
         .shared();
@@ -334,37 +418,31 @@ impl AuthState {
     async fn verify_session(
         &self,
         session_key: Key,
-        cached_marker_path: Option<ObjectPath>,
+        cached_paths: Option<(ObjectPath, ObjectPath)>,
     ) -> Option<Arc<VerifiedSession>> {
         let session_path = self.path("sessions", &session_key);
         let record = self.store.get_with_etag_bounded(&session_path, 64 * 1024);
-        let marker = async {
-            let path = cached_marker_path.as_ref()?;
-            self.store.get_with_etag_bounded(path, 8 * 1024).await.ok()
+        let cached = async {
+            let paths = cached_paths.as_ref()?;
+            self.read_session_authority(paths).await
         };
-        // The cached identity supplies only an address. A changed identity must
-        // select its current marker before any grant, even within a shared read.
-        let (record, marker) = tokio::join!(record, marker);
+        // Cached addresses only overlap I/O. The current record selects the
+        // session marker and account revision before any grant is admitted.
+        let (record, cached) = tokio::join!(record, cached);
         let record: StoredSession = serde_json::from_slice(&record.ok()?.0).ok()?;
-        let marker_path = self.identity_session_path(
-            &record.identity.issuer,
-            &record.identity.subject,
-            &session_key,
-        );
-        let (body, _) = if cached_marker_path.as_ref() == Some(&marker_path) {
-            marker?
+        let paths = self.session_authority_paths(session_key, &record.identity);
+        let (marker, account) = if cached_paths.as_ref() == Some(&paths) {
+            cached?
         } else {
-            self.store
-                .get_with_etag_bounded(&marker_path, 8 * 1024)
-                .await
-                .ok()?
+            self.read_session_authority(&paths).await?
         };
-        let marker: IdentitySessionMarker = serde_json::from_slice(&body).ok()?;
         if marker.schema_version != 1
             || marker.session_key != session_key
             || marker.issuer != record.identity.issuer
             || marker.subject != record.identity.subject
             || marker.expires_at != record.expires_at
+            || account.suspended
+            || account.revision != record.account_revision
         {
             return None;
         }
@@ -373,7 +451,33 @@ impl AuthState {
             groups: super::oidc::groups(record.groups).ok()?,
             csrf: record.csrf,
             expires_at: record.expires_at,
+            git_tokens: record.git_tokens,
         }))
+    }
+
+    fn session_authority_paths(
+        &self,
+        session_key: Key,
+        identity: &super::Identity,
+    ) -> (ObjectPath, ObjectPath) {
+        (
+            self.identity_session_path(&identity.issuer, &identity.subject, &session_key),
+            self.account_path(&identity.issuer, &identity.subject),
+        )
+    }
+
+    async fn read_session_authority(
+        &self,
+        (marker_path, account_path): &(ObjectPath, ObjectPath),
+    ) -> Option<(IdentitySessionMarker, super::AccountState)> {
+        let (marker, account) = tokio::join!(
+            self.store.get_with_etag_bounded(marker_path, 8 * 1024),
+            self.read_account(account_path),
+        );
+        Some((
+            serde_json::from_slice(&marker.ok()?.0).ok()?,
+            account.ok()?.0,
+        ))
     }
 
     pub(super) async fn cleanup_marker(

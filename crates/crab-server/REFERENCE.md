@@ -1192,6 +1192,64 @@ catalog once and indexes grants by UUID. There is no permission cache that waits
 for the routing refresh interval. Explicit local-operator mode bypasses these
 member lookups.
 
+### Assign a repository to an organization
+
+Create or adopt the repository and bootstrap the owning organization. An
+operator binds the existing repository through private management. Use
+`repository list` for the catalog `version` and repository `id`, and use the
+organization UUID returned by bootstrap.
+
+```sh
+crab-server --config server.toml repository set-organization \
+  --owner team --name project --input-file access.json
+```
+
+```json
+{
+  "repository_id": "10000000-0000-4000-8000-000000000001",
+  "expected_revision": 42,
+  "organization": {
+    "id": "10000000-0000-4000-8000-000000000002",
+    "teams": [{"team":"10000000-0000-4000-8000-000000000003","access":"write"}]
+  }
+}
+```
+
+Use an empty `teams` array to bind ownership before granting access. The binding
+preserves the repository UUID, path, and existing individual and signed-group
+grants. Organization owners get repository Admin access. Team grants accept
+Read, Triage, or Write for up to 100 distinct live team UUIDs in the owning
+organization. The operator can replace grants for the existing owner using the
+same command. Transfer to another organization requires a separate operation.
+
+Organization owners can open **Settings → Team access** on the bound repository
+to find teams by name, add grants, change roles, and remove grants. **Save team
+access** applies the draft. When another administrator saves first, reload the
+grants and review the current list before retrying. Remove unavailable teams
+from the draft before saving. Their grants cease contributing access when the
+team is deleted.
+
+The browser reads `GET /api/repos/{owner}/{name}/team-access` and replaces the
+grant list with `PUT` and `{expected_revision, teams}`. Both responses include
+`team_names` keyed by the current team UUIDs. The mutation requires the session
+CSRF token and repository UUID header. A stale change returns 409. Grant changes
+use the catalog audit outbox. Direct member and team changes share the same
+revision. Repository admins without organization ownership cannot see or edit
+the grant list. Forks inherit access from their source. Authenticated catalog responses include
+`organization_id` for visible organization-owned repositories.
+
+Each protected request resolves current organization and team membership.
+Effective access is the highest valid grant, subject to the Git token's ceiling.
+Removal from a team revokes its contribution on the next request, including
+requests with existing Git and LFS credentials. A separate individual, SSO
+group, or team grant can still confer access. Publication retains its late
+checks. Ordering a removal atomically with an in-flight publication remains a
+separate cross-authority guarantee.
+
+Upgrade all serving peers before binding repositories. Unbound catalog rows
+retain their existing serialization. Old peers reject the new catalog field
+and cannot run the organization authorization read.
+
 ### Configure protected branches
 
 A repository can define at most 100 exact branch rules:
@@ -1278,6 +1336,12 @@ If GitHub sign-in must retain signed back-channel logout, configure GitHub in
 an OIDC broker and point Crab at the broker with `provider = "oidc"`; the UI and
 membership subjects then remain provider-neutral.
 
+Private operators can also suspend or reactivate a subject for the configured
+issuer using `accounts status`, `accounts suspend`, and `accounts reactivate`.
+Verification reads the current account state alongside the durable session and
+its marker. Sessions and derived Git tokens issued before a change in account
+revision stay invalid after reactivation. See [the operations runbook](deploy/operations.md#manage-membership-and-sessions).
+
 `GET /api/session` returns the current account and CSRF token to the same-origin frontend. Anonymous repository APIs return HTTP 401. No cloud credential reaches the browser.
 
 ## Git HTTP reads
@@ -1316,6 +1380,8 @@ Token rules:
 - A read token never inherits write capability
 - Each session retains at most 10 tokens
 - Sign-out, replacement sign-in, and explicit revocation invalidate tokens
+- Explicit revocation clears the session's token index before token object
+  cleanup. Authentication rejects any token missing from the current index.
 - Revocation is enforced on the next request; an already admitted request drains
 
 ### Fetch through smart HTTP
@@ -1780,6 +1846,11 @@ owner label does not acquire ownership.
 | Merge | `POST /api/repos/{owner}/{name}/pulls/{number}/merge` |
 | Label search choices | `GET /api/repos/{owner}/{name}/discussion-search/labels` |
 | Milestone search choices | `GET /api/repos/{owner}/{name}/discussion-search/milestones` |
+| Markdown suggestions | `GET /api/repos/{owner}/{name}/discussion-search/{mentions,team-mentions,references}` |
+| Team mention settings | `GET/PUT /api/repos/{owner}/{name}/mention-settings` |
+| Account mention inbox | `GET /api/notifications`, `GET /api/notifications/unread`, `PUT /api/notifications/{id}/read` |
+| Stable discussion links | `GET /api/discussion-references/{repository_id}/{kind}/{number}` |
+| Discussion attachments | `POST /api/repos/{owner}/{name}/discussion-attachments`, `GET /api/discussion-attachments/{repository_id}/{id}` |
 | Labels | `GET/POST /api/repos/{owner}/{name}/labels`, `PATCH/DELETE /api/repos/{owner}/{name}/labels/{number}` |
 | Assignees | `GET /api/repos/{owner}/{name}/assignees`; issue and pull `PATCH` requests replace assignments |
 | Milestones | `GET/POST /api/repos/{owner}/{name}/milestones`, `GET/PATCH /api/repos/{owner}/{name}/milestones/{number}`, `GET /api/repos/{owner}/{name}/milestones/{number}/items`; issue/pull `GET/PUT .../{number}/milestone` |
@@ -1867,6 +1938,65 @@ Before serving existing repositories, deploy all peers and run
 `cells rebuild-search --owner OWNER --name REPO` to prepare discussion index
 format 13. This indexes existing descriptions and preserves prior issue states.
 
+Person mention suggestions require a matching `repository_id` UUID. Person and reference endpoints
+accept an optional `search` of up to 80 characters and return up to 12 items.
+Mentions search handles and display names of repository collaborators with
+Crab profiles, including group-only collaborators with an unexpired, verified
+OIDC session. Group candidates must match current repository grants and
+suggestions expose only profile fields. Group candidate lookup is bounded,
+with exact handles ranked first. References search issue and pull request titles or number
+prefixes across all states. Empty searches return collaborators or recent work.
+Reference items carry an explicit issue or pull request kind because the two
+sequences can share a number. Both reads recheck repository access before
+returning results.
+
+Team suggestions use a matching `repository_id` and an optional `search` of up
+to 129 characters. They return up to 12 configured `@namespace/team` aliases
+for closed teams visible to the current organization member. Repository
+administrators can read or clear the binding. Saving a binding requires the
+current organization owner and its expected repository settings version.
+Each binding accepts up to 24 distinct team aliases. A binding grants no access.
+
+Discussion writes queue newly introduced mentions. Delivery checks repository
+grants and rechecks current team membership and visibility for team mentions.
+A recipient gets one notification per write, with a direct
+mention taking priority when both kinds apply. Plain handles resolve only if
+their current binding predates the write. Selecting a suggestion stores a
+stable Directory or team UUID. Delivery is capped at 20 distinct mentions
+per body version. When a repository has SSO group grants, addressed mentions
+for accounts without explicit access are retained separately. An offline
+recipient sees a retained notice when their signed-in session proves current
+repository read access.
+
+The account inbox returns up to 20 visible notices by default. Supply
+`limit` (1–50) and a returned `next` value as `before` for pagination.
+Each account retains up to 100 explicit-grant notices and up to 100 addressed
+notices for group-backed repositories. Source titles, links, and the unread
+indicator require current repository read access. The unread endpoint returns
+`{"unread":true}` when any accessible entry is unread. Mark a notice read
+with its `created_at_ms`. The request is idempotent.
+
+Reference lookups can resolve an independently authorized repository by name.
+The response supplies its UUID. With `exact=true`, only exact issue and pull
+numbers match. Selected cross-repository links persist the UUID and typed
+number. The resolver checks current access before redirecting.
+
+Account settings use `GET /api/profile/saved-replies` and versioned
+`PUT/DELETE /api/profile/saved-replies/{id}`. Version zero creates a new reply.
+The private Directory account owns up to 24 saved replies, independent of
+public profile enrollment or handle changes.
+
+Discussion attachment uploads accept a raw file body, a client-selected UUID
+`id`, and a `name`. Files are limited to 25 MiB. Resending an identical
+upload with the same ID recovers the same result. The uploader alone can read
+an unpublished draft. Issue, pull request, comment, and review writes claim
+linked drafts inside the same native transaction as the body. Current
+repository readers can open published attachments. PNG, JPEG, GIF, and WebP
+signatures allow inline display. Other files download as binary attachments.
+Unclaimed uploads expire after 24 hours and the background sweep removes
+their blobs. Removing a link from a published body keeps the uploaded file
+accessible to repository readers.
+
 ### Separate collaboration triage from code write access
 
 Repository membership supports `read`, `triage`, `write` and `admin` roles.
@@ -1942,7 +2072,8 @@ the query. Public HTTP parameters cannot supply those bindings. Directory reads
 7/8 resolve at most 64 handles or return up to 20 public actor summaries from
 one indexed handle prefix. Read 8 returns `items` and `truncated`, rather than a
 bare array; update all native peers together. No older-output reader is supported.
-Integration-account author syntax, mentions and complete involvement predicates remain open.
+Integration-account author syntax, mention search predicates and complete
+involvement predicates remain open.
 
 The shared Author menu uses `GET .../discussion-search/authors` with `query` and
 `search`. It searches registered public usernames by prefix, ignoring ASCII case
@@ -2419,22 +2550,18 @@ Signed-in users open **Notifications** from the global header. The inbox has
 Unread and All views, a repository filter, and links to the relevant issue,
 pull request, comment, review, or inline conversation.
 
-New individual and team review requests and Markdown `@handle` mentions deliver to an
-account's inbox in the same repository Cell transaction as the activity event.
-Mentions match public handles case-insensitively and resolve to verified
-accounts with an explicit repository grant. Code, block quotes, links, email
-addresses, and team names do not trigger mentions. A recipient gets at most
-one mention per contribution. Draft review comments deliver when submitted.
+Individual and team review requests, Markdown `@handle` mentions, and configured
+closed-team mentions enqueue a notification with the source activity. The server
+delivers it to the recipient's private Directory inbox using current repository
+access. Retried delivery preserves read state. Pending review comments enqueue
+mentions only when the reviewer publishes the review.
 
-`GET /api/inbox` accepts `unread` (default true), `limit` (1–50, default 25),
-`repository` (repository UUID), and the opaque `cursor` from `next`.
-Cursors are bound to the signed-in account and filters. Users with access to
-more than 32 repositories choose one repository before loading notifications.
-`PATCH /api/inbox/{repository}/{event}` accepts `{"at":<timestamp in ms>,"read":true}`
-or `read:false`. This CSRF-protected write sets the recipient's private read
-state and can be retried after a lost response. Both routes check current
-repository access. Archived repositories keep notifications readable and
-their private read state editable.
+`GET /api/notifications` accepts `repository` (repository UUID), `unread`
+(default false), `limit` (1–50, default 20), and the `before` cursor from `next`.
+`PUT /api/notifications/{id}/read` accepts `{"created_at_ms":<timestamp in ms>}`
+and optional `read:false` to mark an entry unread. The CSRF-protected write
+sets private read state and can be retried after a lost response. The inbox
+rechecks repository access before presenting titles, links or unread status.
 
 ### Link related work
 
@@ -3144,7 +3271,7 @@ namespace and immutable asset bodies in backups. Restoring visible records
 without counters, claims, request ledgers,
 control and immutable roots loses numbering, ownership and retry guarantees.
 
-Discussion deletion, moderation, edit history, repository watching, and
+Discussion deletion, moderation, edit history, repository watching, broad activity feeds, and
 email delivery remain unimplemented. Native backup restore, cross-provider
 export, and complete product-root restore qualification remain pending.
 
@@ -3578,40 +3705,6 @@ submissions, restart and team name reuse. Desktop and actual mobile dark screens
 were inspected. The local preview preserves all 18 public repository resources
 and 39 canonical tables per repository Cell. These results qualify the standalone
 team slice.
-
-### Repository team access
-
-On organization-owned repositories, repository admins can grant a visible team
-Read, Triage, Write or Admin in **Settings → Members → Team access**. Crab uses
-the highest applicable role across direct grants, OIDC groups, current
-organization ownership and current direct team memberships. Team removal,
-organization membership removal and team deletion take effect on subsequent
-authorization checks, including browser access, Git token use and PR approval
-eligibility. A token's original scope still limits it. Restoring access requires
-a current membership. A new team with the same name has a different ID and
-never inherits the old grant.
-
-`GET /api/repos/{owner}/{name}/settings/team-access` returns the catalog
-`revision` and visible `grants` with `team`, `name` and `access`. `PUT` on
-`.../settings/team-access/{team}` grants or updates a role with
-`{expected_revision, access}`. `DELETE` on the same route revokes it with
-`{expected_revision}`. Both return the committed `{revision}`. Team edits share
-the members endpoint's catalog revision and append to the same membership audit
-chain. Stale edits return `409`. Admins can edit access on archived repositories.
-Organization owners can remove retired grants,
-which have a null name. Secret grants are visible only to organization owners
-and current members of the granted team with repository Admin.
-
-Repository team resolution uses the owning Organization Cell. The supported
-limits are 100 granted teams per repository and 4,096 team membership rows per
-access or roster lookup. Existing organizations must prepare their Teams schema
-before assigning grants. Deploy updated catalog readers together before granting
-the first team because older readers reject the new catalog field.
-
-The `repository_team_access` server tests cover a team-backed stock Git push,
-live revocation, reviewer eligibility, secret team filtering and archive cleanup.
-The opt-in embedded browser test saves the grant through the settings screen
-using an isolated OIDC session and verifies it after reload.
 
 Initial issue/PR metadata is owned by `cells/repository/collaboration/creation/`
 and composed by `api/discussion_creation/`. Public create bodies optionally include

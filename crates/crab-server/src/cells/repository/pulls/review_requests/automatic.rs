@@ -36,8 +36,7 @@ pub(in crate::cells::repository::pulls) fn apply(
     if plan.is_empty() {
         return Ok(());
     }
-    if plan.people.len() > MAX_RECIPIENTS || plan.teams.len() > crate::catalog::MAX_REPOSITORY_TEAMS
-    {
+    if plan.people.len() > MAX_RECIPIENTS || plan.teams.len() > crate::catalog::MAX_TEAM_GRANTS {
         return Err(Error::Invalid(
             "automatic code owner requests exceed the request limit",
         ));
@@ -82,7 +81,7 @@ pub(in crate::cells::repository::pulls) fn apply(
             {
                 continue;
             }
-            if current.len() >= crate::catalog::MAX_REPOSITORY_TEAMS {
+            if current.len() >= crate::catalog::MAX_TEAM_GRANTS {
                 return Err(Error::Invalid(
                     "pull requests support up to 100 team review requests",
                 ));
@@ -120,13 +119,10 @@ pub(in crate::cells::repository::pulls) fn apply(
         actor,
         Action::CodeOwnerReviewsRequested,
     )?;
-    for subject in notified {
-        super::super::super::collaboration::notifications::review_requested(
-            context,
-            &actor.issuer,
-            &subject,
-            &event,
-        )?;
-    }
-    Ok(())
+    super::super::super::collaboration::mentions::review_requested(
+        context,
+        &event,
+        &actor.issuer,
+        notified,
+    )
 }

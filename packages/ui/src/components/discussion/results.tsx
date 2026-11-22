@@ -86,10 +86,12 @@ export function DiscussionResults({
         label={view === "issues" ? "Issues" : "Pull requests"}
       >
         <div className="issue-list-panel panel">
-          {/* Filters retain their open interaction across refreshes. Counts and
-            rows clear while loading; one timing boundary owns the whole list. */}
-          <BulkActions repo={repo} bulk={bulk} selection={selection} />
-          {!bulk.selected.length && (
+          <div className="discussion-toolbar">
+            {selection && (
+              <div className="discussion-toolbar-selection">{selection}</div>
+            )}
+            {/* Keep the filter layout to hold row positions while selection
+                checks run. The select-all button stays mounted in both modes. */}
             <DiscussionListControls
               repo={repo}
               url={url}
@@ -98,9 +100,10 @@ export function DiscussionResults({
               loading={page.loading}
               density={density}
               onDensityChange={setDensity}
-              selection={selection}
+              selecting={Boolean(bulk.selected.length || bulk.recovering)}
             />
-          )}
+            <BulkActions repo={repo} bulk={bulk} />
+          </div>
           <Result state={{ ...page, timing: undefined }}>
             {(data) => (
               <>

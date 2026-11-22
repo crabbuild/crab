@@ -1,16 +1,17 @@
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 pub(super) struct Fields(u8);
 impl Fields {
-    const TITLE: u8 = 1;
+    const TITLE_BIT: u8 = 1;
     const BODY: u8 = 2;
     const COMMENTS: u8 = 4;
-    pub(super) const ALL: Self = Self(Self::TITLE | Self::BODY | Self::COMMENTS);
+    pub(super) const TITLE: Self = Self(Self::TITLE_BIT);
+    pub(super) const ALL: Self = Self(Self::TITLE_BIT | Self::BODY | Self::COMMENTS);
 
     pub(super) fn parse(value: &str) -> Result<Self, &'static str> {
         let mut selected = 0;
         for field in value.to_ascii_lowercase().split(',') {
             selected |= match field {
-                "title" => Self::TITLE,
+                "title" => Self::TITLE_BIT,
                 "body" => Self::BODY,
                 "comments" => Self::COMMENTS,
                 _ => {
@@ -27,7 +28,7 @@ impl Fields {
     }
 
     fn header(self) -> Vec<&'static str> {
-        [(Self::TITLE, "title"), (Self::BODY, "body")]
+        [(Self::TITLE_BIT, "title"), (Self::BODY, "body")]
             .into_iter()
             .filter_map(|(flag, name)| (self.0 & flag != 0).then_some(name))
             .collect()

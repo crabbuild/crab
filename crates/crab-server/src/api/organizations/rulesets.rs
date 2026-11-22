@@ -76,7 +76,7 @@ async fn replace(
         let available = document
             .repositories
             .iter()
-            .filter(|repo| repo.organization == Some(id))
+            .filter(|repo| repo.organization_id() == Some(id))
             .map(|repo| repo.id)
             .collect::<std::collections::HashSet<_>>();
         // Preserve currently saved selections when the repository is gone,

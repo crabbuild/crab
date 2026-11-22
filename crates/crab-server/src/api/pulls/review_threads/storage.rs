@@ -145,7 +145,7 @@ pub(super) async fn create_thread(
     repo: &Repository,
     input: CreatePullReviewThreadInput,
 ) -> Result<PullReviewThread> {
-    let routed = crate::api::mentions::cell(server, repo, [input.body.as_str()]).await?;
+    let routed = app::repository_cell(server, repo)?;
     match crate::app::command_output(
         routed
             .client
@@ -174,7 +174,7 @@ pub(super) async fn update_thread(
     number: u64,
     input: PullReviewThreadEdit,
 ) -> Result<PullReviewThread> {
-    let routed = crate::api::mentions::cell(server, repo, input.body.as_deref()).await?;
+    let routed = app::repository_cell(server, repo)?;
     match crate::app::command_output(
         routed
             .client
@@ -274,7 +274,7 @@ pub(super) async fn create_reply(
     thread: u64,
     input: NewPullReviewReply,
 ) -> Result<PullReviewReply> {
-    let routed = crate::api::mentions::cell(server, repo, [input.body.as_str()]).await?;
+    let routed = app::repository_cell(server, repo)?;
     match crate::app::command_output(
         routed
             .client
@@ -308,7 +308,7 @@ pub(super) async fn update_reply(
     version: u64,
     body: String,
 ) -> Result<PullReviewReply> {
-    let routed = crate::api::mentions::cell(server, repo, [body.as_str()]).await?;
+    let routed = app::repository_cell(server, repo)?;
     match crate::app::command_output(
         routed
             .client

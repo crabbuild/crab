@@ -13,6 +13,7 @@ pub(in crate::cells::organization) fn handles(operation: u32, mutation: bool) ->
                 | GetMembership::ID
                 | Candidates::ID
                 | GetPolicy::ID
+                | MentionMembers::ID
         )
     }
 }

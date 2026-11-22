@@ -182,8 +182,8 @@ described below. It is not a native grant cutover.
 
 ## Organization authority
 
-Organization schema 1 lives in `cells/organization/schema.sql`. Prepare Directory,
-then explicitly bootstrap through the private mTLS listener:
+Organization schema 1 lives in `cells/organization/schema.sql`. Run the private
+mTLS bootstrap to initialize a fresh Directory and organization:
 
 ```sh
 crab-server --config server.toml cells bootstrap-organization \
@@ -194,8 +194,10 @@ crab-server --config server.toml cells bootstrap-organization \
 The JSON supplies `owner: {issuer, subject}`, `name` and optional `description`.
 Use a new organization UUID and the owner's exact provider-qualified account.
 Metadata is validated before account registration or schema creation. Bootstrap
-registers that stable account without enrolling a public profile; retries with
-identical intent preserve the organization. Different bootstrap intent conflicts.
+registers that stable account without enrolling a public profile. Retry with
+the same inputs and UUID after interruption. An outdated Directory requires an
+explicit `cells migrate-directory` before bootstrap can register accounts.
+Different bootstrap intent conflicts.
 Neither a catalog owner string nor a public handle creates authority. Upgrade
 all peers before bootstrapping this new class; existing Repository/Directory
 schemas and identities do not change, and no rebuild is required.
@@ -290,15 +292,32 @@ rejection releases it. Reload/closing warns while an intent is uncertain. A
 conflicted settings draft survives refresh until saved metadata is reviewed.
 The UI uses shadcn components and existing Geist/Vercel tokens.
 
-Repository team grants are stored by team UUID in the owning repository's catalog
-record. The Organization Cell resolves the current organization role and active
-team membership at admission. The existing organization membership epoch prevents
-an old team seat from reappearing when someone rejoins. Repository admin and
-team visibility checks guard grant edits, which share the catalog membership CAS
-and audit chain. There is no atomic cross-Cell authority fence. Project grants,
-nested membership and team mention notifications remain open.
+Repository administrators and organization owners can bind explicit aliases
+for closed teams. The private Organization mention read checks sender access,
+team visibility, and current membership epochs.
+
+Repository team grants are catalog-owned alongside the organization binding.
+The native owner read checks live team UUIDs and current organization membership
+epochs. This lets HTTP replicas query one authority for current membership even
+when the team's owner is on another node. The read performs no schema changes.
+Team-backed review requests use the current grants and membership epochs.
+Nested teams, project grants, and atomic ordering between team removals and
+repository publication remain separate work.
 
 ## Repository collaboration
+
+Discussion writes store newly added mentions and individual and team review
+requests in a durable Repository outbox alongside the source activity. The
+server drains each bounded page after commit. It resolves addressed Directory
+accounts, applies current repository grants, and pages current closed-team
+members for team mentions.
+Deduplicated delivery writes to private, bounded Directory inboxes before
+acknowledging the Repository event. Separate bounded retention protects
+explicit grants from being displaced by pending SSO group notices. Retries
+preserve read state. The inbox rechecks the current signed-in account and
+repository access before disclosing unread state, titles, or links. Team
+bindings, queued mentions, and inbox entries use native document records and
+require no SQL preparation.
 
 Discussion author enrichment uses the bounded native `LookupActors` read (Directory
 operation 6). It resolves qualified private keys into public UUID/handle/name
@@ -405,8 +424,8 @@ Native list output adds `review_requested_from_me`. Author, reviewer and comment
 names now share one ordered `people` binding collection, one Directory snapshot,
 digest encoding and validation. Public HTTP cannot supply bindings.
 Update peers together; there is no old list-shape reader or source-scan fallback.
-Team requests, mention relationships and native grant authority remain separate
-delivery work. Review-status predicates are described below.
+Team review requests and mention search relationships remain separate work.
+Review-status predicates are described below.
 
 ## Reviewer status preparation
 

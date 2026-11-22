@@ -25,6 +25,8 @@ async function fixture(page: Page) {
   await page.route("**/api/**", async (route) => {
     const request = route.request(),
       path = new URL(request.url()).pathname;
+    if (path === "/api/notifications/unread")
+      return route.fulfill({ json: { unread: false } });
     if (path === "/api/session")
       return route.fulfill({
         json: {

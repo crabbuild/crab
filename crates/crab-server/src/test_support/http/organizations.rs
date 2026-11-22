@@ -11,6 +11,13 @@ use uuid::Uuid;
 
 pub(crate) async fn bootstrap(h: &Harness) -> (Uuid, Uuid, Uuid) {
     let cells = h.server.cells().unwrap();
+    bootstrap_on(h, &cells).await
+}
+
+pub(crate) async fn bootstrap_on(
+    h: &Harness,
+    cells: &crate::cells::CellClient,
+) -> (Uuid, Uuid, Uuid) {
     let issuer = h.provider.issuer.clone();
     let actors = cells
         .command::<RegisterAccounts>(

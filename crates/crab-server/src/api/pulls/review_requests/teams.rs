@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::{
     app::{self, Error, Result},
     auth::Principal,
-    catalog::MAX_REPOSITORY_TEAMS,
+    catalog::MAX_TEAM_GRANTS,
     cells::repository::review_requests::{
         State,
         teams::{SetTeamReviewRequest, TeamOutcome, TeamRequest, TeamSelection},
@@ -53,7 +53,7 @@ pub(in crate::api::pulls) async fn views(
     }
     let ids: Vec<_> = teams.keys().copied().collect();
     let mut result = Vec::new();
-    for chunk in ids.chunks(MAX_REPOSITORY_TEAMS) {
+    for chunk in ids.chunks(MAX_TEAM_GRANTS) {
         let visibility =
             visible_team_names(server, principal, organization, chunk.to_vec()).await?;
         let names: BTreeMap<_, _> = visibility.names.into_iter().collect();

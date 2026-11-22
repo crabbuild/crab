@@ -39,7 +39,6 @@ import { ChevronDownIcon } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 
 import { GroupAccess } from "./groups";
-import { TeamAccessSettings } from "./team-access";
 
 type DraftMember = RepositoryMember & { id: number };
 
@@ -569,20 +568,6 @@ export function MemberSettings({
           {saving ? "Saving…" : "Save access"}
         </Button>
       </div>
-      {repo.organization && (
-        <TeamAccessSettings
-          key={state?.revision}
-          repo={{ ...repo, organization: repo.organization }}
-          csrf={csrf}
-          onChanged={(expected, revision) => {
-            setState((current) =>
-              current?.revision === expected
-                ? { ...current, revision }
-                : current,
-            );
-          }}
-        />
-      )}
     </section>
   );
 }

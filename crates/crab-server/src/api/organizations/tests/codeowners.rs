@@ -69,16 +69,15 @@ async fn codeowners_requests_reviews_and_enforces_base_policy_at_merge() {
     h.write(Method::POST, &commands, &alice,
         json!({"request_id":Uuid::now_v7(),"command":{"kind":"member","team":team,"member":bob_id,"version":0,"role":"member"}}))
         .await.error_for_status().unwrap();
-    let teams = format!("{repo}/settings/team-access");
-    let grant = format!("{teams}/{team}");
+    let teams = format!("{repo}/team-access");
     let revision = h.json(&teams, &alice).await["revision"].clone();
     repository_write(
         &h,
         Method::PUT,
-        &grant,
+        &teams,
         &alice,
         repo_id,
-        json!({"expected_revision":revision,"access":"write"}),
+        json!({"expected_revision":revision,"teams":[{"team":team,"access":"write"}]}),
     )
     .await
     .error_for_status()
@@ -193,7 +192,8 @@ async fn codeowners_requests_reviews_and_enforces_base_policy_at_merge() {
     let requests = h.json(&format!("{pull}/reviewers"), &alice).await;
     assert_eq!(requests["items"][0]["request"]["code_owner"], true);
     assert_eq!(requests["teams"][0]["code_owner"], true);
-    let inbox = format!("/api/inbox?repository={repo_id}");
+    let inbox = format!("/api/notifications?repository={repo_id}");
+    h.deliver_notifications(owner, "owners").await;
     let notifications = h.json(&inbox, &bob).await;
     assert_eq!(notifications["items"].as_array().unwrap().len(), 1);
     assert_eq!(notifications["items"][0]["reason"], "review_requested");
@@ -223,11 +223,14 @@ async fn codeowners_requests_reviews_and_enforces_base_policy_at_merge() {
     let queued = h.json(&draft_reviewers, &alice).await;
     assert_eq!(queued["items"][0]["request"]["code_owner"], true);
     assert_eq!(queued["teams"][0]["code_owner"], true);
+    h.deliver_notifications(owner, "owners").await;
     let delivered = h.json(&inbox, &bob).await;
     assert_eq!(delivered["items"].as_array().unwrap().len(), 2);
-    assert_eq!(
-        delivered["items"][0]["target"],
-        json!({"kind":"pull","number":2})
+    assert!(
+        delivered["items"][0]["href"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!("/pull/2?repository_id={repo_id}"))
     );
     repository_write(
         &h,
@@ -321,10 +324,10 @@ async fn codeowners_requests_reviews_and_enforces_base_policy_at_merge() {
     repository_write(
         &h,
         Method::PUT,
-        &grant,
+        &teams,
         &alice,
         repo_id,
-        json!({"expected_revision":revision,"access":"read"}),
+        json!({"expected_revision":revision,"teams":[{"team":team,"access":"read"}]}),
     )
     .await
     .error_for_status()
@@ -353,10 +356,10 @@ async fn codeowners_requests_reviews_and_enforces_base_policy_at_merge() {
     repository_write(
         &h,
         Method::PUT,
-        &grant,
+        &teams,
         &alice,
         repo_id,
-        json!({"expected_revision":revision,"access":"write"}),
+        json!({"expected_revision":revision,"teams":[{"team":team,"access":"write"}]}),
     )
     .await
     .error_for_status()

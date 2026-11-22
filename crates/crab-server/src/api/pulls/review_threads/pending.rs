@@ -182,17 +182,7 @@ async fn submit(
     } else {
         None
     };
-    let cell = if source.is_some() {
-        crate::api::mentions::cell(
-            &server,
-            &repo,
-            std::iter::once(input.body.as_str())
-                .chain(saved.comments.iter().map(|comment| comment.body.as_str())),
-        )
-        .await?
-    } else {
-        app::repository_cell(&server, &repo)?
-    };
+    let cell = app::repository_cell(&server, &repo)?;
     let membership = app::membership(&server, &principal, &repo).await?;
     let outcome = app::command_output(
         cell.client

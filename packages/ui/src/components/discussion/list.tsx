@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useState } from "react";
 import {
   AlignJustifyIcon,
   Rows2Icon,
@@ -100,7 +100,7 @@ export function DiscussionListControls({
   loading,
   density,
   onDensityChange,
-  selection,
+  selecting,
 }: {
   repo: Repository;
   url: URL;
@@ -109,7 +109,7 @@ export function DiscussionListControls({
   loading: boolean;
   density: "comfortable" | "compact";
   onDensityChange: (density: "comfortable" | "compact") => void;
-  selection?: ReactNode;
+  selecting: boolean;
 }) {
   const filters = discussionFilters(url);
   const [sortOpen, setSortOpen] = useState(false);
@@ -125,21 +125,19 @@ export function DiscussionListControls({
   const change = (values: Partial<typeof filters>) =>
     navigate(repoHref(repo, { view, ...filters, ...values }));
   return (
-    <div className="issues-filters flex-wrap">
+    <div className="issues-filters flex-wrap" inert={selecting}>
       <div className="discussion-counts gap-3">
-        {selection}
         {!data ? (
           <span role="status" className="text-sm text-muted-foreground">
             {loading ? "Loading results…" : "Results unavailable"}
           </span>
         ) : navigation?.kind === "state" ? (
           <nav
-            className="discussion-state-controls"
             aria-label={
               view === "issues" ? "Issue state" : "Pull request state"
             }
           >
-            <ButtonGroup>
+            <ButtonGroup className="discussion-segments">
               {(["open", "closed"] as const).map((state) => {
                 const query = navigation[state];
                 const label = (
@@ -153,7 +151,7 @@ export function DiscussionListControls({
                 return query === null ? (
                   <Button
                     key={state}
-                    variant="outline"
+                    variant="ghost"
                     size="sm"
                     disabled
                     title="Shorten this search to change its state filter"
@@ -161,7 +159,7 @@ export function DiscussionListControls({
                     {label}
                   </Button>
                 ) : (
-                  <Button asChild variant="outline" size="sm" key={state}>
+                  <Button asChild variant="ghost" size="sm" key={state}>
                     <Link
                       aria-current={
                         navigation.selected === state ? "page" : undefined
@@ -273,9 +271,8 @@ export function DiscussionListControls({
           />
         )}
         <ToggleGroup
-          className="discussion-density"
+          className="discussion-segments"
           type="single"
-          variant="outline"
           size="sm"
           spacing={0}
           aria-label="List density"

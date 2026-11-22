@@ -13,11 +13,9 @@ use futures_util::StreamExt;
 use gix_hash::ObjectId;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
-use tokio::io::AsyncWriteExt;
 
 use crate::{
-    api::statuses,
+    api::{asset_transfer, statuses},
     app::{self, Error, Result},
     auth::{Identity, Principal},
     git::receive::{self, ReceiveError},
@@ -40,8 +38,14 @@ fn transfer_error(error: crate::transfer_admission::Error) -> Error {
     }
 }
 
-fn staging_error(error: crate::local_disk::Error) -> Error {
-    Error::ReleaseStaging(error)
+fn upload_error(error: asset_transfer::Error) -> Error {
+    match error {
+        asset_transfer::Error::TooLarge => Error::ReleaseAssetTooLarge,
+        asset_transfer::Error::Cancelled => Error::ReleaseAssetCancelled,
+        asset_transfer::Error::Staging(error) => Error::ReleaseStaging(error),
+        asset_transfer::Error::Body(error) => Error::ReleaseAssetBody(error),
+        asset_transfer::Error::Io(error) => Error::ReleaseAssetIo(error),
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -505,14 +509,9 @@ async fn upload_asset(
             "Release asset uploads require identity content encoding",
         ));
     }
-    let staging_bytes = headers
-        .get(header::CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(crate::server::MAX_RELEASE_ASSET_BYTES);
-    if staging_bytes > crate::server::MAX_RELEASE_ASSET_BYTES {
-        return Err(Error::ReleaseAssetTooLarge);
-    }
+    let staging_bytes =
+        asset_transfer::staging_bytes(&headers, crate::server::MAX_RELEASE_ASSET_BYTES)
+            .map_err(upload_error)?;
     let reservation = storage::AssetReservation {
         release: number,
         request_id,
@@ -539,38 +538,9 @@ async fn upload_asset(
     server.receives.spawn(async move {
         let _permit = permit;
         let work = async {
-            let directory = worker_server
-                .local_staging
-                .create(staging_bytes, &cancel)
+            let staged = asset_transfer::stage(&worker_server, request, staging_bytes, &cancel)
                 .await
-                .map_err(staging_error)?;
-            let path = directory.path().join("release-asset");
-            let mut file = tokio::fs::File::create(&path)
-                .await
-                .map_err(Error::ReleaseAssetIo)?;
-            let mut stream = request.into_body().into_data_stream();
-            let mut size = 0_u64;
-            let mut sha256 = Sha256::new();
-            let mut blake3 = blake3::Hasher::new();
-            while let Some(chunk) = tokio::select! {
-                () = cancel.cancelled() => return Err(Error::ReleaseAssetCancelled),
-                chunk = stream.next() => chunk,
-            } {
-                let chunk = chunk.map_err(Error::ReleaseAssetBody)?;
-                size = size
-                    .checked_add(chunk.len() as u64)
-                    .filter(|size| *size <= crate::server::MAX_RELEASE_ASSET_BYTES)
-                    .ok_or(Error::ReleaseAssetTooLarge)?;
-                sha256.update(&chunk);
-                blake3.update(&chunk);
-                file.write_all(&chunk)
-                    .await
-                    .map_err(Error::ReleaseAssetIo)?;
-            }
-            file.flush().await.map_err(Error::ReleaseAssetIo)?;
-            drop(file);
-            let digest = format!("{:x}", sha256.finalize());
-            let expected_hash = *blake3.finalize().as_bytes();
+                .map_err(upload_error)?;
             let repo = app::repository(&worker_server, &principal, &key)?;
             let repo = repo.as_ref();
             app::actor(&principal)?;
@@ -583,16 +553,23 @@ async fn upload_asset(
             }
             repo.store
                 .put_multipart_file_retry(
-                    &repo.layout.repo_path(&asset_path(&digest)),
-                    &path,
-                    size,
-                    expected_hash,
+                    &repo.layout.repo_path(&asset_path(&staged.digest)),
+                    &staged.path,
+                    staged.size,
+                    staged.hash,
                     8 * 1024 * 1024,
                     &cancel,
                     None,
                 )
                 .await?;
-            storage::attach_asset(&worker_server, repo, &reservation, size, digest).await
+            storage::attach_asset(
+                &worker_server,
+                repo,
+                &reservation,
+                staged.size,
+                staged.digest,
+            )
+            .await
         };
         tokio::pin!(work);
         let completed = tokio::select! {

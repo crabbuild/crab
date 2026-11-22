@@ -262,6 +262,78 @@ impl Read for Candidates {
     }
 }
 pub(crate) struct GetPolicy;
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MentionMembersInput {
+    pub actor: Uuid,
+    pub team: Uuid,
+    pub roster: MentionRoster,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MentionRoster {
+    Candidates(Vec<Uuid>),
+    Page(Option<MemberCursor>),
+}
+
+pub(crate) struct MentionMembers;
+impl Read for MentionMembers {
+    const CLASS: &'static str = super::super::CLASS;
+    const ID: u32 = 18;
+    type Input = MentionMembersInput;
+    type Output = Page<Uuid, MemberCursor>;
+
+    fn execute(context: &mut Transaction<'_>, input: Self::Input) -> Result<Self::Output> {
+        if !view(context, input.actor, input.team)?
+            .is_some_and(|visible| visible.team.visibility == Visibility::Closed)
+        {
+            return Err(Error::AccessDenied);
+        }
+        let candidates = match input.roster {
+            MentionRoster::Candidates(candidates) => candidates,
+            MentionRoster::Page(after) => {
+                let input = MemberInput {
+                    actor: input.actor,
+                    team: input.team,
+                    after,
+                    limit: 50,
+                };
+                return Ok(match people(context, input, Collection::Members)? {
+                    Page::Changed => Page::Changed,
+                    Page::Page {
+                        items,
+                        next,
+                        revision,
+                    } => Page::Page {
+                        items: items.into_iter().map(|member| member.actor).collect(),
+                        next,
+                        revision,
+                    },
+                });
+            }
+        };
+        if candidates.len() > 100 {
+            return Err(Error::Invalid(
+                "Team mention roster is limited to 100 candidates per turn",
+            ));
+        }
+        let revision = record(context)?.ok_or(Error::NotInitialized)?.version;
+        let mut recipients = Vec::new();
+        for candidate in candidates {
+            actor(candidate)?;
+            if membership(context, input.team, candidate)?.role.is_some() {
+                recipients.push(candidate);
+            }
+        }
+        Ok(Page::Page {
+            items: recipients,
+            next: None,
+            revision,
+        })
+    }
+}
 impl Read for GetPolicy {
     const CLASS: &'static str = super::super::CLASS;
     const ID: u32 = 16;

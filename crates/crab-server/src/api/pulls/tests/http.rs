@@ -340,7 +340,10 @@ async fn pending_review_keeps_comments_private_and_recovers_a_published_batch() 
     );
     assert_eq!(h.json(&reviews, &alice).await["items"], json!([]));
     assert_eq!(h.json(&threads, &alice).await["items"], json!([]));
-    assert_eq!(h.json("/api/inbox", &alice).await["items"], json!([]));
+    assert_eq!(
+        h.json("/api/notifications", &alice).await["items"],
+        json!([])
+    );
     assert_eq!(
         h.write(Method::PUT, &draft, &bob, first_edit)
             .await
@@ -360,20 +363,21 @@ async fn pending_review_keeps_comments_private_and_recovers_a_published_batch() 
         .await
         .unwrap();
     assert_eq!(submitted, json!({"review":1,"threads":[1,2]}));
-    let inbox = h.json("/api/inbox", &alice).await;
-    let notified: Vec<_> = inbox["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|item| item["target"].clone())
-        .collect();
-    assert_eq!(
-        notified,
-        [
-            json!({"kind":"pull_thread","pull":1,"number":1}),
-            json!({"kind":"pull_review","pull":1,"number":1}),
-        ]
+    h.deliver_notifications("team", "private").await;
+    let inbox = h.json("/api/notifications", &alice).await;
+    let notified = inbox["items"].as_array().unwrap();
+    assert_eq!(notified.len(), 2);
+    assert!(
+        notified
+            .iter()
+            .any(|item| item["href"].as_str().unwrap().ends_with("#review-thread-1"))
     );
+    assert!(notified.iter().any(|item| {
+        item["href"]
+            .as_str()
+            .unwrap()
+            .ends_with("#pullrequestreview-1")
+    }));
     assert_eq!(h.json(&draft, &bob).await["comments"], json!([]));
     assert_eq!(
         h.json(&reviews, &alice).await["items"][0]["commit_oid"],
@@ -428,7 +432,7 @@ async fn pending_review_keeps_comments_private_and_recovers_a_published_batch() 
         .await
         .unwrap();
     assert_eq!(replayed, submitted);
-    assert_eq!(h.json("/api/inbox", &alice).await, inbox);
+    assert_eq!(h.json("/api/notifications", &alice).await, inbox);
     assert_eq!(h.json(&draft, &bob).await["version"], json!(stale));
     let discarded = Uuid::now_v7();
     h.write(

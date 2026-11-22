@@ -94,6 +94,7 @@ export function MilestoneForm({
             />
           </Field>
           <Editor
+            attachments={false}
             id="milestone-description"
             label="Description (optional)"
             value={description}

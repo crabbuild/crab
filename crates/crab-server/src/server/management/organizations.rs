@@ -3,7 +3,7 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::{
     app::{self, Error, Result},
+    catalog::{CatalogRecord, MembershipActor, OrganizationAccess},
     cells::{
         Address,
         directory::{IdentityKey, RegisterAccounts},
@@ -21,6 +22,10 @@ use crate::{
 
 pub(super) fn routes() -> Router<Arc<Server>> {
     Router::new()
+        .route(
+            "/internal/repositories/{owner}/{name}/organization",
+            put(set_repository_organization),
+        )
         .route("/internal/organizations/{id}", post(bootstrap))
         .route(
             "/internal/organizations/{id}/teams",
@@ -31,6 +36,64 @@ pub(super) fn routes() -> Router<Arc<Server>> {
             get(project_state).post(prepare_projects),
         )
         .layer(axum::extract::DefaultBodyLimit::max(32 * 1024))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RepositoryOrganization {
+    repository_id: Uuid,
+    expected_revision: u64,
+    organization: OrganizationAccess,
+}
+
+async fn set_repository_organization(
+    State(server): State<Arc<Server>>,
+    Path((owner, name)): Path<(String, String)>,
+    Json(input): Json<RepositoryOrganization>,
+) -> Result<Json<CatalogRecord>> {
+    let _permit = super::admit(&server)?;
+    input
+        .organization
+        .validate()
+        .map_err(|_| Error::Invalid("Invalid organization or team grants"))?;
+    let catalog = server.catalog().ok_or(Error::NotFound)?;
+    let snapshot = catalog
+        .membership(&owner, &name)
+        .await
+        .map_err(app::repository_access_error)?;
+    if snapshot.repository_id != input.repository_id || snapshot.revision != input.expected_revision
+    {
+        return Err(Error::Conflict);
+    }
+    let teams = app::repository_team_access(&server, &input.organization, None, false).await?;
+    if teams.teams.len() != input.organization.teams.len() {
+        return Err(Error::Invalid(
+            "Every grant must name a current team in the owning organization",
+        ));
+    }
+    let actor = MembershipActor {
+        issuer: "urn:crab:local".into(),
+        subject: "operator".into(),
+    };
+    let record = catalog
+        .set_organization_access(
+            &owner,
+            &name,
+            input.repository_id,
+            input.expected_revision,
+            input.organization,
+            actor,
+        )
+        .await
+        .map_err(app::repository_access_error)?;
+    let (document, _) = catalog.load().await.map_err(app::repository_access_error)?;
+    // Publish the new owner with the repository route before returning. Until
+    // another peer refreshes, it must fail closed on a different owner binding.
+    server
+        .install_catalog(document)
+        .await
+        .map_err(|source| Error::RepositorySetup(Box::new(source)))?;
+    Ok(Json(record))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -49,11 +112,24 @@ async fn bootstrap(
         return Err(Error::Invalid("Organization ID is invalid"));
     }
     input.owner.validate().map_err(Error::Cell)?;
+    if server
+        .auth
+        .as_ref()
+        .is_some_and(|auth| auth.issuer() != input.owner.issuer)
+    {
+        return Err(Error::Invalid(
+            "First owner must use the server's configured identity issuer",
+        ));
+    }
     organization::details(&input.name, &input.description).map_err(Error::Cell)?;
     let _permit = super::admit(&server)?;
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
     // Bootstrap is explicit private operator work. The qualified account is
     // registered without a profile; no catalog owner string acquires authority.
+    cells
+        .initialize(Address::Directory)
+        .await
+        .map_err(Error::Cell)?;
     let registered = app::command_output(
         cells
             .command::<RegisterAccounts>(

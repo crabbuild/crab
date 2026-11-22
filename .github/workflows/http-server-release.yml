@@ -16,6 +16,6 @@ jobs:
     steps:
       - name: Block publication until the native contract is qualified
         run: |
-          echo '::error::Native Cellar release publication is disabled. A fixed SQLite dependency plus provider, crash/partition, restore, scale, and upgrade qualification must bind the exact source and image before publication.'
+          echo '::error::Native Cellar release publication is disabled. Provider, crash/partition, restore, scale, and upgrade qualification must bind the exact source, image, chart, and runtime before publication.'
           echo 'See crates/crab-server/CELLAR.md. Container process smoke remains available in http-server-container.yml.'
           exit 1

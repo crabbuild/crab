@@ -386,7 +386,7 @@ async fn organization_repository_ownership_survives_creator_revocation_without_a
     }
     assert_eq!(h.json(&listed, &bob).await["repositories"], json!([]));
     let owners = h.json(&listed, &alice).await;
-    assert_eq!(owners["repositories"][0]["organization"], json!(id));
+    assert_eq!(owners["repositories"][0]["organization_id"], json!(id));
     assert_eq!(owners["repositories"][0]["can_admin"], true);
     let acl = h.json(&members, &alice).await;
     assert_eq!(acl["members"], json!([]));
@@ -568,7 +568,7 @@ async fn repository_team_access_follows_current_membership_and_private_team_visi
     let repo_id = Uuid::parse_str(created["id"].as_str().unwrap()).unwrap();
     let owner = created["owner"].as_str().unwrap();
     let repo = format!("/api/repos/{owner}/library");
-    let endpoint = format!("{repo}/settings/team-access");
+    let endpoint = format!("{repo}/team-access");
     let listed = format!("/api/repos?organization={organization}");
     let team = Uuid::now_v7();
     h.write(Method::POST, &teams, &alice,
@@ -590,24 +590,23 @@ async fn repository_team_access_follows_current_membership_and_private_team_visi
     let revision = h.json(&endpoint, &alice).await["revision"]
         .as_u64()
         .unwrap();
-    let set = format!("{endpoint}/{team}");
     let unknown = repository_write(
         &h,
         Method::PUT,
-        &format!("{endpoint}/{}", Uuid::now_v7()),
+        &endpoint,
         &alice,
         repo_id,
-        json!({"expected_revision":revision,"access":"write"}),
+        json!({"expected_revision":revision,"teams":[{"team":Uuid::now_v7(),"access":"write"}]}),
     )
     .await;
-    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
     repository_write(
         &h,
         Method::PUT,
-        &set,
+        &endpoint,
         &alice,
         repo_id,
-        json!({"expected_revision":revision,"access":"write"}),
+        json!({"expected_revision":revision,"teams":[{"team":team,"access":"write"}]}),
     )
     .await
     .error_for_status()
@@ -615,17 +614,17 @@ async fn repository_team_access_follows_current_membership_and_private_team_visi
     let stale = repository_write(
         &h,
         Method::PUT,
-        &set,
+        &endpoint,
         &alice,
         repo_id,
-        json!({"expected_revision":revision,"access":"read"}),
+        json!({"expected_revision":revision,"teams":[{"team":team,"access":"read"}]}),
     )
     .await;
     assert_eq!(stale.status(), StatusCode::CONFLICT);
     let granted = h.json(&endpoint, &alice).await;
     assert_eq!(
-        granted["grants"],
-        json!([{"team":team,"name":"Engineering","access":"write"}])
+        granted["organization"]["teams"],
+        json!([{"team":team,"access":"write"}])
     );
     let last_revision = granted["revision"].as_u64().unwrap().to_string();
     let (document, _) = catalog.load().await.unwrap();
@@ -734,7 +733,7 @@ async fn repository_team_access_follows_current_membership_and_private_team_visi
     let pull = format!("{repo}/pulls/1");
     let reviewers = format!("{pull}/reviewers");
     let requests = format!("{pull}/review-requests");
-    let inbox = format!("/api/inbox?repository={repo_id}");
+    let inbox = format!("/api/notifications?repository={repo_id}");
     let ready = h.json(&reviewers, &alice).await;
     assert_eq!(
         ready["teams"],
@@ -748,12 +747,15 @@ async fn repository_team_access_follows_current_membership_and_private_team_visi
             .error_for_status()
             .unwrap();
     }
+    h.deliver_notifications(owner, "library").await;
     let notified = h.json(&inbox, &bob).await;
     assert_eq!(notified["items"].as_array().unwrap().len(), 1);
     assert_eq!(notified["items"][0]["reason"], "review_requested");
-    assert_eq!(
-        notified["items"][0]["target"],
-        json!({"kind":"pull","number":1})
+    assert!(
+        notified["items"][0]["href"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!("/pull/1?repository_id={repo_id}"))
     );
     assert!(!notified.to_string().contains("Engineering"));
     assert_eq!(h.json(&inbox, &alice).await["items"], json!([]));
@@ -825,7 +827,7 @@ async fn repository_team_access_follows_current_membership_and_private_team_visi
     .error_for_status()
     .unwrap();
     assert_eq!(h.json(&listed, &bob).await["repositories"], json!([]));
-    assert_eq!(h.json("/api/inbox", &bob).await["items"], json!([]));
+    assert_eq!(h.json("/api/notifications", &bob).await["items"], json!([]));
     assert_eq!(
         h.json(&pull, &alice).await["merge_requirements"]["approvals"],
         0
@@ -860,8 +862,14 @@ async fn repository_team_access_follows_current_membership_and_private_team_visi
     .await;
     assert!(!blocked.status.success());
     assert!(String::from_utf8_lossy(&blocked.stderr).contains("restricts ref creation"));
-    let bob_teams = h.json(&endpoint, &bob).await;
-    assert_eq!(bob_teams["grants"], json!([]));
+    let bob_teams = h
+        .http
+        .get(format!("{}{endpoint}", h.origin))
+        .header("cookie", &bob)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bob_teams.status(), StatusCode::NOT_FOUND);
     let bob_reviewers = h.json(&reviewers, &bob).await;
     assert_eq!(bob_reviewers["teams"], json!([]));
     assert_eq!(
@@ -893,15 +901,15 @@ async fn repository_team_access_follows_current_membership_and_private_team_visi
     let denied = repository_write(
         &h,
         Method::PUT,
-        &set,
+        &endpoint,
         &bob,
         repo_id,
-        json!({"expected_revision":bob_teams["revision"],"access":"admin"}),
+        json!({"expected_revision":acl["revision"],"teams":[]}),
     )
     .await;
     assert_eq!(denied.status(), StatusCode::NOT_FOUND);
     assert_eq!(
-        h.json(&endpoint, &alice).await["grants"][0]["access"],
+        h.json(&endpoint, &alice).await["organization"]["teams"][0]["access"],
         "write"
     );
 
@@ -918,9 +926,10 @@ async fn repository_team_access_follows_current_membership_and_private_team_visi
     .error_for_status()
     .unwrap();
     let deleted = h.json(&endpoint, &alice).await;
+    assert!(deleted["team_names"].get(team.to_string()).is_none());
     assert_eq!(
-        deleted["grants"],
-        json!([{"team":team,"name":null,"access":"write"}])
+        deleted["organization"]["teams"],
+        json!([{"team":team,"access":"write"}])
     );
     repository_write(
         &h,
@@ -935,15 +944,18 @@ async fn repository_team_access_follows_current_membership_and_private_team_visi
     .unwrap();
     repository_write(
         &h,
-        Method::DELETE,
-        &set,
+        Method::PUT,
+        &endpoint,
         &alice,
         repo_id,
-        json!({"expected_revision":deleted["revision"]}),
+        json!({"expected_revision":deleted["revision"],"teams":[]}),
     )
     .await
     .error_for_status()
     .unwrap();
-    assert_eq!(h.json(&endpoint, &alice).await["grants"], json!([]));
+    assert_eq!(
+        h.json(&endpoint, &alice).await["organization"]["teams"],
+        json!([])
+    );
     h.close().await;
 }

@@ -27,4 +27,18 @@ describe("discussion Markdown", () => {
     expect(html).toContain("Design proposal");
     expect(html).not.toContain("<img");
   });
+
+  it("renders Markdown alerts and collapsible sections through the safe renderer", () => {
+    const html = renderToStaticMarkup(
+      <DiscussionMarkdown>
+        {
+          "<details>\n<summary>Test results</summary>\n\n> [!TIP]\n> **Run** the suite.\n\n<img src=x onerror=alert(1)>\n\n</details>"
+        }
+      </DiscussionMarkdown>,
+    );
+    expect(html).toMatch(
+      /<details><summary>Test results<\/summary>[\s\S]*data-kind="tip"[\s\S]*<strong>Run<\/strong>[\s\S]*<\/details>/,
+    );
+    expect(html).not.toMatch(/<img|onerror=/i);
+  });
 });

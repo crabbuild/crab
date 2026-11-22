@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    app::{Error, Result},
+    app::{self, Error, Result},
     auth::Identity,
     cells::repository::{
         CaptureIssueClosure, CaptureIssueClosureInput, CreatePull, CreatePullComment,
@@ -208,7 +208,7 @@ pub(super) async fn create_pull(
     input: NewPullRequest,
     stale: bool,
 ) -> Result<PullRequest> {
-    let routed = crate::api::mentions::cell(server, repo, [input.body.as_str()]).await?;
+    let routed = app::repository_cell(server, repo)?;
     let input = CreatePullInput {
         metadata: input.metadata,
         code_owner_requests: input.code_owner_requests,
@@ -249,7 +249,7 @@ pub(super) async fn update_pull(
     number: u64,
     input: PullEdit,
 ) -> Result<PullRequest> {
-    let routed = crate::api::mentions::cell(server, repo, input.body.as_deref()).await?;
+    let routed = app::repository_cell(server, repo)?;
     match crate::app::command_output(
         routed
             .client
@@ -339,7 +339,7 @@ pub(super) async fn create_comment(
     request_id: String,
     body: String,
 ) -> Result<PullComment> {
-    let routed = crate::api::mentions::cell(server, repo, [body.as_str()]).await?;
+    let routed = app::repository_cell(server, repo)?;
     match crate::app::command_output(
         routed
             .client
@@ -371,7 +371,7 @@ pub(super) async fn update_comment(
     version: u64,
     body: String,
 ) -> Result<PullComment> {
-    let routed = crate::api::mentions::cell(server, repo, [body.as_str()]).await?;
+    let routed = app::repository_cell(server, repo)?;
     match crate::app::command_output(
         routed
             .client
@@ -473,7 +473,7 @@ pub(super) async fn create_review(
     pull: u64,
     input: NewPullReview,
 ) -> Result<crate::cells::repository::PullReviewRecord> {
-    let routed = crate::api::mentions::cell(server, repo, [input.body.as_str()]).await?;
+    let routed = app::repository_cell(server, repo)?;
     let membership = crate::app::membership(server, principal, repo).await?;
     let outcome = crate::app::command_output(
         routed
@@ -526,7 +526,7 @@ pub(super) async fn update_review(
     version: u64,
     body: String,
 ) -> Result<crate::cells::repository::PullReviewRecord> {
-    let routed = crate::api::mentions::cell(server, repo, [body.as_str()]).await?;
+    let routed = app::repository_cell(server, repo)?;
     match crate::app::command_output(
         routed
             .client

@@ -281,24 +281,6 @@ pub(in crate::cells::repository) fn append(
     Ok(event)
 }
 
-pub(in crate::cells::repository) fn append_content(
-    context: &Transaction<'_>,
-    target: Target,
-    actor: &RepositoryAuthor,
-    action: Action,
-    body: &str,
-) -> crate::cells::Result<()> {
-    let event = append(context, target, actor, action)?;
-    super::notifications::mention(context, &event, body)
-}
-
-pub(super) fn load_event(context: &Transaction<'_>, event: u64) -> crate::cells::Result<Event> {
-    validate_number(event)?;
-    context
-        .document(&format!("{}{event:016x}", events(None)))?
-        .ok_or(crate::cells::Error::Invalid("activity event is missing"))
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Query {

@@ -2415,32 +2415,74 @@ main {
   font-size: var(--text-sm);
   font-weight: 500;
 }
-.discussion-density {
+.discussion-segments {
+  overflow: hidden;
+  border: 1px solid var(--input);
+  border-radius: var(--radius-md);
   background: var(--background);
 }
-.discussion-density > span:not(:first-child) [data-slot="toggle-group-item"] {
-  border-left: 0;
-  border-top-left-radius: 0;
-  border-bottom-left-radius: 0;
+.discussion-segments
+  :where([data-slot="button"], [data-slot="toggle-group-item"]) {
+  height: calc(--spacing(7) - 2px);
+  border: 0;
+  border-radius: 0;
+  /* The group owns the frame. Press feedback must stay inside it. */
+  translate: none;
+  transition-property: background-color;
 }
-.discussion-density > span:not(:last-child) [data-slot="toggle-group-item"] {
-  border-top-right-radius: 0;
-  border-bottom-right-radius: 0;
+.discussion-segments > :not(:first-child) {
+  border-inline-start: 1px solid var(--border);
 }
-.discussion-state-controls a[aria-current="page"] {
-  color: var(--foreground);
+.discussion-segments :is([aria-current="page"], [data-state="on"]) {
   background: var(--secondary);
   font-weight: 600;
 }
+@media (hover: hover) {
+  .discussion-segments
+    :is([data-slot="button"], [data-slot="toggle-group-item"]):hover:not(
+      :disabled
+    ) {
+    background: var(--accent);
+  }
+}
+.discussion-segments
+  :is([data-slot="button"], [data-slot="toggle-group-item"]):focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+  box-shadow: none;
+}
 .issue-list-panel {
   overflow: hidden;
+}
+.discussion-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  background: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+.discussion-toolbar > * {
+  grid-area: 1 / 1;
+}
+.discussion-toolbar-selection {
+  display: flex;
+  align-items: center;
+  justify-self: start;
+  min-height: --spacing(10);
+  margin-block-start: --spacing(2);
+  margin-inline-start: --spacing(4);
+  z-index: 1;
+}
+.discussion-toolbar:has(> .discussion-toolbar-selection) .discussion-counts {
+  padding-inline-start: --spacing(9);
 }
 .issue-list-panel .issues-filters {
   min-height: 48px;
   margin: 0;
   padding: --spacing(2) --spacing(4);
-  background: var(--muted);
-  border-bottom: 1px solid var(--border);
+}
+.discussion-toolbar > .issues-filters[inert] {
+  visibility: hidden;
 }
 .issue-list {
   padding: 0;
@@ -2448,6 +2490,7 @@ main {
   margin: 0;
 }
 .issue-list li {
+  --discussion-title-line: 1.5rem;
   display: flex;
   gap: --spacing(3);
   padding: --spacing(4.5) --spacing(5);
@@ -2456,6 +2499,43 @@ main {
 .discussion-row-content {
   flex: 1;
   min-width: 0;
+}
+.discussion-row-title {
+  font-size: var(--text-base);
+  line-height: var(--discussion-title-line);
+}
+.discussion-row-checkbox {
+  /* The comfortable row needs a small optical lift from the line center. */
+  margin-block-start: min(
+    0.2rem,
+    calc((var(--discussion-title-line) - 1rem) / 2)
+  );
+}
+:where(
+  .discussion-toolbar-selection [data-slot="checkbox"],
+  .discussion-row-checkbox
+) {
+  transition-property: border-color;
+}
+@media (hover: hover) {
+  :where(
+      .discussion-toolbar-selection [data-slot="checkbox"],
+      .discussion-row-checkbox
+    ):enabled[data-state="unchecked"]:hover {
+    border-color: var(--input-hover);
+  }
+}
+.issue-list .discussion-row-status {
+  /* Align with the first title line even when the title wraps. */
+  margin-block-start: calc((var(--discussion-title-line) - 1rem) / 2);
+  width: 1rem;
+  height: 1rem;
+  padding: 0;
+}
+.discussion-row-status svg {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 .discussion-author {
   overflow-wrap: anywhere;
@@ -2466,13 +2546,14 @@ main {
   overflow-wrap: anywhere;
 }
 .issue-list[data-density="compact"] li {
+  --discussion-title-line: 1.25rem;
   padding-block: --spacing(2);
   gap: --spacing(2);
 }
 .issue-list[data-density="compact"] p {
   margin-top: --spacing(0.5);
 }
-.issue-list[data-density="compact"] .issue-link {
+.issue-list[data-density="compact"] .discussion-row-title {
   font-size: var(--text-sm);
 }
 .issue-list li:last-child {
@@ -2488,7 +2569,6 @@ main {
 .issue-link {
   color: var(--foreground);
   font-weight: 600;
-  font-size: var(--text-base);
   overflow-wrap: anywhere;
 }
 .discussion-labels {
@@ -2739,6 +2819,14 @@ main {
 .editor-write {
   padding: --spacing(2);
 }
+.editor-input {
+  position: relative;
+}
+.editor-caret-anchor {
+  position: absolute;
+  width: 1px;
+  pointer-events: none;
+}
 .editor-write textarea {
   display: block;
   min-height: 170px;
@@ -2749,10 +2837,114 @@ main {
   min-height: calc(170px + --spacing(4));
 }
 .editor-help {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: --spacing(1) --spacing(3);
   padding: 0 --spacing(3) --spacing(2.5);
   margin: 0;
   font-size: var(--text-xs);
   color: var(--muted-foreground);
+}
+.editor-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: --spacing(1) --spacing(2);
+  padding: 0 --spacing(2) --spacing(1);
+  color: var(--muted-foreground);
+  font-size: var(--text-xs);
+}
+.editor-attachments ul {
+  flex-basis: 100%;
+}
+.editor-attachments li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: --spacing(1);
+  padding-left: --spacing(2);
+  overflow-wrap: anywhere;
+}
+.discussion-markdown .discussion-attachment-image {
+  max-width: 100%;
+  max-height: 34rem;
+  object-fit: contain;
+}
+.editor-help kbd {
+  font: inherit;
+  font-family: var(--font-mono);
+  color: var(--foreground);
+  background: var(--muted);
+  border-radius: var(--radius-sm);
+  padding: 0 --spacing(1);
+}
+.editor-help kbd:not(:first-child) {
+  margin-left: --spacing(1);
+}
+.editor-menu[data-slot="popover-content"] {
+  width: min(22rem, var(--radix-popover-content-available-width));
+  max-height: min(19rem, var(--radix-popover-content-available-height));
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
+}
+.editor-menu-heading {
+  display: flex;
+  align-items: center;
+  gap: --spacing(1.5);
+  padding: --spacing(2) --spacing(3);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--text-caption);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.editor-menu [role="listbox"] {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: --spacing(1);
+}
+.editor-menu [role="option"] {
+  display: flex;
+  align-items: flex-start;
+  gap: --spacing(2.5);
+  padding: --spacing(1.5) --spacing(2);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.editor-menu [role="option"][aria-selected="true"] {
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+}
+.editor-menu [role="option"] > svg {
+  width: 1rem;
+  height: 1rem;
+  flex: none;
+  margin-top: --spacing(0.5);
+  color: var(--muted-foreground);
+}
+.editor-menu [role="option"] > svg[data-state="open"] {
+  color: var(--success);
+}
+.editor-menu [role="option"] > svg[data-state="merged"] {
+  color: var(--info);
+}
+.editor-menu [role="option"] > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.editor-menu [role="option"] strong {
+  display: block;
+  font-weight: 550;
+}
+.editor-menu [role="option"] div span,
+.editor-menu-status {
+  color: var(--muted-foreground);
+  font-size: var(--text-xs);
+}
+.editor-menu-status {
+  margin: 0;
+  padding: --spacing(2) --spacing(3);
 }
 .discussion-actions {
   flex-wrap: wrap;
@@ -2868,6 +3060,40 @@ main {
   padding-left: --spacing(4);
   border-left: 3px solid var(--border);
   color: var(--muted-foreground);
+}
+.discussion-markdown .markdown-alert {
+  margin: --spacing(3) 0;
+  padding: --spacing(2) --spacing(3);
+  border: 1px solid var(--border);
+  border-inline-start-color: var(--alert-accent);
+  border-radius: var(--radius-sm);
+  --alert-accent: var(--info);
+}
+.markdown-alert[data-kind="tip"] {
+  --alert-accent: var(--success);
+}
+.markdown-alert[data-kind="warning"] {
+  --alert-accent: var(--warning);
+}
+.markdown-alert[data-kind="caution"] {
+  --alert-accent: var(--destructive);
+}
+.markdown-alert-title {
+  color: var(--alert-accent);
+  font-weight: 600;
+}
+.markdown-alert > :last-child {
+  margin-bottom: 0;
+}
+.discussion-markdown details {
+  margin: --spacing(3) 0;
+  padding: --spacing(2) --spacing(3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.discussion-markdown summary {
+  cursor: pointer;
+  font-weight: 550;
 }
 .discussion-markdown table {
   display: block;
@@ -4628,12 +4854,33 @@ main {
 .repo-file-workspace .code-layout.no-sidebar {
   grid-template-columns: minmax(0, 1fr);
 }
-.repo-file-workspace .tree-sidebar,
-.repo-file-workspace .tree-resizer {
-  position: sticky;
-  top: 0;
-  height: var(--workspace-available-height, 100dvh);
-  align-self: start;
+@media (min-width: 641px) {
+  main:has(.repo-file-workspace),
+  .repo-file-workspace,
+  .timing-widget:has(> .repo-file-workspace),
+  .repo-file-workspace > .timing-widget:has(> .code-layout) {
+    display: flex;
+    flex-direction: column;
+  }
+  .repo-file-workspace,
+  .timing-widget:has(> .repo-file-workspace),
+  .repo-file-workspace > .timing-widget:has(> .code-layout),
+  .repo-file-workspace .code-layout {
+    flex: 1 0 auto;
+  }
+  .repo-file-workspace {
+    margin: 0;
+  }
+  .repo-file-workspace .tree-sidebar,
+  .repo-file-workspace .tree-resizer {
+    /* The content column sets the grid's natural height. The rails fill the
+       visible part of that grid without feeding back into its measurement. */
+    contain: size;
+    align-self: stretch;
+    position: sticky;
+    top: 0;
+    max-height: var(--workspace-available-height, 100dvh);
+  }
 }
 .repo-file-workspace .tree-sidebar {
   display: flex;
@@ -6291,13 +6538,10 @@ main {
     border-width: 1px;
     border-radius: var(--radius-md);
   }
-  .repo-file-workspace .repository-tree {
-    height: 300px;
-    min-height: 0;
-  }
+  .repo-file-workspace .repository-tree,
   .repo-file-workspace .tree-search-results {
+    flex: none;
     height: 300px;
-    min-height: 0;
   }
   .repo-file-workspace .code-main {
     padding: 0;

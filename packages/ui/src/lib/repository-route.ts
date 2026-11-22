@@ -320,7 +320,14 @@ export function repositoryRoute(url: URL, refs?: Refs): RepositoryRoute | null {
       page === "settings" &&
       tail.length <= 1 &&
       (!tail[0] ||
-        ["branches", "access", "integrations", "rulesets"].includes(tail[0]))
+        [
+          "branches",
+          "access",
+          "mentions",
+          "team-access",
+          "integrations",
+          "rulesets",
+        ].includes(tail[0]))
     )
       return {
         ...route,

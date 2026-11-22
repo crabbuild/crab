@@ -1,4 +1,4 @@
-import { emptyPullRollup } from "../fixtures";
+import { emptyIssueTemplates, emptyPullRollup } from "../fixtures";
 import type { FilePreview } from "@/lib/contracts";
 import { conversationPage } from "../conversation";
 import type { DiscussionAuthor } from "@/components/discussion/author";
@@ -209,6 +209,8 @@ export async function mockPullRequest(
       /^\/api\/repos\/team\/project\/(issues|pulls)\/\d+\/projects$/.test(path)
     )
       return route.fulfill({ json: { items: [], can_manage: true } });
+    if (path.endsWith("/issues/templates") && request.method() === "GET")
+      return route.fulfill({ json: emptyIssueTemplates });
     if (path.endsWith("/issues/pins") && request.method() === "GET")
       return route.fulfill({
         json: { version: 0, items: [], can_manage: true },

@@ -1,0 +1,298 @@
+use axum::http::StatusCode;
+use reqwest::Method;
+use serde_json::{Value, json};
+use uuid::Uuid;
+
+use crate::test_support::http::{Harness, organizations::bootstrap};
+
+const ROOT: &str = "/api/repos/team/private";
+const ISSUES: &str = "/api/repos/team/private/issues";
+const INBOX: &str = "/api/notifications";
+const UNREAD: &str = "/api/notifications/unread";
+
+async fn login(h: &Harness) -> (String, String) {
+    let alice = h.login().await;
+    *h.provider.mode.lock().await = "member".into();
+    let bob = h.login().await;
+    (alice, bob)
+}
+
+async fn enroll_bob(h: &Harness, cookie: &str) -> Uuid {
+    let profile: Value = h
+        .write(
+            Method::POST,
+            "/api/profile",
+            cookie,
+            json!({"request_id":Uuid::now_v7(),"handle":"bob","name":"Bob"}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    serde_json::from_value(profile["id"].clone()).unwrap()
+}
+
+async fn issue(h: &Harness, cookie: &str, input: Value) -> Value {
+    let response = h.write(Method::POST, ISSUES, cookie, input).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    response.json().await.unwrap()
+}
+
+#[tokio::test]
+async fn committed_mentions_deliver_once_and_inbox_hides_revoked_repository() {
+    let h = Harness::new(false).await;
+    let (alice, bob) = login(&h).await;
+    let bob_id = enroll_bob(&h, &bob).await;
+    let repo = &h.server.repositories.values()[0];
+
+    issue(
+        &h,
+        &alice,
+        json!({
+            "request_id":Uuid::now_v7(),
+            "title":"Inert terms",
+            "body":"`@bob` and \\@bob are examples.\n\n```text\n@bob\n```"
+        }),
+    )
+    .await;
+    super::drain_repository(&h.server, repo).await.unwrap();
+    assert_eq!(h.json(INBOX, &bob).await["items"], json!([]));
+
+    let input = json!({
+        "request_id":Uuid::now_v7(),
+        "title":"Review the contribution",
+        "body":"Can @bob take a look?"
+    });
+    let posted = issue(&h, &alice, input.clone()).await;
+    let number = posted["number"].as_u64().unwrap();
+    assert_eq!(issue(&h, &alice, input.clone()).await["number"], number);
+    super::drain_repository(&h.server, repo).await.unwrap();
+    let inbox = h.json(INBOX, &bob).await;
+    let [notice] = inbox["items"].as_array().unwrap().as_slice() else {
+        panic!("the post must produce one mention notification")
+    };
+    assert_eq!(notice["reason"], "mention");
+    assert_eq!(notice["read"], false);
+    assert_eq!(notice["title"], "Review the contribution");
+    assert_eq!(
+        notice["repository"],
+        json!({"owner":"team","name":"private"})
+    );
+    assert_eq!(
+        notice["href"],
+        format!("/team/private/issues/{number}?repository_id={}", repo.id)
+    );
+    let path = format!("{INBOX}/{}/read", notice["id"].as_str().unwrap());
+    h.write(
+        Method::PUT,
+        &path,
+        &bob,
+        json!({"created_at_ms":notice["created_at_ms"]}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+
+    // Another envelope replays the permanent issue creation. Changing prose
+    // and adding a picker link to the same actor must preserve the read notice.
+    assert_eq!(issue(&h, &alice, input).await["number"], number);
+    h.write(
+        Method::PATCH,
+        &format!("{ISSUES}/{number}"),
+        &alice,
+        json!({"version":posted["version"],"body":format!("Added context for @bob and [@bob](/-/users/{bob_id}).")}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    super::drain_repository(&h.server, repo).await.unwrap();
+    let inbox = h.json(INBOX, &bob).await;
+    let [current] = inbox["items"].as_array().unwrap().as_slice() else {
+        panic!("replay and equivalent mention spellings must not add a notice")
+    };
+    assert_eq!(current["id"], notice["id"]);
+    assert_eq!(current["read"], true);
+    assert_eq!(h.json(INBOX, &alice).await["items"], json!([]));
+
+    let mut members = repo.config.members.clone();
+    members.retain(|member| member.subject != "bob-id");
+    h.server
+        .catalog()
+        .unwrap()
+        .set_members("team", "private", members, true)
+        .await
+        .unwrap();
+    assert_eq!(h.json(INBOX, &bob).await, json!({"items":[],"next":null}));
+    h.close().await;
+}
+
+#[tokio::test]
+async fn bound_team_mention_delivers_and_direct_mention_wins_for_shared_recipient() {
+    team_notifications(false).await;
+}
+
+#[tokio::test]
+async fn group_only_mentions_reach_offline_recipients_with_current_signed_access() {
+    team_notifications(true).await;
+}
+
+async fn team_notifications(group_only: bool) {
+    let h = Harness::new(false).await;
+    let (organization, _, bob_id) = bootstrap(&h).await;
+    let (alice, bob) = login(&h).await;
+    assert_eq!(enroll_bob(&h, &bob).await, bob_id);
+    let offer: Value = h
+        .write(
+            Method::PUT,
+            &format!("/api/organizations/{organization}/invitations/{bob_id}"),
+            &alice,
+            json!({"version":0,"role":"member"}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    h.write(
+        Method::POST,
+        &format!("/api/organizations/{organization}/invitation"),
+        &bob,
+        json!({"version":offer["version"],"accept":true}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let team = Uuid::now_v7();
+    let teams = format!("/api/organizations/{organization}/teams/commands");
+    h.write(
+        Method::POST,
+        &teams,
+        &alice,
+        json!({"request_id":team,"command":{"kind":"create","name":"Maintainers","description":"","visibility":"closed"}}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    h.write(
+        Method::POST,
+        &teams,
+        &alice,
+        json!({"request_id":Uuid::now_v7(),"command":{"kind":"member","team":team,"member":bob_id,"version":0,"role":"member"}}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    h.write(
+        Method::PUT,
+        &format!("{ROOT}/mention-settings"),
+        &alice,
+        json!({"organization":organization,"namespace":"crab","teams":[{"id":team,"slug":"maintainers"}],"version":0}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+
+    if group_only {
+        group_grant(&h, &alice, true).await;
+    }
+    let mut cases = vec![
+        ("Team only", "Can @crab/maintainers review?"),
+        (
+            "Several spellings",
+            "Can @crab/maintainers and @bob review?",
+        ),
+    ];
+    let stable_mention = format!("Can [@bob](/-/users/{bob_id}) review?");
+    if group_only {
+        cases.push(("Stable person mention", &stable_mention));
+    }
+    for (title, body) in &cases {
+        issue(
+            &h,
+            &alice,
+            json!({"request_id":Uuid::now_v7(),"title":title,"body":body}),
+        )
+        .await;
+    }
+    let repo = &h.server.repositories.values()[0];
+    super::drain_repository(&h.server, repo).await.unwrap();
+    let bob = if group_only {
+        // No matching session exists when the worker delivers the mention.
+        assert_eq!(h.json(INBOX, &bob).await, json!({"items":[],"next":null}));
+        assert_eq!(h.json(UNREAD, &bob).await, json!({"unread":false}));
+        *h.provider.mode.lock().await = "member".into();
+        h.provider
+            .claims
+            .lock()
+            .await
+            .insert("groups".into(), json!(["reviewers"]));
+        h.login().await
+    } else {
+        bob
+    };
+    let inbox = h.json(INBOX, &bob).await;
+    let items = inbox["items"].as_array().unwrap();
+    assert_eq!(items.len(), cases.len());
+    for &(title, _) in &cases {
+        let reason = if title == "Team only" {
+            "team_mention"
+        } else {
+            "mention"
+        };
+        let item = items.iter().find(|item| item["title"] == title).unwrap();
+        assert_eq!(item["reason"], reason);
+    }
+    assert_eq!(h.json(INBOX, &alice).await["items"], json!([]));
+    if group_only {
+        assert_eq!(h.json(UNREAD, &bob).await, json!({"unread":true}));
+        let item = &items[0];
+        h.write(
+            Method::PUT,
+            &format!("{INBOX}/{}/read", item["id"].as_str().unwrap()),
+            &bob,
+            json!({"created_at_ms":item["created_at_ms"]}),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+        assert_eq!(h.json(INBOX, &bob).await["items"][0]["read"], true);
+        h.provider.claims.lock().await.remove("groups");
+        let without_claim = h.login().await;
+        assert_eq!(
+            h.json(INBOX, &without_claim).await,
+            json!({"items":[],"next":null})
+        );
+        assert_eq!(
+            h.json(UNREAD, &without_claim).await,
+            json!({"unread":false})
+        );
+        group_grant(&h, &alice, false).await;
+        assert_eq!(h.json(INBOX, &bob).await, json!({"items":[],"next":null}));
+        assert_eq!(h.json(UNREAD, &bob).await, json!({"unread":false}));
+    }
+    h.close().await;
+}
+
+async fn group_grant(h: &Harness, alice: &str, enabled: bool) {
+    let path = format!("{ROOT}/members");
+    let current = h.json(&path, alice).await;
+    let mut members = current["members"].as_array().unwrap().clone();
+    members.retain(|member| member["subject"] != "bob-id");
+    let groups = if enabled {
+        json!([{"group":"reviewers","access":"read"}])
+    } else {
+        json!([])
+    };
+    h.write(
+        Method::PUT,
+        &path,
+        alice,
+        json!({"members":members,"groups":groups,"expected_revision":current["revision"]}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+}

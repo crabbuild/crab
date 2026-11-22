@@ -201,7 +201,7 @@ async fn create(
             .allows(&server, &repo, &principal, &metadata.selection)
             .await?;
     }
-    let routed = crate::api::mentions::cell(&server, &repo, [input.body.as_str()]).await?;
+    let routed = app::repository_cell(&server, &repo)?;
     let committed = routed
         .client
         .command::<CreateIssue>(
@@ -330,7 +330,7 @@ async fn edit(
         let permissions = app::membership(&server, &principal, &repo).await?;
         (permissions.principal.can_triage(repo.id), None)
     };
-    let routed = crate::api::mentions::cell(&server, &repo, input.body.as_deref()).await?;
+    let routed = app::repository_cell(&server, &repo)?;
     let committed = routed
         .client
         .command::<UpdateIssue>(
@@ -482,7 +482,7 @@ async fn comment(
     let Json(input) = input?;
     let author = actor(&principal)?;
     body(&input.body, true)?;
-    let routed = crate::api::mentions::cell(&server, &repo, [input.body.as_str()]).await?;
+    let routed = app::repository_cell(&server, &repo)?;
     let output = crate::app::command_output(
         routed
             .client
@@ -576,7 +576,7 @@ async fn edit_comment(
     let Json(input) = input?;
     let author = actor(&principal)?;
     body(&input.body, true)?;
-    let routed = crate::api::mentions::cell(&server, &repo, [input.body.as_str()]).await?;
+    let routed = app::repository_cell(&server, &repo)?;
     let output = crate::app::command_output(
         routed
             .client

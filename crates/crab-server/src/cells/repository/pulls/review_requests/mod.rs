@@ -204,11 +204,11 @@ impl Mutation for SetReviewRequest {
             action,
         )?;
         if input.requested {
-            super::super::collaboration::notifications::review_requested(
+            super::super::collaboration::mentions::review_requested(
                 context,
-                &request.reviewer.issuer,
-                &request.reviewer.subject,
                 &event,
+                &request.reviewer.issuer,
+                [request.reviewer.subject.clone()],
             )?;
         }
         advance_revision(context)?;

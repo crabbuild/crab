@@ -69,7 +69,7 @@ pub(super) async fn list(
             "archived": lifecycle.archived,
         });
         if let Some(organization) = repository.organization {
-            view["organization"] = json!(organization);
+            view["organization_id"] = json!(organization);
         }
         if let Some(source) = repository
             .forked_from
@@ -84,7 +84,7 @@ pub(super) async fn list(
     if !principal.is_local()
         && repositories
             .iter()
-            .any(|repo| repo.get("organization").is_some())
+            .any(|repo| repo.get("organization_id").is_some())
     {
         // Settings reads may yield after a change to the organization role.
         let current: std::collections::HashSet<_> =
@@ -94,7 +94,7 @@ pub(super) async fn list(
                 .map(|visible| visible.repository.id.to_string())
                 .collect();
         repositories.retain(|repo| {
-            repo.get("organization").is_none()
+            repo.get("organization_id").is_none()
                 || repo["id"].as_str().is_some_and(|id| current.contains(id))
         });
     }
@@ -147,13 +147,16 @@ pub(super) async fn visible(
     if let Some(grants) = &grants {
         for repo in &selected {
             if let Some(record) = grants.get(&repo.id)
-                && let Some(organization) = record.organization
+                && let Some(organization) = record.organization_id()
             {
                 let source = record
                     .access_record(record.forked_from.and_then(|id| grants.get(&id)))
                     .map_err(|error| app::Error::Membership(Box::new(error)))?;
                 let include = organizations.entry(organization).or_insert(false);
-                *include |= !source.teams.is_empty();
+                *include |= source
+                    .organization
+                    .as_ref()
+                    .is_some_and(|access| !access.teams.is_empty());
             }
         }
     }
@@ -165,7 +168,7 @@ pub(super) async fn visible(
             let Some(record) = grants.get(&repository.id).filter(|record| {
                 record.owner == repository.config.owner
                     && record.name == repository.config.name
-                    && record.organization == repository.organization
+                    && record.organization_id() == repository.organization
                     && record.forked_from == repository.forked_from
             }) else {
                 continue;
@@ -181,10 +184,12 @@ pub(super) async fn visible(
                 &config,
                 issuer,
                 record
-                    .organization
+                    .organization_id()
                     .and_then(|id| organization_grants.get(&id))
                     .and_then(|grant| {
-                        crate::repository::access::organization_access(grant, &source.teams)
+                        source.organization.as_ref().and_then(|access| {
+                            crate::repository::access::organization_access(grant, &access.teams)
+                        })
                     }),
             )
         } else {
@@ -408,7 +413,7 @@ async fn publish(
     let repository = server
         .repositories
         .get(&key)
-        .filter(|repo| repo.id == result.id && repo.organization == result.organization)
+        .filter(|repo| repo.id == result.id && repo.organization == result.organization_id())
         .ok_or(app::Error::NotFound)?;
     // A replay must still pass current grants after routing has been refreshed.
     app::membership(server, principal, &repository).await?;

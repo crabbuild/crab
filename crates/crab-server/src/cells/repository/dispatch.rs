@@ -1,9 +1,13 @@
-use super::collaboration::links::{GetLink, ListLinks, SetLink};
 use super::collaboration::milestones::{
     AssignMilestone, CreateMilestone, EditMilestone, GetAssignment, GetMilestone,
     ListMilestoneItems, ListMilestones,
 };
 use super::collaboration::reactions::{GetReactions, SetReaction};
+use super::collaboration::{
+    attachments,
+    links::{GetLink, ListLinks, SetLink},
+    mention_settings, mentions,
+};
 use super::*;
 use crate::cells::application::{invoke_mutation, invoke_read};
 
@@ -40,6 +44,12 @@ pub(in crate::cells) fn dispatch_mutation(
         search::index::ensure_ready(context)?;
     }
     let result = match id {
+        attachments::Reserve::ID => invoke_mutation::<attachments::Reserve>(context, input),
+        attachments::Finish::ID => invoke_mutation::<attachments::Finish>(context, input),
+        attachments::Expire::ID => invoke_mutation::<attachments::Expire>(context, input),
+        attachments::Collect::ID => invoke_mutation::<attachments::Collect>(context, input),
+        mentions::Acknowledge::ID => invoke_mutation::<mentions::Acknowledge>(context, input),
+        mention_settings::Set::ID => invoke_mutation::<mention_settings::Set>(context, input),
         #[cfg(test)]
         projection::tests::Historical::ID => {
             invoke_mutation::<projection::tests::Historical>(context, input)
@@ -180,9 +190,6 @@ pub(in crate::cells) fn dispatch_mutation(
         viewed::SetViewedFile::ID => invoke_mutation::<viewed::SetViewedFile>(context, input),
         pending_reviews::Change::ID => invoke_mutation::<pending_reviews::Change>(context, input),
         pending_reviews::Submit::ID => invoke_mutation::<pending_reviews::Submit>(context, input),
-        collaboration::notifications::SetRead::ID => {
-            invoke_mutation::<collaboration::notifications::SetRead>(context, input)
-        }
         integrations::Edit::ID => invoke_mutation::<integrations::Edit>(context, input),
         integrations::Record::ID => invoke_mutation::<integrations::Record>(context, input),
         integrations::dispatches::Reserve::ID => {
@@ -250,6 +257,10 @@ pub(in crate::cells) fn dispatch_read(
     input: serde_json::Value,
 ) -> crate::cells::Result<serde_json::Value> {
     match id {
+        attachments::Get::ID => invoke_read::<attachments::Get>(context, input),
+        attachments::Due::ID => invoke_read::<attachments::Due>(context, input),
+        mentions::Pending::ID => invoke_read::<mentions::Pending>(context, input),
+        mention_settings::Get::ID => invoke_read::<mention_settings::Get>(context, input),
         #[cfg(test)]
         projection::tests::Inspect::ID => invoke_read::<projection::tests::Inspect>(context, input),
         #[cfg(test)]
@@ -321,6 +332,9 @@ pub(in crate::cells) fn dispatch_read(
         <search::labels::LabelOptions as Read>::ID => {
             invoke_read::<search::labels::LabelOptions>(context, input)
         }
+        search::index::references::FindReferences::ID => {
+            invoke_read::<search::index::references::FindReferences>(context, input)
+        }
         <search::milestones::MilestoneOptions as Read>::ID => {
             invoke_read::<search::milestones::MilestoneOptions>(context, input)
         }
@@ -375,9 +389,6 @@ pub(in crate::cells) fn dispatch_read(
         <GetPull as Read>::ID => invoke_read::<GetPull>(context, input),
         viewed::GetViewedFiles::ID => invoke_read::<viewed::GetViewedFiles>(context, input),
         pending_reviews::Get::ID => invoke_read::<pending_reviews::Get>(context, input),
-        collaboration::notifications::List::ID => {
-            invoke_read::<collaboration::notifications::List>(context, input)
-        }
         integrations::List::ID => invoke_read::<integrations::List>(context, input),
         integrations::dispatches::Get::ID => {
             invoke_read::<integrations::dispatches::Get>(context, input)

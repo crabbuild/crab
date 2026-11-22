@@ -24,6 +24,8 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
   or config overrides the inherited chooser.
 - Pending review comments and suggestions persist privately across reloads.
   One submission publishes the review and comments with a durable retry receipt.
+  The discussion editor retains Markdown commands, saved replies, references
+  and repository-scoped attachments.
 - Writers can apply selected suggestions across several files in one commit.
   The head, comment versions, file blobs, and line ranges are checked before publication.
 - Browser creation provisions empty private repositories in personal and
@@ -54,10 +56,10 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
 - Repository code search now matches literal text on a selected snapshot,
   with directory and case filters, bounded pages, and commit-pinned line links.
   Persistent full-text and symbol indexes and cross-repository search remain open.
-- The in-app inbox delivers individual and team review requests and Markdown mentions to
-  eligible accounts. Read state is durable, and discussion links target the
-  specific contribution. Assignment notifications, watching, email delivery,
-  and an unscoped inbox across more than 32 repositories remain open.
+- The account-wide in-app inbox delivers individual and team review requests,
+  individual mentions and configured closed-team mentions. Read state is
+  durable, and links target the specific contribution. Assignment
+  notifications, watching, and email delivery remain open.
 - GitHub Actions reports signed push-workflow results for the PR head and can
   run required workflows automatically for queued candidates. The dispatch is
   scoped to the operator's repository, workflow, and branch binding. Candidate
@@ -115,7 +117,7 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
   The mutation verifies both tips, records the change, expires active approvals
   and binds new reviews to the updated base revision. Fork PRs select the new
   target in the upstream repository.
-- Repository admins can grant roles to visible organization teams. Browser and
+- Organization owners can grant roles to their teams from repository settings. Browser and
   Git access and approval eligibility use current memberships. The PR picker
   supports team review requests and links to the fulfilling review. Team search
   filters, automatic assignment, organization creation policy and base
@@ -153,11 +155,11 @@ Effort is relative to the existing architecture. M is a bounded server and UI sl
 | P0 | Review and merge with confidence | Protected merge evaluates current eligible reviewers, all required check sources, and exact commit identity. Ref leases and publication receipts support recovery. `crates/crab-server/src/api/pulls/merge/mod.rs`, `crates/crab-server/src/api/pulls/tests/http.rs`, `crates/crab-server/src/app.rs` | Extend fault and live external CI qualification. Track additional protection policy in P2. | L / high |
 | P1 | Review a substantial change | Private pending review, atomic submission, revision-aware viewed progress and multi-file suggestion batches are available. `crates/crab-server/src/api/pulls/review_threads`, `packages/ui/src/features/pull-requests/reviews` | Qualify review and batch application on representative large changes using the embedded UI. | L / medium–high |
 | P1 | Create, import and find a repository | Personal and organization browser creation share durable setup. Organizations list accessible repositories. Git imports resume by job ID, verify the pinned refs before exposing a destination and exclude LFS object bytes. `crates/crab-server/src/api/catalog.rs`, `packages/ui/src/features/organizations/repositories.tsx`, `crates/crab-server/src/git_import/jobs.rs` | Add bounded catalog search and rename and transfer with stable UUIDs. | L / high |
-| P1 | Get back to requested work | The inbox delivers individual and team review requests and individual mentions with private unread state, deep links, and current repository access. `crates/crab-server/src/api/inbox/mod.rs`, `packages/ui/src/features/inbox/index.tsx` | Add assignment and team mention notifications, repository subscriptions, and account-wide indexing. Add email after preferences and revocation cases pass. | L / medium–high |
+| P1 | Get back to requested work | The inbox delivers individual and team review requests and mentions with private unread state, deep links, and current repository access. `crates/crab-server/src/api/notifications/mod.rs`, `packages/ui/src/features/notifications/index.tsx` | Add assignment notifications, repository subscriptions and delivery preferences. Add email after preferences and revocation cases pass. | L / medium–high |
 | P1 | Find code and symbols | Repository code search reads the authorized snapshot and returns text matches with commit-pinned line links. Go to file and current-file Symbols are available. `crates/crab-server/src/api/code_search.rs`, `packages/ui/src/features/repository/code-search.tsx` | Add indexed content, paths and symbols, visible indexing state, and cross-repository search after revocation and scale proof. | L / high |
 | P1 | Connect external CI | GitHub Actions workflow results use repository-scoped credentials, signature verification, durable redelivery receipts and provider-bound merge requirements. PR checks link to the GitHub run. Required workflows can dispatch from the queue with a candidate-scoped Git checkout. `crates/crab-server/src/api/integrations/mod.rs`, `packages/ui/src/features/settings/integrations.tsx` | Qualify a deployed GitHub App with live deliveries. Add durable outbound Git and PR events and delivery history. | L / high |
 | P2 | Govern and integrate changes | Merge methods are configurable and include squash and rebase. PR writers can merge the current base into the head branch, rebase onto it, or resolve simple text conflicts in the browser, including on a replacement branch for protected heads. Team grants and PR team review requests use current membership. CODEOWNERS requests owners, can require eligible approvals by changed path, and appears on repository files. Repository rulesets layer active branch and tag patterns with classic protection in Git HTTP and browser publication. Either branch policy can require all published inline review conversations to be resolved. Repository and organization rulesets support current role and visible team bypass. Organization rulesets target all, selected, or name-matched repositories and layer with local policy. `crates/crab-server/REFERENCE.md`, `crates/crab-server/src/api/pulls/branch_update.rs`, `crates/crab-server/src/api/pulls/codeowners/mod.rs` | Add team review filters, repository property targeting, and integration bypass authority. Add push attribution for retaining eligible auto-merge requests after a writer changes the head. Add batched publication and wider build concurrency. | XL / high |
-| P2 | Triage, plan and release | Issues, labels, milestones, pins, bulk edits, linked work, default-branch issue closure through manual links and PR descriptions, Markdown and YAML issue templates with inherited account defaults, sub-issues, shared Projects and release assets are available. `crates/crab-server/README.md:649`, `crates/crab-server/REFERENCE.md`, `crates/crab-server/src/api/issues/templates/mod.rs` | Closing keywords in commit messages, cross-repository issue links, attachment uploads, issue types and dependencies, moderation and edit history, Projects automation, generated release notes and release subscriptions. Prioritize the remaining closure paths before adding more planning surfaces. | L / medium–high |
+| P2 | Triage, plan and release | Issues, labels, milestones, pins, bulk edits, linked work, default-branch issue closure through manual links and PR descriptions, Markdown and YAML issue templates with inherited account defaults, sub-issues, discussion attachments, shared Projects and release assets are available. `crates/crab-server/README.md:649`, `crates/crab-server/REFERENCE.md`, `crates/crab-server/src/api/issues/templates/mod.rs` | Closing keywords in commit messages, cross-repository issue links, issue types and dependencies, moderation and edit history, Projects automation, generated release notes and release subscriptions. Prioritize the remaining closure paths before adding more planning surfaces. | L / medium–high |
 | P2 | Contribute across repository boundaries | Private organization forks use stable source UUIDs, independent refs, current source ACLs, verified Git LFS copies, and verified native Xet bindings. The browser compares fork and upstream branches from their common ancestor, opens upstream PRs, applies review suggestions and text conflict resolutions to the fork, and supports the upstream's enabled merge methods. A GitHub Actions mirror branch lets the upstream require results for commits present only in the fork. `crates/crab-server/src/api/pulls/git.rs`, `crates/crab-server/src/api/integrations/mod.rs`, `crates/crab-server/src/git/receive/fork_merge.rs` | Add review-state search across forks and policy for wider fork networks. Public visibility introduces a separate policy for anonymous browse, clone, search, fork access and abuse controls. | XL / high |
 | P2 | Review large assets | The UI previews many formats and supports range-backed Parquet analysis. Browser downloads of Crab/LFS pointers return pointer bytes. `crates/crab-server/REFERENCE.md:590`, `crates/crab-server/REFERENCE.md:598` | Authorized artifact download and size-appropriate preview at a pinned commit. Start with metadata and ranged download for an actually stored artifact, then add representative dataset or model comparisons. | L / high |
 | P3 | Extend the platform | The enterprise inventory identifies missing hosted workflow execution, package registry, security findings, enterprise provisioning and unified audit. `crab/docs/architecture/enterprise-server-ui.md:69` | Plan Actions-compatible runners, security reporting and scanning, Packages, Pages, Discussions, Wiki, Insights, stars and public discovery independently. Scope external API compatibility, SSH, enterprise SSO/provisioning and audit as separate programs. | XL / high |
@@ -201,6 +203,11 @@ Prove one private repository from an author’s browser and stock Git through a 
 
 ## Verification and release claims
 
+- After integrating the current `crab-v2` catalog, editor and notification
+  changes, 30 focused native tests passed. Stock Git and embedded Chromium
+  exercised owner-managed grants and revocation, CODEOWNERS, fork permissions,
+  pending reviews, issue template inheritance and tested merge publication.
+  The production UI build, 120 unit tests and 31 focused Playwright tests passed.
 - Stock Git and embedded Chromium verified issue template inheritance after
   granting access to the source repository, creation with target-repository
   defaults, source access revocation, and a local config override. The

@@ -79,47 +79,62 @@ async fn inbox_delivers_a_review_request_and_mention_to_the_current_member() {
     .error_for_status()
     .unwrap();
 
-    let page = h.json("/api/inbox?limit=1", &bob).await;
+    h.deliver_notifications("team", "private").await;
+    let page = h.json("/api/notifications?limit=1&unread=true", &bob).await;
     let review = &page["items"][0];
     assert_eq!(review["reason"], "review_requested");
     assert_eq!(review["title"], "Please review");
-    assert_eq!(review["target"], json!({"kind":"pull","number":1}));
-    let next = format!("/api/inbox?cursor={}", page["next"].as_str().unwrap());
+    assert!(
+        review["href"]
+            .as_str()
+            .unwrap()
+            .starts_with("/team/private/pull/1?repository_id=")
+    );
+    let next = format!(
+        "/api/notifications?unread=true&before={}",
+        page["next"].as_str().unwrap()
+    );
     let mentions = h.json(&next, &bob).await;
     assert_eq!(mentions["next"], Value::Null);
     assert_eq!(mentions["items"].as_array().unwrap().len(), 1);
     assert_eq!(mentions["items"][0]["reason"], "mention");
-    assert_eq!(
-        mentions["items"][0]["target"],
-        json!({"kind":"issue","number":1})
-    );
-    assert_eq!(h.json("/api/inbox", &alice).await["items"], json!([]));
-    assert_eq!(
-        h.http
-            .get(format!("{}{next}", h.origin))
-            .header("cookie", &alice)
-            .send()
-            .await
+    assert!(
+        mentions["items"][0]["href"]
+            .as_str()
             .unwrap()
-            .status(),
-        StatusCode::BAD_REQUEST
+            .starts_with("/team/private/issues/1?repository_id=")
     );
+    assert_eq!(
+        h.json("/api/notifications?unread=true", &alice).await["items"],
+        json!([])
+    );
+    assert_eq!(h.json(&next, &alice).await["items"], json!([]));
     for private in [&h.provider.issuer, "bob-id", "alice-id"] {
         assert!(!page.to_string().contains(private));
     }
 
-    let id = review["repository"]["id"].as_str().unwrap();
-    let mark = format!("/api/inbox/{id}/{}", review["event"]);
-    let read = json!({"at":review["at"],"read":true});
+    let id = review["href"]
+        .as_str()
+        .unwrap()
+        .split("repository_id=")
+        .nth(1)
+        .unwrap();
+    let mark = format!("/api/notifications/{}/read", review["id"].as_str().unwrap());
+    let read = json!({"created_at_ms":review["created_at_ms"],"read":true});
+    h.write(Method::PUT, &mark, &alice, read.clone())
+        .await
+        .error_for_status()
+        .unwrap();
     assert_eq!(
-        h.write(Method::PATCH, &mark, &alice, read.clone())
-            .await
-            .status(),
-        StatusCode::NOT_FOUND
+        h.json("/api/notifications?unread=true", &bob).await["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
     );
     assert_eq!(
         h.http
-            .patch(format!("{}{mark}", h.origin))
+            .put(format!("{}{mark}", h.origin))
             .header("cookie", &bob)
             .header("origin", &h.origin)
             .json(&read)
@@ -130,25 +145,28 @@ async fn inbox_delivers_a_review_request_and_mention_to_the_current_member() {
         StatusCode::FORBIDDEN
     );
     for _ in 0..2 {
-        h.write(Method::PATCH, &mark, &bob, read.clone())
+        h.write(Method::PUT, &mark, &bob, read.clone())
             .await
             .error_for_status()
             .unwrap();
     }
-    assert_eq!(h.json("/api/inbox", &bob).await["items"], mentions["items"]);
-    let all = format!("/api/inbox?unread=false&repository={id}");
+    assert_eq!(
+        h.json("/api/notifications?unread=true", &bob).await["items"],
+        mentions["items"]
+    );
+    let all = format!("/api/notifications?unread=false&repository={id}");
     assert_eq!(h.json(&all, &bob).await["items"][0]["read"], true);
     h.write(
-        Method::PATCH,
+        Method::PUT,
         &mark,
         &bob,
-        json!({"at":review["at"],"read":false}),
+        json!({"created_at_ms":review["created_at_ms"],"read":false}),
     )
     .await
     .error_for_status()
     .unwrap();
     assert_eq!(
-        h.json("/api/inbox", &bob).await["items"]
+        h.json("/api/notifications?unread=true", &bob).await["items"]
             .as_array()
             .unwrap()
             .len(),
@@ -170,7 +188,10 @@ async fn inbox_delivers_a_review_request_and_mention_to_the_current_member() {
         )
         .await
         .unwrap();
-    assert_eq!(h.json("/api/inbox", &bob).await["items"], json!([]));
+    assert_eq!(
+        h.json("/api/notifications?unread=true", &bob).await["items"],
+        json!([])
+    );
     assert_eq!(h.json(&next, &bob).await["items"], json!([]));
     assert_eq!(
         h.http
@@ -182,9 +203,9 @@ async fn inbox_delivers_a_review_request_and_mention_to_the_current_member() {
             .status(),
         StatusCode::NOT_FOUND
     );
-    assert_eq!(
-        h.write(Method::PATCH, &mark, &bob, read).await.status(),
-        StatusCode::NOT_FOUND
-    );
+    h.write(Method::PUT, &mark, &bob, read)
+        .await
+        .error_for_status()
+        .unwrap();
     h.close().await;
 }

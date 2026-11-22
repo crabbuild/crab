@@ -114,8 +114,7 @@ impl OrganizationOwner {
     pub(super) async fn policy_grant(
         self,
         server: &Server,
-    ) -> app::Result<crate::cells::organization::teams::repository_access::RepositoryTeamAccess>
-    {
+    ) -> app::Result<crate::cells::organization::teams::repository_access::ActorTeams> {
         use crate::cells::organization::teams::repository_access::{
             RepositoryActor, RepositoryTeamsForActor,
         };

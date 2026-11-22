@@ -21,31 +21,31 @@ test("notifications preserve unread state and open the exact review reply", asyn
   const notices = [
     {
       repository,
-      actor,
-      event: 14,
-      at: 1_700_000_100_000,
+      sender: actor.name,
+      id: "notice-14",
+      href: "/team/project/pull/1",
+      created_at_ms: 1_700_000_100_000,
       read: false,
-      target: { kind: "pull", number: 1 },
       title: "Review the README",
       reason: "review_requested",
     },
     {
       repository,
-      actor,
-      event: 13,
-      at: 1_700_000_060_000,
+      sender: actor.name,
+      id: "notice-13",
+      href: "/team/project/pull/1/files?thread=1&reply=86",
+      created_at_ms: 1_700_000_060_000,
       read: false,
-      target: { kind: "pull_reply", pull: 1, thread: 1, number: 86 },
       title: "Reply about the README",
       reason: "mention",
     },
     {
       repository: second,
-      actor,
-      event: 3,
-      at: 1_700_000_000_000,
+      sender: actor.name,
+      id: "notice-3",
+      href: "/team/library/issues/2#issuecomment-9",
+      created_at_ms: 1_700_000_000_000,
       read: false,
-      target: { kind: "issue_comment", issue: 2, number: 9 },
       title: "Library issue",
       reason: "mention",
     },
@@ -62,11 +62,18 @@ test("notifications preserve unread state and open the exact review reply", asyn
     }),
   );
   await page.route(
-    (url) => url.pathname === "/api/inbox",
+    (url) => url.pathname === "/api/repos" && !url.search,
+    (route) => route.fulfill({ json: { repositories: [repository, second] } }),
+  );
+  await page.route("**/api/notifications/unread", (route) =>
+    route.fulfill({ json: { unread: notices.some((notice) => !notice.read) } }),
+  );
+  await page.route(
+    (url) => url.pathname === "/api/notifications",
     (route) => {
       const query = new URL(route.request().url()).searchParams;
       const selected = query.get("repository");
-      const cursor = query.get("cursor");
+      const cursor = query.get("before");
       if (cursor && failPage) {
         failPage = false;
         return route.fulfill({
@@ -84,24 +91,25 @@ test("notifications preserve unread state and open the exact review reply", asyn
         json: {
           items: cursor ? items.slice(start) : items.slice(0, 1),
           next: !cursor && items.length > 1 ? "fixture-cursor" : null,
-          repositories: [repository, second],
-          scope_required: false,
         },
       });
     },
   );
-  await page.route(`**/api/inbox/${repository.id}/14`, (route) => {
+  await page.route("**/api/notifications/notice-14/read", (route) => {
     const request = route.request();
-    expect(request.method()).toBe("PATCH");
+    expect(request.method()).toBe("PUT");
     expect(request.headers()["x-csrf-token"]).toBe("fixture-csrf");
     const body = request.postDataJSON();
-    expect(body).toEqual({ at: notices[0].at, read: true });
+    expect(body).toEqual({
+      created_at_ms: notices[0].created_at_ms,
+      read: true,
+    });
     notices[0].read = body.read;
     if (loseReadReply) {
       loseReadReply = false;
       return route.abort("failed");
     }
-    return route.fulfill({ json: { read: notices[0].read } });
+    return route.fulfill({ json: null });
   });
   lifecycle.branchesAvailable = false;
   threads[0].resolved = true;
@@ -117,15 +125,15 @@ test("notifications preserve unread state and open the exact review reply", asyn
           body: "@bob This is the specific reply.",
           reactions: emptyReactions(),
           version: 1,
-          created_at: notices[1].at,
-          updated_at: notices[1].at,
+          created_at: notices[1].created_at_ms,
+          updated_at: notices[1].created_at_ms,
           can_edit: false,
         },
       }),
   );
 
   await page.goto("/team/project/pull/1");
-  await page.getByRole("link", { name: "Notifications", exact: true }).click();
+  await page.getByRole("link", { name: /^Notifications/ }).click();
   await expect(
     page.getByRole("heading", { name: "Notifications" }),
   ).toBeVisible();

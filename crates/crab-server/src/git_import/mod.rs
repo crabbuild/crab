@@ -282,9 +282,7 @@ impl ReceiveGrant {
     pub(crate) async fn policy_grant(
         &self,
         server: &Server,
-    ) -> crate::app::Result<
-        crate::cells::organization::teams::repository_access::RepositoryTeamAccess,
-    > {
+    ) -> crate::app::Result<crate::cells::organization::teams::repository_access::ActorTeams> {
         match self.organization {
             Some(owner) => owner.policy_grant(server).await,
             None => Ok(Default::default()),

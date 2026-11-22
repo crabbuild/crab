@@ -19,8 +19,13 @@ pub use migration::DirectoryState;
 pub(crate) use migration::{GetDirectoryState, MigrateDirectory};
 mod lookup;
 mod search;
-pub(crate) use search::{CompleteHandles, ResolveHandles, validate_handle_prefix};
+pub(crate) use search::{
+    CompleteHandles, MentionCandidate, MentionCandidates, MentionSearch, ResolveHandles,
+    validate_handle_prefix,
+};
+pub(crate) mod notifications;
 mod profiles;
+pub(crate) mod saved_replies;
 pub(crate) use lookup::{
     AccountsExist, ActorSummary, LookupAccounts, LookupActors, LookupIdentities, LookupProfiles,
 };
@@ -232,6 +237,14 @@ pub(in crate::cells) fn dispatch_read(
         LookupActors::ID => invoke_read::<LookupActors>(context, input),
         ResolveHandles::ID => invoke_read::<ResolveHandles>(context, input),
         CompleteHandles::ID => invoke_read::<CompleteHandles>(context, input),
+        MentionCandidates::ID => invoke_read::<MentionCandidates>(context, input),
+        notifications::List::ID => invoke_read::<notifications::List>(context, input),
+        notifications::ResolveHandlesAt::ID => {
+            invoke_read::<notifications::ResolveHandlesAt>(context, input)
+        }
+        saved_replies::ListSavedReplies::ID => {
+            invoke_read::<saved_replies::ListSavedReplies>(context, input)
+        }
         _ => Err(Error::Invalid("unknown directory query")),
     }
 }
@@ -249,6 +262,14 @@ pub(in crate::cells) fn dispatch_mutation(
         RegisterAccounts::ID => invoke_mutation::<RegisterAccounts>(context, input),
         CreateProfile::ID => invoke_mutation::<CreateProfile>(context, input),
         EditProfile::ID => invoke_mutation::<EditProfile>(context, input),
+        notifications::Deliver::ID => invoke_mutation::<notifications::Deliver>(context, input),
+        notifications::MarkRead::ID => invoke_mutation::<notifications::MarkRead>(context, input),
+        saved_replies::PutSavedReply::ID => {
+            invoke_mutation::<saved_replies::PutSavedReply>(context, input)
+        }
+        saved_replies::DeleteSavedReply::ID => {
+            invoke_mutation::<saved_replies::DeleteSavedReply>(context, input)
+        }
         _ => Err(Error::Invalid("unknown directory command")),
     }
 }

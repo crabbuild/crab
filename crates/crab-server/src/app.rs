@@ -15,6 +15,11 @@ use serde_json::json;
 
 use crate::{
     auth::{Identity, Principal},
+    catalog::{CatalogError, OrganizationAccess},
+    cells::{
+        Address,
+        organization::teams::{GetRepositoryTeamAccess, RepositoryTeamAccess, RepositoryTeams},
+    },
     repository::Repository,
     server::Server,
 };
@@ -155,6 +160,10 @@ pub(crate) enum Error {
     ReleaseAssetIo(#[source] std::io::Error),
     #[error("Release asset transfer admission failed")]
     ReleaseAssetCoordination(#[source] crab_coordination::CoordinationError),
+    #[error("Discussion attachment transfer failed")]
+    AttachmentTransfer(#[source] crate::api::asset_transfer::Error),
+    #[error("Discussion attachment transfer admission failed")]
+    AttachmentAdmission(#[source] crate::transfer_admission::Error),
     #[error("Release tag publication failed")]
     Release(#[source] Box<crate::git::receive::ReceiveError>),
     #[error("Pull request merge failed")]
@@ -219,6 +228,14 @@ pub(crate) fn repository_cell(
 
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
+        if matches!(self, Self::Cell(crate::cells::Error::AttachmentUnavailable)) {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                [("x-crab-write-outcome", "rejected")],
+                Json(json!({"error":{"code":"attachment_unavailable","message":"An attachment is unavailable or the attachment limit was exceeded. Remove it or upload it again."}})),
+            )
+                .into_response();
+        }
         let expected_lock_conflict = matches!(
             &self,
             Self::Merge(error) if matches!(error.as_ref(), crate::git::receive::ReceiveError::Locked)
@@ -526,6 +543,30 @@ impl IntoResponse for Error {
                 "asset_too_large",
                 "Release assets must be no larger than 512 MiB",
             ),
+            Self::AttachmentTransfer(crate::api::asset_transfer::Error::TooLarge) => (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "attachment_too_large",
+                "Attachments must be no larger than 25 MiB",
+            ),
+            Self::AttachmentTransfer(
+                crate::api::asset_transfer::Error::Cancelled
+                | crate::api::asset_transfer::Error::Staging(crate::local_disk::Error::Cancelled),
+            )
+            | Self::AttachmentAdmission(crate::transfer_admission::Error::Cancelled) => (
+                StatusCode::REQUEST_TIMEOUT,
+                "attachment_cancelled",
+                "Attachment transfer was cancelled or timed out",
+            ),
+            Self::AttachmentTransfer(crate::api::asset_transfer::Error::Body(_)) => (
+                StatusCode::BAD_REQUEST,
+                "invalid_attachment_body",
+                "The attachment body could not be read",
+            ),
+            Self::AttachmentTransfer(_) | Self::AttachmentAdmission(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "attachment_unavailable",
+                "Attachment transfers are temporarily unavailable. Retry shortly.",
+            ),
             Self::ReleaseAssetCancelled
             | Self::ReleaseStaging(crate::local_disk::Error::Cancelled) => (
                 StatusCode::REQUEST_TIMEOUT,
@@ -739,9 +780,10 @@ pub(crate) fn repository(
 
 pub(crate) struct Membership {
     pub members: Vec<crate::RepositoryMember>,
+    pub groups: Vec<crate::RepositoryGroup>,
     pub principal: Principal,
     pub organization: Option<uuid::Uuid>,
-    pub(crate) teams: Vec<crate::catalog::RepositoryTeam>,
+    pub(crate) teams: Vec<crate::catalog::TeamGrant>,
     pub(crate) review_teams: Vec<uuid::Uuid>,
     organization_owner: bool,
     bypass_teams: Vec<uuid::Uuid>,
@@ -826,6 +868,37 @@ impl Membership {
     }
 }
 
+pub(crate) fn repository_access_error(error: CatalogError) -> Error {
+    match error {
+        CatalogError::Conflict => Error::Conflict,
+        CatalogError::NotFound => Error::NotFound,
+        CatalogError::Invalid(message) => Error::Invalid(message),
+        error => Error::Membership(Box::new(error)),
+    }
+}
+
+pub(crate) async fn repository_team_access(
+    server: &Server,
+    organization: &OrganizationAccess,
+    actor: Option<uuid::Uuid>,
+    include_names: bool,
+) -> Result<RepositoryTeamAccess> {
+    let cells = server.cells().ok_or(Error::CellUnavailable)?;
+    query_output(
+        cells
+            .query::<GetRepositoryTeamAccess>(
+                Address::Organization(organization.id),
+                None,
+                RepositoryTeams {
+                    actor,
+                    teams: organization.teams.iter().map(|grant| grant.team).collect(),
+                    include_names,
+                },
+            )
+            .await,
+    )
+}
+
 pub(crate) async fn membership(
     server: &Server,
     principal: &Principal,
@@ -845,6 +918,7 @@ pub(crate) async fn membership(
         };
         return Ok(Membership {
             members: Vec::new(),
+            groups: Vec::new(),
             principal: principal.clone(),
             organization: repo.organization,
             teams: Vec::new(),
@@ -876,12 +950,14 @@ pub(crate) async fn membership_snapshot(
     repo: &Repository,
     snapshot: crate::catalog::MembershipSnapshot,
 ) -> Result<Membership> {
-    if snapshot.repository_id != repo.id || snapshot.organization != repo.organization {
+    let organization = snapshot.organization.as_ref().map(|access| access.id);
+    if snapshot.repository_id != repo.id || organization != repo.organization {
         return Err(Error::NotFound);
     }
     if principal.is_local() {
         return Ok(Membership {
             members: snapshot.members,
+            groups: snapshot.groups,
             principal: principal.clone(),
             organization: None,
             teams: Vec::new(),
@@ -892,11 +968,14 @@ pub(crate) async fn membership_snapshot(
         });
     }
     let issuer = server.auth.as_ref().ok_or(Error::NotFound)?.issuer();
-    let grant = if let Some(organization) = snapshot.organization {
+    let teams = snapshot
+        .organization
+        .map_or_else(Vec::new, |access| access.teams);
+    let grant = if let Some(organization) = organization {
         crate::repository::access::organization_grants(
             server,
             principal,
-            [(organization, !snapshot.teams.is_empty())].into(),
+            [(organization, !teams.is_empty())].into(),
         )
         .await?
         .remove(&organization)
@@ -908,20 +987,21 @@ pub(crate) async fn membership_snapshot(
     config.groups = snapshot.groups;
     let inherited = grant
         .as_ref()
-        .and_then(|grant| crate::repository::access::organization_access(grant, &snapshot.teams));
+        .and_then(|grant| crate::repository::access::organization_access(grant, &teams));
     let principal = principal.with_membership(repo.id, &config, issuer, inherited);
     let grant = grant.unwrap_or_default();
     let mut review_teams = grant.teams;
     let mut bypass_teams = grant.bypass_teams.clone();
     // A bypass actor still needs a current repository grant and active,
     // non-secret membership. This applies to refreshed Git credentials too.
-    bypass_teams.retain(|id| snapshot.teams.iter().any(|grant| grant.team == *id));
-    review_teams.retain(|id| snapshot.teams.iter().any(|grant| grant.team == *id));
+    bypass_teams.retain(|id| teams.iter().any(|grant| grant.team == *id));
+    review_teams.retain(|id| teams.iter().any(|grant| grant.team == *id));
     Ok(Membership {
         members: config.members,
+        groups: config.groups,
         principal,
-        organization: snapshot.organization,
-        teams: snapshot.teams,
+        organization,
+        teams,
         review_teams,
         organization_owner: grant.owner,
         bypass_teams,

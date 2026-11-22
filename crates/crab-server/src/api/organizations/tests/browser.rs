@@ -1,6 +1,6 @@
 use super::*;
 use crate::cells::organization::{ChangeMember, ChangeOutcome, MemberChange, Role};
-use std::time::{Duration, Instant};
+use crate::test_support::http::browser::Browser;
 
 mod branch_update;
 mod candidate;
@@ -8,63 +8,6 @@ mod issue_templates;
 mod merge_queue;
 mod retarget;
 mod suggestions;
-
-struct Browser(String);
-impl Browser {
-    fn new(name: &str) -> Self {
-        Self(format!("crab-org-{name}-{}", Uuid::now_v7().simple()))
-    }
-    async fn run(&self, arguments: &[&str]) -> String {
-        let output = tokio::time::timeout(
-            Duration::from_secs(45),
-            tokio::process::Command::new("agent-browser")
-                .args(["--session", &self.0])
-                .args(arguments)
-                .kill_on_drop(true)
-                .output(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        if !output.status.success() {
-            let snapshot = tokio::process::Command::new("agent-browser")
-                .args(["--session", &self.0, "snapshot"])
-                .output()
-                .await
-                .unwrap();
-            panic!(
-                "{:?}: {}\n{}",
-                arguments,
-                String::from_utf8_lossy(&output.stderr),
-                String::from_utf8_lossy(&snapshot.stdout)
-            );
-        }
-        String::from_utf8(output.stdout).unwrap()
-    }
-}
-impl Drop for Browser {
-    fn drop(&mut self) {
-        // Failed qualification must close only its own browser, before fixture
-        // storage disappears. Bound cleanup even if its daemon stopped replying.
-        let Ok(mut child) = std::process::Command::new("agent-browser")
-            .args(["--session", &self.0, "close"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        else {
-            return;
-        };
-        let deadline = Instant::now() + Duration::from_secs(8);
-        while Instant::now() < deadline {
-            if child.try_wait().is_ok_and(|value| value.is_some()) {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        let _ = child.kill();
-        let _ = child.wait();
-    }
-}
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires agent-browser and the built embedded UI; uses isolated real OIDC/native Cells"]
@@ -803,20 +746,19 @@ async fn native_browser_saves_repository_team_access_and_review_requests() {
         .await
         .unwrap();
     let owner = repository["owner"].as_str().unwrap();
-    let url = format!("{}/{owner}/library/settings/access", h.origin);
+    let url = format!("{}/{owner}/library/settings/team-access", h.origin);
     let browser = Browser::new("team-access");
     browser.run(&["open", &url]).await;
-    let actions: [(&[&str], &str); 4] = [
+    let actions: [(&[&str], &str); 3] = [
         (
             &["wait", "--text", "Continue to sign in"],
             "Continue to sign in",
         ),
         (&["wait", "--text", "Add team"], "Add team"),
         (
-            &["wait", "[aria-label='Choose Engineering']"],
-            "Choose Engineering",
+            &["wait", "[aria-label='Add Engineering']"],
+            "Add Engineering",
         ),
-        (&["wait", "--text", "Save team role"], "Save team role"),
     ];
     for (wait, label) in actions {
         browser.run(wait).await;
@@ -827,19 +769,28 @@ async fn native_browser_saves_repository_team_access_and_review_requests() {
             .await;
     }
     browser
-        .run(&["wait", "[aria-label='Change access for Engineering']"])
+        .run(&["wait", "--fn", "!document.querySelector('[role=dialog]')"])
         .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Save team access",
+            "--exact",
+        ])
+        .await;
+    browser.run(&["wait", "--text", "Team access saved."]).await;
     assert_eq!(
-        h.json(
-            &format!("/api/repos/{owner}/library/settings/team-access"),
-            &alice
-        )
-        .await["grants"],
-        json!([{"team":team,"name":"Engineering","access":"read"}])
+        h.json(&format!("/api/repos/{owner}/library/team-access"), &alice)
+            .await["organization"]["teams"],
+        json!([{"team":team,"access":"read"}])
     );
     browser.run(&["reload"]).await;
     browser
-        .run(&["wait", "[aria-label='Change access for Engineering']"])
+        .run(&["wait", "[aria-label='Role for Engineering']"])
         .await;
 
     let repo_id = Uuid::parse_str(repository["id"].as_str().unwrap()).unwrap();

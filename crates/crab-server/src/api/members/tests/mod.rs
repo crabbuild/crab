@@ -8,6 +8,8 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+mod team_access_browser;
+
 #[tokio::test]
 async fn catalog_installation_preserves_revocation_before_http_access() {
     let h = Harness::new(false).await;

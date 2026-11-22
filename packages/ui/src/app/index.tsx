@@ -19,8 +19,8 @@ import { Spinner } from "@/components/ui/spinner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { GitAccess } from "@/features/git-access";
 import { GitImport } from "@/features/imports";
-import { Inbox } from "@/features/inbox";
 import { CreateRepository } from "@/features/repository/create";
+import { NotificationLink, Notifications } from "@/features/notifications";
 import { gitOwnerSuggestion } from "@/features/imports/source";
 import {
   OrganizationPage,
@@ -31,8 +31,13 @@ import {
   useTeamCommands,
 } from "@/features/organizations/teams/commands";
 import { ProfileSettings, UserProfile } from "@/features/profile";
-import { BellIcon, LogOutIcon, UserRoundIcon } from "lucide-react";
+import { LogOutIcon, UserRoundIcon } from "lucide-react";
 import { RepositoryPage } from "@/features/repository/page";
+import {
+  DiscussionCodeTheme,
+  DiscussionCsrf,
+  DiscussionRepository,
+} from "@/components/discussion/repository-context";
 import type { Session } from "@/lib/contracts";
 import { navigate, useLocation, useRequest, type Repository } from "@/lib/api";
 import {
@@ -117,8 +122,9 @@ export function App() {
     };
   }, [codeTheme, resolved]);
   const url = new URL(location, window.location.origin);
-  const profileSettings = url.pathname === "/-/profile";
-  const inboxRoute = url.pathname === "/-/inbox";
+  const notifications = url.pathname === "/-/notifications";
+  const savedReplies = url.pathname === "/-/settings/saved-replies";
+  const profileSettings = url.pathname === "/-/profile" || savedReplies;
   const actorId =
     /^\/-\/users\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(
       url.pathname,
@@ -128,7 +134,7 @@ export function App() {
       url.pathname,
     );
   const route =
-    profileSettings || inboxRoute || actorId || organizationRoute
+    profileSettings || actorId || organizationRoute || notifications
       ? undefined
       : repositoryRoute(url);
   const projectWorkspace = organizationRoute?.[2]?.startsWith("/projects")
@@ -156,7 +162,8 @@ export function App() {
   });
   const [gitAccessOpen, setGitAccessOpen] = useState(false);
   const catalog = useRequest<{ repositories: Repository[] }>(
-    session.data?.authenticated && (url.pathname === "/" || gitAccessOpen)
+    session.data?.authenticated &&
+      (url.pathname === "/" || notifications || gitAccessOpen)
       ? "/api/repos"
       : null,
   );
@@ -191,18 +198,22 @@ export function App() {
       setSigningOut(false);
     }
   }
+  const expectedRepository = url.searchParams.get("repository_id");
   const repo = pageCatalog.data?.repositories.find(
-    (repo) => repo.owner === route?.owner && repo.name === route.name,
+    (repo) =>
+      repo.owner === route?.owner &&
+      repo.name === route.name &&
+      (expectedRepository === null || expectedRepository === repo.id),
   );
   useEffect(() => {
     document.title = repo
       ? `${repo.owner}/${repo.name} · Crab`
-      : inboxRoute
+      : notifications
         ? "Notifications · Crab"
         : projectWorkspace
           ? "Projects · Crab"
           : "Repositories · Crab";
-  }, [repo, inboxRoute, projectWorkspace]);
+  }, [repo, notifications, projectWorkspace]);
   useEffect(() => {
     if (!importedRepository || !catalog.data) return;
     if (
@@ -256,22 +267,6 @@ export function App() {
               </Link>
             )}
             <div className="header-actions">
-              {session.data?.authenticated && (
-                <Button
-                  asChild
-                  variant="ghost"
-                  size="icon"
-                  className="rounded-full"
-                >
-                  <Link
-                    href="/-/inbox"
-                    aria-label="Notifications"
-                    aria-current={inboxRoute ? "page" : undefined}
-                  >
-                    <BellIcon aria-hidden="true" />
-                  </Link>
-                </Button>
-              )}
               {session.data?.user && (
                 <GitAccess
                   session={session.data}
@@ -285,6 +280,9 @@ export function App() {
                 codeTheme={codeTheme}
                 setCodeTheme={selectCodeTheme}
               />
+              {session.data?.authenticated && (
+                <NotificationLink current={notifications} />
+              )}
               {session.data?.authenticated && (
                 <DropdownMenu modal={false}>
                   <DropdownMenuTrigger asChild>
@@ -407,6 +405,12 @@ export function App() {
                     : "Continue to sign in"}
                 </Button>
               </div>
+            ) : notifications ? (
+              <Notifications
+                csrf={session.data.csrf ?? ""}
+                repositories={catalog.data?.repositories ?? []}
+                url={url}
+              />
             ) : organizationRoute ? (
               organizationRoute[2]?.startsWith("/projects") ? (
                 <OrganizationProjects
@@ -429,12 +433,11 @@ export function App() {
                   csrf={session.data.csrf ?? ""}
                 />
               )
-            ) : inboxRoute ? (
-              <Inbox csrf={session.data.csrf ?? ""} url={url} />
             ) : profileSettings ? (
               <ProfileSettings
                 csrf={session.data.csrf ?? ""}
                 suggestedName={session.data.user?.name ?? ""}
+                section={savedReplies ? "saved-replies" : "profile"}
               />
             ) : actorId ? (
               <UserProfile id={actorId} />
@@ -515,19 +518,30 @@ export function App() {
                       </div>
                     </div>
                   ) : repo ? (
-                    <RepositoryPage
-                      key={repo.id}
-                      repo={repo}
-                      url={url}
-                      theme={resolved}
-                      codeThemes={codeThemeChoices[codeTheme].themes}
-                      csrf={session.data?.csrf ?? ""}
-                      identity={session.data?.user ?? null}
-                      onRepositoryChanged={() => {
-                        catalog.retry();
-                        repositoryCatalog.retry();
-                      }}
-                    />
+                    <DiscussionRepository.Provider value={repo}>
+                      <DiscussionCsrf.Provider value={session.data?.csrf ?? ""}>
+                        <DiscussionCodeTheme.Provider
+                          value={{
+                            theme: resolved,
+                            codeThemes: codeThemeChoices[codeTheme].themes,
+                          }}
+                        >
+                          <RepositoryPage
+                            key={repo.id}
+                            repo={repo}
+                            url={url}
+                            theme={resolved}
+                            codeThemes={codeThemeChoices[codeTheme].themes}
+                            csrf={session.data?.csrf ?? ""}
+                            identity={session.data?.user ?? null}
+                            onRepositoryChanged={() => {
+                              catalog.retry();
+                              repositoryCatalog.retry();
+                            }}
+                          />
+                        </DiscussionCodeTheme.Provider>
+                      </DiscussionCsrf.Provider>
+                    </DiscussionRepository.Provider>
                   ) : (
                     <div className="notice">
                       <h1>Repository not found</h1>

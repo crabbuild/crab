@@ -14,6 +14,8 @@ test("Git tokens require a repository and keep secrets tied to that selection", 
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
+    if (path === "/api/notifications/unread")
+      return route.fulfill({ json: { unread: false } });
     if (path === "/api/session")
       return route.fulfill({
         json: {

@@ -21,6 +21,8 @@ pub(crate) use client::{CellClient, Committed, Observed, Receipt, RepositoryCell
 pub enum Error {
     #[error("invalid Cell request: {0}")]
     Invalid(&'static str),
+    #[error("an attachment is unavailable or the discussion attachment limit was exceeded")]
+    AttachmentUnavailable,
     #[error("Cell operation failed")]
     Runtime {
         #[source]

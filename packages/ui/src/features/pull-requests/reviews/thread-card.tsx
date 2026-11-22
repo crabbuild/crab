@@ -151,6 +151,7 @@ export function ReviewThreadCard({
   return (
     <article
       id={`review-thread-${thread.number}`}
+      tabIndex={-1}
       className={`panel review-thread-card${thread.outdated ? " outdated" : ""}${thread.resolved ? " resolved" : ""}`}
     >
       <details

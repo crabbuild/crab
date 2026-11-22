@@ -291,8 +291,8 @@ fn membership_digest_is_independent_of_presentation_order() {
         access: crate::RepositoryAccess::Read,
     };
     assert_eq!(
-        membership_digest(&[first.clone(), second.clone()], &[], &[]).unwrap(),
-        membership_digest(&[second, first], &[], &[]).unwrap()
+        membership_digest(&[first.clone(), second.clone()], &[], None).unwrap(),
+        membership_digest(&[second, first], &[], None).unwrap()
     );
 }
 

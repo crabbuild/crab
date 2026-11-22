@@ -3,7 +3,10 @@ import { Button } from "@/components/ui/button";
 import { useRequest, type Repository } from "@/lib/api";
 import { Result } from "@/components/request/result";
 
-export function useMutation(csrf: string, repo: Pick<Repository, "id"> | null) {
+export function useMutation(
+  csrf: string,
+  repo: Pick<Repository, "id" | "owner" | "name"> | null,
+) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string>();
   const [conflict, setConflict] = useState(false);
@@ -19,6 +22,9 @@ export function useMutation(csrf: string, repo: Pick<Repository, "id"> | null) {
   }
   const active = useRef(true);
   const busy = useRef(false);
+  const preparedBody = useRef<{ key: string; body: string } | undefined>(
+    undefined,
+  );
   useEffect(() => {
     active.current = true;
     return () => {
@@ -35,6 +41,39 @@ export function useMutation(csrf: string, repo: Pick<Repository, "id"> | null) {
     setPending(true);
     reset();
     try {
+      let payload = input;
+      const path = url.split("?", 1)[0];
+      if (
+        repo &&
+        "body" in input &&
+        typeof input.body === "string" &&
+        /^\/api\/repos\/[^/]+\/[^/]+\/(issues|pulls)(?:\/|$)/.test(path) &&
+        /[\w.-]\/[\w.-]+#\d/.test(input.body)
+      ) {
+        const body = input.body;
+        const revision =
+          "request_id" in input
+            ? input.request_id
+            : "version" in input
+              ? input.version
+              : null;
+        const key = JSON.stringify([method, url, revision, body]);
+        if (preparedBody.current?.key !== key) {
+          const { bindCrossReferences } =
+            await import("./discussion-references");
+          const stable = await bindCrossReferences(body, repo);
+          const limit = /\/issues(?:\/|$)|\/state$/.test(path)
+            ? 80 * 1024
+            : 160 * 1024;
+          const fits =
+            new TextEncoder().encode(JSON.stringify({ ...input, body: stable }))
+              .length <= limit;
+          // Resolve only for the first attempt. A catalog rename or revoked
+          // grant may change results while a previous write is being recovered.
+          preparedBody.current = { key, body: fits ? stable : body };
+        }
+        payload = { ...input, body: preparedBody.current.body };
+      }
       const response = await fetch(url, {
         method,
         headers: {
@@ -42,7 +81,7 @@ export function useMutation(csrf: string, repo: Pick<Repository, "id"> | null) {
           "X-CSRF-Token": csrf,
           ...(repo ? { "X-Crab-Repository-Id": repo.id } : {}),
         },
-        body: JSON.stringify(input),
+        body: JSON.stringify(payload),
         signal: AbortSignal.timeout(35_000),
       });
       if (response.status === 401)

@@ -7,14 +7,14 @@ use crate::{
     RepositoryAccess, RepositoryMember,
     app::{self, Error, Result},
     auth::Principal,
-    catalog::RepositoryTeam,
+    catalog::TeamGrant,
     cells::{
         Address,
         directory::{IdentityKey, LookupAccounts, LookupIdentities},
         organization::{
             Caller, GetOrganization, Role,
             teams::repository_access::{
-                RepositoryActor, RepositoryTeamAccess, RepositoryTeamNames, RepositoryTeamQuery,
+                ActorTeams, RepositoryActor, RepositoryTeamNames, RepositoryTeamQuery,
                 RepositoryTeamRoster, RepositoryTeamsForActor, VisibleRepositoryTeams,
             },
         },
@@ -54,8 +54,8 @@ pub(crate) async fn organization_role(
 }
 
 pub(crate) fn organization_access(
-    grant: &RepositoryTeamAccess,
-    teams: &[RepositoryTeam],
+    grant: &ActorTeams,
+    teams: &[TeamGrant],
 ) -> Option<RepositoryAccess> {
     if grant.owner {
         return Some(RepositoryAccess::Admin);
@@ -71,7 +71,7 @@ pub(crate) async fn organization_grants(
     server: &Server,
     principal: &Principal,
     organizations: HashMap<Uuid, bool>,
-) -> Result<HashMap<Uuid, RepositoryTeamAccess>> {
+) -> Result<HashMap<Uuid, ActorTeams>> {
     if organizations.is_empty() {
         return Ok(HashMap::new());
     }
@@ -104,7 +104,7 @@ pub(crate) async fn organization_grants(
                         Ok(result) => result.output,
                         Err(
                             crate::cells::Error::NotInitialized | crate::cells::Error::AccessDenied,
-                        ) => RepositoryTeamAccess::default(),
+                        ) => ActorTeams::default(),
                         Err(error) => return Err(Error::Cell(error)),
                     };
                     Ok((organization, grant))
@@ -141,7 +141,7 @@ pub(crate) async fn visible_team_names(
 pub(crate) async fn organization_members(
     server: &Server,
     organization: Uuid,
-    teams: &[RepositoryTeam],
+    teams: &[TeamGrant],
     principal: Option<&Principal>,
 ) -> Result<Vec<RepositoryMember>> {
     let issuer = server.auth.as_ref().ok_or(Error::NotFound)?.issuer();

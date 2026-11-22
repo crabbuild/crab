@@ -6,7 +6,6 @@ use axum::{
 };
 use cellar::sdk::IngressHandle;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use uuid::Uuid;
 
 use super::{
@@ -18,7 +17,6 @@ pub(super) const REQUEST_BUDGET: Duration = Duration::from_secs(30);
 #[derive(Clone)]
 pub(crate) struct CellClient {
     ingress: IngressHandle,
-    mentions: Arc<[super::repository::collaboration::notifications::Mentions]>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -45,18 +43,7 @@ pub(crate) struct RepositoryCell {
 
 impl CellClient {
     pub(crate) fn new(ingress: IngressHandle) -> Self {
-        Self {
-            ingress,
-            mentions: Arc::default(),
-        }
-    }
-
-    pub(crate) fn with_mentions(
-        mut self,
-        mentions: Vec<super::repository::collaboration::notifications::Mentions>,
-    ) -> Self {
-        self.mentions = mentions.into();
-        self
+        Self { ingress }
     }
 
     pub(crate) fn repository(&self, repository: Uuid) -> Result<RepositoryCell> {
@@ -199,11 +186,6 @@ impl CellClient {
             mutation,
             input: serde_json::to_value(input)?,
             minimum,
-            mentions: if mutation.is_some() {
-                self.mentions.to_vec()
-            } else {
-                Vec::new()
-            },
         };
         let bytes = bytes::Bytes::from(serde_json::to_vec(&request)?);
         if bytes.len() > 4 * 1024 * 1024 {
@@ -230,6 +212,7 @@ impl CellClient {
                 StatusCode::LOCKED => Err(Error::SchemaUnavailable),
                 StatusCode::RANGE_NOT_SATISFIABLE => Err(Error::StaleSearch),
                 StatusCode::BAD_REQUEST => Err(Error::Invalid("Cell rejected the request")),
+                StatusCode::UNPROCESSABLE_ENTITY => Err(Error::AttachmentUnavailable),
                 _ => Err(Error::Unavailable),
             }
         };
@@ -254,6 +237,7 @@ impl CellClient {
                 | Error::Expired
                 | Error::AccessDenied
                 | Error::Invalid(_)
+                | Error::AttachmentUnavailable
                 | Error::SchemaUnavailable
                 | Error::NotInitialized
                 | Error::IndexUnavailable

@@ -97,7 +97,7 @@ impl Read for LookupProfiles {
 pub(crate) struct LookupIdentities;
 impl Read for LookupIdentities {
     const CLASS: &'static str = super::CLASS;
-    const ID: u32 = 15;
+    const ID: u32 = 23;
     type Input = Vec<Uuid>;
     type Output = Vec<Option<IdentityKey>>;
 

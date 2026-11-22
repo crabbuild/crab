@@ -8,7 +8,6 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::{Address, Error, Result, directory, organization, repository};
-use repository::collaboration::notifications::Mentions;
 
 pub(crate) use cellar::sdk::storage::SqlValue;
 
@@ -39,16 +38,11 @@ pub(crate) struct SqlResultSet {
 pub(crate) struct Transaction<'a> {
     storage: &'a Storage,
     now_ms: i64,
-    mentions: &'a [Mentions],
 }
 
 impl Transaction<'_> {
     pub(crate) fn now_ms(&self) -> i64 {
         self.now_ms
-    }
-
-    pub(crate) fn mentions(&self) -> &[Mentions] {
-        self.mentions
     }
 
     pub(crate) fn apply<T>(
@@ -62,7 +56,6 @@ impl Transaction<'_> {
                 let mut application = Transaction {
                     storage,
                     now_ms: self.now_ms,
-                    mentions: self.mentions,
                 };
                 let result = operation(&mut application)?;
                 if matches!(result, MutationResult::Rejected(_)) {
@@ -241,8 +234,6 @@ pub(crate) struct Request {
     pub mutation: Option<MutationIdentity>,
     pub input: Value,
     pub minimum: Option<u64>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub mentions: Vec<Mentions>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -293,22 +284,7 @@ impl Cell for ApplicationCell {
                 {
                     return Err(Error::Invalid("Cell route and request authority disagree").into());
                 }
-                if !request.mentions.is_empty()
-                    && (!matches!(request.target, Address::Repository(_))
-                        || request.mutation.is_none()
-                        || request.mentions.len() > 21
-                        || request
-                            .mentions
-                            .iter()
-                            .any(|group| group.recipients.len() > 64))
-                {
-                    return Err(Error::Invalid("Invalid repository mention context").into());
-                }
-                let mut transaction = Transaction {
-                    storage,
-                    now_ms,
-                    mentions: &request.mentions,
-                };
+                let mut transaction = Transaction { storage, now_ms };
                 let create = request.operation == INITIALIZE && request.mutation.is_none();
                 match request.target {
                     Address::Repository(id) => repository::initialize(
@@ -345,6 +321,7 @@ impl Cell for ApplicationCell {
                 Err(error) => {
                     let status = match error.downcast_ref::<Error>() {
                         Some(Error::Invalid(_) | Error::Json(_)) => 400,
+                        Some(Error::AttachmentUnavailable) => 422,
                         Some(Error::IndexUnavailable) => 424,
                         Some(Error::SchemaUnavailable) => 423,
                         Some(Error::NotInitialized) => 428,
@@ -430,13 +407,7 @@ fn execute(context: &mut Transaction<'_>, request: &Request) -> Result<Reply> {
         identity.expires_at_ms,
         &request.input,
     ))?;
-    let mut digest = blake3::Hasher::new();
-    digest.update(&payload);
-    if !request.mentions.is_empty() {
-        digest.update(b"\0repository-mentions-v1\0");
-        digest.update(&serde_json::to_vec(&request.mentions)?);
-    }
-    let digest = digest.finalize();
+    let digest = blake3::hash(&payload);
     let mut existing = context
         .storage
         .sql_cursor(

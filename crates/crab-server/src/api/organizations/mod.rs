@@ -81,7 +81,7 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .merge(rulesets::routes())
         .route_layer(middleware::from_fn_with_state(server, app::admit))
 }
-pub(super) async fn actor(server: &Server, principal: &Principal) -> Result<Uuid> {
+pub(in crate::api) async fn actor(server: &Server, principal: &Principal) -> Result<Uuid> {
     let identity = app::account(principal)?;
     let actor = crate::repository::access::actor_id(server, identity).await?;
     app::account(principal)?;
