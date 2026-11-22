@@ -8,6 +8,7 @@ import hashlib
 import json
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -18,7 +19,7 @@ from cdn_qualification import (  # noqa: E402
     read_git_record, require, scope_parts, validate_git_fetch, verify_viewer_requests,
 )
 from collect_front_door_deployment_policy import FRONT_DOOR_HOST, SUBSCRIPTION  # noqa: E402
-from run_cdn_transport_checks import approved_fixture, deployment_target, fixture_base  # noqa: E402
+from run_cdn_transport_checks import approved_fixture, deployment_target, fixture_base, origin_bucket  # noqa: E402
 
 
 LOG_FIELDS = {b"x-edge-request-id", b"x-host-header", b"cs-method", b"cs-uri-stem", b"cs-protocol",
@@ -29,12 +30,18 @@ GCS_VIEWER_AGENT = re.compile(r"crab-cdn-qualification/[0-9a-f]{32}")
 GCS_ORIGIN_AGENT = "Cloud-CDN-Google"
 MAX_LINE = 64 * 1024
 JSON_LOG_LIMIT = 32 * 1024 * 1024
+S3_LOG_PREFIX = re.compile(rb'\S+ (?P<bucket>\S+) \[(?P<time>[^\]]+)\] \S+ \S+ (?P<id>\S+) REST\.GET\.OBJECT (?P<key>\S+) ')
+S3_CLOUDFRONT_READ = re.compile(
+    rb'"GET (?P<path>/[^" ]+) HTTP/[^" ]+" (?P<status>[1-5][0-9]{2}) \S+ (?P<bytes>-|[0-9]{1,20}) '
+    rb'\S+ \S+ \S+ (?:"[^"]*"|-) "Amazon CloudFront" \S+ \S+ SigV4 \S+ AuthHeader (?P<host>\S+)(?: .*)?'
+)
 
 
 def cloudfront_logs(paths: list[Path], expected: dict, fixture: dict) -> dict:
     base = fixture_base(fixture["base_url"])
     host = base.netloc.encode()
-    prefix = f"{base.path.rstrip('/')}/{fixture['fixture_prefix']}{fixture['view_suffix']}/".encode()
+    base_path = (base.path.rstrip("/") + "/").encode()
+    prefix = base_path + f"{fixture['fixture_prefix']}{fixture['view_suffix']}/".encode()
     records = {}
     for path in paths:
         names = []
@@ -61,11 +68,51 @@ def cloudfront_logs(paths: list[Path], expected: dict, fixture: dict) -> dict:
                     require(re.fullmatch(rb"[1-5][0-9]{2}", status) and re.fullmatch(rb"[0-9]{1,20}", size),
                             "CloudFront log has invalid HTTP status or response size")
                     record = {"status": int(status), "response_bytes": int(size),
+                              "key_sha256": hashlib.sha256(path_name.removeprefix(base_path)).hexdigest(),
                               "cache": CF_CACHE_STATUS.get(event[b"x-edge-response-result-type"], "unknown")}
                     require(fingerprint not in records or records[fingerprint] == record,
                             "CloudFront exports disagree about one viewer request")
                     records[fingerprint] = record
             require(names, "CloudFront standard log needs a W3C field header")
+    return records
+
+
+def s3_cloudfront_reads(paths: list[Path], viewers: dict, fixture: dict, client: dict) -> dict:
+    _, access, _, _, _ = scope_parts(fixture["scope"])
+    origin = fixture["export_origin"] if access == "public" else fixture["native_origin"]
+    bucket = origin_bucket(origin, "cloudfront").encode()
+    host = re.compile(re.escape(bucket) + rb"\.s3(?:\.[a-z0-9-]+)?\.amazonaws\.com")
+    viewer_keys = {row["key_sha256"] for row in viewers.values()}
+    start, finish = (client[key] // 1000 for key in ("started_at_unix_ms", "finished_at_unix_ms"))
+    records = {}
+    for path in paths:
+        with path.open("rb") as source:
+            while line := source.readline(MAX_LINE + 1):
+                require(len(line) <= MAX_LINE, "S3 server access log line exceeds the size limit")
+                header = S3_LOG_PREFIX.match(line)
+                if header is None or header["bucket"] != bucket:
+                    continue
+                key = header["key"].removeprefix(b"/")
+                fingerprint = hashlib.sha256(key).hexdigest()
+                if fingerprint not in viewer_keys:
+                    continue
+                read = S3_CLOUDFRONT_READ.fullmatch(line[header.end():].rstrip(b"\r\n"))
+                if read is None:
+                    continue  # A direct S3 reader can request the same immutable key.
+                try:
+                    at = int(datetime.strptime(header["time"].decode("ascii"), "%d/%b/%Y:%H:%M:%S %z").timestamp())
+                except ValueError:
+                    raise ValueError("invalid S3 server access log timestamp") from None
+                if not start <= at <= finish:
+                    continue
+                require(read["path"] == b"/" + key and host.fullmatch(read["host"]) and header["id"] != b"-",
+                        "CloudFront origin read was logged outside the approved S3 endpoint or object")
+                size = 0 if read["bytes"] == b"-" else int(read["bytes"])
+                row = {"key_sha256": fingerprint, "at_unix_s": at, "status": int(read["status"]), "response_body_bytes": size}
+                request_id = hashlib.sha256(header["id"]).hexdigest()
+                require(request_id not in records or records[request_id] == row,
+                        "S3 access log exports disagree about one origin request")
+                records[request_id] = row
     return records
 
 
@@ -219,12 +266,16 @@ def main() -> int:
     parser.add_argument("--client", required=True, type=Path, help="exact timed client.json")
     parser.add_argument("--log", required=True, action="append", type=Path,
                         help="CloudFront W3C access log, Cloud Logging JSON export or Azure Monitor Front Door archive")
+    parser.add_argument("--s3-origin-log", action="append", type=Path, default=[],
+                        help="plain-text S3 server access log from the approved CloudFront origin")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     try:
         fixture = approved_fixture(args.fixture, args.configuration_sha256)
         edge, _, _, _, _ = scope_parts(fixture["scope"])
         require(PROVIDER_FOR_EDGE[edge] in VIEWER_REQUEST_FILES, "no viewer log collector is defined for this CDN fixture")
+        require(bool(args.s3_origin_log) == (edge == "cloudfront"),
+                "CloudFront viewer evidence requires S3 origin access logs")
         raw = read_git_record(args.client, limit=GIT_FETCH_RECORD_LIMIT)
         candidate = decode(raw)
         require(isinstance(candidate, dict) and CDN_PROVENANCE_FIELDS | {"arm", "platform"} <= candidate.keys()
@@ -239,6 +290,8 @@ def main() -> int:
         records = loaders[edge](args.log, client["edge_responses"], fixture)
         digest = hashlib.sha256(raw).hexdigest()
         proof = {"schema": f"crab.{edge}-viewer-requests/v1", "client_report_sha256": digest, "records": records}
+        if edge == "cloudfront":
+            proof["origin_requests"] = s3_cloudfront_reads(args.s3_origin_log, records, fixture, client)
         verify_viewer_requests(proof, client, digest, edge)
         with args.output.open("x", encoding="utf-8") as destination:
             destination.write(json.dumps(proof, sort_keys=True) + "\n")

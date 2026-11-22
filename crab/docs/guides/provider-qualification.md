@@ -976,14 +976,23 @@ evidence beside `client.json`. For CloudFront, write
 `cloudfront-requests.json` from the approved distribution's standard
 access logs in W3C format. Keep the `#Fields`
 header and the request ID, viewer host, URI stem, method, protocol, response
-status, sent bytes and response result type fields. Leave cookie logging
-disabled and keep raw exports on the protected worker. [CloudFront standard logging](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/standard-logs-reference.html)
+status, sent bytes and response result type fields. Also supply the approved
+origin bucket's plain-text S3 server access logs with `--s3-origin-log`. Use
+the private repository bucket or the public export bucket as applicable.
+The collector joins CloudFront's signed S3 object GETs to viewer keys and
+the timed fetch window. The cold arm needs a successful S3 response with
+body bytes. Use a fresh publication for each pair, keep other CloudFront
+traffic outside the measured UTC seconds, and start the warm edge arm
+in a later UTC second than the cold arm's finish. Leave cookie logging
+disabled and keep raw exports on the protected worker.
+[CloudFront standard logging](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/standard-logs-reference.html) · [S3 server access log format](https://docs.aws.amazon.com/AmazonS3/latest/userguide/LogFormat.html)
 
 ```bash
 python3 -B crab/scripts/e2e/collect_cdn_viewer_requests.py \
   --fixture "$approved_fixture_json" \
   --configuration-sha256 "$approved_configuration_sha256" \
   --client "$arm_directory/client.json" --log "$decompressed_cloudfront_log" \
+  --s3-origin-log "$s3_origin_access_log" \
   --output "$arm_directory/cloudfront-requests.json"
 ```
 
@@ -1019,14 +1028,15 @@ APIM before Front Door and removes the `/crab` prefix. The collector matches
 the Front Door tracking reference and resource profile and excludes duplicate
 traffic from origin-shield logs. [Front Door access logs](https://learn.microsoft.com/en-us/azure/frontdoor/front-door-diagnostics) · [Azure Monitor resource logs](https://learn.microsoft.com/en-us/azure/azure-monitor/essentials/resource-logs)
 
-Repeat `--log` for additional files. Every viewer attempt needs a matching
+Repeat `--log` or `--s3-origin-log` for additional files. Every viewer attempt needs a matching
 access log record for its hashed request ID. Missing logs,
 conflicting records, or disagreements with the client's status or cache
 classification fail the check. Viewer response bytes include HTTP overhead
 and must cover the observed payload bytes. Collect native request counts and
 origin fill bytes separately. AWS delivers S3 server access logs on a
-best-effort basis, so an empty export
-alone cannot verify zero origin traffic. [S3 server access logging](https://docs.aws.amazon.com/AmazonS3/latest/userguide/ServerLogs.html)
+best-effort basis. Treat the matched CloudFront GET counts and response
+body bytes as minimums. Corroborate zero-origin and cost claims with
+independent provider measurements. [S3 server access logging](https://docs.aws.amazon.com/AmazonS3/latest/userguide/ServerLogs.html)
 
 ```bash
 python3 -B crab/scripts/e2e/collect_cdn_git_performance.py \

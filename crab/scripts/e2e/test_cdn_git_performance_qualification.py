@@ -176,6 +176,37 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, error):
                     self.collect()
 
+    def test_cloudfront_cold_arm_requires_an_approved_s3_fill(self) -> None:
+        path = self.root / "near/0001/cold_edge" / fixture.CDN.VIEWER_REQUEST_FILES["s3"]
+        proof = json.loads(path.read_bytes())
+        request_id, request = next(iter(proof["origin_requests"].items()))
+        for origins, error in (
+            ({}, "has no logged CloudFront fill"),
+            ({request_id: request | {"key_sha256": "f" * 64}}, "does not match the timed CloudFront request"),
+            ({request_id: request | {"at_unix_s": request["at_unix_s"] - 1}}, "does not match the timed CloudFront request"),
+        ):
+            with self.subTest(origins=origins):
+                fixture.json_file(path, proof | {"origin_requests": origins})
+                with self.assertRaisesRegex(ValueError, error):
+                    self.collect()
+
+    def test_cloudfront_cold_arm_totals_must_cover_the_s3_fill(self) -> None:
+        report = self.root / "near/0001/cold_edge/measurement.json"
+        external = json.loads(report.read_bytes())
+        for changes, expected in (
+            ({"origin_gets": 1}, "undercounts observed native GET responses or logged CDN origin GETs"),
+            ({"origin_fill_bytes": 7}, "undercounts logged CDN cache fill bytes"),
+        ):
+            with self.subTest(changes=changes):
+                fixture.json_file(report, external | changes)
+                with self.assertRaisesRegex(ValueError, expected):
+                    self.collect()
+
+    def test_cloudfront_warm_and_cold_arms_must_use_distinct_s3_log_seconds(self) -> None:
+        self.amend_client("near/0001/warm_edge", started_at_unix_ms=1_011_500, finished_at_unix_ms=1_011_620)
+        with self.assertRaisesRegex(ValueError, "CloudFront edge arms must use disjoint S3 log seconds"):
+            self.collect()
+
     def test_rejects_reusing_a_local_cache_across_arms(self) -> None:
         client = json.loads((self.root / "near/0001/cold_edge/client.json").read_bytes())
         self.amend_client("near/0001/warm_edge", reader=client["reader"])
@@ -188,7 +219,7 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
             self.collect()
 
     def test_cold_edge_must_be_measured_before_warm_edge(self) -> None:
-        self.amend_client("near/0001/cold_edge", started_at_unix_ms=1_012_400, finished_at_unix_ms=1_012_800)
+        self.amend_client("near/0001/warm_edge", started_at_unix_ms=1_010_500, finished_at_unix_ms=1_010_650)
         with self.assertRaisesRegex(ValueError, "must measure cold edge, warm edge and warm local in order"):
             self.collect()
 

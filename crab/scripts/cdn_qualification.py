@@ -1274,7 +1274,10 @@ def validate_git_fetch(raw: bytes, provenance: dict[str, Any], mode: str, label:
 
 
 def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: str, edge: str) -> tuple[set[str], int, int]:
-    proof = fields(value, {"schema", "client_report_sha256", "records"}, "CDN viewer request evidence")
+    proof_fields = {"schema", "client_report_sha256", "records"}
+    if edge == "cloudfront":
+        proof_fields.add("origin_requests")
+    proof = fields(value, proof_fields, "CDN viewer request evidence")
     require(proof["schema"] == f"crab.{edge}-viewer-requests/v1" and proof["client_report_sha256"] == client_digest,
             "CDN viewer evidence differs from the measured fetch")
     expected = client["edge_responses"]
@@ -1285,6 +1288,9 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
     record_fields = {"status", "cache", "response_bytes"}
     if edge == "cloud-cdn":
         record_fields |= {"cache_fill_bytes", "origin_requests"}
+    if edge == "cloudfront":
+        record_fields.add("key_sha256")
+    viewer_keys = set()
     logged_ids = set(records)
     origin_gets = child_fill_bytes = viewer_fill_bytes = 0
     for request_id, record in records.items():
@@ -1296,6 +1302,9 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
                 "CDN log status or response bytes disagree with the client")
         if response["complete"] and response["cache"] != "unknown":
             require(row["cache"] == response["cache"], "CDN log cache result disagrees with the completed response")
+        if edge == "cloudfront":
+            require(matches(SHA256, row["key_sha256"]), "invalid CloudFront object key fingerprint")
+            viewer_keys.add(row["key_sha256"])
         if edge == "cloud-cdn":
             require(type(row["cache_fill_bytes"]) is int and row["cache_fill_bytes"] >= 0,
                     "Cloud CDN log has invalid reported cache fill bytes")
@@ -1311,6 +1320,22 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
                 logged_ids.add(origin_id)
                 origin_gets += origin["method"] == "GET"
                 child_fill_bytes += origin["cache_fill_bytes"]
+    if edge == "cloudfront":
+        origins = proof["origin_requests"]
+        require(isinstance(origins, dict), "invalid S3 origin requests")
+        start, finish = (client[key] // 1000 for key in ("started_at_unix_ms", "finished_at_unix_ms"))
+        for origin_id, value in origins.items():
+            origin = fields(value, {"key_sha256", "at_unix_s", "status", "response_body_bytes"}, "S3 origin request")
+            require(matches(SHA256, origin_id) and origin_id not in logged_ids and matches(SHA256, origin["key_sha256"])
+                    and origin["key_sha256"] in viewer_keys and type(origin["at_unix_s"]) is int
+                    and start <= origin["at_unix_s"] <= finish
+                    and type(origin["status"]) is int and 100 <= origin["status"] <= 599
+                    and type(origin["response_body_bytes"]) is int and origin["response_body_bytes"] >= 0,
+                    "S3 origin request does not match the timed CloudFront request")
+            logged_ids.add(origin_id)
+            origin_gets += 1
+            if origin["status"] in (200, 206):
+                child_fill_bytes += origin["response_body_bytes"]
     # Collapsed traffic and separate range-fills can describe the same bytes
     # at both levels. Use the strongest floor without adding overlapping totals.
     return logged_ids, origin_gets, max(viewer_fill_bytes, child_fill_bytes)
@@ -1485,6 +1510,8 @@ def collect_git_performance(
                         f"{label} undercounts observed native GET responses or logged CDN origin GETs")
                 require(measured["origin_fill_bytes"] >= cdn_fill_bytes,
                         f"{label} undercounts logged CDN cache fill bytes")
+                require(provider != "s3" or arm != "cold_edge" or positive(cdn_fill_bytes),
+                        f"{label} has no logged CloudFront fill from the approved S3 origin")
                 require(incomplete <= measured["rejected_bytes"]
                         and measured["client_bytes"] >= native["body_bytes"] + measured["edge_bytes"] + incomplete,
                         f"{label} undercounts observed client bytes")
@@ -1504,6 +1531,9 @@ def collect_git_performance(
             require(windows["cold_edge"][1] <= windows["warm_edge"][0]
                     and windows["warm_edge"][1] <= windows["warm_local"][0],
                     f"{location} {index} must measure cold edge, warm edge and warm local in order")
+            if provider == "s3":
+                require(windows["cold_edge"][1] // 1000 < windows["warm_edge"][0] // 1000,
+                        f"{location} {index} CloudFront edge arms must use disjoint S3 log seconds")
             previous_end = intervals[-1][1]
             pairs.append(pair)
         performance[location] = {"region": region, "pairs": pairs}

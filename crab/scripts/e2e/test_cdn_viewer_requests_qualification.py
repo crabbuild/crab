@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -24,7 +25,7 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
                             "regions": {"near": "near"}, "samples": 1, "viewer_binding_sha256": "e" * 64,
                             "candidate": examples.cli_candidate(config["scope"], "linux-x86_64")}
             examples.write_git_measurements(root, registration, "linux-x86_64")
-            client = root / "near/0001/warm_edge/client.json"
+            client = root / "near/0001/cold_edge/client.json"
             report = json.loads(client.read_bytes())
             viewer_id = "fixture-request_V1=="
             fingerprint = hashlib.sha256(viewer_id.encode()).hexdigest()
@@ -34,19 +35,36 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
             prefix = f"/crab/{config['fixture_prefix']}/"
             header = ("#Version: 1.0\n#Fields: date x-edge-request-id x-host-header cs-method cs-uri-stem cs-protocol "
                       "sc-status sc-bytes x-edge-response-result-type c-ip\n")
-            actual = (f"2026-11-22\t{viewer_id}\tfixture.example.com\tGET\t{prefix}{PACK}\thttps\t206\t620\tHit\t192.0.2.1\n")
+            actual = (f"1970-01-01\t{viewer_id}\tfixture.example.com\tGET\t{prefix}{PACK}\thttps\t206\t620\tMiss\t192.0.2.1\n")
             unrelated = actual.replace(viewer_id, "unrelated-request").replace("fixture.example.com", "other.example.com")
+            key = f"{config['fixture_prefix']}/{PACK}"
+            at = report["started_at_unix_ms"] // 1000
+            timestamp = datetime.fromtimestamp(at, timezone.utc).strftime("%d/%b/%Y:%H:%M:%S %z")
+            origin_line = (
+                f'fixture-owner fixture-bucket [{timestamp}] 192.0.2.2 fixture-principal s3-origin-id '
+                f'REST.GET.OBJECT {key} "GET /{key} HTTP/1.1" 206 - 4096 5000 4 1 "-" "Amazon CloudFront" '
+                '- extended-id SigV4 cipher AuthHeader fixture-bucket.s3.us-east-1.amazonaws.com TLSv1.3 - - us-east-1\n'
+            )
+            origins = root / "s3-access.log"
             output = root / "cloudfront-requests.json"
             command = [sys.executable, "-B", str(Path(COLLECT.__file__)), "--fixture", str(fixture_path), "--log", str(log),
-                       "--client", str(client), "--configuration-sha256", configuration, "--output", str(output)]
-            for records, reason in (
-                (unrelated, "must cover each measured viewer attempt"),
-                (actual.replace(prefix, "/other/"), "outside the approved viewer host or repository prefix"),
-                (actual + actual.replace("620", "619"), "exports disagree about one viewer request"),
-                (unrelated + actual + actual, None),
+                       "--client", str(client), "--configuration-sha256", configuration, "--output", str(output),
+                       "--s3-origin-log", str(origins)]
+            for records, s3, reason in (
+                (unrelated, origin_line, "must cover each measured viewer attempt"),
+                (actual.replace(prefix, "/other/"), origin_line, "outside the approved viewer host or repository prefix"),
+                (actual + actual.replace("620", "619"), origin_line, "exports disagree about one viewer request"),
+                (actual, origin_line + origin_line.replace("4096", "4100"), "exports disagree about one origin request"),
+                (actual, origin_line.replace("fixture-bucket.s3.", "wrong-bucket.s3."), "outside the approved S3 endpoint"),
+                (unrelated + actual + actual, origin_line * 2
+                 + origin_line.replace("s3-origin-id", "direct-id").replace("Amazon CloudFront", "crab")
+                 + origin_line.replace("s3-origin-id", "wrong-bucket-id").replace("fixture-bucket", "another-bucket")
+                 + origin_line.replace("s3-origin-id", "wrong-object-id").replace(key, "other/key")
+                 + origin_line.replace("s3-origin-id", "older-id").replace(timestamp, "01/Jan/1970:00:00:00 +0000"), None),
             ):
                 with self.subTest(reason=reason):
                     log.write_text(header + records, encoding="utf-8")
+                    origins.write_text(s3, encoding="utf-8")
                     result = subprocess.run(command, capture_output=True, text=True, check=False)
                     if reason is not None:
                         self.assertEqual(result.returncode, 1)
@@ -55,11 +73,16 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
                     else:
                         self.assertEqual(result.returncode, 0, result.stderr)
                         retained = output.read_text(encoding="utf-8")
+                        key_hash = hashlib.sha256(key.encode()).hexdigest()
                         self.assertEqual(json.loads(retained), {
                             "schema": "crab.cloudfront-viewer-requests/v1", "client_report_sha256": digest,
-                            "records": {fingerprint: {"status": 206, "response_bytes": 620, "cache": "hit"}},
+                            "records": {fingerprint: {"status": 206, "response_bytes": 620, "cache": "miss", "key_sha256": key_hash}},
+                            "origin_requests": {hashlib.sha256(b"s3-origin-id").hexdigest(): {
+                                "key_sha256": key_hash, "at_unix_s": at, "status": 206, "response_body_bytes": 4096,
+                            }},
                         })
-                        for private in (viewer_id, "fixture.example.com", prefix, "192.0.2.1"):
+                        for private in (viewer_id, "fixture.example.com", prefix, "192.0.2.1", "192.0.2.2",
+                                        "s3-origin-id", "fixture-principal", key, "fixture-bucket"):
                             self.assertNotIn(private, retained)
 
     def test_cloud_cdn_joins_range_fills_and_validations_to_the_tagged_viewer(self):
