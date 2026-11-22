@@ -111,12 +111,17 @@ origin = "s3://example-repository-bucket"
 repo_prefix = "org/models"
 base_url = "https://downloads.example.com"
 access = "private"
+approval_sha256 = "<reviewed private-binding receipt SHA-256>"
 ```
 
 Use `gs://<bucket>` for GCS or
 `https://<account>.blob.core.windows.net/<container>` for Azure. Private access
 uses the Crab Auth issuer in the same trusted user config to obtain a scoped
-viewer grant. Public access requires `access = "public"` and an
+viewer grant. Set `approval_sha256` to the digest reviewed by the operator
+and pinned in that issuer. Crab accepts a viewer grant only when the
+issuer confirms the selected entry's digest. A private binding without
+an approval digest uses the issuer's native authorization.
+Public access requires `access = "public"` and an
 `export_origin` that names a separate native bucket or container in the
 same cloud. Keep `origin` set to the live repository's storage. To enable
 public acceleration, set `publication = { path = "/absolute/path/to/publication.json",

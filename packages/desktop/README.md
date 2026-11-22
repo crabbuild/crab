@@ -299,7 +299,8 @@ provider when set. Azure also takes its account from
 `[auth.azure].storage_account` or `AZURE_STORAGE_ACCOUNT_NAME`.
 
 For a private export, select **Use default credentials** and sign in through
-the configured Crab Auth issuer. A sidecar built with
+the configured Crab Auth issuer. Set `approval_sha256` in the private binding
+to the reviewed digest pinned in the issuer. A sidecar built with
 `provider-cdn-qualification` obtains the viewer grant and keeps it in memory.
 Default builds use the authorized origin. An approved public export can use
 the selected connection's native credentials. Set the receipt's absolute

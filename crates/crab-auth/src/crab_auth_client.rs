@@ -99,7 +99,11 @@ pub struct CdnViewerDeployment {
     pub source_repo: String,
     pub origin: String,
     pub base_url: String,
+    approval_sha256: Option<String>,
 }
+
+const CDN_APPROVAL_HEADER: &str = "x-crab-cdn-approval-sha256";
+const MAX_CDN_APPROVALS: usize = 16;
 
 impl CdnViewerDeployment {
     /// Return the native storage provider named by this validated deployment.
@@ -131,7 +135,25 @@ impl CdnViewerDeployment {
             source_repo: source_repo.to_owned(),
             origin: origin.to_owned(),
             base_url: base_url.to_owned(),
+            approval_sha256: None,
         })
+    }
+
+    /// Pin the reviewed private deployment receipt. Omit it to use native authorization.
+    pub fn with_approval(mut self, sha256: Option<&str>) -> Result<Self> {
+        if sha256.is_some_and(|value| !valid_approval_digest(value)) {
+            return Err(AuthError::InvalidCrabAuthRequest(
+                "expected a lowercase SHA-256 digest for private CDN approval".into(),
+            ));
+        }
+        self.approval_sha256 = sha256.map(str::to_owned);
+        Ok(self)
+    }
+
+    /// Return the trusted digest carried in the viewer negotiation.
+    #[must_use]
+    pub fn approval_sha256(&self) -> Option<&str> {
+        self.approval_sha256.as_deref()
     }
 
     /// Validate that public bytes are served from a distinct native export of the same cloud.
@@ -145,6 +167,13 @@ impl CdnViewerDeployment {
         }
         Ok(())
     }
+}
+
+fn valid_approval_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn native_cdn_identity(origin: &str) -> Option<(crate::cdn::CdnProvider, &str)> {
@@ -300,7 +329,8 @@ impl CrabAuthProvider {
         repo_url: &str,
         operation: &str,
         bound_read: bool,
-    ) -> Result<CrabAuthCredentialResponse> {
+        approval_pins: Option<&str>,
+    ) -> Result<(CrabAuthCredentialResponse, Option<String>)> {
         let body = CrabAuthRequest {
             id_token: id_token.to_owned(),
             repo_url: repo_url.to_owned(),
@@ -327,8 +357,10 @@ impl CrabAuthProvider {
                 .bearer_auth(id_token)
                 .json(&body)
                 .timeout(REQUEST_TIMEOUT);
-            let request = if bound_read && self.allow_viewer_grants {
-                request.header("X-Crab-CDN-Grant-Version", "1")
+            let request = if let Some(pins) = approval_pins {
+                request
+                    .header("X-Crab-CDN-Grant-Version", "1")
+                    .header(CDN_APPROVAL_HEADER, pins)
             } else {
                 request
             };
@@ -353,6 +385,22 @@ impl CrabAuthProvider {
                 source,
             };
             if bound_read && status.is_success() {
+                let approvals = resp.headers().get_all(CDN_APPROVAL_HEADER);
+                let mut approvals = approvals.iter();
+                let approval = approvals
+                    .next()
+                    .map(|value| {
+                        value
+                            .to_str()
+                            .ok()
+                            .filter(|value| valid_approval_digest(value))
+                            .map(str::to_owned)
+                            .ok_or_else(invalid_negotiated_response)
+                    })
+                    .transpose()?;
+                if approvals.next().is_some() {
+                    return Err(invalid_negotiated_response());
+                }
                 let mut body = Vec::new();
                 while let Some(chunk) = resp.chunk().await.map_err(read_error)? {
                     if body.len().saturating_add(chunk.len()) > MAX_NEGOTIATED_CREDENTIAL_BYTES {
@@ -363,10 +411,14 @@ impl CrabAuthProvider {
                     body.extend_from_slice(&chunk);
                 }
                 // Parse errors can echo invalid values from the issuer's secret-bearing body.
-                return std::str::from_utf8(&body)
+                let response = std::str::from_utf8(&body)
                     .ok()
                     .and_then(|body| parse_credential_response(body).ok())
-                    .ok_or_else(invalid_negotiated_response);
+                    .ok_or_else(invalid_negotiated_response)?;
+                if response.cdn.is_some() != approval.is_some() {
+                    return Err(invalid_negotiated_response());
+                }
+                return Ok((response, approval));
             }
             let resp_body = if bound_read {
                 "credential response omitted".to_owned()
@@ -374,7 +426,7 @@ impl CrabAuthProvider {
                 resp.text().await.map_err(read_error)?
             };
             if status.is_success() {
-                return parse_credential_response(&resp_body);
+                return parse_credential_response(&resp_body).map(|response| (response, None));
             }
 
             let error = AuthError::CrabAuthRejected {
@@ -699,6 +751,20 @@ impl CredentialProvider for CrabAuthProvider {
             .iter()
             .filter(|deployment| deployment.bucket == bucket && deployment.source_repo == prefix);
         let bound_read = deployments.clone().next().is_some();
+        let approval_pins = if self.allow_viewer_grants {
+            let pins = deployments
+                .clone()
+                .filter_map(CdnViewerDeployment::approval_sha256)
+                .collect::<std::collections::BTreeSet<_>>();
+            if pins.len() > MAX_CDN_APPROVALS {
+                return Err(AuthError::InvalidCrabAuthRequest(
+                    "too many private CDN approvals for the selected repository".into(),
+                ));
+            }
+            (!pins.is_empty()).then(|| pins.into_iter().collect::<Vec<_>>().join(","))
+        } else {
+            None
+        };
         let cdn_login = bound_read.then(|| self.load_cdn_login()).transpose()?;
 
         {
@@ -720,8 +786,14 @@ impl CredentialProvider for CrabAuthProvider {
             None => self.cached_id_token()?,
         };
         let repo_url = format!("crab://{bucket}/{prefix}");
-        let auth_resp = match self
-            .call_endpoint(&id_token, &repo_url, operation, bound_read)
+        let (auth_resp, approval) = match self
+            .call_endpoint(
+                &id_token,
+                &repo_url,
+                operation,
+                bound_read,
+                approval_pins.as_deref(),
+            )
             .await
         {
             Ok(resp) => resp,
@@ -732,8 +804,14 @@ impl CredentialProvider for CrabAuthProvider {
                 } else {
                     self.refresh_id_token().await?
                 };
-                self.call_endpoint(&refreshed, &repo_url, operation, bound_read)
-                    .await?
+                self.call_endpoint(
+                    &refreshed,
+                    &repo_url,
+                    operation,
+                    bound_read,
+                    approval_pins.as_deref(),
+                )
+                .await?
             }
             Err(error) => return Err(error),
         };
@@ -748,7 +826,7 @@ impl CredentialProvider for CrabAuthProvider {
             ));
         }
         if let Some(grant) = &auth_resp.cdn {
-            if !self.allow_viewer_grants {
+            if approval_pins.is_none() {
                 return Err(invalid_negotiated_response());
             }
             let parent = expiry.ok_or_else(|| {
@@ -757,7 +835,11 @@ impl CredentialProvider for CrabAuthProvider {
                 )
             })?;
             let deployment = deployments
-                .find(|item| item.origin == grant.origin && item.base_url == grant.base_url)
+                .find(|item| {
+                    item.origin == grant.origin
+                        && item.base_url == grant.base_url
+                        && item.approval_sha256() == approval.as_deref()
+                })
                 .ok_or_else(|| {
                     AuthError::InvalidCredentialResponse(
                         "Crab Auth returned a CDN viewer grant for an unapproved deployment".into(),
@@ -1109,7 +1191,15 @@ mod tests {
             provider.endpoint = endpoint;
             provider.http = reqwest::Client::builder().no_proxy().build().unwrap();
             let error = provider
-                .call_endpoint("fixture-token", "crab://bucket/repo", "fetch", true)
+                .call_endpoint(
+                    "fixture-token",
+                    "crab://bucket/repo",
+                    "fetch",
+                    true,
+                    viewer_grants.then_some(
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    ),
+                )
                 .await
                 .unwrap_err();
             assert!(error.to_string().contains(expected));

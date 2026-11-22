@@ -24,6 +24,8 @@ pub struct CdnCheckoutBinding {
     pub export_origin: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub publication: Option<CdnPublicationFile>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_sha256: Option<String>,
     pub source_repo: String,
     pub base_url: String,
     pub target_identity: [u8; 32],
@@ -51,10 +53,13 @@ pub struct CdnCheckoutIssuer {
 impl CdnCheckoutBinding {
     /// Revalidate the serialized deployment and issuer before using the binding.
     pub fn deployment(&self) -> Result<CdnViewerDeployment> {
-        let deployment = CdnViewerDeployment::new(&self.origin, &self.source_repo, &self.base_url)?;
+        let deployment = CdnViewerDeployment::new(&self.origin, &self.source_repo, &self.base_url)?
+            .with_approval(self.approval_sha256.as_deref())?;
         match (&self.issuer, &self.export_origin, &self.publication) {
             (Some(issuer), None, None) => validate_issuer(&issuer.config)?,
-            (None, Some(export), Some(_)) if self.scope.is_none() => {
+            (None, Some(export), Some(_))
+                if self.scope.is_none() && self.approval_sha256.is_none() =>
+            {
                 deployment.validate_public_export(export)?;
             }
             _ => return Err(invalid("invalid CDN checkout issuer or public export")),

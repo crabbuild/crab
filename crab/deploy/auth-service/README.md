@@ -264,8 +264,12 @@ access. The private fixtures cover repository-local or projected-view data.
 Bucket-global content needs a separately qualified physical export.
 
 Clients opt in with the `X-Crab-CDN-Grant-Version: 1` header on
-`/v1/credentials`. The issuer returns the optional `cdn` envelope after
-repository policy, view resolution and origin credential issuance succeed.
+`/v1/credentials` and send their pinned `X-Crab-CDN-Approval-Sha256`
+digest. For a locator that maps to multiple approved deployments, the
+client sends its allowed digests as one comma-delimited header. The issuer
+confirms the selected deployment digest in the response header when it
+returns the `cdn` envelope. Missing approval pins leave the read on native
+authorization. A conflicting explicit pin fails the request.
 Viewer expiry is bounded by the origin credentials and the configured TTL,
 with a maximum of 15 minutes. Clients select one credential by physical key
 and keep it in memory.

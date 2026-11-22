@@ -333,7 +333,8 @@ successfully before the same attempt can publish the release evidence.
 For a hosted private fixture, add a `viewer_issuer` object to the approved
 fixture JSON. Set `endpoint` to the dedicated Crab Auth HTTPS
 `/v1/credentials` endpoint and `audience` to that service's
-`CRAB_AUTH_AUDIENCE`. Configure the service for GitHub's issuer and JWKS using
+`CRAB_AUTH_AUDIENCE`. Set `approval_sha256` to the reviewed binding digest
+pinned by the issuer. Configure the service for GitHub's issuer and JWKS using
 its OIDC discovery document. Authorize the exact protected workflow subject
 for `fetch` on only the test repository, with read permissions. Use the
 repository's actual subject format, including immutable owner and repository
@@ -509,7 +510,8 @@ AWS_PROFILE=crab python3 crab/scripts/e2e/collect_private_cdn_binding.py \
   --output private-binding.json
 ```
 
-Review the candidate and pin the reported `approval_sha256` in Crab Auth.
+Review the candidate and pin the reported `approval_sha256` in Crab Auth
+and in the client's private binding.
 The native and edge reads, warm authorization and out-of-scope denial
 probes must pass, and the deployment policy must still match afterward.
 The release workflow keeps its separate fixture namespace and workflow

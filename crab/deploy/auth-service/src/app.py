@@ -23,10 +23,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from src.auth import JWTVerifier, TokenClaims
 from src.cdn import (
+    APPROVAL_HEADER,
     CAPABILITY_HEADER,
     CAPABILITY_VERSION,
+    ApprovalConflict,
     CdnGrant,
     issue_viewer_grant,
+    requested_approvals,
     resolve_export,
 )
 from src.policy import PolicyEngine, PolicyDecision
@@ -786,6 +789,11 @@ async def issue_credentials(
     cdn = None
     if request.headers.get(CAPABILITY_HEADER) == CAPABILITY_VERSION:
         response.headers["Cache-Control"] = "no-store"
+        try:
+            approvals = requested_approvals(request.headers.getlist(APPROVAL_HEADER))
+        except ValueError:
+            raise HTTPException(status_code=400, detail={"error": "invalid_cdn_approval_list"},
+                                headers={"Cache-Control": "no-store"}) from None
         source = parse_repo_url(body.repo_url)
         export = resolve_export(
             get_policy().cdn_exports,
@@ -805,8 +813,14 @@ async def issue_credentials(
                     view_repo_prefix=storage_scope.repo_prefix if storage_scope else None,
                     view_global_prefix=storage_scope.global_prefix if storage_scope else None,
                     credentials=result.credentials,
+                    approvals=approvals,
                     now=datetime.now(timezone.utc),
                 )
+                if cdn is not None and export.approval is not None:
+                    response.headers[APPROVAL_HEADER] = export.approval.sha256
+            except ApprovalConflict:
+                raise HTTPException(status_code=409, detail={"error": "cdn_approval_conflict"},
+                                    headers={"Cache-Control": "no-store"}) from None
             except (OSError, ValueError, PyJWTError) as e:
                 log.error("cdn_grant_issue_failed", error_type=type(e).__name__)
                 raise HTTPException(

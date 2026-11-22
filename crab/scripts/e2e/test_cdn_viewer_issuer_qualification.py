@@ -33,7 +33,9 @@ def encoded(value):
 
 
 def settings(edge, *, protected=False):
-    config = fixture(edge, "private") | {"viewer_issuer": {"endpoint": ISSUER_URL, "audience": AUDIENCE}}
+    config = fixture(edge, "private") | {"viewer_issuer": {
+        "endpoint": ISSUER_URL, "audience": AUDIENCE, "approval_sha256": "a" * 64,
+    }}
     if protected:
         config["view_suffix"] = f"/acl-views/v2/{'a' * 64}/1-{'b' * 64}"
         config["scope"] = f"{edge}/private/cli/xorb/direct"
@@ -89,7 +91,7 @@ class CdnViewerIssuerQualificationTests(TestCase):
                 reply = issue_reply(edge, config)
                 self.connection.getresponse.side_effect = [
                     response(200, json.dumps({"value": OIDC_TOKEN}).encode()),
-                    response(200, json.dumps(reply).encode(), Cache_Control="no-store"),
+                    response(200, json.dumps(reply).encode(), Cache_Control="no-store", X_Crab_CDN_Approval_Sha256="a" * 64),
                 ]
                 viewer = ISSUER.issue_github_viewer(config, edge, "xorb" if protected else "git")
                 credential_value = reply["cdn"]["grants"][0]["credential"]
@@ -104,6 +106,7 @@ class CdnViewerIssuerQualificationTests(TestCase):
                 self.assertEqual(exchange.args, ("POST", "/v1/credentials"))
                 self.assertEqual(exchange.kwargs["headers"]["Authorization"], f"Bearer {OIDC_TOKEN}")
                 self.assertEqual(exchange.kwargs["headers"]["X-Crab-CDN-Grant-Version"], "1")
+                self.assertEqual(exchange.kwargs["headers"][ISSUER.APPROVAL_HEADER], "a" * 64)
                 self.assertEqual(json.loads(exchange.kwargs["body"]), {
                     "id_token": OIDC_TOKEN, "repo_url": TRANSPORT.native_remote(config, edge),
                     "operation": "fetch", "client_version": "provider-cdn-qualification",
@@ -125,8 +128,11 @@ class CdnViewerIssuerQualificationTests(TestCase):
         cases = (
             (response(302, b"unexpected-secret", Location="https://other.example.com"), "HTTP 302"),
             (response(200, b"unexpected-secret"), "must require no-store"),
-            (response(200, b"unexpected-secret", Cache_Control="no-store"), "invalid JSON"),
-            (response(200, b"x" * (ISSUER.MAX_ISSUER_RESPONSE + 1), Cache_Control="no-store"), "response is too large"),
+            (response(200, b"unexpected-secret", Cache_Control="no-store", X_Crab_CDN_Approval_Sha256="a" * 64), "invalid JSON"),
+            (response(200, b"x" * (ISSUER.MAX_ISSUER_RESPONSE + 1), Cache_Control="no-store",
+                      X_Crab_CDN_Approval_Sha256="a" * 64), "response is too large"),
+            (response(200, b"unexpected-secret", Cache_Control="no-store", X_Crab_CDN_Approval_Sha256="b" * 64),
+             "different private binding approval"),
         )
         for rejected, error in cases:
             with self.subTest(error=error):

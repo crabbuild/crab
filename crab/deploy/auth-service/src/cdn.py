@@ -21,6 +21,8 @@ from src.repo_url import normalize_repo_prefix
 
 CAPABILITY_HEADER = "X-Crab-CDN-Grant-Version"
 CAPABILITY_VERSION = "1"
+APPROVAL_HEADER = "X-Crab-CDN-Approval-Sha256"
+_APPROVAL_DIGEST = re.compile(r"[0-9a-f]{64}")
 _READ_OPERATIONS = frozenset({"clone", "fetch", "hydrate", "pull", "mount", "smudge"})
 _REPOSITORY_OBJECTS = (
     "v2/capsules",
@@ -35,6 +37,22 @@ _VIEW_SUFFIX = re.compile(r"/acl-views/v2/[0-9a-f]{64}/(?:0|[1-9][0-9]{0,19})-[0
 _PATH = re.compile(r"[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*")
 _HOST_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 Provider = Literal["cloudfront", "cloud_cdn", "front_door"]
+
+
+class ApprovalConflict(ValueError):
+    """The selected issuer approval differs from the caller's pinned approval."""
+
+
+def requested_approvals(values: list[str]) -> frozenset[str]:
+    if not values:
+        return frozenset()
+    if len(values) != 1 or len(values[0]) > 16 * 65 - 1:
+        raise ValueError("invalid CDN approval list")
+    digests = values[0].split(",")
+    unique = frozenset(digests)
+    if len(unique) != len(digests) or not all(_APPROVAL_DIGEST.fullmatch(digest) for digest in digests):
+        raise ValueError("invalid CDN approval list")
+    return unique
 
 
 def canonical_prefix(prefix: str) -> str:
@@ -154,11 +172,12 @@ def issue_viewer_grant(
     view_repo_prefix: str | None,
     view_global_prefix: str | None,
     credentials: dict[str, object],
+    approvals: frozenset[str],
     now: datetime,
 ) -> CdnGrant | None:
     """Mint only for an authorized physical export and read-only operation."""
     operation = operation.strip().lower()
-    if export.approval is None or operation not in _READ_OPERATIONS or set(permissions) != {"read"}:
+    if not approvals or export.approval is None or operation not in _READ_OPERATIONS or set(permissions) != {"read"}:
         return None
     if view_repo_prefix is None:
         if view_global_prefix is not None or not export.allow_unfiltered:
@@ -187,6 +206,8 @@ def issue_viewer_grant(
     if expires <= now_epoch:
         return None
 
+    if export.approval.sha256 not in approvals:
+        raise ApprovalConflict("CDN deployment approval differs from the client pin")
     export.approval.verify(
         provider=export.provider,
         origin=export.origin,

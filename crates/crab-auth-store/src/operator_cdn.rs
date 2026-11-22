@@ -24,6 +24,7 @@ pub struct OperatorCdn {
     origin: String,
     export_origin: Option<String>,
     publication: Option<CdnPublicationFile>,
+    approval_sha256: Option<String>,
     base_url: String,
     #[serde(default)]
     access: Access,
@@ -74,9 +75,12 @@ pub enum OperatorCdnError {
 
 impl OperatorCdn {
     fn deployment(&self, repository_prefix: &str) -> Result<CdnViewerDeployment, OperatorCdnError> {
-        let deployment = CdnViewerDeployment::new(&self.origin, repository_prefix, &self.base_url)?;
+        let deployment = CdnViewerDeployment::new(&self.origin, repository_prefix, &self.base_url)?
+            .with_approval(self.approval_sha256.as_deref())?;
         match (self.access, self.export_origin.as_deref()) {
-            (Access::Public, Some(export)) => deployment.validate_public_export(export)?,
+            (Access::Public, Some(export)) if self.approval_sha256.is_none() => {
+                deployment.validate_public_export(export)?;
+            }
             (Access::Private, None) if self.publication.is_none() => {}
             _ => {
                 return Err(OperatorCdnError::Binding(
@@ -159,13 +163,14 @@ impl OperatorCdn {
             (Access::Private, Some(issuer)) => {
                 let config = issuer.config(client_version);
                 validate_issuer(&config)?;
-                if !(CdnPolicy {
-                    provider: origin.bucket_identity().cloud,
-                    consumer,
-                    profile: CdnProfile::Direct,
-                    visibility: CdnVisibility::Private,
-                })
-                .enabled()
+                if deployment.approval_sha256().is_none()
+                    || !(CdnPolicy {
+                        provider: origin.bucket_identity().cloud,
+                        consumer,
+                        profile: CdnProfile::Direct,
+                        visibility: CdnVisibility::Private,
+                    })
+                    .enabled()
                 {
                     return Ok(origin.clone().without_cdn_route());
                 }
@@ -243,6 +248,7 @@ mod tests {
                 origin: origin.into(),
                 export_origin: Some(export),
                 publication: Some(publication),
+                approval_sha256: None,
                 base_url: "https://downloads.example.com/".into(),
                 access: Access::Public,
                 issuer: None,

@@ -222,6 +222,7 @@ mod tests {
                 path: scratch.path().join("publication.json"),
                 sha256: "a".repeat(64),
             }),
+            approval_sha256: None,
             source_repo: "team/models".into(),
             base_url: "https://edge.example.test".into(),
             target_identity: [1; 32],

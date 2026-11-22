@@ -21,6 +21,7 @@ struct Binding {
     origin: String,
     export_origin: Option<String>,
     publication: Option<CdnPublicationFile>,
+    approval_sha256: Option<String>,
     repo_prefix: String,
     base_url: String,
     #[serde(default)]
@@ -169,9 +170,12 @@ impl UserConfiguration {
         for entry in entries {
             let deployment =
                 CdnViewerDeployment::new(&entry.origin, &entry.repo_prefix, &entry.base_url)
+                    .and_then(|deployment| {
+                        deployment.with_approval(entry.approval_sha256.as_deref())
+                    })
                     .map_err(|_| invalid_binding())?;
             match (&entry.access, entry.export_origin.as_deref()) {
-                (Access::Public, Some(export)) => {
+                (Access::Public, Some(export)) if deployment.approval_sha256().is_none() => {
                     deployment
                         .validate_public_export(export)
                         .map_err(|_| invalid_binding())?;
@@ -223,7 +227,13 @@ impl UserConfiguration {
                     ));
                 }
                 let issuer = self.private_issuer()?;
-                DirectCdnOptions::private_export(origin, prefix, base, issuer)?
+                DirectCdnOptions::private_export(
+                    origin,
+                    prefix,
+                    base,
+                    issuer,
+                    deployment.approval_sha256(),
+                )?
             }
             _ => return Err(invalid_binding()),
         };

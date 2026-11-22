@@ -2148,9 +2148,18 @@ def test_issue_credentials_negotiates_cdn_after_origin_authorization(tmp_path, m
     monkeypatch.setattr(cdn_approval, "_gcp", lambda binding: observed.append(binding) is None)
     approval = approve_cdn(export)
     app_module._policy = app_module.PolicyEngine.from_dict(policy | {"cdn": [export | {"approval": approval}]})
+    no_pin = client.post("/v1/credentials", json=payload, headers=headers)
+    assert no_pin.status_code == 200
+    assert "cdn" not in no_pin.json()
+    assert "X-Crab-CDN-Approval-Sha256" not in no_pin.headers
+    conflicting = headers | {"X-Crab-CDN-Approval-Sha256": "f" * 64}
+    assert client.post("/v1/credentials", json=payload, headers=conflicting).status_code == 409
+    assert not observed
+    headers |= {"X-Crab-CDN-Approval-Sha256": approval["sha256"]}
     response = client.post("/v1/credentials", json=payload, headers=headers)
     assert response.status_code == 200
     assert response.headers["Cache-Control"] == "no-store"
+    assert response.headers["X-Crab-CDN-Approval-Sha256"] == approval["sha256"]
     grant = response.json()["cdn"]
     assert grant["repo_prefix"] == "org/repo"
     assert grant["origin"] == "gs://test-bucket"
@@ -2163,7 +2172,7 @@ def test_issue_credentials_negotiates_cdn_after_origin_authorization(tmp_path, m
     assert "cdn" not in response.json()
     denied = payload | {"repo_url": "crab://test-bucket/org/other"}
     assert client.post("/v1/credentials", json=denied, headers=headers).status_code == 403
-    assert len(provider.calls) == 4
+    assert len(provider.calls) == 6
     assert len(observed) == 1
 
     # A changed approval is terminal and cannot produce a viewer credential.
@@ -2214,7 +2223,9 @@ def test_issue_credentials_pins_cdn_to_approved_view_generation(tmp_path, monkey
         "key_file": key,
     }
     monkeypatch.setattr(cdn_approval, "_gcp", lambda binding: True)
-    app_module._policy = app_module.PolicyEngine.from_dict(config | {"cdn": [export | {"approval": approve_cdn(export)}]})
+    approval = approve_cdn(export)
+    app_module._policy = app_module.PolicyEngine.from_dict(config | {"cdn": [export | {"approval": approval}]})
+    headers |= {"X-Crab-CDN-Approval-Sha256": approval["sha256"]}
 
     response = client.post("/v1/credentials", json=payload, headers=headers)
     assert response.status_code == 200

@@ -132,7 +132,7 @@ use crab_sdk::Client;
 use crab_sdk::storage::{CdnIssuerOptions, DirectCdnOptions, DirectStoreOptions};
 use std::path::Path;
 
-fn build_client(token_cache: &Path) -> crab_sdk::Result<Client> {
+fn build_client(token_cache: &Path, approval_sha256: &str) -> crab_sdk::Result<Client> {
     let issuer = CdnIssuerOptions::new(
         "https://auth.example.com/v1/credentials",
         "https://identity.example.com",
@@ -144,6 +144,7 @@ fn build_client(token_cache: &Path) -> crab_sdk::Result<Client> {
         "repositories/example",
         "https://downloads.example.com",
         issuer,
+        Some(approval_sha256),
     )?;
     Client::builder()
         .direct_store(DirectStoreOptions::s3_from_env("my-bucket")?)
@@ -155,7 +156,8 @@ fn build_client(token_cache: &Path) -> crab_sdk::Result<Client> {
 Use `gs://<bucket>` for GCS or
 `https://<account>.blob.core.windows.net/<container>` for Azure. A private
 binding uses the issuer's native credentials and resolved physical view for
-matching reads. The origin and viewer credentials rotate together. If the
+matching reads. Pass the same reviewed approval digest pinned by the issuer
+to enable viewer negotiation. The origin and viewer credentials rotate together. If the
 issuer changes the target, view, or viewer permissions, open a new repository
 handle. Pass the absolute location of an existing OIDC token cache.
 Use `DirectCdnOptions::public_export` with a `CdnPublicationFile` containing

@@ -82,14 +82,27 @@ impl DirectCdnOptions {
         Ok(options)
     }
 
-    /// Select a private export with viewer credentials issued per read.
+    /// Select a private export. Omit approval to use the issuer's native authorization.
     pub fn private_export(
         origin: &str,
         repository_prefix: &str,
         base_url: &str,
         issuer: CdnIssuerOptions,
+        approval_sha256: Option<&str>,
     ) -> Result<Self> {
-        Self::new(origin, repository_prefix, base_url, Access::Private(issuer))
+        let mut options = Self::new(origin, repository_prefix, base_url, Access::Private(issuer))?;
+        options.deployment =
+            options
+                .deployment
+                .with_approval(approval_sha256)
+                .map_err(|source| {
+                    Error::with_source(
+                        ErrorKind::InvalidInput,
+                        "invalid private CDN approval",
+                        source,
+                    )
+                })?;
+        Ok(options)
     }
 
     fn new(origin: &str, repository_prefix: &str, base_url: &str, access: Access) -> Result<Self> {
@@ -135,7 +148,10 @@ impl DirectCdnOptions {
     }
 
     fn edge_enabled(&self, consumer: CdnConsumer) -> bool {
-        if matches!(self.access, Access::Public(_)) && self.publication.is_none() {
+        if match self.access {
+            Access::Public(_) => self.publication.is_none(),
+            Access::Private(_) => self.deployment.approval_sha256().is_none(),
+        } {
             return false;
         }
         self.deployment.storage_provider().is_some_and(|provider| {
@@ -173,6 +189,7 @@ impl DirectCdnOptions {
                 Access::Private(_) => None,
             },
             publication: self.publication.clone(),
+            approval_sha256: self.deployment.approval_sha256().map(str::to_owned),
             source_repo: self.deployment.source_repo.clone(),
             base_url: self.deployment.base_url.clone(),
             target_identity,
@@ -465,6 +482,7 @@ mod tests {
             "org/repo",
             "https://downloads.example.com",
             issuer,
+            None,
         )
         .unwrap();
         let client = Client::builder()
@@ -497,6 +515,7 @@ mod tests {
             "org/repo",
             "https://downloads.example.com",
             issuer,
+            None,
         )
         .unwrap();
         let client = Client::builder()

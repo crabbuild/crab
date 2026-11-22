@@ -68,6 +68,7 @@ def mint(export, **overrides):
         view_repo_prefix=None,
         view_global_prefix=None,
         credentials={},
+        approvals=frozenset({export.approval.sha256}) if export.approval is not None else frozenset(),
         now=NOW,
     )
     return issue_viewer_grant(export, **(arguments | overrides))

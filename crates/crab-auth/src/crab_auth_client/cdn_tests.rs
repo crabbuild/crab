@@ -3,6 +3,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use super::*;
 
+const APPROVAL: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
 #[test]
 fn public_exports_require_a_distinct_native_origin_in_the_same_cloud() {
     for (source, export) in [
@@ -51,7 +53,10 @@ fn provider(cache: Arc<TokenCache>) -> CrabAuthProvider {
 }
 
 fn deployment() -> CdnViewerDeployment {
-    CdnViewerDeployment::new("gs://fixture", "org/repo", "https://downloads.example.com").unwrap()
+    CdnViewerDeployment::new("gs://fixture", "org/repo", "https://downloads.example.com")
+        .unwrap()
+        .with_approval(Some(APPROVAL))
+        .unwrap()
 }
 
 fn id_token(subject: &str, issued: u32) -> String {
@@ -65,20 +70,36 @@ async fn credential_endpoint(
     permissions: &[&str],
     viewer_grants: bool,
     scope: Option<&StorageScope>,
+    viewer: Option<(Option<&str>, &str)>,
 ) -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/v1/credentials", listener.local_addr().unwrap());
     let expiry = (time::OffsetDateTime::now_utc() + time::Duration::hours(1))
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap();
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "provider": "gcp",
         "credentials": {"access_token": "fixture-native-token"},
         "permissions": permissions,
         "expires_at": expiry,
         "storage_scope": scope,
-    })
-    .to_string();
+    });
+    let approval_header = if let Some((approval, base_url)) = viewer {
+        body["cdn"] = serde_json::json!({
+            "provider": "cloud_cdn",
+            "origin": "gs://fixture",
+            "base_url": base_url,
+            "repo_prefix": "org/repo",
+            "expires_at": time::OffsetDateTime::now_utc().unix_timestamp() + 300,
+            "grants": [{"prefix": "org/repo/v2/pack-layers/", "credential": "Cloud-CDN-Cookie=URLPrefix=fixture"}],
+        });
+        approval
+            .map(|value| format!("{CDN_APPROVAL_HEADER}: {value}\r\n"))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let body = body.to_string();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let mut stream = BufReader::new(stream);
@@ -91,8 +112,13 @@ async fn credential_endpoint(
                 .contains("x-crab-cdn-grant-version: 1\r\n"),
             viewer_grants,
         );
+        assert_eq!(
+            head.to_ascii_lowercase()
+                .contains(&format!("{CDN_APPROVAL_HEADER}: {APPROVAL}\r\n")),
+            viewer_grants,
+        );
         let header = format!(
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 200 OK\r\n{approval_header}Content-Length: {}\r\nConnection: close\r\n\r\n",
             body.len()
         );
         stream.write_all(header.as_bytes()).await.unwrap();
@@ -109,7 +135,7 @@ async fn cached_and_refreshed_reads_cannot_change_principal() {
     cache
         .store(CRAB_AUTH_CACHE_KEY, &original, Some("fixture-refresh"))
         .unwrap();
-    let (endpoint, server) = credential_endpoint(&["read"], true, None).await;
+    let (endpoint, server) = credential_endpoint(&["read"], true, None, None).await;
     let mut reader = provider(Arc::clone(&cache)).with_cdn(deployment()).unwrap();
     reader.endpoint = endpoint;
     reader
@@ -156,7 +182,7 @@ async fn negotiated_origin_only_credentials_must_remain_read_only() {
     cache
         .store(CRAB_AUTH_CACHE_KEY, &id_token("alice", 1), None)
         .unwrap();
-    let (endpoint, server) = credential_endpoint(&["read", "write"], true, None).await;
+    let (endpoint, server) = credential_endpoint(&["read", "write"], true, None, None).await;
     let mut reader = provider(cache).with_cdn(deployment()).unwrap();
     reader.endpoint = endpoint;
     let error = reader
@@ -182,7 +208,7 @@ async fn release_origin_read_keeps_the_bound_issuer_scope_and_principal() {
         source_repo: "org/repo".into(),
         scope_hash,
     };
-    let (endpoint, server) = credential_endpoint(&["read"], false, Some(&scope)).await;
+    let (endpoint, server) = credential_endpoint(&["read"], false, Some(&scope), None).await;
     let mut reader = provider(Arc::clone(&cache))
         .with_cdn(deployment())
         .unwrap()
@@ -207,6 +233,60 @@ async fn release_origin_read_keeps_the_bound_issuer_scope_and_principal() {
         child.resolve("fixture", "org/repo", "hydrate").await,
         Err(AuthError::CredentialsExpired(_))
     ));
+}
+
+#[tokio::test]
+async fn private_viewer_grant_requires_the_exact_approval_and_endpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = Arc::new(TokenCache::test_cache(dir.path().to_path_buf()));
+    cache
+        .store(CRAB_AUTH_CACHE_KEY, &id_token("alice", 1), None)
+        .unwrap();
+    let foreign = "b".repeat(64);
+    for (approval, url, valid) in [
+        (None, "https://downloads.example.com", false),
+        (
+            Some(foreign.as_str()),
+            "https://downloads.example.com",
+            false,
+        ),
+        (Some(APPROVAL), "https://other.example.com", false),
+        (Some(APPROVAL), "https://downloads.example.com", true),
+    ] {
+        let (endpoint, server) =
+            credential_endpoint(&["read"], true, None, Some((approval, url))).await;
+        let mut reader = provider(Arc::clone(&cache)).with_cdn(deployment()).unwrap();
+        reader.endpoint = endpoint;
+        let result = reader.resolve("fixture", "org/repo", "fetch").await;
+        server.await.unwrap();
+        match result {
+            Ok(result) => assert!(valid && result.cdn.is_some()),
+            Err(error) => {
+                assert!(!valid && matches!(error, AuthError::InvalidCredentialResponse(_)))
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn private_binding_without_approval_retains_native_authority() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = Arc::new(TokenCache::test_cache(dir.path().to_path_buf()));
+    cache
+        .store(CRAB_AUTH_CACHE_KEY, &id_token("alice", 1), None)
+        .unwrap();
+    let (endpoint, server) = credential_endpoint(&["read"], false, None, None).await;
+    let mut reader = provider(cache)
+        .with_cdn(deployment().with_approval(None).unwrap())
+        .unwrap();
+    reader.endpoint = endpoint;
+    let resolution = reader
+        .resolve("fixture", "org/repo", "fetch")
+        .await
+        .unwrap();
+    assert!(resolution.cdn.is_none());
+    assert!(reader.cdn_principal().is_some());
+    server.await.unwrap();
 }
 
 #[test]

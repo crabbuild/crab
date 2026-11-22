@@ -15,7 +15,7 @@ from run_cdn_transport_checks import (
     native_remote, private_viewer_headers, viewer_policy,
 )
 
-from cdn_qualification import CdnEvidenceError, decode, fields, matches, positive, require
+from cdn_qualification import SHA256, CdnEvidenceError, decode, fields, matches, positive, require
 
 
 HOST_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
@@ -26,6 +26,7 @@ PROVIDERS = {"cloudfront": ("aws", "cloudfront"), "cloud-cdn": ("gcp", "cloud_cd
              "front-door": ("azure", "front_door")}
 MAX_ISSUER_RESPONSE = 1024 * 1024
 MAX_VIEWER_LIFETIME = 900
+APPROVAL_HEADER = "X-Crab-CDN-Approval-Sha256"
 
 
 def https_endpoint(value: str, label: str) -> SplitResult:
@@ -42,18 +43,20 @@ def https_endpoint(value: str, label: str) -> SplitResult:
     return endpoint
 
 
-def issuer_settings(fixture: dict) -> tuple[SplitResult, str]:
-    settings = fields(fixture["viewer_issuer"], {"endpoint", "audience"}, "GitHub CDN viewer issuer")
+def issuer_settings(fixture: dict) -> tuple[SplitResult, str, str]:
+    settings = fields(fixture["viewer_issuer"], {"endpoint", "audience", "approval_sha256"}, "GitHub CDN viewer issuer")
     endpoint = https_endpoint(settings["endpoint"], "Crab Auth issuer")
     require(endpoint.path == "/v1/credentials" and not endpoint.query
             and endpoint.hostname != fixture_base(fixture["base_url"]).hostname,
             "Crab Auth issuer must use its own HTTPS /v1/credentials endpoint")
     require(matches(AUDIENCE, settings["audience"]), "invalid GitHub OIDC audience")
-    return endpoint, settings["audience"]
+    require(matches(SHA256, settings["approval_sha256"]), "invalid private binding approval digest")
+    return endpoint, settings["audience"], settings["approval_sha256"]
 
 
 def response_json(
-    endpoint: SplitResult, target: str, headers: dict[str, str], label: str, *, body: bytes | None = None,
+    endpoint: SplitResult, target: str, headers: dict[str, str], label: str, *,
+    body: bytes | None = None, approval: str | None = None,
 ) -> dict:
     with https_response(endpoint, "GET" if body is None else "POST", target, headers, label, body=body) as response:
         require(response.status == 200, f"{label} rejected the request (HTTP {response.status})")
@@ -63,6 +66,8 @@ def response_json(
             directives = response.getheader("Cache-Control", "").lower().split(",")
             require(any(entry.strip() == "no-store" for entry in directives),
                     "Crab Auth viewer response must require no-store")
+            require(response.headers.get_all(APPROVAL_HEADER) == [approval],
+                    "Crab Auth returned a different private binding approval")
         raw = response.read(MAX_ISSUER_RESPONSE + 1)
         require(len(raw) <= MAX_ISSUER_RESPONSE, f"{label} response is too large")
     try:
@@ -163,11 +168,11 @@ def verify_viewer_scope(
 
 
 def issue_github_viewer(fixture: dict, edge: str, family: str) -> dict[str, str]:
-    endpoint, audience = issuer_settings(fixture)
+    endpoint, audience, approval = issuer_settings(fixture)
     token = github_id_token(audience)
     body = json.dumps({"id_token": token, "repo_url": native_remote(fixture, edge),
                        "operation": "fetch", "client_version": "provider-cdn-qualification"}).encode()
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json",
-               "Accept-Encoding": "identity", "X-Crab-CDN-Grant-Version": "1"}
-    response = response_json(endpoint, endpoint.path, headers, "Crab Auth viewer issuer", body=body)
+               "Accept-Encoding": "identity", "X-Crab-CDN-Grant-Version": "1", APPROVAL_HEADER: approval}
+    response = response_json(endpoint, endpoint.path, headers, "Crab Auth viewer issuer", body=body, approval=approval)
     return approved_credential(fixture, edge, family, response)

@@ -20,6 +20,7 @@ pub struct CdnBinding {
     origin: String,
     export_origin: Option<String>,
     publication: Option<CdnPublicationFile>,
+    approval_sha256: Option<String>,
     repo_prefix: String,
     base_url: String,
     #[serde(default)]
@@ -83,11 +84,16 @@ impl CdnBinding {
         for entry in entries {
             let deployment =
                 CdnViewerDeployment::new(&entry.origin, &entry.repo_prefix, &entry.base_url)
+                    .and_then(|deployment| {
+                        deployment.with_approval(entry.approval_sha256.as_deref())
+                    })
                     .map_err(|_| {
                         config_error("invalid native origin, repository prefix or HTTPS base")
                     })?;
             match (entry.access, entry.export_origin.as_deref()) {
-                (Access::Public, Some(export)) => deployment.validate_public_export(export)?,
+                (Access::Public, Some(export)) if entry.approval_sha256.is_none() => {
+                    deployment.validate_public_export(export)?;
+                }
                 (Access::Private, None) => {
                     if entry.publication.is_some() {
                         return Err(config_error(
@@ -127,7 +133,7 @@ impl CdnBinding {
             config_error("private CDN bindings require Crab Auth in user configuration")
         })?;
         let deployments = candidates
-            .map(|binding| CdnViewerDeployment::new(&binding.origin, prefix, &binding.base_url))
+            .map(|binding| binding.private_deployment(prefix))
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(Some((deployments, issuer)))
     }
@@ -186,10 +192,12 @@ impl CdnBinding {
         let issuer = binding.trusted_issuer.as_ref().ok_or_else(|| {
             config_error("private CDN bindings require Crab Auth in user configuration")
         })?;
-        Ok(Some((
-            CdnViewerDeployment::new(&binding.origin, prefix, &binding.base_url)?,
-            issuer,
-        )))
+        Ok(Some((binding.private_deployment(prefix)?, issuer)))
+    }
+
+    fn private_deployment(&self, prefix: &str) -> crab_auth::error::Result<CdnViewerDeployment> {
+        CdnViewerDeployment::new(&self.origin, prefix, &self.base_url)?
+            .with_approval(self.approval_sha256.as_deref())
     }
 
     fn for_selected_origin<'a>(
