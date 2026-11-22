@@ -206,6 +206,13 @@ Prove one private repository from an author’s browser and stock Git through a 
 
 ## Verification and release claims
 
+- Native HTTP and stock Git verified issue and PR watch preferences, exclusion of
+  earlier and self-authored activity, versioned retry, mute, revocation, and
+  fanout across multiple recipient pages. Twenty-four focused native tests
+  passed. Playwright verified lost-response recovery, persistence and the unread
+  badge in an accessible watch dialog. The production UI build and 120 unit
+  tests passed.
+
 - Native HTTP and stock Git verified assignment notices on issue and PR
   creation and on bulk edits. Replayed requests, retained assignees and
   self-assignment produced no duplicate or self notices. Revocation hid
