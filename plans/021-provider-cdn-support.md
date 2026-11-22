@@ -575,8 +575,11 @@ and edge payload through redacted observations.
   CloudFront, Cloud CDN and Front Door measurements match timed fetches to
   provider logs using hashed viewer request IDs and retain the verified
   status, cache result, and viewer response bytes. Cloud CDN retains the
-  cache-fill bytes reported on its viewer log records. Front Door separates
-  viewer responses from origin-shield traffic before measuring egress.
+  cache-fill bytes reported on its viewer log records and joins range-fill and
+  validation requests to the measured viewer using the provider's parent
+  log-entry ID. The benchmark checks external origin GETs and fill bytes
+  against these observations. Front Door separates viewer responses from
+  origin-shield traffic before measuring egress.
   Each timed fetch records redacted native HTTPS GET and HEAD response counts
   and consumed body bytes. The origin control must observe a native GET with
   payload bytes, and external totals must cover the observed GETs and combined

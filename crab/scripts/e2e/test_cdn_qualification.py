@@ -113,6 +113,7 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str) -> N
                     proof[request_id] = {"status": 206, "response_bytes": 800, "cache": cache}
                     if provider == "gcs":
                         proof[request_id]["cache_fill_bytes"] = metrics["origin_fill_bytes"]
+                        proof[request_id]["origin_requests"] = {}
                 digest = json_file(directory / "client.json", client)
                 if proof:
                     edge_name = CDN.PROVIDERS[provider][0]

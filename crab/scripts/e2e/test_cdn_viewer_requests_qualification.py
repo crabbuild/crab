@@ -1,4 +1,4 @@
-"""Exercise the CloudFront and Front Door log joins for timed fetch evidence."""
+"""Exercise provider log joins for timed fetch evidence."""
 
 import hashlib
 import json
@@ -62,7 +62,7 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
                         for private in (viewer_id, "fixture.example.com", prefix, "192.0.2.1"):
                             self.assertNotIn(private, retained)
 
-    def test_cloud_cdn_matches_the_tagged_viewer_and_retains_reported_fill_bytes(self):
+    def test_cloud_cdn_joins_range_fills_and_validations_to_the_tagged_viewer(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             host = "fixture.example.com"
@@ -88,7 +88,11 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
             resource = {"type": "http_load_balancer", "labels": {"project_id": project, "forwarding_rule_name": rule}}
             viewer = {"httpRequest": request, "jsonPayload": {"statusDetails": "response_sent_by_backend"},
                       "logName": f"projects/{project}/logs/requests", "insertId": "viewer", "resource": resource}
-            origin = viewer | {"jsonPayload": {"parentInsertId": "viewer"}, "insertId": "range-fill"}
+            origin = viewer | {"jsonPayload": {"parentInsertId": "viewer"}, "insertId": "range-fill",
+                               "httpRequest": request | {"userAgent": "Cloud-CDN-Google", "cacheFillBytes": "2048"}}
+            validation = origin | {"insertId": "validation",
+                                   "httpRequest": origin["httpRequest"] | {"status": 304, "cacheFillBytes": "0"}}
+            unrelated = origin | {"jsonPayload": {"parentInsertId": "another-viewer"}, "insertId": "unrelated-origin"}
             log, output = root / "gcloud.json", root / "cloud-cdn-requests.json"
             command = [sys.executable, "-B", str(Path(COLLECT.__file__)), "--fixture", str(fixture_path), "--log", str(log),
                        "--client", str(client), "--configuration-sha256", configuration, "--output", str(output)]
@@ -99,7 +103,11 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
                 ([viewer, viewer | {"insertId": "a-different-viewer"}], "exports disagree about one viewer request"),
                 ([viewer | {"httpRequest": request | {"cacheHit": True, "cacheValidatedWithOriginServer": True}}],
                  "cache result disagrees"),
-                ([origin, viewer, viewer], None),
+                ([viewer, origin | {"resource": resource | {"type": "another-resource"}}],
+                 "origin request was logged outside the approved forwarding rule"),
+                ([viewer, origin, origin | {"httpRequest": origin["httpRequest"] | {"cacheFillBytes": "1999"}}],
+                 "exports disagree about one origin request"),
+                ([origin, unrelated, viewer, viewer, validation, origin], None),
             ):
                 with self.subTest(error=error):
                     examples.json_file(log, entries)
@@ -114,9 +122,14 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
                         self.assertEqual(json.loads(retained), {
                             "schema": "crab.cloud-cdn-viewer-requests/v1", "client_report_sha256": digest,
                             "records": {fingerprint: {"status": 206, "response_bytes": 620, "cache": "miss",
-                                                     "cache_fill_bytes": 4096}},
+                                                     "cache_fill_bytes": 4096, "origin_requests": {
+                                                         hashlib.sha256(b"range-fill").hexdigest():
+                                                         {"method": "GET", "status": 206, "cache_fill_bytes": 2048},
+                                                         hashlib.sha256(b"validation").hexdigest():
+                                                         {"method": "GET", "status": 304, "cache_fill_bytes": 0},
+                                                     }}},
                         })
-                        for private in (tag, host, project, rule, "192.0.2.1"):
+                        for private in (tag, host, project, rule, "192.0.2.1", "range-fill", "validation", "unrelated-origin"):
                             self.assertNotIn(private, retained)
 
     def test_front_door_matches_the_viewer_row_and_excludes_its_origin_shield_row(self):

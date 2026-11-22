@@ -993,12 +993,18 @@ project and forwarding rule for the measurement window. The workload sends
 a random per-request User-Agent tag for qualification. The attested backend
 bucket keeps that header out of the cache key. The collector joins viewer
 records by the tag and retains Google's `cacheFillBytes` from each matched
-viewer record. Separate range-fill and validation requests need their own
-native measurements. [Cloud CDN logging](https://docs.cloud.google.com/cdn/docs/logging) · [Backend bucket cache keys](https://docs.cloud.google.com/cdn/docs/caching#cache_keys)
+viewer record. It joins Cloud CDN's range-fill and validation requests on
+`parentInsertId` and retains their hashed IDs, methods, status codes, and fill
+bytes. Include both kinds of log entry, and give delayed validation entries
+time to arrive. The benchmark requires external measurements to cover the
+logged origin GETs in addition to client-native GETs. The fill-byte minimum is
+the higher of the total from distinct origin records and the largest viewer
+record, since viewer and origin records can describe the same fill.
+[Cloud CDN logging](https://docs.cloud.google.com/cdn/docs/logging) · [Backend bucket cache keys](https://docs.cloud.google.com/cdn/docs/caching#cache_keys)
 
 ```bash
 gcloud logging read \
-  "resource.type=\"http_load_balancer\" AND resource.labels.forwarding_rule_name=\"$forwarding_rule\" AND httpRequest.userAgent:\"crab-cdn-qualification/\" AND timestamp>=\"$window_start\" AND timestamp<=\"$window_end\"" \
+  "resource.type=\"http_load_balancer\" AND resource.labels.forwarding_rule_name=\"$forwarding_rule\" AND (httpRequest.userAgent:\"crab-cdn-qualification/\" OR httpRequest.userAgent=\"Cloud-CDN-Google\") AND timestamp>=\"$window_start\" AND timestamp<=\"$window_end\"" \
   --project "$project_id" --format=json > "$cloud_cdn_log"
 ```
 

@@ -26,6 +26,7 @@ LOG_FIELDS = {b"x-edge-request-id", b"x-host-header", b"cs-method", b"cs-uri-ste
 CF_CACHE_STATUS = {b"Hit": "hit", b"Miss": "miss"}
 AZURE_CACHE_STATUS = {"HIT": "hit", "REMOTE_HIT": "hit", "MISS": "miss"}
 GCS_VIEWER_AGENT = re.compile(r"crab-cdn-qualification/[0-9a-f]{32}")
+GCS_ORIGIN_AGENT = "Cloud-CDN-Google"
 MAX_LINE = 64 * 1024
 JSON_LOG_LIMIT = 32 * 1024 * 1024
 
@@ -137,12 +138,20 @@ def cloud_cdn_cache_status(request: dict, details: str) -> str:
     return "unknown"
 
 
+def cloud_cdn_forwarding_rule(entry: dict, project: str, rule: str) -> bool:
+    resource = entry.get("resource")
+    labels = resource.get("labels") if isinstance(resource, dict) else None
+    return (isinstance(labels, dict) and resource.get("type") == "http_load_balancer"
+            and entry.get("logName") == f"projects/{project}/logs/requests"
+            and labels.get("project_id") == project and labels.get("forwarding_rule_name") == rule)
+
+
 def cloud_cdn_logs(paths: list[Path], expected: dict, fixture: dict) -> dict:
     deployment = deployment_target(fixture, "cloud-cdn")
     project, rule = deployment["project"], deployment["forwarding_rule"]
     base = fixture_base(fixture["base_url"])
     prefix = f"{base.path.rstrip('/')}/{fixture['fixture_prefix']}{fixture['view_suffix']}/"
-    records, inserts = {}, {}
+    records, inserts, origin_entries = {}, {}, []
     for path in paths:
         entries = read_json_log(path)
         require(isinstance(entries, list), "expected a JSON array exported from Cloud Logging")
@@ -150,22 +159,21 @@ def cloud_cdn_logs(paths: list[Path], expected: dict, fixture: dict) -> dict:
             require(isinstance(entry, dict), "invalid Cloud Logging record")
             request = entry.get("httpRequest")
             agent = request.get("userAgent") if isinstance(request, dict) else None
+            payload = entry.get("jsonPayload")
+            if isinstance(payload, dict) and "parentInsertId" in payload:
+                if agent == GCS_ORIGIN_AGENT:
+                    origin_entries.append(entry)
+                continue
             if not matches(GCS_VIEWER_AGENT, agent):
                 continue
             fingerprint = hashlib.sha256(agent.encode()).hexdigest()
             if fingerprint not in expected:
                 continue
-            payload = entry.get("jsonPayload")
             require(isinstance(payload, dict), "missing Cloud CDN log payload")
-            if "parentInsertId" in payload:
-                continue  # Cache-fill requests have separate origin-side log records.
-            resource = entry.get("resource")
-            labels = resource.get("labels") if isinstance(resource, dict) else None
             uri = request.get("requestUrl")
-            require(isinstance(labels, dict) and isinstance(uri, str), "Cloud CDN log needs a load-balancer resource and request URL")
+            require(isinstance(uri, str), "Cloud CDN log needs a request URL")
             url = urlsplit(uri)
-            require(resource.get("type") == "http_load_balancer" and entry.get("logName") == f"projects/{project}/logs/requests"
-                    and labels.get("project_id") == project and labels.get("forwarding_rule_name") == rule
+            require(cloud_cdn_forwarding_rule(entry, project, rule)
                     and url.scheme == "https" and url.netloc in (base.netloc, f"{base.netloc}:443") and not url.query and not url.fragment
                     and request.get("requestMethod") == "GET" and url.path.startswith(prefix),
                     "Cloud CDN request was logged outside the approved forwarding rule, viewer host or repository prefix")
@@ -176,10 +184,31 @@ def cloud_cdn_logs(paths: list[Path], expected: dict, fixture: dict) -> dict:
                     and re.fullmatch(r"[0-9]{1,19}", fill) and isinstance(insert_id, str) and bool(insert_id),
                     "Cloud CDN log has invalid status, byte counts or log entry ID")
             record = {"status": status, "response_bytes": int(size), "cache_fill_bytes": int(fill),
-                      "cache": cloud_cdn_cache_status(request, payload.get("statusDetails"))}
+                      "cache": cloud_cdn_cache_status(request, payload.get("statusDetails")), "origin_requests": {}}
             require(fingerprint not in records or (records[fingerprint] == record and inserts[fingerprint] == insert_id),
                     "Cloud CDN exports disagree about one viewer request")
             records[fingerprint], inserts[fingerprint] = record, insert_id
+    viewers = {insert: viewer_id for viewer_id, insert in inserts.items()}
+    require(len(viewers) == len(inserts), "Cloud CDN viewer log entry ID matched more than one request")
+    for entry in origin_entries:
+        parent = entry["jsonPayload"]["parentInsertId"]
+        if not isinstance(parent, str) or parent not in viewers:
+            continue
+        require(cloud_cdn_forwarding_rule(entry, project, rule),
+                "Cloud CDN origin request was logged outside the approved forwarding rule")
+        request = entry["httpRequest"]
+        insert_id, method, status = entry.get("insertId"), request.get("requestMethod"), request.get("status")
+        fill = str(request.get("cacheFillBytes", 0))
+        require(isinstance(insert_id, str) and bool(insert_id) and insert_id not in viewers
+                and method in ("GET", "HEAD") and type(status) is int and 100 <= status <= 599
+                and re.fullmatch(r"[0-9]{1,19}", fill),
+                "Cloud CDN origin log has invalid method, status, byte count or log entry ID")
+        fingerprint = hashlib.sha256(insert_id.encode()).hexdigest()
+        requests = records[viewers[parent]]["origin_requests"]
+        record = {"method": method, "status": status, "cache_fill_bytes": int(fill)}
+        require(fingerprint not in requests or requests[fingerprint] == record,
+                "Cloud CDN exports disagree about one origin request")
+        requests[fingerprint] = record
     return records
 
 

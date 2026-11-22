@@ -1273,7 +1273,7 @@ def validate_git_fetch(raw: bytes, provenance: dict[str, Any], mode: str, label:
     return client
 
 
-def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: str, edge: str) -> set[str]:
+def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: str, edge: str) -> tuple[set[str], int, int]:
     proof = fields(value, {"schema", "client_report_sha256", "records"}, "CDN viewer request evidence")
     require(proof["schema"] == f"crab.{edge}-viewer-requests/v1" and proof["client_report_sha256"] == client_digest,
             "CDN viewer evidence differs from the measured fetch")
@@ -1284,7 +1284,9 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
             "CDN logs must cover each measured viewer attempt exactly once")
     record_fields = {"status", "cache", "response_bytes"}
     if edge == "cloud-cdn":
-        record_fields.add("cache_fill_bytes")
+        record_fields |= {"cache_fill_bytes", "origin_requests"}
+    logged_ids = set(records)
+    origin_gets = child_fill_bytes = viewer_fill_bytes = 0
     for request_id, record in records.items():
         row = fields(record, record_fields, "CDN viewer log record")
         response = expected[request_id]
@@ -1297,7 +1299,21 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
         if edge == "cloud-cdn":
             require(type(row["cache_fill_bytes"]) is int and row["cache_fill_bytes"] >= 0,
                     "Cloud CDN log has invalid reported cache fill bytes")
-    return set(records)
+            viewer_fill_bytes = max(viewer_fill_bytes, row["cache_fill_bytes"])
+            children = row["origin_requests"]
+            require(isinstance(children, dict), "invalid Cloud CDN origin requests")
+            for origin_id, value in children.items():
+                origin = fields(value, {"method", "status", "cache_fill_bytes"}, "Cloud CDN origin request")
+                require(matches(SHA256, origin_id) and origin_id not in logged_ids
+                        and origin["method"] in ("GET", "HEAD") and type(origin["status"]) is int and 100 <= origin["status"] <= 599
+                        and type(origin["cache_fill_bytes"]) is int and origin["cache_fill_bytes"] >= 0,
+                        "invalid or repeated Cloud CDN origin request")
+                logged_ids.add(origin_id)
+                origin_gets += origin["method"] == "GET"
+                child_fill_bytes += origin["cache_fill_bytes"]
+    # Collapsed traffic and separate range-fills can describe the same bytes
+    # at both levels. Use the strongest floor without adding overlapping totals.
+    return logged_ids, origin_gets, max(viewer_fill_bytes, child_fill_bytes)
 
 
 def verify_git_native_ref(
@@ -1414,7 +1430,7 @@ def collect_git_performance(
                    "candidate": spec["candidate"]}
     seen = set()
     cache_roots = set()
-    viewer_request_ids = set()
+    provider_request_ids = set()
     performance = {}
     for location, region in spec["regions"].items():
         pairs = []
@@ -1443,12 +1459,15 @@ def collect_git_performance(
                 if arm == "warm_local":
                     require(client["edge_attempts"] == 0, "warm-local control observed edge requests")
                 viewer_log = None
+                cdn_origin_gets = cdn_fill_bytes = 0
                 if provider in VIEWER_REQUEST_FILES and client["all_edge_attempts"]:
                     log_name = VIEWER_REQUEST_FILES[provider]
                     viewer_log = read_git_record(inputs / slot / log_name, limit=GIT_FETCH_RECORD_LIMIT)
-                    request_ids = verify_viewer_requests(decode(viewer_log), client, digest, PROVIDERS[provider][0])
-                    require(viewer_request_ids.isdisjoint(request_ids), "CDN viewer requests were reused across arms")
-                    viewer_request_ids.update(request_ids)
+                    request_ids, cdn_origin_gets, cdn_fill_bytes = verify_viewer_requests(
+                        decode(viewer_log), client, digest, PROVIDERS[provider][0],
+                    )
+                    require(provider_request_ids.isdisjoint(request_ids), "CDN log requests were reused across arms")
+                    provider_request_ids.update(request_ids)
                 external_raw = read_git_record(inputs / slot / "measurement.json")
                 external = fields(decode(external_raw), GIT_MEASUREMENT_FIELDS, "benchmark measurement")
                 require(external["schema"] == "crab.cdn-git-measurement/v1" and external["provider"] == provider
@@ -1462,8 +1481,10 @@ def collect_git_performance(
                         f"{label} is missing Git memory or disk measurements")
                 incomplete = client["incomplete_edge_bytes"]
                 native = client["native_traffic"]
-                require(measured["origin_gets"] >= native["get_responses"],
-                        f"{label} undercounts observed native GET responses")
+                require(measured["origin_gets"] >= native["get_responses"] + cdn_origin_gets,
+                        f"{label} undercounts observed native GET responses or logged CDN origin GETs")
+                require(measured["origin_fill_bytes"] >= cdn_fill_bytes,
+                        f"{label} undercounts logged CDN cache fill bytes")
                 require(incomplete <= measured["rejected_bytes"]
                         and measured["client_bytes"] >= native["body_bytes"] + measured["edge_bytes"] + incomplete,
                         f"{label} undercounts observed client bytes")
