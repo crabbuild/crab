@@ -13,7 +13,7 @@ from pathlib import Path
 
 from collect_cdn_product_metrics import measure, measure_native
 from cdn_viewer_issuer import issuer_settings
-from run_cdn_git_workload import approved_public_export, runner_platform
+from run_cdn_git_workload import approved_public_export, runner_platform, viewer_binding_sha256
 from run_cdn_transport_checks import approved_fixture
 
 from cdn_qualification import (
@@ -25,6 +25,26 @@ from public_inventory import ExportError
 
 PRIVATE_READER_FIELDS = {"oidc_issuer", "oidc_client_id", "token_cache_directory"}
 PROBE_FIELDS = {"commit", "sha256", "bytes", "source_sha", "qualification_feature", "git_blob_oid_sha256"}
+READ_TARGET = "crab_sdk::cdn::read_target"
+
+
+def verified_target(lines: list[bytes], fixture: dict, arm: str, approval: str) -> dict:
+    expected = {
+        "origin_sha256": hashlib.sha256(fixture["native_origin"].encode()).hexdigest(),
+        "prefix_sha256": hashlib.sha256(f"{fixture['fixture_prefix']}/".encode()).hexdigest(),
+        "binding_sha256": viewer_binding_sha256(fixture) if arm == "edge" else "",
+        "public_export_sha256": approval if scope_parts(fixture["scope"])[1] == "public" else "",
+    }
+    observations = []
+    for line in lines:
+        if READ_TARGET.encode() not in line:
+            continue
+        event = decode(line)
+        if isinstance(event, dict) and event.get("target") == READ_TARGET:
+            observations.append(event.get("fields"))
+    require(observations == [expected | {"message": "SDK captured CDN read target"}],
+            "SDK snapshot did not confirm the approved native target, prefix and active CDN binding")
+    return expected
 
 
 def binding_for(args: argparse.Namespace, fixture: dict) -> tuple[dict, str]:
@@ -86,6 +106,7 @@ def fetch(args: argparse.Namespace) -> dict:
             and matches(SHA256, observed["git_blob_oid_sha256"]),
             "SDK snapshot did not verify the published Git payload")
     lines = result.stderr.splitlines()
+    reader = verified_target(lines, fixture, args.arm, approval)
     responses = {}
     counters = measure(lines, scope, edge_responses=responses, expected_git_blob=observed["git_blob_oid_sha256"])
     native = measure_native(lines, scope)
@@ -100,6 +121,7 @@ def fetch(args: argparse.Namespace) -> dict:
         "probe_sha256": probe_digest, "approval_sha256": approval,
         "publication_sha256": hashlib.sha256(raw).hexdigest(), "started_at_unix_ms": started_at,
         "finished_at_unix_ms": finished_at, "elapsed_ms": elapsed, "edge_responses": responses, "native_traffic": native,
+        "reader": reader,
     }
 
 

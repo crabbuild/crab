@@ -455,7 +455,7 @@ mod tests {
         let options = DirectCdnOptions::public_export(
             "https://other.blob.core.windows.net/models",
             "org/repo",
-            "https://other.blob.core.windows.net/approved-export",
+            "https://sdkexport.blob.core.windows.net/approved-export",
             "https://downloads.example.com",
             None,
         )
@@ -463,12 +463,16 @@ mod tests {
         let azure = DirectStoreOptions::azure(
             AzureOptions::bearer("sdkfixture", "models", "test-token").unwrap(),
         );
-        assert!(
-            Client::builder()
-                .direct_store(azure)
-                .direct_cdn(options)
-                .build()
-                .is_err()
+        let Err(error) = Client::builder()
+            .direct_store(azure)
+            .direct_cdn(options)
+            .build()
+        else {
+            panic!("the SDK accepted a different Azure storage account");
+        };
+        assert_eq!(
+            error.to_string(),
+            "CDN binding does not match the selected native origin"
         );
     }
 

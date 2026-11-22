@@ -129,7 +129,7 @@ async fn run() -> Result<(), Failure> {
         .ok_or("SDK probe requires its source commit at build time")?;
     tracing_subscriber::fmt()
         .with_env_filter(
-            "off,crab_storage::cdn::transfer=debug,crab_storage::native_read=debug,crab_storage::cdn::gcs_viewer_log=trace",
+            "off,crab_sdk::cdn::read_target=debug,crab_storage::cdn::transfer=debug,crab_storage::native_read=debug,crab_storage::cdn::gcs_viewer_log=trace",
         )
         .with_writer(std::io::stderr)
         .json()

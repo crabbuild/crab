@@ -25,6 +25,7 @@ class CdnSdkWorkloadQualificationTests(unittest.TestCase):
         config = fixture(access="private") | {"scope": scope, "viewer_issuer": {
             "endpoint": self.issuer, "audience": "https://issuer.example.com", "approval_sha256": self.approval,
         }}
+        self.config = config
         config_path = root / "fixture.json"
         configuration = json_file(config_path, config)
         self.oid, self.sha = "a" * 40, "b" * 64
@@ -45,7 +46,8 @@ class CdnSdkWorkloadQualificationTests(unittest.TestCase):
                                        receipt=receipt, probe=probe, source_sha=COMMIT, run_id="123", run_attempt="2",
                                        private_reader=reader, export_approval=None)
 
-    def observe(self, *, edge: bool, observed_blob: str = "e" * 64, **result: object) -> subprocess.CompletedProcess[bytes]:
+    def observe(self, *, edge: bool, observed_blob: str = "e" * 64, reader: dict | None = None,
+                **result: object) -> subprocess.CompletedProcess[bytes]:
         report = {"commit": self.oid, "sha256": self.sha, "bytes": SDK.GIT_PAYLOAD_SIZE,
                   "source_sha": COMMIT, "qualification_feature": True, "git_blob_oid_sha256": "e" * 64} | result
         native = {"target": "crab_storage::native_read", "fields": {
@@ -59,7 +61,14 @@ class CdnSdkWorkloadQualificationTests(unittest.TestCase):
         verify = {"target": "crab_storage::cdn::transfer", "fields": route | {
             "message": "CDN verified Git payload", "source": "edge", "git_blob_oid_sha256": observed_blob,
         }}
-        logs = [native, transfer, verify] if edge else [native]
+        selected = {"target": SDK.READ_TARGET, "fields": {
+            "message": "SDK captured CDN read target",
+            "origin_sha256": hashlib.sha256(self.config["native_origin"].encode()).hexdigest(),
+            "prefix_sha256": hashlib.sha256(f"{self.config['fixture_prefix']}/".encode()).hexdigest(),
+            "binding_sha256": SDK.viewer_binding_sha256(self.config) if edge else "",
+            "public_export_sha256": "",
+        } | (reader or {})}
+        logs = [selected, native, transfer, verify] if edge else [selected, native]
         return subprocess.CompletedProcess([], 0, json.dumps(report).encode(),
                                            "\n".join(json.dumps(event) for event in logs).encode())
 
@@ -75,11 +84,14 @@ class CdnSdkWorkloadQualificationTests(unittest.TestCase):
                 self.assertEqual(report["publication_sha256"], self.receipt_digest)
                 self.assertEqual(report["probe_sha256"], hashlib.sha256(b"fixture probe").hexdigest())
                 self.assertEqual(report["verified_edge_payloads"], int(arm == "edge"))
+                self.assertEqual(report["reader"]["binding_sha256"],
+                                 SDK.viewer_binding_sha256(self.config) if arm == "edge" else "")
                 self.assertNotIn(self.issuer, json.dumps(report))
 
     def test_rejects_a_fallback_or_a_different_candidate_as_edge_evidence(self) -> None:
         for response, reason in (
-            (self.observe(edge=False), "did not accept verified Git bytes"),
+            (self.observe(edge=False, reader={"binding_sha256": SDK.viewer_binding_sha256(self.config)}),
+             "did not accept verified Git bytes"),
             (self.observe(edge=True, observed_blob="f" * 64), "did not accept verified Git bytes"),
             (self.observe(edge=True, commit="c" * 40), "did not verify the published Git payload"),
             (self.observe(edge=True, source_sha="f" * 40), "did not use the requested source build"),
@@ -87,3 +99,22 @@ class CdnSdkWorkloadQualificationTests(unittest.TestCase):
             with self.subTest(reason=reason), patch.object(SDK.subprocess, "run", return_value=response):
                 with self.assertRaisesRegex(ValueError, reason):
                     SDK.fetch(self.args)
+
+    def test_rejects_different_resolved_targets_even_when_bytes_match(self) -> None:
+        for key in ("origin_sha256", "prefix_sha256", "binding_sha256", "public_export_sha256"):
+            for arm in ("edge", "origin"):
+                with self.subTest(field=key, arm=arm):
+                    self.args.arm = arm
+                    result = self.observe(edge=arm == "edge", reader={key: "0" * 64})
+                    with patch.object(SDK.subprocess, "run", return_value=result):
+                        with self.assertRaisesRegex(ValueError, "did not confirm the approved native target"):
+                            SDK.fetch(self.args)
+
+    def test_public_edge_read_must_report_the_loaded_export_receipt(self) -> None:
+        self.config["scope"] = "cloudfront/public/sdk/git/direct"
+        result = self.observe(edge=True, reader={"public_export_sha256": self.approval})
+        lines = result.stderr.splitlines()
+        self.assertEqual(SDK.verified_target(lines, self.config, "edge", self.approval)["public_export_sha256"],
+                         self.approval)
+        with self.assertRaisesRegex(ValueError, "did not confirm the approved native target"):
+            SDK.verified_target(lines, self.config, "edge", "0" * 64)

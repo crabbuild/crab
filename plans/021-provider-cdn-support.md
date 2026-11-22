@@ -683,9 +683,12 @@ run and attempt to bind each observation.
 The SDK Git snapshot collector uses the ordinary SDK open, snapshot and read
 APIs through `crates/crab-sdk/examples/cdn-sdk-read.rs`. It binds redacted edge
 and native controls to a confirmed native publication and an exact SDK probe
-build. An edge sample needs the verified Git object ID fingerprint for the blob
-delivered to the caller. The protected worker still needs live runs, regional
-pairing, and release assembly and verification of the SDK records.
+build. Each arm confirms the native origin and effective repository prefix
+captured after SDK authorization. The edge arm confirms the active viewer,
+the public receipt where applicable, and the Git object ID fingerprint for the
+verified blob delivered to the caller. The independent native ref collector
+also accepts the SDK fixture. The protected worker still needs live runs,
+regional pairing, and release assembly and verification of the SDK records.
 
 The protected workflow or its dedicated workers own producing these raw
 observations. The assembly and release jobs own rejecting missing, mismatched

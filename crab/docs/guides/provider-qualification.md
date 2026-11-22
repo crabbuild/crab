@@ -936,11 +936,14 @@ for the native control. For a public row, replace `--private-reader` with
 both options for the native control.
 
 The probe opens the repository through the SDK, checks the snapshot commit,
-verifies the Git blob's SHA-256 and length, and closes the client. The
-collector retains the candidate digest and redacted transfer evidence. Edge
-delivery requires the verified Git object ID fingerprint for the exact
-blob returned by the SDK. The origin control
-requires native body bytes and zero edge attempts. Fixture builds can add
+verifies the Git blob's SHA-256 and length, and closes the client. Each arm
+confirms the native origin and prefix captured by the SDK after authorization.
+The edge arm confirms the attached viewer and, for public delivery, the
+loaded publication receipt. Edge delivery requires the verified Git object
+ID fingerprint for the exact blob returned by the SDK. The origin control
+requires native body bytes, an inactive viewer and zero edge attempts.
+Use the independent native ref probe described above for both publication and
+retirement on the same SDK fixture. Fixture builds can add
 `provider-cdn-qualification` to exercise unqualified HTTPS rows. The report
 records whether that feature was enabled. These SDK action records still
 need to be incorporated into release assembly and measured regional pairs.

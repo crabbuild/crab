@@ -226,9 +226,15 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         self.assertTrue(self.run_phase("retire")["ref_retired"])
 
     def test_native_collector_observes_only_the_approved_provider_and_ref(self) -> None:
-        self.run_phase("publish")
+        self.verify_native_ref_observation()
+
+    def verify_native_ref_observation(self) -> None:
+        self.assertTrue(self.run_phase("publish")["visible_new_ref"])
         publication = json.loads(self.receipt.read_bytes())
         configuration = json.loads(self.fixture.read_bytes())
+        self.assertEqual(publication["scope"], configuration["scope"])
+        if "/sdk/" in publication["scope"]:
+            self.assertNotEqual(self.call("fetch").returncode, 0)
 
         def digest(value: str) -> str:
             return hashlib.sha256(value.encode()).hexdigest()
@@ -458,15 +464,12 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         self.assertIn("warm-local fetch must use a verified local payload", missed.stderr)
         self.assertTrue(self.run_phase("retire")["ref_retired"])
 
-    def test_native_writer_publishes_and_retires_on_behalf_of_an_sdk_fixture(self) -> None:
+    def test_native_writer_and_independent_probe_support_an_sdk_fixture(self) -> None:
         config = fixture(access="private") | {"scope": "cloudfront/private/sdk/git/direct"}
         raw = json.dumps(config).encode()
         self.fixture.write_bytes(raw)
         self.digest = hashlib.sha256(raw).hexdigest()
-        self.assertTrue(self.run_phase("publish")["visible_new_ref"])
-        self.assertEqual(json.loads(self.receipt.read_bytes())["scope"], config["scope"])
-        self.assertNotEqual(self.call("fetch").returncode, 0)
-        self.assertTrue(self.run_phase("retire")["ref_retired"])
+        self.verify_native_ref_observation()
 
     def test_rejects_unapproved_fixture_or_another_runs_receipt(self) -> None:
         rejected = self.call("publish", digest="f" * 64)
