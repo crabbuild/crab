@@ -311,7 +311,8 @@ export function repositoryRoute(url: URL, refs?: Refs): RepositoryRoute | null {
     if (
       page === "settings" &&
       tail.length <= 1 &&
-      (!tail[0] || ["branches", "access", "mentions"].includes(tail[0]))
+      (!tail[0] ||
+        ["branches", "access", "mentions", "team-access"].includes(tail[0]))
     )
       return {
         ...route,

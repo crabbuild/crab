@@ -63,6 +63,7 @@ pub(crate) const MAX_TEAM_GRANTS: usize = 100;
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub(crate) struct OrganizationAccess {
     pub id: Uuid,
     pub teams: Vec<TeamGrant>,
@@ -70,6 +71,7 @@ pub(crate) struct OrganizationAccess {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub(crate) struct TeamGrant {
     pub team: Uuid,
     pub access: crate::RepositoryAccess,

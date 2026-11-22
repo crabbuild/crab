@@ -471,7 +471,8 @@ export function RepositoryPage({
                     section={
                       route?.section === "branches" ||
                       route?.section === "members" ||
-                      route?.section === "mentions"
+                      route?.section === "mentions" ||
+                      route?.section === "team-access"
                         ? route.section
                         : "general"
                     }

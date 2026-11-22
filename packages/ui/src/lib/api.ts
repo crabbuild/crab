@@ -26,6 +26,7 @@ export interface Repository {
   description: string;
   access: "read" | "write";
   can_admin: boolean;
+  organization_id?: string;
   archive_version: number;
   archived: boolean;
   protection_version: number;

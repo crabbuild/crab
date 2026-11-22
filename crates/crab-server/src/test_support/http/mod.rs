@@ -1,3 +1,4 @@
+pub(crate) mod browser;
 pub(crate) mod organizations;
 use crate::{
     RepositoryConfig,

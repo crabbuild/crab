@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use axum::{
     Extension, Json, Router,
@@ -16,14 +16,17 @@ use crate::{
 };
 
 #[derive(Serialize)]
-struct StateView {
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub(in crate::api) struct TeamAccessState {
     revision: u64,
     organization: OrganizationAccess,
+    team_names: BTreeMap<Uuid, String>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Update {
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub(in crate::api) struct TeamAccessUpdate {
     expected_revision: u64,
     teams: Vec<TeamGrant>,
 }
@@ -61,18 +64,17 @@ async fn list(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
     Path(route): Path<(String, String)>,
-) -> Result<Json<StateView>> {
+) -> Result<Json<TeamAccessState>> {
     let (_, snapshot, organization, actor) = lookup(&server, &principal, &route).await?;
-    if !app::repository_team_access(&server, &organization, Some(actor))
-        .await?
-        .owner
-    {
+    let current = app::repository_team_access(&server, &organization, Some(actor), true).await?;
+    if !current.owner {
         return Err(Error::NotFound);
     }
     app::account(&principal)?;
-    Ok(Json(StateView {
+    Ok(Json(TeamAccessState {
         revision: snapshot.revision,
         organization,
+        team_names: current.team_names,
     }))
 }
 
@@ -80,15 +82,15 @@ async fn replace(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
     Path(route): Path<(String, String)>,
-    Json(input): Json<Update>,
-) -> Result<Json<StateView>> {
+    Json(input): Json<TeamAccessUpdate>,
+) -> Result<Json<TeamAccessState>> {
     let (catalog, snapshot, mut organization, actor) = lookup(&server, &principal, &route).await?;
     let before = organization.clone();
     organization.teams = input.teams;
     organization
         .validate()
         .map_err(app::repository_access_error)?;
-    let current = app::repository_team_access(&server, &organization, Some(actor)).await?;
+    let current = app::repository_team_access(&server, &organization, Some(actor), true).await?;
     if !current.owner {
         return Err(Error::NotFound);
     }
@@ -117,8 +119,9 @@ async fn replace(
         .map_err(app::repository_access_error)?;
     let organization = record.organization.ok_or(Error::NotFound)?;
     let revision = snapshot.revision + u64::from(organization != before);
-    Ok(Json(StateView {
+    Ok(Json(TeamAccessState {
         revision,
         organization,
+        team_names: current.team_names,
     }))
 }
