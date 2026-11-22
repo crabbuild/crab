@@ -422,7 +422,7 @@ class CdnQualificationTests(unittest.TestCase):
             self.record_xorb_read()
         elif service:
             self.record_service_product()
-        if access == "public":
+        if access == "public" and not CDN.is_direct_desktop_git_scope(self.scope):
             self.public_transition_trace()
 
     def write_public_export(self, provider: str) -> dict[str, str]:
@@ -441,9 +441,11 @@ class CdnQualificationTests(unittest.TestCase):
         previous = root / CDN.PUBLIC_EXPORT_BEFORE
         previous.mkdir(parents=True, exist_ok=True)
         self.public_origins = {"native": source, "export": export}
-        entry = Object("v2/pack-layers/aa/" + "a" * 64, len(EXPORT_BODY), hashlib.sha256(EXPORT_BODY).hexdigest())
-        old_entry = Object("v2/pack-layers/bb/" + "b" * 64, len(EXPORT_BODY), "c" * 64)
-        if CDN.scope_parts(self.scope)[3] == "lfs":
+        family = CDN.scope_parts(self.scope)[3]
+        directory = "v2/catalogs" if family == "capsule" else "v2/pack-layers"
+        entry = Object(f"{directory}/aa/" + "a" * 64, len(EXPORT_BODY), hashlib.sha256(EXPORT_BODY).hexdigest())
+        old_entry = Object(f"{directory}/bb/" + "b" * 64, len(EXPORT_BODY), "c" * 64)
+        if family == "lfs":
             entry = Object(CDN.lfs_object_path(entry.sha256), entry.size, entry.sha256)
             old_entry = Object(CDN.lfs_object_path("f" * 64), entry.size, "f" * 64)
         self.object_key = hashlib.sha256(f"{FIXTURE_PREFIX}/{entry.path}".encode()).hexdigest()
@@ -517,6 +519,13 @@ class CdnQualificationTests(unittest.TestCase):
         }
         if managed:
             rollback["managed_grant"] = self.registration["managed_issuer"] | {"approval_sha256": None, "grant_version": 1}
+        if public:
+            start = fetch["started_at_unix_ms"] - 30
+            json_file(records / CDN.GIT_PRIOR_EXPORT_RECORD, rollback | transition | {
+                "arm": "prior_export", "started_at_unix_ms": start, "finished_at_unix_ms": start + 5,
+                "reader": fetch["reader"] | {"cache_root_sha256": "9" * 64,
+                                            "public_export_sha256": self.registration["previous_publication_sha256"]},
+            })
         self.rollback_trace(rollback)
         json_file(records / "retirement.json", provenance | {
             "schema": "crab.cdn-git-retirement/v1", "publication_sha256": receipt, "ref_retired": True,
@@ -976,36 +985,12 @@ class CdnQualificationTests(unittest.TestCase):
         self.report["checks"][check] = {"passed": True, "trace_sha256": json_file(path, trace)}
 
     def public_transition_trace(self) -> None:
-        reference, visible, start, finish, attempts = "4" * 64, PUBLIC_SEAL - 40, PUBLIC_SEAL + 10, PUBLIC_SEAL + 30, 1
         if CDN.requires_cli_workload(self.scope):
-            records = self.directory / CDN.GIT_PRODUCT_DIR
-            publication = json.loads((records / "publication.json").read_bytes())
-            fetch = json.loads((records / "fetch.json").read_bytes())
-            reference = CDN.deployment_component_digest({"ref": publication["ref"], "oid": publication["oid"]})
-            visible = publication["visible_at_unix_ms"]
-            start, finish, attempts = (fetch[key] for key in ("started_at_unix_ms", "finished_at_unix_ms", "all_edge_attempts"))
-        action = self.report["product_action"]
-        common = {"action": action["name"], "reference_sha256": reference, "key_sha256": self.object_key,
-                  "result_sha256": action["observed_sha256"], "result_bytes": action["observed_bytes"], "binding_active": True}
-        trace = {key: self.report[key] for key in CDN.CDN_PROVENANCE_FIELDS | {"platform"}} | {
-            "schema": "crab.cdn-public-transition/v1",
-            "key_sha256": self.object_key,
-            "native_publication": {"reference_sha256": reference, "visible_at_unix_ms": visible},
-            "before": common | {"receipt_sha256": self.registration["previous_publication_sha256"],
-                                "started_at_unix_ms": visible + 5, "finished_at_unix_ms": visible + 10,
-                                "edge_attempts": 0, "verified_edge_key_sha256": None},
-            "after": common | {"receipt_sha256": self.registration["publication_sha256"],
-                               "started_at_unix_ms": start, "finished_at_unix_ms": finish,
-                               "edge_attempts": attempts, "verified_edge_key_sha256": self.object_key},
-        }
-        if CDN.requires_cli_workload(self.scope):
-            trace["after"]["reader"] = fetch["reader"]
-            trace["before"]["reader"] = fetch["reader"] | {"cache_root_sha256": "9" * 64,
-                                                         "public_export_sha256": self.registration["previous_publication_sha256"]}
-        elif CDN.is_direct_sdk_git_scope(self.scope) or CDN.requires_desktop_workload(self.scope, action["name"]):
-            trace = CDN.derive_git_blob_public_transition(self.directory / CDN.GIT_PRODUCT_DIR, self.report, self.registration)
+            trace = CDN.derive_cli_public_transition(self.directory / CDN.GIT_PRODUCT_DIR, self.report, self.registration)
         elif CDN.is_direct_service_scope(self.scope):
             trace = CDN.derive_service_public_transition(self.directory / CDN.SERVICE_PRODUCT_DIR, self.report, self.registration)
+        else:
+            trace = CDN.derive_git_blob_public_transition(self.directory / CDN.GIT_PRODUCT_DIR, self.report, self.registration)
         check = CDN.PUBLIC_TRANSITION_CHECK
         path = self.directory / "traces" / f"{check}.json"
         self.report["checks"][check] = {"passed": True, "trace_sha256": json_file(path, trace)}
@@ -1388,7 +1373,7 @@ class CdnQualificationTests(unittest.TestCase):
             ("before", {"edge_attempts": 1}, "must avoid the edge before approval"),
             ("before", {"finished_at_unix_ms": PUBLIC_SEAL}, "must be sealed after the native-only read"),
             ("after", {"verified_edge_key_sha256": "8" * 64}, "verify the exact edge object"),
-            ("after", {"edge_attempts": 2}, "must use the retained Git product fetch"),
+            ("after", {"edge_attempts": 2}, "must use the retained CLI product fetches"),
         )
         for phase, changes, reason in cases:
             with self.subTest(phase=phase, changes=changes):

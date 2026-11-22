@@ -302,6 +302,30 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
         fixture.json_file(cleanup, trace)
         self.assertEqual(self.assemble(digest), 1)
 
+    def test_public_cli_capsule_transition_requires_the_native_fetch_record(self) -> None:
+        cdn = fixture.CDN
+        digest = self.inputs("gcs", consumer="cli", access="public", family="capsule")
+        row = self.root / self.row
+        relative = Path(cdn.GIT_PRODUCT_DIR) / cdn.GIT_PRIOR_EXPORT_RECORD
+        prior = row / relative
+        raw = prior.read_bytes()
+        prior.unlink()
+        with self.assertRaisesRegex(FileNotFoundError, cdn.GIT_PRIOR_EXPORT_RECORD):
+            self.assemble(digest)
+        self.assertFalse(self.output.exists())
+        client = json.loads(raw)
+        fixture.json_file(prior, client | {"native_traffic": dict.fromkeys(cdn.NATIVE_TRAFFIC_FIELDS, 0)})
+        with self.assertRaisesRegex(ValueError, "observed no native payload transfer"):
+            self.assemble(digest)
+        prior.write_bytes(raw)
+        (row / "traces" / f"{cdn.PUBLIC_TRANSITION_CHECK}.json").unlink()
+        self.assertEqual(self.assemble(digest), 1)
+        retained = self.output / self.row / relative
+        self.assertEqual(retained.read_bytes(), raw)
+        fixture.json_file(retained, client | {"publication_oid": "f" * 40})
+        with self.assertRaises(subprocess.CalledProcessError):
+            cdn.verify_bundle_row(self.output, self.row, self.example.registration, fixture.COMMIT, "123", "2")
+
     def test_public_sdk_assembly_requires_and_retains_the_transition_viewer_proof(self) -> None:
         digest = self.inputs("azure", access="public")
         relative = Path(self.row) / fixture.CDN.GIT_PRODUCT_DIR / fixture.CDN.PRODUCT_VIEWER_RECORD

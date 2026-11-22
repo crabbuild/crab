@@ -647,18 +647,8 @@ def verify_public_transition(
             and before["finished_at_unix_ms"] < sealed_at <= after["started_at_unix_ms"],
             "public export must be sealed after the native-only read and before the verified edge action")
     if cli_workload:
-        provenance = {key: report[key] for key in CDN_PROVENANCE_FIELDS | {"platform"}}
-        fetch = validate_git_fetch(read_git_record(directory / GIT_PRODUCT_DIR / "fetch.json", limit=GIT_FETCH_RECORD_LIMIT),
-                                   provenance, "edge", "public transition Git action")
-        require(after["started_at_unix_ms"] == fetch["started_at_unix_ms"]
-                and after["finished_at_unix_ms"] == fetch["finished_at_unix_ms"]
-                and after["edge_attempts"] == fetch["all_edge_attempts"]
-                and after["reader"] == fetch["reader"] and key == fetch.get("transition_key_sha256"),
-                "the public transition must use the retained Git product fetch")
-        require(all(before["reader"][key] == after["reader"][key] for key in CLI_NATIVE_FIELDS),
-                "the public transition changed the selected native target")
-        require(before["reader"]["cache_root_sha256"] != after["reader"]["cache_root_sha256"],
-                "the public transition reused the native-only fetch cache")
+        measured = derive_cli_public_transition(directory / GIT_PRODUCT_DIR, report, registration)
+        require(trace == measured, "public transition must use the retained CLI product fetches")
     elif sdk or desktop:
         measured = derive_git_blob_public_transition(directory / GIT_PRODUCT_DIR, report, registration)
         require(trace == measured, f"public transition differs from the retained {'desktop' if desktop else 'SDK snapshot'} reads")
@@ -1539,12 +1529,14 @@ def validate_git_fetch(
     edge, access, _, _, _ = scope_parts(provenance["scope"])
     value = decode(raw)
     expected = GIT_FETCH_FIELDS
+    prior = mode == "prior_export"
     managed = is_managed_cli_git_scope(provenance["scope"])
     if managed:
         expected = expected | {"managed_grant"}
-    if isinstance(value, dict) and "transition_key_sha256" in value:
-        require(access == "public" and mode == "edge" and matches(SHA256, value["transition_key_sha256"]),
-                "CLI transition needs an exact public object fingerprint on the edge fetch")
+    if prior or (isinstance(value, dict) and "transition_key_sha256" in value):
+        require(access == "public" and mode in ("edge", "prior_export") and isinstance(value, dict)
+                and matches(SHA256, value.get("transition_key_sha256")),
+                "CLI transition needs an exact public object fingerprint")
         expected = expected | {"transition_key_sha256"}
     client = fields(value, expected, "redacted LFS fetch" if action == "lfs-fetch" else "redacted Git fetch")
     require(client["schema"] == f"crab.cdn-{action}/v1" and client["name"] == action
@@ -1585,6 +1577,9 @@ def validate_git_fetch(
     if mode == "origin":
         require(reader["binding_sha256"] == "" and all(client[key] == 0 for key in PRODUCT_COUNTERS),
                 f"{label} requires an inactive viewer binding and zero edge or local payload reads")
+    if prior:
+        require(all(client[key] == 0 for key in PRODUCT_COUNTERS), f"{label} requires zero edge or local payload reads")
+    if mode == "origin" or prior:
         require(positive(native["get_responses"]) and positive(native["body_bytes"]),
                 f"{label} observed no native payload transfer")
     if mode == "edge":
@@ -2428,8 +2423,11 @@ def collect_git_product_action(
     verify_product_viewer_requests(viewer_raw, fetch, fetch_raw, scope_parts(row["scope"])[0])
     if retain is not None:
         retain.mkdir()
-        for filename, raw in (("publication.json", publication_raw), ("fetch.json", fetch_raw),
-                              ("retirement.json", retirement_raw), (PRODUCT_VIEWER_RECORD, viewer_raw)):
+        retained = {"publication.json": publication_raw, "fetch.json": fetch_raw,
+                    "retirement.json": retirement_raw, PRODUCT_VIEWER_RECORD: viewer_raw}
+        if public_export_sha256:
+            retained[GIT_PRIOR_EXPORT_RECORD] = read_git_record(inputs / GIT_PRIOR_EXPORT_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
+        for filename, raw in retained.items():
             (retain / filename).write_bytes(raw)
         for phase, raw in observations.items():
             (retain / GIT_NATIVE_REF_FILES[phase]).write_bytes(raw)
@@ -2577,6 +2575,47 @@ def collect_desktop_product_action(
         "observed_edge_gets": edge["observed_edge_gets"], "verified_edge_payloads": edge["verified_edge_payloads"],
     }
     return DesktopProductEvidence(action, viewers, roots, publication["oid"], cleanup_at, export_ready_at)
+
+
+def derive_cli_public_transition(inputs: Path, row: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
+    provenance = {field: row[field] for field in CDN_PROVENANCE_FIELDS | {"platform"}}
+    publication_raw = read_git_record(inputs / "publication.json")
+    publication = validate_git_publication(publication_raw, provenance)
+    digest = hashlib.sha256(publication_raw).hexdigest()
+    reference = deployment_component_digest({"ref": publication["ref"], "oid": publication["oid"]})
+    provenance["candidate"] = spec["candidate"]
+    prior = validate_git_fetch(read_git_record(inputs / GIT_PRIOR_EXPORT_RECORD, limit=GIT_FETCH_RECORD_LIMIT),
+                               provenance, "prior_export", "CLI prior export fetch")
+    edge = validate_git_fetch(read_git_record(inputs / "fetch.json", limit=GIT_FETCH_RECORD_LIMIT),
+                               provenance, "edge", "CLI current export fetch")
+    key = prior["transition_key_sha256"]
+    require(key == edge.get("transition_key_sha256"), "CLI export transition must verify the same object")
+    require(publication["published"] and publication["candidate"] == spec["candidate"]
+            and all(read["publication_sha256"] == digest and read["publication_oid"] == publication["oid"]
+                    and read["observed_sha256"] == publication["sha256"]
+                    and read["observed_bytes"] == publication["payload_bytes"] == cli_payload_bytes(spec)
+                    for read in (prior, edge)),
+            "CLI export transition must verify the same published payload")
+    require(all(prior["reader"][field] == edge["reader"][field] for field in CLI_NATIVE_FIELDS)
+            and prior["reader"]["cache_root_sha256"] != edge["reader"]["cache_root_sha256"],
+            "CLI export transition needs the same native target and fresh caches")
+    trace = {field: row[field] for field in CDN_PROVENANCE_FIELDS | {"platform"}} | {
+        "schema": "crab.cdn-public-transition/v1", "key_sha256": key,
+        "native_publication": {"reference_sha256": reference, "visible_at_unix_ms": publication["visible_at_unix_ms"]},
+    }
+    for phase, read, approval in (("before", prior, spec["previous_publication_sha256"]),
+                                  ("after", edge, spec["publication_sha256"])):
+        reader = read["reader"]
+        require(reader["binding_sha256"] == spec["viewer_binding_sha256"] and reader["public_export_sha256"] == approval,
+                "CLI export transition must use the registered binding and approval for each fetch")
+        trace[phase] = {
+            "action": read["name"], "receipt_sha256": approval, "key_sha256": key,
+            "reference_sha256": reference, "result_sha256": read["observed_sha256"], "result_bytes": read["observed_bytes"],
+            "started_at_unix_ms": read["started_at_unix_ms"], "finished_at_unix_ms": read["finished_at_unix_ms"],
+            "edge_attempts": read["all_edge_attempts"], "binding_active": True, "reader": reader,
+            "verified_edge_key_sha256": key if phase == "after" else None,
+        }
+    return trace
 
 
 def derive_git_blob_public_transition(inputs: Path, row: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:

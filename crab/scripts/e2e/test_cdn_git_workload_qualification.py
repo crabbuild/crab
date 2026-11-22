@@ -15,8 +15,8 @@ from tempfile import TemporaryDirectory
 
 import run_cdn_git_workload as WORKLOAD
 from cdn_qualification import (
-    CLI_BUILD_FIELDS, GIT_FETCH_FIELDS, WORKLOAD_PAYLOAD_LIMIT, collect_git_product_action, lfs_object_path,
-    verify_public_transition,
+    CLI_BUILD_FIELDS, GIT_FETCH_FIELDS, GIT_PRIOR_EXPORT_RECORD, WORKLOAD_PAYLOAD_LIMIT, collect_git_product_action,
+    derive_cli_public_transition, lfs_object_path, verify_public_transition,
 )
 from public_inventory import Object, SCHEMA, publication_receipt, read_publication
 from test_cdn_transport_qualification import PACK, fixture
@@ -427,34 +427,33 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         payload = json.loads(self.receipt.read_bytes())
         if family == "lfs":
             added = Object(lfs_object_path(payload["sha256"]), payload["payload_bytes"], payload["sha256"])
-            selector = ()
         else:
             added = Object(PACK, 6, "d" * 64)
-            selector = ("--transition-object", PACK)
+        selector = ("--transition-object", added.path)
         key = hashlib.sha256(f"{sample['fixture_prefix']}/{added.path}".encode()).hexdigest()
-        before, after = self.root / "before.json", self.root / "after.json"
         (self.root / "origin-only").touch()
         observe("0" * 64, "unlisted")
-        flags = (*selector, "--export-approval", str(old), "--transition-output", str(before))
+        flags = (*selector, "--export-approval", str(old))
         rejected = self.call("fetch-origin", *flags)
         self.assertNotEqual(rejected.returncode, 0)
         self.assertIn("different public export receipt", rejected.stderr)
-        self.assertFalse(before.exists())
+        self.assertEqual(rejected.stdout, "")
         observe(previous, "unlisted")
         result = self.call("fetch-origin", *flags)
         self.assertEqual(result.returncode, 0, result.stderr)
+        prior_fetch = json.loads(result.stdout)
 
         (self.root / "origin-only").unlink()
         current = seal(new, [prior, added])
         active_export.write_text(current)
         observe(current, "listed", "verified_edge")
-        flags = (*selector, "--export-approval", str(new), "--transition-output", str(after), "--before-transition", str(before))
+        flags = (*selector, "--export-approval", str(new))
         if family == "lfs":
             (self.root / "rejected-edge").touch()
             rejected = self.call("fetch", *flags)
             self.assertNotEqual(rejected.returncode, 0)
             self.assertIn("did not accept a verified edge payload", rejected.stderr)
-            self.assertFalse(after.exists())
+            self.assertEqual(rejected.stdout, "")
             (self.root / "rejected-edge").unlink()
         result = self.call("fetch", *flags)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -462,12 +461,12 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         self.assertEqual(set(fetched), GIT_FETCH_FIELDS | {"transition_key_sha256"})
         self.assertEqual(fetched["transition_key_sha256"], key)
         self.assertEqual(fetched["name"], f"{family}-fetch")
-        retained = json.loads(after.read_bytes())
-        self.assertEqual(retained["before"]["receipt_sha256"], previous)
-        self.assertEqual(retained["after"]["receipt_sha256"], current)
-        self.assertEqual(retained["after"]["verified_edge_key_sha256"], key)
-        self.assertEqual(retained["before"]["result_sha256"], fetched["observed_sha256"])
-        self.assertEqual(retained["before"]["edge_attempts"], 0)
+        self.assertEqual(prior_fetch["arm"], "prior_export")
+        self.assertEqual(prior_fetch["reader"]["public_export_sha256"], previous)
+        self.assertEqual(fetched["reader"]["public_export_sha256"], current)
+        self.assertEqual(prior_fetch["transition_key_sha256"], key)
+        self.assertEqual(prior_fetch["observed_sha256"], fetched["observed_sha256"])
+        self.assertEqual(prior_fetch["all_edge_attempts"], 0)
         if family == "git":
             missing = self.call("fetch")
             self.assertIn("an export approval is required", missing.stderr)
@@ -489,6 +488,7 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
             records = self.root / "git-product"
             records.mkdir()
             (records / "publication.json").write_bytes(self.receipt.read_bytes())
+            (records / GIT_PRIOR_EXPORT_RECORD).write_text(json.dumps(prior_fetch), encoding="utf-8")
             fetch_path = records / "fetch.json"
             fetch_path.write_text(json.dumps(fetched), encoding="utf-8")
             write_product_viewer_proof(fetch_path, key)
@@ -501,9 +501,10 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
             copytree(new, export)
             copytree(old, export / "before")
             registration = {"previous_publication_sha256": previous, "publication_sha256": current,
-                            "viewer_binding_sha256": viewer}
+                            "viewer_binding_sha256": viewer, "candidate": fetched["candidate"]}
             binding, entries, sealed = read_publication(export, current)
             row = fetched | {"product_action": product}
+            retained = derive_cli_public_transition(records, row, registration)
             verify_public_transition(retained, self.root, row, registration, binding, entries, sealed)
             with self.assertRaisesRegex(ValueError, "must verify the exported LFS object itself"):
                 verify_public_transition(

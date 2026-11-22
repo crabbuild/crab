@@ -690,8 +690,10 @@ to publish the test ref and retain its publication receipt. For Git and
 capsule, identify the new repository-relative immutable object selected
 by that ref. For LFS, place the matched `crab` executable beside the
 Git helper. The worker stages the payload with `crab lfs clean`, publishes
-its pointer with ordinary Git push and derives the exact LFS object key
-from the publication receipt. Omit `--transition-object` on the LFS row.
+its pointer with ordinary Git push and verifies that `--transition-object`
+matches the publication's exact LFS path
+`lfs/objects/<first-byte>/<second-byte>/<sha256>`. Use the SHA-256 from the
+publication receipt for the two lowercase hexadecimal fanouts and filename.
 Fetch while the earlier receipt is active and excludes that object. Use the same
 ref, object and approved fixture on both fetches. Each fetch starts with
 fresh Git and Crab caches.
@@ -705,7 +707,7 @@ git_workload_args=(
 )
 python3 -B crab/scripts/e2e/run_cdn_git_workload.py fetch-origin "${git_workload_args[@]}" \
   --transition-object "$new_object_path" --export-approval "$row_directory/public-export/before" \
-  --transition-output "$native_only_observation"
+  > "$row_directory/git-product/before-export.json"
 ```
 
 Stage the updated inventory with public delivery disabled. Preserve existing
@@ -716,8 +718,6 @@ receipt in the trusted Crab configuration and repeat the normal fetch.
 ```bash
 python3 -B crab/scripts/e2e/run_cdn_git_workload.py fetch "${git_workload_args[@]}" \
   --transition-object "$new_object_path" --export-approval "$row_directory/public-export" \
-  --before-transition "$native_only_observation" \
-  --transition-output "$row_directory/traces/public_export_transition.json" \
   > "$row_directory/git-product/fetch.json"
 ```
 
@@ -729,8 +729,10 @@ commit, then measures `crab lfs fetch` in the fresh repository and hashes
 the resulting local object. After checking the complete SHA-256, Crab
 reports the fingerprint of the physical LFS key for edge delivery or a
 verified local cache hit. The CLI and service measurement workers match
-that fingerprint to the object approved for the run. The release verifier
-checks both receipts, the native ref, the seal time, and the verified result.
+that fingerprint to the object approved for the run. Assembly derives
+`traces/public_export_transition.json` from both fetch records. Release
+verification reconstructs it and checks the receipts, native ref, seal time,
+provider request evidence, distinct cache roots, and verified result.
 
 ### Verify retained native versions
 

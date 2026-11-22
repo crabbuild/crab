@@ -19,7 +19,7 @@ from cdn_qualification import (  # noqa: E402
     PUBLIC_TRANSITION_CHECK, RUN_NUMBER, SCHEMA, SCOPED_VIEW_CHECK, SERVICE_PRODUCT_DIR, SHA256, UNRELATED_VIEWER_CHECK,
     benchmark_registration, cli_payload_bytes, collect_desktop_product_action, collect_git_performance, collect_git_product_action,
     collect_xorb_read_evidence, collect_sdk_product_action, collect_service_product_action, decode,
-    derive_git_blob_public_transition, derive_service_public_transition, fields,
+    derive_cli_public_transition, derive_git_blob_public_transition, derive_service_public_transition, fields,
     is_direct_sdk_git_scope, is_direct_xorb_read_scope, is_direct_service_scope,
     matches, read_trace, release_scopes, require,
     is_managed_cli_git_scope, required_check_names, required_platform_rows, requires_cli_workload, requires_desktop_workload,
@@ -164,8 +164,10 @@ def assemble_bundle(
                 filename = f"{check}.json"
                 trace_path = inputs / row / "traces" / filename
                 require(outcomes.get(check, True) is True, f"{row} failed measured check: {check}")
-                if check == PUBLIC_TRANSITION_CHECK and (sdk_workload or desktop or service):
-                    if service:
+                if check == PUBLIC_TRANSITION_CHECK and (cli_workload or sdk_workload or desktop or service):
+                    if cli_workload:
+                        transition = derive_cli_public_transition(inputs / row / GIT_PRODUCT_DIR, measured, spec)
+                    elif service:
                         transition = derive_service_public_transition(inputs / row / SERVICE_PRODUCT_DIR, measured, spec)
                     else:
                         transition = derive_git_blob_public_transition(inputs / row / GIT_PRODUCT_DIR, measured, spec)
