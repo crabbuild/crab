@@ -31,6 +31,7 @@ pub struct ViewRetentionRequest {
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 enum Operation {
     Acquire,
+    Verify { incarnation: String },
     Renew { revision: ReadRetentionRevision },
     Release { revision: ReadRetentionRevision },
 }
@@ -63,6 +64,10 @@ pub enum ViewRetentionResponse {
     },
     Renewed {
         revision: ReadRetentionRevision,
+        remaining_ms: u64,
+    },
+    Verified {
+        repo_prefix: String,
         remaining_ms: u64,
     },
     Released,
@@ -123,7 +128,21 @@ async fn retain_with_store(
                 repo_prefix,
                 view_state_digest,
                 revision: lease.revision().map_err(crab_read::ReadError::from)?,
-                remaining_ms: remaining_ms(&lease)?,
+                remaining_ms: remaining_ms(lease.deadline().map_err(crab_read::ReadError::from)?)?,
+            })
+        }
+        Operation::Verify { incarnation } => {
+            let deadline = ReadRetentionLease::verify_active_incarnation(
+                &native,
+                &path,
+                &repo_prefix,
+                &incarnation,
+            )
+            .await
+            .map_err(crab_read::ReadError::from)?;
+            Ok(ViewRetentionResponse::Verified {
+                repo_prefix,
+                remaining_ms: remaining_ms(deadline)?,
             })
         }
         Operation::Renew { revision } => {
@@ -133,7 +152,7 @@ async fn retain_with_store(
                     .map_err(crab_read::ReadError::from)?;
             Ok(ViewRetentionResponse::Renewed {
                 revision: lease.revision().map_err(crab_read::ReadError::from)?,
-                remaining_ms: remaining_ms(&lease)?,
+                remaining_ms: remaining_ms(lease.deadline().map_err(crab_read::ReadError::from)?)?,
             })
         }
         Operation::Release { revision } => {
@@ -160,11 +179,9 @@ fn owner_for_target(store: &Store, reader: &str) -> Result<String> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
-fn remaining_ms(lease: &ReadRetentionLease) -> Result<u64> {
+fn remaining_ms(deadline: Instant) -> Result<u64> {
     let remaining = u64::try_from(
-        lease
-            .deadline()
-            .map_err(crab_read::ReadError::from)?
+        deadline
             .saturating_duration_since(Instant::now())
             .as_millis(),
     )

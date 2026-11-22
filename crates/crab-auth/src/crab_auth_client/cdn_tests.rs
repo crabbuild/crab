@@ -60,6 +60,7 @@ fn provider(cache: Arc<TokenCache>) -> CrabAuthProvider {
         cdn: Vec::new(),
         allow_viewer_grants: true,
         cdn_principal: OnceLock::new(),
+        retained_mount: OnceLock::new(),
     }
 }
 

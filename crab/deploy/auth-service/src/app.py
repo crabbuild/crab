@@ -54,12 +54,15 @@ from src.view_helper import (
 )
 from src.view_retention import (
     ChangeRetention,
-    HexDigest,
+    NativeRetentionReply,
+    RetainedViewCredentials,
     RetentionAcquired,
     RetentionAction,
     RetentionConflict,
     RetentionRenewed,
     RetentionReply,
+    RetentionVerified,
+    ViewRetentionBinding,
 )
 
 logger = structlog.get_logger()
@@ -389,6 +392,7 @@ class AuthRequest(RequestModel):
     repo_url: RepoUrlField
     operation: OperationField
     client_version: ClientVersionField = ""
+    retained_view: RetainedViewCredentials | None = Field(default=None, repr=False)
 
 
 class StorageScope(BaseModel):
@@ -407,12 +411,9 @@ class AuthResponse(BaseModel):
     cdn: CdnGrant | None = Field(default=None, repr=False)
 
 
-class ViewRetentionRequest(RequestModel):
+class ViewRetentionRequest(ViewRetentionBinding):
     id_token: IdTokenField = Field(repr=False)
     repo_url: RepoUrlField
-    view_prefix: Annotated[str, Field(min_length=1, max_length=1024)]
-    reader_nonce: HexDigest = Field(repr=False)
-    target: HexDigest
     operation: RetentionAction
 
 
@@ -767,13 +768,18 @@ async def issue_credentials(
             },
         )
 
-    claims, decision = await _authorize_request(
-        id_token=body.id_token,
-        repo_url=body.repo_url,
-        operation=body.operation,
-        request=request,
-        log=log,
-    )
+    try:
+        claims, decision = await _authorize_request(
+            id_token=body.id_token,
+            repo_url=body.repo_url,
+            operation=body.operation,
+            request=request,
+            log=log,
+        )
+    except HTTPException as error:
+        if body.retained_view is not None:
+            error.headers = dict(error.headers or {}) | NO_STORE_HEADERS
+        raise
     if "immutable-write" in decision.permissions:
         log.warning(
             "protected_repo_credentials_write_rejected",
@@ -791,12 +797,28 @@ async def issue_credentials(
             },
         )
 
-    credential_repo_url, storage_scope, view = await _materialize_filtered_read_scope(
-        repo_url=body.repo_url,
-        claims=claims,
-        decision=decision,
-        log=log,
-    )
+    view = None
+    retained_until = None
+    if body.retained_view is not None:
+        if body.operation.strip().lower() != "mount" or decision.permissions != ["read"]:
+            raise _retention_failure(403, "projected_mount_required")
+        response.headers.update(NO_STORE_HEADERS)
+        retained = body.retained_view
+        native, storage_scope = _retention_binding(body.repo_url, retained, claims, decision)
+        started = time.monotonic()
+        verified = await _run_retention(native, {"action": "verify", "incarnation": retained.incarnation}, log)
+        if not isinstance(verified, RetentionVerified) or verified.repo_prefix != storage_scope.repo_prefix:
+            raise _retention_failure(503, "retention_invalid_reply")
+        retained_until = started + verified.remaining_ms / 1000
+        parsed = parse_repo_url(body.repo_url)
+        credential_repo_url = f"crab://{parsed.bucket}/{storage_scope.repo_prefix}"
+    else:
+        credential_repo_url, storage_scope, view = await _materialize_filtered_read_scope(
+            repo_url=body.repo_url,
+            claims=claims,
+            decision=decision,
+            log=log,
+        )
 
     provider = get_provider(decision.provider)
     try:
@@ -861,6 +883,8 @@ async def issue_credentials(
                     },
                 ) from None
 
+    if retained_until is not None and time.monotonic() >= retained_until:
+        raise _retention_failure(409, "retention_revision_lost")
     elapsed_ms = (time.time() - start) * 1000
     log.info(
         "credentials_issued",
@@ -898,38 +922,10 @@ async def retain_projected_view(
         error.headers = dict(error.headers or {}) | NO_STORE_HEADERS
         raise
 
-    if not claims.issuer or not claims.subject or not _requires_filtered_read_view(decision):
-        raise _retention_failure(403, "projected_mount_required")
-    parsed = parse_repo_url(body.repo_url)
-    repo_url = f"crab://{parsed.bucket}/{parsed.prefix}"
-    scope_hash = _read_scope_hash(
-        source_repo=parsed.prefix, read_paths=decision.read_paths, denied_read_paths=decision.denied_read_paths,
-    )
-    prefix = f"{parsed.prefix}/acl-views/v2/{scope_hash}/"
-    selection = re.fullmatch(r"(0|[1-9][0-9]{0,19})-([0-9a-f]{64})", body.view_prefix.removeprefix(prefix))
-    if not body.view_prefix.startswith(prefix) or selection is None or int(selection[1]) >= 2**64:
-        raise _retention_failure(403, "retention_scope_mismatch")
-
-    # Only the issuer derives ownership. Client-controlled nonces and native
-    # revisions are insufficient to select another principal's claim.
-    reader = hashlib.sha256(json.dumps([
-        "crab retention reader v1", claims.issuer, claims.subject, decision.provider,
-        repo_url, body.view_prefix, body.target, body.reader_nonce,
-    ], separators=(",", ":")).encode()).hexdigest()
-    try:
-        reply = await asyncio.to_thread(get_view_helper().retention, {
-            "repo_url": repo_url, "provider": decision.provider, "scope_hash": scope_hash,
-            "source_generation": int(selection[1]), "source_digest": selection[2],
-            "reader": reader, "target": body.target, "operation": operation.model_dump(),
-        })
-    except RetentionConflict:
-        raise _retention_failure(409, "retention_revision_lost") from None
-    except Exception as error:
-        log.error("view_retention_helper_failed", error_type=type(error).__name__)
-        raise _retention_failure(503, "retention_unavailable") from None
-
+    native, _ = _retention_binding(body.repo_url, body, claims, decision)
+    reply = await _run_retention(native, operation.model_dump(), log)
     expected = {"acquire": "acquired", "renew": "renewed", "release": "released"}[operation.action]
-    if reply.action != expected:
+    if isinstance(reply, RetentionVerified) or reply.action != expected:
         raise _retention_failure(503, "retention_invalid_reply")
     if isinstance(reply, RetentionAcquired) and (
         reply.repo_prefix != body.view_prefix or reply.revision.sequence != 0
@@ -943,6 +939,48 @@ async def retain_projected_view(
     response.headers.update(NO_STORE_HEADERS)
     return reply
 
+
+def _retention_binding(
+    repo_url: str, binding: ViewRetentionBinding, claims: TokenClaims, decision: PolicyDecision,
+) -> tuple[dict[str, Any], StorageScope]:
+    if not claims.issuer or not claims.subject or not _requires_filtered_read_view(decision):
+        raise _retention_failure(403, "projected_mount_required")
+    parsed = parse_repo_url(repo_url)
+    repo_url = f"crab://{parsed.bucket}/{parsed.prefix}"
+    scope_hash = _read_scope_hash(
+        source_repo=parsed.prefix, read_paths=decision.read_paths, denied_read_paths=decision.denied_read_paths,
+    )
+    prefix = f"{parsed.prefix}/acl-views/v2/{scope_hash}/"
+    selection = re.fullmatch(r"(0|[1-9][0-9]{0,19})-([0-9a-f]{64})", binding.view_prefix.removeprefix(prefix))
+    if not binding.view_prefix.startswith(prefix) or selection is None or int(selection[1]) >= 2**64:
+        raise _retention_failure(403, "retention_scope_mismatch")
+
+    # Only the issuer derives ownership. Client-controlled nonces and native
+    # revisions are insufficient to select another principal's claim.
+    reader = hashlib.sha256(json.dumps([
+        "crab retention reader v1", claims.issuer, claims.subject, decision.provider,
+        repo_url, binding.view_prefix, binding.target, binding.reader_nonce,
+    ], separators=(",", ":")).encode()).hexdigest()
+    return {
+        "repo_url": repo_url, "provider": decision.provider, "scope_hash": scope_hash,
+        "source_generation": int(selection[1]), "source_digest": selection[2],
+        "reader": reader, "target": binding.target,
+    }, StorageScope(
+        repo_prefix=binding.view_prefix, global_prefix=f"{binding.view_prefix}/.crab",
+        source_repo=parsed.prefix, scope_hash=scope_hash,
+    )
+
+
+async def _run_retention(
+    native: dict[str, Any], operation: dict[str, Any], log: Any,
+) -> NativeRetentionReply:
+    try:
+        return await asyncio.to_thread(get_view_helper().retention, native | {"operation": operation})
+    except RetentionConflict:
+        raise _retention_failure(409, "retention_revision_lost") from None
+    except Exception as error:
+        log.error("view_retention_helper_failed", error_type=type(error).__name__)
+        raise _retention_failure(503, "retention_unavailable") from None
 
 def _retention_failure(status: int, code: str) -> HTTPException:
     return HTTPException(status_code=status, detail={"error": code}, headers=NO_STORE_HEADERS)

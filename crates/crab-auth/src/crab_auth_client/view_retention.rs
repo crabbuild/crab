@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -15,9 +15,71 @@ const MAX_LIFETIME_MS: u64 = 150_000;
 #[derive(Clone)]
 pub struct ViewRetention {
     provider: Arc<CrabAuthProvider>,
+    binding: Arc<RetainedMount>,
+}
+
+pub(super) struct RetainedMount {
     repo_url: String,
     view_prefix: String,
     target: String,
+    leases: Mutex<Vec<Weak<LeaseIdentity>>>,
+}
+
+#[derive(Clone)]
+pub(super) struct LeaseIdentity {
+    nonce: String,
+    incarnation: String,
+}
+
+#[derive(Clone, Copy, Serialize)]
+pub(super) struct RetainedViewProof<'a> {
+    view_prefix: &'a str,
+    target: &'a str,
+    reader_nonce: &'a str,
+    incarnation: &'a str,
+}
+
+impl RetainedMount {
+    pub(super) fn lease_for(&self, repo_url: &str, operation: &str) -> Result<LeaseIdentity> {
+        if self.repo_url != repo_url || operation != "mount" {
+            return Err(AuthError::InvalidCrabAuthRequest(
+                "mount grant source changed".into(),
+            ));
+        }
+        let mut leases = self
+            .leases
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        leases.retain(|lease| lease.strong_count() != 0);
+        // Refresh may race replacement of the catalog. A proof belongs to a
+        // currently owned lease and never extends its lifetime.
+        leases
+            .iter()
+            .rev()
+            .find_map(Weak::upgrade)
+            .as_deref()
+            .cloned()
+            .ok_or_else(|| {
+                AuthError::InvalidCrabAuthRequest(
+                    "mount grant requires an active retained view".into(),
+                )
+            })
+    }
+
+    pub(super) fn proof<'a>(&'a self, identity: &'a LeaseIdentity) -> RetainedViewProof<'a> {
+        RetainedViewProof {
+            view_prefix: &self.view_prefix,
+            target: &self.target,
+            reader_nonce: &identity.nonce,
+            incarnation: &identity.incarnation,
+        }
+    }
+}
+
+impl RetainedViewProof<'_> {
+    pub(super) fn matches(self, scope: Option<&crab_types::storage::StorageScope>) -> bool {
+        scope.is_some_and(|scope| scope.repo_prefix == self.view_prefix)
+    }
 }
 
 impl ViewRetention {
@@ -33,12 +95,19 @@ impl ViewRetention {
                 "view retention requires a principal-bound mount grant".into(),
             ));
         }
-        Ok(Self {
-            provider,
+        let binding = Arc::new(RetainedMount {
             repo_url,
             view_prefix,
             target,
-        })
+            leases: Mutex::new(Vec::new()),
+        });
+        provider
+            .retained_mount
+            .set(Arc::clone(&binding))
+            .map_err(|_| {
+                AuthError::InvalidCrabAuthRequest("mount grant already has a bound view".into())
+            })?;
+        Ok(Self { provider, binding })
     }
 
     /// Acquire a new claim and return the exact catalog digest it retains.
@@ -58,12 +127,16 @@ impl ViewRetention {
         else {
             return Err(invalid_reply());
         };
-        if repo_prefix != self.view_prefix || revision.sequence != 0 || !revision.is_valid() {
+        if repo_prefix != self.binding.view_prefix || revision.sequence != 0 || !revision.is_valid()
+        {
             return Err(invalid_reply());
         }
         let mut lease = ViewRetentionLease {
             authority: self.clone(),
-            nonce,
+            identity: Arc::new(LeaseIdentity {
+                nonce,
+                incarnation: revision.incarnation.clone(),
+            }),
             revision,
             started,
             lifetime: Duration::ZERO,
@@ -78,6 +151,13 @@ impl ViewRetention {
                 return Err(error);
             }
         }
+        let mut leases = self
+            .binding
+            .leases
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        leases.retain(|lease| lease.strong_count() != 0);
+        leases.push(Arc::downgrade(&lease.identity));
         Ok((view_state_digest, lease))
     }
 
@@ -106,9 +186,9 @@ impl ViewRetention {
         let endpoint = self.provider.endpoint_for(PATH);
         let body = Request {
             id_token,
-            repo_url: &self.repo_url,
-            view_prefix: &self.view_prefix,
-            target: &self.target,
+            repo_url: &self.binding.repo_url,
+            view_prefix: &self.binding.view_prefix,
+            target: &self.binding.target,
             reader_nonce: nonce,
             operation,
         };
@@ -154,7 +234,7 @@ impl ViewRetention {
 /// Owns the last acknowledged issuer revision for one catalog until readers drain.
 pub struct ViewRetentionLease {
     authority: ViewRetention,
-    nonce: String,
+    identity: Arc<LeaseIdentity>,
     revision: Revision,
     started: Instant,
     lifetime: Duration,
@@ -163,7 +243,7 @@ pub struct ViewRetentionLease {
 impl ViewRetentionLease {
     /// Return the physical projected prefix for local diagnostics.
     pub fn view_prefix(&self) -> &str {
-        &self.authority.view_prefix
+        &self.authority.binding.view_prefix
     }
 
     /// Return the first renewal time and conservative local deadline.
@@ -179,7 +259,7 @@ impl ViewRetentionLease {
         let (reply, started) = self
             .authority
             .request(
-                &self.nonce,
+                &self.identity.nonce,
                 Action::Renew {
                     revision: &self.revision,
                 },
@@ -206,10 +286,12 @@ impl ViewRetentionLease {
 
     /// Release only the last acknowledged revision after all readers drain.
     pub async fn release(self) -> Result<()> {
+        let nonce = self.identity.nonce.clone();
+        drop(self.identity);
         let (reply, _) = self
             .authority
             .request(
-                &self.nonce,
+                &nonce,
                 Action::Release {
                     revision: &self.revision,
                 },

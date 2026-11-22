@@ -25,6 +25,7 @@ use crate::protected_push::{
 use crate::token_cache::{CachedTokens, TokenCache};
 
 mod view_retention;
+use view_retention::{RetainedMount, RetainedViewProof};
 pub use view_retention::{ViewRetention, ViewRetentionLease};
 
 /// Refresh window: credentials within 5 minutes of expiry trigger a refresh.
@@ -41,11 +42,13 @@ const CRAB_AUTH_CACHE_KEY: &str = "crab-auth";
 
 /// Request body sent to the Crab Auth endpoint.
 #[derive(Serialize)]
-struct CrabAuthRequest {
+struct CrabAuthRequest<'a> {
     id_token: String,
     repo_url: String,
     operation: String,
     client_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retained_view: Option<RetainedViewProof<'a>>,
 }
 
 #[derive(Serialize)]
@@ -93,6 +96,7 @@ pub struct CrabAuthProvider {
     cdn: Vec<CdnViewerDeployment>,
     allow_viewer_grants: bool,
     cdn_principal: OnceLock<[u8; 32]>,
+    retained_mount: OnceLock<Arc<RetainedMount>>,
 }
 
 /// Trusted viewer deployment selected for one source repository.
@@ -238,6 +242,7 @@ impl CrabAuthProvider {
             cdn: Vec::new(),
             allow_viewer_grants: true,
             cdn_principal: OnceLock::new(),
+            retained_mount: OnceLock::new(),
         })
     }
 
@@ -327,12 +332,14 @@ impl CrabAuthProvider {
         operation: &str,
         bound_read: bool,
         approval_pins: Option<&str>,
+        retained_view: Option<RetainedViewProof<'_>>,
     ) -> Result<(CrabAuthCredentialResponse, Option<String>)> {
         let body = CrabAuthRequest {
             id_token: id_token.to_owned(),
             repo_url: repo_url.to_owned(),
             operation: operation.to_owned(),
             client_version: self.client_version.clone(),
+            retained_view,
         };
 
         let mut last_err = None;
@@ -786,6 +793,13 @@ impl CredentialProvider for CrabAuthProvider {
             None => self.cached_id_token()?,
         };
         let repo_url = format!("crab://{bucket}/{prefix}");
+        let retained_mount = self.retained_mount.get();
+        let lease = retained_mount
+            .map(|mount| mount.lease_for(&repo_url, operation))
+            .transpose()?;
+        let proof = retained_mount
+            .zip(lease.as_ref())
+            .map(|(mount, lease)| mount.proof(lease));
         let (auth_resp, approval) = match self
             .call_endpoint(
                 &id_token,
@@ -793,6 +807,7 @@ impl CredentialProvider for CrabAuthProvider {
                 operation,
                 principal_bound,
                 approval_pins.as_deref(),
+                proof,
             )
             .await
         {
@@ -810,11 +825,16 @@ impl CredentialProvider for CrabAuthProvider {
                     operation,
                     principal_bound,
                     approval_pins.as_deref(),
+                    proof,
                 )
                 .await?
             }
             Err(error) => return Err(error),
         };
+
+        if proof.is_some_and(|proof| !proof.matches(auth_resp.storage_scope.as_ref())) {
+            return Err(invalid_negotiated_response());
+        }
 
         let expiry = parse_iso8601(&auth_resp.expires_at);
         if principal_bound && expiry.is_none() {
@@ -1199,6 +1219,7 @@ mod tests {
                     viewer_grants.then_some(
                         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                     ),
+                    None,
                 )
                 .await
                 .unwrap_err();

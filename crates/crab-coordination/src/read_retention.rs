@@ -205,12 +205,8 @@ impl ReadRetentionLease {
     ) -> Result<Self> {
         let started = Instant::now();
         let (claim, version, modified) = load_acknowledged(&store, &path, revision).await?;
-        if claim.state != ClaimState::Active {
-            return Err(lost(&path));
-        }
-        let clock = Path::from(gc_fence_path(repository)?);
-        let now = backend_unix_time(&store, &clock).await?;
-        let deadline = acknowledged_deadline(&path, started, modified, now)?;
+        let deadline =
+            active_deadline(&store, &path, repository, &claim, started, modified).await?;
         let mut lease = Self {
             store,
             path,
@@ -220,6 +216,23 @@ impl ReadRetentionLease {
         };
         lease.renew().await?;
         Ok(lease)
+    }
+
+    /// Verify one active incarnation for issuer credential renewal without changing
+    /// its claim. A concurrent lease renewal can advance its sequence. The caller
+    /// must already authenticate the holder and select the exact native claim path.
+    pub async fn verify_active_incarnation(
+        store: &Arc<dyn ObjectStore>,
+        path: &Path,
+        repository: &str,
+        incarnation: &str,
+    ) -> Result<Instant> {
+        let started = Instant::now();
+        let (claim, _, modified) = load_claim(store, path).await?;
+        if claim.incarnation != incarnation {
+            return Err(lost(path));
+        }
+        active_deadline(store, path, repository, &claim, started, modified).await
     }
 
     /// Release a specific acknowledged revision after readers have drained.
@@ -403,6 +416,22 @@ fn renewal_deadline(path: &Path) -> Result<Instant> {
         .ok_or_else(|| lost(path))
 }
 
+async fn active_deadline(
+    store: &Arc<dyn ObjectStore>,
+    path: &Path,
+    repository: &str,
+    claim: &Claim,
+    started: Instant,
+    modified: i64,
+) -> Result<Instant> {
+    if claim.state != ClaimState::Active {
+        return Err(lost(path));
+    }
+    let clock = Path::from(gc_fence_path(repository)?);
+    let now = backend_unix_time(store, &clock).await?;
+    acknowledged_deadline(path, started, modified, now)
+}
+
 fn acknowledged_deadline(
     path: &Path,
     started: Instant,
@@ -496,6 +525,32 @@ mod tests {
         }
         assert!(matches!(
             ReadRetentionLease::renew_acknowledged(store, path, "repo", &renewed).await,
+            Err(CoordinationError::ReadRetentionLost { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn credential_verification_observes_one_incarnation_without_changing_its_revision() {
+        let (store, path, mut lease) = fixture().await;
+        let initial = lease.revision().unwrap();
+        lease.renew().await.unwrap();
+        ReadRetentionLease::verify_active_incarnation(&store, &path, "repo", &initial.incarnation)
+            .await
+            .unwrap();
+        assert!(matches!(
+            ReadRetentionLease::verify_active_incarnation(&store, &path, "repo", "wrong").await,
+            Err(CoordinationError::ReadRetentionLost { .. })
+        ));
+        // The native version last acknowledged by the reader still releases.
+        lease.release().await.unwrap();
+        assert!(matches!(
+            ReadRetentionLease::verify_active_incarnation(
+                &store,
+                &path,
+                "repo",
+                &initial.incarnation
+            )
+            .await,
             Err(CoordinationError::ReadRetentionLost { .. })
         ));
     }

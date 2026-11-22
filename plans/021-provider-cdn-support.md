@@ -887,13 +887,17 @@ by the logical URL. A local macOS NFS test with Crab Auth and RustFS verified a
 2 MiB projected Xet file, sibling exclusion, native claim renewal and release,
 rejection of a broader Git clone, and a denied new Xet read after renewal loss.
 
-Credential renewal preserves the selected native target and physical scope.
-If the source advances and the issuer returns a newer projection when refreshing
-native credentials, the mount rejects the new scope. Long-lived mounts still
-need an issuer refresh path for credentials covering the acknowledged old view.
-Managed mounts request `hydrate` under the managed grant contract. Managed
-issuer retention, deployed direct issuer access, and live provider proof remain
-open.
+Credential refresh preserves the selected native target and physical scope after
+the source advances. A direct mount presents its retained view and claim
+incarnation to the credentials endpoint. The issuer rechecks the mount policy
+and verifies the active incarnation on the selected native target using backend
+age. The check leaves the claim revision intact when lease renewal races
+credential issuance. A macOS NFS run against RustFS advanced the repository,
+observed a distinct current projection, let the mount's original storage grant
+expire, and verified a cold 2 MiB Xet read from the retained projection. The
+original claim was released on unmount. Managed mounts request `hydrate` under
+the managed grant contract. Managed issuer retention, deployed direct issuer
+access, and live provider proof remain open.
 
 The qualification guard leaves the native target check active in the Git clone
 child and checks the expected viewer binding and projected content prefix in

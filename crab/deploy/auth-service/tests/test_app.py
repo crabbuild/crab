@@ -24,7 +24,7 @@ from src.receive_helper import (
     ReceiveVerifyResult,
 )
 from src.view_helper import ViewMaterializationResult, ViewRuntimeStatus
-from src.view_retention import RETENTION_REPLY, RetentionConflict
+from src.view_retention import NATIVE_RETENTION_REPLY, RetentionConflict
 
 
 class FakeVerifier:
@@ -717,14 +717,17 @@ def retention_client(monkeypatch):
     }
     calls = []
     incarnation = "0" * 8 + "-0000-7000-8000-" + "0" * 12
+    active = False
 
     def retain(request):
+        nonlocal active
         calls.append(request)
         if request["reader"] != calls[0]["reader"]:
             raise RetentionConflict("native reader changed")
         operation = request["operation"]
         match operation["action"]:
             case "acquire":
+                active = True
                 reply = {"action": "acquired", "repo_prefix": payload["view_prefix"],
                          "view_state_digest": "c" * 64, "remaining_ms": 149_000,
                          "revision": {"incarnation": incarnation, "sequence": 0}}
@@ -732,8 +735,13 @@ def retention_client(monkeypatch):
                 reply = {"action": "renewed", "remaining_ms": 149_000,
                          "revision": {"incarnation": incarnation, "sequence": operation["revision"]["sequence"] + 1}}
             case "release":
+                active = False
                 reply = {"action": "released"}
-        return RETENTION_REPLY.validate_python(reply)
+            case "verify":
+                if not active or operation["incarnation"] != incarnation:
+                    raise RetentionConflict("native claim inactive")
+                reply = {"action": "verified", "repo_prefix": payload["view_prefix"], "remaining_ms": 149_000}
+        return NATIVE_RETENTION_REPLY.validate_python(reply)
 
     helper = FakeViewHelper()
     monkeypatch.setattr(helper, "retention", retain, raising=False)
@@ -764,6 +772,36 @@ def test_retention_keeps_one_reader_for_the_same_verified_issuer_and_subject(ret
     assert all(call["target"] == "d" * 64 for call in calls)
     assert all({"id_token", "reader_nonce"}.isdisjoint(call) for call in calls)
     assert helper.calls == []  # Retention uses native view proofs without rebuilding a projection.
+
+
+def test_mount_credentials_keep_the_verified_projection_until_release(retention_client, monkeypatch):
+    post, helper, calls = retention_client
+    acquired = post("acquire").json()
+    provider = FakeProvider()
+    monkeypatch.setattr(app_module, "get_provider", lambda name: provider)
+    client = TestClient(app_module.app)
+    request = {
+        "id_token": "token", "repo_url": "crab://bucket/restricted/repo", "operation": "mount",
+        "retained_view": {
+            "view_prefix": acquired["repo_prefix"], "reader_nonce": "a" * 64, "target": "d" * 64,
+            "incarnation": acquired["revision"]["incarnation"],
+        },
+    }
+    renewed = post("renew", acquired["revision"]).json()
+    response = client.post("/v1/credentials", json=request)
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "no-store"
+    assert response.json()["storage_scope"]["repo_prefix"] == acquired["repo_prefix"]
+    assert provider.calls[0]["repo_url"] == f"crab://bucket/{acquired['repo_prefix']}"
+    assert calls[-1]["operation"] == {"action": "verify", "incarnation": acquired["revision"]["incarnation"]}
+
+    app_module._verifier = FakeVerifier(subject="different-principal")
+    assert client.post("/v1/credentials", json=request).status_code == 409
+    app_module._verifier = FakeVerifier()
+    assert post("release", renewed["revision"]).status_code == 200
+    assert client.post("/v1/credentials", json=request).status_code == 409
+    assert helper.calls == []
+    assert len(provider.calls) == 1
 
 
 @pytest.mark.parametrize("changed", ["issuer", "subject"])

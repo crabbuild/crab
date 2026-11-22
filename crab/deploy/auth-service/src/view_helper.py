@@ -8,7 +8,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from src.view_retention import RETENTION_REPLY, RetentionConflict, RetentionReply
+from src.view_retention import NATIVE_RETENTION_REPLY, NativeRetentionReply, RetentionConflict
 
 _MATERIALIZE_FIELDS = frozenset({
     "repo_prefix",
@@ -52,7 +52,7 @@ class ViewHelper(Protocol):
 
     def check_runtime(self) -> ViewRuntimeStatus: ...
 
-    def retention(self, payload: dict[str, Any]) -> RetentionReply: ...
+    def retention(self, payload: dict[str, Any]) -> NativeRetentionReply: ...
 
 
 class SubprocessViewHelper:
@@ -91,8 +91,8 @@ class SubprocessViewHelper:
         output = self._run(["doctor"])
         return _doctor_result(output)
 
-    def retention(self, payload: dict[str, Any]) -> RetentionReply:
-        return RETENTION_REPLY.validate_python(self._run(["retention"], payload))
+    def retention(self, payload: dict[str, Any]) -> NativeRetentionReply:
+        return NATIVE_RETENTION_REPLY.validate_python(self._run(["retention"], payload))
 
     def _run(self, args: list[str], payload: dict[str, Any] | None = None) -> dict[str, Any]:
         try:

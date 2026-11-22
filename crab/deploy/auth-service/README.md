@@ -396,6 +396,14 @@ revision, or expiry. Drain outstanding reads before release. A `409` indicates
 that the helper could not acknowledge the requested view or revision. A `503`
 leaves its outcome uncertain. A subsequent `acquire` uses a fresh nonce.
 
+For storage credential renewal, a direct mount sends `retained_view` with its
+`mount` request to `/v1/credentials`. This object holds `view_prefix`, `target`,
+`reader_nonce`, and the `incarnation` returned by acquisition. The issuer
+evaluates the current mount policy and verifies that the exact native claim is
+still active before issuing read-only credentials for the retained prefix. A
+lease renewal can advance its sequence while a credential request is in flight.
+The verified incarnation stays the same until that claim ends.
+
 The helper runs with the issuer's native storage identity. For each deployed
 view it needs the same source and view reads as materialization, plus writes
 to the view's `v2/readers/` subtree and repository GC clock. AWS Lambda
