@@ -49,6 +49,10 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
             observations.pop("performance")
             for name in (fixture.CDN.SDK_HYDRATION_DIR, fixture.CDN.GIT_BENCHMARK_DIR):
                 (self.root / name).rename(row / name)
+        if fixture.CDN.is_direct_service_scope(self.example.scope):
+            observations.pop("product_action")
+            name = fixture.CDN.SERVICE_PRODUCT_DIR
+            (self.root / name).rename(row / name)
         if access == "public":
             name = fixture.CDN.PUBLIC_EXPORT_DIR
             (self.root / name).rename(row / name)
@@ -145,6 +149,49 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "invalid fields in CDN observations"):
             self.assemble(digest)
         self.assertFalse(self.output.exists())
+
+    def test_service_assembly_derives_the_product_from_the_retained_lifecycle(self) -> None:
+        digest = self.inputs("gcs", consumer="s3-gateway", family="lfs")
+        self.assertEqual(self.assemble(digest), 1)
+        row = self.output / self.row
+        report = json.loads((row / "cdn-report.json").read_bytes())
+        self.assertEqual(report["product_action"], self.example.report["product_action"])
+        product = row / fixture.CDN.SERVICE_PRODUCT_DIR
+        self.assertEqual({file.name for file in product.iterdir()}, set(fixture.CDN.SERVICE_PRODUCT_FILES.values()))
+        policy = self.root / "qualified-scopes.txt"
+        policy.write_text(self.example.scope + "\n", encoding="utf-8")
+        with self.assertRaises(subprocess.CalledProcessError):
+            fixture.CDN.verify_bundle_row(self.output, self.row, self.example.registration, fixture.COMMIT, "123", "2",
+                                          policy=policy)
+        edge = product / "edge.json"
+        candidate = json.loads(edge.read_bytes())
+        fixture.json_file(edge, candidate | {"etag_sha256": "0" * 64})
+        with self.assertRaises(subprocess.CalledProcessError):
+            fixture.CDN.verify_bundle_row(self.output, self.row, self.example.registration, fixture.COMMIT, "123", "2")
+
+    def test_service_assembly_rejects_a_generic_summary_and_a_missing_provider_record(self) -> None:
+        digest = self.inputs("azure", consumer="server")
+        observations = json.loads(self.observations.read_bytes())
+        fixture.json_file(self.observations, observations | {"product_action": self.example.report["product_action"]})
+        with self.assertRaisesRegex(ValueError, "invalid fields in CDN observations"):
+            self.assemble(digest)
+        self.assertFalse(self.output.exists())
+        fixture.json_file(self.observations, observations)
+        (self.root / self.row / fixture.CDN.SERVICE_PRODUCT_DIR / fixture.CDN.GIT_NATIVE_REF_FILES["retired"]).unlink()
+        with self.assertRaises(FileNotFoundError):
+            self.assemble(digest)
+        self.assertFalse(self.output.exists())
+
+    def test_public_service_assembly_requires_the_registered_export(self) -> None:
+        digest = self.inputs("s3", consumer="server", access="public")
+        path = self.root / self.row / fixture.CDN.SERVICE_PRODUCT_DIR / "edge.json"
+        edge = json.loads(path.read_bytes())
+        fixture.json_file(path, edge | {"reader": edge["reader"] | {"public_export_sha256": "0" * 64}})
+        with self.assertRaisesRegex(ValueError, "different native target or viewer binding"):
+            self.assemble(digest)
+        self.assertFalse(self.output.exists())
+        fixture.json_file(path, edge)
+        self.assertEqual(self.assemble(digest), 1)
 
     def test_failed_operational_check_leaves_no_artifact(self) -> None:
         self.inputs("gcs")

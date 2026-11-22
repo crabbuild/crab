@@ -215,6 +215,7 @@ class CdnQualificationTests(unittest.TestCase):
             self.registration["viewer_binding_sha256"] = "e" * 64
         sdk = CDN.is_direct_sdk_git_scope(self.scope)
         hydration = CDN.is_direct_sdk_hydration_scope(self.scope)
+        service = CDN.is_direct_service_scope(self.scope)
         if sdk or hydration:
             self.registration.update(workload=CDN.SDK_HYDRATION_ACTION if hydration else CDN.SDK_GIT_ACTION,
                                      sdk_candidate=sdk_candidate(self.scope, platform),
@@ -284,7 +285,7 @@ class CdnQualificationTests(unittest.TestCase):
                 self.historical_origin_trace(edge)
             elif check == CDN.PUBLIC_TRANSITION_CHECK:
                 continue
-            elif check == "rollback" and (CDN.requires_cli_workload(self.scope) or sdk or hydration):
+            elif check == "rollback" and (CDN.requires_cli_workload(self.scope) or sdk or hydration or service):
                 continue
             else:
                 self.trace(check, observations.get(check, [edge_hit]))
@@ -298,6 +299,8 @@ class CdnQualificationTests(unittest.TestCase):
             write_git_measurements(self.directory / CDN.GIT_BENCHMARK_DIR, self.registration, platform, sdk_native=native)
         elif hydration:
             self.record_sdk_hydration()
+        elif service:
+            self.record_service_product()
         if access == "public":
             self.public_transition_trace()
 
@@ -398,6 +401,74 @@ class CdnQualificationTests(unittest.TestCase):
                 },
             })
         self.report["product_action"].update({key: fetch[key] for key in self.report["product_action"] if key in fetch})
+
+    def record_service_product(self) -> None:
+        report = self.report
+        records = self.directory / CDN.SERVICE_PRODUCT_DIR
+        records.mkdir()
+        edge, _, _, family, _ = CDN.scope_parts(self.scope)
+        cleanup = json.loads((self.directory / "traces/cleanup.json").read_bytes())
+        cleanup_at = cleanup["observed_at_unix_ms"]
+        reader = {"origin_sha256": cleanup["targets"]["native"]["origin_sha256"], "prefix_sha256": cleanup["prefix_sha256"]}
+        spec = reader | {"sha256": "5" * 64, "etag_sha256": "6" * 64, "payload_bytes": 8}
+        self.registration.update(workload=CDN.SERVICE_READ_ACTION, service_workload=spec, viewer_binding_sha256="e" * 64)
+        report["product_action"]["name"] = CDN.SERVICE_READ_ACTION
+        provenance = {key: report[key] for key in CDN.CDN_PROVENANCE_FIELDS}
+        platform = report["platform"]
+        ref = "refs/heads/crab-cdn-qualification-123-2-abcdefabcdef"
+        commit, payload = "a" * 40, report["product_action"]["expected_sha256"]
+        writer = cli_candidate(self.scope, platform)
+        receipt = json_file(records / "publication.json", provenance | {
+            "schema": "crab.cdn-git-publication/v1", "ref": ref, "oid": commit, "sha256": payload,
+            "published": True, "visible_at_unix_ms": cleanup_at - 90, "candidate": writer,
+        })
+        json_file(records / "retirement.json", provenance | {
+            "schema": "crab.cdn-git-retirement/v1", "publication_sha256": receipt, "ref_retired": True,
+            "retired_at_unix_ms": cleanup_at - 30, "candidate": writer,
+        })
+        for phase, at, marker in (("published", cleanup_at - 80, "1"), ("retired", cleanup_at - 20, "2")):
+            digest = json_file(records / CDN.GIT_NATIVE_REF_FILES[phase], provenance | {
+                "schema": "crab.cdn-native-ref/v1", "phase": phase, "platform": platform,
+                "publication_sha256": receipt, "started_at_unix_ms": at, "observed_at_unix_ms": at + 5,
+                "native_ref": reader | {
+                    "probe_source_sha": COMMIT, "ref_sha256": hashlib.sha256(ref.encode()).hexdigest(),
+                    "repository_sha256": "3" * 64, "epoch_sha256": "4" * 64, "root_digest": "b" * 64,
+                    "head_sha256": marker * 64, "revision_sha256": marker * 64, "transaction_id": marker * 64,
+                    "oid": commit if phase == "published" else None,
+                },
+            })
+            if phase == "published":
+                published_digest = digest
+        lfs_key = (hashlib.sha256(f"{FIXTURE_PREFIX}/{CDN.lfs_object_path(payload)}".encode()).hexdigest()
+                   if family == "lfs" else None)
+        common = provenance | dict.fromkeys(CDN.PRODUCT_COUNTERS, 0) | {
+            "schema": "crab.cdn-service-read/v1", "platform": platform, "arm": "origin",
+            "publication_sha256": receipt, "native_published_sha256": published_digest, "commit": commit,
+            "workload_sha256": spec["sha256"], "payload_sha256": payload, "payload_bytes": spec["payload_bytes"],
+            "etag_sha256": spec["etag_sha256"], "git_blob_oid_sha256": "7" * 64 if family == "git" else None,
+            "lfs_key_sha256": lfs_key, "elapsed_ms": 10, "edge_responses": {},
+            "reader": reader | {"binding_sha256": "", "public_export_sha256": ""},
+            "native_traffic": {"get_responses": 1, "head_responses": 0, "body_bytes": 8},
+        }
+        self.rollback_trace(common | {"started_at_unix_ms": cleanup_at - 50, "finished_at_unix_ms": cleanup_at - 40})
+        request = "d" * 64
+        response = {"status": 206, "cache": "hit", "bytes": 8, "complete": True}
+        client = json_file(records / "edge.json", common | {
+            "arm": "edge", "started_at_unix_ms": cleanup_at - 70, "finished_at_unix_ms": cleanup_at - 60,
+            "all_edge_attempts": 1, "edge_attempts": 1, "observed_edge_gets": 1, "verified_edge_payloads": 1,
+            "edge_bytes": 8, "edge_hits": 1, "edge_responses": {request: response},
+            "reader": reader | {"binding_sha256": "e" * 64,
+                                "public_export_sha256": self.registration.get("publication_sha256", "")},
+        })
+        log = {"status": 206, "cache": "hit", "response_bytes": 30}
+        if edge != "cloud-cdn" or lfs_key:
+            log["key_sha256"] = lfs_key or "8" * 64
+        proof = {"schema": f"crab.{edge}-viewer-requests/v1", "client_report_sha256": client, "records": {request: log}}
+        if edge == "cloud-cdn":
+            log.update(cache_fill_bytes=0, origin_requests={})
+        else:
+            proof["origin_requests"] = {}
+        json_file(records / "viewer-requests.json", proof)
 
     def record_sdk_product(self) -> None:
         records = self.directory / CDN.GIT_PRODUCT_DIR
@@ -1125,7 +1196,7 @@ class CdnQualificationTests(unittest.TestCase):
         self.rejected("cold edge sample must prove a miss, origin fill and delivered bytes")
 
     def test_rollback_rejects_native_read_for_a_different_key(self) -> None:
-        self.configure("azure", "private", "direct", consumer="server")
+        self.configure("azure", "private", "direct", consumer="desktop")
         self.trace("rollback", [self.request("edge", 200), self.request("origin", 200) | {"key_sha256": "c" * 64}])
         self.rejected("rollback requires an edge read followed by a native read of the same complete object")
 
@@ -1138,7 +1209,7 @@ class CdnQualificationTests(unittest.TestCase):
         self.rejected("requires retained regional SDK benchmark records", "--cdn-release-policy", str(policy))
 
     def test_generic_fixture_summary_cannot_promote_a_release_scope(self) -> None:
-        for provider, consumer, profile in (("gcs", "server", "direct"), ("azure", "cli", "managed")):
+        for provider, consumer, profile in (("gcs", "desktop", "direct"), ("azure", "cli", "managed")):
             with self.subTest(provider=provider, consumer=consumer, profile=profile), TemporaryDirectory() as directory:
                 self.directory = Path(directory)
                 (self.directory / "traces").mkdir()
@@ -1464,7 +1535,7 @@ class CdnQualificationTests(unittest.TestCase):
         self.rejected("edge route policy requires same-object cache hits before and after denials")
 
     def test_rejects_trace_with_no_observations(self) -> None:
-        self.configure("s3", "private", "direct", consumer="server")
+        self.configure("s3", "private", "direct", consumer="desktop")
         self.trace("rollback", [])
         self.rejected("trace has no observations: rollback")
 

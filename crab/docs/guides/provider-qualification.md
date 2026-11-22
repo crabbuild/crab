@@ -856,9 +856,21 @@ python3 -B crab/scripts/e2e/verify_cdn_service_lifecycle.py \
 ```
 
 The verifier requires a distinct tombstone in the same epoch, matching storage
-targets, and cleanup after both reads and retirement. Live regional samples,
-cache evidence, and release assembly integration remain required before either
-service's rows can qualify.
+targets, and cleanup after both reads and retirement. Use the verified files
+as assembly inputs for the service fixture row.
+
+- Keep `edge.json`, `viewer-requests.json`, `publication.json`,
+  `retirement.json`, `provider-published.json`, and `provider-retired.json` in
+  `service-product/`. Keep the origin read in `traces/rollback.json` and the
+  cleanup inventory in `traces/cleanup.json`.
+- Register `workload: "service-http-read"` and `viewer_binding_sha256` in
+  the benchmark row. Set `service_workload` to the approved workload file's
+  `sha256`, the native origin hash in `origin_sha256`, the hash of the physical
+  prefix with its trailing slash in `prefix_sha256`, and the approved
+  `etag_sha256` and `payload_bytes`.
+- Provide the fixture performance summary in `observations.json`. Assembly
+  and bundle verification derive `product_action` from the retained records.
+  Promotion requires per-run regional verification and cache evidence.
 
 ### Verify native publication and CDN Git fetch
 
@@ -1363,7 +1375,9 @@ Git and private xorb scopes, assembly derives `product_action` from the
 product records in `git-product/` or `xorb-product/` and the rollback and
 cleanup traces. It derives `performance` from `git-benchmarks/`. Supply the
 measured `product_action` and `performance` fields in `observations.json`
-for other scopes' fixture reports. Release verification requires a
+for fixture scopes with no product-specific collector. Direct Crab Server and
+S3 gateway rows derive `product_action` from `service-product/`, rollback,
+and cleanup. Release verification requires a
 product-specific verifier for each enabled row. Git and capsule scopes require
 `product_action.verified_edge_payloads` alongside the completed GET count.
 Each benchmark arm records `local_payload_hits`. The warm-local comparison

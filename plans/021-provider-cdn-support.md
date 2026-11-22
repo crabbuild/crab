@@ -758,9 +758,10 @@ approved object. The native writer can publish these service fixtures and
 verifies LFS bytes against the approved fixture before pushing. Both service
 read arms require the same independently observed native publication. The
 lifecycle verifier binds the edge and rollback records, provider viewer logs,
-distinct native retirement tombstone, and final storage inventories. Live
-regional records, warm-local evidence, and release assembly integration remain
-release requirements.
+distinct native retirement tombstone, and final storage inventories. Assembly
+and bundle verification derive the service product result from the retained
+records and the preregistered payload size, ETag, and storage fingerprints.
+Live regional records and warm-local evidence remain release requirements.
 
 The protected workflow or its dedicated workers own producing these raw
 observations. The assembly and release jobs own rejecting missing, mismatched

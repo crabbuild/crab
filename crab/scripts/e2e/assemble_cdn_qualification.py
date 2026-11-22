@@ -16,10 +16,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from cdn_qualification import (  # noqa: E402
     CDN_PROVENANCE_FIELDS, COMMIT, EXPIRY_RANGE_CHECK, GIT_BENCHMARK_DIR, GIT_PRODUCT_DIR, LABEL, PROVIDERS,
     PROVIDER_FOR_EDGE, PUBLIC_EXPORT_BEFORE, PUBLIC_EXPORT_CHECK, PUBLIC_EXPORT_DIR, PUBLIC_EXPORT_FILES,
-    PUBLIC_TRANSITION_CHECK, RUN_NUMBER, SCHEMA, SCOPED_VIEW_CHECK, SHA256,
+    PUBLIC_TRANSITION_CHECK, RUN_NUMBER, SCHEMA, SCOPED_VIEW_CHECK, SERVICE_PRODUCT_DIR, SHA256,
     benchmark_registration, collect_git_performance, collect_git_product_action, collect_sdk_hydration_evidence,
-    collect_sdk_product_action, decode, derive_sdk_public_transition, fields,
-    is_direct_sdk_git_scope, is_direct_sdk_hydration_scope, matches, read_trace, release_scopes, require,
+    collect_sdk_product_action, collect_service_product_action, decode, derive_sdk_public_transition, fields,
+    is_direct_sdk_git_scope, is_direct_sdk_hydration_scope, is_direct_service_scope, matches, read_trace, release_scopes, require,
     required_check_names, required_platform_rows, requires_cli_workload, scope_parts, verify_bundle_row,
     verify_cleanup_trace, verify_deployment_policy_trace,
 )
@@ -120,9 +120,12 @@ def assemble_bundle(
             cli_workload = requires_cli_workload(scope)
             sdk_workload = is_direct_sdk_git_scope(scope)
             sdk_hydration = is_direct_sdk_hydration_scope(scope)
+            service = is_direct_service_scope(scope)
             expected = OBSERVATION_FIELDS.copy()
             if cli_workload or sdk_workload or sdk_hydration:
                 expected.difference_update({"product_action", "performance"})
+            if service:
+                expected.remove("product_action")
             measured = fields(
                 decode((inputs / row / "observations.json").read_bytes()),
                 expected, "CDN observations",
@@ -131,7 +134,7 @@ def assemble_bundle(
             names = required_check_names(access, profile)
             require(isinstance(registration, dict) and matches(SHA256, registration.get("configuration_sha256")),
                     f"invalid CDN configuration digest for {row}")
-            spec = benchmark_registration(registration) if sdk_workload or sdk_hydration else registration
+            spec = benchmark_registration(registration) if sdk_workload or sdk_hydration or service else registration
             canary = canaries.get((scope, registration["configuration_sha256"]), {})
             outcomes = measured.pop("check_results")
             require(isinstance(outcomes, dict) and names - canary.keys() <= outcomes.keys() <= names,
@@ -198,6 +201,15 @@ def assemble_bundle(
                     inputs / row, measured, spec, rollback, placement=placement,
                     cleanup_at=cleanup_at, native_origin_sha256=cleanup["targets"]["native"]["origin_sha256"],
                     retain=destination,
+                )
+            elif service:
+                cleanup = decode(read_trace(destination / "traces/cleanup.json", "cleanup"))
+                cleanup_at = verify_cleanup_trace(cleanup, measured, edge, access)
+                rollback = read_trace(destination / "traces/rollback.json", "rollback")
+                measured["product_action"] = collect_service_product_action(
+                    inputs / row / SERVICE_PRODUCT_DIR, measured, spec, rollback,
+                    cleanup_at=cleanup_at, native_origin_sha256=cleanup["targets"]["native"]["origin_sha256"],
+                    retain=destination / SERVICE_PRODUCT_DIR,
                 )
             if cli_workload or sdk_workload:
                 measured["performance"] = collect_git_performance(

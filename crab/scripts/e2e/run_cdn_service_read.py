@@ -23,7 +23,7 @@ from s3_gateway_workload import _canonical_path, _signed_headers
 from public_inventory import ExportError
 
 from cdn_qualification import (
-    COMMIT, GIT_FETCH_RECORD_LIMIT, GIT_OID, RUN_NUMBER, SHA256,
+    COMMIT, GIT_FETCH_RECORD_LIMIT, GIT_OID, RUN_NUMBER, SERVICE_PAYLOAD_LIMIT, SHA256,
     decode, fields, is_direct_service_scope, matches, positive, read_git_record, require, scope_parts,
     validate_git_publication, validate_service_read, verify_git_native_ref,
 )
@@ -40,7 +40,6 @@ REGION = re.compile(r"[a-z0-9-]{1,32}")
 SESSION_COOKIE = re.compile(r"__Host-crab_session=[A-Za-z0-9._~+=/%-]{1,8192}")
 BASIC = re.compile(r"Basic [A-Za-z0-9+/]{2,8192}={0,2}")
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
-SERVICE_BODY_LIMIT = 512 * 1024 * 1024
 
 
 def workload(args: argparse.Namespace, consumer: str) -> dict:
@@ -51,7 +50,7 @@ def workload(args: argparse.Namespace, consumer: str) -> dict:
             and approved["configuration_sha256"] == args.configuration_sha256
             and all(matches(SHA256, approved[field]) for field in ("publication_sha256", "payload_sha256", "etag_sha256"))
             and matches(GIT_OID, approved["commit"]) and positive(approved["payload_bytes"])
-            and approved["payload_bytes"] <= SERVICE_BODY_LIMIT,
+            and approved["payload_bytes"] <= SERVICE_PAYLOAD_LIMIT,
             "CDN service read needs the exact approved workload, publication, and payload")
     repo = approved["repository"]
     require(isinstance(repo, str), "service workload needs the approved logical repository")

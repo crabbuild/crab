@@ -128,12 +128,20 @@ METRICS = {
 }
 GIT_BENCHMARK_DIR = "git-benchmarks"
 GIT_PRODUCT_DIR = "git-product"
+SERVICE_PRODUCT_DIR = "service-product"
+SERVICE_READ_ACTION = "service-http-read"
+SERVICE_PAYLOAD_LIMIT = 512 * 1024 * 1024
+SERVICE_WORKLOAD_REGISTRATION_FIELDS = {"sha256", "origin_sha256", "prefix_sha256", "etag_sha256", "payload_bytes"}
 SDK_PRIOR_EXPORT_RECORD = "before-export.json"
 SDK_CLONE_FILES = {"edge": "clone-edge.json", "origin": "clone-origin.json"}
 SDK_FETCH_FILES = {"edge": "fetch-edge.json", "origin": "fetch-origin.json"}
 VIEWER_REQUEST_FILES = {"s3": "cloudfront-requests.json", "gcs": "cloud-cdn-requests.json", "azure": "front-door-requests.json"}
 GIT_FETCH_RECORD_LIMIT = 256 * 1024
 GIT_NATIVE_REF_FILES = {"published": "provider-published.json", "retired": "provider-retired.json"}
+SERVICE_PRODUCT_FILES = {
+    "publication": "publication.json", "retirement": "retirement.json", "edge": "edge.json",
+    "viewer_requests": "viewer-requests.json", **GIT_NATIVE_REF_FILES,
+}
 GIT_NATIVE_REF_FIELDS = {
     "origin_sha256", "prefix_sha256", "ref_sha256", "repository_sha256", "epoch_sha256",
     "root_digest", "head_sha256", "revision_sha256", "transaction_id", "oid", "probe_source_sha",
@@ -732,7 +740,8 @@ def verify_check_evidence(
             f"trace digest mismatch: {name}",
         )
         if name == "rollback" and (requires_cli_workload(report["scope"]) or is_direct_sdk_git_scope(report["scope"])
-                                   or is_direct_sdk_hydration_scope(report["scope"])):
+                                   or is_direct_sdk_hydration_scope(report["scope"])
+                                   or is_direct_service_scope(report["scope"])):
             rollback = raw
             continue
         decoded = decode(raw)
@@ -1131,6 +1140,15 @@ def benchmark_registration(registration: Any) -> dict[str, Any]:
                 and all(matches(SHA256, registration.get(key)) for key in
                         ("viewer_binding_sha256", "viewer_approval_sha256", "hydration_workload_sha256")),
                 "SDK hydration benchmark needs the approved workload and viewer binding")
+    if is_direct_service_scope(registration["scope"]):
+        expected.update(("service_workload", "viewer_binding_sha256"))
+        workload = fields(registration.get("service_workload"), SERVICE_WORKLOAD_REGISTRATION_FIELDS,
+                          "registered service HTTP workload")
+        require(registration.get("workload") == SERVICE_READ_ACTION
+                and matches(SHA256, registration.get("viewer_binding_sha256"))
+                and all(matches(SHA256, workload[key]) for key in SERVICE_WORKLOAD_REGISTRATION_FIELDS - {"payload_bytes"})
+                and positive(workload["payload_bytes"]) and workload["payload_bytes"] <= SERVICE_PAYLOAD_LIMIT,
+                "service benchmark needs the approved HTTP workload and viewer binding")
     if access == "public":
         expected |= {"publication_sha256", "previous_publication_sha256", "historical_origin_sha256"}
         require(matches(SHA256, registration.get("publication_sha256")),
@@ -1370,6 +1388,7 @@ def validate_service_read(value: Any, provenance: dict[str, Any], arm: str) -> d
             and all(client[key] == provenance[key] for key in CDN_PROVENANCE_FIELDS | {"platform"}),
             "CDN service read has mismatched workflow or product provenance")
     require(matches(GIT_OID, client["commit"]) and positive(client["payload_bytes"])
+            and client["payload_bytes"] <= SERVICE_PAYLOAD_LIMIT
             and all(matches(SHA256, client[key]) for key in ("workload_sha256", "publication_sha256",
                     "native_published_sha256", "payload_sha256", "etag_sha256")),
             "CDN service read has invalid publication or payload fingerprints")
@@ -1622,6 +1641,71 @@ def verify_git_retirement(raw: bytes, row: dict[str, Any], publication_digest: s
             and retirement["retired_at_unix_ms"] >= rollback_finished,
             "Git product action requires retirement of the same published ref after rollback")
     return retirement["retired_at_unix_ms"]
+
+
+def verify_service_lifecycle(
+    records: dict[str, bytes], row: dict[str, Any], spec: dict[str, Any], *,
+    cleanup_at: int, native_origin_sha256: str,
+) -> dict[str, Any]:
+    publication_raw = records["publication"]
+    publication = validate_git_publication(publication_raw, row)
+    publication_sha = hashlib.sha256(publication_raw).hexdigest()
+    require(publication["published"], "service lifecycle requires a confirmed native publication")
+    edge = validate_service_read(decode(records["edge"]), row, "edge")
+    origin = validate_service_read(decode(records["origin"]), row, "origin")
+    provider, _, _, family, _ = scope_parts(row["scope"])
+    published = hashlib.sha256(records["published"]).hexdigest()
+    prefix_sha256 = hashlib.sha256(f"{row['fixture_prefix']}/".encode()).hexdigest()
+    workload = spec["service_workload"]
+    require(workload["origin_sha256"] == native_origin_sha256 and workload["prefix_sha256"] == prefix_sha256,
+            "service cleanup did not cover the registered native target")
+    lfs_key = None
+    if family == "lfs":
+        key = f"{row['fixture_prefix']}/{lfs_object_path(publication['sha256'])}"
+        lfs_key = hashlib.sha256(key.encode()).hexdigest()
+    for arm, read in (("edge", edge), ("origin", origin)):
+        require(read["workload_sha256"] == workload["sha256"]
+                and read["native_published_sha256"] == published and read["publication_sha256"] == publication_sha
+                and read["commit"] == publication["oid"] and read["payload_sha256"] == publication["sha256"],
+                "edge and rollback reads must use the same approved workload and native publication")
+        require(read["payload_bytes"] == workload["payload_bytes"] and read["etag_sha256"] == workload["etag_sha256"],
+                "service read does not match the approved payload size and ETag")
+        require(read["reader"] == {
+            "origin_sha256": native_origin_sha256, "prefix_sha256": prefix_sha256,
+            "binding_sha256": spec["viewer_binding_sha256"] if arm == "edge" else "",
+            "public_export_sha256": spec.get("publication_sha256", "") if arm == "edge" else "",
+        }, "service read used a different native target or viewer binding")
+        require(read["lfs_key_sha256"] == lfs_key, "service lifecycle requires the approved LFS object")
+    require(edge["git_blob_oid_sha256"] == origin["git_blob_oid_sha256"]
+            and edge["finished_at_unix_ms"] <= origin["started_at_unix_ms"],
+            "service rollback must follow the edge read and verify the same published blob")
+    verify_viewer_requests(decode(records["viewer_requests"]), edge, hashlib.sha256(records["edge"]).hexdigest(), provider)
+    retired_at = verify_git_retirement(
+        records["retirement"], row, publication_sha, publication["candidate"], origin["finished_at_unix_ms"],
+    )
+    verify_git_lifecycle(records, row, publication, publication_sha, edge["started_at_unix_ms"], edge["reader"],
+                         retired_at, cleanup_at, native_origin_sha256)
+    return {
+        "name": SERVICE_READ_ACTION, "expected_sha256": publication["sha256"], "observed_sha256": edge["payload_sha256"],
+        "expected_bytes": origin["payload_bytes"], "observed_bytes": edge["payload_bytes"],
+        "native_writes": 1, "visible_new_ref": True, "fixture_cleanup_verified": True,
+        "observed_edge_gets": edge["observed_edge_gets"], "verified_edge_payloads": edge["verified_edge_payloads"],
+    }
+
+
+def collect_service_product_action(
+    inputs: Path, row: dict[str, Any], spec: dict[str, Any], rollback_raw: bytes,
+    *, cleanup_at: int, native_origin_sha256: str, retain: Path | None = None,
+) -> dict[str, Any]:
+    records = {name: read_git_record(inputs / filename, limit=GIT_FETCH_RECORD_LIMIT if name in ("edge", "viewer_requests")
+                                    else 8 * 1024) for name, filename in SERVICE_PRODUCT_FILES.items()}
+    result = verify_service_lifecycle(records | {"origin": rollback_raw}, row, spec,
+                                      cleanup_at=cleanup_at, native_origin_sha256=native_origin_sha256)
+    if retain is not None:
+        retain.mkdir()
+        for name, filename in SERVICE_PRODUCT_FILES.items():
+            (retain / filename).write_bytes(records[name])
+    return result
 
 
 def validate_sdk_hydration_workload(raw: bytes, approval: str, configuration: str) -> dict[str, Any]:
@@ -2100,6 +2184,7 @@ def verify_cdn_report(
     cli_workload = requires_cli_workload(scope)
     sdk_git = is_direct_sdk_git_scope(scope)
     sdk_hydration = is_direct_sdk_hydration_scope(scope)
+    # Service rows can prove the read lifecycle while their regional metrics remain fixture summaries.
     require(policy is None or cli_workload or sdk_git or sdk_hydration,
             "CDN promotion requires a product-specific workload and per-run regional evidence verifier")
     if cli_workload:
@@ -2143,5 +2228,10 @@ def verify_cdn_report(
         )
         require(row["product_action"] == product, "product action differs from the retained SDK hydration evidence")
         require(row["performance"] == measured, "SDK hydration performance summary differs from the retained measurements")
+    if is_direct_service_scope(scope):
+        require(rollback is not None, "direct service qualification requires an ordinary HTTP rollback read")
+        product = collect_service_product_action(directory / SERVICE_PRODUCT_DIR, row, registration, rollback,
+                                                 cleanup_at=cleanup_at, native_origin_sha256=native_origin_sha256)
+        require(row["product_action"] == product, "product action differs from the retained service lifecycle evidence")
     return {"status": "verified", "scope": scope, "platform": platform, "deployment": row["deployment"],
             "checks": checks, "distant_median_savings_lower_bound_ms": lower}
