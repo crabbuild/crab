@@ -12,9 +12,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cdn_qualification import (  # noqa: E402
-    CDN_PROVENANCE_FIELDS, COMMIT, LABEL, RUN_NUMBER, SHA256, benchmark_registration,
-    decode, fields, matches, positive, read_git_record, read_trace, require, scope_parts,
-    verify_deployment_policy_trace, verify_managed_issuer,
+    CDN_PROVENANCE_FIELDS, COMMIT, GIT_FETCH_RECORD_LIMIT, GIT_PRODUCT_DIR, LABEL, MANAGED_GIT_READ_ROLES,
+    RUN_NUMBER, SHA256, benchmark_registration, decode, fields, is_managed_cli_git_scope, matches,
+    positive, read_git_record, read_trace, require, scope_parts, validate_git_fetch, verify_deployment_policy_trace,
+    verify_managed_issuer,
 )
 from collect_cdn_product_metrics import NATIVE_TARGET_MARKER, measure, measure_native  # noqa: E402
 from run_cdn_transport_checks import approved_fixture  # noqa: E402
@@ -49,8 +50,16 @@ def observation_events(lines: list[bytes]) -> tuple[dict, dict]:
     return resolved, grant
 
 
+def grant_fingerprints(grant: dict) -> dict:
+    return {
+        "identity_sha256": grant["issuer_identity_sha256"], "version": grant["issuer_version"],
+        "repository_sha256": grant["repository_sha256"], "approval_sha256": grant["grant_approval_sha256"] or None,
+        "grant_version": grant["grant_version"],
+    }
+
+
 def collect_managed_issuer(
-    fixture: dict, report: dict, registration: dict, policy: dict, actions: Path,
+    fixture: dict, report: dict, registration: dict, policy: dict, actions: Path, *, measured_row: Path,
 ) -> dict:
     edge, access, _, family, profile = scope_parts(report["scope"])
     require(access == "private" and profile == "managed" and fixture["scope"] == report["scope"] and fixture["view_suffix"] == "",
@@ -69,11 +78,25 @@ def collect_managed_issuer(
     expected_binding = {f"binding_{name}_sha256": digest for name, digest in placements.items()} | {
         "binding_approval_sha256": approval,
     }
-    action = report["product_action"]
+    managed_git = is_managed_cli_git_scope(report["scope"])
+    retained_reads = {}
+    provenance = {key: report[key] for key in CDN_PROVENANCE_FIELDS | {"platform"}}
+    if managed_git:
+        provenance["candidate"] = registration["candidate"]
+        retained_reads = {
+            "approved_v2": read_git_record(measured_row / GIT_PRODUCT_DIR / "fetch.json", limit=GIT_FETCH_RECORD_LIMIT),
+            "v1_peer": read_trace(measured_row / "traces/rollback.json", "rollback"),
+        }
+        action = validate_git_fetch(retained_reads["approved_v2"], provenance, "edge", "managed issuer product fetch",
+                                    managed_issuer=issuer)
+        report = report | {"product_action": action}
+    else:
+        action = report["product_action"]
     require(action["name"] == registration["workload"]
             and matches(SHA256, action["observed_sha256"]) and positive(action["observed_bytes"]),
             "managed issuer evidence needs the registered action's verified product result")
     operations = {}
+    product_reads = {}
     repositories, observed_operations = set(), set()
     for role in ROLES:
         directory = actions / role
@@ -91,12 +114,39 @@ def collect_managed_issuer(
                         (grant["request_approval_sha256"], grant["grant_approval_sha256"])),
                 "invalid managed grant observation for the registered action")
         observed_operations.add(grant["operation"])
-        successful = role in ("approved_v2", "v1_peer")
+        successful = role in MANAGED_GIT_READ_ROLES
         require(grant["accepted"] is successful, "managed action did not accept or reject the grant as expected")
         exit_code = read_git_record(directory / "exit-code", limit=16).strip()
         require(exit_code.isdigit() and (int(exit_code) == 0) == successful,
                 "managed product action did not exit with the expected result")
-        traffic, native = measure(lines, report["scope"]), measure_native(lines, report["scope"])
+        responses = {}
+        traffic = measure(lines, report["scope"], edge_responses=responses)
+        native = measure_native(lines, report["scope"])
+        if managed_git:
+            require(grant["operation"] == "Fetch" and resolved["repository_sha256"] == issuer["repository_sha256"],
+                    "managed issuer observation needs the registered Git repository and fetch operation")
+            observed_raw = read_git_record(directory / "client.json", limit=GIT_FETCH_RECORD_LIMIT)
+            if successful:
+                require(observed_raw == retained_reads[role],
+                        "managed issuer capture differs from the retained Git fetch or rollback")
+                client = validate_git_fetch(observed_raw, provenance, "edge" if role == "approved_v2" else "origin",
+                                            "managed issuer product read", managed_issuer=issuer)
+                require(client["managed_grant"] == grant_fingerprints(grant)
+                        and all(client[key] == value for key, value in traffic.items())
+                        and client["edge_responses"] == responses and client["native_traffic"] == native,
+                        "managed issuer capture does not account for the retained product traffic and grant")
+                require(client["publication_sha256"] == action["publication_sha256"]
+                        and client["reader"]["origin_sha256"] == placements["origin"]
+                        and client["reader"]["prefix_sha256"] == hashlib.sha256(f"{fixture['fixture_prefix']}/".encode()).hexdigest()
+                        and client["reader"]["binding_sha256"] == (registration["viewer_binding_sha256"] if role == "approved_v2" else ""),
+                        "managed issuer product read changed the approved publication, native target or viewer")
+                product_reads[role] = hashlib.sha256(observed_raw).hexdigest()
+            else:
+                client = fields(decode(observed_raw), provenance.keys() | {"publication_sha256", "rejected"},
+                                "managed Git rejection result")
+                require(all(client[key] == value for key, value in provenance.items()) and client["rejected"] is True
+                        and client["publication_sha256"] == action["publication_sha256"],
+                        "managed issuer rejection was observed for a different publication, build or attempt")
         payload = directory / "payload"
         if successful:
             require(all(grant[f"grant_{name}_sha256"] == placements[name] for name in ("origin", "prefix")),
@@ -131,7 +181,9 @@ def collect_managed_issuer(
         "binding_sha256": approval, "placement_sha256": policy["components"]["private-binding"], "workload": action["name"],
         "operations": operations,
     }
-    verify_managed_issuer(trace, report, registration, policy)
+    if managed_git:
+        trace |= {"repository_sha256": issuer["repository_sha256"], "product_reads": product_reads}
+    verify_managed_issuer(trace, report, registration, policy, product_reads=retained_reads if managed_git else None)
     return trace
 
 
@@ -160,7 +212,7 @@ def main() -> int:
         require(isinstance(registrations, dict) and row in registrations, "no approved benchmark registration for this managed row")
         registration = benchmark_registration(registrations[row])
         policy = decode(read_trace(args.deployment_policy, "deployment_policy"))
-        trace = collect_managed_issuer(fixture, report, registration, policy, args.actions)
+        trace = collect_managed_issuer(fixture, report, registration, policy, args.actions, measured_row=args.observations.parent)
         with args.output.open("x", encoding="utf-8") as output:
             output.write(json.dumps(trace, sort_keys=True) + "\n")
     except (OSError, ValueError, KeyError, TypeError) as error:

@@ -22,8 +22,9 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
         self.root = example.directory
         self.output = self.root / "artifact"
 
-    def inputs(self, provider: str = "s3", consumer: str = "sdk", access: str = "private", *, family: str = "git") -> str:
-        self.example.configure(provider, access, "direct", consumer=consumer, family=family)
+    def inputs(self, provider: str = "s3", consumer: str = "sdk", access: str = "private", *,
+               family: str = "git", profile: str = "direct") -> str:
+        self.example.configure(provider, access, profile, consumer=consumer, family=family)
         if fixture.CDN.is_direct_desktop_git_scope(self.example.scope):
             self.example.record_desktop_product()
         report = self.example.report
@@ -149,6 +150,33 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
         fixture.json_file(edge, original | {"xorb_key_sha256": "0" * 64})
         with self.assertRaises(subprocess.CalledProcessError):
             fixture.CDN.verify_bundle_row(self.output, self.row, self.example.registration, fixture.COMMIT, "123", "2")
+
+    def test_managed_git_assembly_binds_regional_grants_and_native_ref_epoch(self) -> None:
+        digest = self.inputs("s3", consumer="cli", profile="managed")
+        cdn = fixture.CDN
+        pair = self.root / self.row / cdn.GIT_BENCHMARK_DIR / "near/0001"
+        client = pair / "origin/client.json"
+        native = pair / cdn.GIT_NATIVE_REF_FILES["published"]
+        client_record = json.loads(client.read_bytes())
+        native_record = json.loads(native.read_bytes())
+        changes = (
+            (client, client_record | {"managed_grant": client_record["managed_grant"] | {"repository_sha256": "0" * 64}},
+             "different registered managed issuer, repository or approval"),
+            (native, native_record | {"native_ref": native_record["native_ref"] | {"epoch_sha256": "0" * 64}},
+             "must observe the publication in the managed Git product's native repository epoch"),
+        )
+        for path, value, error in changes:
+            with self.subTest(file=path.name):
+                original = path.read_bytes()
+                fixture.json_file(path, value)
+                with self.assertRaisesRegex(ValueError, error):
+                    self.assemble(digest)
+                self.assertFalse(self.output.exists())
+                path.write_bytes(original)
+        self.assertEqual(self.assemble(digest), 1)
+        retained = self.output / native.relative_to(self.root)
+        self.assertEqual(retained.read_bytes(), native.read_bytes())
+        cdn.verify_bundle_row(self.output, self.row, self.example.registration, fixture.COMMIT, "123", "2")
 
     def test_mount_assembly_rechecks_physical_view_live_revision_and_detach(self) -> None:
         digest = self.inputs("azure", consumer="mount", family="xorb")

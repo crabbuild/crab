@@ -179,6 +179,8 @@ GIT_FETCH_FIELDS = PRODUCT_COUNTERS | CDN_PROVENANCE_FIELDS | {
     "native_writes", "visible_new_ref", "elapsed_ms", "publication_oid", "started_at_unix_ms", "finished_at_unix_ms",
     "platform", "publication_sha256", "candidate", "reader", "edge_responses", "native_traffic",
 }
+MANAGED_GIT_GRANT_FIELDS = MANAGED_ISSUER_FIELDS | {"repository_sha256", "grant_version"}
+MANAGED_GIT_READ_ROLES = ("approved_v2", "v1_peer")
 SDK_GIT_ACTION = "sdk-git-snapshot"
 DESKTOP_GIT_ACTION = "desktop-git-read"
 DIRECT_READ_TARGET_FIELDS = CLI_NATIVE_FIELDS | {"binding_sha256", "public_export_sha256"}
@@ -673,14 +675,34 @@ def verify_public_export(
 
 def verify_managed_issuer(
     value: Any, report: dict[str, Any], registration: dict[str, Any], policy: dict[str, Any],
+    *, product_reads: dict[str, bytes] | None = None,
 ) -> None:
-    trace = fields(value, CDN_PROVENANCE_FIELDS | {
+    managed_git = is_managed_cli_git_scope(report["scope"])
+    expected = CDN_PROVENANCE_FIELDS | {
         "schema", "platform", "issuer", "binding_sha256", "placement_sha256", "workload", "operations",
-    }, "managed issuer trace")
+    }
+    if managed_git:
+        expected |= {"repository_sha256", "product_reads"}
+    trace = fields(value, expected, "managed issuer trace")
     require(trace["schema"] == "crab.cdn-managed-issuer/v1"
             and all(trace[key] == report[key] for key in CDN_PROVENANCE_FIELDS | {"platform"}),
             "managed issuer trace must match the release row and workflow attempt")
     approved = registration["managed_issuer"]
+    managed_clients = {}
+    if managed_git:
+        require(trace["repository_sha256"] == approved["repository_sha256"],
+                "managed issuer trace used a different registered repository")
+        observed = fields(trace["product_reads"], set(MANAGED_GIT_READ_ROLES), "managed Git product read digests")
+        require(product_reads is not None and observed == {
+            role: hashlib.sha256(raw).hexdigest() for role, raw in product_reads.items()
+        }, "managed issuer trace must match the retained Git fetch and rollback")
+        provenance = {key: report[key] for key in CDN_PROVENANCE_FIELDS | {"platform"}}
+        provenance["candidate"] = registration["candidate"]
+        managed_clients = {
+            role: validate_git_fetch(raw, provenance, "edge" if role == "approved_v2" else "origin",
+                                     "managed issuer product read", managed_issuer=approved)
+            for role, raw in product_reads.items()
+        }
     issuer = fields(trace["issuer"], {"identity_sha256", "version"}, "observed production issuer")
     require(all(issuer[key] == approved[key] for key in issuer),
             "managed issuer identity or version differs from the approved production issuer")
@@ -719,6 +741,10 @@ def verify_managed_issuer(
                     "managed operation did not verify the granted authority and expected output")
             require((edge >= action["observed_edge_gets"] if role == "approved_v2" else edge == 0 and native > 0),
                     "managed operation used the wrong payload path")
+            if managed_git:
+                client = managed_clients[role]
+                require(edge == client["observed_edge_gets"] and native == client["native_traffic"]["get_responses"],
+                        "managed issuer traffic differs from the retained Git product read")
         else:
             require(operation["verified_output_sha256"] is None and operation["verified_output_bytes"] == edge == native == 0,
                     "failed managed issuance attempted payload reads or returned content")
@@ -842,7 +868,12 @@ def verify_check_evidence(
         if name in fixture_checks:
             fixture_reads[name] = requests
     if profile == "managed":
-        verify_managed_issuer(managed_issuer, report, registration, policy)
+        product_reads = None
+        if is_managed_cli_git_scope(report["scope"]):
+            require(rollback is not None, "managed Git qualification requires its native rollback fetch")
+            fetch = read_git_record(directory / GIT_PRODUCT_DIR / "fetch.json", limit=GIT_FETCH_RECORD_LIMIT)
+            product_reads = dict(zip(MANAGED_GIT_READ_ROLES, (fetch, rollback)))
+        verify_managed_issuer(managed_issuer, report, registration, policy, product_reads=product_reads)
     full_sizes = {}
     for row in fixture_reads["exact_get"]:
         if row["source"] == "edge" and row["status"] == 200:
@@ -1272,10 +1303,14 @@ def benchmark_registration(registration: Any) -> dict[str, Any]:
                 "private benchmark needs a distinct approved rotation overlap policy digest")
     if profile == "managed":
         expected.add("managed_issuer")
-        issuer = fields(registration.get("managed_issuer"), MANAGED_ISSUER_FIELDS, "registered production issuer")
+        issuer_fields = MANAGED_ISSUER_FIELDS
+        if is_managed_cli_git_scope(registration["scope"]):
+            issuer_fields = issuer_fields | {"repository_sha256"}
+        issuer = fields(registration.get("managed_issuer"), issuer_fields, "registered production issuer")
         require(matches(SHA256, issuer["identity_sha256"]) and matches(LABEL, issuer["version"])
-                and matches(SHA256, issuer["approval_sha256"]),
-                "managed benchmark needs an approved issuer and binding receipt")
+                and matches(SHA256, issuer["approval_sha256"])
+                and ("repository_sha256" not in issuer or matches(SHA256, issuer["repository_sha256"])),
+                "managed benchmark needs an approved issuer, repository and binding receipt")
     spec = fields(registration, expected, "benchmark registration")
     require(spec["schema"] == "crab.cdn-benchmark/v1" and matches(LABEL, spec["workload"]),
             "invalid benchmark registration")
@@ -1338,7 +1373,12 @@ def requires_cli_lfs_workload(scope: str) -> bool:
 
 def requires_cli_workload(scope: str) -> bool:
     _, _, consumer, family, profile = scope_parts(scope)
-    return consumer == "cli" and family in {"git", "capsule", "lfs"} and profile == "direct"
+    return (consumer == "cli" and family in {"git", "capsule", "lfs"} and profile == "direct"
+            or is_managed_cli_git_scope(scope))
+
+
+def is_managed_cli_git_scope(scope: str) -> bool:
+    return scope_parts(scope)[1:] == ("private", "cli", "git", "managed")
 
 
 def is_direct_sdk_git_scope(scope: str) -> bool:
@@ -1445,11 +1485,16 @@ def validate_git_publication(raw: bytes, provenance: dict[str, Any]) -> dict[str
     return record
 
 
-def validate_git_fetch(raw: bytes, provenance: dict[str, Any], mode: str, label: str) -> dict[str, Any]:
+def validate_git_fetch(
+    raw: bytes, provenance: dict[str, Any], mode: str, label: str, *, managed_issuer: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     action = cli_action_name(provenance["scope"])
     edge, access, _, _, _ = scope_parts(provenance["scope"])
     value = decode(raw)
     expected = GIT_FETCH_FIELDS
+    managed = is_managed_cli_git_scope(provenance["scope"])
+    if managed:
+        expected = expected | {"managed_grant"}
     if isinstance(value, dict) and "transition_key_sha256" in value:
         require(access == "public" and mode == "edge" and matches(SHA256, value["transition_key_sha256"]),
                 "CLI transition needs an exact public object fingerprint on the edge fetch")
@@ -1469,6 +1514,19 @@ def validate_git_fetch(raw: bytes, provenance: dict[str, Any], mode: str, label:
             f"{label} has an invalid public export approval")
     if "candidate" in provenance:
         require(client["candidate"] == provenance["candidate"], f"{label} did not run the registered CLI build")
+    if managed:
+        grant = fields(client["managed_grant"], MANAGED_GIT_GRANT_FIELDS, "managed Git read grant")
+        origin = mode == "origin"
+        require(matches(SHA256, grant["identity_sha256"]) and matches(SHA256, grant["repository_sha256"])
+                and matches(LABEL, grant["version"]) and type(grant["grant_version"]) is int
+                and grant["grant_version"] == (1 if origin else 2)
+                and (grant["approval_sha256"] is None if origin else matches(SHA256, grant["approval_sha256"])),
+                f"{label} did not observe the expected managed grant version and approval")
+        if managed_issuer is not None:
+            expected_grant = managed_issuer | {"grant_version": 1 if origin else 2}
+            if origin:
+                expected_grant["approval_sha256"] = None
+            require(grant == expected_grant, f"{label} used a different registered managed issuer, repository or approval")
     require(matches(GIT_OID, client["publication_oid"]) and matches(SHA256, client["publication_sha256"])
             and matches(SHA256, client["expected_sha256"]) and client["expected_sha256"] == client["observed_sha256"]
             and client["expected_bytes"] == client["observed_bytes"] == GIT_PAYLOAD_SIZE
@@ -2159,7 +2217,8 @@ def collect_git_product_action(
     fetch_provenance = provenance | {"platform": row["platform"], "candidate": row["candidate"]}
     require(publication["candidate"] == row["candidate"], "publication did not run the registered CLI build")
     fetch_raw = read_git_record(inputs / "fetch.json", limit=GIT_FETCH_RECORD_LIMIT)
-    fetch = validate_git_fetch(fetch_raw, fetch_provenance, "edge", "Git product action")
+    issuer = row.get("managed_issuer")
+    fetch = validate_git_fetch(fetch_raw, fetch_provenance, "edge", "Git product action", managed_issuer=issuer)
     require(fetch["reader"]["binding_sha256"] == row.get("viewer_binding_sha256"),
             "product fetch did not use the registered viewer binding")
     require(fetch["reader"]["public_export_sha256"] == public_export_sha256,
@@ -2169,7 +2228,7 @@ def collect_git_product_action(
             and fetch["expected_sha256"] == publication["sha256"]
             and fetch["started_at_unix_ms"] >= publication["visible_at_unix_ms"],
             "Git product fetch did not verify this native publication after the ref became visible")
-    rollback = validate_git_fetch(rollback_raw, fetch_provenance, "origin", "CDN rollback")
+    rollback = validate_git_fetch(rollback_raw, fetch_provenance, "origin", "CDN rollback", managed_issuer=issuer)
     require(all(rollback[key] == fetch[key] for key in ("publication_sha256", "publication_oid", "observed_sha256")),
             "CDN rollback must verify the same published payload as the edge fetch")
     require(all(rollback["reader"][key] == fetch["reader"][key] for key in CLI_NATIVE_FIELDS),
@@ -2434,6 +2493,7 @@ def collect_git_performance(
     verify_xorb: Callable[[bytes, str], dict[str, Any]] | None = None,
     service_row: Path | None = None, product_request_ids: set[str] | None = None,
     desktop_product: DesktopProductEvidence | None = None,
+    managed_row: Path | None = None,
 ) -> dict[str, Any]:
     spec = benchmark_registration(registration)
     scope = spec["scope"]
@@ -2443,9 +2503,13 @@ def collect_git_performance(
     desktop = requires_desktop_workload(scope, spec["workload"])
     service = is_direct_service_scope(scope)
     cli_workload = requires_cli_workload(scope)
+    managed_git = is_managed_cli_git_scope(scope)
+    require(managed_git == (managed_row is not None)
+            and (not managed_git or native_target is not None),
+            "managed Git benchmarks require the retained product lifecycle and native target")
     require(service == (service_row is not None), "service benchmarks require the retained lifecycle row")
     require(sdk or desktop or hydration or service or (cli_workload and spec["workload"] == cli_action_name(scope)),
-            "benchmark must register a supported direct CLI, SDK, desktop or service workload")
+            "benchmark must register a supported CLI, SDK, desktop or service workload")
     if sdk:
         require(inputs.is_dir(), "direct SDK Git requires retained regional SDK benchmark records")
     if hydration:
@@ -2468,6 +2532,27 @@ def collect_git_performance(
     provider_request_ids = set(product_request_ids or ())
     cache_roots = set()
     desktop_commits = set()
+    managed_commits = set()
+    managed_native = None
+    managed_cleanup_at = None
+    if managed_row is not None:
+        managed_product = managed_row / GIT_PRODUCT_DIR
+        edge_raw = read_git_record(managed_product / "fetch.json", limit=GIT_FETCH_RECORD_LIMIT)
+        edge_fetch = validate_git_fetch(edge_raw, provenance, "edge", "managed Git product fetch",
+                                        managed_issuer=spec["managed_issuer"])
+        origin_fetch = validate_git_fetch(read_trace(managed_row / "traces/rollback.json", "rollback"), provenance,
+                                          "origin", "managed Git product rollback", managed_issuer=spec["managed_issuer"])
+        managed_commits.add(edge_fetch["publication_oid"])
+        cache_roots.update(fetch["reader"]["cache_root_sha256"] for fetch in (edge_fetch, origin_fetch))
+        viewer_raw = read_git_record(managed_product / PRODUCT_VIEWER_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
+        provider_request_ids.update(verify_product_viewer_requests(viewer_raw, edge_fetch, edge_raw, PROVIDERS[provider][0]))
+        publication_raw = read_git_record(managed_product / "publication.json")
+        publication = validate_git_publication(publication_raw, provenance)
+        observed = verify_git_native_ref(decode(read_git_record(managed_product / GIT_NATIVE_REF_FILES["published"])),
+                                         provenance, publication, hashlib.sha256(publication_raw).hexdigest(), "published",
+                                         native_target["origin_sha256"], prefix_sha256=native_target["prefix_sha256"])
+        managed_native = observed["native_ref"]
+        managed_cleanup_at = decode(read_trace(managed_row / "traces/cleanup.json", "cleanup"))["observed_at_unix_ms"]
     if desktop_product is not None:
         require(desktop, "desktop product evidence requires a desktop benchmark")
         provider_request_ids.update(desktop_product.viewer_ids)
@@ -2613,7 +2698,8 @@ def collect_git_performance(
                                client["git_blob_oid_sha256"], client["lfs_key_sha256"])
                     receipt = client["publication_sha256"]
                 else:
-                    client = validate_git_fetch(client_raw, provenance, GIT_MODES[arm], label)
+                    client = validate_git_fetch(client_raw, provenance, GIT_MODES[arm], label,
+                                                managed_issuer=spec.get("managed_issuer"))
                     reader = client["reader"]
                     require(arm == "origin" or reader["binding_sha256"] == spec["viewer_binding_sha256"],
                             f"{label} did not use the required viewer configuration")
@@ -2712,6 +2798,22 @@ def collect_git_performance(
                             f"{location} {index} desktop reads require an independently observed native publication")
                     if retain is not None:
                         (retain / native_path).write_bytes(native_raw)
+                if managed_native is not None:
+                    require(oid not in managed_commits, f"{location} {index} reused a managed Git benchmark commit")
+                    managed_commits.add(oid)
+                    native_path = pair_path / GIT_NATIVE_REF_FILES["published"]
+                    native_raw = read_git_record(inputs / native_path)
+                    observed = verify_git_native_ref(decode(native_raw), provenance, publication, receipt, "published",
+                                                     native_target["origin_sha256"], prefix_sha256=native_target["prefix_sha256"])
+                    require(publication["visible_at_unix_ms"] <= observed["started_at_unix_ms"]
+                            <= observed["observed_at_unix_ms"] <= intervals[0][0]
+                            and all(observed["native_ref"][key] == managed_native[key]
+                                    for key in ("repository_sha256", "epoch_sha256")),
+                            f"{location} {index} must observe the publication in the managed Git product's native repository epoch")
+                    require(intervals[-1][1] <= managed_cleanup_at,
+                            f"{location} {index} finished after the managed Git fixture cleanup")
+                    if retain is not None:
+                        (retain / native_path).write_bytes(native_raw)
             previous_end = intervals[-1][1]
             pairs.append(pair)
         performance[location] = {"region": region, "pairs": pairs}
@@ -2781,17 +2883,20 @@ def verify_cdn_report(
         native_target = {"origin_sha256": native_origin_sha256,
                          "prefix_sha256": hashlib.sha256(f"{row['fixture_prefix']}/".encode()).hexdigest()}
     if cli_workload:
-        measured = collect_git_performance(directory / GIT_BENCHMARK_DIR, registration, platform, run_id, run_attempt,
-                                          native_target=native_target)
-        require(measured == row["performance"], "CLI performance summary differs from the retained measurements")
-        require(rollback is not None, "direct CLI qualification requires a product rollback fetch")
+        require(rollback is not None, "CLI qualification requires a product rollback fetch")
         registered_read = {key: registration[key] for key in ("candidate", "viewer_binding_sha256")}
+        if is_managed_cli_git_scope(scope):
+            registered_read["managed_issuer"] = registration["managed_issuer"]
         product = collect_git_product_action(
             directory / GIT_PRODUCT_DIR, row | registered_read, rollback, cleanup_at=cleanup_at,
             native_origin_sha256=native_origin_sha256, public_export_sha256=registration.get("publication_sha256", ""),
         )
         require(row["product_action"] == product | {"fixture_cleanup_verified": True},
                 "product action differs from the retained publication, fetch, and retirement evidence")
+        measured = collect_git_performance(directory / GIT_BENCHMARK_DIR, registration, platform, run_id, run_attempt,
+                                          native_target=native_target,
+                                          managed_row=directory if is_managed_cli_git_scope(scope) else None)
+        require(measured == row["performance"], "CLI performance summary differs from the retained measurements")
     if sdk_git:
         require(rollback is not None, "direct SDK qualification requires an ordinary SDK rollback read")
         product, request_ids = collect_sdk_product_action(directory / GIT_PRODUCT_DIR, row, registration, rollback,

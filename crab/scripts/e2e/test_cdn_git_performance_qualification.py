@@ -387,7 +387,7 @@ class DesktopGitPerformanceQualificationTests(unittest.TestCase):
         generic = {key: value for key, value in spec.items() if key not in {
             "candidate", "desktop_candidate", "desktop_native_target", "viewer_binding_sha256", "viewer_approval_sha256",
         }} | {"workload": "git-fetch"}
-        with self.assertRaisesRegex(ValueError, "benchmark must register a supported direct"):
+        with self.assertRaisesRegex(ValueError, "benchmark must register a supported CLI"):
             fixture.CDN.collect_git_performance(inputs, generic, PLATFORM, RUN_ID, ATTEMPT)
 
     def test_requires_the_independent_observation_of_the_published_commit_before_reading(self) -> None:

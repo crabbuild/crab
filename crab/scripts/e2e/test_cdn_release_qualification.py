@@ -42,10 +42,10 @@ class CdnReleaseQualificationTests(unittest.TestCase):
             "head_repository": {"full_name": REPOSITORY},
         }
 
-    def bundle(self, consumer: str, *platforms: str, provider: str = "s3", family: str = "git") -> str:
+    def bundle(self, consumer: str, *platforms: str, provider: str = "s3", family: str = "git", profile: str = "direct") -> str:
         registrations = {}
         for platform in platforms:
-            self.fixture.configure(provider, "private", "direct", consumer=consumer, platform=platform, family=family)
+            self.fixture.configure(provider, "private", profile, consumer=consumer, platform=platform, family=family)
             scope = self.fixture.scope
             row = f"{scope}/{platform}"
             directory = self.directory / row
@@ -72,6 +72,13 @@ class CdnReleaseQualificationTests(unittest.TestCase):
             RUN_ID, ATTEMPT, digest,
         )
         self.assertEqual(count, 6)
+
+    def test_managed_cli_git_policy_requires_every_packaged_platform(self) -> None:
+        digest = self.bundle("cli", *fixture.CDN.CLI_PLATFORMS, profile="managed")
+        self.assertEqual(RELEASE.verify_bundle(
+            self.directory, self.policy, RELEASE.release_scopes(self.policy), fixture.COMMIT,
+            RUN_ID, ATTEMPT, digest,
+        ), len(fixture.CDN.CLI_PLATFORMS))
 
     def test_complete_mount_xorb_bundle_verifies_every_release_platform(self) -> None:
         digest = self.bundle("mount", *fixture.CDN.CLI_PLATFORMS, family="xorb")

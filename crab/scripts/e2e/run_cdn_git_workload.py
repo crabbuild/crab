@@ -16,7 +16,7 @@ from tempfile import TemporaryDirectory
 from typing import Any
 from uuid import uuid4
 
-from collect_cdn_managed_issuer import TARGET as MANAGED_TARGET, observation_events
+from collect_cdn_managed_issuer import TARGET as MANAGED_TARGET, grant_fingerprints, observation_events
 from collect_cdn_product_metrics import NATIVE_TARGET, ROUTE, ROUTE_FIELDS, TARGET, measure, measure_native
 from run_cdn_transport_checks import approved_fixture, fixture_base, fixture_object_key, native_remote
 
@@ -334,7 +334,9 @@ def write_transition(proof: dict, record: dict, result: dict, output: Path, befo
         destination.write("\n")
 
 
-def managed_observation(run: subprocess.CompletedProcess[bytes], fixture: dict, *, origin: bool, rejected: bool) -> list[dict]:
+def managed_observation(
+    run: subprocess.CompletedProcess[bytes], fixture: dict, *, origin: bool, rejected: bool,
+) -> tuple[list[dict], dict]:
     events = []
     targets = (MANAGED_TARGET, TARGET, NATIVE_TARGET)
     for line in run.stderr.splitlines():
@@ -375,7 +377,7 @@ def managed_observation(run: subprocess.CompletedProcess[bytes], fixture: dict, 
                 and all(grant[f"grant_{name}_sha256"] == placement[name] for name in ("origin", "prefix"))
                 and (not origin or (traffic["all_edge_attempts"] == 0 and native["body_bytes"] > 0)),
                 "managed Git fetch did not accept the approved grant and use its expected payload path")
-    return events
+    return events, grant_fingerprints(grant)
 
 
 def retain_managed_observation(directory: Path, run: subprocess.CompletedProcess[bytes], events: list[dict], payload: bytes | None) -> None:
@@ -419,9 +421,9 @@ def fetch_once(
         run = run_command(["git", "fetch", "--no-tags", "--no-auto-maintenance", remote, record["ref"]], "git fetch",
                           root, env, allow_failure=True)
         require(managed is not None and managed_capture is not None, "rejection needs a managed evidence destination")
-        events = managed_observation(run, managed, origin=False, rejected=True)
+        events, _ = managed_observation(run, managed, origin=False, rejected=True)
         retain_managed_observation(managed_capture, run, events, None)
-        return {"rejected": True}
+        return {"rejected": True, "candidate": guard.candidate, "platform": guard.platform}
     if crab is None:
         run = run_git("fetch", "--no-tags", "--no-auto-maintenance", remote, record["ref"], root=root, env=env, guard=guard)
     else:
@@ -438,8 +440,10 @@ def fetch_once(
             blob = payload.read(GIT_PAYLOAD_SIZE + 1)
     observed = hashlib.sha256(blob).hexdigest()
     require(len(blob) == GIT_PAYLOAD_SIZE and observed == record["sha256"], "fetched bytes differ from the writer payload")
+    authority = {}
     if managed is not None:
-        events = managed_observation(run, managed, origin=not binding, rejected=False)
+        events, grant = managed_observation(run, managed, origin=not binding, rejected=False)
+        authority = {"managed_grant": grant}
         if managed_capture is not None:
             retain_managed_observation(managed_capture, run, events, blob)
     lines = run.stderr.splitlines()
@@ -460,7 +464,7 @@ def fetch_once(
         "platform": guard.platform, "candidate": guard.candidate,
         "reader": verified_read(lines, read) | guard.fingerprints, "edge_responses": edge_responses,
         "native_traffic": measure_native(lines, record["scope"]),
-    } | metrics
+    } | metrics | authority
 
 
 def require_edge_fetch(result: dict) -> None:
@@ -547,7 +551,7 @@ def main() -> int:
                 and (args.action != "fetch-rejected" or (managed and args.managed_issuer_capture is not None)),
                 "managed issuer capture requires one approved managed fetch arm")
         native_publication = is_direct_sdk_git_scope(scope) or is_direct_desktop_git_scope(scope) or service
-        require(requires_cli_workload(scope) or managed
+        require(requires_cli_workload(scope)
                 or (native_publication and args.action in ("publish", "retire") and fixture["view_suffix"] == ""),
                 "workload needs an approved CLI fixture or a native publication for a direct SDK, desktop, or service scope")
         content = None
@@ -609,10 +613,13 @@ def main() -> int:
                         if proof["phase"] == "after":
                             result["transition_key_sha256"] = proof["key_sha256"]
                 result["publication_sha256"] = hashlib.sha256(raw).hexdigest()
+        output = json.dumps(provenance | result, sort_keys=True) + "\n"
+        if args.managed_issuer_capture is not None:
+            (args.managed_issuer_capture / "client.json").write_bytes(output.encode())
     except (ExportError, OSError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
-    print(json.dumps(provenance | result, sort_keys=True))
+    sys.stdout.write(output)
     return 0
 
 

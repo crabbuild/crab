@@ -109,6 +109,7 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, nati
     provider = CDN.PROVIDER_FOR_EDGE[registration["scope"].split("/", 1)[0]]
     sdk = CDN.is_direct_sdk_git_scope(registration["scope"])
     desktop = CDN.is_direct_desktop_git_scope(registration["scope"])
+    managed = CDN.is_managed_cli_git_scope(registration["scope"])
     cli = CDN.requires_cli_workload(registration["scope"])
     action = CDN.cli_action_name(registration["scope"])
     for ordinal, (location, region) in enumerate(registration["regions"].items()):
@@ -125,17 +126,20 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, nati
                 publication = {
                     "schema": "crab.cdn-git-publication/v1", "oid": oid, "sha256": blob, "published": True,
                     "ref": f"refs/heads/crab-cdn-qualification-123-2-{oid[:12]}",
-                    "visible_at_unix_ms": start - (3 if desktop else 1), "candidate": registration["candidate"],
+                    "visible_at_unix_ms": start - (3 if desktop or managed else 1), "candidate": registration["candidate"],
                     "source_sha": registration["source_sha"], "scope": registration["scope"],
                     "configuration_sha256": registration["configuration_sha256"],
                     "workflow_run_id": "123", "workflow_run_attempt": "2",
                 }
                 publication_digest = json_file(pair / "publication.json", publication)
-                if desktop:
-                    observed = dict.fromkeys(CDN.GIT_NATIVE_REF_FIELDS, "4" * 64) | registration["desktop_native_target"] | {
+                if desktop or managed:
+                    target = registration["desktop_native_target"] if desktop else native_target
+                    observed = dict.fromkeys(CDN.GIT_NATIVE_REF_FIELDS, "4" * 64) | target | {
                         "ref_sha256": hashlib.sha256(publication["ref"].encode()).hexdigest(),
                         "oid": oid, "probe_source_sha": publication["source_sha"],
                     }
+                    if managed:
+                        observed["repository_sha256"] = "3" * 64
                     json_file(pair / CDN.GIT_NATIVE_REF_FILES["published"], {
                         key: publication[key] for key in CDN.CDN_PROVENANCE_FIELDS
                     } | {"schema": "crab.cdn-native-ref/v1", "phase": "published", "platform": platform,
@@ -173,6 +177,10 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, nati
                     "visible_new_ref": True, "native_writes": 1,
                     "edge_responses": {}, "native_traffic": {"get_responses": 1, "head_responses": 0, "body_bytes": 8},
                 }
+                if managed:
+                    client["managed_grant"] = registration["managed_issuer"] | {"grant_version": 2}
+                    if arm == "origin":
+                        client["managed_grant"].update(approval_sha256=None, grant_version=1)
                 proof = {}
                 origin_requests = {}
                 if provider in CDN.VIEWER_REQUEST_FILES and edge:
@@ -307,10 +315,13 @@ class CdnQualificationTests(unittest.TestCase):
                                      viewer_binding_sha256="e" * 64)
             if access == "private":
                 self.registration["viewer_approval_sha256"] = "d" * 64
+        managed_git = CDN.is_managed_cli_git_scope(self.scope)
         if profile == "managed":
             self.registration["managed_issuer"] = {
                 "identity_sha256": "1" * 64, "version": "2026.11.22", "approval_sha256": "2" * 64,
             }
+            if managed_git:
+                self.registration["managed_issuer"]["repository_sha256"] = "7" * 64
         self.report = {
             "schema": CDN.SCHEMA, "schema_version": 1, "status": "qualified", "scope": self.scope,
             "source_sha": COMMIT, "workflow_run_id": "123", "workflow_run_attempt": "2",
@@ -365,7 +376,8 @@ class CdnQualificationTests(unittest.TestCase):
             elif check == CDN.SCOPED_VIEW_CHECK:
                 self.scoped_view_trace()
             elif check == CDN.MANAGED_ISSUER_CHECK:
-                self.managed_issuer_trace()
+                if not managed_git:
+                    self.managed_issuer_trace()
             elif check == CDN.HISTORICAL_ORIGIN_CHECK:
                 self.historical_origin_trace(edge)
             elif check == CDN.PUBLIC_TRANSITION_CHECK:
@@ -382,6 +394,8 @@ class CdnQualificationTests(unittest.TestCase):
                 self.record_git_blob_product()
             else:
                 self.record_git_product()
+                if managed_git:
+                    self.managed_issuer_trace()
         elif hydration:
             self.record_xorb_read()
         elif service:
@@ -450,6 +464,11 @@ class CdnQualificationTests(unittest.TestCase):
     def record_git_product(self) -> None:
         sample = self.directory / CDN.GIT_BENCHMARK_DIR / "near/0001/warm_edge/client.json"
         fetch = json.loads(sample.read_bytes())
+        managed = CDN.is_managed_cli_git_scope(self.scope)
+        if managed:
+            fetch["publication_oid"] = "f" * 40
+            fetch["edge_responses"] = {"2" * 64: next(iter(fetch["edge_responses"].values()))}
+            fetch["reader"]["cache_root_sha256"] = "c" * 64
         records = self.directory / CDN.GIT_PRODUCT_DIR
         records.mkdir(exist_ok=True)
         provenance = {key: fetch[key] for key in CDN.CDN_PROVENANCE_FIELDS}
@@ -467,12 +486,15 @@ class CdnQualificationTests(unittest.TestCase):
         fetch_path = records / "fetch.json"
         json_file(fetch_path, fetch | {"publication_sha256": receipt} | transition)
         write_product_viewer_proof(fetch_path, transition.get("transition_key_sha256"))
-        self.rollback_trace(fetch | dict.fromkeys(CDN.PRODUCT_COUNTERS, 0) | {
+        rollback = fetch | dict.fromkeys(CDN.PRODUCT_COUNTERS, 0) | {
             "publication_sha256": receipt, "arm": "origin", "edge_responses": {},
             "started_at_unix_ms": fetch["finished_at_unix_ms"] + 5,
             "finished_at_unix_ms": fetch["finished_at_unix_ms"] + 10,
             "reader": fetch["reader"] | {"binding_sha256": "", "cache_root_sha256": "1" * 64, "public_export_sha256": ""},
-        })
+        }
+        if managed:
+            rollback["managed_grant"] = self.registration["managed_issuer"] | {"approval_sha256": None, "grant_version": 1}
+        self.rollback_trace(rollback)
         json_file(records / "retirement.json", provenance | {
             "schema": "crab.cdn-git-retirement/v1", "publication_sha256": receipt, "ref_retired": True,
             "retired_at_unix_ms": fetch["finished_at_unix_ms"] + 50, "candidate": fetch["candidate"],
@@ -970,6 +992,13 @@ class CdnQualificationTests(unittest.TestCase):
                 "mismatched_v2": issued | failed | {"grant_approval_sha256": "3" * 64, "result": "client_rejected"},
             },
         }
+        if CDN.is_managed_cli_git_scope(self.scope):
+            trace["repository_sha256"] = issuer["repository_sha256"]
+            trace["product_reads"] = {}
+            for role, path in zip(CDN.MANAGED_GIT_READ_ROLES, ("git-product/fetch.json", "traces/rollback.json")):
+                raw = (self.directory / path).read_bytes()
+                trace["product_reads"][role] = hashlib.sha256(raw).hexdigest()
+                trace["operations"][role]["native_payload_reads"] = json.loads(raw)["native_traffic"]["get_responses"]
         check = CDN.MANAGED_ISSUER_CHECK
         path = self.directory / "traces" / f"{check}.json"
         self.report["checks"][check] = {"passed": True, "trace_sha256": json_file(path, trace)}
@@ -1105,6 +1134,8 @@ class CdnQualificationTests(unittest.TestCase):
             (lambda t: t["issuer"].update(version="reference-v2"), "differs from the approved production issuer"),
             (lambda t: t.update(placement_sha256="4" * 64), "approved binding and attested placement"),
             (lambda t: t.update(binding_sha256="4" * 64), "approved binding and attested placement"),
+            (lambda t: t.update(repository_sha256="4" * 64), "different registered repository"),
+            (lambda t: t["product_reads"].update(v1_peer="4" * 64), "match the retained Git fetch and rollback"),
             (lambda t: t.update(workflow_run_attempt="1"), "match the release row and workflow attempt"),
             (lambda t: t["operations"]["approved_v2"].update(request_approval_sha256="4" * 64),
              "did not use the authenticated approval"),
@@ -1113,6 +1144,7 @@ class CdnQualificationTests(unittest.TestCase):
             (lambda t: t["operations"]["approved_v2"].update(verified_output_sha256="4" * 64),
              "did not verify the granted authority"),
             (lambda t: t["operations"]["v1_peer"].update(edge_payload_requests=1), "wrong payload path"),
+            (lambda t: t["operations"]["approved_v2"].update(edge_payload_requests=2), "differs from the retained Git product read"),
             (lambda t: t["operations"]["denied_v2"].update(request_versions=[2, 1]), "retried or downgraded"),
             (lambda t: t["operations"]["denied_v2"].update(status=401), "issuer denial was not terminal"),
             (lambda t: t["operations"]["mismatched_v2"].update(native_payload_reads=1), "attempted payload reads"),
@@ -1420,7 +1452,7 @@ class CdnQualificationTests(unittest.TestCase):
         self.rejected("requires retained regional SDK benchmark records", "--cdn-release-policy", str(policy))
 
     def test_generic_fixture_summary_cannot_promote_a_release_scope(self) -> None:
-        for provider, consumer, profile in (("gcs", "desktop", "direct"), ("azure", "cli", "managed")):
+        for provider, consumer, profile in (("gcs", "desktop", "direct"), ("azure", "sdk", "managed")):
             with self.subTest(provider=provider, consumer=consumer, profile=profile), TemporaryDirectory() as directory:
                 self.directory = Path(directory)
                 (self.directory / "traces").mkdir()

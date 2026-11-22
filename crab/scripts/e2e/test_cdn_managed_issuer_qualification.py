@@ -12,14 +12,15 @@ from unittest.mock import patch
 
 import collect_cdn_managed_issuer as COLLECTOR
 import cdn_qualification as EVIDENCE
-from collect_cdn_product_metrics import EVENT, NATIVE_TARGET, TARGET, VERIFIED_GIT_EVENT
+from collect_cdn_product_metrics import EVENT, NATIVE_TARGET, TARGET, VERIFIED_GIT_EVENT, measure, measure_native
+from test_cdn_qualification import cli_candidate
 from test_cdn_transport_qualification import fixture
 
 
 APPROVAL = "a" * 64
 ISSUER = "b" * 64
 REPOSITORY = "c" * 64
-BODY = b"verified managed content"
+BODY = b"m" * EVIDENCE.GIT_PAYLOAD_SIZE
 
 
 def digest(content):
@@ -40,6 +41,7 @@ class CdnManagedIssuerQualificationTests(unittest.TestCase):
     def inputs(self, root, edge):
         config = fixture(edge, "private")
         config["scope"] = config["scope"].replace("/direct", "/managed")
+        config["managed_url"] = "crab://issuer.example/org/models"
         components = dict.fromkeys(EVIDENCE.deployment_component_names(edge, "private"), "e" * 64)
         policy_digest = EVIDENCE.deployment_policy_digest(edge, "private", components)
         config["deployment_policy_sha256"] = policy_digest
@@ -51,22 +53,26 @@ class CdnManagedIssuerQualificationTests(unittest.TestCase):
         write_json(root / "policy.json", provenance | {
             "schema": "crab.cdn-deployment-policy/v1", "deployment_policy_sha256": policy_digest, "components": components,
         })
-        report = provenance | {"platform": "linux-x86_64", "product_action": {
-            "name": "git-fetch", "observed_sha256": digest(BODY), "observed_bytes": len(BODY), "observed_edge_gets": 1,
-        }}
+        platform = "linux-x86_64"
+        build = cli_candidate(config["scope"], platform) | {"source_sha": provenance["source_sha"]}
+        report = provenance | {"platform": platform}
         write_json(root / "observations.json", report)
         registration = {key: provenance[key] for key in ("scope", "configuration_sha256", "source_sha")} | {
             "schema": "crab.cdn-benchmark/v1", "deployment_policy_sha256": policy_digest,
             "workload": "git-fetch", "samples": 30, "p95_budget_ms": 100, "cost_budget_microusd": 100,
             "regions": {"near": "near-origin", "distant": "distant-edge"},
             "scoped_view_sha256": "d" * 64, "cache_reuse_sha256": "d" * 64, "rotation_overlap_policy_sha256": "d" * 64,
-            "managed_issuer": {"identity_sha256": ISSUER, "version": "1.2.3", "approval_sha256": APPROVAL},
+            "candidate": build, "viewer_binding_sha256": "d" * 64,
+            "managed_issuer": {"identity_sha256": ISSUER, "version": "1.2.3", "approval_sha256": APPROVAL,
+                               "repository_sha256": REPOSITORY},
         }
         benchmarks = write_json(root / "benchmarks.json", {f"{config['scope']}/linux-x86_64": registration})
         identity = {"issuer_identity_sha256": ISSUER, "issuer_version": "1.2.3", "repository_sha256": REPOSITORY}
         origin, prefix, viewer = (
             digest(config[key].encode()) for key in ("native_origin", "fixture_prefix", "base_url")
         )
+        (root / "git-product").mkdir()
+        (root / "traces").mkdir()
         for role in COLLECTOR.ROLES:
             directory = root / role
             directory.mkdir()
@@ -96,7 +102,29 @@ class CdnManagedIssuerQualificationTests(unittest.TestCase):
             if ok:
                 (directory / "payload").write_bytes(BODY)
             (directory / "exit-code").write_text("0\n" if ok else "1\n")
-            (directory / "stderr.jsonl").write_text("\n".join(json.dumps(trace) for trace in traces) + "\n")
+            lines = [json.dumps(trace).encode() for trace in traces]
+            (directory / "stderr.jsonl").write_bytes(b"\n".join(lines) + b"\n")
+            client = provenance | {"platform": platform, "candidate": build, "publication_sha256": "d" * 64}
+            if ok:
+                responses = {}
+                metrics = measure(lines, config["scope"], edge_responses=responses)
+                client |= metrics | {
+                    "schema": "crab.cdn-git-fetch/v1", "name": "git-fetch", "arm": "edge" if version == 2 else "origin",
+                    "expected_sha256": digest(BODY), "observed_sha256": digest(BODY),
+                    "expected_bytes": len(BODY), "observed_bytes": len(BODY),
+                    "native_writes": 1, "visible_new_ref": True, "publication_oid": "f" * 40,
+                    "started_at_unix_ms": 2, "finished_at_unix_ms": 3, "elapsed_ms": 1,
+                    "managed_grant": COLLECTOR.grant_fingerprints(traces[1]["fields"]),
+                    "reader": {"origin_sha256": origin, "prefix_sha256": digest((config["fixture_prefix"] + "/").encode()),
+                               "binding_sha256": registration["viewer_binding_sha256"] if version == 2 else "",
+                               "public_export_sha256": "", "cache_root_sha256": str(version) * 64},
+                    "edge_responses": responses, "native_traffic": measure_native(lines, config["scope"]),
+                }
+                path = "git-product/fetch.json" if version == 2 else "traces/rollback.json"
+                write_json(root / path, client)
+            else:
+                client["rejected"] = True
+            write_json(directory / "client.json", client)
         return [
             "probe", "--fixture", str(root / "fixture.json"), "--configuration-sha256", fixture_digest,
             "--benchmarks", str(root / "benchmarks.json"), "--benchmarks-sha256", benchmarks,
@@ -116,11 +144,14 @@ class CdnManagedIssuerQualificationTests(unittest.TestCase):
                 self.assertEqual([operations[role]["status"] for role in COLLECTOR.ROLES], [201, 201, 403, 201])
                 self.assertEqual(operations["approved_v2"]["edge_payload_requests"], 1)
                 self.assertEqual(operations["v1_peer"]["native_payload_reads"], 1)
-                self.assertNotIn(REPOSITORY, json.dumps(trace))
+                self.assertEqual(trace["repository_sha256"], REPOSITORY)
+                self.assertEqual(trace["product_reads"]["approved_v2"], digest((root / "git-product/fetch.json").read_bytes()))
 
     def test_managed_rejection_cannot_replay_or_start_payload_traffic(self):
         for case, reason in (("replay", "one observed grant POST"), ("origin", "must read no edge or native payload"),
-                             ("succeeded", "did not exit with the expected result")):
+                             ("succeeded", "did not exit with the expected result"),
+                             ("replaced-read", "differs from the retained Git fetch or rollback"),
+                             ("changed-publication", "different publication, build or attempt")):
             with self.subTest(case=case), TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 args = self.inputs(root, "cloudfront")
@@ -133,8 +164,14 @@ class CdnManagedIssuerQualificationTests(unittest.TestCase):
                     with logs.open("a") as output:
                         output.write(json.dumps(event(NATIVE_TARGET, message="Native object store read", provider="s3",
                                                       method="get", status=0, bytes=0)) + "\n")
-                else:
+                elif case == "succeeded":
                     (rejected / "exit-code").write_text("0\n")
+                elif case == "replaced-read":
+                    with (root / "traces/rollback.json").open("ab") as artifact:
+                        artifact.write(b"\n")
+                else:
+                    output = rejected / "client.json"
+                    write_json(output, json.loads(output.read_bytes()) | {"publication_sha256": "a" * 64})
                 with patch.object(sys, "argv", args), redirect_stderr(StringIO()) as error:
                     self.assertEqual(COLLECTOR.main(), 1)
                 self.assertIn(reason, error.getvalue())

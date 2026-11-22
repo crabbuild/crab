@@ -252,6 +252,7 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
                     self.assertEqual(hashlib.sha256((directory / "payload").read_bytes()).hexdigest(), result["observed_sha256"])
                 else:
                     self.assertTrue(result["rejected"])
+                self.assertEqual(json.loads((directory / "client.json").read_bytes()), result)
         self.assertTrue(self.run_phase("retire")["ref_retired"])
 
     def test_managed_workload_rejects_a_locator_with_an_unapproved_selector(self) -> None:

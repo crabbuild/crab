@@ -96,7 +96,7 @@ def approved_fixture(path: Path, configuration_sha256: str, *, operator_binding:
         else:
             expected |= {"unrelated_control", "viewer_issuer"} & fixture.keys()
             if (consumer, family, profile) == ("cli", "git", "managed"):
-                expected |= {"managed_url"} & fixture.keys()
+                expected.add("managed_url")
         expected |= {"deployment"} & fixture.keys()
     fields(fixture, expected, "CDN fixture")
     if not operator_binding:

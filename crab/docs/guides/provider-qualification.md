@@ -823,7 +823,10 @@ Run the same product read in a fresh process and cache for each role.
 
 For private CLI Git, include the exact managed URL (for example,
 `crab://issuer.example/org/repo`) as `managed_url` in the approved fixture JSON.
-Leave `view_suffix` empty. Publish the fixture once with
+Leave `view_suffix` empty. Register `managed_issuer.repository_sha256` as the
+SHA-256 of the 16 UUID bytes returned by authenticated managed resolution.
+The native repository's own UUID and epoch are observed independently.
+Publish the fixture once with
 `run_cdn_git_workload.py publish` and use that receipt across all four arms.
 The worker publishes and retires the temporary ref through the native bucket
 and runs ordinary `git fetch` against the managed URL. The guard checks the
@@ -844,8 +847,12 @@ invocation.
 
 The v1 policy must return a direct native grant for the same physical
 repository. Each action creates its role directory with the allowlisted
-trace in `stderr.jsonl`, the Git process status in `exit-code`, and the
-verified `payload` for a successful fetch. For another managed consumer,
+trace in `stderr.jsonl`, the Git process status in `exit-code`, the redacted
+`client.json`, and the verified `payload` for a successful fetch.
+Copy the exact captured `approved_v2/client.json` to `git-product/fetch.json`
+and `v1_peer/client.json` to `traces/rollback.json` in the measured row.
+Use those same bytes when collecting the product fetch's provider viewer
+requests. For another managed consumer,
 capture those same files from its normal product operation with
 `CRAB_LOG=crab_auth::managed::cdn=debug,crab_storage::cdn::transfer=debug,crab_storage::native_read=debug`.
 
@@ -864,9 +871,10 @@ per role. It checks the issuer, logical repository and native placement,
 then derives the four outcomes from the observed HTTP status, client's
 decision, transfer events and verified product bytes. Keep the working logs
 and payload files on the protected worker. Retain the redacted issuer trace
-with the row. Managed release promotion still requires the production
-issuer run and a product-specific verifier for the corresponding managed
-consumer and regional runs.
+with the row. For managed CLI Git, release verification matches the exact
+fetch and rollback digests and their transfer counters. A protected production
+issuer run is still required. Other managed consumers need their own
+product-specific verifier.
 
 ### Measure CDN transfers during product actions
 
@@ -1526,6 +1534,17 @@ measures LFS payload delivery and its native metadata reads.
 Assembly and release verification match the native origin and repository
 prefix of every CLI arm to the independently verified product fixture.
 
+For private managed Git, use the registered managed URL for the timed reads.
+Use the approved v2 grant for edge and warm-local arms and the direct v1
+grant for the origin arm. The worker records the observed issuer, repository,
+and grant version in each result. Use a fresh commit per pair and collect
+the independent `provider-published.json` with
+`collect_cdn_git_native_ref.py published` before the first arm.
+Retain that observation beside the pair's publication receipt.
+All pairs must observe the same native repository and epoch as the product
+fetch and finish before fixture cleanup. To check the retained pairs locally
+with `collect_cdn_git_performance.py`, pass `--managed-row` and `--fixture`.
+
 For public benchmarks, stage the immutable objects for every benchmark pair
 before sealing the current export approval. Use that same approved export
 for the timed cold edge, warm edge, and warm-local arms. The release verifier
@@ -1764,7 +1783,7 @@ Use a new output directory under an existing scratch directory. The assembler
 checks coverage for the compiled release policy, verifies each report and its
 traces, then exposes the artifact directory. It retains the approved benchmark
 file, the native provider reports, and the verified CDN reports and trace files.
-Direct CLI and SDK workload rows also retain the bounded, redacted product
+CLI and SDK workload rows also retain the bounded, redacted product
 and paired benchmark records. Release verification checks their build
 identity and recomputes the summaries from the retained measurements.
 

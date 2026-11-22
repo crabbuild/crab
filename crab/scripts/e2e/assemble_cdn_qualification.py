@@ -22,7 +22,8 @@ from cdn_qualification import (  # noqa: E402
     derive_git_blob_public_transition, derive_service_public_transition, fields,
     is_direct_sdk_git_scope, is_direct_xorb_read_scope, is_direct_service_scope,
     matches, read_trace, release_scopes, require,
-    required_check_names, required_platform_rows, requires_cli_workload, requires_desktop_workload, scope_parts, verify_bundle_row,
+    is_managed_cli_git_scope, required_check_names, required_platform_rows, requires_cli_workload, requires_desktop_workload,
+    scope_parts, verify_bundle_row,
     verify_cleanup_trace, verify_deployment_policy_trace,
 )
 from public_inventory import ExportError, read_document
@@ -123,6 +124,7 @@ def assemble_bundle(
                 native_report.write_bytes((origin_inputs / provider / "report.json").read_bytes())
 
             cli_workload = requires_cli_workload(scope)
+            managed_git = is_managed_cli_git_scope(scope)
             sdk_workload = is_direct_sdk_git_scope(scope)
             xorb_read = is_direct_xorb_read_scope(scope)
             require(isinstance(registration, dict) and matches(SHA256, registration.get("configuration_sha256")),
@@ -138,7 +140,7 @@ def assemble_bundle(
             )
             require(measured["schema"] == "crab.cdn-observations/v1", "invalid CDN observations schema")
             names = required_check_names(access, profile)
-            spec = benchmark_registration(registration) if sdk_workload or xorb_read or desktop or service else registration
+            spec = benchmark_registration(registration) if cli_workload or sdk_workload or xorb_read or desktop or service else registration
             canary = canaries.get((scope, registration["configuration_sha256"]), {})
             outcomes = measured.pop("check_results")
             require(isinstance(outcomes, dict) and names - canary.keys() <= outcomes.keys() <= names,
@@ -191,6 +193,8 @@ def assemble_bundle(
                 native_target = {"origin_sha256": origin, "prefix_sha256": cleanup["prefix_sha256"]}
             if cli_workload:
                 registered_read = {key: registration.get(key) for key in ("candidate", "viewer_binding_sha256")}
+                if managed_git:
+                    registered_read["managed_issuer"] = spec["managed_issuer"]
                 product = collect_git_product_action(
                     inputs / row / GIT_PRODUCT_DIR, measured | registered_read, rollback,
                     retain=destination / GIT_PRODUCT_DIR, cleanup_at=cleanup_at, native_origin_sha256=origin,
@@ -228,7 +232,7 @@ def assemble_bundle(
                     inputs / row / GIT_BENCHMARK_DIR, registration, platform, run_id, attempt,
                     retain=destination / GIT_BENCHMARK_DIR, native_target=native_target,
                     service_row=destination if service else None, product_request_ids=product_request_ids,
-                    desktop_product=desktop_product,
+                    desktop_product=desktop_product, managed_row=destination if managed_git else None,
                 )
             report = measured | {
                 "schema": SCHEMA,

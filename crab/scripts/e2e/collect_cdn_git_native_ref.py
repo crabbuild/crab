@@ -42,7 +42,7 @@ def main() -> int:
         native_publication = is_direct_sdk_git_scope(scope) or is_direct_desktop_git_scope(scope) or is_direct_service_scope(scope)
         require(requires_cli_workload(scope) or (native_publication and fixture["view_suffix"] == "")
                 or is_direct_xorb_read_scope(scope),
-                "native ref observation needs a supported direct CLI, SDK, desktop, or service publication workload")
+                "native ref observation needs a supported CLI, SDK, desktop, or service publication workload")
         provenance = {
             "scope": fixture["scope"], "configuration_sha256": args.configuration_sha256, "source_sha": args.source_sha,
             "workflow_run_id": args.run_id, "workflow_run_attempt": args.run_attempt, "platform": runner_platform(),
