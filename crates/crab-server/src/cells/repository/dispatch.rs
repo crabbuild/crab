@@ -53,6 +53,9 @@ pub(in crate::cells) fn dispatch_mutation(
         mention_settings::Set::ID => invoke_mutation::<mention_settings::Set>(context, input),
         watches::Set::ID => invoke_mutation::<watches::Set>(context, input),
         watches::SetThread::ID => invoke_mutation::<watches::SetThread>(context, input),
+        watches::UnsubscribeDiscussions::ID => {
+            invoke_mutation::<watches::UnsubscribeDiscussions>(context, input)
+        }
         watches::Dismiss::ID => invoke_mutation::<watches::Dismiss>(context, input),
         watches::AcknowledgeRelease::ID => {
             invoke_mutation::<watches::AcknowledgeRelease>(context, input)

@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { Link } from "@/components/navigation/link";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Spinner } from "@/components/ui/spinner";
 import {
   NativeSelect,
@@ -8,6 +9,8 @@ import {
 } from "@/components/ui/native-select";
 import { navigate, useRequest } from "@/lib/api";
 import type { Address } from "./actions";
+import { BulkSubscriptions, discussionKey } from "./bulk-subscriptions";
+import { refreshNotificationBadge } from "./index";
 import {
   DiscussionWatchButton,
   discussionModeLabel,
@@ -105,7 +108,7 @@ export function DiscussionSubscriptions({
 }
 
 function rowKey({ repository, subject }: Subscription) {
-  return `${repository.id}:${subject.kind}:${subject.number}`;
+  return discussionKey({ repository_id: repository.id, subject });
 }
 
 function follows({ mode }: DiscussionPreference) {
@@ -125,6 +128,7 @@ function SubscriptionList({
   const [earlier, setEarlier] = useState<Subscription[]>([]);
   const [saved, setSaved] = useState<Record<string, DiscussionPreference>>({});
   const [announcement, setAnnouncement] = useState("");
+  const [selected, setSelected] = useState<Set<string>>(new Set());
   const list = useRef<HTMLDivElement>(null);
   const query = new URLSearchParams();
   if (after) query.set("after", after);
@@ -134,9 +138,21 @@ function SubscriptionList({
   const rows = [...earlier, ...(page.data?.items ?? [])].filter((item) =>
     follows(saved[rowKey(item)] ?? item.preference),
   );
+  const selection = rows
+    .filter((item) => selected.has(rowKey(item)))
+    .map((item) => ({
+      repository_id: item.repository.id,
+      subject: item.subject,
+      version: (saved[rowKey(item)] ?? item.preference).version,
+    }));
+  const loaded = rows.slice(0, 50);
+  const allSelected =
+    loaded.length > 0 && loaded.every((item) => selected.has(rowKey(item)));
+
   function startOver() {
     setEarlier([]);
     setSaved({});
+    setSelected(new Set());
     setAfter(undefined);
     page.retry();
   }
@@ -153,6 +169,37 @@ function SubscriptionList({
         {announcement}
       </p>
       {rows.length > 0 && (
+        <div className="flex flex-wrap items-center gap-3 rounded-lg border px-4 py-2">
+          <label className="flex items-center gap-2 text-sm">
+            <Checkbox
+              checked={
+                allSelected ? true : selection.length ? "indeterminate" : false
+              }
+              onCheckedChange={() =>
+                setSelected(new Set(allSelected ? [] : loaded.map(rowKey)))
+              }
+            />
+            {rows.length > 50
+              ? "Select first 50 loaded subscriptions"
+              : "Select all loaded subscriptions"}
+          </label>
+          {selection.length > 0 && (
+            <span className="text-sm text-muted-foreground">
+              {selection.length} selected
+            </span>
+          )}
+          <BulkSubscriptions
+            csrf={csrf}
+            selection={selection}
+            onFinished={() => {
+              refreshNotificationBadge();
+              startOver();
+              list.current?.focus();
+            }}
+          />
+        </div>
+      )}
+      {rows.length > 0 && (
         <ul className="divide-y overflow-hidden rounded-lg border">
           {rows.map((item) => {
             const { repository: repo, subject, title, state, muted } = item;
@@ -165,23 +212,38 @@ function SubscriptionList({
                 key={key}
                 className="flex flex-wrap items-center justify-between gap-3 px-4 py-3"
               >
-                <div className="min-w-0">
-                  <Link
-                    className="break-words font-medium hover:underline"
-                    href={`/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}/${isIssue ? "issues" : "pull"}/${subject.number}?${new URLSearchParams({ repository_id: repo.id })}`}
-                  >
-                    {title}
-                  </Link>
-                  <div className="break-words text-sm text-muted-foreground">
-                    {repo.owner}/{repo.name} {number} ·{" "}
-                    {isIssue ? "Issue" : "Pull request"} ·{" "}
-                    {state === "open"
-                      ? "Open"
-                      : state === "closed"
-                        ? "Closed"
-                        : "Merged"}{" "}
-                    · {discussionModeLabel(preference.mode)}
-                    {muted && " · Repository muted"}
+                <div className="flex min-w-0 items-start gap-3">
+                  <Checkbox
+                    aria-label={`Select ${repo.owner}/${repo.name} ${isIssue ? "issue" : "pull request"} ${number}`}
+                    checked={selected.has(key)}
+                    disabled={!selected.has(key) && selection.length >= 50}
+                    onCheckedChange={(checked) =>
+                      setSelected((current) => {
+                        const next = new Set(current);
+                        if (checked === true && next.size < 50) next.add(key);
+                        if (checked !== true) next.delete(key);
+                        return next;
+                      })
+                    }
+                  />
+                  <div className="min-w-0">
+                    <Link
+                      className="break-words font-medium hover:underline"
+                      href={`/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}/${isIssue ? "issues" : "pull"}/${subject.number}?${new URLSearchParams({ repository_id: repo.id })}`}
+                    >
+                      {title}
+                    </Link>
+                    <div className="break-words text-sm text-muted-foreground">
+                      {repo.owner}/{repo.name} {number} ·{" "}
+                      {isIssue ? "Issue" : "Pull request"} ·{" "}
+                      {state === "open"
+                        ? "Open"
+                        : state === "closed"
+                          ? "Closed"
+                          : "Merged"}{" "}
+                      · {discussionModeLabel(preference.mode)}
+                      {muted && " · Repository muted"}
+                    </div>
                   </div>
                 </div>
                 <DiscussionWatchButton
@@ -191,7 +253,14 @@ function SubscriptionList({
                   label={`Notification settings for ${repo.owner}/${repo.name} ${isIssue ? "issue" : "pull request"} ${number}`}
                   onSaved={(updated) => {
                     setSaved((current) => ({ ...current, [key]: updated }));
-                    if (!follows(updated)) list.current?.focus();
+                    if (!follows(updated)) {
+                      setSelected((current) => {
+                        const next = new Set(current);
+                        next.delete(key);
+                        return next;
+                      });
+                      list.current?.focus();
+                    }
                     setAnnouncement(
                       follows(updated)
                         ? `Updated subscription for ${title}.`

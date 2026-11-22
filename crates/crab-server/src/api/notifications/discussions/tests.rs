@@ -228,3 +228,261 @@ async fn native_browser_manages_quiet_discussion_subscriptions() {
     drop(browser);
     h.close().await;
 }
+
+const BULK: &str = "/api/notifications/subscriptions/unsubscribe";
+
+#[tokio::test]
+async fn bulk_discussion_unsubscribe_preserves_newer_follows_and_saved_activity() {
+    let h = Harness::new(false).await;
+    for name in ["library", "restricted"] {
+        h.add_repository(name).await;
+    }
+    let alice = h.login().await;
+    *h.provider.mode.lock().await = "member".into();
+    let bob = h.login().await;
+    let id = |name: &str| {
+        h.server
+            .repositories
+            .get(&("team".into(), name.into()))
+            .unwrap()
+            .id
+    };
+    let put = async |cookie: &str,
+                     repository: &str,
+                     method: Method,
+                     suffix: &str,
+                     body: serde_json::Value| {
+        let session = h.json("/api/session", cookie).await;
+        h.http
+            .request(
+                method,
+                format!("{}/api/repos/team/{repository}/{suffix}", h.origin),
+            )
+            .header("cookie", cookie)
+            .header("origin", &h.origin)
+            .header("x-csrf-token", session["csrf"].as_str().unwrap())
+            .header("x-crab-repository-id", id(repository).to_string())
+            .json(&body)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+    };
+    for (repository, number) in [
+        ("private", 1),
+        ("private", 2),
+        ("library", 1),
+        ("restricted", 1),
+    ] {
+        put(&alice, repository, Method::POST, "issues", json!({
+            "request_id": Uuid::now_v7(), "title": format!("Quiet {repository} {number}"), "body": ""
+        })).await;
+        put(
+            &bob,
+            repository,
+            Method::PUT,
+            &format!("issues/{number}/subscription"),
+            json!({
+                "mode":"follow","version":0
+            }),
+        )
+        .await;
+    }
+
+    let comment = async |text: &str| {
+        put(
+            &alice,
+            "private",
+            Method::POST,
+            "issues/1/comments",
+            json!({"request_id":Uuid::now_v7(),"body":text}),
+        )
+        .await;
+        h.deliver_notifications("team", "private").await;
+    };
+    comment("Existing inbox activity").await;
+    let notice = h.json("/api/notifications", &bob).await["items"][0].clone();
+    h.write(
+        Method::PUT,
+        &format!(
+            "/api/notifications/{}/state",
+            notice["id"].as_str().unwrap()
+        ),
+        &bob,
+        json!({"repository_id":id("private"),"expected":notice["updated"],"action":{"save":true}}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let saved_before = h.json("/api/notifications?view=saved", &bob).await;
+    assert_eq!(saved_before["items"][0]["id"], notice["id"]);
+    put(
+        &bob,
+        "private",
+        Method::PUT,
+        "issues/2/subscription",
+        json!({"mode":"state_changes","version":1}),
+    )
+    .await;
+    h.server
+        .catalog()
+        .unwrap()
+        .set_members(
+            "team",
+            "restricted",
+            vec![RepositoryMember {
+                subject: "alice-id".into(),
+                name: "Alice".into(),
+                access: RepositoryAccess::Admin,
+            }],
+            true,
+        )
+        .await
+        .unwrap();
+
+    let selection = |repository: &str, number| {
+        json!({
+            "repository_id":id(repository),"subject":{"kind":"issue","number":number},"version":1
+        })
+    };
+    let batch = json!({"items":[
+        selection("private",1), selection("library",1), selection("private",2),
+        selection("restricted",1), selection("library",99)
+    ]});
+    assert_eq!(
+        h.http
+            .post(format!("{}{BULK}", h.origin))
+            .header("cookie", &bob)
+            .header("origin", &h.origin)
+            .json(&batch)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        h.write(
+            Method::POST,
+            BULK,
+            &bob,
+            json!({"items":[selection("private",1),selection("private",1)]})
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+
+    let status = |repository: &str, number, status: &str| {
+        json!({
+            "repository_id":id(repository),"subject":{"kind":"issue","number":number},"status":status
+        })
+    };
+    let expected = json!({"items":[
+        status("private",1,"unsubscribed"),status("library",1,"unsubscribed"),
+        status("private",2,"changed"),status("restricted",1,"unavailable"),status("library",99,"unavailable")
+    ]});
+    let submit = async || {
+        h.write(Method::POST, BULK, &bob, batch.clone())
+            .await
+            .error_for_status()
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap()
+    };
+    assert_eq!(submit().await, expected);
+    assert_eq!(submit().await, expected);
+    let page = h.json(LIST, &bob).await;
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        page["items"][0]["preference"],
+        json!({"mode":"state_changes","version":2})
+    );
+    comment("Ordinary update after unsubscribe").await;
+    assert_eq!(
+        h.json("/api/notifications?view=saved", &bob).await,
+        saved_before
+    );
+
+    put(
+        &bob,
+        "private",
+        Method::PUT,
+        "issues/1/subscription",
+        json!({"mode":"follow","version":2}),
+    )
+    .await;
+    assert_eq!(submit().await["items"][0]["status"], "changed");
+    assert_eq!(
+        h.json(&format!("{REPO}/issues/1/subscription"), &bob).await,
+        json!({"mode":"follow","version":3})
+    );
+    h.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires agent-browser and the built embedded UI; uses isolated real OIDC/native Cells"]
+async fn native_browser_unsubscribes_selected_quiet_discussions() {
+    let h = Harness::new(false).await;
+    let alice = h.login().await;
+    issue(&h, &alice, "First followed discussion").await;
+    issue(&h, &alice, "Second followed discussion").await;
+
+    let browser = Browser::new("unfollow-bulk");
+    browser
+        .run(&[
+            "open",
+            &format!("{}/-/notifications/subscriptions", h.origin),
+        ])
+        .await;
+    let click = async |role: &str, name: &str| {
+        browser.run(&["wait", "--text", name]).await;
+        browser
+            .run(&["find", "role", role, "click", "--name", name, "--exact"])
+            .await;
+    };
+    click("button", "Continue to sign in").await;
+    click("checkbox", "Select all loaded subscriptions").await;
+    click("button", "Unsubscribe selected").await;
+    browser
+        .run(&["wait", "--text", "Unsubscribe from discussions"])
+        .await;
+    assert_eq!(
+        h.json(LIST, &alice).await["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    click("button", "Unsubscribe").await;
+    browser
+        .run(&["wait", "--text", "Unsubscribed from 2 discussions."])
+        .await;
+    for number in 1..=2 {
+        assert_eq!(
+            h.json(&format!("{REPO}/issues/{number}/subscription"), &alice)
+                .await,
+            json!({"mode":"unsubscribed","version":2})
+        );
+    }
+    click("button", "Close").await;
+    browser
+        .run(&[
+            "wait",
+            "--text",
+            "No discussion subscriptions match this view.",
+        ])
+        .await;
+    browser.run(&["reload"]).await;
+    browser
+        .run(&[
+            "wait",
+            "--text",
+            "No discussion subscriptions match this view.",
+        ])
+        .await;
+    drop(browser);
+    h.close().await;
+}

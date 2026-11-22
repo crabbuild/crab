@@ -356,8 +356,10 @@ and mute state before revealing existing notices. Issue and pull request
 overrides use typed subject addresses. The subscriptions view walks canonical
 issue and pull request keys and probes the account's current thread preference
 in the same Repository transaction. Each native read examines at most 32
-discussions. Existing follows require no index preparation. The watcher read
-merges bounded pages
+discussions. Existing follows require no index preparation. Bulk unsubscribe
+groups changes by Repository Cell, runs each captured version through the
+canonical setter, and leaves earlier inbox activity in place. The watcher
+read merges bounded pages
 from the repository and subject indexes, applies the private override to the
 committed event, and emits each eligible actor once. The discussion sidebar
 updates future activity delivery. Inbox unsubscribe verifies the observed

@@ -1851,7 +1851,7 @@ owner label does not acquire ownership.
 | Account notification inbox | `GET /api/notifications`, `GET /api/notifications/unread`, `PUT /api/notifications/{id}/state`, `POST /api/notifications/bulk`, `POST /api/notifications/unsubscribe` |
 | Watched repositories | `GET /api/notifications/watched`, `POST /api/notifications/watched/unwatch` |
 | Repository notification preference | `GET /api/repos/{owner}/{name}/subscription`, `PUT /api/repos/{owner}/{name}/subscription` |
-| Discussion subscriptions | `GET /api/notifications/subscriptions` |
+| Discussion subscriptions | `GET /api/notifications/subscriptions`, `POST /api/notifications/subscriptions/unsubscribe` |
 | Discussion notification preference | `GET` and `PUT /api/repos/{owner}/{name}/issues/{number}/subscription` or `/pulls/{number}/subscription` |
 | Stable discussion links | `GET /api/discussion-references/{repository_id}/{kind}/{number}` |
 | Discussion attachments | `POST /api/repos/{owner}/{name}/discussion-attachments`, `GET /api/discussion-attachments/{repository_id}/{id}` |
@@ -2679,6 +2679,18 @@ same filters. A page can be empty with more discussions to scan. The server
 checks repository grants before reading preferences and refreshes them before
 returning titles or continuation positions. Edits use the existing
 discussion subscription endpoints.
+
+Select up to 50 loaded rows and choose **Unsubscribe selected** to stop
+following several discussions. Selection spans loaded pages and repositories.
+Earlier inbox activity keeps its read and filing state.
+
+`POST /api/notifications/subscriptions/unsubscribe` accepts `items` with
+each row's `repository_id`, typed `subject`, and captured preference `version`.
+It returns those addresses with `unsubscribed`, `changed`, `unavailable`, or
+`unconfirmed` for each item. The request requires CSRF protection and current
+repository read access. Eligible changes commit within each Repository Cell.
+Newer preferences survive. Retry unconfirmed items with their original
+versions to recover a possible completed write.
 
 Use **Notification settings** in the issue or pull request sidebar for a private
 override. Each discussion starts with the repository setting (`inherit`).

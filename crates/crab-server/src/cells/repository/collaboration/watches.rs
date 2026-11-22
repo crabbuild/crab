@@ -11,7 +11,9 @@ use crate::cells::{
 };
 
 mod discussions;
-pub(crate) use discussions::{DiscussionQuery, ListDiscussions};
+pub(crate) use discussions::{
+    DiscussionQuery, ListDiscussions, SelectedThread, ThreadSelection, UnsubscribeDiscussions,
+};
 
 mod inbox;
 pub(crate) use inbox::{

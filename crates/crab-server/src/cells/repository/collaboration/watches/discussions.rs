@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    CLASS, IdentityKey, Mode, Read, Result, Subject, SubjectKind, ThreadPreference, Transaction,
-    identity_key, subscription, thread_subscription,
+    CLASS, IdentityKey, Mode, Mutation, Read, Result, Subject, SubjectKind, ThreadPreference,
+    Transaction, identity_key, subscription, thread_subscription,
 };
 use crate::cells::{
     Error,
@@ -110,5 +110,66 @@ impl Read for ListDiscussions {
             next,
             muted: subscription(context, actor)?.preference.mode == Mode::Muted,
         })
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SelectedThread {
+    pub subject: Subject,
+    pub version: u64,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ThreadSelection {
+    pub actor: IdentityKey,
+    pub items: Vec<SelectedThread>,
+}
+
+pub(crate) struct UnsubscribeDiscussions;
+
+impl Mutation for UnsubscribeDiscussions {
+    const CLASS: &'static str = CLASS;
+    const ID: u32 = 427;
+    type Input = ThreadSelection;
+    type Output = Vec<super::ThreadOutcome>;
+
+    fn execute(
+        context: &mut Transaction<'_>,
+        input: ThreadSelection,
+    ) -> Result<super::MutationResult<Self::Output>> {
+        use super::{MutationResult, SetThread, ThreadChange, ThreadMode};
+
+        let mut subjects = std::collections::BTreeSet::new();
+        if input.items.is_empty()
+            || input.items.len() > 50
+            || input
+                .items
+                .iter()
+                .any(|item| item.version == 0 || !subjects.insert(item.subject.key()))
+        {
+            return Err(Error::Invalid(
+                "Discussion subscription selection is invalid",
+            ));
+        }
+        let mut outcomes = Vec::with_capacity(input.items.len());
+        for item in input.items {
+            let change = ThreadChange {
+                subject: item.subject,
+                actor: input.actor.clone(),
+                desired: ThreadPreference {
+                    mode: ThreadMode::Unsubscribed,
+                    version: item.version,
+                },
+            };
+            // Keep the single-thread setter's rollback boundary for rejected
+            // items. Successful selections share the Repository commit.
+            let outcome = context.apply(|context| SetThread::execute(context, change))?;
+            outcomes.push(match outcome {
+                MutationResult::Success(outcome) | MutationResult::Rejected(outcome) => outcome,
+            });
+        }
+        Ok(MutationResult::Success(outcomes))
     }
 }

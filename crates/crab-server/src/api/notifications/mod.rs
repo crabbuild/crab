@@ -61,6 +61,10 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
                 .route("/api/notifications/bulk", post(state::bulk))
                 .route("/api/notifications/unsubscribe", post(unsubscribe::apply))
                 .route(
+                    "/api/notifications/subscriptions/unsubscribe",
+                    post(discussions::bulk::apply),
+                )
+                .route(
                     "/api/notifications/watched/unwatch",
                     post(watched::bulk::apply),
                 )

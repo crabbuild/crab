@@ -19,6 +19,8 @@ use crate::{
     server::Server,
 };
 
+pub(super) mod bulk;
+
 const REPOSITORIES_PER_PAGE: usize = 4;
 
 #[derive(Deserialize)]
