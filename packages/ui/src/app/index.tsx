@@ -31,6 +31,11 @@ import {
 import { ProfileSettings, UserProfile } from "@/features/profile";
 import { LogOutIcon, UserRoundIcon } from "lucide-react";
 import { RepositoryPage } from "@/features/repository/page";
+import {
+  DiscussionCodeTheme,
+  DiscussionCsrf,
+  DiscussionRepository,
+} from "@/components/discussion/repository-context";
 import type { Session } from "@/lib/contracts";
 import { navigate, useLocation, useRequest, type Repository } from "@/lib/api";
 import {
@@ -115,7 +120,8 @@ export function App() {
     };
   }, [codeTheme, resolved]);
   const url = new URL(location, window.location.origin);
-  const profileSettings = url.pathname === "/-/profile";
+  const savedReplies = url.pathname === "/-/settings/saved-replies";
+  const profileSettings = url.pathname === "/-/profile" || savedReplies;
   const actorId =
     /^\/-\/users\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(
       url.pathname,
@@ -187,8 +193,12 @@ export function App() {
       setSigningOut(false);
     }
   }
+  const expectedRepository = url.searchParams.get("repository_id");
   const repo = pageCatalog.data?.repositories.find(
-    (repo) => repo.owner === route?.owner && repo.name === route.name,
+    (repo) =>
+      repo.owner === route?.owner &&
+      repo.name === route.name &&
+      (expectedRepository === null || expectedRepository === repo.id),
   );
   useEffect(() => {
     document.title = repo
@@ -411,6 +421,7 @@ export function App() {
               <ProfileSettings
                 csrf={session.data.csrf ?? ""}
                 suggestedName={session.data.user?.name ?? ""}
+                section={savedReplies ? "saved-replies" : "profile"}
               />
             ) : actorId ? (
               <UserProfile id={actorId} />
@@ -481,19 +492,30 @@ export function App() {
                       </div>
                     </div>
                   ) : repo ? (
-                    <RepositoryPage
-                      key={repo.id}
-                      repo={repo}
-                      url={url}
-                      theme={resolved}
-                      codeThemes={codeThemeChoices[codeTheme].themes}
-                      csrf={session.data?.csrf ?? ""}
-                      identity={session.data?.user ?? null}
-                      onRepositoryChanged={() => {
-                        catalog.retry();
-                        repositoryCatalog.retry();
-                      }}
-                    />
+                    <DiscussionRepository.Provider value={repo}>
+                      <DiscussionCsrf.Provider value={session.data?.csrf ?? ""}>
+                        <DiscussionCodeTheme.Provider
+                          value={{
+                            theme: resolved,
+                            codeThemes: codeThemeChoices[codeTheme].themes,
+                          }}
+                        >
+                          <RepositoryPage
+                            key={repo.id}
+                            repo={repo}
+                            url={url}
+                            theme={resolved}
+                            codeThemes={codeThemeChoices[codeTheme].themes}
+                            csrf={session.data?.csrf ?? ""}
+                            identity={session.data?.user ?? null}
+                            onRepositoryChanged={() => {
+                              catalog.retry();
+                              repositoryCatalog.retry();
+                            }}
+                          />
+                        </DiscussionCodeTheme.Provider>
+                      </DiscussionCsrf.Provider>
+                    </DiscussionRepository.Provider>
                   ) : (
                     <div className="notice">
                       <h1>Repository not found</h1>

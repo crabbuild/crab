@@ -117,6 +117,10 @@ pub(crate) enum Error {
     ReleaseAssetIo(#[source] std::io::Error),
     #[error("Release asset transfer admission failed")]
     ReleaseAssetCoordination(#[source] crab_coordination::CoordinationError),
+    #[error("Discussion attachment transfer failed")]
+    AttachmentTransfer(#[source] crate::api::asset_transfer::Error),
+    #[error("Discussion attachment transfer admission failed")]
+    AttachmentAdmission(#[source] crate::transfer_admission::Error),
     #[error("Release tag publication failed")]
     Release(#[source] Box<crate::git::receive::ReceiveError>),
     #[error("Pull request merge failed")]
@@ -181,6 +185,14 @@ pub(crate) fn repository_cell(
 
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
+        if matches!(self, Self::Cell(crate::cells::Error::AttachmentUnavailable)) {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                [("x-crab-write-outcome", "rejected")],
+                Json(json!({"error":{"code":"attachment_unavailable","message":"An attachment is unavailable or the attachment limit was exceeded. Remove it or upload it again."}})),
+            )
+                .into_response();
+        }
         let expected_lock_conflict = matches!(
             &self,
             Self::Merge(error) if matches!(error.as_ref(), crate::git::receive::ReceiveError::Locked)
@@ -406,6 +418,30 @@ impl IntoResponse for Error {
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "asset_too_large",
                 "Release assets must be no larger than 512 MiB",
+            ),
+            Self::AttachmentTransfer(crate::api::asset_transfer::Error::TooLarge) => (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "attachment_too_large",
+                "Attachments must be no larger than 25 MiB",
+            ),
+            Self::AttachmentTransfer(
+                crate::api::asset_transfer::Error::Cancelled
+                | crate::api::asset_transfer::Error::Staging(crate::local_disk::Error::Cancelled),
+            )
+            | Self::AttachmentAdmission(crate::transfer_admission::Error::Cancelled) => (
+                StatusCode::REQUEST_TIMEOUT,
+                "attachment_cancelled",
+                "Attachment transfer was cancelled or timed out",
+            ),
+            Self::AttachmentTransfer(crate::api::asset_transfer::Error::Body(_)) => (
+                StatusCode::BAD_REQUEST,
+                "invalid_attachment_body",
+                "The attachment body could not be read",
+            ),
+            Self::AttachmentTransfer(_) | Self::AttachmentAdmission(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "attachment_unavailable",
+                "Attachment transfers are temporarily unavailable. Retry shortly.",
             ),
             Self::ReleaseAssetCancelled
             | Self::ReleaseStaging(crate::local_disk::Error::Cancelled) => (

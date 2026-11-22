@@ -14,6 +14,7 @@ pub(super) const MAX_DIRTY: usize = 128;
 
 mod projection;
 mod query;
+pub(crate) mod references;
 pub(crate) use query::{Direction, LabelSummary, Page, SearchInput, Sort};
 pub(in crate::cells::repository) use query::{Labelled, Metrics, page};
 mod rebuild;

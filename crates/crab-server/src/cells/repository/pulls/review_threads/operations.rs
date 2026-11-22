@@ -109,6 +109,12 @@ impl Mutation for CreatePullReviewThread {
             pull: record.pull,
             number: record.number,
         };
+        crate::cells::repository::collaboration::attachments::claim(
+            context,
+            target,
+            &record.author,
+            &record.body,
+        )?;
         crate::cells::repository::search::contributions::project(
             context,
             target,
@@ -219,6 +225,12 @@ impl Mutation for UpdatePullReviewThread {
             number: record.number,
         };
         if edited {
+            crate::cells::repository::collaboration::attachments::claim(
+                context,
+                target,
+                &input.actor,
+                &record.body,
+            )?;
             crate::cells::repository::search::contributions::edit(context, target, &record.body)?;
             activity::append(context, target, &input.actor, Action::Updated)?;
         }
@@ -335,6 +347,12 @@ impl Mutation for CreatePullReviewReply {
             thread: record.thread,
             number: record.number,
         };
+        crate::cells::repository::collaboration::attachments::claim(
+            context,
+            target,
+            &record.author,
+            &record.body,
+        )?;
         crate::cells::repository::search::contributions::project(
             context,
             target,
@@ -411,6 +429,12 @@ impl Mutation for UpdatePullReviewReply {
                 thread: record.thread,
                 number: record.number,
             };
+            crate::cells::repository::collaboration::attachments::claim(
+                context,
+                target,
+                &input.actor,
+                &record.body,
+            )?;
             crate::cells::repository::search::contributions::edit(context, target, &record.body)?;
             activity::append(context, target, &input.actor, Action::Updated)?;
         }

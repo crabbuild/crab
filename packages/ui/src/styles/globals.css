@@ -2739,6 +2739,14 @@ main {
 .editor-write {
   padding: --spacing(2);
 }
+.editor-input {
+  position: relative;
+}
+.editor-caret-anchor {
+  position: absolute;
+  width: 1px;
+  pointer-events: none;
+}
 .editor-write textarea {
   display: block;
   min-height: 170px;
@@ -2749,10 +2757,114 @@ main {
   min-height: calc(170px + --spacing(4));
 }
 .editor-help {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: --spacing(1) --spacing(3);
   padding: 0 --spacing(3) --spacing(2.5);
   margin: 0;
   font-size: var(--text-xs);
   color: var(--muted-foreground);
+}
+.editor-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: --spacing(1) --spacing(2);
+  padding: 0 --spacing(2) --spacing(1);
+  color: var(--muted-foreground);
+  font-size: var(--text-xs);
+}
+.editor-attachments ul {
+  flex-basis: 100%;
+}
+.editor-attachments li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: --spacing(1);
+  padding-left: --spacing(2);
+  overflow-wrap: anywhere;
+}
+.discussion-markdown .discussion-attachment-image {
+  max-width: 100%;
+  max-height: 34rem;
+  object-fit: contain;
+}
+.editor-help kbd {
+  font: inherit;
+  font-family: var(--font-mono);
+  color: var(--foreground);
+  background: var(--muted);
+  border-radius: var(--radius-sm);
+  padding: 0 --spacing(1);
+}
+.editor-help kbd:not(:first-child) {
+  margin-left: --spacing(1);
+}
+.editor-menu[data-slot="popover-content"] {
+  width: min(22rem, var(--radix-popover-content-available-width));
+  max-height: min(19rem, var(--radix-popover-content-available-height));
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
+}
+.editor-menu-heading {
+  display: flex;
+  align-items: center;
+  gap: --spacing(1.5);
+  padding: --spacing(2) --spacing(3);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--text-caption);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.editor-menu [role="listbox"] {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: --spacing(1);
+}
+.editor-menu [role="option"] {
+  display: flex;
+  align-items: flex-start;
+  gap: --spacing(2.5);
+  padding: --spacing(1.5) --spacing(2);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.editor-menu [role="option"][aria-selected="true"] {
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+}
+.editor-menu [role="option"] > svg {
+  width: 1rem;
+  height: 1rem;
+  flex: none;
+  margin-top: --spacing(0.5);
+  color: var(--muted-foreground);
+}
+.editor-menu [role="option"] > svg[data-state="open"] {
+  color: var(--success);
+}
+.editor-menu [role="option"] > svg[data-state="merged"] {
+  color: var(--info);
+}
+.editor-menu [role="option"] > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.editor-menu [role="option"] strong {
+  display: block;
+  font-weight: 550;
+}
+.editor-menu [role="option"] div span,
+.editor-menu-status {
+  color: var(--muted-foreground);
+  font-size: var(--text-xs);
+}
+.editor-menu-status {
+  margin: 0;
+  padding: --spacing(2) --spacing(3);
 }
 .discussion-actions {
   flex-wrap: wrap;
@@ -2868,6 +2980,40 @@ main {
   padding-left: --spacing(4);
   border-left: 3px solid var(--border);
   color: var(--muted-foreground);
+}
+.discussion-markdown .markdown-alert {
+  margin: --spacing(3) 0;
+  padding: --spacing(2) --spacing(3);
+  border: 1px solid var(--border);
+  border-inline-start-color: var(--alert-accent);
+  border-radius: var(--radius-sm);
+  --alert-accent: var(--info);
+}
+.markdown-alert[data-kind="tip"] {
+  --alert-accent: var(--success);
+}
+.markdown-alert[data-kind="warning"] {
+  --alert-accent: var(--warning);
+}
+.markdown-alert[data-kind="caution"] {
+  --alert-accent: var(--destructive);
+}
+.markdown-alert-title {
+  color: var(--alert-accent);
+  font-weight: 600;
+}
+.markdown-alert > :last-child {
+  margin-bottom: 0;
+}
+.discussion-markdown details {
+  margin: --spacing(3) 0;
+  padding: --spacing(2) --spacing(3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.discussion-markdown summary {
+  cursor: pointer;
+  font-weight: 550;
 }
 .discussion-markdown table {
   display: block;

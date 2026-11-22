@@ -106,6 +106,12 @@ impl Mutation for CreatePull {
         let target = Target::Pull {
             number: record.number,
         };
+        crate::cells::repository::collaboration::attachments::claim(
+            context,
+            target,
+            &record.author,
+            &record.body,
+        )?;
         activity::append(context, target, &record.author, Action::Created)?;
         creation::assign_milestone(
             context,
@@ -242,6 +248,12 @@ impl Mutation for UpdatePull {
             number: pull.number,
         };
         if edited {
+            crate::cells::repository::collaboration::attachments::claim(
+                context,
+                target,
+                &input.actor,
+                &pull.body,
+            )?;
             activity::append(context, target, &input.actor, Action::Updated)?;
         }
         if was_closed != (pull.state != PullState::Open) {

@@ -42,6 +42,7 @@ object_store = { workspace = true }
 reqwest = { workspace = true, features = ["rustls-tls", "socks", "stream"] }
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
+pulldown-cmark = { version = "0.13", default-features = false }
 rustls = "0.23"
 rustls-pemfile = "2"
 url = { version = "2", features = ["serde"] }

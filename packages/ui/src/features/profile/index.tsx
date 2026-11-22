@@ -1,13 +1,65 @@
 import { useState } from "react";
-import { CircleUserRoundIcon } from "lucide-react";
+import { CircleUserRoundIcon, MessageSquareTextIcon } from "lucide-react";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { timestamp } from "@/components/discussion/time";
 import { useRequest } from "@/lib/api";
+import { cn } from "@/lib/utils";
 import { ProfileForm } from "./form";
+import { SavedReplies } from "./saved-replies";
 import type { ActorProfile, OwnProfile } from "@/lib/contracts";
 
 export function ProfileSettings({
+  csrf,
+  suggestedName,
+  section = "profile",
+}: {
+  csrf: string;
+  suggestedName: string;
+  section?: "profile" | "saved-replies";
+}) {
+  const settings = [
+    {
+      id: "profile",
+      href: "/-/profile",
+      label: "Public profile",
+      Icon: CircleUserRoundIcon,
+    },
+    {
+      id: "saved-replies",
+      href: "/-/settings/saved-replies",
+      label: "Saved replies",
+      Icon: MessageSquareTextIcon,
+    },
+  ];
+  return (
+    <div className="account-settings">
+      <aside aria-label="Account settings">
+        {settings.map(({ id, href, label, Icon }) => (
+          <Link
+            key={id}
+            href={href}
+            aria-current={id === section ? "page" : undefined}
+            className={cn(
+              "flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium hover:bg-muted",
+              id === section && "bg-muted",
+            )}
+          >
+            <Icon size={16} aria-hidden="true" />
+            {label}
+          </Link>
+        ))}
+      </aside>
+      {section === "saved-replies" ? (
+        <SavedReplies csrf={csrf} />
+      ) : (
+        <PublicProfileSettings csrf={csrf} suggestedName={suggestedName} />
+      )}
+    </div>
+  );
+}
+
+function PublicProfileSettings({
   csrf,
   suggestedName,
 }: {
@@ -17,37 +69,25 @@ export function ProfileSettings({
   const own = useRequest<OwnProfile>("/api/profile");
   const [saved, setSaved] = useState<ActorProfile>();
   return (
-    <div className="account-settings">
-      <aside aria-label="Account settings">
-        <Link
-          href="/-/profile"
-          aria-current="page"
-          className="flex items-center gap-2 rounded-md bg-muted px-3 py-2 text-sm font-medium"
-        >
-          <CircleUserRoundIcon size={16} />
-          Public profile
-        </Link>
-      </aside>
-      <section className="min-w-0">
-        <h1 className="mb-3 text-2xl font-semibold tracking-tight">
-          Public profile
-        </h1>
-        <p className="mb-6 border-b pb-6 text-sm text-muted-foreground">
-          Your username and display name are visible to signed-in users of this
-          server.
-        </p>
-        <Result state={own} timingLabel="Your profile">
-          {({ profile }) => (
-            <ProfileForm
-              profile={saved ?? profile}
-              csrf={csrf}
-              suggestedName={suggestedName}
-              onSaved={setSaved}
-            />
-          )}
-        </Result>
-      </section>
-    </div>
+    <section className="min-w-0">
+      <h1 className="mb-3 text-2xl font-semibold tracking-tight">
+        Public profile
+      </h1>
+      <p className="mb-6 border-b pb-6 text-sm text-muted-foreground">
+        Your username and display name are visible to signed-in users of this
+        server.
+      </p>
+      <Result state={own} timingLabel="Your profile">
+        {({ profile }) => (
+          <ProfileForm
+            profile={saved ?? profile}
+            csrf={csrf}
+            suggestedName={suggestedName}
+            onSaved={setSaved}
+          />
+        )}
+      </Result>
+    </section>
   );
 }
 

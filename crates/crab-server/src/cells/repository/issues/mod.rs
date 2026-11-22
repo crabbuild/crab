@@ -123,6 +123,12 @@ impl Mutation for CreateIssue {
         let target = Target::Issue {
             number: record.number,
         };
+        crate::cells::repository::collaboration::attachments::claim(
+            context,
+            target,
+            &record.author,
+            &record.body,
+        )?;
         activity::append(context, target, &record.author, Action::Created)?;
         creation::assign_milestone(
             context,
@@ -256,6 +262,12 @@ pub(in crate::cells::repository) fn append_comment(
         issue: record.issue,
         number: record.number,
     };
+    crate::cells::repository::collaboration::attachments::claim(
+        context,
+        target,
+        &record.author,
+        &record.body,
+    )?;
     search::contributions::project(context, target, &record.author, &record.body)?;
     activity::append(context, target, &record.author, Action::Created)?;
     Ok(record)
@@ -436,6 +448,12 @@ impl Mutation for UpdateIssue {
             number: issue.number,
         };
         if edited {
+            crate::cells::repository::collaboration::attachments::claim(
+                context,
+                target,
+                &input.actor,
+                &issue.body,
+            )?;
             activity::append(context, target, &input.actor, Action::Updated)?;
         }
         if was_closed != (issue.state != 0) {
@@ -540,6 +558,12 @@ impl Mutation for UpdateComment {
                 issue: comment.issue,
                 number: comment.number,
             };
+            crate::cells::repository::collaboration::attachments::claim(
+                context,
+                target,
+                &input.actor,
+                &comment.body,
+            )?;
             search::contributions::edit(context, target, &comment.body)?;
             activity::append(context, target, &input.actor, Action::Updated)?;
         }

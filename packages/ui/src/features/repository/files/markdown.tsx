@@ -1,20 +1,10 @@
 import { repoHref } from "@/lib/repository-route";
-import {
-  Children,
-  Suspense,
-  isValidElement,
-  lazy,
-  type ReactNode,
-} from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { endpoint, type Repository } from "@/lib/api";
 import { Link } from "@/components/navigation/link";
-import { enableCodeKeyboardScroll, type CodeThemes } from "@/lib/code-theme";
-
-const HighlightedFile = lazy(() =>
-  import("@pierre/diffs/react").then((module) => ({ default: module.File })),
-);
+import type { CodeThemes } from "@/lib/code-theme";
+import { MarkdownCodeBlock } from "@/components/discussion/markdown-code";
 
 function encodePathComponent(value: string) {
   return Array.from(new TextEncoder().encode(value), (byte) =>
@@ -141,40 +131,5 @@ export function RepositoryMarkdown({
         {children}
       </Markdown>
     </div>
-  );
-}
-
-function MarkdownCodeBlock({
-  children,
-  theme,
-  codeThemes,
-}: {
-  children: ReactNode;
-  theme: "light" | "dark";
-  codeThemes: CodeThemes;
-}) {
-  const code = Children.count(children) === 1 ? Children.only(children) : null;
-  if (!isValidElement<{ className?: string; children?: ReactNode }>(code))
-    return <pre>{children}</pre>;
-  const language = /^language-(\S+)$/.exec(code.props.className ?? "")?.[1];
-  if (!language) return <pre>{children}</pre>;
-  const contents = String(code.props.children ?? "").replace(/\n$/, "");
-  return (
-    <Suspense fallback={<pre>{children}</pre>}>
-      <HighlightedFile
-        key={`${theme}:${codeThemes.light}:${codeThemes.dark}`}
-        className="markdown-code-block"
-        file={{ name: `snippet.${language}`, contents, lang: language }}
-        options={{
-          theme: codeThemes,
-          themeType: theme,
-          preferredHighlighter: "shiki-js",
-          disableFileHeader: true,
-          disableLineNumbers: true,
-          overflow: "scroll",
-          onPostRender: enableCodeKeyboardScroll,
-        }}
-      />
-    </Suspense>
   );
 }
