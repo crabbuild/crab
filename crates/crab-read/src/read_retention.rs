@@ -9,7 +9,7 @@ use crab_metadata::capsule_protocol::{PointerCatalogLookup, load_root, store_rea
 use crab_storage::{Store, StoreLayout};
 use tokio_util::sync::CancellationToken;
 
-use crate::capsule_protocol::{CapsuleReadLimits, open_git_view_from_root};
+use crate::capsule_protocol::{CapsuleReadLimits, CapsuleRepositoryView, open_git_view_from_root};
 use crate::{ReadError, Result};
 
 /// Capture and retain the authenticated pointer catalog before admitting reads.
@@ -23,6 +23,59 @@ pub async fn retain_pointer_catalog(
     session: &ReadRetentionSession,
 ) -> Result<(PointerCatalogLookup, RetainedRead)> {
     let admission = session.capture()?;
+    let CatalogClaim {
+        catalog,
+        lease,
+        barriers,
+        ..
+    } = create_catalog_claim(layout, owner, maximum).await?;
+    let retention = admission.retain(lease)?;
+    // A sweep crossing capture may have omitted the claim. Dropping its owner
+    // on failure drains and releases it without admitting the rejected view.
+    validate_barriers(&barriers).await?;
+    let _ready = retention.pin()?;
+    Ok((catalog, retention))
+}
+
+/// Register a capture on behalf of an authorized remote reader.
+/// Returns the exact view digest and a confirmed native claim. The service
+/// owns renewal and release across requests and must authenticate the reader.
+pub async fn acquire_pointer_retention(
+    layout: &StoreLayout<Store>,
+    owner: &str,
+    maximum: u64,
+) -> Result<(String, ReadRetentionLease)> {
+    let CatalogClaim {
+        lease,
+        barriers,
+        view,
+        ..
+    } = create_catalog_claim(layout, owner, maximum).await?;
+    let digest = view.state_digest();
+    if let Err(error) = validate_barriers(&barriers)
+        .await
+        .and_then(|()| lease.ensure_valid().map_err(Into::into))
+    {
+        if let Err(cleanup) = lease.release().await {
+            tracing::warn!(%cleanup, "failed to release rejected reader capture");
+        }
+        return Err(error);
+    }
+    Ok((digest, lease))
+}
+
+struct CatalogClaim {
+    catalog: PointerCatalogLookup,
+    lease: ReadRetentionLease,
+    barriers: [GcReadBarrier; 2],
+    view: CapsuleRepositoryView,
+}
+
+async fn create_catalog_claim(
+    layout: &StoreLayout<Store>,
+    owner: &str,
+    maximum: u64,
+) -> Result<CatalogClaim> {
     let store = layout.store().inner();
     let repository = GcReadBarrier::observe(Arc::clone(store), layout.repo_prefix()).await?;
     let global = GcReadBarrier::observe(Arc::clone(store), layout.global_prefix()).await?;
@@ -51,14 +104,19 @@ pub async fn retain_pointer_catalog(
         RetainedReadRoot::new(hash, size)?,
     )
     .await?;
-    let retention = admission.retain(lease)?;
-    // A sweep that crossed capture may have omitted this claim. Drop its owner
-    // so it drains and releases, without ever admitting the rejected view.
-    repository.validate().await?;
-    global.validate().await?;
-    // Barrier validation can outlast renewal. Require a healthy claim at handoff.
-    let _ready = retention.pin()?;
-    Ok((catalog, retention))
+    Ok(CatalogClaim {
+        catalog,
+        lease,
+        barriers: [repository, global],
+        view,
+    })
+}
+
+async fn validate_barriers(barriers: &[GcReadBarrier; 2]) -> Result<()> {
+    for barrier in barriers {
+        barrier.validate().await?;
+    }
+    Ok(())
 }
 
 pub(crate) fn read<'a, T: Send + 'a, F>(

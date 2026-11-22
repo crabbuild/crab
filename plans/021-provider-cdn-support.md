@@ -873,11 +873,14 @@ and release. Keep viewer storage credentials read-only. Preserve both GC
 barriers and drain before release. Test denial or expiry during startup and
 renewal on S3, GCS and Azure before live collection.
 
-`crab-read::retain_pointer_catalog` now owns the capture and both GC barriers
-shared by mount lifecycle callers. The issuer verifies the exact projected
-namespace against the authorized repository, scope hash, source generation,
-and source digest before granting credentials. The issuer-side lease
-lifecycle and its mount client are still required.
+The mount and the native `crab-auth-view retention` helper share capture and
+both GC barriers. The helper derives the claim owner from an issuer-bound
+reader ID and the selected native transport target. It checks view readiness
+on acquisition and uses backend age plus the last acknowledged incarnation
+and sequence for conditional renewal. Stale revisions cannot release a newer
+claim or revive a retired one. The reference issuer also verifies the exact
+projected namespace before granting credentials. The authenticated HTTP
+lease lifecycle, mount client integration, and live provider proof remain open.
 
 The qualification guard leaves the native target check active in the Git clone
 child and checks the expected viewer binding and projected content prefix in

@@ -80,6 +80,18 @@ or repairing missing LFS objects from the source. Lookup cleanup runs after
 successful builds, cache hits and errors. GC retention during construction and
 resource limits still require separate qualification.
 
+`crab-auth-view retention` reads one bounded JSON request from the trusted
+issuer over stdin. The issuer supplies `repo_url`, `provider`, `scope_hash`,
+`source_generation`, `source_digest`, and a `reader` ID derived from the
+authenticated identity. The `operation` object names `acquire`, `renew`, or
+`release` in `action`. Renew and release also supply `revision`. The helper
+derives the claim owner from the reader ID and native transport target. Acquisition checks
+the projected view's readiness record and registers its exact catalog under
+both GC barriers. Renewal and release require the last acknowledged revision.
+The caller must bind that revision to the approved principal and view, and
+anchor the returned `remaining_ms` at the start of its own request. These
+commands use issuer credentials and hand out no native write authority.
+
 View repacking verifies source bytes into an operation-owned anonymous file,
 then chunks them incrementally off the async runtime. Cancellation propagates
 to reconstruction and the chunking worker. This avoids retaining a whole

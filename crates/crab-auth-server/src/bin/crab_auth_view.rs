@@ -1,7 +1,9 @@
 use clap::{Parser, Subcommand};
 use crab_auth_server::doctor::git_version;
 use crab_auth_server::output::{HelperOutputPolicy, emit_json_result};
-use crab_auth_server::view::{ViewOutput, materialize_view};
+use crab_auth_server::view::{
+    ViewOutput, ViewRetentionRequest, ViewRetentionResponse, materialize_view, view_retention,
+};
 use serde::Serialize;
 
 #[derive(Parser)]
@@ -14,6 +16,7 @@ struct Args {
 #[derive(Subcommand)]
 enum CommandKind {
     Doctor,
+    Retention,
     Materialize {
         #[arg(long)]
         repo_url: String,
@@ -38,6 +41,7 @@ struct DoctorOutput {
 #[serde(untagged)]
 enum HelperOutput {
     View(ViewOutput),
+    Retention(ViewRetentionResponse),
     Doctor(DoctorOutput),
 }
 
@@ -51,6 +55,10 @@ async fn main() {
                 git_version: version,
             })
         }),
+        CommandKind::Retention => match ViewRetentionRequest::read(std::io::stdin().lock()) {
+            Ok(request) => view_retention(request).await.map(HelperOutput::Retention),
+            Err(error) => Err(error),
+        },
         CommandKind::Materialize {
             repo_url,
             provider,

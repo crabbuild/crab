@@ -21,6 +21,9 @@ mod capsule;
 mod git_workspace;
 mod objects;
 mod repack;
+mod retention;
+
+pub use retention::{ViewRetentionRequest, ViewRetentionResponse, view_retention};
 
 use capsule::{
     publish as publish_filtered_capsule_view, verify_ready as verify_capsule_view_ready,
