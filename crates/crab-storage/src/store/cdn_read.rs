@@ -16,7 +16,7 @@ use crate::{
     Result, StorageError,
     cdn::{
         CdnAccess, CdnGet, CdnReadFamily, CdnRoute, CdnViewer, PayloadObservation,
-        PublicTransitionObservation,
+        PublicTransitionObservation, ReadLimits,
     },
     transport_read_admission,
 };
@@ -107,11 +107,11 @@ impl Store {
         }
         route.provider = self.bucket_identity().cloud;
         if let Some(policy) = route.policy() {
-            route.families = policy.families();
+            route.read_limits = policy.read_limits();
         }
         if matches!(route.access, CdnAccess::Public)
             && !route.transport.is_loopback()
-            && !route.families.is_empty()
+            && !route.read_limits.is_empty()
             && !route
                 .publication_origin
                 .as_ref()
@@ -122,8 +122,8 @@ impl Store {
                 path: "CDN publication requires approval from the selected native authority".into(),
             });
         }
-        self.cdn =
-            (route.transport.is_loopback() || !route.families.is_empty()).then(|| Arc::new(route));
+        self.cdn = (route.transport.is_loopback() || !route.read_limits.is_empty())
+            .then(|| Arc::new(route));
         Ok(self)
     }
 
@@ -186,7 +186,7 @@ impl Store {
             return;
         };
         let family = CdnReadFamily::Git;
-        if (route.transport.is_loopback() || route.families.contains(&family))
+        if route.limits_for(family).is_some()
             && let Some(policy) = route.policy()
             && let Some(observation) = PayloadObservation::new(policy, family, None)
         {
@@ -196,7 +196,7 @@ impl Store {
 
     /// Report a verified xorb cache hit after authorizing the selected physical key.
     pub fn observe_verified_xorb_cache_hit(&self, path: &Path) {
-        if let Some((route, CdnReadFamily::Xorb)) = self.cdn_route_for(path)
+        if let Some((route, CdnReadFamily::Xorb, _)) = self.cdn_route_for(path)
             && let Some(policy) = route.policy()
             && let Some(observation) = PayloadObservation::new(policy, CdnReadFamily::Xorb, None)
         {
@@ -259,7 +259,13 @@ impl Store {
                 };
                 verify(bytes).await
             };
-            let Some(attempt) = self.cdn_attempt(path) else {
+            let range_bytes = range
+                .as_ref()
+                .map(|range| range.end.saturating_sub(range.start));
+            let Some(attempt) = self
+                .cdn_attempt(path)
+                .filter(|edge| edge.admits(size, range_bytes))
+            else {
                 return origin.await;
             };
 
@@ -281,20 +287,19 @@ impl Store {
         })
     }
 
-    fn cdn_route_for(&self, path: &Path) -> Option<(&Arc<CdnRoute>, CdnReadFamily)> {
+    fn cdn_route_for(&self, path: &Path) -> Option<(&Arc<CdnRoute>, CdnReadFamily, ReadLimits)> {
         let route = self.cdn.as_ref()?;
         let family = route.layout.cdn_read_family(path)?;
         if self.read_prefix_target_identity(path) != Some(&route.target)
             || (family.global() && !route.allow_global)
-            || (!route.transport.is_loopback() && !route.families.contains(&family))
         {
             return None;
         }
-        Some((route, family))
+        Some((route, family, route.limits_for(family)?))
     }
 
     fn cdn_lfs_cache_route(&self, path: &Path, size: u64) -> Option<&CdnRoute> {
-        let (route, family) = self.cdn_route_for(path)?;
+        let (route, family, _) = self.cdn_route_for(path)?;
         (family == CdnReadFamily::Lfs
             && route
                 .publication
@@ -306,7 +311,7 @@ impl Store {
     /// Start one edge-only verification attempt for an authorized immutable key.
     #[must_use]
     pub fn cdn_attempt(&self, path: &Path) -> Option<CdnReadAttempt> {
-        let (route, family) = self.cdn_route_for(path)?;
+        let (route, family, limits) = self.cdn_route_for(path)?;
         if let Some(receipt) = &route.publication {
             let listed = receipt.sizes.contains_key(path.as_ref());
             if let Some(policy) = route.policy()
@@ -326,6 +331,7 @@ impl Store {
         }
         Some(CdnReadAttempt {
             store: self.clone(),
+            limits,
             route: Arc::clone(route),
             family,
             path: path.clone(),
@@ -335,7 +341,7 @@ impl Store {
 
     /// Observe a verified native blob whose pack key the public export does not list.
     pub fn observe_verified_unlisted_git_blob(&self, path: &Path, oid: &[u8]) {
-        if let Some((route, CdnReadFamily::Git)) = self.cdn_route_for(path)
+        if let Some((route, CdnReadFamily::Git, _)) = self.cdn_route_for(path)
             && let Some(receipt) = &route.publication
             && !receipt.sizes.contains_key(path.as_ref())
             && let Some(policy) = route.policy()
@@ -350,18 +356,11 @@ impl Store {
         &self,
         route: &CdnRoute,
         request: CdnGet<'_>,
+        timeout: Duration,
         can_restart: bool,
     ) -> Result<Option<Bytes>> {
-        if route
-            .publication
-            .as_ref()
-            .is_some_and(|receipt| receipt.sizes.get(request.path.as_ref()) != Some(&request.size))
-        {
-            // New native objects can become visible before an export updates.
-            return Ok(None);
-        }
         let cancel = CancellationToken::new();
-        let get = |viewer, timeout: Duration| {
+        let get = |viewer| {
             self.record_read_request(if request.range.is_some() {
                 StorageReadKind::Range
             } else {
@@ -384,7 +383,7 @@ impl Store {
         let viewer = credential
             .as_ref()
             .map_or(CdnViewer::Public, |(_, viewer)| viewer.header());
-        let bytes = match (get(viewer, route.edge_timeout()).await, credential.as_ref()) {
+        let bytes = match (get(viewer).await, credential.as_ref()) {
             (Err(StorageError::Forbidden { .. }), Some((provider, rejected))) => {
                 let current = provider
                     .credential(path, Some(rejected.generation()))
@@ -392,7 +391,7 @@ impl Store {
                     .ok_or_else(|| StorageError::Forbidden {
                         path: path.to_string(),
                     })?;
-                get(current.header(), route.edge_timeout()).await?
+                get(current.header()).await?
             }
             // Only the initial HTTP request can authorize a restart. A
             // credential failure or a failed edge recheck must stay terminal.
@@ -414,11 +413,32 @@ pub struct CdnReadAttempt {
     store: Store,
     route: Arc<CdnRoute>,
     family: CdnReadFamily,
+    limits: ReadLimits,
     path: Path,
     deadline: OnceLock<Instant>,
 }
 
 impl CdnReadAttempt {
+    const RANGE_BATCH_BYTES: u64 = 8 * 1024 * 1024;
+
+    /// Check a whole object or request range before selecting an edge attempt.
+    #[must_use]
+    pub fn admits(&self, object_bytes: u64, range_bytes: Option<u64>) -> bool {
+        self.limits.admits(object_bytes, range_bytes)
+            && self
+                .route
+                .publication
+                .as_ref()
+                .is_none_or(|receipt| receipt.sizes.get(self.path.as_ref()) == Some(&object_bytes))
+    }
+
+    /// Check the largest request in a ranged download before selecting the edge.
+    #[must_use]
+    pub fn admits_range_batches(&self, object_bytes: u64, range_bytes: u64) -> bool {
+        let request = (object_bytes != 0).then_some(range_bytes.min(Self::RANGE_BATCH_BYTES));
+        self.admits(object_bytes, request)
+    }
+
     /// Capture the edge source for a caller-owned payload verification.
     #[must_use]
     pub fn payload_observation(&self) -> Option<PayloadObservation> {
@@ -504,7 +524,7 @@ impl CdnReadAttempt {
                         .as_ref()
                         .map_or(CdnViewer::Public, |value| value.header())
                 };
-                let timeout = self.route.edge_timeout();
+                let timeout = self.edge_timeout();
                 let verify = |result: Result<Bytes>, expected: &[u8]| {
                     let body = result?;
                     self.store.record_read_bytes(body.len() as u64);
@@ -572,15 +592,35 @@ impl CdnReadAttempt {
     fn deadline(&self) -> Instant {
         *self
             .deadline
-            .get_or_init(|| Instant::now() + self.route.timeout)
+            .get_or_init(|| Instant::now() + self.route.timeout.min(self.limits.timeout))
+    }
+
+    fn edge_timeout(&self) -> Duration {
+        self.route.edge_timeout().min(self.limits.timeout / 3)
     }
 
     /// Check the shared deadline before returning or persisting verified bytes.
     pub fn check_deadline(&self) -> Result<()> {
-        if Instant::now() >= self.deadline() {
+        if self
+            .deadline
+            .get()
+            .is_some_and(|deadline| Instant::now() >= *deadline)
+        {
             return Err(cdn_deadline_exceeded());
         }
         Ok(())
+    }
+
+    /// Preserve an already-started edge deadline when reading from the origin.
+    pub async fn within_active_deadline<T, E: From<StorageError>>(
+        &self,
+        work: impl Future<Output = std::result::Result<T, E>>,
+    ) -> std::result::Result<T, E> {
+        if self.deadline.get().is_some() {
+            self.within_deadline(work).await
+        } else {
+            work.await
+        }
     }
 
     /// Bound interruptible I/O or verification to this attempt's shared deadline.
@@ -652,6 +692,12 @@ impl CdnReadAttempt {
         can_restart: bool,
     ) -> futures_util::future::BoxFuture<'_, Result<Option<Bytes>>> {
         Box::pin(async move {
+            let range_bytes = range
+                .as_ref()
+                .map(|range| range.end.saturating_sub(range.start));
+            if !self.admits(size, range_bytes) {
+                return Ok(None);
+            }
             let request =
                 transport_read_admission::scope_direct(&self.store.direct_read_admissions, async {
                     let _permit = self
@@ -669,6 +715,7 @@ impl CdnReadAttempt {
                                 range,
                                 context: self.route.policy().map(|policy| (policy, self.family)),
                             },
+                            self.edge_timeout(),
                             can_restart,
                         )
                         .await
@@ -680,13 +727,13 @@ impl CdnReadAttempt {
 
     /// Fetch ordered, bounded batches from one authenticated object range.
     /// A recoverable failure in a batch returns `None`. Any terminal denial in
-    /// that batch wins over restart. Stop consuming on either outcome.
+    /// that batch wins over restart. Preflight with `admits_range_batches`
+    /// before starting the edge deadline. Stop consuming on either outcome.
     pub fn range_batches(
         &self,
         size: u64,
         range: Range<u64>,
     ) -> Result<impl futures_util::Stream<Item = Result<Option<Vec<Bytes>>>> + '_> {
-        const RANGE_BYTES: u64 = 8 * 1024 * 1024;
         if range.start > range.end || range.end > size {
             return Err(StorageError::CorruptObject {
                 path: self.path.to_string(),
@@ -694,8 +741,10 @@ impl CdnReadAttempt {
             });
         }
         let ranges = (range.start..range.end)
-            .step_by(RANGE_BYTES as usize)
-            .map(move |start| Some(start..start.saturating_add(RANGE_BYTES).min(range.end)));
+            .step_by(Self::RANGE_BATCH_BYTES as usize)
+            .map(move |start| {
+                Some(start..start.saturating_add(Self::RANGE_BATCH_BYTES).min(range.end))
+            });
         // For an empty object, still read the authorized zero-byte body.
         let empty = range.is_empty().then_some((size != 0).then_some(range));
         Ok(stream::iter(ranges.chain(empty))

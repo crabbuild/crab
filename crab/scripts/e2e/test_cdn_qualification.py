@@ -60,6 +60,10 @@ def sample(provider: str) -> dict[str, Any]:
     }
 
 
+def release_policy_row(scope: str) -> str:
+    return f"{scope} 1024 2048 1024 5000\n"
+
+
 def cli_candidate(scope: str, platform: str) -> dict:
     system, arch = platform.split("-", 1)
     target = {"darwin": "apple-darwin", "linux": "unknown-linux-gnu", "windows": "pc-windows-msvc"}[system]
@@ -67,7 +71,7 @@ def cli_candidate(scope: str, platform: str) -> dict:
         "source_sha": COMMIT, "target_triple": f"{arch}-{target}", "cargo_profile": "release",
         "cargo_features": "default,tier",
         "qualification_feature": False, "binary_sha256": hashlib.sha256(platform.encode()).hexdigest(),
-        "release_policy_sha256": hashlib.sha256(f"{scope}\n".encode()).hexdigest(),
+        "release_policy_sha256": hashlib.sha256(release_policy_row(scope).encode()).hexdigest(),
     }
 
 
@@ -1100,12 +1104,12 @@ class CdnQualificationTests(unittest.TestCase):
         self.configure("s3", "private", "direct")
         policy = self.directory / "qualified-scopes.txt"
         args = ("--cdn-release-policy", str(policy))
-        policy.write_text("# Release rows\n" + self.scope.replace("/cli/", "/sdk/") + "\n")
+        policy.write_text("# Release rows\n" + release_policy_row(self.scope.replace("/cli/", "/sdk/")))
         self.rejected("scope is absent from the release policy", *args)
-        policy.write_text(self.scope + "\n")
+        policy.write_text(release_policy_row(self.scope))
         result = self.command(*args)
         self.assertEqual(result.returncode, 0, result.stderr)
-        policy.write_bytes((self.scope + "\r\n").encode())
+        policy.write_bytes(release_policy_row(self.scope).replace("\n", "\r\n").encode())
         result = self.command(*args)
         self.assertEqual(result.returncode, 0, result.stderr)
         original = self.registration["candidate"]
@@ -1116,14 +1120,37 @@ class CdnQualificationTests(unittest.TestCase):
         self.registration["candidate"] = original | {"target_triple": "x86_64-unknown-linux-musl"}
         self.rejected("requires the packaged CLI target triple", *args)
         self.registration["candidate"] = original
-        policy.write_text("# Changed after the build\n" + self.scope + "\n")
+        policy.write_text("# Changed after the build\n" + release_policy_row(self.scope))
         self.rejected("did not embed the release checkout", *args)
-        policy.write_text(self.scope + "\n" + self.scope + "\n")
+        policy.write_text(release_policy_row(self.scope) * 2)
         self.rejected("duplicate CDN release scope", *args)
 
     def test_repository_release_policy_contains_only_valid_rows(self) -> None:
         policy = SCRIPT.parents[2] / "crates/crab-storage/src/cdn/qualified-scopes.txt"
         CDN.release_scopes(policy)
+
+    def test_release_policy_rejects_unbounded_or_ambiguous_rows(self):
+        scope = "cloudfront/private/cli/git/direct"
+        policy = self.directory / "qualified-scopes.txt"
+        for limits in ("", "0 0 0 100", "0 64 0 100", "0 8 64 100", "6 0 0 0", "06 0 0 100",
+                       "6 0 0 4294967296", "6 0 0 +100", "6 0 0 100 extra"):
+            with self.subTest(limits=limits):
+                policy.write_text(f"{scope} {limits}\n")
+                with self.assertRaisesRegex(ValueError, "invalid CDN release read limits"):
+                    CDN.release_scopes(policy)
+
+    def test_release_verification_rejects_provider_joined_transfer_outside_limits(self):
+        self.configure("s3", "private", "direct")
+        policy = self.directory / "qualified-scopes.txt"
+        policy.write_text(release_policy_row(self.scope))
+        arm = self.directory / CDN.GIT_BENCHMARK_DIR / "near/0001/cold_edge"
+        client = json.loads((arm / "client.json").read_bytes())
+        next(iter(client["edge_responses"].values()))["elapsed_ms"] = 5001
+        digest = json_file(arm / "client.json", client)
+        for name in (CDN.VIEWER_REQUEST_FILES["s3"], "measurement.json"):
+            path = arm / name
+            json_file(path, json.loads(path.read_bytes()) | {"client_report_sha256": digest})
+        self.rejected("disagrees with its compiled CDN read limits", "--cdn-release-policy", str(policy))
 
     def test_rejects_unqualified_or_unproven_managed_mode(self) -> None:
         self.configure("s3", "private", "managed")
@@ -1461,7 +1488,7 @@ class CdnQualificationTests(unittest.TestCase):
         self.configure("s3", "private", "direct", consumer="sdk")
         self.assertEqual(self.command().returncode, 0)
         policy = self.directory / "qualified-scopes.txt"
-        policy.write_text(self.scope + "\n", encoding="utf-8")
+        policy.write_text(release_policy_row(self.scope), encoding="utf-8")
         (self.directory / CDN.GIT_BENCHMARK_DIR).rename(self.directory / "benchmark-backup")
         self.rejected("requires retained regional SDK benchmark records", "--cdn-release-policy", str(policy))
 
@@ -1474,13 +1501,13 @@ class CdnQualificationTests(unittest.TestCase):
                 fixture = self.command()
                 self.assertEqual(fixture.returncode, 0, fixture.stderr)
                 policy = self.directory / "qualified-scopes.txt"
-                policy.write_text(self.scope + "\n")
+                policy.write_text(release_policy_row(self.scope))
                 self.rejected("CDN promotion requires a product-specific workload", "--cdn-release-policy", str(policy))
 
     def test_sdk_release_requires_clone_of_the_same_publication_before_retirement(self) -> None:
         self.configure("s3", "private", "direct", consumer="sdk")
         policy = self.directory / "qualified-scopes.txt"
-        policy.write_text(self.scope + "\n", encoding="utf-8")
+        policy.write_text(release_policy_row(self.scope), encoding="utf-8")
         args = ("--cdn-release-policy", str(policy))
         path = self.directory / CDN.GIT_PRODUCT_DIR / CDN.SDK_CLONE_FILES["edge"]
         original = json.loads(path.read_bytes())
@@ -1499,7 +1526,7 @@ class CdnQualificationTests(unittest.TestCase):
     def test_sdk_release_requires_fetch_after_clone_from_the_same_local_head(self) -> None:
         self.configure("s3", "private", "direct", consumer="sdk")
         policy = self.directory / "qualified-scopes.txt"
-        policy.write_text(self.scope + "\n", encoding="utf-8")
+        policy.write_text(release_policy_row(self.scope), encoding="utf-8")
         args = ("--cdn-release-policy", str(policy))
         path = self.directory / CDN.GIT_PRODUCT_DIR / CDN.SDK_FETCH_FILES["origin"]
         original = json.loads(path.read_bytes())
@@ -1521,7 +1548,7 @@ class CdnQualificationTests(unittest.TestCase):
             with self.subTest(provider=provider):
                 self.configure(provider, "private", "direct", consumer="sdk")
                 policy = self.directory / "qualified-scopes.txt"
-                policy.write_text(self.scope + "\n", encoding="utf-8")
+                policy.write_text(release_policy_row(self.scope), encoding="utf-8")
                 result = self.command("--cdn-release-policy", str(policy))
                 self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -1594,7 +1621,7 @@ class CdnQualificationTests(unittest.TestCase):
         self.configure("s3", "private", "direct", consumer="sdk", family="xorb")
         self.assertEqual(self.command().returncode, 0)
         policy = self.directory / "policy.txt"
-        policy.write_text(self.scope + "\n", encoding="utf-8")
+        policy.write_text(release_policy_row(self.scope), encoding="utf-8")
         result = self.command("--cdn-release-policy", str(policy))
         self.assertEqual(result.returncode, 0, result.stderr)
         records = self.directory / CDN.XORB_PRODUCT_DIR
@@ -1665,7 +1692,7 @@ class CdnQualificationTests(unittest.TestCase):
     def test_public_sdk_release_requires_ordinary_export_transition_calls(self) -> None:
         self.configure("gcs", "public", "direct", consumer="sdk")
         policy = self.directory / "qualified-scopes.txt"
-        policy.write_text(self.scope + "\n", encoding="utf-8")
+        policy.write_text(release_policy_row(self.scope), encoding="utf-8")
         args = ("--cdn-release-policy", str(policy))
         result = self.command(*args)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -1686,7 +1713,7 @@ class CdnQualificationTests(unittest.TestCase):
     def test_public_sdk_release_requires_provider_delivery_of_the_transition_key(self) -> None:
         self.configure("gcs", "public", "direct", consumer="sdk")
         policy = self.directory / "qualified-scopes.txt"
-        policy.write_text(self.scope + "\n", encoding="utf-8")
+        policy.write_text(release_policy_row(self.scope), encoding="utf-8")
         args = ("--cdn-release-policy", str(policy))
         path = self.directory / CDN.GIT_PRODUCT_DIR / CDN.PRODUCT_VIEWER_RECORD
         proof = json.loads(path.read_bytes())

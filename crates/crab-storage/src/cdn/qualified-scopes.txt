@@ -1,2 +1,3 @@
-# One verified provider/access/consumer/read-family/profile per line.
+# One verified scope and its limits per line, separated by single spaces.
+# provider/access/consumer/read-family/profile full-bytes ranged-object-bytes range-bytes timeout-ms
 # Plan 021 has no promoted rows.

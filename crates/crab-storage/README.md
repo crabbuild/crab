@@ -27,6 +27,10 @@ metadata. Conditional operations and origin receipts use the provider store.
 For transport failures, only the initial edge GET can authorize an origin
 restart. A private viewer denial requires a successful recheck at the same
 edge. Credential and recheck errors stay terminal through range batches.
+Each release row limits full-object bytes, the total size of a ranged object,
+the bytes in each range, and the operation deadline. The limits use sizes from
+the read owner and apply before obtaining an edge viewer credential. A native
+read selected upfront keeps its ordinary deadline.
 CDN transfer diagnostics retain SHA-256 request fingerprints for joining
 qualification fetches to provider logs. CloudFront and Front Door use
 response request IDs. The Cloud CDN measurement worker opts into a

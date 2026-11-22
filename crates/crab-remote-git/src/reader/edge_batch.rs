@@ -43,8 +43,11 @@ impl RemoteGitReader {
             .await
         };
         let Some(anchor) = plan.ranges.iter().find_map(|range| {
-            let (path, _) = self.authenticated_range_source(range)?;
-            self.store.cdn_attempt(path)
+            let (path, size) = self.authenticated_range_source(range)?;
+            let length = range.end.checked_sub(range.start)?;
+            self.store
+                .cdn_attempt(path)
+                .filter(|edge| edge.admits(size, Some(length)))
         }) else {
             return from_origin.await;
         };
@@ -188,12 +191,15 @@ impl RemoteGitReader {
         let Some((path, size)) = self.authenticated_range_source(range) else {
             return Ok(Some(EdgeWindow::Origin));
         };
-        let Some(attempt) = store.cdn_attempt(path) else {
-            return Ok(Some(EdgeWindow::Origin));
-        };
         let length = range.end.checked_sub(range.start).ok_or(Error::Corrupt {
             stage: CorruptionStage::PackEntry,
         })?;
+        let Some(attempt) = store
+            .cdn_attempt(path)
+            .filter(|edge| edge.admits(size, Some(length)))
+        else {
+            return Ok(Some(EdgeWindow::Origin));
+        };
         check_limit(
             "fetched bytes",
             length,

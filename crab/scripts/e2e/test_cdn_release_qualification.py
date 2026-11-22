@@ -62,7 +62,7 @@ class CdnReleaseQualificationTests(unittest.TestCase):
             registrations[row] = self.fixture.registration
         (self.directory / provider).mkdir()
         (self.directory / "report.json").rename(self.directory / provider / "report.json")
-        self.policy.write_text(scope + "\n", encoding="utf-8")
+        self.policy.write_text(fixture.release_policy_row(scope), encoding="utf-8")
         return fixture.json_file(self.directory / "benchmarks.json", registrations)
 
     def test_complete_cli_bundle_verifies_every_release_platform(self) -> None:

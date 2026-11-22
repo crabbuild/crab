@@ -106,7 +106,7 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
         self.assertEqual(set(report["checks"]), set(self.example.report["checks"]))
 
         policy = self.root / "qualified-scopes.txt"
-        policy.write_text(self.example.scope + "\n", encoding="utf-8")
+        policy.write_text(fixture.release_policy_row(self.example.scope), encoding="utf-8")
         sdk_product = row / fixture.CDN.GIT_PRODUCT_DIR
         self.assertEqual({path.name for path in sdk_product.iterdir()},
                          {"publication.json", "snapshot.json", "retirement.json", *fixture.CDN.GIT_NATIVE_REF_FILES.values(),
@@ -230,7 +230,7 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
                  cdn.PRODUCT_VIEWER_RECORD, *cdn.GIT_NATIVE_REF_FILES.values()}
         self.assertEqual({path.name for path in (row / cdn.GIT_PRODUCT_DIR).iterdir()}, files)
         policy = self.root / "qualified-scopes.txt"
-        policy.write_text(self.example.scope + "\n", encoding="utf-8")
+        policy.write_text(fixture.release_policy_row(self.example.scope), encoding="utf-8")
         spec = self.example.registration
         cdn.verify_bundle_row(self.output, self.row, spec, fixture.COMMIT, "123", "2", policy=policy)
         qualification_build = spec["desktop_candidate"] | {"qualification_feature": True}
@@ -261,7 +261,7 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
         self.assertEqual(trace["after"]["verified_edge_key_sha256"], self.example.object_key)
         self.assertTrue((row / cdn.GIT_PRODUCT_DIR / cdn.GIT_PRIOR_EXPORT_RECORD).is_file())
         policy = self.root / "qualified-scopes.txt"
-        policy.write_text(self.example.scope + "\n", encoding="utf-8")
+        policy.write_text(fixture.release_policy_row(self.example.scope), encoding="utf-8")
         cdn.verify_bundle_row(self.output, self.row, self.example.registration, fixture.COMMIT, "123", "2", policy=policy)
 
     def test_front_door_desktop_bundle_bounds_regional_reads_by_cleanup(self) -> None:
@@ -299,7 +299,7 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
         product = row / fixture.CDN.SERVICE_PRODUCT_DIR
         self.assertEqual({file.name for file in product.iterdir()}, set(fixture.CDN.SERVICE_PRODUCT_FILES.values()))
         policy = self.root / "qualified-scopes.txt"
-        policy.write_text(self.example.scope + "\n", encoding="utf-8")
+        policy.write_text(fixture.release_policy_row(self.example.scope), encoding="utf-8")
         fixture.CDN.verify_bundle_row(self.output, self.row, self.example.registration, fixture.COMMIT, "123", "2",
                                       policy=policy)
         edge = product / "edge.json"
@@ -339,7 +339,7 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
         self.assertEqual(derived["after"]["verified_edge_key_sha256"], edge["transition_key_sha256"])
         self.assertTrue((self.output / self.row / fixture.CDN.SERVICE_PRODUCT_DIR / fixture.CDN.SERVICE_PUBLIC_PRIOR_RECORD).exists())
         policy = self.root / "qualified-scopes.txt"
-        policy.write_text(self.example.scope + "\n", encoding="utf-8")
+        policy.write_text(fixture.release_policy_row(self.example.scope), encoding="utf-8")
         fixture.CDN.verify_bundle_row(self.output, self.row, self.example.registration, fixture.COMMIT, "123", "2", policy=policy)
 
     def test_public_service_lfs_transition_rejects_a_prior_process_reused_at_the_edge(self) -> None:
@@ -412,7 +412,7 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
         digest = self.inputs("gcs", consumer="server")
         self.assertEqual(self.assemble(digest), 1)
         policy = self.root / "qualified-scopes.txt"
-        policy.write_text(self.example.scope + "\n", encoding="utf-8")
+        policy.write_text(fixture.release_policy_row(self.example.scope), encoding="utf-8")
         spec = self.example.registration
         fixture.CDN.verify_bundle_row(self.output, self.row, spec, fixture.COMMIT, "123", "2", policy=policy)
 
@@ -573,7 +573,7 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
             self.assertEqual((retained / path.name).read_bytes(), path.read_bytes())
         self.assertTrue((retained / "cleanup.json").exists())
         policy = self.root / "qualified-scopes.txt"
-        policy.write_text(self.example.scope + "\n", encoding="utf-8")
+        policy.write_text(fixture.release_policy_row(self.example.scope), encoding="utf-8")
         self.assertEqual(release.RELEASE.verify_bundle(self.output, policy, {self.example.scope}, fixture.COMMIT, "123", "2", digest), 1)
 
     def test_rejects_mixed_attempt_canary_before_copying_traces(self) -> None:

@@ -23,6 +23,7 @@ mod telemetry;
 pub use crab_types::storage::CdnPublicationFile;
 pub(crate) use placement::NativeAuthority;
 pub use placement::{AzureManagementAuthorization, NativeCdnOrigin};
+pub(crate) use policy::ReadLimits;
 pub use policy::{
     CdnConsumer, CdnPolicy, CdnProfile, CdnReadFamily, CdnVisibility, release_policy_sha256,
 };
@@ -59,7 +60,7 @@ pub struct CdnRoute {
     pub(crate) transport: CdnTransport,
     pub(crate) timeout: Duration,
     pub(crate) context: Option<(CdnConsumer, CdnProfile)>,
-    pub(crate) families: Vec<CdnReadFamily>,
+    pub(crate) read_limits: Vec<(CdnReadFamily, ReadLimits)>,
     pub(crate) publication: Option<publication::Publication>,
     pub(crate) publication_origin: Option<Arc<NativeCdnOrigin>>,
 }
@@ -87,7 +88,7 @@ impl CdnRoute {
             transport,
             timeout,
             context: None,
-            families: Vec::new(),
+            read_limits: Vec::new(),
             publication: None,
             publication_origin: None,
         }
@@ -131,11 +132,7 @@ impl CdnRoute {
             })?;
         self.provider = origin.bucket_identity().cloud;
         self.publication_origin = None;
-        if !self.transport.is_loopback()
-            && self
-                .policy()
-                .is_some_and(|policy| !policy.families().is_empty())
-        {
+        if !self.transport.is_loopback() && self.policy().is_some_and(CdnPolicy::enabled) {
             authority
                 .verify(
                     &publication.source_placement,
@@ -172,6 +169,13 @@ impl CdnRoute {
     pub(crate) fn edge_timeout(&self) -> Duration {
         // Reserve time for one origin attempt or one credential retry.
         self.timeout / 3
+    }
+
+    pub(crate) fn limits_for(&self, family: CdnReadFamily) -> Option<ReadLimits> {
+        self.read_limits
+            .iter()
+            .find_map(|(candidate, limits)| (*candidate == family).then_some(*limits))
+            .or_else(|| self.transport.is_loopback().then_some(ReadLimits::FIXTURE))
     }
 }
 

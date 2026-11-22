@@ -182,9 +182,15 @@ async fn provider_https_route_requires_an_exact_policy_context() {
         .unwrap();
     assert!(unapproved.cdn_attempt(&key).is_none());
 
-    let approved = include_str!("qualified-scopes.txt")
-        .lines()
-        .any(|row| row == "cloudfront/public/cli/git/direct");
+    let approved = CdnPolicy {
+        provider: StorageProviderKind::S3,
+        visibility: CdnVisibility::Public,
+        consumer: CdnConsumer::Cli,
+        profile: CdnProfile::Direct,
+    }
+    .read_limits()
+    .iter()
+    .any(|(family, _)| *family == CdnReadFamily::Git);
     let authorized_route = route()
         .for_consumer(CdnConsumer::Cli, CdnProfile::Direct)
         .with_publication(&store, &file, "s3://export", None)
@@ -208,6 +214,63 @@ async fn provider_https_route_requires_an_exact_policy_context() {
     assert_eq!(
         scoped.cdn_attempt(&key).is_some(),
         qualification_enabled() || approved
+    );
+}
+
+#[tokio::test]
+async fn read_limits_select_origin_before_sending_oversized_requests() {
+    let path = StoreLayout::with_global_prefix((), "org/repo".into(), ".crab".into())
+        .capsule_pack_layer_path(&"a".repeat(64));
+    let bytes = Bytes::from_static(b"abcdef");
+    let origin = InMemory::new();
+    origin.put(&path, bytes.clone().into()).await.unwrap();
+    let (transport, request) = endpoint(
+        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 1-2/6\r\nContent-Length: 2\r\n\r\nbc",
+    )
+    .await;
+    let target = [8; 32];
+    let mut route = CdnRoute::new(
+        target,
+        "org/repo".into(),
+        None,
+        CdnAccess::Public,
+        transport,
+        Duration::from_secs(5),
+    );
+    route.read_limits = vec![(CdnReadFamily::Git, ReadLimits::parse("4 6 2 3000").unwrap())];
+    let store = Store::new(Arc::new(origin))
+        .with_target_identity(target)
+        .with_cdn_route(route)
+        .unwrap();
+    let verify = |bytes| std::future::ready(Ok::<_, StorageError>(bytes));
+    assert_eq!(
+        store.read_verified(&path, 6, None, verify).await.unwrap(),
+        bytes
+    );
+    assert_eq!(
+        store
+            .read_verified(&path, 6, Some(0..3), verify)
+            .await
+            .unwrap(),
+        bytes.slice(0..3)
+    );
+    assert!(!request.is_finished());
+    let edge = store.cdn_attempt(&path).unwrap();
+    assert!(edge.get(6, None).await.unwrap().is_none());
+    assert!(edge.get(8, Some(1..3)).await.unwrap().is_none());
+    assert_eq!(
+        store
+            .read_verified(&path, 6, Some(1..3), verify)
+            .await
+            .unwrap(),
+        bytes.slice(1..3)
+    );
+    assert!(
+        request
+            .await
+            .unwrap()
+            .to_ascii_lowercase()
+            .contains("range: bytes=1-2")
     );
 }
 

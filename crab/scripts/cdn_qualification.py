@@ -263,16 +263,43 @@ def scope_parts(scope: str) -> tuple[str, str, str, str, str]:
     return edge, access, consumer, family, profile
 
 
-def release_scopes(path: Path) -> set[str]:
-    """Read the same exact scope rows that the Rust build embeds."""
-    scopes = set()
+class ReleaseReadLimits(NamedTuple):
+    full_bytes: int
+    ranged_object_bytes: int
+    range_bytes: int
+    timeout_ms: int
+
+    def admits(self, response: dict[str, Any]) -> bool:
+        if response["elapsed_ms"] > self.timeout_ms:
+            return False
+        if response["range"]:
+            return (response["object_bytes"] <= self.ranged_object_bytes
+                    and 0 < response["requested_bytes"] <= self.range_bytes)
+        return 0 < self.full_bytes and response["object_bytes"] <= self.full_bytes
+
+
+def release_read_limits(path: Path) -> dict[str, ReleaseReadLimits]:
+    """Read the same exact scope and transfer limits that the Rust build embeds."""
+    scopes = {}
     for line in path.read_bytes().decode("utf-8").replace("\r\n", "\n").split("\n"):
         if not line or line.startswith("#"):
             continue
-        scope_parts(line)
-        require(line not in scopes, f"duplicate CDN release scope: {line}")
-        scopes.add(line)
+        scope, *raw = line.split(" ")
+        scope_parts(scope)
+        require(scope not in scopes, f"duplicate CDN release scope: {scope}")
+        require(len(raw) == 4 and all(re.fullmatch(r"0|[1-9][0-9]{0,19}", value) for value in raw),
+                f"invalid CDN release read limits for {scope}")
+        limits = ReleaseReadLimits(*map(int, raw))
+        full, ranged_object, byte_range, timeout = limits
+        require(0 < timeout < 2**32 and 0 <= byte_range <= ranged_object < 2**64
+                and full < 2**64 and bool(full or byte_range) and bool(ranged_object) == bool(byte_range),
+                f"invalid CDN release read limits for {scope}")
+        scopes[scope] = limits
     return scopes
+
+
+def release_scopes(path: Path) -> set[str]:
+    return set(release_read_limits(path))
 
 
 def required_platform_rows(scopes: set[str]) -> set[str]:
@@ -2207,7 +2234,7 @@ def collect_xorb_read_evidence(
     performance = collect_git_performance(
         directory / GIT_BENCHMARK_DIR, registration, row["platform"], row["workflow_run_id"], row["workflow_run_attempt"],
         retain=retain / GIT_BENCHMARK_DIR if retain is not None else None, verify_xorb=verify_measurement,
-        product_request_ids=product_request_ids,
+        product_request_ids=product_request_ids, policy=policy,
     )
     if retain is not None:
         product = retain / XORB_PRODUCT_DIR
@@ -2513,10 +2540,12 @@ def collect_git_performance(
     verify_xorb: Callable[[bytes, str], dict[str, Any]] | None = None,
     service_row: Path | None = None, product_request_ids: set[str] | None = None,
     desktop_product: DesktopProductEvidence | None = None,
-    managed_row: Path | None = None,
+    managed_row: Path | None = None, policy: Path | None = None,
 ) -> dict[str, Any]:
     spec = benchmark_registration(registration)
     scope = spec["scope"]
+    limits = release_read_limits(policy).get(scope) if policy is not None else None
+    family = scope_parts(scope)[3]
     hydration = is_direct_xorb_read_scope(scope)
     require(hydration == (verify_xorb is not None), "xorb read benchmarks require verified publication and placement")
     sdk = is_direct_sdk_git_scope(scope)
@@ -2745,6 +2774,11 @@ def collect_git_performance(
                     )
                     require(provider_request_ids.isdisjoint(traffic.request_ids), "CDN log requests were reused across arms")
                     provider_request_ids.update(traffic.request_ids)
+                    if limits is not None:
+                        responses = [row for row in client["edge_responses"].values() if row["family"] == family]
+                        require((not client["observed_edge_gets"] or any(row["complete"] and row["bytes"] for row in responses))
+                                and all(limits.admits(row) for row in responses),
+                                f"{label} disagrees with its compiled CDN read limits")
                 external_raw = read_git_record(inputs / slot / "measurement.json")
                 external = fields(decode(external_raw), GIT_MEASUREMENT_FIELDS, "benchmark measurement")
                 require(external["schema"] == "crab.cdn-git-measurement/v1" and external["provider"] == provider
@@ -2915,7 +2949,8 @@ def verify_cdn_report(
                 "product action differs from the retained publication, fetch, and retirement evidence")
         measured = collect_git_performance(directory / GIT_BENCHMARK_DIR, registration, platform, run_id, run_attempt,
                                           native_target=native_target,
-                                          managed_row=directory if is_managed_cli_git_scope(scope) else None)
+                                          managed_row=directory if is_managed_cli_git_scope(scope) else None,
+                                          policy=policy)
         require(measured == row["performance"], "CLI performance summary differs from the retained measurements")
     if sdk_git:
         require(rollback is not None, "direct SDK qualification requires an ordinary SDK rollback read")
@@ -2923,7 +2958,7 @@ def verify_cdn_report(
                                                           cleanup_at=cleanup_at, native_origin_sha256=native_origin_sha256)
         require(row["product_action"] == product, "product action differs from the retained SDK snapshot evidence")
         measured = collect_git_performance(directory / GIT_BENCHMARK_DIR, registration, platform, run_id, run_attempt,
-                                          native_target=native_target, product_request_ids=request_ids)
+                                          native_target=native_target, product_request_ids=request_ids, policy=policy)
         require(measured == row["performance"], "SDK performance summary differs from the retained measurements")
     if xorb_read:
         require(rollback is not None, "direct xorb reads require their native rollback")
@@ -2940,7 +2975,7 @@ def verify_cdn_report(
                                                  cleanup_at=cleanup_at, native_origin_sha256=native_origin_sha256)
         require(row["product_action"] == product.action, "product action differs from the retained desktop read evidence")
         measured = collect_git_performance(directory / GIT_BENCHMARK_DIR, registration, platform, run_id, run_attempt,
-                                          native_target=native_target, desktop_product=product)
+                                          native_target=native_target, desktop_product=product, policy=policy)
         require(measured == row["performance"], "desktop performance summary differs from the retained measurements")
     if service:
         require(rollback is not None, "direct service qualification requires an ordinary HTTP rollback read")
@@ -2948,7 +2983,7 @@ def verify_cdn_report(
                                                  cleanup_at=cleanup_at, native_origin_sha256=native_origin_sha256)
         require(row["product_action"] == product, "product action differs from the retained service lifecycle evidence")
         measured = collect_git_performance(directory / GIT_BENCHMARK_DIR, registration, platform, run_id, run_attempt,
-                                           service_row=directory)
+                                           service_row=directory, policy=policy)
         require(row["performance"] == measured, "service performance summary differs from the retained measurements")
     return {"status": "verified", "scope": scope, "platform": platform, "deployment": row["deployment"],
             "checks": checks, "distant_median_savings_lower_bound_ms": lower}

@@ -261,6 +261,10 @@ impl LfsObjectStore {
                 .as_ref()
                 .is_none_or(|range| *range == (0..expected_size))
             && let Some(attempt) = self.store.cdn_attempt(&path)
+            && attempt.admits(
+                expected_size,
+                Some(expected_size.min(CDN_STREAM_RANGE_BYTES)),
+            )
         {
             return self
                 .stream_from_edge(attempt, *oid, expected_size, range, session)
@@ -838,7 +842,11 @@ impl LfsObjectStore {
             return Err(StorageError::Cancelled.into());
         }
         let path = self.object_path(oid);
-        if let Some(edge) = self.store.cdn_attempt(&path) {
+        if let Some(edge) = self
+            .store
+            .cdn_attempt(&path)
+            .filter(|edge| edge.admits_range_batches(expected_size, expected_size))
+        {
             let accepted_edge: bool = edge
                 .with_file_deadline(cancel, async |cancel| {
                     if let Some(parent) = destination.parent() {

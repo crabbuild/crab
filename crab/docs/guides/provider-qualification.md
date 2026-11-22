@@ -908,6 +908,14 @@ header describes the first 8 MB chunk, so Crab records an unknown cache
 disposition for larger objects. Use provider logs for their cache and
 origin-fill evidence. [Front Door caching documentation](https://learn.microsoft.com/en-us/azure/frontdoor/front-door-caching#response-headers)
 
+Record a verified release scope as five space-separated columns in
+`crates/crab-storage/src/cdn/qualified-scopes.txt`. After the scope, record the
+maximum full-GET bytes, the maximum object size for ranged requests, the
+maximum bytes in one range, and the operation deadline in milliseconds. Zero
+in a byte column disables that request form. Set both range columns to zero
+for full GETs only. The verifier checks the candidate's compiled policy digest
+and compares its provider-correlated benchmark requests with the row's limits.
+
 For Crab Server and the S3 gateway, start the candidate in a dedicated process with
 `RUST_LOG=crab_storage::cdn::transfer=debug,crab_storage::cdn::read_target=debug,crab_storage::cdn::service_build=debug,crab_storage::native_read=debug`.
 For LFS, append `,crab_storage::cdn::service_lfs_cache=debug` to capture the

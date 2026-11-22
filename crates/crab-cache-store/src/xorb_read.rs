@@ -49,8 +49,10 @@ impl<'a> XorbSource<'a> {
         self,
         read: impl Future<Output = crab_storage::Result<T>>,
     ) -> crab_storage::Result<T> {
+        // Discover the object size at origin before the first edge request
+        // starts a CDN deadline. An origin restart inherits that deadline.
         match self.edge_attempt() {
-            Some(attempt) => attempt.within_deadline(read).await,
+            Some(attempt) => attempt.within_active_deadline(read).await,
             None => read.await,
         }
     }
