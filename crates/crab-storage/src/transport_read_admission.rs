@@ -13,7 +13,7 @@ use object_store::client::{
     HttpResponseBody, HttpService, ReqwestConnector,
 };
 
-use crate::{ReadAdmission, StorageError};
+use crate::{ReadAdmission, StorageError, native_read_telemetry::NativeReadObservation};
 
 tokio::task_local! {
     static READ_CONTEXTS: Vec<Arc<TransportReadContext>>;
@@ -241,23 +241,37 @@ struct ReadAdmissionService(HttpClient);
 impl HttpService for ReadAdmissionService {
     async fn call(&self, mut request: HttpRequest) -> Result<HttpResponse, HttpError> {
         crate::s3_upload::condition_completion(&mut request);
+        let mut observation = NativeReadObservation::start(
+            request.method(),
+            request.uri().scheme_str(),
+            request.uri().host(),
+        );
         let contexts = contexts();
-        if contexts.is_empty() {
+        if contexts.is_empty() && observation.is_none() {
             return self.0.execute(request).await;
         }
         for context in &contexts {
             context.admit_request().await?;
         }
-        let response = tokio::select! {
-            biased;
-            () = cancellation(contexts.clone()) => return Err(cancelled()),
-            response = self.0.execute(request) => response?,
+        let response = if contexts.is_empty() {
+            self.0.execute(request).await?
+        } else {
+            tokio::select! {
+                biased;
+                () = cancellation(contexts.clone()) => return Err(cancelled()),
+                response = self.0.execute(request) => response?,
+            }
         };
         let (mut parts, body) = response.into_parts();
-        // The outer wrapper still verifies response framing, but this marker
-        // prevents its header reservation from double-charging streamed bytes.
-        parts.extensions.insert(TransportReadAccounted);
-        let body = HttpResponseBody::new(AdmissionBody::new(body, contexts));
+        if let Some(observation) = &mut observation {
+            observation.status(parts.status.as_u16());
+        }
+        if !contexts.is_empty() {
+            // The outer wrapper still verifies framing. Preserve its normal
+            // admission marker independently of opt-in request observation.
+            parts.extensions.insert(TransportReadAccounted);
+        }
+        let body = HttpResponseBody::new(AdmissionBody::new(body, contexts, observation));
         Ok(HttpResponse::from_parts(parts, body))
     }
 }
@@ -271,13 +285,18 @@ struct AdmissionBodyState {
     contexts: Vec<Arc<TransportReadContext>>,
     cancellation: futures_util::future::BoxFuture<'static, ()>,
     pending: Option<PendingFrame>,
+    observation: Option<NativeReadObservation>,
 }
 
 type PendingFrame =
     futures_util::future::BoxFuture<'static, Result<Frame<bytes::Bytes>, HttpError>>;
 
 impl AdmissionBody {
-    fn new(inner: HttpResponseBody, contexts: Vec<Arc<TransportReadContext>>) -> Self {
+    fn new(
+        inner: HttpResponseBody,
+        contexts: Vec<Arc<TransportReadContext>>,
+        observation: Option<NativeReadObservation>,
+    ) -> Self {
         let cancellation = cancellation(contexts.clone()).boxed();
         Self {
             state: Mutex::new(AdmissionBodyState {
@@ -285,6 +304,7 @@ impl AdmissionBody {
                 contexts,
                 cancellation,
                 pending: None,
+                observation,
             }),
         }
     }
@@ -320,12 +340,18 @@ impl Body for AdmissionBody {
                     }
                 }
             }
-            if state.cancellation.poll_unpin(context).is_ready() {
+            if !state.contexts.is_empty() && state.cancellation.poll_unpin(context).is_ready() {
                 return Poll::Ready(Some(Err(cancelled())));
             }
             match state.inner.as_mut().poll_frame(context) {
                 Poll::Ready(Some(Ok(frame))) => match frame.into_data() {
                     Ok(bytes) => {
+                        if let Some(observation) = &mut state.observation {
+                            observation.received(bytes.len());
+                        }
+                        if state.contexts.is_empty() {
+                            return Poll::Ready(Some(Ok(Frame::data(bytes))));
+                        }
                         let contexts = state.contexts.clone();
                         state.pending = Some(
                             async move {

@@ -16,7 +16,7 @@ from tempfile import TemporaryDirectory
 from typing import Any
 from uuid import uuid4
 
-from collect_cdn_product_metrics import ROUTE, ROUTE_FIELDS, TARGET, measure
+from collect_cdn_product_metrics import NATIVE_TARGET, ROUTE, ROUTE_FIELDS, TARGET, measure, measure_native
 from run_cdn_transport_checks import approved_fixture, fixture_base, fixture_object_key, native_remote
 
 from cdn_qualification import (
@@ -148,7 +148,8 @@ def git_environment(helper: Path, root: Path, native_target: dict[str, str]) -> 
         "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_EXEC_PATH": str(helper.absolute().parent),
         "GIT_TERMINAL_PROMPT": "0", "CRAB_CACHE_DIR": str(root / "cache"),
-        "CRAB_LOG": (f"{TARGET}=debug,{QUALIFICATION_LOG}=debug,{READ_LOG}=debug,{PUBLIC_TRANSITION_TARGET}=debug,"
+        "CRAB_LOG": (f"{TARGET}=debug,{NATIVE_TARGET}=debug,{QUALIFICATION_LOG}=debug,{READ_LOG}=debug,"
+                     f"{PUBLIC_TRANSITION_TARGET}=debug,"
                      f"{GCS_VIEWER_LOG_TARGET}=trace"),
         QUALIFICATION_TARGET_ENV: json.dumps(native_target),
     }
@@ -340,6 +341,7 @@ def fetch_once(
         "publication_oid": record["oid"], "started_at_unix_ms": started_at, "finished_at_unix_ms": finished_at,
         "platform": guard.platform, "candidate": guard.candidate,
         "reader": verified_read(lines, read) | guard.fingerprints, "edge_responses": edge_responses,
+        "native_traffic": measure_native(lines, record["scope"]),
     } | metrics
 
 

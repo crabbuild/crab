@@ -12,7 +12,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cdn_qualification import (  # noqa: E402
-    PRODUCT_COUNTERS, PROVIDER_FOR_EDGE, SHA256, VIEWER_REQUEST_FILES, decode, fields, matches, require, scope_parts,
+    NATIVE_TRAFFIC_FIELDS, PRODUCT_COUNTERS, PROVIDER_FOR_EDGE, SHA256,
+    VIEWER_REQUEST_FILES, decode, fields, matches, require, scope_parts,
 )
 
 
@@ -25,6 +26,29 @@ ROUTE = ("provider", "access", "consumer", "family", "profile")
 ROUTE_FIELDS = {"message", *ROUTE}
 VERIFIED_FIELDS = ROUTE_FIELDS | {"source"}
 TRANSFER_FIELDS = ROUTE_FIELDS | {"status", "cache", "range", "bytes", "complete", "elapsed_ms", "request_sha256"}
+NATIVE_TARGET = "crab_storage::native_read"
+NATIVE_TARGET_MARKER = NATIVE_TARGET.encode()
+
+
+def measure_native(lines: Iterable[bytes], scope: str) -> dict[str, int]:
+    provider = PROVIDER_FOR_EDGE[scope_parts(scope)[0]]
+    metrics = dict.fromkeys(NATIVE_TRAFFIC_FIELDS, 0)
+    for raw in lines:
+        if NATIVE_TARGET_MARKER not in raw:
+            continue
+        line = decode(raw)
+        if not isinstance(line, dict) or line.get("target") != NATIVE_TARGET:
+            continue
+        event = fields(line.get("fields"), {"message", "provider", "method", "status", "bytes"}, "native read event")
+        method, status, body = (event[name] for name in ("method", "status", "bytes"))
+        require(event["message"] == "Native object store read" and event["provider"] == provider
+                and method in ("get", "head") and type(status) is int and (status == 0 or 100 <= status <= 599)
+                and type(body) is int and body >= 0 and (status != 0 or body == 0),
+                "invalid native read event for the approved provider")
+        if status:
+            metrics[f"{method}_responses"] += 1
+            metrics["body_bytes"] += body
+    return metrics
 
 
 def measure(lines: Iterable[bytes], scope: str, *, edge_responses: dict | None = None) -> dict[str, int]:

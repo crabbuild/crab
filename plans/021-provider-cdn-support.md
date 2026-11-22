@@ -577,8 +577,12 @@ and edge payload through redacted observations.
   status, cache result, and viewer response bytes. Cloud CDN retains the
   cache-fill bytes reported on its viewer log records. Front Door separates
   viewer responses from origin-shield traffic before measuring egress.
-  Native request and fill measurements remain separate inputs. Live metric
-  collection and provider runs still need configured fixtures.
+  Each timed fetch records redacted native HTTPS GET and HEAD response counts
+  and consumed body bytes. The origin control must observe a native GET with
+  payload bytes, and external totals must cover the observed GETs and combined
+  edge and native bytes in every arm. Provider-side origin fills and runner
+  totals remain independently measured inputs. Live metric collection and
+  provider runs still need configured fixtures.
 - **Artifacts and sign-off.** Keep a versioned CDN evidence supplement beside
   the existing provider qualification report. The verifier at
   `crab/scripts/verify-provider-qualification-report.py` checks the native

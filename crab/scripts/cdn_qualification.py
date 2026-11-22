@@ -146,11 +146,12 @@ PRODUCT_COUNTERS = {
 }
 GIT_CLIENT_METRICS = {"elapsed_ms", "edge_hits", "edge_misses", "edge_unknown", "edge_bytes", "local_payload_hits"}
 GIT_EXTERNAL_METRICS = METRICS - GIT_CLIENT_METRICS
+NATIVE_TRAFFIC_FIELDS = {"get_responses", "head_responses", "body_bytes"}
 GIT_MEASUREMENT_FIELDS = GIT_EXTERNAL_METRICS | {"schema", "client_report_sha256", "provider", "region"}
 GIT_FETCH_FIELDS = PRODUCT_COUNTERS | CDN_PROVENANCE_FIELDS | {
     "schema", "name", "arm", "expected_sha256", "observed_sha256", "expected_bytes", "observed_bytes",
     "native_writes", "visible_new_ref", "elapsed_ms", "publication_oid", "started_at_unix_ms", "finished_at_unix_ms",
-    "platform", "publication_sha256", "candidate", "reader", "edge_responses",
+    "platform", "publication_sha256", "candidate", "reader", "edge_responses", "native_traffic",
 }
 GIT_MODES = {"origin": "origin", "cold_edge": "edge", "warm_edge": "edge", "warm_local": "warm_local"}
 SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -1244,6 +1245,10 @@ def validate_git_fetch(raw: bytes, provenance: dict[str, Any], mode: str, label:
             f"{label} has an invalid measurement interval")
     require(all(type(client[key]) is int and client[key] >= 0 for key in PRODUCT_COUNTERS),
             f"{label} has invalid Git transfer counters")
+    native = fields(client["native_traffic"], NATIVE_TRAFFIC_FIELDS, "native object-store traffic")
+    require(all(type(count) is int and count >= 0 for count in native.values())
+            and (native["body_bytes"] == 0 or native["get_responses"] + native["head_responses"] > 0),
+            f"{label} has invalid native object-store counters")
     responses = client["edge_responses"]
     provider = PROVIDER_FOR_EDGE[scope_parts(provenance["scope"])[0]]
     require(isinstance(responses, dict) and len(responses) <= min(1024, client["all_edge_attempts"])
@@ -1260,6 +1265,8 @@ def validate_git_fetch(raw: bytes, provenance: dict[str, Any], mode: str, label:
     if mode == "origin":
         require(reader["binding_sha256"] == "" and all(client[key] == 0 for key in PRODUCT_COUNTERS),
                 f"{label} requires an inactive viewer binding and zero edge or local payload reads")
+        require(positive(native["get_responses"]) and positive(native["body_bytes"]),
+                f"{label} observed no native payload transfer")
     if mode == "edge":
         require(positive(client["observed_edge_gets"]) and positive(client["verified_edge_payloads"]),
                 f"{label} accepted no verified edge payload")
@@ -1454,7 +1461,11 @@ def collect_git_performance(
                 require(positive(measured["peak_memory_bytes"]) and positive(measured["peak_disk_bytes"]),
                         f"{label} is missing Git memory or disk measurements")
                 incomplete = client["incomplete_edge_bytes"]
-                require(incomplete <= measured["rejected_bytes"] and measured["client_bytes"] >= measured["edge_bytes"] + incomplete,
+                native = client["native_traffic"]
+                require(measured["origin_gets"] >= native["get_responses"],
+                        f"{label} undercounts observed native GET responses")
+                require(incomplete <= measured["rejected_bytes"]
+                        and measured["client_bytes"] >= native["body_bytes"] + measured["edge_bytes"] + incomplete,
                         f"{label} undercounts observed client bytes")
                 pair[arm] = measured
                 if retain is not None:

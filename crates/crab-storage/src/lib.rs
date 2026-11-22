@@ -9,6 +9,7 @@ pub mod head_batch;
 pub mod identity;
 pub mod layout;
 pub mod multipart;
+mod native_read_telemetry;
 mod observation;
 pub mod provider_options;
 pub mod provider_store;

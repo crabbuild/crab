@@ -11,6 +11,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import collect_cdn_git_performance as BENCHMARK
+from collect_cdn_product_metrics import NATIVE_TARGET, measure_native
 import test_cdn_qualification as fixture
 
 
@@ -18,6 +19,21 @@ REGIONS = fixture.REGIONS
 PLATFORM = "linux-x86_64"
 RUN_ID = "123"
 ATTEMPT = "2"
+
+
+class NativeReadCountersTests(unittest.TestCase):
+    def test_counts_responses_and_consumed_error_bytes_for_the_approved_provider(self) -> None:
+        def event(method: str, status: int, body: int) -> bytes:
+            return json.dumps({"target": NATIVE_TARGET, "fields": {
+                "message": "Native object store read", "provider": "s3", "method": method,
+                "status": status, "bytes": body,
+            }}).encode()
+
+        lines = [event("get", 206, 8), event("get", 404, 3), event("get", 0, 0), event("head", 200, 0)]
+        self.assertEqual(measure_native(lines, "cloudfront/private/cli/git/direct"),
+                         {"get_responses": 2, "head_responses": 1, "body_bytes": 11})
+        with self.assertRaisesRegex(ValueError, "invalid native read event for the approved provider"):
+            measure_native(lines, "cloud-cdn/private/cli/git/direct")
 
 
 class CdnGitPerformanceQualificationTests(unittest.TestCase):
@@ -94,6 +110,23 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
         self.amend_client(arm, reader=reader | {"binding_sha256": self.registration["viewer_binding_sha256"]})
         with self.assertRaisesRegex(ValueError, "requires an inactive viewer binding"):
             self.collect()
+
+    def test_origin_arm_requires_an_observed_native_payload_transfer(self) -> None:
+        self.amend_client("near/0001/origin", native_traffic={"get_responses": 0, "head_responses": 1, "body_bytes": 0})
+        with self.assertRaisesRegex(ValueError, "observed no native payload transfer"):
+            self.collect()
+
+    def test_runner_and_provider_metrics_must_cover_native_reads_during_an_edge_hit(self) -> None:
+        report = self.root / "near/0001/warm_edge/measurement.json"
+        external = json.loads(report.read_bytes())
+        for changes, expected in (
+            ({"origin_gets": 0}, "undercounts observed native GET responses"),
+            ({"client_bytes": 15}, "undercounts observed client bytes"),
+        ):
+            with self.subTest(changes=changes):
+                fixture.json_file(report, external | changes)
+                with self.assertRaisesRegex(ValueError, expected):
+                    self.collect()
 
     def test_cloudfront_hashes_must_cover_the_timed_requests_and_agree_on_cache_status(self) -> None:
         path = self.root / "near/0001/cold_edge" / fixture.CDN.VIEWER_REQUEST_FILES["s3"]

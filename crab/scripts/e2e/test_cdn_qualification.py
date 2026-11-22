@@ -48,9 +48,11 @@ def json_file(path: Path, data: Any) -> str:
 
 
 def sample() -> dict[str, Any]:
-    metrics = dict.fromkeys(CDN.METRICS, 0) | {"client_bytes": 64, "peak_memory_bytes": 4096, "peak_disk_bytes": 8192}
+    metrics = dict.fromkeys(CDN.METRICS, 0) | {
+        "client_bytes": 64, "origin_gets": 1, "peak_memory_bytes": 4096, "peak_disk_bytes": 8192,
+    }
     return {
-        "origin": metrics | {"elapsed_ms": 300, "origin_gets": 1, "client_bytes": 8},
+        "origin": metrics | {"elapsed_ms": 300, "client_bytes": 8},
         "cold_edge": metrics | {"elapsed_ms": 420, "edge_misses": 1, "origin_fill_bytes": 8, "edge_bytes": 8},
         "warm_edge": metrics | {"elapsed_ms": 120, "edge_hits": 1, "edge_bytes": 8},
         "warm_local": metrics | {"elapsed_ms": 6, "local_payload_hits": 1},
@@ -100,7 +102,7 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str) -> N
                     "expected_bytes": CDN.GIT_PAYLOAD_SIZE, "observed_bytes": CDN.GIT_PAYLOAD_SIZE,
                     "started_at_unix_ms": started, "finished_at_unix_ms": started + metrics["elapsed_ms"],
                     "visible_new_ref": True, "native_writes": 1,
-                    "edge_responses": {},
+                    "edge_responses": {}, "native_traffic": {"get_responses": 1, "head_responses": 0, "body_bytes": 8},
                 }
                 proof = {}
                 if provider in CDN.VIEWER_REQUEST_FILES and edge:

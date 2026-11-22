@@ -3286,7 +3286,7 @@ impl Store {
             let destination = target.path.to_owned();
             let range = range.clone();
             async move {
-                let response = tokio::select! {
+                let (response, mut observation) = tokio::select! {
                     biased;
                     () = cancel.cancelled() => return Err(StorageError::Cancelled),
                     result = self.download_signed_response_stream(&client, &url, &path, range.clone()) => result?,
@@ -3316,6 +3316,9 @@ impl Store {
                                 source: Box::new(error),
                             },
                         })?;
+                        if let Some(observation) = &mut observation {
+                            observation.received(chunk.len());
+                        }
                         let next_size = size.checked_add(chunk.len() as u64).ok_or_else(|| {
                             StorageError::CorruptObject {
                                 path: path.clone(),
@@ -3368,8 +3371,10 @@ impl Store {
         path: &str,
         range: std::ops::Range<u64>,
     ) -> Result<Bytes> {
-        self.download_signed_response_stream(client, url, path, range)
-            .await?
+        let (response, mut observation) = self
+            .download_signed_response_stream(client, url, path, range)
+            .await?;
+        let bytes = response
             .bytes()
             .await
             .map_err(|error| StorageError::NetworkTransient {
@@ -3377,7 +3382,11 @@ impl Store {
                     store: "signed object range read",
                     source: Box::new(error),
                 },
-            })
+            })?;
+        if let Some(observation) = &mut observation {
+            observation.received(bytes.len());
+        }
+        Ok(bytes)
     }
 
     async fn download_signed_response_stream(
@@ -3386,9 +3395,17 @@ impl Store {
         url: &url::Url,
         path: &str,
         range: std::ops::Range<u64>,
-    ) -> Result<reqwest::Response> {
+    ) -> Result<(
+        reqwest::Response,
+        Option<crate::native_read_telemetry::NativeReadObservation>,
+    )> {
         let range_header = format!("bytes={}-{}", range.start, range.end - 1);
         self.record_read_request(StorageReadKind::Range);
+        let mut observation = crate::native_read_telemetry::NativeReadObservation::start(
+            &reqwest::Method::GET,
+            Some(url.scheme()),
+            url.host_str(),
+        );
         let response = client
             .get(url.clone())
             .header(reqwest::header::RANGE, range_header)
@@ -3401,6 +3418,9 @@ impl Store {
                 },
             })?;
         let status = response.status();
+        if let Some(observation) = &mut observation {
+            observation.status(status.as_u16());
+        }
         if status == reqwest::StatusCode::NOT_FOUND {
             return Err(StorageError::NotFound {
                 path: path.to_owned(),
@@ -3447,7 +3467,7 @@ impl Store {
                 ),
             });
         }
-        Ok(response)
+        Ok((response, observation))
     }
 }
 

@@ -961,9 +961,15 @@ contains `client_report_sha256`, `provider` (`s3`, `gcs`, or `azure`),
 `region`, `client_bytes`, `origin_gets`, `origin_fill_bytes`,
 `rejected_bytes`, `peak_memory_bytes`, `peak_disk_bytes`, and
 `cost_microusd`. Hash the exact `client.json` bytes. Use provider logs to
-attribute request and fill counts and runner measurements for client and
-resource totals. The transport counter includes incomplete response bodies;
-the rejected total also needs any bytes discarded by higher-level verification.
+attribute request and fill counts. Measure client and resource totals on the
+runner. Each timed fetch records native HTTPS GET and HEAD responses and
+consumed body bytes, including reads of refs and metadata on the cloud storage
+endpoint. The origin control requires native GET and body evidence. External
+`origin_gets` must cover every observed native GET response, including listing
+requests. External `client_bytes` must cover both native and edge body bytes,
+including incomplete edge bodies. The rejected total also needs any bytes
+discarded by higher-level verification. Measure protocol overhead and
+provider-side origin fills independently.
 
 For each timed fetch that made edge attempts, collect provider viewer
 evidence beside `client.json`. For CloudFront, write
