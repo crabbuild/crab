@@ -3,6 +3,7 @@
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -20,12 +21,17 @@ from public_inventory import (
 
 
 BUCKET = re.compile(r"s3://([a-z0-9][a-z0-9.-]{1,61}[a-z0-9])")
-MAX_OBJECT = 5_000_000_000
+SINGLE_PUT_LIMIT = 5_000_000_000
+MAX_OBJECT = 50_000_000_000_000
+MAX_PARTS = 10_000
+DEFAULT_PART_BYTES = 64 * 1024 * 1024
+COPY_BUFFER_BYTES = 1024 * 1024
 
 
 class AwsError(ExportError):
     def __init__(self, operation, stderr):
         match = re.search(r"An error occurred \(([A-Za-z0-9]+)\)", stderr)
+        self.operation = operation
         self.code = match.group(1) if match else None
         super().__init__(f"AWS {operation} failed ({self.code or 'unclassified'})")
 
@@ -46,6 +52,8 @@ def aws(profile, region, service, operation, *arguments):
     )
     if result.returncode:
         raise AwsError(operation, result.stderr)
+    if operation == "abort-multipart-upload" and not result.stdout.strip():
+        return {}
     return json.loads(result.stdout)
 
 
@@ -110,6 +118,70 @@ def download_verified(profile, region, location, obj, path):
     return received
 
 
+def upload_multipart(profile, region, destination, obj, path):
+    part_bytes = max(DEFAULT_PART_BYTES, (obj.size + MAX_PARTS - 1) // MAX_PARTS)
+    upload = aws(profile, region, "s3api", "create-multipart-upload", *destination,
+                 "--checksum-algorithm", "SHA256", "--checksum-type", "COMPOSITE",
+                 "--content-type", CONTENT_TYPE, "--cache-control", CACHE_CONTROL)
+    location = [*destination, "--upload-id", upload["UploadId"]]
+    completed = False
+    try:
+        parts = []
+        body_digest = hashlib.sha256()
+        part_file = path.with_name("part")
+        with path.open("rb") as source:
+            for index, offset in enumerate(range(0, obj.size, part_bytes), 1):
+                part_digest = hashlib.sha256()
+                remaining = min(part_bytes, obj.size - offset)
+                with part_file.open("wb") as output:
+                    while remaining:
+                        block = source.read(min(remaining, COPY_BUFFER_BYTES))
+                        if not block:
+                            raise ExportError(f"source spool ended before the approved size for {obj.path}")
+                        output.write(block)
+                        part_digest.update(block)
+                        body_digest.update(block)
+                        remaining -= len(block)
+                checksum = base64.b64encode(part_digest.digest()).decode("ascii")
+                response = aws(profile, region, "s3api", "upload-part", *location,
+                               "--part-number", str(index), "--body", str(part_file), "--checksum-sha256", checksum)
+                if response.get("ChecksumSHA256") != checksum or not response.get("ETag"):
+                    raise ExportError(f"export upload returned a different part identity for {obj.path}")
+                parts.append({"PartNumber": index, "ETag": response["ETag"], "ChecksumSHA256": checksum})
+            # Bind the exact uploaded parts to the reviewed digest before S3 can
+            # expose the key. The provider's composite SHA-256 is a different digest.
+            if source.read(1) or body_digest.hexdigest() != obj.sha256:
+                raise ExportError(f"source spool differs from the approved object for {obj.path}")
+        part_file.unlink()
+        manifest = path.with_name("parts.json")
+        manifest.write_text(json.dumps({"Parts": parts}), encoding="utf-8")
+        result = aws(profile, region, "s3api", "complete-multipart-upload", *location, "--if-none-match", "*",
+                     "--checksum-type", "COMPOSITE", "--mpu-object-size", str(obj.size),
+                     "--multipart-upload", f"file://{manifest.resolve()}")
+        if not result.get("ETag"):
+            raise ExportError(f"S3 did not confirm multipart completion for {obj.path}")
+        completed = True
+    finally:
+        if not completed:
+            try:
+                aws(profile, region, "s3api", "abort-multipart-upload", *location)
+            except AwsError as error:
+                if error.code != "NoSuchUpload":
+                    raise
+
+
+def create_object(profile, region, destination, obj, path):
+    if obj.size > SINGLE_PUT_LIMIT:
+        upload_multipart(profile, region, destination, obj, path)
+        return
+    checksum = base64.b64encode(bytes.fromhex(obj.sha256)).decode("ascii")
+    result = aws(profile, region, "s3api", "put-object", *destination,
+                 "--body", str(path), "--if-none-match", "*", "--checksum-sha256", checksum,
+                 "--content-type", CONTENT_TYPE, "--cache-control", CACHE_CONTROL)
+    if result.get("ChecksumSHA256") != checksum:
+        raise ExportError(f"export upload returned a different checksum for {obj.path}")
+
+
 def publish(options):
     source, source_placement, prefix, digest, objects = read_inventory(options.inventory, bucket, MAX_OBJECT)
     source_bucket = bucket(source)
@@ -130,20 +202,11 @@ def publish(options):
             download_verified(options.source_profile, source_region,
                               ["--bucket", source_bucket, "--key", key, "--expected-bucket-owner", source_owner], obj, path)
             destination = ["--bucket", export, "--key", key, "--expected-bucket-owner", owner]
-            checksum = base64.b64encode(bytes.fromhex(obj.sha256)).decode("ascii")
             try:
-                result = aws(
-                    options.writer_profile, options.region, "s3api", "put-object", *destination,
-                    "--body", str(path), "--if-none-match", "*", "--checksum-sha256", checksum,
-                    "--content-type", CONTENT_TYPE,
-                    "--cache-control", CACHE_CONTROL,
-                )
+                create_object(options.writer_profile, options.region, destination, obj, path)
             except AwsError as error:
-                if error.code != "PreconditionFailed":
+                if error.code != "PreconditionFailed" or error.operation not in ("put-object", "complete-multipart-upload"):
                     raise
-            else:
-                if result.get("ChecksumSHA256") != checksum:
-                    raise ExportError(f"export upload returned a different checksum for {obj.path}")
             path.unlink()
             existing = download_verified(options.writer_profile, options.region, destination, obj, path)
             if (existing.get("ContentType") != CONTENT_TYPE or existing.get("CacheControl") != CACHE_CONTROL

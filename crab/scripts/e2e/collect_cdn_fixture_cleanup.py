@@ -47,16 +47,24 @@ def api_body(base: SplitResult, target: str, headers: dict[str, str], check: str
 def s3_inventory(origin: str, prefix: str) -> dict[str, str]:
     base = native_base(origin, "cloudfront")
     region = base.netloc.split(".")[1]
-    result = decode(command_output(
-        "aws", "s3api", "list-object-versions", "--bucket", base.path.removeprefix("/"), "--prefix", prefix,
-        "--max-keys", "1", "--region", region, "--endpoint-url", f"https://{base.netloc}",
+    bucket = base.path.removeprefix("/")
+    target = (
+        "--bucket", bucket, "--prefix", prefix, "--region", region, "--endpoint-url", f"https://{base.netloc}",
         "--no-paginate", "--no-cli-pager", "--output", "json",
-    ))
+    )
+    # A retired upload can become a version between requests. Check uploads
+    # first so a concurrent completion cannot move between the two inventories.
+    uploads = decode(command_output("aws", "s3api", "list-multipart-uploads", *target, "--max-uploads", "1"))
+    require(isinstance(uploads, dict) and uploads.get("IsTruncated") is False
+            and uploads.get("Bucket") == bucket and uploads.get("Prefix") == prefix
+            and all(uploads.get(name, []) == [] for name in ("Uploads", "CommonPrefixes")),
+            "S3 fixture prefix still contains incomplete multipart uploads, or its inventory is incomplete")
+    result = decode(command_output("aws", "s3api", "list-object-versions", *target, "--max-keys", "1"))
     require(isinstance(result, dict) and result.get("IsTruncated") is False
             and result.get("Prefix") == prefix
             and all(result.get(name, []) == [] for name in ("Versions", "DeleteMarkers", "CommonPrefixes")),
             "S3 fixture prefix still contains versions or delete markers, or its inventory is incomplete")
-    return {"versions_and_delete_markers": "empty"}
+    return {"multipart_uploads": "empty", "versions_and_delete_markers": "empty"}
 
 
 def gcs_inventory(origin: str, prefix: str, authorization: str) -> dict[str, str]:

@@ -147,15 +147,19 @@ For example, this inventory approves a three-byte LFS object containing `abc`.
    source and prefix, the SHA-256 of the exact reviewed inventory file as
    `ApprovedInventorySha256`, and `ExportWriterRoleArn`. Leave
    `EnablePublicDelivery` at its default of false. Give the dedicated writer
-   role S3 GetObject and PutObject access to the export families. The bucket
-   policy requires that role, conditional creation, and a separate cleanup
+   role `s3:GetObject`, `s3:PutObject`, and `s3:AbortMultipartUpload` access
+   to the export families. The bucket policy requires that role, conditional
+   creation, and a separate cleanup
    principal. [S3 conditional writes](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes-enforce.html)
 2. Run the publisher with AWS CLI v2 and Python 3.11 or later. Give the
    operator profile read access to the stack and the export bucket's location.
    Use an independent source-reader profile with `s3:GetBucketLocation` and
    object read access, and use the dedicated export-writer profile.
-   Specify private scratch space for one object at a time. This fixture
-   accepts objects through 5,000,000,000 bytes using single PUTs.
+   Specify private scratch space for one object plus one multipart part at
+   a time. The publisher uses single PUTs through 5,000,000,000 bytes and
+   multipart uploads through Crab's 50 TB S3 object limit. Use an AWS CLI v2
+   build that supports the multipart completion options `--if-none-match`,
+   `--checksum-type`, and `--mpu-object-size`.
 
    ```sh
    python3 crab/deploy/cdn/aws/publish_export.py approved.json \
@@ -165,17 +169,21 @@ For example, this inventory approves a three-byte LFS object containing `abc`.
      --receipt /path/to/publication.json
    ```
 
-   The publisher uses a conditional checksum-protected PUT and reads back
-   the body and representation of each destination, including an existing
-   key on retry. It checks the disabled distribution and both bucket owners
-   and regions before and after the copy. It uses the approved source region
+   The publisher uses create-only PUT or multipart completion. It supplies
+   SHA-256 for each part and checks the digest of the uploaded bytes against
+   the approved inventory before making the completed object visible. It
+   aborts failed uploads, and S3 lifecycle cleans up uploads left incomplete
+   after seven days. It reads back the body and representation of each
+   destination, including an existing key on retry. It checks the disabled
+   distribution and both bucket owners and regions before and after the copy.
+   It uses the approved source region
    and expected owner for every source read. It writes the complete publication receipt
    to a new path and returns that file's SHA-256. The receipt binds the
    approved inventory digest, source, export, prefix, deployment, viewer
    hostname, and every verified object. The inventory and receipt each have
    an 8 MiB limit. Retain the exact receipt and printed digest for approval.
    A failed run can be retried while public delivery is disabled.
-   [S3 checksums](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObject.html) · [Conditional S3 readback](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObject.html)
+   [S3 checksums](https://docs.aws.amazon.com/AmazonS3/latest/userguide/checking-object-integrity-upload.html) · [Conditional multipart completion](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CompleteMultipartUpload.html)
 3. Confirm the export covers the Git and LFS objects named by the captured
    source view, then enable public delivery. Probe the warm distribution's
    own host, exact ranges and digests, and denial of mutable paths, adjacent

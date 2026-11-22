@@ -110,7 +110,7 @@ PUBLIC_CHECKS = {
     "export_origin_access", "public_listing_denied",
 }
 CLEANUP_INVENTORIES = {
-    "cloudfront": ({"versions_and_delete_markers": "empty"},),
+    "cloudfront": ({"multipart_uploads": "empty", "versions_and_delete_markers": "empty"},),
     "cloud-cdn": ({"generations": "empty", "soft_deleted": "empty"},
                   {"generations": "empty", "soft_deleted": "disabled"}),
     "front-door": ({"blobs": "empty", "soft_deleted": "empty"}, {"versions_and_snapshots": "empty"}),

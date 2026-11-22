@@ -42,6 +42,13 @@ Resources:
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: AbortIncompleteExportUploads
+            Status: Enabled
+            Prefix: !Sub '${RepositoryPrefix}/'
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
       Tags:
         - Key: CrabSourceOrigin
           Value: !Ref SourceOrigin

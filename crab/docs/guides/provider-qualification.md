@@ -1476,9 +1476,11 @@ filesystem read after the live commit and pointer checks.
 After retiring the test ref and completing fixture cleanup, collect
 `traces/cleanup.json` with the approved fixture configuration. Run this probe
 on the Git product worker so its clock can prove the inventory was checked
-after ref retirement. For Amazon S3, use the AWS profile with list-version
-access to the fixture, for example `AWS_PROFILE=crab`. GCS uses the active
-`gcloud` identity with bucket metadata and object listing access. Azure uses
+after ref retirement. For Amazon S3, stop fixture writers and use an AWS
+profile with `s3:ListBucketVersions` and `s3:ListBucketMultipartUploads`
+on the dedicated fixture buckets, for example `AWS_PROFILE=crab`.
+GCS uses the active `gcloud` identity with bucket metadata and object
+listing access. Azure uses
 the active Azure CLI identity with Blob account information and listing access.
 
 ```bash
@@ -1491,15 +1493,16 @@ python3 -B crab/scripts/e2e/collect_cdn_fixture_cleanup.py \
 ```
 
 The probe checks the slash-terminated repository prefix in the native origin
-and the separate public export where applicable. S3 lists versions and delete
-markers. GCS lists generations and checks soft-deleted objects when the bucket
+and the separate public export where applicable. S3 lists incomplete multipart
+uploads before checking committed versions and delete markers. GCS lists
+generations and checks soft-deleted objects when the bucket
 policy enables recovery. Use GCS cleanup fixtures with soft delete disabled
 before test writes or allow the applicable retention period to elapse.
 Azure lists current and soft-deleted paths on hierarchical accounts, or
 versions and snapshots on flat accounts. All listings must complete with an
 empty result. The retained trace contains scope fingerprints and inventory
 outcomes. Retain CDN deployment and purge evidence under the deployment and
-rollback checks. [S3 version listing](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectVersions.html) · [GCS object listing](https://docs.cloud.google.com/storage/docs/json_api/v1/objects/list) · [Azure Blob listing](https://learn.microsoft.com/en-us/rest/api/storageservices/list-blobs)
+rollback checks. [S3 multipart listing](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListMultipartUploads.html) · [S3 version listing](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectVersions.html) · [GCS object listing](https://docs.cloud.google.com/storage/docs/json_api/v1/objects/list) · [Azure Blob listing](https://learn.microsoft.com/en-us/rest/api/storageservices/list-blobs)
 
 ### Pair regional CLI fetch measurements
 

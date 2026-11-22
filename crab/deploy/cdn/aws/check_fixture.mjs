@@ -75,6 +75,7 @@ assert.match(publicTemplate, /Bucket: !Ref ExportBucket/);
 assert.match(publicTemplate, /AWS:SourceArn: !Sub 'arn:\$\{AWS::Partition\}:cloudfront::\$\{AWS::AccountId\}:distribution\/\$\{Distribution\}'/);
 assert.match(publicTemplate, /aws:PrincipalArn: !Ref ExportWriterRoleArn/);
 assert.match(publicTemplate, /s3:ObjectCreationOperation: 'true'\n              StringNotEquals:\n                s3:if-none-match: '\*'/);
+assert.match(publicTemplate, /Prefix: !Sub '\$\{RepositoryPrefix\}\/'\n            AbortIncompleteMultipartUpload:\n              DaysAfterInitiation: 7/);
 assert.doesNotMatch(publicTemplate, /TrustedKeyGroups|Action: s3:ListBucket|DomainName:.*SourceOrigin/);
 
 const viewerFields = logTemplate.match(/RecordFields:\n((?: {8}- [^\n]+\n)+)/)?.[1];

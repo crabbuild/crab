@@ -14,6 +14,7 @@ from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, urlsplit
 
 import collect_cdn_fixture_cleanup as cleanup
+from cdn_qualification import CLEANUP_INVENTORIES
 from test_cdn_transport_qualification import REPO, fixture
 
 
@@ -21,30 +22,47 @@ PREFIX = REPO + "/"
 
 
 class CdnCleanupQualificationTests(unittest.TestCase):
-    def test_s3_uses_bucket_region_and_an_exact_version_listing(self) -> None:
+    def test_s3_checks_pending_uploads_before_committed_versions_for_the_exact_prefix(self) -> None:
         base = urlsplit("https://s3.us-west-2.amazonaws.com/fixture-bucket")
         empty = {"Prefix": PREFIX, "IsTruncated": False}
         with (patch.object(cleanup, "native_base", return_value=base),
-              patch.object(cleanup, "command_output", return_value=json.dumps(empty).encode()) as run):
+              patch.object(cleanup, "command_output",
+                           side_effect=[json.dumps(page).encode() for page in (empty | {"Bucket": "fixture-bucket"}, empty)]) as run):
             result = cleanup.s3_inventory("s3://fixture-bucket", PREFIX)
-        args = run.call_args.args
-        self.assertEqual(args[:3], ("aws", "s3api", "list-object-versions"))
-        for option, expected in (
-            ("--bucket", "fixture-bucket"), ("--prefix", PREFIX), ("--max-keys", "1"),
-            ("--region", "us-west-2"), ("--endpoint-url", "https://s3.us-west-2.amazonaws.com"),
-        ):
-            self.assertEqual(args[args.index(option) + 1], expected)
-        self.assertIn("--no-paginate", args)
-        self.assertEqual(result, {"versions_and_delete_markers": "empty"})
+        self.assertEqual(run.call_count, 2)
+        for call, (operation, maximum) in zip(run.call_args_list, (
+            ("list-multipart-uploads", "--max-uploads"), ("list-object-versions", "--max-keys"),
+        )):
+            args = call.args
+            self.assertEqual(args[:3], ("aws", "s3api", operation))
+            for option, expected in (
+                ("--bucket", "fixture-bucket"), ("--prefix", PREFIX), (maximum, "1"),
+                ("--region", "us-west-2"), ("--endpoint-url", "https://s3.us-west-2.amazonaws.com"),
+            ):
+                self.assertEqual(args[args.index(option) + 1], expected)
+            self.assertIn("--no-paginate", args)
+        self.assertIn(result, CLEANUP_INVENTORIES["cloudfront"])
 
     def test_s3_rejects_retained_versions_delete_markers_and_incomplete_inventory(self) -> None:
         base = urlsplit("https://s3.us-west-2.amazonaws.com/fixture-bucket")
         candidate = {"Prefix": PREFIX, "IsTruncated": False}
+        uploads = candidate | {"Bucket": "fixture-bucket"}
         for changed in ({"Versions": [{}]}, {"DeleteMarkers": [{}]}, {"IsTruncated": True}, {"Prefix": REPO}):
             with (self.subTest(changed=changed), patch.object(cleanup, "native_base", return_value=base),
-                  patch.object(cleanup, "command_output", return_value=json.dumps(candidate | changed).encode())):
+                  patch.object(cleanup, "command_output",
+                               side_effect=[json.dumps(page).encode() for page in (uploads, candidate | changed)])):
                 with self.assertRaisesRegex(ValueError, "inventory is incomplete"):
                     cleanup.s3_inventory("s3://fixture-bucket", PREFIX)
+
+    def test_s3_cannot_claim_cleanup_with_an_upload_or_incomplete_upload_listing(self) -> None:
+        base = urlsplit("https://s3.us-west-2.amazonaws.com/fixture-bucket")
+        candidate = {"Bucket": "fixture-bucket", "Prefix": PREFIX, "IsTruncated": False}
+        for changed in ({"Uploads": [{}]}, {"IsTruncated": True}, {"Bucket": "other"}, {"Prefix": REPO}):
+            with (self.subTest(changed=changed), patch.object(cleanup, "native_base", return_value=base),
+                  patch.object(cleanup, "command_output", return_value=json.dumps(candidate | changed).encode()) as run):
+                with self.assertRaisesRegex(ValueError, "multipart uploads"):
+                    cleanup.s3_inventory("s3://fixture-bucket", PREFIX)
+                self.assertEqual(run.call_count, 1)
 
     def test_gcs_fetches_live_and_historical_inventories_based_on_the_bucket_policy(self) -> None:
         settings = {"name": "fixture-bucket", "softDeletePolicy": {"retentionDurationSeconds": "604800"}}
@@ -97,7 +115,7 @@ class CdnCleanupQualificationTests(unittest.TestCase):
             argv = ["cleanup", "--fixture", str(source), "--configuration-sha256", digest,
                     "--output", str(output), "--source-sha", "a" * 40, "--run-id", "123", "--run-attempt", "2"]
             with (patch.object(sys, "argv", argv), redirect_stdout(StringIO()),
-                  patch.object(cleanup, "s3_inventory", return_value={"versions_and_delete_markers": "empty"}) as inventory):
+                  patch.object(cleanup, "s3_inventory", return_value=CLEANUP_INVENTORIES["cloudfront"][0]) as inventory):
                 self.assertEqual(cleanup.main(), 0)
             self.assertEqual([call.args for call in inventory.call_args_list],
                              [(sample["native_origin"], PREFIX), (sample["export_origin"], PREFIX)])

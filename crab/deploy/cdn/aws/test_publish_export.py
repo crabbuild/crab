@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import json
 from pathlib import Path
@@ -44,6 +45,13 @@ class ExportTest(unittest.TestCase):
         self.corrupt_destination_write = False
         self.enable_during_readback = False
         self.writes = 0
+        self.parts = None
+        self.aborts = 0
+        self.complete_attempts = 0
+        self.failed_part = None
+        self.bad_part_checksum = False
+        self.complete_conflict = None
+        self.mutate_spool = False
 
     def write_inventory(self):
         raw = json.dumps(self.inventory).encode()
@@ -111,9 +119,14 @@ class ExportTest(unittest.TestCase):
         if operation == "get-object":
             self.assertEqual(args[-3:-1], ("--if-match", '"fixture"'))
             Path(args[-1]).write_bytes(data)
+            if target == "source-models":
+                self.source_spool = Path(args[-1])
             if target == "export-models" and self.enable_during_readback:
                 self.enabled = "true"
             return {"ContentType": publisher.CONTENT_TYPE, "CacheControl": publisher.CACHE_CONTROL}
+        if operation in ("create-multipart-upload", "upload-part", "complete-multipart-upload", "abort-multipart-upload"):
+            self.assertEqual(target, "export-models")
+            return self.multipart(operation, args)
         self.assertEqual(operation, "put-object")
         self.assertEqual(target, "export-models")
         self.assertEqual(args[args.index("--if-none-match") + 1], "*")
@@ -124,6 +137,95 @@ class ExportTest(unittest.TestCase):
             self.export_data = b"x" * len(self.export_data)
         self.writes += 1
         return {"ChecksumSHA256": args[args.index("--checksum-sha256") + 1]}
+
+    def multipart(self, operation, args):
+        def argument(flag):
+            return args[args.index(flag) + 1]
+
+        if operation == "create-multipart-upload":
+            self.assertIsNone(self.parts)
+            self.assertEqual(argument("--checksum-algorithm"), "SHA256")
+            self.assertEqual(argument("--checksum-type"), "COMPOSITE")
+            self.assertEqual(argument("--content-type"), publisher.CONTENT_TYPE)
+            self.assertEqual(argument("--cache-control"), publisher.CACHE_CONTROL)
+            self.assertNotIn("--if-none-match", args)
+            self.parts = []
+            if self.mutate_spool:
+                with self.source_spool.open("r+b") as source:
+                    source.seek(5)
+                    source.write(b"X")
+            return {"UploadId": "fixture-upload"}
+        self.assertEqual(argument("--upload-id"), "fixture-upload")
+        self.assertIsNotNone(self.parts)
+        if operation == "abort-multipart-upload":
+            self.aborts += 1
+            self.parts = None
+            return {}
+        if operation == "upload-part":
+            number = int(argument("--part-number"))
+            self.assertEqual(number, len(self.parts) + 1)
+            if number == self.failed_part:
+                raise publisher.AwsError(operation, "An error occurred (ServiceUnavailable)")
+            body = Path(argument("--body")).read_bytes()
+            checksum = base64.b64encode(hashlib.sha256(body).digest()).decode("ascii")
+            self.assertEqual(argument("--checksum-sha256"), checksum)
+            tag = f'"part-{number}"'
+            self.parts.append((body, {"PartNumber": number, "ETag": tag, "ChecksumSHA256": checksum}))
+            return {"ETag": tag, "ChecksumSHA256": "" if self.bad_part_checksum else checksum}
+        self.complete_attempts += 1
+        self.assertEqual(argument("--if-none-match"), "*")
+        self.assertEqual(argument("--checksum-type"), "COMPOSITE")
+        self.assertEqual(int(argument("--mpu-object-size")), len(self.data))
+        manifest = json.loads(Path(argument("--multipart-upload").removeprefix("file://")).read_bytes())
+        self.assertEqual(manifest, {"Parts": [part for _, part in self.parts]})
+        if self.complete_conflict:
+            raise publisher.AwsError(operation, f"An error occurred ({self.complete_conflict})")
+        if self.export_data is not None:
+            raise publisher.AwsError(operation, "An error occurred (PreconditionFailed)")
+        self.assertEqual([body for body, _ in self.parts], [self.data[:5], self.data[5:10], self.data[10:]])
+        self.export_data = b"".join(body for body, _ in self.parts)
+        self.parts = None
+        self.writes += 1
+        return {"ETag": '"complete"'}
+
+    def enable_multipart_fixture(self):
+        self.enterContext(patch.object(publisher, "aws", self.aws))
+        self.enterContext(patch.multiple(publisher, SINGLE_PUT_LIMIT=8, DEFAULT_PART_BYTES=5, COPY_BUFFER_BYTES=2))
+
+    def test_multipart_creates_once_and_rechecks_existing_destination_on_retry(self):
+        self.enable_multipart_fixture()
+        receipt = publisher.publish(self.options)
+        self.assertEqual(publisher.publish(self.options), receipt)
+        self.assertEqual(self.export_data, self.data)
+        self.assertEqual((self.writes, self.complete_attempts, self.aborts), (1, 2, 1))
+        self.export_data = b"d" * len(self.data)
+        with self.assertRaisesRegex(publisher.ExportError, "inventory digest mismatch"):
+            publisher.publish(self.options)
+        self.assertEqual(self.export_data, b"d" * len(self.data))
+
+    def test_multipart_aborts_before_publication_on_failed_part_or_changed_bytes(self):
+        self.enable_multipart_fixture()
+        for settings, message in (
+            ({"failed_part": 2}, "ServiceUnavailable"),
+            ({"bad_part_checksum": True}, "different part identity"),
+            ({"mutate_spool": True}, "source spool differs"),
+        ):
+            with self.subTest(settings=settings), patch.multiple(self, **settings):
+                with self.assertRaisesRegex(publisher.ExportError, message):
+                    publisher.publish(self.options)
+                self.assertIsNone(self.parts)
+                self.assertIsNone(self.export_data)
+        self.assertEqual((self.complete_attempts, self.aborts), (0, 3))
+
+    def test_multipart_completion_conflict_aborts_and_leaves_no_receipt(self):
+        self.enable_multipart_fixture()
+        self.complete_conflict = "ConditionalRequestConflict"
+        path = Path(self.scratch) / "publication.json"
+        with self.assertRaisesRegex(publisher.ExportError, "ConditionalRequestConflict"):
+            publisher.write_publication(path, lambda: publisher.publish(self.options))
+        self.assertFalse(path.exists())
+        self.assertEqual((self.complete_attempts, self.aborts), (1, 1))
+        self.assertIsNone(self.parts)
 
     def test_create_and_retry_preserve_verified_bytes(self):
         with patch.object(publisher, "aws", self.aws):
