@@ -4,6 +4,7 @@ pub(crate) mod asset_transfer;
 mod assignees;
 mod branches;
 mod catalog;
+mod catalog_browse;
 mod checks;
 mod contents;
 mod conversation;

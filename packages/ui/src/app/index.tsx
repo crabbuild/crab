@@ -35,6 +35,7 @@ import {
 import { ProfileSettings, UserProfile } from "@/features/profile";
 import { LogOutIcon, UserRoundIcon } from "lucide-react";
 import { RepositoryPage } from "@/features/repository/page";
+import { BrowseRepositories } from "@/features/repository/catalog-browse";
 import {
   DiscussionCodeTheme,
   DiscussionCsrf,
@@ -167,23 +168,18 @@ export function App() {
   });
   const [gitAccessOpen, setGitAccessOpen] = useState(false);
   const catalog = useRequest<{ repositories: Repository[] }>(
-    session.data?.authenticated &&
-      (url.pathname === "/" || inbox || subscriptions || gitAccessOpen)
+    session.data?.authenticated && (inbox || subscriptions || gitAccessOpen)
       ? "/api/repos"
       : null,
   );
+  const [importedRepository, setImportedRepository] =
+    useState<Pick<Repository, "owner" | "name">>();
+  const requestedRepository = route ?? importedRepository;
   const repositoryCatalog = useRequest<{ repositories: Repository[] }>(
-    session.data?.authenticated && route
-      ? `/api/repos?${new URLSearchParams({ owner: route.owner, name: route.name })}`
+    session.data?.authenticated && requestedRepository
+      ? `/api/repos?${new URLSearchParams({ owner: requestedRepository.owner, name: requestedRepository.name })}`
       : null,
   );
-  // A repository page must not wait for settings reads from unrelated Cells.
-  // Load the full catalog only for navigation or an open Git access selector.
-  const pageCatalog = route ? repositoryCatalog : catalog;
-  const [importedRepository, setImportedRepository] = useState<{
-    owner: string;
-    name: string;
-  }>();
   async function signOut() {
     setSigningOut(true);
     setSessionError(undefined);
@@ -204,7 +200,7 @@ export function App() {
     }
   }
   const expectedRepository = url.searchParams.get("repository_id");
-  const repo = pageCatalog.data?.repositories.find(
+  const repo = repositoryCatalog.data?.repositories.find(
     (repo) =>
       repo.owner === route?.owner &&
       repo.name === route.name &&
@@ -224,20 +220,18 @@ export function App() {
               : "Repositories · Crab";
   }, [repo, watched, inbox, subscriptions, projectWorkspace]);
   useEffect(() => {
-    if (!importedRepository || !catalog.data) return;
+    if (!importedRepository || url.pathname !== "/") return;
     if (
-      catalog.data.repositories.some(
-        (candidate) =>
-          candidate.owner === importedRepository.owner &&
-          candidate.name === importedRepository.name,
+      repositoryCatalog.data?.repositories.some(
+        ({ owner, name }) =>
+          owner === importedRepository.owner &&
+          name === importedRepository.name,
       )
     ) {
-      navigate(
-        `/${encodeURIComponent(importedRepository.owner)}/${encodeURIComponent(importedRepository.name)}`,
-      );
+      navigate(repoHref(importedRepository));
       setImportedRepository(undefined);
     }
-  }, [catalog.data, importedRepository]);
+  }, [importedRepository, repositoryCatalog.data, url.pathname]);
   return (
     <TooltipProvider>
       <ProjectCommandsProvider
@@ -467,78 +461,40 @@ export function App() {
                 <h1>Page not found</h1>
                 <Link href="/">Back to repositories</Link>
               </div>
-            ) : (
-              <Result state={pageCatalog} timingLabel="Repository catalog">
-                {(data) =>
-                  url.pathname === "/" ? (
-                    <div className="catalog">
-                      <div className="section-heading">
-                        <div className="catalog-heading-title">
-                          <h1>Your repositories</h1>
-                          <Badge variant="outline">
-                            {data.repositories.length}
-                          </Badge>
-                        </div>
-                        <div className="flex flex-wrap items-start gap-2">
-                          <CreateRepository
-                            csrf={session.data?.csrf ?? ""}
-                            onCreated={(repository) =>
-                              navigate(repoHref(repository))
-                            }
-                          />
-                          <GitImport
-                            key={importAccount}
-                            account={importAccount}
-                            csrf={session.data?.csrf ?? ""}
-                            defaultOwner={gitOwnerSuggestion(
-                              session.data?.user?.name,
-                            )}
-                            onImported={(repository) => {
-                              setImportedRepository(repository);
-                              catalog.retry();
-                            }}
-                          />
-                        </div>
-                      </div>
-                      <p className="muted">Your code, in your storage.</p>
-                      {data.repositories.length === 0 && (
-                        <div className="notice">
-                          <h2>No repositories available</h2>
-                          <p>
-                            Create a repository, import one from Git, or ask an
-                            administrator for access to an existing repository.
-                          </p>
-                          {session.data?.user && (
-                            <p className="muted">
-                              Your user ID:{" "}
-                              <code>{session.data.user.subject}</code>
-                            </p>
-                          )}
-                        </div>
+            ) : url.pathname === "/" ? (
+              <div className="catalog">
+                <div className="section-heading">
+                  <h1>Your repositories</h1>
+                  <div className="flex flex-wrap items-start gap-2">
+                    <CreateRepository
+                      csrf={session.data?.csrf ?? ""}
+                      onCreated={(repository) => navigate(repoHref(repository))}
+                    />
+                    <GitImport
+                      key={importAccount}
+                      account={importAccount}
+                      csrf={session.data?.csrf ?? ""}
+                      defaultOwner={gitOwnerSuggestion(
+                        session.data?.user?.name,
                       )}
-                      <div className="repo-cards">
-                        {data.repositories.map((repo) => (
-                          <article className="panel repo-card" key={repo.id}>
-                            <div className="repo-card-heading">
-                              <RepoIcon size={18} aria-hidden="true" />
-                              <h2>
-                                <Link href={repoHref(repo)}>
-                                  {repo.owner} / <strong>{repo.name}</strong>
-                                </Link>
-                              </h2>
-                              {repo.archived && (
-                                <Badge variant="outline">Archived</Badge>
-                              )}
-                            </div>
-                            <p className="muted">
-                              {repo.description ||
-                                "Browse files, history, and changes."}
-                            </p>
-                          </article>
-                        ))}
-                      </div>
-                    </div>
-                  ) : repo ? (
+                      onImported={(repository) =>
+                        navigate(repoHref(repository))
+                      }
+                    />
+                  </div>
+                </div>
+                <BrowseRepositories
+                  url={url}
+                  subject={session.data?.user?.subject}
+                />
+              </div>
+            ) : (
+              <Result
+                state={repositoryCatalog}
+                timingLabel="Repository catalog"
+              >
+                {() =>
+                  repo ? (
                     <DiscussionRepository.Provider value={repo}>
                       <DiscussionCsrf.Provider value={session.data?.csrf ?? ""}>
                         <DiscussionCodeTheme.Provider

@@ -33,6 +33,9 @@ pub(super) struct RepositorySelection {
     owner: Option<String>,
     name: Option<String>,
     organization: Option<Uuid>,
+    q: Option<String>,
+    after: Option<String>,
+    limit: Option<u8>,
 }
 
 pub(super) async fn list(
@@ -45,7 +48,26 @@ pub(super) async fn list(
             "owner and name must be provided together",
         ));
     }
-    app::actor(&principal)?;
+    let actor = app::actor(&principal)?;
+    if selection.q.is_some() || selection.after.is_some() || selection.limit.is_some() {
+        if selection.owner.is_some() {
+            return Err(app::Error::Invalid(
+                "Search and exact repository lookup cannot be combined",
+            ));
+        }
+        return super::catalog_browse::list(
+            &server,
+            &principal,
+            &actor,
+            super::catalog_browse::Search {
+                organization: selection.organization,
+                query: selection.q.unwrap_or_default(),
+                after: selection.after,
+                limit: selection.limit,
+            },
+        )
+        .await;
+    }
     let address = selection.owner.as_deref().zip(selection.name.as_deref());
     let mut repositories = Vec::new();
     for VisibleRepository {
@@ -113,6 +135,28 @@ pub(super) async fn visible(
     selection: Option<(&str, &str)>,
     organization: Option<Uuid>,
 ) -> app::Result<Vec<VisibleRepository>> {
+    visible_matching(server, principal, |repository| {
+        selection.is_none_or(|(owner, name)| {
+            owner == repository.config.owner && name == repository.config.name
+        }) && organization.is_none_or(|id| repository.organization == Some(id))
+    })
+    .await
+}
+
+pub(super) async fn visible_matching(
+    server: &Server,
+    principal: &Principal,
+    mut include: impl FnMut(&crate::repository::Repository) -> bool,
+) -> app::Result<Vec<VisibleRepository>> {
+    let selected: Vec<_> = server
+        .repositories
+        .values()
+        .into_iter()
+        .filter(|repository| include(repository))
+        .collect();
+    if selected.is_empty() {
+        return Ok(Vec::new());
+    }
     let grants = if principal.is_local() {
         None
     } else {
@@ -133,16 +177,6 @@ pub(super) async fn visible(
         .auth
         .as_ref()
         .map_or("urn:crab:local", |auth| auth.issuer());
-    let selected: Vec<_> = server
-        .repositories
-        .values()
-        .into_iter()
-        .filter(|repository| {
-            selection.is_none_or(|(owner, name)| {
-                owner == repository.config.owner && name == repository.config.name
-            }) && organization.is_none_or(|id| repository.organization == Some(id))
-        })
-        .collect();
     let mut organizations = std::collections::HashMap::new();
     if let Some(grants) = &grants {
         for repo in &selected {

@@ -616,6 +616,26 @@ repository creation policy are separate capabilities.
 Upgrade serving replicas together before starting organization-owned
 creation. Existing catalog entries keep their previous ownership and grants.
 
+### Find a repository
+
+The home page and an organization's **Repositories** tab search repositories
+you can read. Search treats words case-insensitively and matches the name,
+qualified owner/name, or description. Exact names and name prefixes appear
+before description matches. The organization tab keeps the search scoped to
+that organization. Search terms and the current page are in the URL.
+
+`GET /api/repos?limit=32` returns `{repositories, next}`. Each result has
+`id`, `owner`, `name`, `description`, and `archived`. Provide optional
+`q` (up to 200 characters) and `organization` (UUID). Pages accept a
+`limit` from 1 to 50 and return `next: null` on the last page. Send the
+returned continuation as `after` with the same search and organization.
+Crab binds it to the signed-in account and rechecks current repository
+access. If a continuation has gone stale, start from the first page.
+
+Exact `owner` plus `name` lookups return the repository detail needed by
+repository pages and settings. Search and exact lookup options are mutually
+exclusive.
+
 ### Git imports
 
 The catalog page exposes **Import from Git** for an authenticated browser

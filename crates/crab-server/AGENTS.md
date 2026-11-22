@@ -272,6 +272,10 @@ and session migration paths are supported.
   receive, and LFS endpoints and their route assembly. `auth/` assembles login
   and session routes. `server/http/mod.rs` applies the common security boundary
   after merging these routers. Shared request policy remains in `app.rs`.
+- `api/catalog_browse/` ranks and pages catalog matches. Reuse `api/catalog.rs`
+  for current direct, group, organization, and fork grants. Browse reads
+  lifecycle settings only for the result page and rechecks access before
+  returning results and continuations.
 - `api/code_search.rs` searches authorized Git snapshots under bulk read admission.
   Its signed continuation binds the repository UUID, commit, and query filters.
 - `api/contracts.rs` exports the public identity/access/organization/team wire

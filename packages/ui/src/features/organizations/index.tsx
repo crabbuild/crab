@@ -134,7 +134,7 @@ export function OrganizationPage({
                 name={organization.name}
                 actor={actor}
                 canCreate={role === "owner"}
-                requestedImport={url.searchParams.get("import") ?? undefined}
+                url={url}
                 csrf={csrf}
               />
             ) : tab === "teams" ? (

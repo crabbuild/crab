@@ -542,11 +542,6 @@ main {
   margin: 0 auto;
   padding: --spacing(12) var(--page-gutter);
 }
-.catalog-heading-title {
-  display: flex;
-  align-items: center;
-  gap: --spacing(3);
-}
 .catalog > .section-heading {
   flex-wrap: wrap;
 }

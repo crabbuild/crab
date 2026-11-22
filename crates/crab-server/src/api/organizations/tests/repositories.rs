@@ -570,6 +570,7 @@ async fn repository_team_access_follows_current_membership_and_private_team_visi
     let repo = format!("/api/repos/{owner}/library");
     let endpoint = format!("{repo}/team-access");
     let listed = format!("/api/repos?organization={organization}");
+    let searched = format!("{listed}&q=LIBRARY&limit=1");
     let team = Uuid::now_v7();
     h.write(Method::POST, &teams, &alice,
         json!({"request_id":team,"command":{"kind":"create","name":"Engineering","description":"","visibility":"secret"}}))
@@ -586,6 +587,7 @@ async fn repository_team_access_follows_current_membership_and_private_team_visi
     .error_for_status()
     .unwrap();
     assert_eq!(h.json(&listed, &bob).await["repositories"], json!([]));
+    assert_eq!(h.json(&searched, &bob).await["repositories"], json!([]));
 
     let revision = h.json(&endpoint, &alice).await["revision"]
         .as_u64()
@@ -638,6 +640,9 @@ async fn repository_team_access_follows_current_membership_and_private_team_visi
     assert_eq!(visible["repositories"][0]["id"], json!(repo_id));
     assert_eq!(visible["repositories"][0]["access"], "write");
     assert_eq!(visible["repositories"][0]["can_admin"], false);
+    let matching = h.json(&searched, &bob).await;
+    assert_eq!(matching["repositories"][0]["id"], json!(repo_id));
+    assert_eq!(matching["next"], Value::Null);
 
     let token: Value = h
         .write(
@@ -827,6 +832,7 @@ async fn repository_team_access_follows_current_membership_and_private_team_visi
     .error_for_status()
     .unwrap();
     assert_eq!(h.json(&listed, &bob).await["repositories"], json!([]));
+    assert_eq!(h.json(&searched, &bob).await["repositories"], json!([]));
     assert_eq!(h.json("/api/notifications", &bob).await["items"], json!([]));
     assert_eq!(
         h.json(&pull, &alice).await["merge_requirements"]["approvals"],
