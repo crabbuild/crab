@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from cdn_qualification import PRODUCT_COUNTERS, PROVIDER_FOR_EDGE, decode, fields, require, scope_parts  # noqa: E402
+from cdn_qualification import PRODUCT_COUNTERS, PROVIDER_FOR_EDGE, SHA256, decode, fields, matches, require, scope_parts  # noqa: E402
 
 
 TARGET = "crab_storage::cdn::transfer"
@@ -22,10 +22,10 @@ VERIFIED_LFS_EVENT = "CDN verified LFS payload"
 ROUTE = ("provider", "access", "consumer", "family", "profile")
 ROUTE_FIELDS = {"message", *ROUTE}
 VERIFIED_FIELDS = ROUTE_FIELDS | {"source"}
-TRANSFER_FIELDS = ROUTE_FIELDS | {"status", "cache", "range", "bytes", "complete", "elapsed_ms"}
+TRANSFER_FIELDS = ROUTE_FIELDS | {"status", "cache", "range", "bytes", "complete", "elapsed_ms", "request_sha256"}
 
 
-def measure(lines: Iterable[bytes], scope: str) -> dict[str, int]:
+def measure(lines: Iterable[bytes], scope: str, *, edge_responses: dict | None = None) -> dict[str, int]:
     edge, access, consumer, family, profile = scope_parts(scope)
     selected = (PROVIDER_FOR_EDGE[edge], access, consumer, family, profile)
     metrics = dict.fromkeys(PRODUCT_COUNTERS, 0)
@@ -49,6 +49,12 @@ def measure(lines: Iterable[bytes], scope: str) -> dict[str, int]:
         event = fields(event, TRANSFER_FIELDS, "CDN transfer event")
         require(event["message"] == EVENT, "unrecognized CDN transfer event")
         metrics["all_edge_attempts"] += 1
+        request_id = event["request_sha256"]
+        require(request_id == "" or (event["provider"] == "s3" and matches(SHA256, request_id)),
+                "invalid CloudFront request fingerprint")
+        if edge_responses is not None and request_id:
+            require(request_id not in edge_responses, "duplicate CloudFront viewer request fingerprint")
+            edge_responses[request_id] = {key: event[key] for key in ("status", "cache", "bytes", "complete")}
         route = tuple(event[name] for name in ROUTE)
         if route != selected:
             continue

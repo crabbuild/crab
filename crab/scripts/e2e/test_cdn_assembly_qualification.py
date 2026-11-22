@@ -170,6 +170,12 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
             self.assemble(digest)
         self.assertFalse(self.output.exists())
 
+    def test_cloudfront_viewer_records_are_preserved_with_measured_requests(self) -> None:
+        digest = self.inputs("s3", consumer="cli")
+        proof = Path(self.row) / fixture.CDN.GIT_BENCHMARK_DIR / "near/0001/warm_edge" / fixture.CDN.CLOUDFRONT_REQUEST_FILE
+        self.assertEqual(self.assemble(digest), 1)
+        self.assertEqual((self.output / proof).read_bytes(), (self.root / proof).read_bytes())
+
     def test_cli_takes_native_reports_from_the_workflow_download(self) -> None:
         digest = self.inputs("gcs")
         downloaded = self.root / "downloaded"

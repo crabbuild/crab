@@ -112,6 +112,7 @@ pub(super) struct Transfer {
     range: bool,
     status: u16,
     cache: &'static str,
+    request_id: Option<Output<Sha256>>,
     bytes: u64,
     pub(super) complete: bool,
 }
@@ -130,6 +131,7 @@ impl Transfer {
             range,
             status: 0,
             cache: "unknown",
+            request_id: None,
             bytes: 0,
             complete: false,
         })
@@ -137,6 +139,9 @@ impl Transfer {
 
     pub(super) fn response(&mut self, response: &Response) {
         self.status = response.status().as_u16();
+        if self.policy.provider == StorageProviderKind::S3 {
+            self.request_id = cloudfront_request_id(response.headers());
+        }
         let header = if self.policy.provider == StorageProviderKind::Gcs {
             "x-crab-cdn-cache"
         } else {
@@ -159,6 +164,10 @@ impl Transfer {
 
 impl Drop for Transfer {
     fn drop(&mut self) {
+        let request_sha256 = self
+            .request_id
+            .map(|digest| format!("{digest:x}"))
+            .unwrap_or_default();
         // This event can be retained independently of the command's spans.
         tracing::event!(
             target: TARGET,
@@ -170,6 +179,7 @@ impl Drop for Transfer {
             profile = self.policy.profile.label(),
             family = self.family.label(),
             status = self.status,
+            request_sha256 = request_sha256.as_str(),
             cache = self.cache,
             range = self.range,
             bytes = self.bytes,
@@ -178,6 +188,16 @@ impl Drop for Transfer {
             "CDN immutable GET"
         );
     }
+}
+
+fn cloudfront_request_id(headers: &reqwest::header::HeaderMap) -> Option<Output<Sha256>> {
+    let values = headers.get_all("x-amz-cf-id");
+    let mut values = values.iter();
+    let value = values.next()?.as_bytes();
+    (values.next().is_none()
+        && (1..=256).contains(&value.len())
+        && value.iter().all(u8::is_ascii_graphic))
+    .then(|| Sha256::digest(value))
 }
 
 fn provider_label(provider: StorageProviderKind) -> &'static str {
@@ -210,6 +230,23 @@ fn cache_status(provider: StorageProviderKind, object_size: u64, value: &str) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cloudfront_request_id_is_hashed_only_when_present_and_unambiguous() {
+        use reqwest::header::{HeaderMap, HeaderValue};
+
+        let mut headers = HeaderMap::new();
+        assert!(cloudfront_request_id(&headers).is_none());
+        headers.insert("x-amz-cf-id", HeaderValue::from_static("opaque-example=="));
+        assert_eq!(
+            cloudfront_request_id(&headers),
+            Some(Sha256::digest("opaque-example=="))
+        );
+        headers.append("x-amz-cf-id", HeaderValue::from_static("other"));
+        assert!(cloudfront_request_id(&headers).is_none());
+        headers.insert("x-amz-cf-id", HeaderValue::from_static("opaque example"));
+        assert!(cloudfront_request_id(&headers).is_none());
+    }
 
     #[test]
     fn cache_status_is_specific_to_the_provider_and_complete_representation() {

@@ -965,6 +965,30 @@ attribute request and fill counts and runner measurements for client and
 resource totals. The transport counter includes incomplete response bodies;
 the rejected total also needs any bytes discarded by higher-level verification.
 
+For each timed CloudFront fetch that made edge attempts, collect its
+`cloudfront-requests.json` beside `client.json`. Export CloudFront standard
+access logs in W3C format from the approved distribution. Keep the `#Fields`
+header and the request ID, viewer host, URI stem, method, protocol, response
+status, sent bytes and response result type fields. Leave cookie logging
+disabled and keep raw exports on the protected worker. [CloudFront standard logging](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/standard-logs-reference.html)
+
+```bash
+python3 -B crab/scripts/e2e/collect_cloudfront_viewer_requests.py \
+  --fixture "$approved_fixture_json" \
+  --configuration-sha256 "$approved_configuration_sha256" \
+  --client "$arm_directory/client.json" --log "$decompressed_cloudfront_log" \
+  --output "$arm_directory/cloudfront-requests.json"
+```
+
+Repeat `--log` for additional files. The collector joins the access log to
+the fetch using SHA-256 fingerprints of CloudFront's response request IDs.
+Every viewer attempt needs a matching log record. Missing logs, conflicting
+records, or disagreements with the completed client's status, byte count or
+cache classification fail the check. Viewer response bytes include HTTP
+overhead. Collect S3 request counts and origin fill bytes separately. AWS
+delivers S3 server access logs on a best-effort basis, so an empty export
+alone cannot verify zero origin traffic. [S3 server access logging](https://docs.aws.amazon.com/AmazonS3/latest/userguide/ServerLogs.html)
+
 ```bash
 python3 -B crab/scripts/e2e/collect_cdn_git_performance.py \
   --inputs "$paired_measurements" --benchmarks "$approved_benchmarks_json" \

@@ -13,7 +13,7 @@ def event(**fields):
     payload = {
         "message": PRODUCT.EVENT, "provider": "s3", "access": "private", "consumer": "cli",
         "family": "git", "profile": "direct", "status": 200, "cache": "hit",
-        "range": False, "bytes": 8, "complete": True, "elapsed_ms": 10,
+        "range": False, "bytes": 8, "complete": True, "elapsed_ms": 10, "request_sha256": "",
     }
     return json.dumps({"target": PRODUCT.TARGET, "fields": payload | fields}).encode()
 
@@ -61,3 +61,12 @@ class CdnProductQualificationTests(unittest.TestCase):
             PRODUCT.measure([event(range=True)], SCOPE)
         with self.assertRaisesRegex(ValueError, "invalid fields in CDN transfer event"):
             PRODUCT.measure([event(headers={"cookie": "fake"})], SCOPE)
+
+    def test_cloudfront_request_fingerprints_bind_all_families_without_entering_metrics(self):
+        responses = {}
+        observed = PRODUCT.measure([event(request_sha256="a" * 64), event(family="capsule", request_sha256="b" * 64)],
+                                   SCOPE, edge_responses=responses)
+        self.assertEqual(set(responses), {"a" * 64, "b" * 64})
+        self.assertEqual(observed["observed_edge_gets"], 1)
+        with self.assertRaisesRegex(ValueError, "duplicate CloudFront viewer request fingerprint"):
+            PRODUCT.measure([event(request_sha256="a" * 64)], SCOPE, edge_responses=responses)

@@ -413,6 +413,7 @@ async fn endpoint(response: &'static str) -> (CdnTransport, tokio::task::JoinHan
 async fn product_read_records_one_redacted_transfer_for_its_actual_scope() {
     use std::{collections::BTreeMap, fmt::Debug, sync::Mutex};
 
+    use sha2::{Digest as _, Sha256};
     use tracing::{
         Event, Metadata, Subscriber,
         field::{Field, Visit},
@@ -459,7 +460,7 @@ async fn product_read_records_one_redacted_transfer_for_its_actual_scope() {
     let dispatcher = tracing::Dispatch::new(capture.clone());
     let _guard = tracing::dispatcher::set_default(&dispatcher);
     let (transport, request) = endpoint(
-        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 1-2/6\r\nContent-Length: 2\r\nX-Cache: Hit from cloudfront\r\n\r\n12",
+        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 1-2/6\r\nContent-Length: 2\r\nX-Cache: Hit from cloudfront\r\nX-Amz-Cf-Id: opaque-viewer-id==\r\n\r\n12",
     ).await;
     let directory = tempfile::tempdir().unwrap();
     let relative = format!("v2/pack-layers/aa/{}", "a".repeat(64));
@@ -512,7 +513,9 @@ async fn product_read_records_one_redacted_transfer_for_its_actual_scope() {
         panic!("expected one event for one GET")
     };
     let fields = &event.0;
-    assert_eq!(fields.len(), 12);
+    assert_eq!(fields.len(), 13);
+    let fingerprint = format!("\"{:x}\"", Sha256::digest("opaque-viewer-id=="));
+    assert_eq!(fields["request_sha256"], fingerprint);
     for (name, expected) in [
         ("provider", "\"s3\""),
         ("family", "\"git\""),
@@ -527,18 +530,17 @@ async fn product_read_records_one_redacted_transfer_for_its_actual_scope() {
     ] {
         assert_eq!(fields[name], expected);
     }
-    assert!(
-        !events
-            .iter()
-            .any(|event| event.0.values().any(|value| value.contains("org/repo")))
-    );
+    assert!(!events.iter().any(|event| {
+        event
+            .0
+            .values()
+            .any(|value| value.contains("org/repo") || value.contains("opaque-viewer-id"))
+    }));
     let transitions: Vec<_> = events
         .iter()
         .filter(|event| event.0.contains_key("observation"))
         .collect();
     if qualification_enabled() {
-        use sha2::{Digest as _, Sha256};
-
         let key = format!("{:x}", Sha256::digest(path.as_ref().as_bytes()));
         let missing = format!("{:x}", Sha256::digest(missing.as_ref().as_bytes()));
         assert_eq!(transitions.len(), 3);

@@ -326,7 +326,8 @@ def fetch_once(
     observed = hashlib.sha256(blob).hexdigest()
     require(len(blob) == GIT_PAYLOAD_SIZE and observed == record["sha256"], "fetched bytes differ from the writer payload")
     lines = run.stderr.splitlines()
-    metrics = measure(lines, record["scope"])
+    edge_responses = {}
+    metrics = measure(lines, record["scope"], edge_responses=edge_responses)
     if proof is not None:
         verify_transition_events(lines, record["scope"], proof)
     action = cli_action_name(record["scope"])
@@ -336,7 +337,7 @@ def fetch_once(
         "native_writes": 1, "visible_new_ref": True, "elapsed_ms": elapsed,
         "publication_oid": record["oid"], "started_at_unix_ms": started_at, "finished_at_unix_ms": finished_at,
         "platform": guard.platform, "candidate": guard.candidate,
-        "reader": verified_read(lines, read) | guard.fingerprints,
+        "reader": verified_read(lines, read) | guard.fingerprints, "edge_responses": edge_responses,
     } | metrics
 
 

@@ -100,8 +100,20 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str) -> N
                     "expected_bytes": CDN.GIT_PAYLOAD_SIZE, "observed_bytes": CDN.GIT_PAYLOAD_SIZE,
                     "started_at_unix_ms": started, "finished_at_unix_ms": started + metrics["elapsed_ms"],
                     "visible_new_ref": True, "native_writes": 1,
+                    "edge_responses": {},
                 }
+                proof = {}
+                if provider == "s3" and edge:
+                    request_id = hashlib.sha256(f"{location}/{index}/{arm}/viewer".encode()).hexdigest()
+                    cache = "miss" if arm == "cold_edge" else "hit"
+                    client["edge_responses"][request_id] = {"status": 206, "cache": cache, "bytes": metrics["edge_bytes"],
+                                                           "complete": True}
+                    proof[request_id] = {"status": 206, "response_bytes": 800, "cache": cache}
                 digest = json_file(directory / "client.json", client)
+                if proof:
+                    json_file(directory / CDN.CLOUDFRONT_REQUEST_FILE, {
+                        "schema": "crab.cloudfront-viewer-requests/v1", "client_report_sha256": digest, "records": proof,
+                    })
                 external = {key: metrics[key] for key in CDN.GIT_EXTERNAL_METRICS} | {
                     "schema": "crab.cdn-git-measurement/v1", "provider": provider,
                     "region": region, "client_report_sha256": digest,
@@ -285,7 +297,7 @@ class CdnQualificationTests(unittest.TestCase):
         })
         json_file(records / "fetch.json", fetch | {"publication_sha256": receipt})
         self.rollback_trace(fetch | dict.fromkeys(CDN.PRODUCT_COUNTERS, 0) | {
-            "publication_sha256": receipt, "arm": "origin",
+            "publication_sha256": receipt, "arm": "origin", "edge_responses": {},
             "started_at_unix_ms": fetch["finished_at_unix_ms"] + 5,
             "finished_at_unix_ms": fetch["finished_at_unix_ms"] + 10,
             "reader": fetch["reader"] | {"binding_sha256": "", "cache_root_sha256": "1" * 64},

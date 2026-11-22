@@ -46,6 +46,10 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
         digest = fixture.json_file(directory / "client.json", client)
         external = json.loads((directory / "measurement.json").read_bytes())
         fixture.json_file(directory / "measurement.json", external | {"client_report_sha256": digest})
+        proof_path = directory / fixture.CDN.CLOUDFRONT_REQUEST_FILE
+        if proof_path.exists():
+            proof = json.loads(proof_path.read_bytes())
+            fixture.json_file(proof_path, proof | {"client_report_sha256": digest})
 
     def test_cli_produces_a_report_that_the_release_contract_accepts(self) -> None:
         benchmarks = self.root / "benchmarks.json"
@@ -90,6 +94,20 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
         self.amend_client(arm, reader=reader | {"binding_sha256": self.registration["viewer_binding_sha256"]})
         with self.assertRaisesRegex(ValueError, "requires an inactive viewer binding"):
             self.collect()
+
+    def test_cloudfront_hashes_must_cover_the_timed_requests_and_agree_on_cache_status(self) -> None:
+        path = self.root / "near/0001/cold_edge" / fixture.CDN.CLOUDFRONT_REQUEST_FILE
+        proof = json.loads(path.read_bytes())
+        request_id, record = next(iter(proof["records"].items()))
+        for records, error in (
+            ({}, "must cover each measured viewer attempt"),
+            ({request_id: record | {"status": 200}}, "log status or response bytes disagree"),
+            ({request_id: record | {"cache": "hit"}}, "log cache result disagrees"),
+        ):
+            with self.subTest(records=records):
+                fixture.json_file(path, proof | {"records": records})
+                with self.assertRaisesRegex(ValueError, error):
+                    self.collect()
 
     def test_rejects_reusing_a_local_cache_across_arms(self) -> None:
         client = json.loads((self.root / "near/0001/cold_edge/client.json").read_bytes())
