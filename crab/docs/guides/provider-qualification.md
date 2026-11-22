@@ -916,7 +916,9 @@ Record a verified release scope as five space-separated columns in
 maximum full-GET bytes, the maximum object size for ranged requests, the
 maximum bytes in one range, and the operation deadline in milliseconds. Zero
 in a byte column disables that request form. Set both range columns to zero
-for full GETs only. The verifier checks the candidate's compiled policy digest
+for full GETs only. LFS streams and file-backed Git and capsule reads use the
+smaller of the single-range limit and Crab's 8 MiB transport buffer. The
+verifier checks the candidate's compiled policy digest
 and compares its provider-correlated benchmark requests with the row's limits.
 On every release platform, the retained `warm_edge` samples must contain a
 provider-confirmed cache hit that completed at the exact byte limit for each

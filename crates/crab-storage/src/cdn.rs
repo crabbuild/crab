@@ -153,6 +153,22 @@ impl CdnRoute {
         self
     }
 
+    /// Exercise compiled size and deadline limits on a loopback-only route.
+    #[cfg(feature = "test-support")]
+    pub fn with_loopback_read_limits(
+        mut self,
+        family: CdnReadFamily,
+        columns: &str,
+    ) -> Result<Self> {
+        let limits = ReadLimits::parse(columns)
+            .filter(|_| self.transport.is_loopback() && self.context.is_none())
+            .ok_or_else(|| StorageError::Forbidden {
+                path: "CDN fixture requires a loopback route with valid read limits".into(),
+            })?;
+        self.read_limits = vec![(family, limits)];
+        Ok(self)
+    }
+
     pub(crate) fn policy(&self) -> Option<CdnPolicy> {
         let (consumer, profile) = self.context?;
         Some(CdnPolicy {

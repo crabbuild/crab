@@ -5,6 +5,7 @@
 //! Verifies integrity on upload, accepts matching objects idempotently, and
 //! conditionally repairs corrupt objects.
 
+use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::path::Path as StdPath;
 use std::pin::Pin;
@@ -89,7 +90,6 @@ const MAX_PENDING_UPLOAD_BYTES: usize = MIN_STREAM_PART_SIZE * MAX_IN_FLIGHT_PAR
 /// accumulators. Sized to match the part size so a single read tops up
 /// one part without an extra copy in the common case.
 const FILE_READ_BUF: usize = MIN_STREAM_PART_SIZE;
-const CDN_STREAM_RANGE_BYTES: u64 = 8 * 1024 * 1024;
 const RECEIPT_MAGIC: &[u8] = b"crab-lfs-receipt\0\x02";
 // Earlier receipts lacked canonical transport binding. They must miss rather
 // than certify another store whose opaque version tokens happen to coincide.
@@ -256,18 +256,14 @@ impl LfsObjectStore {
         session: Option<&LfsReadSession>,
     ) -> Result<(Range<u64>, LfsByteStream)> {
         let path = self.object_path(oid);
-        if expected_size != 0
-            && range
-                .as_ref()
-                .is_none_or(|range| *range == (0..expected_size))
+        if range
+            .as_ref()
+            .is_none_or(|range| *range == (0..expected_size))
             && let Some(attempt) = self.store.cdn_attempt(&path)
-            && attempt.admits(
-                expected_size,
-                Some(expected_size.min(CDN_STREAM_RANGE_BYTES)),
-            )
+            && let Some(chunk_bytes) = attempt.range_chunk_bytes(expected_size)
         {
             return self
-                .stream_from_edge(attempt, *oid, expected_size, range, session)
+                .stream_from_edge(attempt, *oid, expected_size, range, session, chunk_bytes)
                 .await;
         }
         let (_, range, stream) = self
@@ -328,8 +324,10 @@ impl LfsObjectStore {
         size: u64,
         range: Option<Range<u64>>,
         session: Option<&LfsReadSession>,
+        chunk_bytes: NonZeroUsize,
     ) -> Result<(Range<u64>, LfsByteStream)> {
-        let first_end = size.min(CDN_STREAM_RANGE_BYTES);
+        let chunk_bytes = chunk_bytes.get() as u64;
+        let first_end = size.min(chunk_bytes);
         let Some(first) = attempt.get(size, Some(0..first_end)).await? else {
             // Restart only the selected native source. Keep the original
             // deadline while opening and consuming the replacement stream.
@@ -354,7 +352,7 @@ impl LfsObjectStore {
                 if offset == size {
                     return Ok(None);
                 }
-                let end = size.min(offset.saturating_add(CDN_STREAM_RANGE_BYTES));
+                let end = size.min(offset.saturating_add(chunk_bytes));
                 let chunk = edge.get_after_delivery(size, offset..end).await?;
                 Ok(Some((chunk, end)))
             }
@@ -845,7 +843,7 @@ impl LfsObjectStore {
         if let Some(edge) = self
             .store
             .cdn_attempt(&path)
-            .filter(|edge| edge.admits_range_batches(expected_size, expected_size))
+            .filter(|edge| edge.admits_range_batches(expected_size))
         {
             let accepted_edge: bool = edge
                 .with_file_deadline(cancel, async |cancel| {

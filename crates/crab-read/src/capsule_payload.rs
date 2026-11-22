@@ -195,9 +195,9 @@ async fn read_window(
     directory: Arc<tempfile::TempDir>,
     cancel: &CancellationToken,
 ) -> Result<LayeredPayloadRead> {
-    let edge = store.cdn_attempt(&window.path).filter(|edge| {
-        edge.admits_range_batches(window.source_size, window.range.end - window.range.start)
-    });
+    let edge = store
+        .cdn_attempt(&window.path)
+        .filter(|edge| edge.admits_range_batches(window.source_size));
     let transfer = async |cancel: &CancellationToken| {
         if let Some(edge) = &edge {
             let body = edge

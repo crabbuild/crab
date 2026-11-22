@@ -1,12 +1,17 @@
 use std::{
     future::Future,
+    num::NonZeroUsize,
     ops::Range,
     sync::{Arc, OnceLock},
     time::{Duration, SystemTime},
 };
 
 use bytes::Bytes;
-use futures_util::{StreamExt, future::try_join_all, stream};
+use futures_util::{
+    StreamExt,
+    future::{Either, try_join_all},
+    stream,
+};
 use object_store::path::Path;
 use tokio::{io::AsyncWriteExt, time::Instant};
 use tokio_util::sync::CancellationToken;
@@ -432,11 +437,24 @@ impl CdnReadAttempt {
                 .is_none_or(|receipt| receipt.sizes.get(self.path.as_ref()) == Some(&object_bytes))
     }
 
-    /// Check the largest request in a ranged download before selecting the edge.
+    /// Select a bounded chunk size for an admitted, nonempty ranged object.
     #[must_use]
-    pub fn admits_range_batches(&self, object_bytes: u64, range_bytes: u64) -> bool {
-        let request = (object_bytes != 0).then_some(range_bytes.min(Self::RANGE_BATCH_BYTES));
-        self.admits(object_bytes, request)
+    pub fn range_chunk_bytes(&self, object_bytes: u64) -> Option<NonZeroUsize> {
+        let size = object_bytes
+            .min(self.limits.range_bytes)
+            .min(Self::RANGE_BATCH_BYTES);
+        let chunk = NonZeroUsize::new(size as usize)?;
+        self.admits(object_bytes, Some(size)).then_some(chunk)
+    }
+
+    /// Check whether a batched download can read the authenticated object.
+    #[must_use]
+    pub fn admits_range_batches(&self, object_bytes: u64) -> bool {
+        if object_bytes == 0 {
+            self.admits(0, None)
+        } else {
+            self.range_chunk_bytes(object_bytes).is_some()
+        }
     }
 
     /// Capture the edge source for a caller-owned payload verification.
@@ -740,20 +758,26 @@ impl CdnReadAttempt {
                 reason: "file range exceeds the authenticated object bounds".into(),
             });
         }
+        let step = self
+            .range_chunk_bytes(size)
+            .or_else(|| (size == 0 && self.admits(0, None)).then_some(NonZeroUsize::MIN));
+        let Some(step) = step else {
+            return Ok(Either::Left(stream::iter([Ok(None)])));
+        };
         let ranges = (range.start..range.end)
-            .step_by(Self::RANGE_BATCH_BYTES as usize)
-            .map(move |start| {
-                Some(start..start.saturating_add(Self::RANGE_BATCH_BYTES).min(range.end))
-            });
+            .step_by(step.get())
+            .map(move |start| Some(start..start.saturating_add(step.get() as u64).min(range.end)));
         // For an empty object, still read the authorized zero-byte body.
         let empty = range.is_empty().then_some((size != 0).then_some(range));
-        Ok(stream::iter(ranges.chain(empty))
-            .chunks(super::parallel_read::CONCURRENCY)
-            .then(move |batch| async move {
-                let results =
-                    try_join_all(batch.into_iter().map(|range| self.get(size, range))).await?;
-                Ok(results.into_iter().collect())
-            }))
+        Ok(Either::Right(
+            stream::iter(ranges.chain(empty))
+                .chunks(super::parallel_read::CONCURRENCY)
+                .then(move |batch| async move {
+                    let results =
+                        try_join_all(batch.into_iter().map(|range| self.get(size, range))).await?;
+                    Ok(results.into_iter().collect())
+                }),
+        ))
     }
 
     /// Write one immutable range to a caller-private staging destination.

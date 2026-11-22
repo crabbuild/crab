@@ -33,9 +33,10 @@ CLI transfer path verify immutable objects while keeping file-sized payloads
 out of memory.
 
 `LfsObjectStore::stream_content` can use an authorized CDN for a full read
-using the descriptor's OID and size. It validates bounded edge ranges and
-holds the final bytes until SHA-256 verification succeeds. Partial reads still
-require proof of the native object version or a verified local descriptor.
+using the descriptor's OID and size. It splits the payload into ranges within
+the qualified byte limit and holds the final bytes until SHA-256 verification
+succeeds. Partial reads still require proof of the native object version or a
+verified local descriptor.
 Verified edge delivery and CLI local-cache evidence include a SHA-256
 fingerprint of the physical object key so qualification can match the selected
 payload without recording its path.

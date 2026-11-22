@@ -92,7 +92,7 @@ pub async fn read_pack_ranges(
 
     let edge = origin
         .cdn_attempt(source.path)
-        .filter(|edge| edge.admits_range_batches(source.size, length));
+        .filter(|edge| edge.admits_range_batches(source.size));
     let transfer = async |cancel: &CancellationToken| {
         if let Some(edge) = &edge {
             let mut hasher = blake3::Hasher::new();

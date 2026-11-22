@@ -258,6 +258,7 @@ async fn read_limits_select_origin_before_sending_oversized_requests() {
     let edge = store.cdn_attempt(&path).unwrap();
     assert!(edge.get(6, None).await.unwrap().is_none());
     assert!(edge.get(8, Some(1..3)).await.unwrap().is_none());
+    assert!(!edge.admits_range_batches(8));
     assert_eq!(
         store
             .read_verified(&path, 6, Some(1..3), verify)
@@ -1286,7 +1287,7 @@ async fn private_denial_rechecks_at_the_same_edge() {
 
 #[tokio::test]
 async fn file_download_hashes_bounded_ranges_in_object_order() {
-    const FIRST_LENGTH: usize = 8 * 1024 * 1024;
+    const FIRST_LENGTH: usize = 5;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
     let client = client_builder().no_proxy().build().unwrap();
@@ -1326,16 +1327,21 @@ async fn file_download_hashes_bounded_ranges_in_object_order() {
     let hash = "abcd".repeat(16);
     let path = Path::from(format!("org/repo/v2/pack-layers/ab/{hash}"));
     let target = [11; 32];
+    let mut route = CdnRoute::new(
+        target,
+        "org/repo".into(),
+        None,
+        CdnAccess::Public,
+        CdnTransport { base, client },
+        Duration::from_secs(10),
+    );
+    route.read_limits = vec![(
+        CdnReadFamily::Git,
+        ReadLimits::parse("0 6 5 10000").unwrap(),
+    )];
     let store = Store::new(Arc::new(InMemory::new()))
         .with_target_identity(target)
-        .with_cdn_route(CdnRoute::new(
-            target,
-            "org/repo".into(),
-            None,
-            CdnAccess::Public,
-            CdnTransport { base, client },
-            Duration::from_secs(10),
-        ))
+        .with_cdn_route(route)
         .unwrap();
     let staging = tempfile::tempdir().unwrap();
     let destination = staging.path().join("pack");

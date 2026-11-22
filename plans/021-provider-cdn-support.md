@@ -313,6 +313,8 @@ to a range is a failed attempt. Handle zero-byte files and empty ranges
 locally when authorized metadata proves them. Bound parallelism, memory,
 temporary disk and file offsets. Select origin upfront when the provider's
 supported object/range sizes or the caller's verifier cannot serve the request.
+LFS streams and file-backed reads can split an authenticated object into
+requests within the qualified range size and the transport's buffer limit.
 Record each qualified profile's full-object, range and duration limits and
 enforce them before sending the first edge request. Reuse trusted descriptor
 sizes to avoid an extra origin HEAD per object.

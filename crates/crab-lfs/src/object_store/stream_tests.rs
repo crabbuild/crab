@@ -172,24 +172,31 @@ async fn fixture(fault: Fault) -> (LfsObjectStore, Arc<DeliveryStore>, [u8; 32])
 async fn edge_fixture(
     origin: Arc<DeliveryStore>,
     responses: Vec<(Range<u64>, String, Bytes)>,
+    limits: Option<&str>,
 ) -> (LfsObjectStore, tokio::task::JoinHandle<()>) {
-    use crab_storage::cdn::{CdnAccess, CdnRoute, CdnTransport};
+    use crab_storage::cdn::{CdnAccess, CdnReadFamily, CdnRoute, CdnTransport};
     use std::time::Duration;
     use tokio::io::{AsyncBufReadExt, BufReader};
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let transport = CdnTransport::loopback_fixture(listener.local_addr().unwrap()).unwrap();
     let target = [4; 32];
+    let mut route = CdnRoute::new(
+        target,
+        "stream".into(),
+        None,
+        CdnAccess::Public,
+        transport,
+        Duration::from_secs(10),
+    );
+    if let Some(columns) = limits {
+        route = route
+            .with_loopback_read_limits(CdnReadFamily::Lfs, columns)
+            .unwrap();
+    }
     let store = Store::new(origin)
         .with_target_identity(target)
-        .with_cdn_route(CdnRoute::new(
-            target,
-            "stream".into(),
-            None,
-            CdnAccess::Public,
-            transport,
-            Duration::from_secs(10),
-        ))
+        .with_cdn_route(route)
         .unwrap();
     let server = tokio::spawn(async move {
         for (range, headers, body) in responses {
@@ -228,7 +235,7 @@ fn edge_partial(range: Range<u64>, size: u64, bytes: Bytes) -> (Range<u64>, Stri
 async fn cdn_stream_validates_edge_bytes_without_proving_the_native_version() {
     let (_, origin, oid) = fixture(Fault::CorruptBody).await;
     let response = edge_partial(0..8, 8, Bytes::from_static(b"verified"));
-    let (lfs, edge) = edge_fixture(origin.clone(), vec![response]).await;
+    let (lfs, edge) = edge_fixture(origin.clone(), vec![response], None).await;
     let session = LfsReadSession::new(LfsReadCache::default());
     let (range, stream) = lfs
         .stream_content(&oid, 8, None, Some(&session))
@@ -258,7 +265,7 @@ async fn cdn_stream_denial_stops_before_native_or_primary_io() {
         "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n".into(),
         Bytes::new(),
     );
-    let (lfs, edge) = edge_fixture(origin.clone(), vec![forbidden]).await;
+    let (lfs, edge) = edge_fixture(origin.clone(), vec![forbidden], None).await;
     let lfs =
         LfsObjectStore::new_with_primary_fallback(lfs.store, "stream", primary.store, "stream");
     let Err(error) = lfs.stream_content(&oid, 8, None, None).await else {
@@ -281,7 +288,7 @@ async fn cdn_stream_origin_restart_keeps_the_native_partial_reader() {
         "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n".into(),
         Bytes::new(),
     );
-    let (lfs, edge) = edge_fixture(origin.clone(), vec![unavailable]).await;
+    let (lfs, edge) = edge_fixture(origin.clone(), vec![unavailable], None).await;
     let (_, partial) = lfs.stream_content(&oid, 8, Some(1..4), None).await.unwrap();
     assert_eq!(
         partial.try_collect::<Vec<_>>().await.unwrap().concat(),
@@ -300,22 +307,42 @@ async fn cdn_stream_origin_restart_keeps_the_native_partial_reader() {
 
 #[tokio::test]
 async fn cdn_stream_withholds_corrupt_final_range_after_delivering_the_first_range() {
-    let prefix = Bytes::from(vec![b'a'; CDN_STREAM_RANGE_BYTES as usize]);
+    const RANGE_BUFFER_BYTES: u64 = 8 * 1024 * 1024;
+    let prefix = Bytes::from(vec![b'a'; RANGE_BUFFER_BYTES as usize]);
     let mut hash = Sha256::new();
     hash.update(&prefix);
     hash.update(b"z");
     let oid = hash.finalize().into();
     let (_, origin, _) = fixture(Fault::None).await;
-    let size = CDN_STREAM_RANGE_BYTES + 1;
-    let first = edge_partial(0..CDN_STREAM_RANGE_BYTES, size, prefix.clone());
-    let last = edge_partial(CDN_STREAM_RANGE_BYTES..size, size, Bytes::from_static(b"x"));
-    let (lfs, edge) = edge_fixture(origin.clone(), vec![first, last]).await;
+    let size = RANGE_BUFFER_BYTES + 1;
+    let first = edge_partial(0..RANGE_BUFFER_BYTES, size, prefix.clone());
+    let last = edge_partial(RANGE_BUFFER_BYTES..size, size, Bytes::from_static(b"x"));
+    let (lfs, edge) = edge_fixture(origin.clone(), vec![first, last], None).await;
     let (_, mut stream) = lfs.stream_content(&oid, size, None, None).await.unwrap();
     assert_eq!(stream.try_next().await.unwrap().unwrap(), prefix);
     assert!(matches!(
         stream.try_next().await,
         Err(LfsError::ObjectCorrupt { .. })
     ));
+    assert_eq!(origin.reads.load(Ordering::Relaxed), 0);
+    edge.await.unwrap();
+}
+
+#[tokio::test]
+async fn cdn_stream_splits_all_requests_at_the_qualified_range_size() {
+    let (_, origin, oid) = fixture(Fault::None).await;
+    let responses = vec![
+        edge_partial(0..3, 8, Bytes::from_static(b"ver")),
+        edge_partial(3..6, 8, Bytes::from_static(b"ifi")),
+        edge_partial(6..8, 8, Bytes::from_static(b"ed")),
+    ];
+    let (lfs, edge) = edge_fixture(origin.clone(), responses, Some("0 8 3 10000")).await;
+    let (range, stream) = lfs.stream_content(&oid, 8, None, None).await.unwrap();
+    assert_eq!(range, 0..8);
+    assert_eq!(
+        stream.try_collect::<Vec<_>>().await.unwrap().concat(),
+        b"verified"
+    );
     assert_eq!(origin.reads.load(Ordering::Relaxed), 0);
     edge.await.unwrap();
 }

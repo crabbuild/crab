@@ -10,7 +10,7 @@ const RELEASE_SCOPES: &str = include_str!("qualified-scopes.txt");
 pub(crate) struct ReadLimits {
     full_bytes: u64,
     ranged_object_bytes: u64,
-    range_bytes: u64,
+    pub(crate) range_bytes: u64,
     pub(crate) timeout: Duration,
 }
 
