@@ -177,8 +177,8 @@ def probe(args: argparse.Namespace) -> dict:
             and not fixture["view_suffix"], "service read evidence requires a direct Git or LFS repository fixture")
     local = args.arm == "warm_local"
     prior = args.arm == "prior_export"
-    require((args.primer is not None) == local and (not local or family == "git"),
-            "service warm-local reads require a Git workload and its own edge primer")
+    require((args.primer is not None) == local,
+            "service warm-local reads require their own edge primer")
     require((not prior or args.transition_object is not None)
             and (args.transition_object is None or (access == "public" and args.arm in ("edge", "prior_export"))),
             "service export transition requires a public edge or prior export read and the exact object")

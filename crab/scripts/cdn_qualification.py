@@ -1414,7 +1414,7 @@ def validate_service_read(value: Any, provenance: dict[str, Any], arm: str) -> d
     client = fields(value, expected, "CDN service read")
     edge, access, _, family, _ = scope_parts(provenance["scope"])
     require(is_direct_service_scope(provenance["scope"])
-            and (arm in ("edge", "origin") or (local and family == "git") or (prior and transition))
+            and (arm in ("edge", "origin", "warm_local") or (prior and transition))
             and client["schema"] == "crab.cdn-service-read/v1" and client["arm"] == arm
             and all(client[key] == provenance[key] for key in CDN_PROVENANCE_FIELDS | {"platform"}),
             "CDN service read has mismatched workflow or product provenance")
@@ -1441,7 +1441,7 @@ def validate_service_read(value: Any, provenance: dict[str, Any], arm: str) -> d
     if local:
         require(matches(SHA256, client["primer_sha256"]) and positive(client["local_payload_hits"])
                 and all(client[key] == 0 for key in PRODUCT_COUNTERS - {"local_payload_hits"}),
-                "service warm-local read requires a verified cached blob without edge traffic")
+                "service warm-local read requires a verified cached payload without edge traffic")
     elif arm == "origin" or prior:
         native = client["native_traffic"]
         require(all(client[key] == 0 for key in PRODUCT_COUNTERS)
@@ -1458,7 +1458,8 @@ def validate_service_read(value: Any, provenance: dict[str, Any], arm: str) -> d
 def verify_service_repeat(local: dict[str, Any], primer: dict[str, Any], primer_sha256: str) -> None:
     require(local["primer_sha256"] == primer_sha256 and all(local[key] == primer[key] for key in
                 ("candidate", "service_instance_sha256", "publication_sha256", "native_published_sha256", "workload_sha256",
-                 "reader", "commit", "payload_sha256", "payload_bytes", "etag_sha256", "git_blob_oid_sha256"))
+                 "reader", "commit", "payload_sha256", "payload_bytes", "etag_sha256",
+                 "git_blob_oid_sha256", "lfs_key_sha256"))
             and primer["finished_at_unix_ms"] <= local["started_at_unix_ms"],
             "service warm-local read must repeat its own edge primer in the same process")
 

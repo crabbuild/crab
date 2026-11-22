@@ -14,6 +14,7 @@ path = "src/lib.rs"
 
 [features]
 default = []
+lfs = ["dep:crab-lfs"]
 remote-client = ["crab-cache/remote-client"]
 
 [dependencies]
@@ -21,6 +22,7 @@ async-trait = { workspace = true }
 blake3 = { workspace = true }
 bytes = { workspace = true }
 crab-cache = { workspace = true, features = ["local-cache"] }
+crab-lfs = { workspace = true, optional = true }
 crab-storage = { workspace = true }
 crab-xet = { workspace = true }
 futures-util = { workspace = true }

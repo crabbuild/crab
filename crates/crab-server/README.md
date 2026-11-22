@@ -449,7 +449,10 @@ absolute receipt `path` and publisher-reported `sha256`. Unlisted objects
 use native storage. Storage origins can
 be native S3, GCS, or Azure Blob Storage. Browser and native Git read
 handlers authorize the requesting user, then verified immutable Git and full
-LFS downloads can use CDN. Partial LFS requests keep their native version
+LFS downloads can use CDN. Complete eligible LFS downloads can populate a
+verified disk cache within the Cellar data directory. The service reserves
+up to 512 MiB from its measured disk capacity for this cache while preserving
+capacity for a Git receive. Partial LFS requests keep their native version
 proof. Catalog and Cellar operations, ref controls, writes and maintenance
 use the native storage paths. Container builds include `provider-cdn` and
 enable only qualified scopes. Pass the checkout's full commit as the
@@ -458,7 +461,8 @@ See [Plan 021](../../plans/021-provider-cdn-support.md) for the live
 qualification requirements.
 
 The repository HTTP smoke test covers full Git and LFS delivery with native
-body reads blocked, native LFS ranges, and Git rollback with the same ETag.
+body reads blocked, a verified LFS cache repeat, native LFS ranges, and
+Git and LFS rollback with the same ETags.
 Run `ordinary_http_reads_use_verified_edge_bodies_and_keep_native_controls`
 from the library test suite after building the embedded UI.
 

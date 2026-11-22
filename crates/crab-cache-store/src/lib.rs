@@ -45,6 +45,8 @@ use crab_xet::hash::MerkleHash;
 use crab_xet::xorb::format::MAX_XORB_SIZE;
 
 pub mod git_pack;
+#[cfg(feature = "lfs")]
+pub mod lfs;
 mod observation;
 mod shard_read;
 mod xorb_read;

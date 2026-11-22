@@ -7,7 +7,7 @@ description = "S3-compatible gateway for Crab repositories."
 publish = false
 
 [features]
-provider-cdn = ["dep:crab-auth-store", "crab-auth-store/operator-cdn"]
+provider-cdn = ["dep:crab-auth-store", "crab-auth-store/operator-cdn", "crab-cache-store/lfs"]
 provider-cdn-qualification = ["provider-cdn", "crab-storage/provider-cdn-qualification"]
 
 [dependencies]

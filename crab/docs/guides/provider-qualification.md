@@ -918,6 +918,12 @@ and zero edge requests in the local repeat. To validate a service Git
 benchmark separately, pass `--service-row` to `collect_cdn_git_performance.py`
 with the row directory holding `service-product/` and `traces/`.
 
+The LFS service worker also accepts `warm_local --primer "$warm_edge_record"`.
+Use the same process, workload and service log for the repeat. It verifies the
+same bytes, ETag, and exact local LFS object key with zero CDN requests. Use
+isolated service cache roots for fresh arms, since the LFS cache is on disk.
+Service LFS still requires regional assembly and release verification.
+
 ### Verify native publication and CDN Git fetch
 
 Use `crab/scripts/e2e/run_cdn_git_workload.py` for direct CLI Git, capsule, and

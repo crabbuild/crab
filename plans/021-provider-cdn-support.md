@@ -776,8 +776,12 @@ inventory and joins the new object's successful delivery to its provider log.
 Full LFS verification and CLI local-cache observations also carry the exact
 physical key fingerprint. The service and CLI workers require the approved key
 when counting those observations.
-Service LFS warm-local evidence and live regional measurements remain release
-requirements.
+For eligible full service LFS reads, the gateway uses its existing disk cache
+budget and Crab Server reserves a capped share of local disk capacity.
+Namespaces bind the physical target, repository, and active CDN approval.
+The service worker can measure the repeat in the primer's process and prove
+the exact verified local LFS key and zero edge requests. Service LFS regional
+assembly, release verification, and live measurements remain open.
 
 The protected workflow or its dedicated workers own producing these raw
 observations. The assembly and release jobs own rejecting missing, mismatched

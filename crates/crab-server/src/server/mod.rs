@@ -47,6 +47,8 @@ pub(crate) struct Server {
     pub(crate) bulk_reads: Arc<Semaphore>,
     pub(crate) transfer_admission: TransferAdmission,
     pub(crate) local_staging: crate::local_disk::LocalStaging,
+    #[cfg(feature = "provider-cdn")]
+    pub(crate) lfs_read_cache: Option<crab_cache_store::lfs::LfsPayloadCache>,
     pub(crate) app_admission: Semaphore,
     pub(crate) maintenance_admission: Arc<Semaphore>,
     pub(crate) cancellation: CancellationToken,
@@ -68,6 +70,9 @@ impl Server {
     ) -> Self {
         let metrics = crate::metrics::Metrics::new().unwrap();
         let runtime = RemoteGitRuntime::new(Default::default(), Arc::new(metrics.clone())).unwrap();
+        let local_staging = crate::local_disk::LocalStaging::for_test();
+        #[cfg(feature = "provider-cdn")]
+        let lfs_read_cache = lfs_read_cache(local_staging.test_cache_root(), 16 * 1024 * 1024);
         Self {
             repositories,
             runtime: Arc::new(runtime),
@@ -80,7 +85,9 @@ impl Server {
             admission: Arc::new(Semaphore::new(READ_ADMISSION_CAPACITY)),
             bulk_reads: Arc::new(Semaphore::new(BULK_READ_CAPACITY)),
             transfer_admission,
-            local_staging: crate::local_disk::LocalStaging::for_test(),
+            local_staging,
+            #[cfg(feature = "provider-cdn")]
+            lfs_read_cache,
             app_admission: Semaphore::new(APP_ADMISSION_CAPACITY),
             maintenance_admission: Arc::new(Semaphore::new(MAINTENANCE_ADMISSION_CAPACITY)),
             cancellation: CancellationToken::new(),
@@ -179,6 +186,17 @@ impl Server {
     }
 }
 
+#[cfg(feature = "provider-cdn")]
+fn lfs_read_cache(
+    path: std::path::PathBuf,
+    bytes: u64,
+) -> Option<crab_cache_store::lfs::LfsPayloadCache> {
+    (bytes > 0).then(|| {
+        let cache = crab_cache::LocalCache::with_limits(path, bytes, Some(bytes));
+        crab_cache_store::lfs::LfsPayloadCache::new(Arc::new(cache))
+    })
+}
+
 /// Serve configured repositories and compiled React assets until shutdown.
 pub async fn serve(config: Config) -> Result<()> {
     config.validate()?;
@@ -206,7 +224,7 @@ pub async fn serve(config: Config) -> Result<()> {
     let local_staging = crate::local_disk::LocalStaging::new_with_restart_inventory(
         session_dir.join("transfers"),
         budget.local_disk(),
-        budget.disk_reserve_bytes,
+        budget.disk_reserve_bytes + budget.lfs_cache_bytes(),
         &config.cells.data_dir,
         &session_dir,
     )
@@ -284,6 +302,11 @@ pub async fn serve(config: Config) -> Result<()> {
     };
     let mut node = started.node;
     let cancellation = CancellationToken::new();
+    #[cfg(feature = "provider-cdn")]
+    let lfs_read_cache = lfs_read_cache(
+        config.cells.data_dir.join("lfs-read-cache"),
+        budget.lfs_cache_bytes(),
+    );
     let server = Arc::new(Server {
         repositories: repositories.into(),
         runtime: runtime.clone(),
@@ -301,6 +324,8 @@ pub async fn serve(config: Config) -> Result<()> {
         bulk_reads: Arc::new(Semaphore::new(BULK_READ_CAPACITY)),
         transfer_admission: storage::transfer_admission(&catalog),
         local_staging,
+        #[cfg(feature = "provider-cdn")]
+        lfs_read_cache,
         app_admission: Semaphore::new(APP_ADMISSION_CAPACITY),
         maintenance_admission: Arc::new(Semaphore::new(MAINTENANCE_ADMISSION_CAPACITY)),
         cancellation: cancellation.clone(),

@@ -52,6 +52,8 @@ pub(crate) struct RepositoryEdgeReader {
     pub(crate) identity: RepositoryIdentity,
     pub(crate) views: Arc<crate::repository::ReadViewCache>,
     lfs: Arc<crab_lfs::LfsObjectStore>,
+    #[cfg(feature = "provider-cdn")]
+    lfs_cache: Arc<crab_cache_store::lfs::LfsPayloadCache>,
 }
 
 impl Repository {
@@ -108,6 +110,10 @@ impl Repository {
                     read_store.clone(),
                     &config.prefix,
                 )),
+                #[cfg(feature = "provider-cdn")]
+                lfs_cache: Arc::new(crab_cache_store::lfs::LfsPayloadCache::new(Arc::clone(
+                    caching.local_cache(),
+                ))),
                 layout: StoreLayout::new(read_store, config.prefix.clone()),
                 // Cache entries proved by the edge must never substitute for
                 // an origin-only mutation or maintenance read.
@@ -330,14 +336,26 @@ impl ReadContent {
                 })))
             }
             Self::LfsPointer(pointer) => {
-                let lfs = repository
-                    .edge_reader
-                    .as_ref()
-                    .map_or(&repository.lfs, |reader| &reader.lfs);
-                let (actual, stream) = lfs
-                    .stream_content(&pointer.oid, pointer.size, Some(range.clone()), None)
-                    .await
-                    .map_err(|error| gateway_error(error.into()))?;
+                let result = match repository.edge_reader.as_ref() {
+                    #[cfg(feature = "provider-cdn")]
+                    Some(reader) => {
+                        reader
+                            .lfs_cache
+                            .stream_content(
+                                &reader.lfs,
+                                &pointer.oid,
+                                pointer.size,
+                                Some(range.clone()),
+                            )
+                            .await
+                    }
+                    reader => {
+                        let lfs = reader.map_or(&repository.lfs, |reader| &reader.lfs);
+                        lfs.stream_content(&pointer.oid, pointer.size, Some(range.clone()), None)
+                            .await
+                    }
+                };
+                let (actual, stream) = result.map_err(|error| gateway_error(error.into()))?;
                 if actual != range {
                     return Err(s3_error!(InvalidObjectState));
                 }

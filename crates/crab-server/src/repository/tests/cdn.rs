@@ -173,6 +173,17 @@ async fn ordinary_http_reads_use_verified_edge_bodies_and_keep_native_controls()
     );
 
     edge.reset();
+    let cached = read(&server, &lfs_url, None).await;
+    assert_eq!(cached.status(), StatusCode::OK);
+    assert_eq!(cached.headers()[header::ETAG], lfs_etag);
+    assert_eq!(
+        axum::body::to_bytes(cached.into_body(), 1024)
+            .await
+            .unwrap(),
+        lfs_body
+    );
+    assert!(edge.requests().is_empty());
+
     native.unblock_body_reads_for(&lfs_path);
     let response = read(
         &server,
@@ -213,6 +224,19 @@ async fn ordinary_http_reads_use_verified_edge_bodies_and_keep_native_controls()
             && pack_layers
                 .iter()
                 .any(|object| object.location.as_ref() == request.location)
+    }));
+    native.reset();
+    let rollback = read(&server, &lfs_url, None).await;
+    assert_eq!(rollback.status(), StatusCode::OK);
+    assert_eq!(rollback.headers()[header::ETAG], lfs_etag);
+    assert_eq!(
+        axum::body::to_bytes(rollback.into_body(), 1024)
+            .await
+            .unwrap(),
+        lfs_body
+    );
+    assert!(native.requests().iter().any(|request| {
+        request.kind != ObjectReadKind::Head && request.location == lfs_path.as_ref()
     }));
     assert!(edge.requests().is_empty());
     close(&server).await;

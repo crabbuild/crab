@@ -530,7 +530,9 @@ Use the gateway process's installed Crab Auth login for that deployment. The
 issuer must authorize the exact full repository and pin the same private
 approval digest. The gateway applies its own
 client permissions before serving verified Git reads or full LFS downloads
-through the CDN. Partial LFS requests keep their native version proof. Control
+through the CDN. Complete eligible LFS downloads can populate the existing
+bounded local cache. The gateway verifies the cached bytes before delivery.
+Partial LFS requests keep their native version proof. Control
 reads, writes and shared bucket-global reads use the native store. Gateway
 ranges and ETags come from the pinned repository object and its attributes.
 Container builds include `provider-cdn` and enable only qualified scopes.

@@ -206,16 +206,31 @@ impl Store {
 
     /// Report a SHA-256-verified local LFS object for the active CDN route.
     pub fn observe_verified_lfs_cache_hit(&self, path: &Path, size: u64) {
-        if let Some((route, CdnReadFamily::Lfs)) = self.cdn_route_for(path)
-            && route
-                .publication
-                .as_ref()
-                .is_none_or(|receipt| receipt.sizes.get(path.as_ref()) == Some(&size))
+        if let Some(route) = self.cdn_lfs_cache_route(path, size)
             && let Some(policy) = route.policy()
             && let Some(observation) = PayloadObservation::new(policy, CdnReadFamily::Lfs, None)
         {
             observation.record_local_lfs(path.as_ref());
         }
+    }
+
+    /// Derive a cache namespace for an LFS key eligible under the active route.
+    ///
+    /// The caller must authorize repository access before opening cached bytes.
+    #[must_use]
+    pub fn cdn_lfs_cache_namespace(&self, path: &Path, size: u64) -> Option<[u8; 32]> {
+        let route = self.cdn_lfs_cache_route(path, size)?;
+        let mut hash = blake3::Hasher::new_derive_key("crab CDN LFS cache v1");
+        hash.update(&route.target);
+        hash.update(blake3::hash(route.layout.repo_prefix().as_bytes()).as_bytes());
+        let binding = route
+            .transport
+            .binding_sha256(matches!(&route.access, CdnAccess::Private(_)));
+        hash.update(binding.as_bytes());
+        if let Some(receipt) = &route.publication {
+            hash.update(&receipt.approval_digest);
+        }
+        Some(*hash.finalize().as_bytes())
     }
 
     /// Read and verify one immutable unit, optionally using the scoped CDN route.
@@ -276,6 +291,16 @@ impl Store {
             return None;
         }
         Some((route, family))
+    }
+
+    fn cdn_lfs_cache_route(&self, path: &Path, size: u64) -> Option<&CdnRoute> {
+        let (route, family) = self.cdn_route_for(path)?;
+        (family == CdnReadFamily::Lfs
+            && route
+                .publication
+                .as_ref()
+                .is_none_or(|receipt| receipt.sizes.get(path.as_ref()) == Some(&size)))
+        .then_some(route.as_ref())
     }
 
     /// Start one edge-only verification attempt for an authorized immutable key.

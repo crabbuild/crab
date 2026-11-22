@@ -91,6 +91,47 @@ fn validates_base_and_preserves_literal_storage_key() {
     );
 }
 
+#[test]
+fn lfs_cache_namespace_respects_target_repository_and_viewer() {
+    let viewer_a = "http://127.0.0.1:10101";
+    let viewer_b = "http://127.0.0.1:10102";
+    let scoped = |target, repository: &str, viewer: &str| {
+        Store::new(Arc::new(InMemory::new()))
+            .with_target_identity(target)
+            .with_cdn_route(CdnRoute::new(
+                target,
+                repository.into(),
+                None,
+                CdnAccess::Public,
+                CdnTransport {
+                    base: Url::parse(viewer).unwrap(),
+                    client: client_builder().no_proxy().build().unwrap(),
+                },
+                Duration::from_secs(5),
+            ))
+            .unwrap()
+    };
+    let relative = format!("lfs/objects/aa/aa/{}", "a".repeat(64));
+    let object = Path::from(format!("org/repo/{relative}"));
+    let neighbor = Path::from(format!("org/other/{relative}"));
+    let first = scoped([1; 32], "org/repo", viewer_a);
+    let namespace = first.cdn_lfs_cache_namespace(&object, 6).unwrap();
+    assert!(first.cdn_lfs_cache_namespace(&neighbor, 6).is_none());
+    assert!(
+        first
+            .without_cdn_route()
+            .cdn_lfs_cache_namespace(&object, 6)
+            .is_none()
+    );
+    for (store, key) in [
+        (scoped([2; 32], "org/repo", viewer_a), &object),
+        (scoped([1; 32], "org/other", viewer_a), &neighbor),
+        (scoped([1; 32], "org/repo", viewer_b), &object),
+    ] {
+        assert_ne!(store.cdn_lfs_cache_namespace(key, 6).unwrap(), namespace);
+    }
+}
+
 #[tokio::test]
 async fn provider_https_route_requires_an_exact_policy_context() {
     let target = [8; 32];

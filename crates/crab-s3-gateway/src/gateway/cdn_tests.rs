@@ -119,7 +119,8 @@ publication = {{ path = {receipt:?}, sha256 = {digest:?} }}
         )
         .await
         .unwrap();
-    let lfs_bytes = Bytes::from_static(b"verified lfs payload");
+    // Exercise more than one local verification block with a short final block.
+    let lfs_bytes = Bytes::from(vec![b'l'; 1024 * 1024 + 19]);
     let lfs_size = lfs_bytes.len() as u64;
     let oid = sha2::Sha256::digest(&lfs_bytes).into();
     writer.lfs.put(&oid, lfs_bytes.clone()).await.unwrap();
@@ -177,14 +178,20 @@ publication = {{ path = {receipt:?}, sha256 = {digest:?} }}
     let transport = CdnTransport::loopback_fixture(listener.local_addr().unwrap()).unwrap();
     let read_store = origin
         .clone()
-        .with_cdn_route(CdnRoute::new(
-            target,
-            entry.prefix.clone(),
-            None,
-            CdnAccess::Public,
-            transport,
-            Duration::from_secs(10),
-        ))
+        .with_cdn_route(
+            CdnRoute::new(
+                target,
+                entry.prefix.clone(),
+                None,
+                CdnAccess::Public,
+                transport,
+                Duration::from_secs(10),
+            )
+            .for_consumer(
+                crab_storage::cdn::CdnConsumer::S3Gateway,
+                crab_storage::cdn::CdnProfile::Direct,
+            ),
+        )
         .unwrap();
     let requests = Arc::new(Mutex::new(Vec::new()));
     let edge = serve_edge(
@@ -300,40 +307,67 @@ publication = {{ path = {receipt:?}, sha256 = {digest:?} }}
         .unwrap();
     assert_eq!(bytes, b"original");
     assert!(requests.lock().unwrap().is_empty());
-    for range in [None, Some(Range::parse("bytes=0-7").unwrap())] {
-        let full = range.is_none();
+    let lfs_request = |range| {
         let mut request = request(true);
         request.uri = http::Uri::from_static("/repo/main/large");
         request.input.key = "main/large".into();
         request.input.range = range;
         request.input.if_match = None;
-        let output = gateway.get_object(request).await.unwrap().output;
-        let bytes = output
-            .body
-            .unwrap()
-            .try_fold(Vec::new(), |mut body, bytes| async move {
-                body.extend_from_slice(&bytes);
-                Ok(body)
-            })
-            .await
-            .unwrap();
-        assert_eq!(
-            bytes,
-            if full {
-                &lfs_bytes[..]
-            } else {
-                &lfs_bytes[..8]
-            }
-        );
+        request
+    };
+    for (uses_edge, corrupt_cache) in [(true, false), (false, false), (true, true)] {
+        if corrupt_cache {
+            let lfs = &reader.edge_reader.as_ref().unwrap().lfs;
+            let namespace = lfs
+                .store()
+                .cdn_lfs_cache_namespace(&lfs.object_path_for(&oid), lfs_size)
+                .unwrap();
+            let cache = gateway.local_cache.for_authorized_reads(&namespace);
+            let path = cache
+                .open_lfs_file(&oid, lfs_size)
+                .await
+                .unwrap()
+                .unwrap()
+                .key()
+                .to_owned();
+            std::fs::write(path, vec![0; lfs_bytes.len()]).unwrap();
+        }
+        let output = gateway.get_object(lfs_request(None)).await.unwrap().output;
+        assert_eq!(read_lfs_body(output).await, lfs_bytes.as_ref());
         let edge_paths = std::mem::take(&mut *requests.lock().unwrap());
         assert_eq!(
             edge_paths.iter().any(|key| key.contains("/lfs/objects/")),
-            full
+            uses_edge
         );
     }
+    let output = gateway
+        .get_object(lfs_request(Some(Range::parse("bytes=0-7").unwrap())))
+        .await
+        .unwrap()
+        .output;
+    assert_eq!(read_lfs_body(output).await, &lfs_bytes[..8]);
+    assert!(
+        !requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|key| key.contains("/lfs/objects/"))
+    );
     gateway.shutdown().await;
     cancellation.cancel();
     edge.await.unwrap();
+}
+
+async fn read_lfs_body(output: GetObjectOutput) -> Vec<u8> {
+    output
+        .body
+        .unwrap()
+        .try_fold(Vec::new(), |mut body, bytes| async move {
+            body.extend_from_slice(&bytes);
+            Ok(body)
+        })
+        .await
+        .unwrap()
 }
 
 fn serve_edge(

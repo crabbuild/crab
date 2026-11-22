@@ -7,11 +7,13 @@ description = "Self-hosted repository web application backed by Crab object stor
 publish = false
 
 [features]
-provider-cdn = ["dep:crab-auth-store", "crab-auth-store/operator-cdn"]
+provider-cdn = ["dep:crab-auth-store", "crab-auth-store/operator-cdn", "dep:crab-cache", "dep:crab-cache-store", "crab-cache-store/lfs"]
 provider-cdn-qualification = ["provider-cdn", "crab-storage/provider-cdn-qualification"]
 
 [dependencies]
 crab-auth-store = { workspace = true, optional = true }
+crab-cache = { workspace = true, features = ["local-cache"], optional = true }
+crab-cache-store = { workspace = true, optional = true }
 crab-workflow = { workspace = true }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 bytes = { workspace = true }

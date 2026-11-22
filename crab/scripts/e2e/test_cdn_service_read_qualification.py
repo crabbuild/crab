@@ -260,20 +260,25 @@ class CdnServiceReadTests(unittest.TestCase):
                         SERVICE.probe(args)
                     http.assert_not_called()
 
-    def test_repeats_the_exact_git_blob_in_the_edge_primers_process(self):
-        for consumer in ("server", "s3-gateway"):
-            with self.subTest(consumer=consumer), TemporaryDirectory() as directory:
+    def test_repeats_the_exact_payload_in_the_edge_primers_process(self):
+        for consumer, family in (("server", "git"), ("s3-gateway", "git"),
+                                 ("server", "lfs"), ("s3-gateway", "lfs")):
+            with self.subTest(consumer=consumer, family=family), TemporaryDirectory() as directory:
                 root = Path(directory)
-                args = self.prepare(root, "cloudfront", consumer, "git")
-                edge = self.request(args, "cloudfront", consumer, "git")
+                args = self.prepare(root, "cloudfront", consumer, family)
+                edge = self.request(args, "cloudfront", consumer, family)
                 args.arm, args.primer = "warm_local", root / "warm-edge.json"
                 digest = json_file(args.primer, edge)
-                local = self.request(args, "cloudfront", consumer, "git")
+                local = self.request(args, "cloudfront", consumer, family)
                 self.assertEqual((local["primer_sha256"], local["local_payload_hits"]), (digest, 1))
                 self.assertEqual(local["all_edge_attempts"], 0)
-                for fault, error in (("another-process", "same process"), ("no-local", "verified cached blob")):
+                for fault, error in (("another-process", "same process"), ("no-local", "verified cached payload")):
                     with self.subTest(fault=fault), self.assertRaisesRegex(ValueError, error):
-                        self.request(args, "cloudfront", consumer, "git", fault)
+                        self.request(args, "cloudfront", consumer, family, fault)
+                if family == "lfs":
+                    json_file(args.primer, edge | {"lfs_key_sha256": "e" * 64})
+                    with self.assertRaisesRegex(ValueError, "same process"):
+                        self.request(args, "cloudfront", consumer, family)
 
     def test_service_read_observes_the_exact_public_transition_key(self):
         for consumer, family in (("server", "git"), ("s3-gateway", "lfs")):
