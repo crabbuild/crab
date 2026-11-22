@@ -52,7 +52,8 @@ def measure_native(lines: Iterable[bytes], scope: str) -> dict[str, int]:
 
 
 def measure(lines: Iterable[bytes], scope: str, *, edge_responses: dict | None = None,
-            expected_git_blob: str | None = None) -> dict[str, int]:
+            expected_git_blob: str | None = None, expected_git_packs: set[str] | None = None,
+            verified_git_packs: set[str] | None = None) -> dict[str, int]:
     edge, access, consumer, family, profile = scope_parts(scope)
     selected = (PROVIDER_FOR_EDGE[edge], access, consumer, family, profile)
     metrics = dict.fromkeys(PRODUCT_COUNTERS, 0)
@@ -64,17 +65,24 @@ def measure(lines: Iterable[bytes], scope: str, *, edge_responses: dict | None =
             continue
         event = line.get("fields")
         if isinstance(event, dict) and event.get("message") in (VERIFIED_GIT_EVENT, VERIFIED_LFS_EVENT):
-            blob = "git_blob_oid_sha256"
-            fields(event, VERIFIED_FIELDS | ({blob} if blob in event else set()), "CDN verified payload event")
+            blob, pack = "git_blob_oid_sha256", "git_pack_blake3"
+            fingerprints = event.keys() & {blob, pack}
+            fields(event, VERIFIED_FIELDS | fingerprints, "CDN verified payload event")
             source = event["source"]
             lfs = event["message"] == VERIFIED_LFS_EVENT
             require(lfs == (event["family"] == "lfs") and source in ("edge", "local"),
                     "unknown verified payload source or family")
-            require(blob not in event or (event["family"] == "git" and matches(SHA256, event[blob])),
-                    "invalid verified CDN Git blob fingerprint")
+            require(not fingerprints or (len(fingerprints) == 1 and event["family"] == "git"
+                    and all(matches(SHA256, event[key]) for key in fingerprints)
+                    and (pack not in event or source == "edge")),
+                    "invalid verified CDN Git payload fingerprint")
             if tuple(event[name] for name in ROUTE) == selected:
                 if expected_git_blob is not None and event.get(blob) != expected_git_blob:
                     continue
+                if expected_git_packs is not None and event.get(pack) not in expected_git_packs:
+                    continue
+                if verified_git_packs is not None and pack in event:
+                    verified_git_packs.add(event[pack])
                 metric = "verified_edge_payloads" if source == "edge" else "local_payload_hits"
                 metrics[metric] += 1
             continue

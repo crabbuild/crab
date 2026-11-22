@@ -694,7 +694,11 @@ verified blob delivered to the caller. The independent native ref collector
 also accepts the SDK fixture. Assembly and verification derive the product
 result from the registered SDK build, verified edge snapshot, ordinary
 native rollback, independently observed publication and tombstone, and
-fixture cleanup. Regional SDK inputs use a fresh probe for the native,
+fixture cleanup. The SDK Git release row also requires a fresh
+`Client::clone_local` through the CDN and a native clone of the same ref.
+The probe verifies the checked-out commit and file bytes and matches the
+pack containing the file to a digest observed by the CDN pack reader.
+Regional SDK inputs use a fresh probe for the native,
 cold edge and warm edge arms. The local arm repeats the blob read on the
 warm probe's pinned snapshot. It proves the exact checksum-verified cached
 blob and zero edge attempts. Assembly and release verification rebuild the
@@ -704,7 +708,8 @@ read with each active approval. The prior read proves native delivery of
 the exact blob from its unlisted pack layer. The current read proves CDN
 delivery of that blob from the same layer. The release verifier reconstructs
 the transition trace from the retained SDK records. Live runs still require
-the protected provider fixtures.
+the protected provider fixtures. SDK fetch and the child hydration paths
+still need their own product evidence.
 
 The protected workflow or its dedicated workers own producing these raw
 observations. The assembly and release jobs own rejecting missing, mismatched

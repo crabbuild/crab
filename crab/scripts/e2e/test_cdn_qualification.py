@@ -73,7 +73,7 @@ def cli_candidate(scope: str, platform: str) -> dict:
 
 def sdk_candidate(scope: str, platform: str) -> dict:
     return cli_candidate(scope, platform) | {
-        "cargo_features": "default,remote,service",
+        "cargo_features": "default,files,local,publish,remote,service",
         "binary_sha256": hashlib.sha256(f"sdk/{platform}".encode()).hexdigest(),
     }
 
@@ -415,6 +415,16 @@ class CdnQualificationTests(unittest.TestCase):
             "arm": "origin", "started_at_unix_ms": PUBLIC_SEAL + 25, "finished_at_unix_ms": PUBLIC_SEAL + 35,
             "reader": reader | {"binding_sha256": "", "public_export_sha256": ""}, "approval_sha256": "",
         })
+        pack = "8" * 64
+        for arm, filename, start in (("edge", "snapshot.json", 36), ("origin", "traces/rollback.json", 42)):
+            path = records / filename if arm == "edge" else self.directory / filename
+            read = json.loads(path.read_bytes())
+            read.pop("transition_key_sha256", None)
+            json_file(records / CDN.SDK_CLONE_FILES[arm], read | {
+                "schema": "crab.cdn-sdk-git-clone/v1", "crab_sha256": writer["binary_sha256"],
+                "started_at_unix_ms": PUBLIC_SEAL + start, "finished_at_unix_ms": PUBLIC_SEAL + start + 5,
+                "elapsed_ms": 5, "installed_packs": [pack], "verified_edge_packs": [pack] if arm == "edge" else [],
+            })
         json_file(records / "retirement.json", provenance | {
             "schema": "crab.cdn-git-retirement/v1", "publication_sha256": receipt, "ref_retired": True,
             "retired_at_unix_ms": PUBLIC_SEAL + 50, "candidate": writer,
@@ -1028,6 +1038,25 @@ class CdnQualificationTests(unittest.TestCase):
         policy.write_text(self.scope + "\n", encoding="utf-8")
         (self.directory / CDN.GIT_BENCHMARK_DIR).rename(self.directory / "benchmark-backup")
         self.rejected("requires retained regional SDK benchmark records", "--cdn-release-policy", str(policy))
+
+    def test_sdk_release_requires_clone_of_the_same_publication_before_retirement(self) -> None:
+        self.configure("s3", "private", "direct", consumer="sdk")
+        policy = self.directory / "qualified-scopes.txt"
+        policy.write_text(self.scope + "\n", encoding="utf-8")
+        args = ("--cdn-release-policy", str(policy))
+        path = self.directory / CDN.GIT_PRODUCT_DIR / CDN.SDK_CLONE_FILES["edge"]
+        original = json.loads(path.read_bytes())
+        for changes, reason in (
+            ({"schema": "crab.cdn-sdk-git-read/v1"}, "mismatched product or workflow provenance"),
+            ({"crab_sha256": "9" * 64}, "the approved Crab build"),
+            ({"verified_edge_packs": ["9" * 64]}, "needs verified pack evidence"),
+            ({"commit": "f" * 40}, "published blob"),
+        ):
+            with self.subTest(changes=changes):
+                json_file(path, original | changes)
+                self.rejected(reason, *args)
+        path.unlink()
+        self.rejected(CDN.SDK_CLONE_FILES["edge"], *args)
 
     def test_private_sdk_release_accepts_regional_provider_records(self) -> None:
         for provider in ("s3", "gcs", "azure"):

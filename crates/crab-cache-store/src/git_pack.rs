@@ -159,7 +159,7 @@ pub async fn read_pack_ranges(
         edge.check_deadline()?;
     }
     if let Some(observation) = observation {
-        observation.record_verified();
+        observation.record_verified_git_pack(actual_hash);
     }
     Ok(sidecars)
 }

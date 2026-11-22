@@ -211,7 +211,7 @@ jobs:
           done
           cargo test --locked -p crab-storage --lib 'cdn::'
           cargo test --locked -p crab-storage --lib --features provider-cdn-qualification 'cdn::'
-          cargo check --locked -p crab-sdk --features service --example cdn-sdk-read
+          cargo check --locked -p crab-sdk --features local,service --example cdn-sdk-read
           cargo test --locked -p crab-lfs --test cdn_observation
           cargo test --locked -p crab-lfs --test cdn_observation --features crab-storage/provider-cdn-qualification
 

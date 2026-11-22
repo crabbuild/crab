@@ -30,6 +30,15 @@ struct Request {
     binding: Binding,
     repeat_snapshot: bool,
     public_transition: bool,
+    #[serde(default)]
+    clone_tools: Option<CloneTools>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CloneTools {
+    git: PathBuf,
+    crab: PathBuf,
 }
 
 #[derive(Deserialize)]
@@ -130,20 +139,85 @@ impl Request {
 
     async fn read_blob(&self, snapshot: &Snapshot) -> Result<serde_json::Value, Failure> {
         let bytes = snapshot.read_blob(GitPath::new(PAYLOAD)?).await?;
-        let sha256 = format!("{:x}", Sha256::digest(&bytes));
+        self.verified_payload(&bytes).map(|(payload, _)| payload)
+    }
+
+    fn verified_payload(
+        &self,
+        bytes: &[u8],
+    ) -> Result<(serde_json::Value, gix_hash::ObjectId), Failure> {
+        let sha256 = format!("{:x}", Sha256::digest(bytes));
         if bytes.len() != self.expected_bytes || sha256 != self.expected_sha256 {
-            return Err("SDK snapshot returned different published bytes".into());
+            return Err("SDK read returned different published bytes".into());
         }
         let mut git = gix_hash::hasher(gix_hash::Kind::Sha1);
         git.update(format!("blob {}\0", bytes.len()).as_bytes());
-        git.update(&bytes);
+        git.update(bytes);
         let blob = git.try_finalize()?;
-        Ok(serde_json::json!({
+        let payload = serde_json::json!({
             "sha256": sha256,
             "bytes": bytes.len(),
             "git_blob_oid_sha256": format!("{:x}", Sha256::digest(blob.as_bytes())),
-        }))
+        });
+        Ok((payload, blob))
     }
+
+    async fn clone_read(&self, client: &Client) -> Result<serde_json::Value, Failure> {
+        use crab_sdk::local::CloneOptions;
+
+        let scratch = tempfile::tempdir()?;
+        let destination = scratch.path().join("clone");
+        let timing = Timing::start()?;
+        let repository = client
+            .clone_local(
+                RepositoryLocator::new(&self.repository_prefix)?,
+                destination.clone(),
+                CloneOptions::default().with_branch(&self.branch)?,
+            )
+            .await?;
+        let local = repository.local()?;
+        let oid = local.snapshot("HEAD").await?.commit_id();
+        if oid != ObjectId::from_hex(&self.expected_oid)? {
+            return Err("SDK clone checked out a different commit".into());
+        }
+        let mut bytes = Vec::new();
+        std::fs::File::open(destination.join(PAYLOAD))?
+            .take(self.expected_bytes as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        let (payload, blob) = self.verified_payload(&bytes)?;
+        let mut report = timing.finish()?;
+        tracing::debug!(target: "crab_cdn_probe::arm_boundary", parent: None, phase = "primary_finish");
+        report["commit"] = serde_json::json!(oid.to_string());
+        report["payload"] = payload;
+        report["warm_local"] = serde_json::Value::Null;
+        report["clone_packs"] =
+            serde_json::json!(installed_blob_packs(local.common_directory(), blob)?);
+        Ok(report)
+    }
+}
+
+fn installed_blob_packs(
+    git_dir: &std::path::Path,
+    blob: gix_hash::ObjectId,
+) -> Result<std::collections::BTreeSet<String>, Failure> {
+    let mut packs = std::collections::BTreeSet::new();
+    for entry in std::fs::read_dir(git_dir.join("objects").join("pack"))? {
+        let index = entry?.path();
+        if index.extension().and_then(|ext| ext.to_str()) != Some("idx") {
+            continue;
+        }
+        let (oids, _) =
+            crab_git::pack_locator::sorted_object_ids_from_index_bytes(&std::fs::read(&index)?)?;
+        if oids.binary_search(&blob).is_ok() {
+            let pack = std::fs::File::open(index.with_extension("pack"))?;
+            let digest = blake3::Hasher::new().update_reader(pack)?.finalize();
+            packs.insert(digest.to_hex().to_string());
+        }
+    }
+    if packs.is_empty() {
+        return Err("SDK clone did not install a Git pack containing the fixture blob".into());
+    }
+    Ok(packs)
 }
 
 struct Timing {
@@ -221,11 +295,23 @@ async fn run() -> Result<(), Failure> {
         .with_current_span(false)
         .with_span_list(false)
         .try_init()?;
-    let client = Client::builder()
+    let builder = Client::builder()
         .direct_store(request.store()?)
-        .direct_cdn(request.cdn()?)
-        .build()?;
-    let read = request.read(&client).await;
+        .direct_cdn(request.cdn()?);
+    let builder = if let Some(tools) = &request.clone_tools {
+        builder.local(crab_sdk::local::Options::new(crab_sdk::local::Tools::new(
+            &tools.git,
+            &tools.crab,
+        )?))
+    } else {
+        builder
+    };
+    let client = builder.build()?;
+    let read = if request.clone_tools.is_some() {
+        request.clone_read(&client).await
+    } else {
+        request.read(&client).await
+    };
     let close = client.close().await;
     let mut report = read?;
     close?;
@@ -242,5 +328,55 @@ async fn main() -> ExitCode {
             eprintln!("SDK CDN probe could not verify the published snapshot");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn installed_pack_lookup_reads_real_git_indexes_and_hashes_the_pack() {
+        let worktree = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let result = std::process::Command::new("git")
+                .current_dir(worktree.path())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(result.status.success(), "{args:?}");
+            String::from_utf8(result.stdout).unwrap().trim().to_owned()
+        };
+        git(&["init", "--quiet", "--object-format=sha1"]);
+        std::fs::write(worktree.path().join(PAYLOAD), b"checked out bytes").unwrap();
+        git(&["add", "--", PAYLOAD]);
+        git(&[
+            "-c",
+            "user.name=SDK test",
+            "-c",
+            "user.email=sdk@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-m",
+            "inspect installed pack",
+        ]);
+        git(&["repack", "-a", "-d"]);
+        let git_dir = worktree.path().join(".git");
+        let oid = gix_hash::ObjectId::from_hex(git(&["hash-object", PAYLOAD]).as_bytes()).unwrap();
+        let packs = installed_blob_packs(&git_dir, oid).unwrap();
+        let pack = std::fs::read_dir(git_dir.join("objects/pack"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "pack")
+            })
+            .unwrap();
+        let digest = blake3::hash(&std::fs::read(pack).unwrap())
+            .to_hex()
+            .to_string();
+        assert_eq!(packs, [digest].into_iter().collect());
+        assert!(installed_blob_packs(&git_dir, gix_hash::Kind::Sha1.null()).is_err());
     }
 }

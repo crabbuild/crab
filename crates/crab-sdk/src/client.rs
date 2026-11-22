@@ -304,7 +304,23 @@ impl ClientState {
         let selected = self.resolve_repository(locator, cancel).await?;
         #[cfg(feature = "service")]
         if let Some(options) = &self.direct_cdn {
-            return options.resolve(selected, self.cdn_consumer, cancel).await;
+            let resolved = options.resolve(selected, self.cdn_consumer, cancel).await?;
+            if let Some(origin) = resolved.store.native_cdn_origin() {
+                use sha2::{Digest as _, Sha256};
+
+                // Private authorization can replace the prefix and the store.
+                // Both snapshot and local transfer must report the resolved target.
+                tracing::debug!(
+                    target: "crab_sdk::cdn::read_target",
+                    parent: None,
+                    origin_sha256 = %format_args!("{:x}", Sha256::digest(origin)),
+                    prefix_sha256 = %format_args!("{:x}", Sha256::digest(format!("{}/", resolved.prefix))),
+                    binding_sha256 = resolved.store.cdn_binding_sha256().as_deref().unwrap_or_default(),
+                    public_export_sha256 = resolved.store.cdn_public_export_sha256().as_deref().unwrap_or_default(),
+                    "SDK captured CDN read target"
+                );
+            }
+            return Ok(resolved);
         }
         Ok(selected)
     }
@@ -414,24 +430,6 @@ impl Client {
         ));
         #[cfg(not(feature = "files"))]
         let _ = capsule;
-        #[cfg(feature = "service")]
-        if self.0.direct_cdn.is_some()
-            && let Some(origin) = resolved.store.native_cdn_origin()
-        {
-            use sha2::{Digest as _, Sha256};
-
-            // Report the target used by the captured repository. An issuer
-            // can replace the prefix and store from the caller's options.
-            tracing::debug!(
-                target: "crab_sdk::cdn::read_target",
-                parent: None,
-                origin_sha256 = %format_args!("{:x}", Sha256::digest(origin)),
-                prefix_sha256 = %format_args!("{:x}", Sha256::digest(format!("{}/", resolved.prefix))),
-                binding_sha256 = resolved.store.cdn_binding_sha256().as_deref().unwrap_or_default(),
-                public_export_sha256 = resolved.store.cdn_public_export_sha256().as_deref().unwrap_or_default(),
-                "SDK captured CDN read target"
-            );
-        }
         Ok(RemoteRepository {
             client: self.clone(),
             locator,

@@ -80,7 +80,7 @@ required-features = ["remote"]
 
 [[example]]
 name = "cdn-sdk-read"
-required-features = ["service"]
+required-features = ["service", "local"]
 
 [[example]]
 name = "remote_archive"

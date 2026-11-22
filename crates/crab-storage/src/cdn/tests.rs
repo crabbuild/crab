@@ -576,6 +576,11 @@ async fn product_read_records_one_redacted_transfer_for_its_actual_scope() {
         .payload_observation()
         .unwrap()
         .record_verified_git_blob(&blob_oid);
+    let pack_hash = blake3::hash(b"12");
+    attempt
+        .payload_observation()
+        .unwrap()
+        .record_verified_git_pack(pack_hash);
     request.await.unwrap();
 
     let events = capture.events.lock().unwrap();
@@ -617,6 +622,12 @@ async fn product_read_records_one_redacted_transfer_for_its_actual_scope() {
         observed_blob,
         Some(&format!("\"{:x}\"", Sha256::digest(blob_oid)))
     );
+    assert_eq!(
+        events
+            .iter()
+            .find_map(|event| event.0.get("git_pack_blake3")),
+        Some(&format!("\"{}\"", pack_hash.to_hex()))
+    );
     let transitions: Vec<_> = events
         .iter()
         .filter(|event| event.0.contains_key("observation"))
@@ -624,12 +635,13 @@ async fn product_read_records_one_redacted_transfer_for_its_actual_scope() {
     let key = format!("{:x}", Sha256::digest(path.as_ref().as_bytes()));
     let missing = format!("{:x}", Sha256::digest(missing.as_ref().as_bytes()));
     let blob = format!("\"{:x}\"", Sha256::digest(blob_oid));
-    assert_eq!(transitions.len(), 4);
+    assert_eq!(transitions.len(), 5);
     for (event, kind, digest, exact_blob) in [
         (transitions[0], "\"unlisted\"", &missing, None),
         (transitions[1], "\"verified_native\"", &missing, Some(&blob)),
         (transitions[2], "\"listed\"", &key, None),
         (transitions[3], "\"verified_edge\"", &key, Some(&blob)),
+        (transitions[4], "\"verified_edge\"", &key, None),
     ] {
         assert_eq!(event.0["observation"], kind);
         assert_eq!(event.0["key_sha256"], *digest);

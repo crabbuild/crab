@@ -919,7 +919,7 @@ from the checkout used for the native publication.
 
 ```bash
 CRAB_CDN_PROBE_SOURCE_SHA="$GITHUB_SHA" CARGO_TARGET_DIR="$measurement_cargo_target" \
-  cargo build --locked -p crab-sdk --features service --example cdn-sdk-read
+  cargo build --locked -p crab-sdk --features local,service --example cdn-sdk-read
 
 "$sdk_read_probe" --build-info
 
@@ -946,8 +946,8 @@ ID fingerprint for the exact blob returned by the SDK. The origin control
 requires native body bytes, an inactive viewer and zero edge attempts.
 Use the independent native ref probe described above for both publication and
 retirement on the same SDK fixture. The record order is native publication,
-independent ref observation, edge read, origin read, native retirement,
-independent tombstone observation, and cleanup.
+independent ref observation, edge snapshot, origin snapshot, edge clone,
+origin clone, native retirement, independent tombstone observation, and cleanup.
 
 Preregister `sdk-git-snapshot` as the workload. Set `sdk_candidate` to the
 build info plus the SHA-256 of the probe executable as `binary_sha256`.
@@ -962,6 +962,17 @@ Keep the edge record at `git-product/snapshot.json` and the origin record at
 `provider-published.json` and `provider-retired.json` in `git-product`. The
 assembler derives `product_action` from these records, and the release
 verifier recomputes it.
+
+For both clone arms, pass `--clone-git` and `--clone-crab` with the executable
+paths and keep stdout as `git-product/clone-edge.json` or
+`git-product/clone-origin.json`. Use the same Crab build as the native
+publisher. Each invocation calls `Client::clone_local` in a fresh worktree.
+The probe checks HEAD and the visible file, identifies the packs containing
+the blob through their local Git indexes, and fingerprints the installed
+pack bytes. The edge arm requires a matching digest verified by the CDN
+pack reader. The origin arm proves the same pack is available natively
+with the binding withdrawn. Use an authenticated layered checkpoint that
+covers the test ref so the clone has eligible immutable pack ranges.
 
 For each registered regional pair, start a fresh probe for `origin`,
 `cold_edge`, and `warm_edge`. The timed window covers repository open,

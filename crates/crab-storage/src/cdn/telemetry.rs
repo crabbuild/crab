@@ -84,27 +84,36 @@ impl PayloadObservation {
     }
 
     fn record_verified_with_blob(self, oid: Option<&[u8]>) {
-        self.record("edge", oid);
+        self.record("edge", oid, None);
         if let Some(public) = self.public {
             public.record(self.policy, self.family, "verified_edge", oid);
         }
     }
 
+    /// Report an edge pack after its complete authenticated BLAKE3 digest matches.
+    pub fn record_verified_git_pack(self, hash: blake3::Hash) {
+        self.record("edge", None, Some(hash));
+        if let Some(public) = self.public {
+            public.record(self.policy, self.family, "verified_edge", None);
+        }
+    }
+
     /// Report a verified local payload hit on the selected CDN-enabled route.
     pub fn record_local(self) {
-        self.record("local", None);
+        self.record("local", None, None);
     }
 
     pub(crate) fn record_local_git_blob(self, oid: &[u8]) {
-        self.record("local", Some(oid));
+        self.record("local", Some(oid), None);
     }
 
-    fn record(self, source: &'static str, oid: Option<&[u8]>) {
+    fn record(self, source: &'static str, oid: Option<&[u8]>, pack: Option<blake3::Hash>) {
         let message = match self.family {
             CdnReadFamily::Lfs => "CDN verified LFS payload",
             _ => "CDN verified Git payload",
         };
         let oid = oid.map(|oid| format!("{:x}", Sha256::digest(oid)));
+        let pack = pack.map(|pack| pack.to_hex());
         tracing::event!(
             target: TARGET,
             parent: None,
@@ -116,6 +125,7 @@ impl PayloadObservation {
             family = self.family.label(),
             source,
             git_blob_oid_sha256 = oid.as_deref(),
+            git_pack_blake3 = pack.as_ref().map(|digest| digest.as_str()),
             "{message}"
         );
     }

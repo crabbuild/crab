@@ -123,6 +123,7 @@ METRICS = {
 GIT_BENCHMARK_DIR = "git-benchmarks"
 GIT_PRODUCT_DIR = "git-product"
 SDK_PRIOR_EXPORT_RECORD = "before-export.json"
+SDK_CLONE_FILES = {"edge": "clone-edge.json", "origin": "clone-origin.json"}
 VIEWER_REQUEST_FILES = {"s3": "cloudfront-requests.json", "gcs": "cloud-cdn-requests.json", "azure": "front-door-requests.json"}
 GIT_FETCH_RECORD_LIMIT = 256 * 1024
 GIT_NATIVE_REF_FILES = {"published": "provider-published.json", "retired": "provider-retired.json"}
@@ -1319,10 +1320,13 @@ def verify_git_traffic(client: dict[str, Any], edge: str, label: str) -> None:
             <= client["edge_attempts"] <= client["all_edge_attempts"], f"{label} has inconsistent edge counts")
 
 
-def verify_sdk_git_read(raw: bytes, row: dict[str, Any], spec: dict[str, Any], mode: str) -> dict[str, Any]:
+def verify_sdk_git_read(raw: bytes, row: dict[str, Any], spec: dict[str, Any], mode: str, *,
+                        clone: bool = False) -> dict[str, Any]:
     local = mode == "warm_local"
     prior = mode == "prior_export"
     expected_fields = SDK_GIT_READ_FIELDS | ({"primer_sha256"} if local else set())
+    if clone:
+        expected_fields |= {"crab_sha256", "installed_packs", "verified_edge_packs"}
     edge, access, _, _, _ = scope_parts(row["scope"])
     value = decode(raw)
     transition = isinstance(value, dict) and "transition_key_sha256" in value
@@ -1333,11 +1337,24 @@ def verify_sdk_git_read(raw: bytes, row: dict[str, Any], spec: dict[str, Any], m
     if transition:
         require(access == "public" and mode in ("edge", "prior_export") and matches(SHA256, client["transition_key_sha256"]),
                 "SDK transition needs an exact public pack-layer fingerprint")
-    require(client["schema"] == "crab.cdn-sdk-git-read/v1" and client["arm"] == mode
+    schema = "crab.cdn-sdk-git-clone/v1" if clone else "crab.cdn-sdk-git-read/v1"
+    require(client["schema"] == schema and client["arm"] == mode
             and all(client[key] == row[key] for key in CDN_PROVENANCE_FIELDS | {"platform"}),
             "SDK snapshot has mismatched product or workflow provenance")
     verify_sdk_candidate(client["candidate"], row["source_sha"], row["platform"])
     require(client["candidate"] == spec["sdk_candidate"], "SDK snapshot did not run the registered SDK build")
+    if clone:
+        require(mode in SDK_CLONE_FILES and not transition
+                and "local" in client["candidate"]["cargo_features"].split(",")
+                and matches(SHA256, client["crab_sha256"]),
+                "SDK clone needs the local build and an approved Crab executable")
+        packs, edge_packs = client["installed_packs"], client["verified_edge_packs"]
+        require(isinstance(packs, list) and isinstance(edge_packs, list) and 0 < len(packs) <= 1024
+                and len(edge_packs) <= len(packs)
+                and all(matches(SHA256, pack) for pack in packs + edge_packs)
+                and sorted(set(packs)) == packs and sorted(set(edge_packs)) == edge_packs
+                and set(edge_packs) <= set(packs) and bool(edge_packs) == (mode == "edge"),
+                "SDK clone needs verified pack evidence for the checked-out blob")
     require(matches(GIT_OID, client["commit"]) and all(matches(SHA256, client[key])
             for key in ("sha256", "publication_sha256", "git_blob_oid_sha256"))
             and type(client["bytes"]) is int and client["bytes"] == GIT_PAYLOAD_SIZE,
@@ -1576,8 +1593,25 @@ def collect_sdk_product_action(
             "SDK rollback changed the selected native target")
     require(edge["finished_at_unix_ms"] <= origin["started_at_unix_ms"],
             "SDK rollback must follow the verified edge snapshot")
+    clone_records = {arm: read_git_record(inputs / name, limit=GIT_FETCH_RECORD_LIMIT)
+                     for arm, name in SDK_CLONE_FILES.items()}
+    clone_edge, clone_origin = (
+        verify_sdk_git_read(clone_records[arm], row, spec, arm, clone=True) for arm in SDK_CLONE_FILES
+    )
+    require(all(clone["crab_sha256"] == publication["candidate"]["binary_sha256"]
+                and all(clone[field] == edge[field] for field in (
+                    "publication_sha256", "commit", "sha256", "git_blob_oid_sha256",
+                ))
+                and all(clone["reader"][field] == edge["reader"][field] for field in CLI_NATIVE_FIELDS)
+                for clone in (clone_edge, clone_origin)),
+            "SDK clones must use the approved Crab build, native target, and published blob")
+    require(set(clone_edge["verified_edge_packs"]) <= set(clone_origin["installed_packs"]),
+            "SDK native clone must install the same verified CDN packs")
+    require(origin["finished_at_unix_ms"] <= clone_edge["started_at_unix_ms"]
+            and clone_edge["finished_at_unix_ms"] <= clone_origin["started_at_unix_ms"],
+            "SDK clone controls must follow snapshot rollback in order")
     retirement_raw = read_git_record(inputs / "retirement.json")
-    retired_at = verify_git_retirement(retirement_raw, row, receipt, publication["candidate"], origin["finished_at_unix_ms"])
+    retired_at = verify_git_retirement(retirement_raw, row, receipt, publication["candidate"], clone_origin["finished_at_unix_ms"])
     earliest = edge
     retained = {"publication.json": publication_raw, "snapshot.json": edge_raw, "retirement.json": retirement_raw}
     if scope_parts(row["scope"])[1] == "public":
@@ -1587,6 +1621,7 @@ def collect_sdk_product_action(
     verify_git_lifecycle(native_records, row, publication, receipt, earliest, retired_at, cleanup_at, native_origin_sha256)
     if retain is not None:
         retain.mkdir()
+        retained.update({name: clone_records[arm] for arm, name in SDK_CLONE_FILES.items()})
         retained.update({name: native_records[phase] for phase, name in GIT_NATIVE_REF_FILES.items()})
         for name, raw in retained.items():
             (retain / name).write_bytes(raw)
