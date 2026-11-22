@@ -1053,6 +1053,12 @@ If GitHub sign-in must retain signed back-channel logout, configure GitHub in
 an OIDC broker and point Crab at the broker with `provider = "oidc"`; the UI and
 membership subjects then remain provider-neutral.
 
+Private operators can also suspend or reactivate a subject for the configured
+issuer using `accounts status`, `accounts suspend`, and `accounts reactivate`.
+Verification reads the current account state alongside the durable session and
+its marker. Sessions and derived Git tokens issued before a change in account
+revision stay invalid after reactivation. See [the operations runbook](deploy/operations.md#manage-membership-and-sessions).
+
 `GET /api/session` returns the current account and CSRF token to the same-origin frontend. Anonymous repository APIs return HTTP 401. No cloud credential reaches the browser.
 
 ## Git HTTP reads
@@ -1091,6 +1097,8 @@ Token rules:
 - A read token never inherits write capability
 - Each session retains at most 10 tokens
 - Sign-out, replacement sign-in, and explicit revocation invalidate tokens
+- Explicit revocation clears the session's token index before token object
+  cleanup. Authentication rejects any token missing from the current index.
 - Revocation is enforced on the next request; an already admitted request drains
 
 ### Fetch through smart HTTP

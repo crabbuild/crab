@@ -93,6 +93,8 @@ pub enum Error {
     },
     #[error("object storage preflight failed: {0}")]
     StorageProbe(&'static str),
+    #[error("team preflight failed: {0}")]
+    TeamPreflight(&'static str),
     #[error("local staging setup failed")]
     LocalStaging {
         #[source]

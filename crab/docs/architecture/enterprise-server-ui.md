@@ -68,9 +68,10 @@ assets. It does not waive the production qualification gates in `CELLAR.md`.
 
 | Capability | Current server/UI or infrastructure evidence | Remaining work before an enterprise support claim |
 | --- | --- | --- |
-| Unified delivery | `build.rs`, `assets.rs`, UI build, `deploy/Dockerfile` | Keep source/image/UI/SDK evidence bound together; native server release publication is still gated. |
+| Unified delivery | `build.rs`, `assets.rs`, UI build, `deploy/Dockerfile`, private organization bootstrap, and `team-preflight` | Publish an attested image and chart after native provider qualification. Verify public ingress and SSO separately from the private readiness check. |
 | Enterprise/customer boundary | One configured storage root, catalog, Directory and independent Organization Cells | No enterprise account, enterprise owner/admin role, customer lifecycle, billing/license model or enterprise policy owner. A storage prefix is not that model. |
-| Sign-in and sessions | `auth/http/`, `auth/oidc/`, `auth/backchannel_logout/`, browser session UI | OIDC and GitHub OAuth exist. Direct SAML, SCIM provisioning and a managed-user lifecycle are not implemented by these paths. |
+| Sign-in and sessions | OIDC, GitHub OAuth, back-channel logout, and private operator suspension and reactivation | Add IdP-driven provisioning and organization-facing administration. Qualify new-request revocation and in-flight publication ordering on the supported provider. |
+| Git and CI credentials | Session-bound Read and Write tokens, durable bulk revocation | Add named tokens, independent expiry and individual revocation. Give CI an independently managed identity with least-privilege scopes. |
 | Public identity | Directory account/profile separation; profile UI and qualified account lookup | Organization discovery, owner-name registration/routing and a unified enterprise directory are incomplete. |
 | Groups and provisioning | Signed, bounded OIDC groups can grant repository roles; group sessions have a bounded lifetime | This is not SCIM or team synchronization. Provisioning/deprovisioning needs one durable lifecycle and reconciliation owner. |
 | Organization and team authority | Native membership and teams, explicit repository ownership, catalog team grants, owner-managed grants in repository settings, and current membership checks across replicas | Add organization repository provisioning, team-backed collaboration rosters, and ordering for removals racing in-flight publication. |

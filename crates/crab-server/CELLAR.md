@@ -182,8 +182,8 @@ described below. It is not a native grant cutover.
 
 ## Organization authority
 
-Organization schema 1 lives in `cells/organization/schema.sql`. Prepare Directory,
-then explicitly bootstrap through the private mTLS listener:
+Organization schema 1 lives in `cells/organization/schema.sql`. Run the private
+mTLS bootstrap to initialize a fresh Directory and organization:
 
 ```sh
 crab-server --config server.toml cells bootstrap-organization \
@@ -194,8 +194,10 @@ crab-server --config server.toml cells bootstrap-organization \
 The JSON supplies `owner: {issuer, subject}`, `name` and optional `description`.
 Use a new organization UUID and the owner's exact provider-qualified account.
 Metadata is validated before account registration or schema creation. Bootstrap
-registers that stable account without enrolling a public profile; retries with
-identical intent preserve the organization. Different bootstrap intent conflicts.
+registers that stable account without enrolling a public profile. Retry with
+the same inputs and UUID after interruption. An outdated Directory requires an
+explicit `cells migrate-directory` before bootstrap can register accounts.
+Different bootstrap intent conflicts.
 Neither a catalog owner string nor a public handle creates authority. Upgrade
 all peers before bootstrapping this new class; existing Repository/Directory
 schemas and identities do not change, and no rebuild is required.

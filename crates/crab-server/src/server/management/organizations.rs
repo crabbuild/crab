@@ -105,11 +105,24 @@ async fn bootstrap(
         return Err(Error::Invalid("Organization ID is invalid"));
     }
     input.owner.validate().map_err(Error::Cell)?;
+    if server
+        .auth
+        .as_ref()
+        .is_some_and(|auth| auth.issuer() != input.owner.issuer)
+    {
+        return Err(Error::Invalid(
+            "First owner must use the server's configured identity issuer",
+        ));
+    }
     organization::details(&input.name, &input.description).map_err(Error::Cell)?;
     let _permit = super::admit(&server)?;
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
     // Bootstrap is explicit private operator work. The qualified account is
     // registered without a profile; no catalog owner string acquires authority.
+    cells
+        .initialize(Address::Directory)
+        .await
+        .map_err(Error::Cell)?;
     let registered = app::command_output(
         cells
             .command::<RegisterAccounts>(

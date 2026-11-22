@@ -18,6 +18,8 @@ and migration limitations.
 2. `crates/crab-server/src/server/mod.rs` — `serve`: process composition and ordered shutdown; `src/server/http/mod.rs` composes routes and `src/repository/mod.rs` owns pinned reads and maintenance.
 3. `crates/crab-server/src/app.rs` — `admit / repository`: request repository/principal boundary and error mapping.
 4. `crates/crab-server/src/auth/mod.rs` — `Authentication`: identity and configuration; `auth/principal/` owns credentials and UUID-bound current grants; `auth/state.rs` owns durable sessions, `auth/http/mod.rs` owns login/session endpoints, and `auth/transport.rs` bounds provider requests.
+   `auth/accounts.rs` owns durable suspension revisions, with mutations exposed
+   only through private `server/management/accounts.rs` and the `accounts` CLI.
 5. `crates/crab-server/src/git/receive/mod.rs` — `receive / publish_objects`: bounded native receive and publication orchestration.
 
 Trace one path: `crates/crab-server/src/main.rs` → `src/cli/mod.rs` → `serve` in
