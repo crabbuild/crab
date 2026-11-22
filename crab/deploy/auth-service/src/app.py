@@ -8,6 +8,7 @@ import ipaddress
 import json
 import math
 import os
+import re
 import secrets
 import time
 from datetime import datetime, timezone
@@ -495,7 +496,10 @@ async def _materialize_filtered_read_scope(
                 "message": "Failed to materialize ACL-filtered repository view",
             },
         )
-    expected_global_prefix = f"{view.repo_prefix}/.crab"
+    source_digest = view.source_manifest_hash
+    generation = view.source_generation
+    expected_view = f"{parsed.prefix}/acl-views/v2/{scope_hash}/{generation}-{source_digest}"
+    expected_global_prefix = f"{expected_view}/.crab"
     try:
         parse_repo_url(f"crab://{parsed.bucket}/{view.repo_prefix}")
     except RepoUrlError as e:
@@ -517,6 +521,11 @@ async def _materialize_filtered_read_scope(
     if (
         view.scope_hash != scope_hash
         or view.source_repo != parsed.prefix
+        or type(generation) is not int
+        or not 0 <= generation < 2**64
+        or not isinstance(source_digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", source_digest) is None
+        or view.repo_prefix != expected_view
         or view.global_prefix != expected_global_prefix
     ):
         log.error(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -562,6 +563,47 @@ def test_issue_credentials_path_scoped_read_uses_filtered_view(monkeypatch):
     }]
     assert provider.calls[0]["repo_url"] == f"crab://bucket/{scope['repo_prefix']}"
     assert provider.calls[0]["permissions"] == ["read"]
+
+
+@pytest.mark.parametrize("misbound", ["source", "sibling", "generation", "digest", "global"])
+def test_issue_credentials_refuses_a_misbound_projected_view(monkeypatch, misbound):
+    provider = FakeProvider()
+    view = FakeViewHelper()
+    materialize = view.materialize
+
+    def misbound_view(**kwargs):
+        result = materialize(**kwargs)
+        if misbound in {"source", "sibling"}:
+            prefix = result.source_repo if misbound == "source" else "restricted/sibling"
+            return replace(result, repo_prefix=prefix, global_prefix=f"{prefix}/.crab")
+        if misbound == "generation":
+            return replace(result, source_generation=result.source_generation + 1)
+        if misbound == "digest":
+            return replace(result, source_manifest_hash="a" * 64)
+        return replace(result, global_prefix=f"{result.source_repo}/.crab")
+
+    monkeypatch.setattr(view, "materialize", misbound_view)
+    monkeypatch.setattr(app_module, "get_view_helper", lambda: view)
+    monkeypatch.setattr(app_module, "get_provider", lambda name: provider)
+    app_module._policy = app_module.PolicyEngine.from_dict({
+        "default_provider": "aws",
+        "rules": [{
+            "group": "platform-admins",
+            "repos": ["restricted/repo"],
+            "operations": ["mount"],
+            "read_paths": ["src/**"],
+        }],
+    })
+
+    response = TestClient(app_module.app).post("/v1/credentials", json={
+        "id_token": "token",
+        "repo_url": "crab://bucket/restricted/repo",
+        "operation": "mount",
+    })
+
+    assert response.status_code == 500
+    assert response.json()["detail"]["message"] == "ACL-filtered repository view scope mismatch"
+    assert not provider.calls
 
 
 def test_issue_credentials_path_scoped_read_audits_view_scope(monkeypatch):

@@ -191,6 +191,11 @@ Repository URLs must include a non-empty repo prefix, for example
 `crab://bucket/team/repo`. Bucket-root and container-root repo URLs are rejected
 because they cannot be safely scoped as an enterprise repo boundary.
 
+Before minting credentials for a path-scoped read, the issuer verifies that
+the view helper returned the exact Capsule v2 namespace for the authorized
+repository, scope hash, source generation, and source digest. The view's
+content prefix must be its `.crab` child.
+
 ### CDN viewer grants
 
 Add a `cdn` entry to the issuer's trusted policy file for each approved
