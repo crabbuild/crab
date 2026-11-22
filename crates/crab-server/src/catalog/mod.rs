@@ -1,5 +1,6 @@
 mod read;
 mod rename;
+pub(crate) mod transfer;
 pub(crate) use rename::Rename;
 
 use std::collections::{HashMap, HashSet};
@@ -65,6 +66,8 @@ pub struct CatalogRecord {
     pub protected_branches: Vec<BranchProtection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     naming: Option<rename::Naming>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) transfer: Option<transfer::Offer>,
 }
 
 pub(crate) const MAX_TEAM_GRANTS: usize = 100;
@@ -274,6 +277,7 @@ impl CatalogDocument {
                 .map_err(|_| CatalogError::Invalid("repository record failed validation"))?;
         }
         self.validate_renames(&mut names)?;
+        self.validate_transfers()?;
         Ok(())
     }
 
@@ -526,6 +530,7 @@ impl CatalogStore {
             groups: Vec::new(),
             protected_branches: Vec::new(),
             naming: None,
+            transfer: None,
         };
         self.initialize_git(&record, &default_branch, false).await?;
         self.insert_with_mode(record, InsertMode::ExistingPrefix)
@@ -563,6 +568,7 @@ impl CatalogStore {
                 groups: Vec::new(),
                 protected_branches: Vec::new(),
                 naming: None,
+                transfer: None,
             },
             InsertMode::Reserved(actor),
         )
@@ -595,6 +601,7 @@ impl CatalogStore {
                 groups: Vec::new(),
                 protected_branches: Vec::new(),
                 naming: None,
+                transfer: None,
             },
             InsertMode::Reserved(actor),
         )
@@ -648,6 +655,7 @@ impl CatalogStore {
             groups: Vec::new(),
             protected_branches: Vec::new(),
             naming: None,
+            transfer: None,
         };
         let runtime = record.runtime_config(&self.root, "main")?;
         crate::config::validate_repository(&runtime)

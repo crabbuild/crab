@@ -7,6 +7,7 @@ import { useMemo, useState } from "react";
 import { ArchiveSettings } from "./archive";
 import { MergeMethodSettings } from "./merge-methods";
 import { RenameSettings } from "./rename";
+import { TransferSettings } from "./transfer";
 
 const names = new Intl.Collator("en", { numeric: true, sensitivity: "base" });
 
@@ -205,6 +206,7 @@ export function DefaultBranchSettings({
         )}
       </section>
       <MergeMethodSettings repo={repo} csrf={csrf} />
+      <TransferSettings repo={repo} csrf={csrf} />
       <ArchiveSettings
         repo={repo}
         csrf={csrf}

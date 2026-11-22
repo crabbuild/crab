@@ -36,6 +36,10 @@ pub(crate) enum Error {
     SessionRequired,
     #[error("Repository permissions are temporarily unavailable")]
     Membership(#[source] Box<crate::catalog::CatalogError>),
+    #[error("Account authority is temporarily unavailable")]
+    IdentityAuthority(#[source] Box<crate::auth::AuthError>),
+    #[error("Repository transfer publication is unavailable")]
+    TransferPublication(#[source] crab_remote::publication::Error),
     #[error("This username is already taken")]
     ProfileHandleTaken,
     #[error("Your profile is already registered; reload to edit it")]
@@ -248,6 +252,8 @@ impl IntoResponse for Error {
                     | Self::Clock(_)
                     | Self::Repository(_)
                     | Self::Membership(_)
+                    | Self::IdentityAuthority(_)
+                    | Self::TransferPublication(_)
                     | Self::Merge(_)
                     | Self::MergeObject(_)
                     | Self::Release(_)
@@ -272,7 +278,7 @@ impl IntoResponse for Error {
                 .into_response();
         }
         let (status, code, message) = match &self {
-            Self::Membership(_) => (
+            Self::Membership(_) | Self::IdentityAuthority(_) | Self::TransferPublication(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "membership_unavailable",
                 "Repository permissions are temporarily unavailable.",
@@ -954,6 +960,16 @@ pub(crate) async fn membership_snapshot(
     if snapshot.repository_id != repo.id || organization != repo.organization {
         return Err(Error::NotFound);
     }
+    membership_for_config(server, principal, &repo.config, snapshot).await
+}
+
+pub(crate) async fn membership_for_config(
+    server: &Server,
+    principal: &Principal,
+    config: &crate::RepositoryConfig,
+    snapshot: crate::catalog::MembershipSnapshot,
+) -> Result<Membership> {
+    let organization = snapshot.organization.as_ref().map(|access| access.id);
     if principal.is_local() {
         return Ok(Membership {
             members: snapshot.members,
@@ -982,14 +998,19 @@ pub(crate) async fn membership_snapshot(
     } else {
         None
     };
-    let mut config = repo.config.clone();
+    let mut config = config.clone();
     config.members = snapshot.members;
     config.groups = snapshot.groups;
     let inherited = grant
         .as_ref()
         .and_then(|grant| crate::repository::access::organization_access(grant, &teams));
-    let principal =
-        principal.with_catalog_membership(repo.id, &config, issuer, inherited, snapshot.renamed);
+    let principal = principal.with_catalog_membership(
+        snapshot.repository_id,
+        &config,
+        issuer,
+        inherited,
+        snapshot.renamed,
+    );
     let grant = grant.unwrap_or_default();
     let mut review_teams = grant.teams;
     let mut bypass_teams = grant.bypass_teams.clone();

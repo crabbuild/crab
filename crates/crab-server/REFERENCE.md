@@ -653,10 +653,38 @@ Use the same input and request ID to recover a lost response. The current
 name version prevents a stale submission from overwriting a newer rename.
 Archived repositories must be unarchived before renaming.
 
-Upgrade serving replicas together before the first rename. The shared
-catalog stores the revision and former addresses for renamed repositories.
+Upgrade serving replicas together before the first rename or transfer. The
+shared catalog stores the revision and former owner/name pairs.
 Clients that use an old remote can update it with `git remote set-url origin`
 and the current URL.
+
+### Transfer repository ownership
+
+In **Settings → General**, a repository administrator can create an offer for a
+personal account by profile handle or for an organization by link or ID. Share
+the private offer link with the recipient. The named account or a current owner
+of the destination organization must sign in and accept within 24 hours. A
+current source administrator can cancel a pending offer. The recipient can
+also decline it. Crab rechecks the requester's authority and destination access
+at acceptance. Archived repositories and repositories in a private fork network
+are ineligible for transfer.
+
+Acceptance retains the repository UUID, storage placement, Git history,
+collaboration records, and direct collaborators. Former organization team and
+SSO group grants are removed. The destination organization uses its current
+access policies, or the destination personal account gains administrator
+access. Existing URLs redirect after checking current access until the former
+address is reclaimed. Issue a fresh Git token for the destination owner after
+acceptance. That token can follow the authorized redirect from the old remote.
+
+`GET /api/repositories/{repository}/transfer` returns the current name version
+and offer to a repository administrator. A `POST` to that route submits `version`,
+`request_id`, destination `name`, and `recipient` (`{kind:"account",handle}` or
+`{kind:"organization",id}`). `GET /api/repository-transfers/{id}` reads the
+private offer. `PUT` on that path takes `decision` (`accept`, `decline`, or
+`cancel`). The browser endpoints use the session and the usual CSRF protection.
+Retry a lost response with the same request ID or decision. A changed source
+address, a competing catalog update, or a claimed destination blocks acceptance.
 
 ### Git imports
 

@@ -40,7 +40,12 @@ pub(crate) async fn renamed(
     let snapshot = document
         .membership_snapshot(record)
         .map_err(app::repository_access_error)?;
-    let current = app::membership_snapshot(server, principal, &active, snapshot).await?;
+    // Resolve both the address and grants from the same authoritative record.
+    // A stale replica may still have the previous organization loaded.
+    let config = record
+        .runtime_config(catalog.root(), &active.config.default_branch)
+        .map_err(app::repository_access_error)?;
+    let current = app::membership_for_config(server, principal, &config, snapshot).await?;
     if !current.principal.can_read(record.id) {
         return Ok(None);
     }

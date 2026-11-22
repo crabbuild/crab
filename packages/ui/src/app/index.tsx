@@ -35,6 +35,7 @@ import {
 import { ProfileSettings, UserProfile } from "@/features/profile";
 import { LogOutIcon, UserRoundIcon } from "lucide-react";
 import { RepositoryPage } from "@/features/repository/page";
+import { TransferPage } from "@/features/settings/transfer";
 import { BrowseRepositories } from "@/features/repository/catalog-browse";
 import {
   DiscussionCodeTheme,
@@ -135,12 +136,19 @@ export function App() {
     /^\/-\/users\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(
       url.pathname,
     )?.[1];
+  const transferId = /^\/-\/repository-transfers\/([0-9a-f-]{36})$/i.exec(
+    url.pathname,
+  )?.[1];
   const organizationRoute =
     /^\/-\/organizations\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(\/invitation|\/projects(?:\/([0-9a-f-]{36}))?)?$/i.exec(
       url.pathname,
     );
   const route =
-    profileSettings || actorId || organizationRoute || notifications
+    profileSettings ||
+    actorId ||
+    transferId ||
+    organizationRoute ||
+    notifications
       ? undefined
       : repositoryRoute(url);
   const projectWorkspace = organizationRoute?.[2]?.startsWith("/projects")
@@ -230,10 +238,12 @@ export function App() {
           ? "Watched repositories · Crab"
           : inbox
             ? "Notifications · Crab"
-            : projectWorkspace
-              ? "Projects · Crab"
-              : "Repositories · Crab";
-  }, [repo, watched, inbox, subscriptions, projectWorkspace]);
+            : transferId
+              ? "Repository transfer · Crab"
+              : projectWorkspace
+                ? "Projects · Crab"
+                : "Repositories · Crab";
+  }, [repo, watched, inbox, subscriptions, projectWorkspace, transferId]);
   useEffect(() => {
     if (!importedRepository || url.pathname !== "/") return;
     if (
@@ -440,6 +450,12 @@ export function App() {
                 csrf={session.data.csrf ?? ""}
                 repositories={catalog.data?.repositories ?? []}
                 url={url}
+              />
+            ) : transferId ? (
+              <TransferPage
+                key={transferId}
+                id={transferId}
+                csrf={session.data.csrf ?? ""}
               />
             ) : organizationRoute ? (
               organizationRoute[2]?.startsWith("/projects") ? (

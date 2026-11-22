@@ -155,6 +155,9 @@ not grant native Organization or team authority. Tests stay with these owners.
 the durable catalog reservation and shared Git and Cell initializer.
 `cells/organization/repositories.rs` records owner-authorized submissions.
 The catalog's explicit organization UUID owns the repository relationship.
+`api/repository_transfer/` checks the current source and destination authorities.
+`catalog/transfer.rs` commits consent, the complete address and grant change,
+and the membership audit together. `catalog/rename.rs` owns historical addresses.
 `repository/access.rs` resolves current owner grants, and `app::membership`
 applies them alongside repository members and groups across browser and Git.
 `git_import/jobs.rs` owns actor-scoped durable import status and worker heartbeats.

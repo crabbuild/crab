@@ -19,7 +19,7 @@ pub(crate) async fn serve(request: Request) -> Response {
         ["-", "profile" | "notifications"]
         | ["-", "notifications", "watched" | "subscriptions"]
         | ["-", "settings", "saved-replies"] => true,
-        ["-", "users" | "organizations", id]
+        ["-", "users" | "organizations" | "repository-transfers", id]
         | ["-", "organizations", id, "invitation" | "projects"] => {
             uuid::Uuid::parse_str(id).is_ok_and(|id| !id.is_nil())
         }
