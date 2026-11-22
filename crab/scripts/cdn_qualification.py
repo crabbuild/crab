@@ -74,9 +74,18 @@ PRIVATE_CHECKS = WARM_DENIAL_CHECKS | {
     "scoped_view_isolation",
 }
 PUBLIC_EXPORT_CHECK = "approved_public_export"
+HISTORICAL_ORIGIN_CHECK = "historical_origin"
+HISTORICAL_KINDS = {
+    "cloudfront": {"versionId"},
+    "cloud-cdn": {"generation"},
+    "front-door": {"versionid", "snapshot"},
+}
+MAX_HISTORICAL_OBJECT_BYTES = 1024 * 1024
+MAX_HISTORICAL_VERSIONS = 8
+HISTORICAL_VERSION_FIELDS = {"kind", "selector_sha256", "sha256", "size"}
 PUBLIC_EXPORT_DIR = "public-export"
 PUBLIC_EXPORT_FILES = ("inventory.json", "publication.json")
-PUBLIC_CHECKS = {PUBLIC_EXPORT_CHECK, "live_origin_denied", "export_origin_access", "public_listing_denied"}
+PUBLIC_CHECKS = {PUBLIC_EXPORT_CHECK, HISTORICAL_ORIGIN_CHECK, "live_origin_denied", "export_origin_access", "public_listing_denied"}
 CLEANUP_INVENTORIES = {
     "cloudfront": ({"versions_and_delete_markers": "empty"},),
     "cloud-cdn": ({"generations": "empty", "soft_deleted": "empty"},
@@ -390,9 +399,53 @@ def verify_key_rotation(value: Any, report: dict[str, Any], edge: str, approved_
     return key, size
 
 
+def historical_approval_digest(origin_sha256: str, key_sha256: str, versions: list[dict[str, Any]]) -> str:
+    return deployment_component_digest({
+        "origin_sha256": origin_sha256,
+        "key_sha256": key_sha256,
+        "versions": sorted(versions, key=lambda item: (item["kind"], item["selector_sha256"])),
+    })
+
+
+def verify_historical_origin(
+    value: Any, report: dict[str, Any], registration: dict[str, Any],
+    origin_sha256: str, current: dict[str, Any],
+) -> None:
+    trace = fields(value, CDN_PROVENANCE_FIELDS | {
+        "schema", "origin_sha256", "key_sha256", "versions",
+    }, "historical native origin trace")
+    require(trace["schema"] == "crab.cdn-historical-origin/v1"
+            and all(trace[key] == report[key] for key in CDN_PROVENANCE_FIELDS)
+            and trace["origin_sha256"] == origin_sha256 and trace["key_sha256"] == current["key_sha256"],
+            "historical origin must match the approved live source, object and workflow attempt")
+    versions = trace["versions"]
+    edge = scope_parts(report["scope"])[0]
+    require(isinstance(versions, list) and 1 <= len(versions) <= MAX_HISTORICAL_VERSIONS,
+            "historical origin requires retained native versions")
+    observed = []
+    selectors = set()
+    for value in versions:
+        version = fields(value, HISTORICAL_VERSION_FIELDS | {"authorized_status", "anonymous_status"},
+                         "historical native version")
+        require(isinstance(version["kind"], str) and version["kind"] in HISTORICAL_KINDS[edge]
+                and matches(SHA256, version["selector_sha256"])
+                and matches(SHA256, version["sha256"]) and version["sha256"] != current["body_sha256"]
+                and positive(version["size"]) and version["size"] <= MAX_HISTORICAL_OBJECT_BYTES,
+                "historical origin requires the selected provider's distinct retired bytes")
+        selector = (version["kind"], version["selector_sha256"])
+        require(selector not in selectors, "duplicate native history selector")
+        selectors.add(selector)
+        require(type(version["authorized_status"]) is int and version["authorized_status"] == (206 if edge == "cloudfront" else 200)
+                and type(version["anonymous_status"]) is int and version["anonymous_status"] in (401, 403),
+                "historical native version must be readable with authorization and denied anonymously")
+        observed.append({field: version[field] for field in HISTORICAL_VERSION_FIELDS})
+    require(historical_approval_digest(trace["origin_sha256"], trace["key_sha256"], observed)
+            == registration["historical_origin_sha256"], "observed native history differs from preregistration")
+
+
 def verify_public_export(
     directory: Path, report: dict[str, Any], registration: dict[str, Any], policy: dict[str, Any],
-    reads: dict[str, list[dict[str, Any]]], native_reads: set[str], cleanup_targets: dict[str, Any],
+    reads: dict[str, list[dict[str, Any]]], native_reads: set[str], cleanup_targets: dict[str, Any], history: Any,
 ) -> None:
     root = directory / PUBLIC_EXPORT_DIR
     require(root.is_dir() and not root.is_symlink(), "public qualification needs retained publication inputs")
@@ -435,6 +488,7 @@ def verify_public_export(
             and any(row["key_sha256"] == key and row["source"] == "edge"
                     and row["status"] == 206 and 0 < row["bytes"] < read["bytes"] for row in reads["exact_range"]),
             "public export proof must cover the same edge, native, and export object")
+    verify_historical_origin(history, report, registration, cleanup_targets["native"]["origin_sha256"], read)
 
 
 def verify_managed_issuer(
@@ -513,6 +567,7 @@ def verify_check_evidence(
     rotation_key = None
     policy = {}
     managed_issuer = None
+    history = None
     deployment_policy_sha256 = registration["deployment_policy_sha256"]
     for name, value in checks.items():
         check = fields(value, {"passed", "trace_sha256"}, name)
@@ -537,6 +592,9 @@ def verify_check_evidence(
             continue
         if name == MANAGED_ISSUER_CHECK:
             managed_issuer = decoded
+            continue
+        if name == HISTORICAL_ORIGIN_CHECK:
+            history = decoded
             continue
         trace_fields = {"schema", "source_sha", "scope", "configuration_sha256",
                         "workflow_run_id", "workflow_run_attempt", "check", "requests"}
@@ -610,7 +668,7 @@ def verify_check_evidence(
                     "the public export must serve the complete approved object")
         require(any(row["key_sha256"] in native_reads for row in export),
                 "export access must use the same object key as the live source")
-        verify_public_export(directory, report, registration, policy, fixture_reads, native_reads, cleanup_targets)
+        verify_public_export(directory, report, registration, policy, fixture_reads, native_reads, cleanup_targets, history)
     return len(checks), cleanup_at
 
 
@@ -790,9 +848,11 @@ def benchmark_registration(registration: Any) -> dict[str, Any]:
     require(isinstance(registration, dict) and isinstance(registration.get("scope"), str), "benchmark needs a CDN scope")
     _, access, _, _, profile = scope_parts(registration["scope"])
     if access == "public":
-        expected.add("publication_sha256")
+        expected |= {"publication_sha256", "historical_origin_sha256"}
         require(matches(SHA256, registration.get("publication_sha256")),
                 "public benchmark needs the approved publication receipt digest")
+        require(matches(SHA256, registration.get("historical_origin_sha256")),
+                "public benchmark needs approved native history")
     if profile == "managed":
         expected.add("managed_issuer")
         issuer = fields(registration.get("managed_issuer"), MANAGED_ISSUER_FIELDS, "registered production issuer")

@@ -572,6 +572,37 @@ read and denial, and export access probe must describe the same receipted
 object. The recorded body digest and length must match its inventory entry.
 The cleanup trace must name the receipt's source and destination.
 
+### Verify retained native versions
+
+Use a dedicated public qualification source with retained versions of the
+fixture object. Keep earlier fixture bytes private and export only the
+approved current bytes. Record each retained selector in an operator-reviewed
+`history.json` with a `versions` array. Each entry has `kind`, `selector`,
+`size`, and `sha256`. Use `versionId` for S3, `generation` for GCS, and
+`versionid` or `snapshot` for Azure. The collector checks one to eight
+retained versions of up to 1 MiB each.
+
+Run the collector with the fixture and history inputs, omitting `--output`
+to print the candidate digest without network requests. Preregister it in
+the benchmark row as `historical_origin_sha256`. Run the collector again on
+the protected measurement worker and retain the trace with the other
+same-attempt observations.
+
+```bash
+python3 -B crab/scripts/e2e/collect_cdn_historical_origin.py \
+  --fixture "$approved_fixture_json" --configuration-sha256 "$configuration_sha256" \
+  --history "$approved_history_json" --historical-origin-sha256 "$historical_origin_sha256" \
+  --source-sha "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
+  --output "$row_directory/traces/historical_origin.json"
+```
+
+Use the source inspection role. S3 needs `s3:GetObjectVersion` on the
+approved fixture object and can select a local profile with `--aws-profile`.
+GCS uses `storage.objects.get`; Azure uses Blob data read authority. The
+collector checks the complete historical bytes using native authorization
+and then requires anonymous denial for the same selector. Retained evidence
+contains digests and status codes. [S3 version reads](https://docs.aws.amazon.com/AmazonS3/latest/userguide/RetrievingObjectVersions.html) · [GCS generation reads](https://docs.cloud.google.com/storage/docs/xml-api/get-object-download) · [Azure version and snapshot reads](https://learn.microsoft.com/en-us/rest/api/storageservices/get-blob)
+
 ### Verify viewer signing-key retirement
 
 On the protected Linux measurement worker, register the policy digest for

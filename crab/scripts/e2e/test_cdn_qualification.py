@@ -177,6 +177,8 @@ class CdnQualificationTests(unittest.TestCase):
                 self.rotation_trace(edge)
             elif check == CDN.MANAGED_ISSUER_CHECK:
                 self.managed_issuer_trace()
+            elif check == CDN.HISTORICAL_ORIGIN_CHECK:
+                self.historical_origin_trace(edge)
             else:
                 self.trace(check, observations.get(check, [edge_hit]))
         if CDN.requires_git_workload(self.scope):
@@ -271,6 +273,21 @@ class CdnQualificationTests(unittest.TestCase):
                       "deployment_policy_sha256": digest} | extra)
         path = self.directory / "traces" / "deployment_policy.json"
         self.report["checks"]["deployment_policy"] = {"passed": True, "trace_sha256": json_file(path, trace)}
+
+    def historical_origin_trace(self, edge: str) -> None:
+        origin_digest = hashlib.sha256(self.public_origins["native"].encode()).hexdigest()
+        version = {"kind": sorted(CDN.HISTORICAL_KINDS[edge])[0], "selector_sha256": "1" * 64,
+                   "sha256": hashlib.sha256(b"retired").hexdigest(), "size": 7}
+        self.registration["historical_origin_sha256"] = CDN.historical_approval_digest(
+            origin_digest, self.object_key, [version],
+        )
+        trace = {key: self.report[key] for key in CDN.CDN_PROVENANCE_FIELDS} | {
+            "schema": "crab.cdn-historical-origin/v1", "origin_sha256": origin_digest, "key_sha256": self.object_key,
+            "versions": [version | {"authorized_status": 206 if edge == "cloudfront" else 200, "anonymous_status": 403}],
+        }
+        check = CDN.HISTORICAL_ORIGIN_CHECK
+        path = self.directory / "traces" / f"{check}.json"
+        self.report["checks"][check] = {"passed": True, "trace_sha256": json_file(path, trace)}
 
     def rotation_trace(self, edge: str) -> None:
         hit = self.request("edge", 200, "hit")
@@ -553,6 +570,25 @@ class CdnQualificationTests(unittest.TestCase):
         receipt["export_placement"] = placement | {"resource": placement["resource"].rsplit("/", 1)[0] + "/export"}
         self.registration["publication_sha256"] = json_file(path, receipt)
         self.rejected("public CDN requires a separate export bucket or Azure storage account")
+
+    def test_public_release_needs_denied_access_to_the_same_verified_native_version(self) -> None:
+        self.configure("gcs", "public", "direct", consumer="sdk")
+        check = CDN.HISTORICAL_ORIGIN_CHECK
+        path = self.directory / "traces" / f"{check}.json"
+        original = json.loads(path.read_bytes())
+        version, = original["versions"]
+        cases = (
+            ({"key_sha256": "8" * 64}, "must match the approved live source"),
+            ({"versions": [version | {"kind": "versionId"}]}, "provider's distinct retired bytes"),
+            ({"versions": [version | {"sha256": hashlib.sha256(EXPORT_BODY).hexdigest()}]}, "provider's distinct retired bytes"),
+            ({"versions": [version | {"authorized_status": 404}]}, "readable with authorization and denied anonymously"),
+            ({"versions": [version | {"anonymous_status": 200}]}, "readable with authorization and denied anonymously"),
+            ({"versions": [version | {"selector_sha256": "8" * 64}]}, "differs from preregistration"),
+        )
+        for changes, reason in cases:
+            with self.subTest(changes=changes):
+                self.report["checks"][check]["trace_sha256"] = json_file(path, original | changes)
+                self.rejected(reason)
 
     def test_public_release_pins_observed_export_owner_and_location_even_with_reapproved_receipt(self) -> None:
         self.configure("s3", "public", "direct", consumer="sdk")
