@@ -1335,9 +1335,12 @@ For the AWS companion, replace `--log` and `--s3-origin-log` with
 inspection or use the protected worker's default AWS credentials. The
 collector checks the companion outputs and the origin logging target. It
 fetches only from the two private log prefixes, using expected-owner and
-ETag checks, and retains only the redacted proof. Retry after log delivery
-if the viewer records are incomplete. Use time-filtered local exports
-when a log prefix exceeds the collector's download bounds.
+ETag checks, and retains only the redacted proof. To wait for delivery, pass
+`--aws-log-wait-seconds` with the polling window in seconds. Pass
+`--require-origin-fill` for the cold arm so the collector also waits for a
+matching successful S3 response with body bytes. With local exports, the
+same flag reports a missing origin fill immediately. Use time-filtered local
+exports when a log prefix exceeds the collector's download bounds.
 
 For Cloud CDN, export a JSON array from Cloud Logging and write
 `cloud-cdn-requests.json` with the same collector. Query the approved GCP

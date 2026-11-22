@@ -18,7 +18,7 @@ from test_cdn_transport_qualification import PACK, fixture
 
 
 class CdnViewerRequestQualificationTests(unittest.TestCase):
-    def test_cloudfront_companion_collects_only_its_timed_logs(self):
+    def test_cloudfront_companion_waits_for_timed_viewer_and_origin_logs(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             config = fixture(access="private") | {"deployment": {"distribution_id": "EDIST12345", "region": "us-east-1"}}
@@ -48,13 +48,14 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
                       f'REST.GET.OBJECT {key} "GET /{key} HTTP/1.1" 206 - 4096 5000 4 1 "-" "Amazon CloudFront" '
                       '- extended-id SigV4 cipher AuthHeader fixture-bucket.s3.us-east-1.amazonaws.com TLSv1.3 - - us-east-1\n').encode()
             objects = {viewer_key: viewer, origin_key: origin}
+            delivered = set(objects)
             values = {"LogBucket": "fixture-logs", "ViewerLogPrefix": viewer_prefix, "OriginLogPrefix": "origin/",
                       "OriginBucket": "fixture-bucket", "DistributionId": "EDIST12345"}
             etag = '"snapshot"'
             downloaded = []
             arguments = ["collect", "--fixture", str(fixture_path), "--client", str(client),
                          "--configuration-sha256", configuration, "--output", str(output),
-                         "--aws-log-stack", "crab-logs", "--aws-profile", "crab"]
+                         "--aws-log-stack", "crab-logs", "--aws-profile", "crab", "--require-origin-fill"]
 
             def aws(profile, region, service, operation, *args):
                 self.assertEqual((profile, region), ("crab", "us-east-1"))
@@ -72,10 +73,10 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
                 if operation == "list-objects-v2":
                     prefix = args[args.index("--prefix") + 1]
                     log = viewer_key if prefix == viewer_prefix else origin_key
-                    return {"IsTruncated": False, "Contents": [
-                        {"Key": prefix + "older", "Size": 100, "ETag": etag, "LastModified": "1970-01-01T00:00:01Z"},
-                        {"Key": log, "Size": len(objects[log]), "ETag": etag, "LastModified": started.isoformat()},
-                    ]}
+                    contents = [{"Key": prefix + "older", "Size": 100, "ETag": etag, "LastModified": "1970-01-01T00:00:01Z"}]
+                    if log in delivered:
+                        contents.append({"Key": log, "Size": len(objects[log]), "ETag": etag, "LastModified": started.isoformat()})
+                    return {"IsTruncated": False, "Contents": contents}
                 self.assertEqual(operation, "get-object")
                 self.assertEqual(args[args.index("--if-match") + 1], etag)
                 key = args[args.index("--key") + 1]
@@ -94,11 +95,33 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
                     self.assertFalse(output.exists())
                     self.assertTrue(all(not raw.parent.exists() for raw in downloaded))
                 downloaded.clear()
-                self.assertEqual(COLLECT.main(), 0)
+                delivered.remove(origin_key)
+                self.assertEqual(COLLECT.main(), 1)
+                self.assertFalse(output.exists())
+                downloaded.clear()
+                delivered.clear()
+                with (patch.object(sys, "argv", arguments + ["--aws-log-wait-seconds", "1"]),
+                      patch.object(COLLECT.time, "monotonic", side_effect=[0, 1]),
+                      patch.object(COLLECT.time, "sleep") as sleep):
+                    self.assertEqual(COLLECT.main(), 1)
+                    self.assertFalse(output.exists())
+                    sleep.assert_not_called()
+                pending = iter((viewer_key, origin_key))
+
+                def receive_log(_seconds):
+                    self.assertFalse(output.exists())
+                    self.assertTrue(all(not raw.parent.exists() for raw in downloaded))
+                    delivered.add(next(pending))
+
+                with (patch.object(sys, "argv", arguments + ["--aws-log-wait-seconds", "180"]),
+                      patch.object(COLLECT.time, "monotonic", side_effect=[0, 0, 60]),
+                      patch.object(COLLECT.time, "sleep", side_effect=receive_log) as sleep):
+                    self.assertEqual(COLLECT.main(), 0)
+                    self.assertEqual(sleep.call_count, 2)
             proof = json.loads(output.read_bytes())
             self.assertEqual(set(proof["records"]), {viewer_digest})
             self.assertEqual(next(iter(proof["origin_requests"].values()))["response_body_bytes"], 4096)
-            self.assertEqual(len(downloaded), 2)
+            self.assertEqual(len(downloaded), 3)
             self.assertTrue(all(not raw.parent.exists() for raw in downloaded))
             self.assertNotIn("raw-origin-id", output.read_text())
 
@@ -136,9 +159,10 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
             output = root / "cloudfront-requests.json"
             command = [sys.executable, "-B", str(Path(COLLECT.__file__)), "--fixture", str(fixture_path), "--log", str(log),
                        "--client", str(client), "--configuration-sha256", configuration, "--output", str(output),
-                       "--s3-origin-log", str(origins)]
+                       "--s3-origin-log", str(origins), "--require-origin-fill"]
             for records, s3, reason in (
                 (unrelated, origin_line, "must cover each measured viewer attempt"),
+                (actual, "", "no logged fill from the approved CDN origin"),
                 (actual.replace(prefix, "/other/"), origin_line, "outside the approved viewer host or repository prefix"),
                 (actual + actual.replace("620", "619"), origin_line, "exports disagree about one viewer request"),
                 (actual, origin_line + origin_line.replace("4096", "4100"), "exports disagree about one origin request"),

@@ -102,7 +102,10 @@ collector in place of the local log flags. Use the read-only identity that
 can describe the given stack, read the origin bucket's logging configuration,
 and list and read both prefixes of its log bucket. The worker checks the
 stack's distribution and bucket against the approved fixture, then removes
-raw downloads when collection exits.
+raw downloads after each collection attempt. Use `--aws-log-wait-seconds`
+to poll for delayed records and `--require-origin-fill` for a cold sample.
+S3 and CloudFront log delivery is best effort. A sample with missing
+required records remains unqualified after the wait. [CloudFront log delivery](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/standard-logs-reference.html) · [S3 log delivery](https://docs.aws.amazon.com/AmazonS3/latest/userguide/ServerLogs.html)
 
 To retire a fixture, stop its origin log delivery before removing the
 companion. Retain the redacted report and empty only the dedicated log

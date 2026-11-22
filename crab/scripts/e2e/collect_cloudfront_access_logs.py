@@ -111,7 +111,6 @@ def download_logs(fixture: dict, client: dict, stack: str, profile: str | None, 
     since = client["started_at_unix_ms"] // 1000
     viewers = log_objects(profile, owner, bucket, viewer_prefix, since)
     origins = log_objects(profile, owner, bucket, "origin/", since)
-    require(viewers, "no CloudFront logs have arrived since the read began")
     require(len(viewers) + len(origins) <= DOWNLOAD_LIMIT, "too many log objects for one qualification read")
     require(sum(obj[1] for obj in viewers + origins) <= LOG_BYTES,
             "AWS qualification logs exceed the download size limit")
