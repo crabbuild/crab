@@ -336,6 +336,13 @@ deadline and budget. Preserve both sanitized failure causes and account for
 discarded bytes. Origin restart preserves availability for the same selected
 target when acceleration fails.
 
+The shared storage reader grants transport restart eligibility only to a
+recoverable first edge GET. A loopback LFS download with two parallel ranges
+observes one availability failure and one denial. A transient issuer refresh
+error after the denial leaves the file unpublished and both native targets
+unread. A separate check verifies that a successful same-edge recheck can
+still supply the bytes. Live provider and issuer runs remain required.
+
 ## Provider deployments
 
 All templates expose only approved immutable routes and read methods. Use a

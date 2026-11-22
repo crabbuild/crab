@@ -24,6 +24,9 @@ carry its discovered region into independent administration processes.
 global keys eligible for this transport. The composing reader must establish
 whole-object access and verify the returned bytes against authenticated
 metadata. Conditional operations and origin receipts use the provider store.
+For transport failures, only the initial edge GET can authorize an origin
+restart. A private viewer denial requires a successful recheck at the same
+edge. Credential and recheck errors stay terminal through range batches.
 CDN transfer diagnostics retain SHA-256 request fingerprints for joining
 qualification fetches to provider logs. CloudFront and Front Door use
 response request IDs. The Cloud CDN measurement worker opts into a

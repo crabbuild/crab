@@ -191,7 +191,8 @@ pub enum CdnAccess {
 #[async_trait::async_trait]
 pub trait CdnCredentials: Send + Sync {
     /// Return a current credential or refresh a rejected generation.
-    /// Return None for a key outside the authorized CDN prefixes.
+    /// Return None for a key outside the authorized CDN prefixes. An error
+    /// stops the read without granting permission to use the origin.
     async fn credential(&self, key: &Path, rejected: Option<u64>) -> Result<Option<CdnCredential>>;
 }
 

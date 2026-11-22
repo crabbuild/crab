@@ -1142,63 +1142,81 @@ impl CdnCredentials for RefreshingViewer {
 }
 
 #[tokio::test]
-async fn unavailable_edge_recheck_after_private_denial_never_reads_origin() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let client = client_builder().no_proxy().build().unwrap();
-    let base = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
-    let serve = tokio::spawn(async move {
-        for (i, status) in ["403 Forbidden", "503 Service Unavailable"]
+async fn private_denial_rechecks_at_the_same_edge() {
+    for (reply, verified) in [
+        (
+            "503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            None,
+        ),
+        (
+            "200 OK\r\nContent-Length: 15\r\nConnection: close\r\n\r\nrenewed content",
+            Some(b"renewed content".as_slice()),
+        ),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = client_builder().no_proxy().build().unwrap();
+        let base = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let serve = tokio::spawn(async move {
+            for (i, response) in [
+                "403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                reply,
+            ]
             .into_iter()
             .enumerate()
-        {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut stream = BufReader::new(stream);
-            let mut request = String::new();
-            while !request.ends_with("\r\n\r\n") {
-                assert!(stream.read_line(&mut request).await.unwrap() != 0);
+            {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut request = String::new();
+                while !request.ends_with("\r\n\r\n") {
+                    assert!(stream.read_line(&mut request).await.unwrap() != 0);
+                }
+                assert!(
+                    request
+                        .lines()
+                        .any(|line| line == format!("cookie: token={i}"))
+                );
+                stream
+                    .write_all(format!("HTTP/1.1 {response}").as_bytes())
+                    .await
+                    .unwrap();
             }
-            assert!(
-                request
-                    .lines()
-                    .any(|line| line == format!("cookie: token={i}"))
-            );
-            stream
-                .write_all(
-                    format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-                        .as_bytes(),
-                )
-                .await
-                .unwrap();
+        });
+        let hash = "abcd".repeat(16);
+        let path = Path::from(format!("org/repo/v2/history/ab/{hash}"));
+        let memory = Arc::new(InMemory::new());
+        memory
+            .put(&path, Bytes::from_static(b"readable origin").into())
+            .await
+            .unwrap();
+        let viewer = Arc::new(RefreshingViewer(std::sync::atomic::AtomicUsize::new(0)));
+        let target = [9; 32];
+        let store = Store::new(memory)
+            .with_target_identity(target)
+            .with_cdn_route(CdnRoute::new(
+                target,
+                "org/repo".into(),
+                None,
+                CdnAccess::Private(viewer.clone()),
+                CdnTransport { base, client },
+                Duration::from_secs(10),
+            ))
+            .unwrap();
+        let result = store
+            .read_verified(&path, 15, None, |body| {
+                std::future::ready(Ok::<_, StorageError>(body))
+            })
+            .await;
+        if let Some(expected) = verified {
+            assert_eq!(result.unwrap(), expected);
+        } else {
+            assert!(matches!(
+                crate::store::cdn_read_rejection(&result.unwrap_err()),
+                Some(StorageError::NetworkTransient { .. })
+            ));
         }
-    });
-    let hash = "abcd".repeat(16);
-    let path = Path::from(format!("org/repo/v2/history/ab/{hash}"));
-    let memory = Arc::new(InMemory::new());
-    memory
-        .put(&path, Bytes::from_static(b"readable origin").into())
-        .await
-        .unwrap();
-    let viewer = Arc::new(RefreshingViewer(std::sync::atomic::AtomicUsize::new(0)));
-    let target = [9; 32];
-    let store = Store::new(memory)
-        .with_target_identity(target)
-        .with_cdn_route(CdnRoute::new(
-            target,
-            "org/repo".into(),
-            None,
-            CdnAccess::Private(viewer.clone()),
-            CdnTransport { base, client },
-            Duration::from_secs(10),
-        ))
-        .unwrap();
-    let result = store
-        .read_verified(&path, 15, None, |body| {
-            std::future::ready(Ok::<_, StorageError>(body))
-        })
-        .await;
-    assert!(matches!(result, Err(StorageError::ObjectStore { .. })));
-    assert_eq!(viewer.0.load(std::sync::atomic::Ordering::Relaxed), 2);
-    serve.await.unwrap();
+        assert_eq!(viewer.0.load(std::sync::atomic::Ordering::Relaxed), 2);
+        serve.await.unwrap();
+    }
 }
 
 #[tokio::test]

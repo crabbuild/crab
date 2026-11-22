@@ -2228,6 +2228,122 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cdn_file_reads_stop_when_a_denied_range_cannot_renew_its_viewer() {
+        use crab_storage::cdn::{CdnAccess, CdnCredential, CdnCredentials, CdnRoute, CdnTransport};
+        use crab_storage::store::StorageReadKind;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        #[derive(Default)]
+        struct Viewer(AtomicUsize);
+
+        #[async_trait::async_trait]
+        impl CdnCredentials for Viewer {
+            async fn credential(
+                &self,
+                _: &Path,
+                rejected: Option<u64>,
+            ) -> crab_storage::Result<Option<CdnCredential>> {
+                if let Some(generation) = rejected {
+                    assert_eq!(generation, 0);
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                    return Err(StorageError::NetworkTransient {
+                        source: object_store::Error::Generic {
+                            store: "fixture issuer",
+                            source: "issuer temporarily unavailable".into(),
+                        },
+                    });
+                }
+                Ok(Some(CdnCredential::cookie(0, "viewer=fixture".into())))
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let transport = CdnTransport::loopback_fixture(listener.local_addr().unwrap()).unwrap();
+        let server = tokio::spawn(async move {
+            let mut ranges = Vec::new();
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut request = String::new();
+                while !request.ends_with("\r\n\r\n") {
+                    assert!(stream.read_line(&mut request).await.unwrap() != 0);
+                }
+                assert!(request.lines().any(|line| line == "cookie: viewer=fixture"));
+                let range = request
+                    .lines()
+                    .find_map(|line| line.strip_prefix("range: bytes="))
+                    .unwrap();
+                ranges.push((range.to_owned(), stream));
+            }
+            ranges.sort_by(|(left, _), (right, _)| left.cmp(right));
+            for ((range, mut stream), (expected, status)) in ranges.into_iter().zip([
+                ("0-8388607", "503 Service Unavailable"),
+                ("8388608-8388608", "403 Forbidden"),
+            ]) {
+                assert_eq!(range, expected);
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        let target = [4; 32];
+        let viewer = Arc::new(Viewer::default());
+        let non_edge_reads = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&non_edge_reads);
+        let selected = test_base_store()
+            .with_target_identity(target)
+            .with_read_request_observer(Arc::new(move |kind| {
+                if kind != StorageReadKind::Range {
+                    observed.fetch_add(1, Ordering::Relaxed);
+                }
+            }))
+            .with_cdn_route(CdnRoute::new(
+                target,
+                "repo".into(),
+                None,
+                CdnAccess::Private(viewer.clone()),
+                transport,
+                Duration::from_secs(10),
+            ))
+            .unwrap();
+        let observed = Arc::clone(&non_edge_reads);
+        let primary = test_base_store().with_read_request_observer(Arc::new(move |_| {
+            observed.fetch_add(1, Ordering::Relaxed);
+        }));
+        let data = Bytes::from(vec![b'x'; 8 * 1024 * 1024 + 1]);
+        let oid = sha256_oid(&data);
+        let path = LfsObjectStore::object_path_for_prefix("repo", &oid);
+        for store in [&selected, &primary] {
+            store.inner().put(&path, data.clone().into()).await.unwrap();
+        }
+        let lfs = LfsObjectStore::new_with_primary_fallback(selected, "repo", primary, "repo");
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("object");
+        let result = lfs
+            .download_to_file(&oid, data.len() as u64, &destination)
+            .await;
+        tokio::time::timeout(Duration::from_secs(12), server)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            crab_storage::store::cdn_read_rejection(&result.unwrap_err()),
+            Some(StorageError::NetworkTransient { .. })
+        ));
+        assert_eq!(viewer.0.load(Ordering::Relaxed), 1);
+        assert_eq!(non_edge_reads.load(Ordering::Relaxed), 0);
+        assert!(!destination.exists());
+    }
+
     #[tokio::test]
     async fn download_to_file_rejects_wrong_declared_size() {
         let store = test_store();

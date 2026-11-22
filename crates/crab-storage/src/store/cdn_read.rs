@@ -346,7 +346,12 @@ impl Store {
         }
     }
 
-    async fn cdn_read(&self, route: &CdnRoute, request: CdnGet<'_>) -> Result<Option<Bytes>> {
+    async fn cdn_read(
+        &self,
+        route: &CdnRoute,
+        request: CdnGet<'_>,
+        can_restart: bool,
+    ) -> Result<Option<Bytes>> {
         if route
             .publication
             .as_ref()
@@ -367,42 +372,37 @@ impl Store {
                 .get(request.clone(), viewer, timeout, &cancel)
         };
         let path = request.path;
-        let bytes = match &route.access {
-            CdnAccess::Public => get(CdnViewer::Public, route.edge_timeout()).await?,
+        let credential = match &route.access {
+            CdnAccess::Public => None,
             CdnAccess::Private(provider) => {
                 let Some(viewer) = provider.credential(path, None).await? else {
                     return Ok(None);
                 };
-                match get(viewer.header(), route.edge_timeout()).await {
-                    Err(StorageError::Forbidden { .. }) => {
-                        let current = provider
-                            .credential(path, Some(viewer.generation()))
-                            .await?
-                            .ok_or_else(|| StorageError::Forbidden {
-                                path: path.to_string(),
-                            })?;
-                        get(current.header(), route.edge_timeout())
-                            .await
-                            .map_err(|source| {
-                                match source {
-                                    StorageError::NetworkTransient { .. }
-                                    | StorageError::CorruptObject { .. } => {
-                                        // After denial, only a successful edge recheck can
-                                        // restore authority for this operation.
-                                        StorageError::ObjectStore {
-                                            source: object_store::Error::Generic {
-                                                store: "CDN authorization recheck",
-                                                source: Box::new(source),
-                                            },
-                                        }
-                                    }
-                                    source => source,
-                                }
-                            })?
-                    }
-                    outcome => outcome?,
-                }
+                Some((provider, viewer))
             }
+        };
+        let viewer = credential
+            .as_ref()
+            .map_or(CdnViewer::Public, |(_, viewer)| viewer.header());
+        let bytes = match (get(viewer, route.edge_timeout()).await, credential.as_ref()) {
+            (Err(StorageError::Forbidden { .. }), Some((provider, rejected))) => {
+                let current = provider
+                    .credential(path, Some(rejected.generation()))
+                    .await?
+                    .ok_or_else(|| StorageError::Forbidden {
+                        path: path.to_string(),
+                    })?;
+                get(current.header(), route.edge_timeout()).await?
+            }
+            // Only the initial HTTP request can authorize a restart. A
+            // credential failure or a failed edge recheck must stay terminal.
+            (
+                Err(StorageError::NetworkTransient { .. } | StorageError::CorruptObject { .. }),
+                _,
+            ) if can_restart => {
+                return Ok(None);
+            }
+            (outcome, _) => outcome?,
         };
         self.record_read_bytes(bytes.len() as u64);
         Ok(Some(bytes))
@@ -669,18 +669,12 @@ impl CdnReadAttempt {
                                 range,
                                 context: self.route.policy().map(|policy| (policy, self.family)),
                             },
+                            can_restart,
                         )
                         .await
                 });
-            self.within_deadline(async {
-                match request.await {
-                    Err(
-                        StorageError::NetworkTransient { .. } | StorageError::CorruptObject { .. },
-                    ) if can_restart => Ok(None),
-                    result => result.map_err(terminal_cdn_read),
-                }
-            })
-            .await
+            self.within_deadline(async { request.await.map_err(terminal_cdn_read) })
+                .await
         })
     }
 
