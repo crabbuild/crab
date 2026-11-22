@@ -6,9 +6,12 @@ import json
 import subprocess
 import sys
 import unittest
-from datetime import datetime, timezone
+from contextlib import contextmanager, redirect_stderr
+from datetime import datetime, timedelta, timezone
+from io import BytesIO, StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import collect_cdn_viewer_requests as COLLECT
@@ -295,6 +298,59 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
                         for private in (tag, host, project, rule, "192.0.2.1", "range-fill", "validation", "unrelated-origin"):
                             self.assertNotIn(private, retained)
 
+            expected = output.read_bytes()
+            output.unlink()
+            log_arg = command.index("--log")
+            api_command = [*command[2:log_arg], *command[log_arg + 2:], "--gcp-logging"]
+            pages = iter((
+                {"nextPageToken": "empty-page"},
+                {"entries": [origin, validation], "nextPageToken": "origin-page"},
+                {"entries": [viewer]},
+            ))
+            tokens = []
+
+            @contextmanager
+            def logging(base, method, target, headers, label, *, body):
+                self.assertEqual((base.netloc, method, target, label),
+                                 ("logging.googleapis.com", "POST", "/v2/entries:list", "Cloud Logging"))
+                self.assertEqual(headers["Authorization"], "Bearer fixture-cloud-identity")
+                query = json.loads(body)
+                self.assertEqual(query["resourceNames"], [f"projects/{project}"])
+                self.assertEqual(query["orderBy"], "timestamp desc")
+                self.assertEqual(query["pageSize"], COLLECT.GCP_LOG_PAGE_SIZE)
+                self.assertIn('resource.type="http_load_balancer"', query["filter"])
+                self.assertIn(f'logName="projects/{project}/logs/requests"', query["filter"])
+                self.assertIn(f'resource.labels.forwarding_rule_name="{rule}"', query["filter"])
+                start = datetime.fromtimestamp(report["started_at_unix_ms"] / 1000, timezone.utc) - timedelta(minutes=1)
+                finish = datetime.fromtimestamp(report["finished_at_unix_ms"] / 1000, timezone.utc) + timedelta(minutes=1)
+                self.assertIn(f'timestamp >= "{start.isoformat(timespec="milliseconds")}"', query["filter"])
+                self.assertIn(f'timestamp <= "{finish.isoformat(timespec="milliseconds")}"', query["filter"])
+                tokens.append(query.get("pageToken"))
+                yield SimpleNamespace(status=200, read=BytesIO(json.dumps(next(pages)).encode()).read)
+
+            with (patch.object(COLLECT, "bearer", return_value="Bearer fixture-cloud-identity") as bearer,
+                  patch.object(COLLECT, "https_response", logging), patch.object(sys, "argv", api_command)):
+                self.assertEqual(COLLECT.main(), 0)
+                bearer.assert_called_once_with("gcloud", "auth", "print-access-token", "--quiet")
+                self.assertEqual(tokens, [None, "empty-page", "origin-page"])
+                self.assertEqual(output.read_bytes(), expected)
+                output.unlink()
+                pages = iter(({"nextPageToken": "repeated-token"}, {"nextPageToken": "repeated-token"}))
+                with redirect_stderr(StringIO()) as errors:
+                    self.assertEqual(COLLECT.main(), 1)
+                self.assertIn("repeated a pagination token", errors.getvalue())
+                self.assertNotIn("repeated-token", errors.getvalue())
+                self.assertFalse(output.exists())
+                for limit, value, reason in (
+                    ("GCP_LOG_PAGES", 1, "exceeds the page limit"),
+                    ("JSON_LOG_LIMIT", 1, "exceed the JSON size limit"),
+                ):
+                    with self.subTest(limit=limit), patch.object(COLLECT, limit, value), redirect_stderr(StringIO()) as errors:
+                        pages = iter(({"nextPageToken": "pending-page"},))
+                        self.assertEqual(COLLECT.main(), 1)
+                        self.assertIn(reason, errors.getvalue())
+                        self.assertFalse(output.exists())
+
             config |= {"scope": "cloud-cdn/private/sdk/xorb/direct", "base_url": f"https://{host}/crab",
                        "view_suffix": "/acl-views/v2/" + "2" * 64 + "/1-" + "3" * 64,
                        "object_path": ".crab/xorbs/aa/" + "a" * 64}
@@ -309,7 +365,6 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
             }
             hydration_digest = examples.json_file(client, hydration)
             command[command.index(configuration)] = hydration_config
-            output.unlink()
             for observed_key in (key[:-64] + "b" * 64, key):
                 request_uri = f"{config['base_url']}/{observed_key}"
                 examples.json_file(log, [viewer | {"httpRequest": request | {"requestUrl": request_uri}}])

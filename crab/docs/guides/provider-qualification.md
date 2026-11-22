@@ -1361,10 +1361,16 @@ matching successful S3 response with body bytes. With local exports, the
 same flag reports a missing origin fill immediately. Use time-filtered local
 exports when a log prefix exceeds the collector's download bounds.
 
-For Cloud CDN, export a JSON array from Cloud Logging and write
-`cloud-cdn-requests.json` with the same collector. Query the approved GCP
-project and forwarding rule for the measurement window. The workload sends
-a random per-request User-Agent tag for qualification. The attested backend
+For Cloud CDN, pass `--gcp-logging` in place of `--log` to query the
+approved project and forwarding rule through the Cloud Logging API. The
+active `gcloud` identity needs `logging.logEntries.list` on the fixture
+project. The collector includes a minute on either side of the timed read
+for clock skew and origin fills. It follows bounded pagination and writes
+only the verified redacted proof. Retry after log delivery if the required
+records have yet to arrive. [Cloud Logging entries.list](https://docs.cloud.google.com/logging/docs/reference/v2/rest/v2/entries/list)
+
+The workload sends a random per-request User-Agent tag for qualification.
+The attested backend
 bucket keeps that header out of the cache key. The collector joins viewer
 records by the tag and retains Google's `cacheFillBytes` from each matched
 viewer record. It joins Cloud CDN's range-fill and validation requests on
@@ -1378,6 +1384,15 @@ Every cold arm must show positive fill bytes on a completed viewer response
 with payload bytes or on its associated successful origin GET. Error
 responses still count toward the reported byte floor.
 [Cloud CDN logging](https://docs.cloud.google.com/cdn/docs/logging) · [Backend bucket cache keys](https://docs.cloud.google.com/cdn/docs/caching#cache_keys)
+
+```bash
+python3 -B crab/scripts/e2e/collect_cdn_viewer_requests.py \
+  --fixture "$approved_fixture_json" --configuration-sha256 "$approved_configuration_sha256" \
+  --client "$arm_directory/client.json" --gcp-logging --require-origin-fill \
+  --output "$arm_directory/cloud-cdn-requests.json"
+```
+
+If the direct query exceeds its bounds, supply a time-filtered JSON export.
 
 ```bash
 gcloud logging read \

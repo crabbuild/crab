@@ -10,6 +10,7 @@ import json
 import re
 import sys
 import time
+from collections.abc import Iterable, Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -24,10 +25,14 @@ from cdn_qualification import (  # noqa: E402
     read_git_record, require, scope_parts, validate_git_fetch, validate_sdk_git_record, validate_service_read,
     verify_git_traffic, verify_viewer_requests,
 )
+from collect_cdn_fixture_cleanup import bearer  # noqa: E402
+from collect_cloud_cdn_deployment_policy import PROJECT, RESOURCE  # noqa: E402
 from collect_front_door_deployment_policy import FRONT_DOOR_HOST, SUBSCRIPTION  # noqa: E402
 from collect_cloudfront_access_logs import download_logs  # noqa: E402
 from run_cdn_git_workload import read_target_fingerprints  # noqa: E402
-from run_cdn_transport_checks import approved_fixture, deployment_target, fixture_base, fixture_object_key, origin_bucket  # noqa: E402
+from run_cdn_transport_checks import (  # noqa: E402
+    approved_fixture, deployment_target, fixture_base, fixture_object_key, https_response, origin_bucket,
+)
 
 
 LOG_FIELDS = {b"x-edge-request-id", b"x-host-header", b"cs-method", b"cs-uri-stem", b"cs-protocol",
@@ -38,6 +43,9 @@ GCS_VIEWER_AGENT = re.compile(r"crab-cdn-qualification/[0-9a-f]{32}")
 GCS_ORIGIN_AGENT = "Cloud-CDN-Google"
 MAX_LINE = 64 * 1024
 JSON_LOG_LIMIT = 32 * 1024 * 1024
+GCP_LOG_PAGES = 20
+GCP_LOG_PAGE_SIZE = 200
+GCP_LOG_ENDPOINT = urlsplit("https://logging.googleapis.com")
 S3_LOG_PREFIX = re.compile(rb'\S+ (?P<bucket>\S+) \[(?P<time>[^\]]+)\] \S+ \S+ (?P<id>\S+) REST\.GET\.OBJECT (?P<key>\S+) ')
 S3_CLOUDFRONT_READ = re.compile(
     rb'"GET (?P<path>/[^" ]+) HTTP/[^" ]+" (?P<status>[1-5][0-9]{2}) \S+ (?P<bytes>-|[0-9]{1,20}) '
@@ -324,7 +332,59 @@ def cloud_cdn_forwarding_rule(entry: dict, project: str, rule: str) -> bool:
             and labels.get("project_id") == project and labels.get("forwarding_rule_name") == rule)
 
 
-def cloud_cdn_logs(paths: list[Path], client: dict, fixture: dict) -> dict:
+def gcp_logging_pages(fixture: dict, client: dict) -> Iterator[list]:
+    target = deployment_target(fixture, "cloud-cdn")
+    project, rule = target["project"], target["forwarding_rule"]
+    require(matches(PROJECT, project) and matches(RESOURCE, rule),
+            "Cloud Logging requires an approved GCP project and forwarding rule")
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    # Include clock skew and cache-fill children initiated just after a viewer
+    # response. The log parser still joins only the measured request IDs.
+    try:
+        start = epoch + timedelta(milliseconds=client["started_at_unix_ms"] - 60_000)
+        finish = epoch + timedelta(milliseconds=client["finished_at_unix_ms"] + 60_000)
+    except OverflowError:
+        raise ValueError("invalid Cloud Logging measurement interval") from None
+    filter_text = "\n".join((
+        f'logName="projects/{project}/logs/requests"',
+        'resource.type="http_load_balancer"',
+        f'resource.labels.project_id="{project}"',
+        f'resource.labels.forwarding_rule_name="{rule}"',
+        f'timestamp >= "{start.isoformat(timespec="milliseconds")}"',
+        f'timestamp <= "{finish.isoformat(timespec="milliseconds")}"',
+        f'(httpRequest.userAgent =~ "^{GCS_VIEWER_AGENT.pattern}$" OR httpRequest.userAgent="{GCS_ORIGIN_AGENT}")',
+    ))
+    query = {"resourceNames": [f"projects/{project}"], "filter": filter_text,
+             "pageSize": GCP_LOG_PAGE_SIZE, "orderBy": "timestamp desc"}
+    headers = {"Authorization": bearer("gcloud", "auth", "print-access-token", "--quiet"),
+               "Content-Type": "application/json", "Accept-Encoding": "identity"}
+    remaining = JSON_LOG_LIMIT
+    seen_tokens = set()
+    for _ in range(GCP_LOG_PAGES):
+        body = json.dumps(query).encode()
+        with https_response(GCP_LOG_ENDPOINT, "POST", "/v2/entries:list", headers, "Cloud Logging", body=body) as response:
+            require(response.status == 200, f"Cloud Logging expected HTTP 200, got {response.status}")
+            raw = response.read(remaining + 1)
+        remaining -= len(raw)
+        require(remaining >= 0, "Cloud Logging results exceed the JSON size limit")
+        try:
+            page = decode(raw)
+        except (ValueError, RecursionError):
+            raise ValueError("invalid Cloud Logging result page") from None
+        require(isinstance(page, dict) and page.keys() <= {"entries", "nextPageToken"}, "invalid Cloud Logging result page")
+        entries, token = page.get("entries", []), page.get("nextPageToken", "")
+        require(isinstance(entries, list) and len(entries) <= GCP_LOG_PAGE_SIZE
+                and isinstance(token, str), "invalid Cloud Logging result page")
+        yield entries
+        if not token:
+            return
+        require(token not in seen_tokens, "Cloud Logging repeated a pagination token")
+        seen_tokens.add(token)
+        query["pageToken"] = token
+    raise ValueError("Cloud Logging query exceeds the page limit")
+
+
+def cloud_cdn_logs(exports: Iterable[object], client: dict, fixture: dict) -> dict:
     expected = client["edge_responses"]
     deployment = deployment_target(fixture, "cloud-cdn")
     project, rule = deployment["project"], deployment["forwarding_rule"]
@@ -332,8 +392,7 @@ def cloud_cdn_logs(paths: list[Path], client: dict, fixture: dict) -> dict:
     prefix = f"{base.path.rstrip('/')}/{fixture['fixture_prefix']}{fixture['view_suffix']}/"
     needs_key = any(client.get(name) for name in ("xorb_key_sha256", "lfs_key_sha256", "transition_key_sha256"))
     records, inserts, origin_entries = {}, {}, []
-    for path in paths:
-        entries = read_json_log(path)
+    for entries in exports:
         require(isinstance(entries, list), "expected a JSON array exported from Cloud Logging")
         for entry in entries:
             require(isinstance(entry, dict), "invalid Cloud Logging record")
@@ -423,15 +482,17 @@ def main() -> int:
     parser.add_argument("--fixture", required=True, type=Path)
     parser.add_argument("--configuration-sha256", required=True)
     parser.add_argument("--client", required=True, type=Path, help="exact timed client.json")
-    parser.add_argument("--log", action="append", type=Path, default=[],
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--log", action="append", type=Path, default=[],
                         help="CloudFront W3C access log, Cloud Logging JSON export or Azure Monitor Front Door archive")
+    source.add_argument("--aws-log-stack", help="download CloudFront and S3 logs from the approved companion stack")
+    source.add_argument("--gcp-logging", action="store_true", help="read Cloud CDN logs for the approved fixture from Cloud Logging")
     parser.add_argument("--s3-origin-log", action="append", type=Path, default=[],
                         help="plain-text S3 server access log from the approved CloudFront origin")
     parser.add_argument("--azure-blob-log", action="append", type=Path, default=[],
                         help="Azure Monitor StorageRead archive from the approved Blob origin")
     parser.add_argument("--azure-origin-authority", type=Path,
                         help="ARM Front Door profile JSON for private rows, Azure Public service tags JSON for public rows")
-    parser.add_argument("--aws-log-stack", help="download CloudFront and S3 logs from the approved companion stack")
     parser.add_argument("--aws-profile", help="AWS CLI profile used for read-only companion log collection")
     parser.add_argument("--aws-log-wait-seconds", type=int, default=0,
                         help="poll for missing AWS companion logs within this window")
@@ -446,13 +507,13 @@ def main() -> int:
         edge, access, _, family, _ = scope_parts(fixture["scope"])
         require(PROVIDER_FOR_EDGE[edge] in VIEWER_REQUEST_FILES, "no viewer log collector is defined for this CDN fixture")
         if args.aws_log_stack is not None:
-            require(edge == "cloudfront" and not args.log and not args.s3_origin_log,
+            require(edge == "cloudfront" and not args.s3_origin_log,
                     "AWS log stack collection requires a CloudFront fixture and no local viewer or origin files")
         else:
-            require(args.aws_profile is None and not args.aws_log_wait_seconds and args.log,
-                    "AWS log options require a companion stack, otherwise supply local log files")
+            require(args.aws_profile is None and not args.aws_log_wait_seconds, "AWS log options require a companion stack")
             require(bool(args.s3_origin_log) == (edge == "cloudfront"),
                     "CloudFront viewer evidence requires S3 origin access logs")
+        require(not args.gcp_logging or edge == "cloud-cdn", "Cloud Logging requires a Cloud CDN fixture")
         require(bool(args.azure_blob_log) == bool(args.azure_origin_authority) == (edge == "front-door"),
                 "Front Door viewer evidence requires Blob origin logs and Azure origin authority")
         raw = read_git_record(args.client, limit=GIT_FETCH_RECORD_LIMIT)
@@ -494,14 +555,18 @@ def main() -> int:
         if args.aws_log_stack is not None:
             proof = aws_viewer_evidence(fixture, client, digest, args)
         else:
-            loaders = {"cloudfront": cloudfront_logs, "cloud-cdn": cloud_cdn_logs, "front-door": front_door_logs}
-            records = loaders[edge](args.log, client, fixture)
-            proof = {"schema": f"crab.{edge}-viewer-requests/v1", "client_report_sha256": digest, "records": records}
+            proof = {"schema": f"crab.{edge}-viewer-requests/v1", "client_report_sha256": digest}
             if edge == "cloudfront":
+                records = cloudfront_logs(args.log, client, fixture)
                 proof["origin_requests"] = s3_cloudfront_reads(args.s3_origin_log, records, fixture, client)
             elif edge == "front-door":
+                records = front_door_logs(args.log, client, fixture)
                 proof["origin_requests"] = azure_blob_front_door_reads(args.azure_blob_log, args.azure_origin_authority,
                                                                       records, fixture, client)
+            else:
+                exports = gcp_logging_pages(fixture, client) if args.gcp_logging else (read_json_log(path) for path in args.log)
+                records = cloud_cdn_logs(exports, client, fixture)
+            proof["records"] = records
             observed = verify_viewer_requests(proof, client, digest, edge)
             require(not args.require_origin_fill or observed.successful_fill, "no logged fill from the approved CDN origin")
         with args.output.open("x", encoding="utf-8") as destination:

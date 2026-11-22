@@ -612,6 +612,8 @@ and edge payload through redacted observations.
   collector can wait for both AWS log streams before returning a cold proof.
   Cloud CDN retains cache-fill bytes on viewer log records and joins
   range-fill and validation requests by the provider's parent log-entry ID.
+  The collector can read those records directly from Cloud Logging for the
+  approved project, forwarding rule, and time window.
   Every Cloud CDN cold arm must show a successful fill linked to a completed
   viewer response. The benchmark checks external origin GETs and fill bytes
   against these observations. Front Door separates viewer responses from

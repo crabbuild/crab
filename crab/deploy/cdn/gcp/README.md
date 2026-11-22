@@ -82,6 +82,11 @@ shape, mutable route or query. Probe direct anonymous bucket access and
 verify `Cache-Control: private, no-store` on successful warm responses.
 Record origin GETs and fill bytes alongside client timings. For key rotation,
 test both keys during the overlap and the old key after deletion.
+Use `collect_cdn_viewer_requests.py --gcp-logging` on the protected
+worker to collect viewer and origin records for the approved forwarding
+rule. The active `gcloud` identity needs permission to list log entries in
+the fixture project. [Cloud Logging entries.list](https://docs.cloud.google.com/logging/docs/reference/v2/rest/v2/entries/list)
+
 For the protected fixture, hydrate projected Xet content and require denial
 for keys from a different scope or generation, the source repository, and the
 bucket-global namespace.
