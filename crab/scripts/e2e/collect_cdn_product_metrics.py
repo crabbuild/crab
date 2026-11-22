@@ -56,7 +56,7 @@ def measure(lines: Iterable[bytes], scope: str, *, edge_responses: dict | None =
             expected_git_blob: str | None = None, expected_git_packs: set[str] | None = None,
             verified_git_packs: set[str] | None = None, expected_lfs_key: str | None = None,
             expected_xorb_key: str | None = None,
-            local_xorb_only: bool = False) -> dict[str, int]:
+            required_xorb_source: str | None = None) -> dict[str, int]:
     edge, access, consumer, family, profile = scope_parts(scope)
     selected = (PROVIDER_FOR_EDGE[edge], access, consumer, family, profile)
     metrics = dict.fromkeys(PRODUCT_COUNTERS, 0)
@@ -74,9 +74,9 @@ def measure(lines: Iterable[bytes], scope: str, *, edge_responses: dict | None =
                     and matches(SHA256, event["xorb_key_sha256"]), "invalid verified CDN xorb key")
             exact_key = event["xorb_key_sha256"] == expected_xorb_key
             same_route = tuple(event[name] for name in ROUTE) == selected
-            if local_xorb_only:
-                require(same_route and exact_key and source == "local",
-                        "SDK warm hydration read xorb chunks outside its approved local cache")
+            if required_xorb_source is not None:
+                require(same_route and exact_key and source == required_xorb_source,
+                        f"Xorb read verified chunks outside its approved {required_xorb_source} cache")
             if same_route and (expected_xorb_key is None or exact_key) and source != "origin":
                 metric = "verified_edge_payloads" if source == "edge" else "local_payload_hits"
                 metrics[metric] += 1

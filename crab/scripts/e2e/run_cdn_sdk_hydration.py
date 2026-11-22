@@ -67,7 +67,7 @@ def child_evidence(lines: list[bytes], fixture: dict, key: str, cache: Path, app
     responses = {}
     key_sha256 = digest(key.encode())
     counts = measure(child_lines, fixture["scope"], expected_xorb_key=key_sha256, edge_responses=responses,
-                     local_xorb_only=arm == "warm_local")
+                     required_xorb_source="local" if arm == "warm_local" else None)
     native = measure_native(child_lines, fixture["scope"])
     if arm == "warm_local":
         require(counts["local_payload_hits"] > 0

@@ -19,8 +19,8 @@ from pathlib import Path
 from collect_cdn_product_metrics import NATIVE_TARGET, TARGET, measure, measure_native
 from cdn_qualification import (
     CDN_PROVENANCE_FIELDS, CLI_BUILD_FIELDS, COMMIT, RUN_NUMBER, decode, fields, is_direct_mount_xorb_scope,
-    matches, read_git_record, require, scope_parts, validate_xorb_publication, validate_xorb_workload,
-    verify_read_candidate, verify_xorb_read,
+    MOUNT_XORB_RANGE_READ, matches, read_git_record, require, scope_parts, validate_xorb_publication,
+    validate_xorb_workload, verify_read_candidate, verify_sparse_xorb_traffic, verify_xorb_read,
 )
 from run_cdn_git_workload import (
     PAYLOAD, companion_crab, git_environment, read_target_fingerprints, runner_platform,
@@ -36,20 +36,24 @@ TIMEOUT = 300
 
 READ_FILE = """
 import hashlib, json, os, stat, sys
-path, size = sys.argv[1], int(sys.argv[2])
+path, size, offset, length = sys.argv[1], *map(int, sys.argv[2:])
 assert stat.S_ISREG(os.lstat(path).st_mode)
 fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
-with os.fdopen(fd, "rb") as stream:
-    assert stat.S_ISREG(os.fstat(stream.fileno()).st_mode)
+with os.fdopen(fd, "rb", buffering=0) as stream:
+    info = os.fstat(stream.fileno())
+    assert stat.S_ISREG(info.st_mode) and info.st_size == size
+    assert 0 <= offset and 0 < length and offset + length <= size
+    stream.seek(offset)
     digest = hashlib.sha256()
-    remaining = size
+    remaining = length
     while remaining:
         data = stream.read(min(1024 * 1024, remaining))
         assert data
         digest.update(data)
         remaining -= len(data)
-    assert not stream.read(1)
-print(json.dumps({"sha256": digest.hexdigest(), "bytes": size}))
+    if length == size:
+        assert not stream.read(1)
+print(json.dumps({"sha256": digest.hexdigest(), "bytes": length}))
 """
 
 
@@ -105,6 +109,16 @@ def confirm_status(value: dict, pid: int, remote: str, ref: str, expected_oid: s
             "live NFS session did not confirm the approved read-only repository, ref and commit")
 
 
+def read_mounted_file(path: Path, spec: dict, env: dict[str, str], root: Path) -> None:
+    window = spec.get("read_range")
+    if window is None:
+        window = {"offset": 0, "bytes": spec["payload_bytes"], "sha256": spec["payload_sha256"]}
+    arguments = [str(path), str(spec["payload_bytes"]), str(window["offset"]), str(window["bytes"])]
+    read = command([sys.executable, "-I", "-c", READ_FILE, *arguments], env, root, timeout=TIMEOUT)
+    require(read.returncode == 0 and decode(read.stdout) == {name: window[name] for name in ("sha256", "bytes")},
+            "mounted filesystem returned different payload bytes")
+
+
 def run_mount(
     crab: Path, remote: str, ref: str, mountpoint: Path, root: Path, env: dict[str, str],
     spec: dict,
@@ -143,19 +157,18 @@ def run_mount(
                     and sha256(pointer.stdout) == spec["pointer_sha256"],
                     "mounted Git commit does not contain the approved Xet pointer")
             first = os.fstat(trace.fileno()).st_size
-            read = command([sys.executable, "-I", "-c", READ_FILE, str(mountpoint / PAYLOAD), str(spec["payload_bytes"])],
-                           env, root, timeout=TIMEOUT)
+            read_mounted_file(mountpoint / PAYLOAD, spec, env, root)
             last = os.fstat(trace.fileno()).st_size
-            require(read.returncode == 0 and 0 <= first <= last <= MAX_TRACE_BYTES,
-                    "mounted read failed or exceeded the redacted trace limit")
-            expected = {"sha256": spec["payload_sha256"], "bytes": spec["payload_bytes"]}
-            require(decode(read.stdout) == expected, "mounted filesystem returned different payload bytes")
             live = status(crab, mountpoint, root, env)
             require(live.returncode == 0, "mount closed before the filesystem read was confirmed")
             confirm_status(decode(live.stdout), process.pid, remote, ref, spec["mounted_oid"])
             require(command(stop, env, root).returncode == 0, "ordinary Crab unmount failed")
             require(process.wait(timeout=30) == 0 and not os.path.ismount(mountpoint)
                     and status(crab, mountpoint, root, env).returncode != 0, "NFS session did not detach cleanly")
+            if "read_range" in spec:
+                # Count read-ahead and cancelled requests that finish during detach.
+                last = os.fstat(trace.fileno()).st_size
+            require(0 <= first <= last <= MAX_TRACE_BYTES, "mounted read exceeded the redacted trace limit")
             finish = time.time_ns() // 1_000_000
             elapsed = (time.monotonic_ns() - timer + 999_999) // 1_000_000
             trace.seek(0)
@@ -183,7 +196,7 @@ def run_mount(
 
 
 def mount_record(startup: list[bytes], transfers: list[bytes], fixture: dict, candidate: dict,
-                 reader: dict, key_digest: str, arm: str) -> dict:
+                 reader: dict, key_digest: str, required_xorb_source: str | None) -> dict:
     target = {name: reader[name] for name in (
         "origin_sha256", "prefix_sha256", "global_prefix_sha256", "binding_sha256", "cache_root_sha256",
     )}
@@ -200,7 +213,7 @@ def mount_record(startup: list[bytes], transfers: list[bytes], fixture: dict, ca
 
     responses: dict = {}
     counts = measure(transfers, fixture["scope"], expected_xorb_key=key_digest, edge_responses=responses,
-                     local_xorb_only=arm == "warm_local")
+                     required_xorb_source=required_xorb_source)
     return counts | {"reader": reader, "xorb_key_sha256": key_digest, "edge_responses": responses,
                      "native_traffic": measure_native(transfers, fixture["scope"])}
 
@@ -217,7 +230,10 @@ def workload(args: argparse.Namespace) -> tuple[dict, dict | None]:
     key = fixture_object_key(fixture, access, family)
     key_digest = sha256(key)
     physical = fixture["fixture_prefix"] + fixture["view_suffix"]
-    spec = validate_xorb_workload(read_git_record(args.workload), args.workload_sha256, args.configuration_sha256, mount=True)
+    spec = validate_xorb_workload(read_git_record(args.workload), args.workload_sha256,
+                                  args.configuration_sha256, mount=True, allow_sparse=True)
+    window = spec.get("read_range")
+    require(window is None or args.warm_local_output is None, "sparse mount uses separate cold and warm edge sessions")
     require(spec["global_prefix_sha256"] == sha256(key.rsplit("/xorbs/", 1)[0]),
             "workload does not name the projected xorb namespace")
     platform = runner_platform()
@@ -274,6 +290,9 @@ def workload(args: argparse.Namespace) -> tuple[dict, dict | None]:
             "crab_sha256": spec["crab_sha256"], "mounted_oid": spec["mounted_oid"], "unmounted": True,
             "payload": {"sha256": spec["payload_sha256"], "bytes": spec["payload_bytes"]},
         }
+        if window is not None:
+            context |= {"schema": MOUNT_XORB_RANGE_READ, "range_offset": window["offset"],
+                        "payload": {name: window[name] for name in ("sha256", "bytes")}}
 
         def arm(name: str, primer: dict | None = None) -> dict:
             # The local arm reuses only Crab's cache. A new mount and Git
@@ -285,11 +304,17 @@ def workload(args: argparse.Namespace) -> tuple[dict, dict | None]:
             timing, pointer, startup, transfers = run_mount(
                 crab, remote, publication["ref"], mountpoint, process_directory, arm_env, spec,
             )
-            evidence = mount_record(startup, transfers, fixture, candidate, reader, key_digest, name)
+            source = "local" if name == "warm_local" else None
+            if window is not None and name == "edge":
+                source = "edge"
+            evidence = mount_record(startup, transfers, fixture, candidate, reader, key_digest, source)
             result = context | timing | evidence | {"arm": name, "pointer_sha256": sha256(pointer)}
             if primer is not None:
                 result["primer_sha256"] = sha256(json_record(primer))
-            return verify_xorb_read(json_record(result).encode(), row, registration, name, spec, placement)
+            verified = verify_xorb_read(json_record(result).encode(), row, registration, name, spec, placement)
+            if window is not None and name == "edge":
+                verify_sparse_xorb_traffic(verified, fixture["size"])
+            return verified
 
         first = arm(args.arm)
         return first, arm("warm_local", first) if args.warm_local_output is not None else None

@@ -1507,6 +1507,29 @@ hits and zero edge attempts for that arm. The timer covers startup, the
 filesystem read, and clean detach. The xorb transfer counters cover the
 filesystem read after the live commit and pointer checks.
 
+#### Measure sparse mounted reads
+
+Use a file reconstructed from one approved xorb with enough distinct,
+compressible chunks to span several 8 MiB mount read windows while the
+serialized xorb stays within the transport fixture's 1 MiB limit. Use the
+same mount command with a separate, digest-pinned workload. Set its
+schema to `crab.cdn-mount-xorb-range-workload/v1` and add `read_range` with
+`offset`, `bytes`, and `sha256` for a proper subrange of the original file.
+Keep `payload_bytes` and `payload_sha256` for the entire file. The worker
+checks the mounted file size, reads the chosen range without userspace
+read-ahead, and verifies its digest. It counts transport through detach.
+The worker rejects complete xorb GETs, incomplete range responses, and xorb
+viewer bytes that total a complete xorb.
+
+Run separate native, cold edge, and warm edge mounts using the same workload
+digest. Join both edge records using `collect_cdn_viewer_requests.py`. Use
+`--require-origin-fill` for the cold edge and confirm that all xorb requests
+hit in the warm edge sample. Compare the client xorb `edge_bytes` with the
+joined provider origin records for that xorb. Keep the sparse records as
+pilot evidence alongside the complete hydration and remount evidence used
+for release qualification. The sparse workload uses a fresh mount each time
+and omits `--warm-local-output`.
+
 ### Verify fixture cleanup
 
 After retiring the test ref and completing fixture cleanup, collect

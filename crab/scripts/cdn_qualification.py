@@ -100,6 +100,8 @@ PUBLIC_EXPORT_BEFORE = "before"
 PUBLIC_EXPORT_FILES = ("inventory.json", "publication.json")
 SDK_HYDRATION_ACTION = "sdk-xorb-hydration"
 MOUNT_XORB_ACTION = "mount-xorb-read"
+MOUNT_XORB_RANGE_WORKLOAD = "crab.cdn-mount-xorb-range-workload/v1"
+MOUNT_XORB_RANGE_READ = "crab.cdn-mount-xorb-range-read/v1"
 XORB_PRODUCT_DIR = "xorb-product"
 XORB_WORKLOAD_FIELDS = {
     "schema", "configuration_sha256", "pointer_sha256", "payload_sha256", "payload_bytes", "crab_sha256",
@@ -1869,6 +1871,7 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
     require(proof["schema"] == f"crab.{edge}-viewer-requests/v1" and proof["client_report_sha256"] == client_digest,
             "CDN viewer evidence differs from the measured fetch")
     expected = client["edge_responses"]
+    sparse_xorb = client.get("schema") == MOUNT_XORB_RANGE_READ
     records = proof["records"]
     require(isinstance(records, dict) and records.keys() == expected.keys()
             and len(records) == client["all_edge_attempts"],
@@ -1887,6 +1890,7 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
     for request_id, record in records.items():
         row = fields(record, record_fields, "CDN viewer log record")
         response = expected[request_id]
+        count_response = not sparse_xorb or response["family"] == "xorb"
         served_payload = response["status"] in (200, 206) and response["complete"] and response["bytes"] > 0
         require(type(row["status"]) is int and row["status"] == response["status"]
                 and row["cache"] in ("hit", "miss", "unknown")
@@ -1894,18 +1898,18 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
                 "CDN log status or response bytes disagree with the client")
         if response["complete"] and response["cache"] != "unknown":
             require(row["cache"] == response["cache"], "CDN log cache result disagrees with the completed response")
-        if served_payload and row["cache"] in ("hit", "miss"):
+        if count_response and served_payload and row["cache"] in ("hit", "miss"):
             completed_cache[request_id] = row["cache"]
         if keyed_origin or object_key is not None or transition_key is not None:
             require(matches(SHA256, row["key_sha256"]), "invalid CDN object key fingerprint")
-            require(xorb_key is None or row["key_sha256"] == xorb_key,
+            require(xorb_key is None or (row["key_sha256"] == xorb_key) == count_response,
                     "CDN viewer request did not read the approved hydration xorb")
             require(lfs_key is None or row["key_sha256"] == lfs_key,
                     "CDN viewer request did not read the approved service LFS object")
             viewer_keys.add(row["key_sha256"])
             if row["key_sha256"] == transition_key and served_payload:
                 verified_transition = True
-        if xorb_key is not None or service:
+        if (xorb_key is not None or service) and count_response:
             if response["complete"]:
                 require(response["status"] in (200, 206), "completed CDN response did not return object bytes")
                 if response["bytes"]:
@@ -1917,8 +1921,9 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
         if edge == "cloud-cdn":
             require(type(row["cache_fill_bytes"]) is int and row["cache_fill_bytes"] >= 0,
                     "Cloud CDN log has invalid reported cache fill bytes")
-            viewer_fill_bytes = max(viewer_fill_bytes, row["cache_fill_bytes"])
-            successful_fill |= served_payload and positive(row["cache_fill_bytes"])
+            if count_response:
+                viewer_fill_bytes = max(viewer_fill_bytes, row["cache_fill_bytes"])
+                successful_fill |= served_payload and positive(row["cache_fill_bytes"])
             children = row["origin_requests"]
             require(isinstance(children, dict), "invalid Cloud CDN origin requests")
             for origin_id, value in children.items():
@@ -1928,14 +1933,16 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
                         and type(origin["cache_fill_bytes"]) is int and origin["cache_fill_bytes"] >= 0,
                         "invalid or repeated Cloud CDN origin request")
                 logged_ids.add(origin_id)
-                origin_gets += origin["method"] == "GET"
-                child_fill_bytes += origin["cache_fill_bytes"]
-                # Origin errors can contribute recorded bytes. Only a successful
-                # GET linked to completed viewer delivery proves a cold fill.
-                successful_fill |= (served_payload and origin["method"] == "GET" and origin["status"] in (200, 206)
-                                    and positive(origin["cache_fill_bytes"]))
+                if count_response:
+                    origin_gets += origin["method"] == "GET"
+                    child_fill_bytes += origin["cache_fill_bytes"]
+                    # Origin errors still contribute bytes. Cold fill needs a
+                    # successful GET linked to completed viewer delivery.
+                    successful_fill |= (served_payload and origin["method"] == "GET" and origin["status"] in (200, 206)
+                                        and positive(origin["cache_fill_bytes"]))
     if xorb_key is not None or service:
-        require(client["edge_attempts"] == len(records) and all(client[key] == count for key, count in observed_transfer.items()),
+        attempts = sum(response["family"] == "xorb" for response in expected.values()) if sparse_xorb else len(records)
+        require(client["edge_attempts"] == attempts and all(client[key] == count for key, count in observed_transfer.items()),
                 "CDN transfer totals disagree with the logged responses")
     require(transition_key is None or verified_transition, "CDN logs did not confirm the new export object")
     if keyed_origin:
@@ -1956,6 +1963,8 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
                     and type(origin["response_body_bytes"]) is int and origin["response_body_bytes"] >= 0,
                     f"{service} origin request does not match the timed {viewer} request")
             logged_ids.add(origin_id)
+            if sparse_xorb and origin["key_sha256"] != xorb_key:
+                continue
             origin_gets += 1
             if origin["status"] in (200, 206):
                 child_fill_bytes += origin["response_body_bytes"]
@@ -2115,12 +2124,18 @@ def collect_service_product_action(
     return result
 
 
-def validate_xorb_workload(raw: bytes, approval: str, configuration: str, *, mount: bool = False) -> dict[str, Any]:
+def validate_xorb_workload(raw: bytes, approval: str, configuration: str, *, mount: bool = False,
+                          allow_sparse: bool = False) -> dict[str, Any]:
     require(matches(SHA256, approval) and hashlib.sha256(raw).hexdigest() == approval,
             "hydration workload differs from the approved digest")
     expected = XORB_WORKLOAD_FIELDS | ({"mounted_oid"} if mount else set())
-    spec = fields(decode(raw), expected, "xorb read workload")
+    value = decode(raw)
     schema = "crab.cdn-mount-xorb-workload/v1" if mount else "crab.cdn-sdk-hydration-workload/v1"
+    sparse = mount and allow_sparse and isinstance(value, dict) and value.get("schema") == MOUNT_XORB_RANGE_WORKLOAD
+    if sparse:
+        expected.add("read_range")
+        schema = MOUNT_XORB_RANGE_WORKLOAD
+    spec = fields(value, expected, "xorb read workload")
     require(spec["schema"] == schema
             and spec["configuration_sha256"] == configuration
             and (not mount or matches(GIT_OID, spec["mounted_oid"]))
@@ -2128,7 +2143,25 @@ def validate_xorb_workload(raw: bytes, approval: str, configuration: str, *, mou
                     ("pointer_sha256", "payload_sha256", "crab_sha256", "global_prefix_sha256", "publication_sha256"))
             and positive(spec["payload_bytes"]) and spec["payload_bytes"] <= 512 * 1024 * 1024,
             "invalid approved xorb read workload")
+    if sparse:
+        window = fields(spec["read_range"], {"offset", "bytes", "sha256"}, "approved xorb file range")
+        require(type(window["offset"]) is int and window["offset"] >= 0
+                and positive(window["bytes"]) and window["bytes"] < spec["payload_bytes"]
+                and window["offset"] + window["bytes"] <= spec["payload_bytes"]
+                and matches(SHA256, window["sha256"]), "invalid approved xorb file range")
     return spec
+
+
+def verify_sparse_xorb_traffic(read: dict[str, Any], object_bytes: int) -> None:
+    # Related catalog and shard requests still need a provider log join.
+    # Only xorb responses can prove the mounted byte window was sparse.
+    transfers = [response for response in read["edge_responses"].values() if response["family"] == "xorb"]
+    require(0 < read["edge_bytes"] == sum(response["bytes"] for response in transfers) < object_bytes
+            and read["edge_attempts"] == read["observed_edge_gets"] == len(transfers)
+            and read["all_edge_attempts"] == len(read["edge_responses"])
+            and positive(read["verified_edge_payloads"]) and read["local_payload_hits"] == 0
+            and all(response["range"] and response["complete"] and response["object_bytes"] == object_bytes
+                    for response in transfers), "sparse mount must verify xorb ranges totaling less than the approved object")
 
 
 def validate_xorb_publication(raw: bytes, row: dict[str, Any]) -> dict[str, Any]:
@@ -2147,9 +2180,16 @@ def verify_xorb_read(
 ) -> dict[str, Any]:
     local = arm == "warm_local"
     mount = is_direct_mount_xorb_scope(row["scope"])
+    window = spec.get("read_range")
     expected_fields = MOUNT_XORB_READ_FIELDS if mount else SDK_HYDRATION_READ_FIELDS
+    if window is not None:
+        expected_fields = expected_fields | {"range_offset"}
     read = fields(decode(raw), expected_fields | ({"primer_sha256"} if local else set()), "xorb read record")
     schema = "crab.cdn-mount-xorb-read/v1" if mount else "crab.cdn-sdk-hydration/v1"
+    if window is not None:
+        schema = MOUNT_XORB_RANGE_READ
+        require(mount and not local and type(read["range_offset"]) is int and read["range_offset"] == window["offset"],
+                "sparse mount read must match the approved file offset")
     require(read["schema"] == schema and read["arm"] == arm
             and all(read[key] == row[key] for key in CDN_PROVENANCE_FIELDS | {"platform"})
             and read["workload_sha256"] == registration["hydration_workload_sha256"]
@@ -2164,7 +2204,9 @@ def verify_xorb_read(
     else:
         require("local" in read["candidate"]["cargo_features"].split(","), "SDK hydration requires the local feature")
     payload = fields(read["payload"], {"sha256", "bytes"}, "verified hydrated file")
-    require(type(payload["bytes"]) is int and payload == {"sha256": spec["payload_sha256"], "bytes": spec["payload_bytes"]},
+    expected_payload = ({"sha256": window["sha256"], "bytes": window["bytes"]} if window is not None
+                        else {"sha256": spec["payload_sha256"], "bytes": spec["payload_bytes"]})
+    require(type(payload["bytes"]) is int and payload == expected_payload,
             "xorb read did not verify the approved file")
     target = placement["views"]["target"]
     reader = fields(read["reader"], CLI_NATIVE_FIELDS | {

@@ -193,6 +193,22 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
             with self.assertRaises(subprocess.CalledProcessError):
                 fixture.CDN.verify_bundle_row(self.output, self.row, self.example.registration, fixture.COMMIT, "123", "2")
 
+    def test_sparse_mount_workload_cannot_replace_full_read_release_evidence(self) -> None:
+        self.inputs("azure", consumer="mount", family="xorb")
+        cdn = fixture.CDN
+        path = self.root / self.row / cdn.XORB_PRODUCT_DIR / "workload.json"
+        original = json.loads(path.read_bytes())
+        spec = original | {"schema": cdn.MOUNT_XORB_RANGE_WORKLOAD,
+                           "read_range": {"offset": 512, "bytes": 128, "sha256": "a" * 64}}
+        approval = fixture.json_file(path, spec)
+        source = spec["configuration_sha256"]
+        self.assertEqual(cdn.validate_xorb_workload(path.read_bytes(), approval, source, mount=True, allow_sparse=True), spec)
+        with self.assertRaisesRegex(ValueError, "invalid fields in xorb read workload"):
+            cdn.validate_xorb_workload(path.read_bytes(), approval, source, mount=True)
+        approval = fixture.json_file(path, spec | {"read_range": spec["read_range"] | {"offset": 1000}})
+        with self.assertRaisesRegex(ValueError, "invalid approved xorb file range"):
+            cdn.validate_xorb_workload(path.read_bytes(), approval, source, mount=True, allow_sparse=True)
+
     def test_sdk_requires_measured_snapshot_and_rejects_operator_supplied_product_summary(self) -> None:
         digest = self.inputs("gcs")
         product = self.root / self.row / fixture.CDN.GIT_PRODUCT_DIR

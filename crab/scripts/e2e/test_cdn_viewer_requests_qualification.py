@@ -17,11 +17,57 @@ from unittest.mock import patch
 import collect_cdn_viewer_requests as COLLECT
 import collect_cloudfront_access_logs as AWS_LOGS
 import collect_azure_access_logs as AZURE_LOGS
+import run_cdn_mount_workload as MOUNT
 import test_cdn_qualification as examples
 from test_cdn_transport_qualification import PACK, fixture
 
 
 class CdnViewerRequestQualificationTests(unittest.TestCase):
+    def test_mount_sparse_reader_verifies_exact_offset_and_total_size(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload = b"before" + b"approved slice" + b"after"
+            path = root / "mounted-file"
+            path.write_bytes(payload)
+            window = {"offset": 6, "bytes": 14, "sha256": hashlib.sha256(b"approved slice").hexdigest()}
+            spec = {"payload_bytes": len(payload), "payload_sha256": hashlib.sha256(payload).hexdigest(),
+                    "read_range": window}
+            MOUNT.read_mounted_file(path, spec, {}, root)
+            with self.assertRaisesRegex(ValueError, "different payload bytes"):
+                MOUNT.read_mounted_file(path, spec | {"read_range": window | {"offset": 7}}, {}, root)
+            with self.assertRaisesRegex(ValueError, "different payload bytes"):
+                MOUNT.read_mounted_file(path, spec | {"payload_bytes": len(payload) + 1}, {}, root)
+
+    def test_sparse_mount_does_not_treat_adjacent_metadata_as_xorb_fill(self):
+        cdn = examples.CDN
+        xorb_key = "a" * 64
+        shard_key = "b" * 64
+        xorb_response = {"family": "xorb", "status": 206, "range": True, "complete": True, "cache": "hit",
+                         "elapsed_ms": 1, "object_bytes": 1024, "bytes": 64, "requested_bytes": 64}
+        shard_response = xorb_response | {"family": "shard", "status": 200, "range": False, "cache": "miss",
+                                         "object_bytes": 64}
+        read = dict.fromkeys(cdn.PRODUCT_COUNTERS, 0) | {
+            "schema": cdn.MOUNT_XORB_RANGE_READ, "xorb_key_sha256": xorb_key, "started_at_unix_ms": 1000,
+            "finished_at_unix_ms": 1001, "all_edge_attempts": 2, "edge_attempts": 1, "observed_edge_gets": 1,
+            "verified_edge_payloads": 1, "edge_hits": 1, "edge_bytes": 64,
+            "edge_responses": {"c" * 64: xorb_response, "d" * 64: shard_response},
+        }
+        proof = {"schema": "crab.cloudfront-viewer-requests/v1", "client_report_sha256": "e" * 64,
+                 "records": {"c" * 64: {"status": 206, "cache": "hit", "response_bytes": 64, "key_sha256": xorb_key},
+                             "d" * 64: {"status": 200, "cache": "miss", "response_bytes": 64, "key_sha256": shard_key}},
+                 "origin_requests": {"f" * 64: {"key_sha256": shard_key, "at_unix_s": 1, "status": 200,
+                                                 "response_body_bytes": 64}}}
+        cdn.verify_sparse_xorb_traffic(read, 1024)
+        observed = cdn.verify_viewer_requests(proof, read, "e" * 64, "cloudfront")
+        self.assertEqual((observed.fill_bytes, observed.successful_fill, observed.completed_cache), (0, False, {"c" * 64: "hit"}))
+        proof["origin_requests"]["1" * 64] = {"key_sha256": xorb_key, "at_unix_s": 1, "status": 206, "response_body_bytes": 512}
+        self.assertEqual(cdn.verify_viewer_requests(proof, read, "e" * 64, "cloudfront").fill_bytes, 512)
+        with self.assertRaisesRegex(ValueError, "ranges totaling less"):
+            cdn.verify_sparse_xorb_traffic(read | {"edge_bytes": 1024}, 1024)
+        with self.assertRaisesRegex(ValueError, "approved hydration xorb"):
+            proof["records"]["c" * 64]["key_sha256"] = shard_key
+            cdn.verify_viewer_requests(proof, read, "e" * 64, "cloudfront")
+
     def test_mount_record_joins_the_exact_projected_xorb_request(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -31,16 +77,16 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
             example.configure("s3", "private", "direct", consumer="mount", family="xorb")
             config = fixture(access="private") | {
                 "scope": example.scope, "view_suffix": f"/acl-views/v2/{'b' * 64}/7-{'c' * 64}",
-                "object_path": ".crab/xorbs/aa/" + "a" * 64,
+                "object_path": ".crab/xorbs/aa/" + "a" * 64, "size": 1024,
             }
             key = config["fixture_prefix"] + config["view_suffix"] + "/" + config["object_path"]
             fixture_path = root / "fixture.json"
             configuration = examples.json_file(fixture_path, config)
             record = json.loads((example.directory / examples.CDN.XORB_PRODUCT_DIR / "mount.json").read_bytes())
             request_id = "mount-viewer-request"
+            response = next(iter(record["edge_responses"].values()))
             record.update(configuration_sha256=configuration, xorb_key_sha256=hashlib.sha256(key.encode()).hexdigest(),
-                          edge_responses={hashlib.sha256(request_id.encode()).hexdigest():
-                                          next(iter(record["edge_responses"].values()))})
+                          edge_responses={hashlib.sha256(request_id.encode()).hexdigest(): response})
             client, logs, origins, output = (root / name for name in ("mount.json", "viewer.log", "s3.log", "proof.json"))
             examples.json_file(client, record)
             origins.touch()
@@ -50,12 +96,19 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
             header = ("#Fields: x-edge-request-id x-host-header cs-method cs-uri-stem cs-protocol "
                       "sc-status sc-bytes x-edge-response-result-type\n")
             wrong_key = key.rsplit("/xorbs/", 1)[0] + "/xorbs/bb/" + "b" * 64
-            with patch.object(sys, "argv", arguments), redirect_stderr(StringIO()):
+            stderr = StringIO()
+            with patch.object(sys, "argv", arguments), redirect_stderr(stderr):
                 for observed, expected in ((wrong_key, 1), (key, 0)):
                     logs.write_text(header + f"{request_id}\tfixture.example.com\tGET\t/crab/{observed}\thttps\t206\t128\tHit\n")
                     self.assertEqual(COLLECT.main(), expected)
                 proof = json.loads(output.read_bytes())
                 self.assertEqual(next(iter(proof["records"].values()))["key_sha256"], record["xorb_key_sha256"])
+                output.unlink()
+                response.update(family="xorb", object_bytes=config["size"])
+                sparse = record | {"schema": examples.CDN.MOUNT_XORB_RANGE_READ, "range_offset": 512,
+                                   "payload": {"sha256": "a" * 64, "bytes": 64}}
+                examples.json_file(client, sparse)
+                self.assertEqual(COLLECT.main(), 0, stderr.getvalue())
 
     def test_cloudfront_companion_waits_for_timed_viewer_and_origin_logs(self):
         with TemporaryDirectory() as temporary:

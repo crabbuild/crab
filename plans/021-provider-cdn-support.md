@@ -318,7 +318,10 @@ requests within the qualified range size and the transport's buffer limit.
 SDK and mount range hydration can use authenticated compressed xorb spans
 from the edge. Keep the selected source through footer, metadata and payload
 verification. Qualify sparse access and provider fill amplification separately
-from complete hydration.
+from complete hydration. The NFS mount worker can verify a preregistered
+file window and join its range responses to provider logs. It measures xorb
+fill separately from adjacent shard and catalog fetches. Live sparse reports
+and the SDK stream workload still remain open.
 Record each qualified profile's full-object, range and duration limits and
 enforce them before sending the first edge request. Reuse trusted descriptor
 sizes to avoid an extra origin HEAD per object.
