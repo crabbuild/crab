@@ -8,10 +8,12 @@ import unittest
 from itertools import cycle
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import run_cdn_sdk_workload as SDK
 from cdn_qualification import CLI_BUILD_FIELDS
+from run_cdn_git_workload import PUBLIC_TRANSITION_TARGET
 from test_cdn_qualification import COMMIT, cli_candidate, json_file, sdk_candidate
 from test_cdn_transport_qualification import fixture
 
@@ -46,7 +48,7 @@ class CdnSdkWorkloadQualificationTests(unittest.TestCase):
                            "token_cache_directory": str(root / "login")})
         self.args = argparse.Namespace(arm="edge", fixture=config_path, configuration_sha256=configuration,
                                        receipt=receipt, probe=probe, source_sha=COMMIT, run_id="123", run_attempt="2",
-                                       private_reader=reader, export_approval=None, warm_local_output=None)
+                                       private_reader=reader, export_approval=None, warm_local_output=None, transition_object=None)
         self.build = {key: value for key, value in sdk_candidate(scope, SDK.runner_platform()).items() if key in CLI_BUILD_FIELDS}
         clock = patch.object(SDK.time, "time_ns", side_effect=cycle((1_000_000_000, 1_010_000_000)))
         clock.start()
@@ -61,7 +63,8 @@ class CdnSdkWorkloadQualificationTests(unittest.TestCase):
         native = {"target": "crab_storage::native_read", "fields": {
             "message": "Native object store read", "provider": "s3", "method": "get", "status": 200, "bytes": 8,
         }}
-        route = {"provider": "s3", "access": "private", "consumer": "sdk", "family": "git", "profile": "direct"}
+        route = {"provider": "s3", "access": self.config["scope"].split("/")[1],
+                 "consumer": "sdk", "family": "git", "profile": "direct"}
         transfer = {"target": "crab_storage::cdn::transfer", "fields": route | {
             "message": "CDN immutable GET", "status": 206, "bytes": 64, "elapsed_ms": 1, "cache": "hit",
             "range": True, "complete": True, "request_sha256": "d" * 64,
@@ -161,3 +164,44 @@ class CdnSdkWorkloadQualificationTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(ValueError, "verified in-memory Git blob without edge traffic"):
                     SDK.fetch(self.args)
+
+    def test_public_transition_requires_the_snapshot_blob_on_the_exact_pack_layer(self) -> None:
+        scope = "cloudfront/public/sdk/git/direct"
+        self.config = fixture(access="public") | {"scope": scope}
+        configuration = json_file(self.args.fixture, self.config)
+        raw = json.loads(self.args.receipt.read_bytes()) | {"scope": scope, "configuration_sha256": configuration}
+        json_file(self.args.receipt, raw)
+        self.args.configuration_sha256 = configuration
+        self.args.private_reader = None
+        self.args.export_approval = self.args.fixture.parent / "export"
+        self.args.transition_object = self.config["object_path"]
+        key = hashlib.sha256(f"{self.config['fixture_prefix']}/{self.args.transition_object}".encode()).hexdigest()
+        for arm in ("prior_export", "edge"):
+            self.args.arm = arm
+            edge = arm == "edge"
+            listing, proof = ("listed", "verified_edge") if edge else ("unlisted", "verified_native")
+            objects = [SimpleNamespace(path=self.args.transition_object)] if edge else []
+            for blob in ("e" * 64, "f" * 64):
+                with self.subTest(arm=arm, blob=blob):
+                    base = self.observe(edge=edge, reader={"binding_sha256": SDK.viewer_binding_sha256(self.config),
+                                                           "public_export_sha256": self.approval})
+                    fields = {"message": "CDN public export observation", "provider": "s3", "access": "public",
+                              "consumer": "sdk", "family": "git", "profile": "direct",
+                              "approval_sha256": self.approval, "key_sha256": key}
+                    evidence = [{"target": PUBLIC_TRANSITION_TARGET, "fields": fields | {"observation": listing}},
+                                {"target": PUBLIC_TRANSITION_TARGET, "fields": fields | {"observation": proof,
+                                                                                       "git_blob_oid_sha256": blob}}]
+                    result = subprocess.CompletedProcess([], 0, base.stdout,
+                                                         "\n".join(map(json.dumps, evidence)).encode() + b"\n" + base.stderr)
+                    with (
+                        patch.object(SDK, "approved_public_export", return_value=(self.approval, objects, 1)),
+                        patch.object(SDK.subprocess, "run", return_value=result) as run,
+                    ):
+                        if blob != "e" * 64:
+                            with self.assertRaisesRegex(ValueError, "did not prove the selected object's public export transition"):
+                                SDK.fetch(self.args)
+                        else:
+                            read, local = SDK.fetch(self.args)
+                            self.assertTrue(json.loads(run.call_args.kwargs["input"])["public_transition"])
+                            self.assertEqual(read["transition_key_sha256"], key)
+                            self.assertIsNone(local)

@@ -566,11 +566,12 @@ async fn product_read_records_one_redacted_transfer_for_its_actual_scope() {
     let store = store.with_cdn_route(route).unwrap();
     let missing = Path::from(format!("org/repo/v2/pack-layers/bb/{}", "b".repeat(64)));
     assert!(store.cdn_attempt(&missing).is_none());
+    let blob_oid = [0x32; 20];
+    store.observe_verified_unlisted_git_blob(&missing, &blob_oid);
     let path = Path::from(format!("org/repo/{relative}"));
     let attempt = store.cdn_attempt(&path).unwrap();
     let body = attempt.get(6, Some(1..3)).await.unwrap();
     assert_eq!(body, Some(Bytes::from_static(b"12")));
-    let blob_oid = [0x32; 20];
     attempt
         .payload_observation()
         .unwrap()
@@ -620,21 +621,20 @@ async fn product_read_records_one_redacted_transfer_for_its_actual_scope() {
         .iter()
         .filter(|event| event.0.contains_key("observation"))
         .collect();
-    if qualification_enabled() {
-        let key = format!("{:x}", Sha256::digest(path.as_ref().as_bytes()));
-        let missing = format!("{:x}", Sha256::digest(missing.as_ref().as_bytes()));
-        assert_eq!(transitions.len(), 3);
-        for (event, kind, digest) in [
-            (transitions[0], "\"unlisted\"", &missing),
-            (transitions[1], "\"listed\"", &key),
-            (transitions[2], "\"verified_edge\"", &key),
-        ] {
-            assert_eq!(event.0["observation"], kind);
-            assert_eq!(event.0["key_sha256"], *digest);
-            assert_eq!(event.0["approval_sha256"], approval.sha256);
-        }
-    } else {
-        assert!(transitions.is_empty());
+    let key = format!("{:x}", Sha256::digest(path.as_ref().as_bytes()));
+    let missing = format!("{:x}", Sha256::digest(missing.as_ref().as_bytes()));
+    let blob = format!("\"{:x}\"", Sha256::digest(blob_oid));
+    assert_eq!(transitions.len(), 4);
+    for (event, kind, digest, exact_blob) in [
+        (transitions[0], "\"unlisted\"", &missing, None),
+        (transitions[1], "\"verified_native\"", &missing, Some(&blob)),
+        (transitions[2], "\"listed\"", &key, None),
+        (transitions[3], "\"verified_edge\"", &key, Some(&blob)),
+    ] {
+        assert_eq!(event.0["observation"], kind);
+        assert_eq!(event.0["key_sha256"], *digest);
+        assert_eq!(event.0["approval_sha256"], approval.sha256);
+        assert_eq!(event.0.get("git_blob_oid_sha256"), exact_blob);
     }
 }
 

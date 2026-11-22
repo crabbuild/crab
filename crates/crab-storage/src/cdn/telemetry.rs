@@ -18,9 +18,7 @@ pub(crate) struct PublicTransitionObservation {
 
 impl PublicTransitionObservation {
     pub(crate) fn new(approval: Output<Sha256>, key: &str) -> Option<Self> {
-        (super::qualification_enabled()
-            && tracing::enabled!(target: PUBLIC_TRANSITION_TARGET, tracing::Level::DEBUG))
-        .then(|| Self {
+        tracing::enabled!(target: PUBLIC_TRANSITION_TARGET, tracing::Level::DEBUG).then(|| Self {
             approval,
             key: Sha256::digest(key.as_bytes()),
         })
@@ -31,7 +29,9 @@ impl PublicTransitionObservation {
         policy: CdnPolicy,
         family: CdnReadFamily,
         observation: &'static str,
+        oid: Option<&[u8]>,
     ) {
+        let oid = oid.map(|oid| format!("{:x}", Sha256::digest(oid)));
         tracing::event!(
             target: PUBLIC_TRANSITION_TARGET,
             parent: None,
@@ -44,6 +44,7 @@ impl PublicTransitionObservation {
             approval_sha256 = %format_args!("{:x}", self.approval),
             key_sha256 = %format_args!("{:x}", self.key),
             observation,
+            git_blob_oid_sha256 = oid.as_deref(),
             "CDN public export observation"
         );
     }
@@ -85,7 +86,7 @@ impl PayloadObservation {
     fn record_verified_with_blob(self, oid: Option<&[u8]>) {
         self.record("edge", oid);
         if let Some(public) = self.public {
-            public.record(self.policy, self.family, "verified_edge");
+            public.record(self.policy, self.family, "verified_edge", oid);
         }
     }
 

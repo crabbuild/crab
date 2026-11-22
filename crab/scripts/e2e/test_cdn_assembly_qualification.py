@@ -137,7 +137,14 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
     def test_public_artifact_retains_the_receipt_with_same_attempt_transport_evidence(self) -> None:
         digest = self.inputs("gcs", access="public")
         transport = self.canary_inputs("gcs")
+        transition = Path(self.row) / "traces" / f"{fixture.CDN.PUBLIC_TRANSITION_CHECK}.json"
+        (self.root / transition).unlink()
         self.assertEqual(self.assemble(digest, transport=transport), 1)
+        retained = json.loads((self.output / transition).read_bytes())
+        sdk_product = self.output / self.row / fixture.CDN.GIT_PRODUCT_DIR
+        self.assertTrue((sdk_product / fixture.CDN.SDK_PRIOR_EXPORT_RECORD).is_file())
+        self.assertEqual(retained["before"]["edge_attempts"], 0)
+        self.assertEqual(retained["after"]["key_sha256"], self.example.object_key)
         public = Path(self.row) / fixture.CDN.PUBLIC_EXPORT_DIR
         for version in ("", fixture.CDN.PUBLIC_EXPORT_BEFORE):
             for name in fixture.CDN.PUBLIC_EXPORT_FILES:

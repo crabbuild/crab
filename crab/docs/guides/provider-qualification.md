@@ -979,8 +979,20 @@ with `collect_cdn_viewer_requests.py`. Keep the independently measured
 `collect_cdn_git_performance.py` for the paired summary. An SDK probe can
 report zero measured disk bytes. The verifier checks all four reads used the
 same publication, blob, and approved native target. Assembly reconstructs
-the performance summary from these files. Public SDK rows also need
-ordinary before-and-after export transition reads for release activation.
+the performance summary from these files.
+
+For a public SDK row, seal the prior export before publishing the test
+ref. After observing the native ref, run `prior_export` with
+`--export-approval` for that prior directory and `--transition-object` for
+the new repository-relative pack-layer key. Keep stdout in
+`git-product/before-export.json`. The read uses the prior viewer binding
+and verifies that the absent pack key was read natively with zero edge
+requests. Seal the new export after that read. Use its approval for the
+`edge` arm and pass the same `--transition-object`, retaining stdout as
+`git-product/snapshot.json`. Both reads prove the exact Git blob on the
+specified layer. Assembly builds the transition trace from those reads
+and verifies both retained inventories and their sealing order. Run the
+separate `origin` rollback with the public binding withdrawn before retirement.
 
 ### Verify fixture cleanup
 

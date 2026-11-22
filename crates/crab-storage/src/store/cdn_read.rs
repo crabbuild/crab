@@ -242,9 +242,7 @@ impl Store {
         })
     }
 
-    /// Start one edge-only verification attempt for an authorized immutable key.
-    #[must_use]
-    pub fn cdn_attempt(&self, path: &Path) -> Option<CdnReadAttempt> {
+    fn cdn_route_for(&self, path: &Path) -> Option<(&Arc<CdnRoute>, CdnReadFamily)> {
         let route = self.cdn.as_ref()?;
         let family = route.layout.cdn_read_family(path)?;
         if self.read_prefix_target_identity(path) != Some(&route.target)
@@ -253,13 +251,25 @@ impl Store {
         {
             return None;
         }
+        Some((route, family))
+    }
+
+    /// Start one edge-only verification attempt for an authorized immutable key.
+    #[must_use]
+    pub fn cdn_attempt(&self, path: &Path) -> Option<CdnReadAttempt> {
+        let (route, family) = self.cdn_route_for(path)?;
         if let Some(receipt) = &route.publication {
             let listed = receipt.sizes.contains_key(path.as_ref());
             if let Some(policy) = route.policy()
                 && let Some(observation) =
                     PublicTransitionObservation::new(receipt.approval_digest, path.as_ref())
             {
-                observation.record(policy, family, if listed { "listed" } else { "unlisted" });
+                observation.record(
+                    policy,
+                    family,
+                    if listed { "listed" } else { "unlisted" },
+                    None,
+                );
             }
             if !listed {
                 return None;
@@ -272,6 +282,19 @@ impl Store {
             path: path.clone(),
             deadline: OnceLock::new(),
         })
+    }
+
+    /// Observe a verified native blob whose pack key the public export does not list.
+    pub fn observe_verified_unlisted_git_blob(&self, path: &Path, oid: &[u8]) {
+        if let Some((route, CdnReadFamily::Git)) = self.cdn_route_for(path)
+            && let Some(receipt) = &route.publication
+            && !receipt.sizes.contains_key(path.as_ref())
+            && let Some(policy) = route.policy()
+            && let Some(observation) =
+                PublicTransitionObservation::new(receipt.approval_digest, path.as_ref())
+        {
+            observation.record(policy, CdnReadFamily::Git, "verified_native", Some(oid));
+        }
     }
 
     async fn cdn_read(&self, route: &CdnRoute, request: CdnGet<'_>) -> Result<Option<Bytes>> {

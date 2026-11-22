@@ -15,9 +15,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cdn_qualification import (  # noqa: E402
     CDN_PROVENANCE_FIELDS, COMMIT, EXPIRY_RANGE_CHECK, GIT_BENCHMARK_DIR, GIT_PRODUCT_DIR, LABEL, PROVIDERS,
-    PROVIDER_FOR_EDGE, PUBLIC_EXPORT_BEFORE, PUBLIC_EXPORT_CHECK, PUBLIC_EXPORT_DIR, PUBLIC_EXPORT_FILES, RUN_NUMBER, SCHEMA, SHA256,
+    PROVIDER_FOR_EDGE, PUBLIC_EXPORT_BEFORE, PUBLIC_EXPORT_CHECK, PUBLIC_EXPORT_DIR, PUBLIC_EXPORT_FILES,
+    PUBLIC_TRANSITION_CHECK, RUN_NUMBER, SCHEMA, SHA256,
     benchmark_registration, collect_git_performance, collect_git_product_action, collect_sdk_product_action,
-    decode, fields, is_direct_sdk_git_scope, matches, read_trace, release_scopes, require,
+    decode, derive_sdk_public_transition, fields, is_direct_sdk_git_scope, matches, read_trace, release_scopes, require,
     required_check_names, required_platform_rows, requires_cli_workload, scope_parts, verify_bundle_row,
     verify_cleanup_trace, verify_deployment_policy_trace,
 )
@@ -128,6 +129,7 @@ def assemble_bundle(
             names = required_check_names(access, profile)
             require(isinstance(registration, dict) and matches(SHA256, registration.get("configuration_sha256")),
                     f"invalid CDN configuration digest for {row}")
+            spec = benchmark_registration(registration) if sdk_workload else registration
             canary = canaries.get((scope, registration["configuration_sha256"]), {})
             outcomes = measured.pop("check_results")
             require(isinstance(outcomes, dict) and names - canary.keys() <= outcomes.keys() <= names,
@@ -151,7 +153,13 @@ def assemble_bundle(
                 filename = f"{check}.json"
                 trace_path = inputs / row / "traces" / filename
                 require(outcomes.get(check, True) is True, f"{row} failed measured check: {check}")
-                if check in canary:
+                if sdk_workload and check == PUBLIC_TRANSITION_CHECK:
+                    transition = derive_sdk_public_transition(inputs / row / GIT_PRODUCT_DIR, measured, spec)
+                    if trace_path.exists():
+                        require(decode(read_trace(trace_path, check)) == transition,
+                                "measured SDK public transition differs from the retained snapshot reads")
+                    trace = (json.dumps(transition, sort_keys=True) + "\n").encode()
+                elif check in canary:
                     trace = canary[check]
                     if trace_path.exists():
                         require(read_trace(trace_path, check) == trace, f"measured trace conflicts with same-attempt canary: {check}")
@@ -168,7 +176,6 @@ def assemble_bundle(
                                                      public_export_sha256=registration.get("publication_sha256", ""))
                 measured["product_action"] = product | {"fixture_cleanup_verified": True}
             elif sdk_workload:
-                spec = benchmark_registration(registration)
                 cleanup = decode(read_trace(destination / "traces/cleanup.json", "cleanup"))
                 cleanup_at = verify_cleanup_trace(cleanup, measured, edge, access)
                 origin = cleanup["targets"]["native"]["origin_sha256"]

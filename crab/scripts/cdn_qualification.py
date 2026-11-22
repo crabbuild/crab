@@ -122,6 +122,7 @@ METRICS = {
 }
 GIT_BENCHMARK_DIR = "git-benchmarks"
 GIT_PRODUCT_DIR = "git-product"
+SDK_PRIOR_EXPORT_RECORD = "before-export.json"
 VIEWER_REQUEST_FILES = {"s3": "cloudfront-requests.json", "gcs": "cloud-cdn-requests.json", "azure": "front-door-requests.json"}
 GIT_FETCH_RECORD_LIMIT = 256 * 1024
 GIT_NATIVE_REF_FILES = {"published": "provider-published.json", "retired": "provider-retired.json"}
@@ -496,6 +497,7 @@ def verify_public_transition(
     require(trace["schema"] == "crab.cdn-public-transition/v1"
             and all(trace[key] == report[key] for key in CDN_PROVENANCE_FIELDS | {"platform"}),
             "public export transition does not match the release row and workflow attempt")
+    sdk = is_direct_sdk_git_scope(report["scope"])
     previous_approval = registration["previous_publication_sha256"]
     previous, previous_entries, previous_seal = verified_publication(directory / PUBLIC_EXPORT_DIR / PUBLIC_EXPORT_BEFORE,
                                                                       previous_approval)
@@ -529,7 +531,7 @@ def verify_public_transition(
     records = {"action", "receipt_sha256", "key_sha256", "reference_sha256", "result_sha256", "result_bytes",
                "started_at_unix_ms", "finished_at_unix_ms", "edge_attempts", "verified_edge_key_sha256", "binding_active"}
     cli_workload = requires_cli_workload(report["scope"])
-    if cli_workload:
+    if cli_workload or sdk:
         records.add("reader")
     product = report["product_action"]
     if family == "lfs":
@@ -573,6 +575,9 @@ def verify_public_transition(
                 "the public transition changed the selected native target")
         require(before["reader"]["cache_root_sha256"] != after["reader"]["cache_root_sha256"],
                 "the public transition reused the native-only fetch cache")
+    elif sdk:
+        measured = derive_sdk_public_transition(directory / GIT_PRODUCT_DIR, report, registration)
+        require(trace == measured, "public transition differs from the retained SDK snapshot reads")
 
 
 def verify_public_export(
@@ -1316,9 +1321,18 @@ def verify_git_traffic(client: dict[str, Any], edge: str, label: str) -> None:
 
 def verify_sdk_git_read(raw: bytes, row: dict[str, Any], spec: dict[str, Any], mode: str) -> dict[str, Any]:
     local = mode == "warm_local"
+    prior = mode == "prior_export"
     expected_fields = SDK_GIT_READ_FIELDS | ({"primer_sha256"} if local else set())
-    client = fields(decode(raw), expected_fields, "redacted SDK Git snapshot")
     edge, access, _, _, _ = scope_parts(row["scope"])
+    value = decode(raw)
+    transition = isinstance(value, dict) and "transition_key_sha256" in value
+    if transition:
+        expected_fields.add("transition_key_sha256")
+    client = fields(value, expected_fields, "redacted SDK Git snapshot")
+    require(not prior or transition, "SDK prior export needs the verified transition object")
+    if transition:
+        require(access == "public" and mode in ("edge", "prior_export") and matches(SHA256, client["transition_key_sha256"]),
+                "SDK transition needs an exact public pack-layer fingerprint")
     require(client["schema"] == "crab.cdn-sdk-git-read/v1" and client["arm"] == mode
             and all(client[key] == row[key] for key in CDN_PROVENANCE_FIELDS | {"platform"}),
             "SDK snapshot has mismatched product or workflow provenance")
@@ -1332,7 +1346,9 @@ def verify_sdk_git_read(raw: bytes, row: dict[str, Any], spec: dict[str, Any], m
     require(all(matches(SHA256, reader[key]) for key in CLI_NATIVE_FIELDS),
             "SDK snapshot has invalid native origin or prefix fingerprints")
     expected_binding = spec["viewer_binding_sha256"] if mode != "origin" else ""
-    expected_export = spec["publication_sha256"] if mode != "origin" and access == "public" else ""
+    expected_export = ""
+    if mode != "origin" and access == "public":
+        expected_export = spec["previous_publication_sha256" if prior else "publication_sha256"]
     expected_approval = spec["viewer_approval_sha256"] if mode != "origin" and access == "private" else expected_export
     require(reader["binding_sha256"] == expected_binding and reader["public_export_sha256"] == expected_export
             and client["approval_sha256"] == expected_approval,
@@ -1342,11 +1358,11 @@ def verify_sdk_git_read(raw: bytes, row: dict[str, Any], spec: dict[str, Any], m
         require(matches(SHA256, client["primer_sha256"]) and positive(client["local_payload_hits"])
                 and all(client[key] == 0 for key in PRODUCT_COUNTERS - {"local_payload_hits"}),
                 "SDK warm-local sample requires its primer and a verified cached blob without edge traffic")
-    elif mode == "origin":
+    elif mode == "origin" or prior:
         native = client["native_traffic"]
         require(all(client[key] == 0 for key in PRODUCT_COUNTERS)
                 and positive(native["get_responses"]) and positive(native["body_bytes"]),
-                "SDK rollback requires native payload reads without edge or cached payload activity")
+                "SDK native control requires native payload reads without edge or cached payload activity")
     else:
         require(positive(client["observed_edge_gets"]) and positive(client["verified_edge_payloads"])
                 and positive(client["edge_bytes"]) and client["local_payload_hits"] == 0,
@@ -1562,10 +1578,15 @@ def collect_sdk_product_action(
             "SDK rollback must follow the verified edge snapshot")
     retirement_raw = read_git_record(inputs / "retirement.json")
     retired_at = verify_git_retirement(retirement_raw, row, receipt, publication["candidate"], origin["finished_at_unix_ms"])
-    verify_git_lifecycle(native_records, row, publication, receipt, edge, retired_at, cleanup_at, native_origin_sha256)
+    earliest = edge
+    retained = {"publication.json": publication_raw, "snapshot.json": edge_raw, "retirement.json": retirement_raw}
+    if scope_parts(row["scope"])[1] == "public":
+        prior_raw = read_git_record(inputs / SDK_PRIOR_EXPORT_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
+        retained[SDK_PRIOR_EXPORT_RECORD] = prior_raw
+        earliest = verify_sdk_git_read(prior_raw, row, spec, "prior_export")
+    verify_git_lifecycle(native_records, row, publication, receipt, earliest, retired_at, cleanup_at, native_origin_sha256)
     if retain is not None:
         retain.mkdir()
-        retained = {"publication.json": publication_raw, "snapshot.json": edge_raw, "retirement.json": retirement_raw}
         retained.update({name: native_records[phase] for phase, name in GIT_NATIVE_REF_FILES.items()})
         for name, raw in retained.items():
             (retain / name).write_bytes(raw)
@@ -1575,6 +1596,39 @@ def collect_sdk_product_action(
         "native_writes": 1, "visible_new_ref": True, "fixture_cleanup_verified": True,
         "observed_edge_gets": edge["observed_edge_gets"], "verified_edge_payloads": edge["verified_edge_payloads"],
     }
+
+
+def derive_sdk_public_transition(inputs: Path, row: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
+    publication_raw = read_git_record(inputs / "publication.json")
+    publication = validate_git_publication(publication_raw, row)
+    digest = hashlib.sha256(publication_raw).hexdigest()
+    prior_raw = read_git_record(inputs / SDK_PRIOR_EXPORT_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
+    edge_raw = read_git_record(inputs / "snapshot.json", limit=GIT_FETCH_RECORD_LIMIT)
+    prior = verify_sdk_git_read(prior_raw, row, spec, "prior_export")
+    edge = verify_sdk_git_read(edge_raw, row, spec, "edge")
+    key = prior["transition_key_sha256"]
+    require(key == edge.get("transition_key_sha256"), "SDK export transition did not verify the same pack-layer key")
+    require(publication["published"] and
+            all(read["publication_sha256"] == digest and read["commit"] == publication["oid"]
+                and read["sha256"] == publication["sha256"] for read in (prior, edge))
+            and prior["git_blob_oid_sha256"] == edge["git_blob_oid_sha256"],
+            "SDK export transition did not verify the same published Git blob")
+    require(all(prior["reader"][field] == edge["reader"][field] for field in CLI_NATIVE_FIELDS),
+            "SDK export transition changed the selected native target")
+    reference = deployment_component_digest({"ref": publication["ref"], "oid": publication["oid"]})
+    trace = {field: row[field] for field in CDN_PROVENANCE_FIELDS | {"platform"}} | {
+        "schema": "crab.cdn-public-transition/v1", "key_sha256": key,
+        "native_publication": {"reference_sha256": reference, "visible_at_unix_ms": publication["visible_at_unix_ms"]},
+    }
+    for phase, read in (("before", prior), ("after", edge)):
+        trace[phase] = {
+            "action": SDK_GIT_ACTION, "receipt_sha256": read["approval_sha256"], "key_sha256": key,
+            "reference_sha256": reference, "result_sha256": read["sha256"], "result_bytes": read["bytes"],
+            "started_at_unix_ms": read["started_at_unix_ms"], "finished_at_unix_ms": read["finished_at_unix_ms"],
+            "edge_attempts": read["all_edge_attempts"], "binding_active": True, "reader": read["reader"],
+            "verified_edge_key_sha256": key if phase == "after" else None,
+        }
+    return trace
 
 
 def collect_git_performance(
@@ -1766,6 +1820,5 @@ def verify_cdn_report(
         measured = collect_git_performance(directory / GIT_BENCHMARK_DIR, registration, platform, run_id, run_attempt,
                                           sdk_native=sdk_native)
         require(measured == row["performance"], "SDK performance summary differs from the retained measurements")
-        require(policy is None or access == "private", "public SDK Git promotion requires ordinary export transition reads")
     return {"status": "verified", "scope": scope, "platform": platform, "deployment": row["deployment"],
             "checks": checks, "distant_median_savings_lower_bound_ms": lower}

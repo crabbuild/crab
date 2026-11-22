@@ -20,7 +20,7 @@ from collect_cdn_product_metrics import NATIVE_TARGET, ROUTE, ROUTE_FIELDS, TARG
 from run_cdn_transport_checks import approved_fixture, fixture_base, fixture_object_key, native_remote
 
 from cdn_qualification import (
-    CLI_BUILD_FIELDS, CLI_NATIVE_FIELDS, COMMIT, GIT_OID, GIT_PAYLOAD_SIZE, PROVIDER_FOR_EDGE, RUN_NUMBER,
+    CLI_BUILD_FIELDS, CLI_NATIVE_FIELDS, COMMIT, GIT_OID, GIT_PAYLOAD_SIZE, PROVIDER_FOR_EDGE, RUN_NUMBER, SHA256,
     cli_action_name, decode, deployment_component_digest,
     fields, is_direct_sdk_git_scope, lfs_object_path, matches, read_git_record, require, requires_cli_lfs_workload,
     requires_cli_workload, scope_parts,
@@ -208,7 +208,7 @@ def publish(
     return {"visible_new_ref": True, "native_writes": 1}
 
 
-def verify_transition_events(lines: list[bytes], scope: str, proof: dict) -> None:
+def verify_transition_events(lines: list[bytes], scope: str, proof: dict, *, git_blob: str | None = None) -> None:
     edge, access, consumer, family, profile = scope_parts(scope)
     selected = (PROVIDER_FOR_EDGE[edge], access, consumer, family, profile)
     observations = set()
@@ -218,16 +218,28 @@ def verify_transition_events(lines: list[bytes], scope: str, proof: dict) -> Non
         event = decode(line)
         if not isinstance(event, dict) or event.get("target") != PUBLIC_TRANSITION_TARGET:
             continue
-        row = fields(event.get("fields"), ROUTE_FIELDS | {"observation", "approval_sha256", "key_sha256"},
+        raw = event.get("fields")
+        blob_field = {"git_blob_oid_sha256"} if isinstance(raw, dict) and "git_blob_oid_sha256" in raw else set()
+        row = fields(raw, ROUTE_FIELDS | {"observation", "approval_sha256", "key_sha256"} | blob_field,
                      "public export product observation")
         require(row["message"] == "CDN public export observation"
-                and row["observation"] in ("listed", "unlisted", "verified_edge"),
+                and row["observation"] in ("listed", "unlisted", "verified_edge", "verified_native")
+                and (not blob_field or (row["family"] == "git"
+                    and row["observation"] in ("verified_edge", "verified_native")
+                    and matches(SHA256, row["git_blob_oid_sha256"]))),
                 "invalid public export product observation")
         if tuple(row[key] for key in ROUTE) != selected or row["key_sha256"] != proof["key_sha256"]:
             continue
         require(row["approval_sha256"] == proof["receipt_sha256"], "fetch loaded a different public export receipt")
-        observations.add(row["observation"])
+        observed = row["observation"]
+        if observed == "verified_native" and git_blob is None:
+            continue
+        if observed.startswith("verified_") and git_blob is not None and row.get("git_blob_oid_sha256") != git_blob:
+            continue
+        observations.add(observed)
     expected = {"unlisted"} if proof["phase"] == "before" else {"listed", "verified_edge"}
+    if git_blob is not None and proof["phase"] == "before":
+        expected.add("verified_native")
     require(observations == expected, "fetch did not prove the selected object's public export transition")
 
 

@@ -39,7 +39,11 @@ impl RemoteGitReader {
             .clone()
             .with_read_admission(budget.read_admission(attempt_cancel.clone()));
         let Some(attempt) = store.cdn_attempt(&path) else {
-            return origin().await;
+            let object = origin().await?;
+            if object.kind == gix_object::Kind::Blob {
+                store.observe_verified_unlisted_git_blob(&path, requested.as_bytes());
+            }
+            return Ok(object);
         };
         let (object, from_edge) = attempt
             .within_deadline(async {

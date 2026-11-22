@@ -396,13 +396,21 @@ class CdnQualificationTests(unittest.TestCase):
             "native_traffic": {"get_responses": 1, "head_responses": 0, "body_bytes": 5},
         }
         export = self.registration.get("publication_sha256", "")
+        transition = {"transition_key_sha256": self.object_key} if export else {}
+        binding = reader | {"binding_sha256": self.registration["viewer_binding_sha256"]}
         json_file(records / "snapshot.json", base | dict.fromkeys(
             ("edge_attempts", "observed_edge_gets", "edge_hits", "edge_bytes", "verified_edge_payloads", "all_edge_attempts"), 1,
         ) | {
             "arm": "edge", "started_at_unix_ms": PUBLIC_SEAL + 10, "finished_at_unix_ms": PUBLIC_SEAL + 20,
             "approval_sha256": self.registration.get("viewer_approval_sha256", export),
-            "reader": reader | {"binding_sha256": self.registration["viewer_binding_sha256"], "public_export_sha256": export},
-        })
+            "reader": binding | {"public_export_sha256": export},
+        } | transition)
+        if export:
+            prior = self.registration["previous_publication_sha256"]
+            json_file(records / CDN.SDK_PRIOR_EXPORT_RECORD, base | transition | {
+                "arm": "prior_export", "started_at_unix_ms": PUBLIC_SEAL - 20, "finished_at_unix_ms": PUBLIC_SEAL - 10,
+                "approval_sha256": prior, "reader": binding | {"public_export_sha256": prior},
+            })
         self.rollback_trace(base | {
             "arm": "origin", "started_at_unix_ms": PUBLIC_SEAL + 25, "finished_at_unix_ms": PUBLIC_SEAL + 35,
             "reader": reader | {"binding_sha256": "", "public_export_sha256": ""}, "approval_sha256": "",
@@ -544,6 +552,8 @@ class CdnQualificationTests(unittest.TestCase):
             trace["after"]["reader"] = fetch["reader"]
             trace["before"]["reader"] = fetch["reader"] | {"cache_root_sha256": "9" * 64,
                                                          "public_export_sha256": self.registration["previous_publication_sha256"]}
+        elif CDN.is_direct_sdk_git_scope(self.scope):
+            trace = CDN.derive_sdk_public_transition(self.directory / CDN.GIT_PRODUCT_DIR, self.report, self.registration)
         check = CDN.PUBLIC_TRANSITION_CHECK
         path = self.directory / "traces" / f"{check}.json"
         self.report["checks"][check] = {"passed": True, "trace_sha256": json_file(path, trace)}
@@ -1032,7 +1042,22 @@ class CdnQualificationTests(unittest.TestCase):
         self.configure("gcs", "public", "direct", consumer="sdk")
         policy = self.directory / "qualified-scopes.txt"
         policy.write_text(self.scope + "\n", encoding="utf-8")
-        self.rejected("requires ordinary export transition reads", "--cdn-release-policy", str(policy))
+        args = ("--cdn-release-policy", str(policy))
+        result = self.command(*args)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        path = self.directory / CDN.GIT_PRODUCT_DIR / CDN.SDK_PRIOR_EXPORT_RECORD
+        original = json.loads(path.read_bytes())
+        for changes, reason in (
+            ({"git_blob_oid_sha256": "9" * 64}, "did not verify the same published Git blob"),
+            ({"transition_key_sha256": "9" * 64}, "did not verify the same pack-layer key"),
+            ({"all_edge_attempts": 1}, "requires native payload reads without edge or cached payload activity"),
+            ({"reader": original["reader"] | {"public_export_sha256": "9" * 64}}, "required viewer binding and approval"),
+        ):
+            with self.subTest(changes=changes):
+                json_file(path, original | changes)
+                self.rejected(reason, *args)
+        path.unlink()
+        self.rejected(CDN.SDK_PRIOR_EXPORT_RECORD, *args)
 
     def test_sdk_rollback_requires_same_approved_build_and_blob_at_origin(self) -> None:
         self.configure("azure", "private", "direct", consumer="sdk")

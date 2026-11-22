@@ -13,8 +13,8 @@ from pathlib import Path
 
 from collect_cdn_product_metrics import measure, measure_native
 from cdn_viewer_issuer import issuer_settings
-from run_cdn_git_workload import approved_public_export, runner_platform, viewer_binding_sha256
-from run_cdn_transport_checks import approved_fixture
+from run_cdn_git_workload import approved_public_export, runner_platform, verify_transition_events, viewer_binding_sha256
+from run_cdn_transport_checks import approved_fixture, fixture_object_key
 
 from cdn_qualification import (
     COMMIT, GIT_PAYLOAD_SIZE, PRODUCT_COUNTERS, RUN_NUMBER, SDK_PAYLOAD_FIELDS, SDK_PROBE_FIELDS, SDK_TIMING_FIELDS,
@@ -33,7 +33,7 @@ def verified_target(lines: list[bytes], fixture: dict, arm: str, approval: str) 
     expected = {
         "origin_sha256": hashlib.sha256(fixture["native_origin"].encode()).hexdigest(),
         "prefix_sha256": hashlib.sha256(f"{fixture['fixture_prefix']}/".encode()).hexdigest(),
-        "binding_sha256": viewer_binding_sha256(fixture) if arm == "edge" else "",
+        "binding_sha256": viewer_binding_sha256(fixture) if arm != "origin" else "",
         "public_export_sha256": approval if scope_parts(fixture["scope"])[1] == "public" else "",
     }
     observations = []
@@ -48,7 +48,7 @@ def verified_target(lines: list[bytes], fixture: dict, arm: str, approval: str) 
     return expected
 
 
-def binding_for(args: argparse.Namespace, fixture: dict) -> tuple[dict, str]:
+def binding_for(args: argparse.Namespace, fixture: dict) -> tuple[dict, str, dict | None]:
     access = scope_parts(fixture["scope"])[1]
     if access == "private":
         require(args.private_reader is not None and args.export_approval is None,
@@ -59,14 +59,21 @@ def binding_for(args: argparse.Namespace, fixture: dict) -> tuple[dict, str]:
                 "SDK issuer values must include an absolute token-cache directory")
         endpoint, _, approved_issuer = issuer_settings(fixture)
         approval = approved_issuer if args.arm == "edge" else ""
-        return {"access": access, **issuer, "endpoint": endpoint.geturl(), "approval_sha256": approval or None}, approval
-    require(args.private_reader is None and ((args.export_approval is not None) == (args.arm == "edge")),
-            "public SDK edge reads require the approved export directory")
+        return {"access": access, **issuer, "endpoint": endpoint.geturl(), "approval_sha256": approval or None}, approval, None
+    require(args.private_reader is None and ((args.export_approval is not None) == (args.arm != "origin")),
+            "public SDK reads with an active viewer require the approved export directory")
     publication, approval = None, ""
+    transition = None
     if args.export_approval is not None:
-        approval, _, _ = approved_public_export(args.export_approval, fixture)
+        approval, objects, sealed_at = approved_public_export(args.export_approval, fixture)
         publication = {"path": str((args.export_approval / "publication.json").resolve()), "sha256": approval}
-    return {"access": access, "export_origin": fixture["export_origin"], "publication": publication}, approval
+        if args.transition_object is not None:
+            key = fixture_object_key(fixture | {"object_path": args.transition_object}, access, "git")
+            listed = any(obj.path == args.transition_object for obj in objects)
+            require(listed == (args.arm == "edge"), "SDK transition object membership does not match the phase")
+            transition = {"key_sha256": hashlib.sha256(key.encode()).hexdigest(), "receipt_sha256": approval,
+                          "phase": "after" if listed else "before", "sealed_at_unix_ms": sealed_at}
+    return {"access": access, "export_origin": fixture["export_origin"], "publication": publication}, approval, transition
 
 
 def split_observations(lines: list[bytes], repeat: bool) -> tuple[list[bytes], list[bytes]]:
@@ -114,11 +121,20 @@ def fetch(args: argparse.Namespace) -> tuple[dict, dict | None]:
     require(publication["published"], "SDK read requires a confirmed native publication")
     repeat = args.warm_local_output is not None
     require(not repeat or args.arm == "edge", "SDK warm-local reads must reuse an edge primer")
-    binding, approval = binding_for(args, fixture)
+    access = scope_parts(scope)[1]
+    require(args.arm != "prior_export" or args.transition_object is not None,
+            "SDK prior export needs the exact transition object")
+    require(args.transition_object is None or (access == "public" and args.arm != "origin" and not repeat),
+            "SDK transition requires a public read with an active receipt")
+    binding, approval, transition = binding_for(args, fixture)
+    if args.arm == "prior_export":
+        require(transition is not None and transition["sealed_at_unix_ms"] <= publication["visible_at_unix_ms"],
+                "SDK prior public export must be sealed before the new native publication")
     request = {"origin": fixture["native_origin"], "repository_prefix": fixture["fixture_prefix"],
                "base_url": fixture["base_url"], "branch": publication["ref"].removeprefix("refs/heads/"),
                "expected_oid": publication["oid"], "expected_sha256": publication["sha256"],
-               "expected_bytes": GIT_PAYLOAD_SIZE, "binding": binding, "repeat_snapshot": repeat}
+               "expected_bytes": GIT_PAYLOAD_SIZE, "binding": binding, "repeat_snapshot": repeat,
+               "public_transition": transition is not None}
     probe = args.probe.resolve(strict=True)
     with probe.open("rb") as binary:
         probe_digest = hashlib.file_digest(binary, "sha256").hexdigest()
@@ -152,11 +168,15 @@ def fetch(args: argparse.Namespace) -> tuple[dict, dict | None]:
     else:
         require(counters["all_edge_attempts"] == 0 and native["get_responses"] > 0 and native["body_bytes"] > 0,
                 "SDK origin control requires native payload reads without edge activity")
+    if transition is not None:
+        verify_transition_events(lines, scope, transition, git_blob=payload["git_blob_oid_sha256"])
     context = provenance | payload | {
         "schema": "crab.cdn-sdk-git-read/v1", "platform": platform, "candidate": candidate, "approval_sha256": approval,
         "publication_sha256": hashlib.sha256(raw).hexdigest(), "reader": reader, "commit": observed["commit"],
     }
     primary = context | timing | counters | {"arm": args.arm, "edge_responses": responses, "native_traffic": native}
+    if transition is not None:
+        primary["transition_key_sha256"] = transition["key_sha256"]
     local = None
     if repeat:
         local_timing = observed_interval(observed["warm_local"], primary["finished_at_unix_ms"], finished_at)
@@ -175,7 +195,7 @@ def fetch(args: argparse.Namespace) -> tuple[dict, dict | None]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("arm", choices=("edge", "origin"))
+    parser.add_argument("arm", choices=("edge", "origin", "prior_export"))
     parser.add_argument("--fixture", required=True, type=Path)
     parser.add_argument("--configuration-sha256", required=True)
     parser.add_argument("--receipt", required=True, type=Path)
@@ -185,6 +205,7 @@ def main() -> int:
     parser.add_argument("--run-attempt", required=True)
     parser.add_argument("--private-reader", type=Path)
     parser.add_argument("--export-approval", type=Path)
+    parser.add_argument("--transition-object", help="exact repository-relative pack-layer key selected by the snapshot")
     parser.add_argument("--warm-local-output", type=Path, help="write the timed repeat read of the same pinned SDK snapshot")
     args = parser.parse_args()
     try:

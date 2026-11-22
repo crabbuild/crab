@@ -29,6 +29,7 @@ struct Request {
     expected_bytes: usize,
     binding: Binding,
     repeat_snapshot: bool,
+    public_transition: bool,
 }
 
 #[derive(Deserialize)]
@@ -198,15 +199,6 @@ async fn run() -> Result<(), Failure> {
         }
         return Err("SDK probe only accepts --build-info".into());
     }
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            "off,crab_cdn_probe::arm_boundary=debug,crab_sdk::cdn::read_target=debug,crab_storage::cdn::transfer=debug,crab_storage::native_read=debug,crab_storage::cdn::gcs_viewer_log=trace",
-        )
-        .with_writer(std::io::stderr)
-        .json()
-        .with_current_span(false)
-        .with_span_list(false)
-        .try_init()?;
     let mut body = Vec::new();
     std::io::stdin()
         .lock()
@@ -216,6 +208,19 @@ async fn run() -> Result<(), Failure> {
         return Err("SDK probe request exceeds its limit".into());
     }
     let request: Request = serde_json::from_slice(&body)?;
+    let mut filter = String::from(
+        "off,crab_cdn_probe::arm_boundary=debug,crab_sdk::cdn::read_target=debug,crab_storage::cdn::transfer=debug,crab_storage::native_read=debug,crab_storage::cdn::gcs_viewer_log=trace",
+    );
+    if request.public_transition {
+        filter.push_str(",crab_storage::cdn::public_transition=debug");
+    }
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .json()
+        .with_current_span(false)
+        .with_span_list(false)
+        .try_init()?;
     let client = Client::builder()
         .direct_store(request.store()?)
         .direct_cdn(request.cdn()?)
