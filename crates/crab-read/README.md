@@ -31,7 +31,8 @@ under both GC barriers. Callers supply the authorized native store and keep the
 retention session alive through reader teardown.
 `acquire_pointer_retention` shares the capture path for issuer-owned leases
 that must renew across requests. It returns the exact view digest and native
-claim after the same barrier checks.
+claim after the same barrier checks. `load_retained_pointer_catalog` holds a read
+pin while verifying that the locally opened catalog matches the issuer's digest.
 
 ## Why it exists
 

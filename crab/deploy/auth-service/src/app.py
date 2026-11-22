@@ -412,6 +412,7 @@ class ViewRetentionRequest(RequestModel):
     repo_url: RepoUrlField
     view_prefix: Annotated[str, Field(min_length=1, max_length=1024)]
     reader_nonce: HexDigest = Field(repr=False)
+    target: HexDigest
     operation: RetentionAction
 
 
@@ -913,13 +914,13 @@ async def retain_projected_view(
     # revisions are insufficient to select another principal's claim.
     reader = hashlib.sha256(json.dumps([
         "crab retention reader v1", claims.issuer, claims.subject, decision.provider,
-        repo_url, body.view_prefix, body.reader_nonce,
+        repo_url, body.view_prefix, body.target, body.reader_nonce,
     ], separators=(",", ":")).encode()).hexdigest()
     try:
         reply = await asyncio.to_thread(get_view_helper().retention, {
             "repo_url": repo_url, "provider": decision.provider, "scope_hash": scope_hash,
             "source_generation": int(selection[1]), "source_digest": selection[2],
-            "reader": reader, "operation": operation.model_dump(),
+            "reader": reader, "target": body.target, "operation": operation.model_dump(),
         })
     except RetentionConflict:
         raise _retention_failure(409, "retention_revision_lost") from None

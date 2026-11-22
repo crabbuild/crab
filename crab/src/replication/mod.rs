@@ -8309,6 +8309,7 @@ fn ensure_active_active_mutation_admitted_with_status(
 /// Verified repository authority selected for one read operation.
 #[derive(Clone)]
 pub struct ReadStoreSelection {
+    pub(crate) view_retention: Option<crab_auth::crab_auth_client::ViewRetention>,
     pub store: Store,
     pub router: StoreLayout,
     pub source: ReadSource,
@@ -8391,6 +8392,7 @@ impl<'a> StoreResolver<'a> {
                 .await?;
             return Ok((
                 ReadStoreSelection {
+                    view_retention: None,
                     router: StoreLayout::new(resolved.store.clone(), resolved.repository_prefix),
                     store: resolved.store,
                     source: ReadSource::Primary,
@@ -8418,6 +8420,7 @@ impl<'a> StoreResolver<'a> {
         )
         .await?;
         let primary = ReadStoreSelection {
+            view_retention: resolved.view_retention,
             router: StoreLayout::new(resolved.store.clone(), resolved.repository_prefix.clone()),
             store: resolved.store,
             source: ReadSource::Primary,
@@ -8525,6 +8528,7 @@ impl<'a> StoreResolver<'a> {
         verify_qualification_target(store.as_storage(), &repo_prefix)?;
         Ok((
             ReadStoreSelection {
+                view_retention: None,
                 router: StoreLayout::new(store.clone(), repo_prefix),
                 store,
                 source: selection.source,

@@ -1,5 +1,5 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 use super::*;
 
@@ -139,6 +139,120 @@ async fn credential_endpoint(
 }
 
 #[tokio::test]
+async fn issuer_retention_uses_only_the_last_acknowledged_revision() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = Arc::new(TokenCache::test_cache(dir.path().to_path_buf()));
+    let token = id_token("alice", 1);
+    cache.store(CRAB_AUTH_CACHE_KEY, &token, None).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut reader = provider(cache);
+    reader.endpoint = format!(
+        "http://{}/issuer/v1/credentials/",
+        listener.local_addr().unwrap()
+    );
+    reader.load_bound_login().unwrap();
+    let retention = ViewRetention::new(
+        Arc::new(reader),
+        "crab://fixture/org/repo".into(),
+        "org/repo/acl-views/v2/scope/view".into(),
+        "ab".repeat(32),
+    )
+    .unwrap();
+    let server = tokio::spawn(async move {
+        let mut nonce = None;
+        let incarnation = "01234567-89ab-7000-8000-0123456789ab";
+        let revision =
+            |sequence| serde_json::json!({"incarnation": incarnation, "sequence": sequence});
+        let view_prefix = "org/repo/acl-views/v2/scope/view";
+        for (expected_action, expected_sequence, reply) in [
+            (
+                "acquire",
+                None,
+                serde_json::json!({
+                    "action": "acquired", "repo_prefix": view_prefix, "view_state_digest": "d".repeat(64),
+                    "revision": revision(0), "remaining_ms": 60_000,
+                }),
+            ),
+            (
+                "renew",
+                Some(0),
+                serde_json::json!({
+                    "action": "renewed", "revision": revision(1), "remaining_ms": 60_000,
+                }),
+            ),
+            (
+                "renew",
+                Some(1),
+                serde_json::json!({
+                    "action": "renewed", "revision": revision(3), "remaining_ms": 60_000,
+                }),
+            ),
+            (
+                "release",
+                Some(1),
+                serde_json::json!({"action": "released"}),
+            ),
+        ] {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut stream = BufReader::new(socket);
+            let mut header = String::new();
+            while !header.ends_with("\r\n\r\n") {
+                assert_ne!(stream.read_line(&mut header).await.unwrap(), 0);
+            }
+            assert!(header.starts_with("POST /issuer/v1/views/retention HTTP/1.1\r\n"));
+            assert!(header.contains(&format!("authorization: Bearer {token}\r\n")));
+            let size = header
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length: "))
+                .unwrap()
+                .parse()
+                .unwrap();
+            let mut body = vec![0; size];
+            stream.read_exact(&mut body).await.unwrap();
+            let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let current_nonce = request["reader_nonce"].as_str().unwrap();
+            assert_eq!(current_nonce.len(), 64);
+            assert!(current_nonce.bytes().all(|byte| byte.is_ascii_hexdigit()));
+            assert_eq!(
+                nonce
+                    .get_or_insert_with(|| current_nonce.to_owned())
+                    .as_str(),
+                current_nonce
+            );
+            assert_eq!(request["repo_url"], "crab://fixture/org/repo");
+            assert_eq!(request["view_prefix"], view_prefix);
+            assert_eq!(request["target"], "ab".repeat(32));
+            assert_eq!(request["id_token"], token);
+            assert_eq!(request["operation"]["action"], expected_action);
+            assert_eq!(
+                request["operation"]["revision"]["sequence"].as_u64(),
+                expected_sequence
+            );
+            let reply = reply.to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                reply.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        }
+    });
+    let start = tokio::time::Instant::now();
+    let (digest, mut lease) = retention.acquire().await.unwrap();
+    assert_eq!(digest, "d".repeat(64));
+    let (renewal, deadline) = lease.schedule();
+    assert!(deadline <= tokio::time::Instant::now() + Duration::from_secs(60));
+    assert!(deadline >= start + Duration::from_secs(60));
+    assert_eq!(deadline - renewal, Duration::from_secs(20));
+    lease.renew().await.unwrap();
+    assert!(matches!(
+        lease.renew().await,
+        Err(AuthError::InvalidCredentialResponse(_))
+    ));
+    lease.release().await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn cached_and_refreshed_reads_cannot_change_principal() {
     let dir = tempfile::tempdir().unwrap();
     let cache = Arc::new(TokenCache::test_cache(dir.path().to_path_buf()));
@@ -166,8 +280,8 @@ async fn cached_and_refreshed_reads_cannot_change_principal() {
         .resolve("fixture", "org/repo", "fetch")
         .await
         .unwrap();
-    assert!(reader.refresh_cdn_id_token(&original).await.unwrap() == rotated);
-    assert!(child.load_cdn_login().is_ok());
+    assert!(reader.refresh_bound_id_token(&original).await.unwrap() == rotated);
+    assert!(child.load_bound_login().is_ok());
 
     cache
         .store(CRAB_AUTH_CACHE_KEY, &id_token("bob", 3), None)
@@ -181,7 +295,7 @@ async fn cached_and_refreshed_reads_cannot_change_principal() {
     }
     cache.delete(CRAB_AUTH_CACHE_KEY).unwrap();
     assert!(matches!(
-        reader.refresh_cdn_id_token(&rotated).await,
+        reader.refresh_bound_id_token(&rotated).await,
         Err(AuthError::NoCredentials)
     ));
 }

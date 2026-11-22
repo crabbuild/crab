@@ -404,6 +404,7 @@ mod tests {
         let store = crate::storage::Store::from_storage(store);
         (
             ReadStoreSelection {
+                view_retention: None,
                 router: crate::storage::StoreLayout::new(store.clone(), prefix.into()),
                 store,
                 source: ReadSource::Replica {

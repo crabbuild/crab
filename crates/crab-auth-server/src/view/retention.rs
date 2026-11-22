@@ -23,6 +23,7 @@ pub struct ViewRetentionRequest {
     source_generation: u64,
     source_digest: String,
     reader: String,
+    target: String,
     operation: Operation,
 }
 
@@ -87,6 +88,12 @@ async fn retain_with_store(
             ));
         }
     }
+    let target = resolved_target(store)?;
+    if blake3::Hash::from_bytes(*target).to_hex().as_str() != request.target {
+        return Err(AuthServerError::AuthFailed {
+            path: "view retention native target changed".into(),
+        });
+    }
     let repo_prefix = view_prefix(
         source_repo,
         &request.scope_hash,
@@ -138,14 +145,17 @@ async fn retain_with_store(
     }
 }
 
-fn owner_for_target(store: &Store, reader: &str) -> Result<String> {
-    let target = store
+fn resolved_target(store: &Store) -> Result<&[u8; 32]> {
+    store
         .target_identity()
         .ok_or_else(|| AuthServerError::AuthFailed {
             path: "view retention requires a resolved native target".into(),
-        })?;
+        })
+}
+
+fn owner_for_target(store: &Store, reader: &str) -> Result<String> {
     let mut hasher = blake3::Hasher::new_derive_key("crab issuer read retention owner v1");
-    hasher.update(target);
+    hasher.update(resolved_target(store)?);
     hasher.update(reader.as_bytes());
     Ok(hasher.finalize().to_hex().to_string())
 }
@@ -192,6 +202,7 @@ mod tests {
             source_generation: captured.root().root().generation(),
             source_digest: digest.clone(),
             reader: "c".repeat(64),
+            target: "01".repeat(32),
             operation,
         };
         let acquire = request(Operation::Acquire);
@@ -252,6 +263,10 @@ mod tests {
                 .is_err()
         );
         let changed_store = store.clone().with_target_identity([2; 32]);
+        assert!(matches!(
+            retain_with_store(request(Operation::Acquire), source_repo, &changed_store).await,
+            Err(AuthServerError::AuthFailed { .. })
+        ));
         let wrong_target = request(Operation::Renew {
             revision: revision.clone(),
         });

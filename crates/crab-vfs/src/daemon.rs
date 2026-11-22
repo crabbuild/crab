@@ -864,6 +864,25 @@ impl DaemonService {
             crate::repository::resolve_mount_ref(&paths.git_dir, Some(&config.branch))?;
         debug!(step = "resolve_head", oid = %head_oid, ref_name = %head_ref);
 
+        let read_context = self.read_resolver.resolve(&config.remote).await?;
+        if let Some(context) = &read_context {
+            if let Err(error) =
+                context
+                    .catalog
+                    .validate_git_head(&head_ref, &head_oid, config.read_only)
+            {
+                if let Err(cleanup) = context.catalog.shutdown().await {
+                    warn!(%cleanup, "failed to release rejected mount capture");
+                }
+                return Err(error);
+            }
+        } else if crab_git::CrabUrl::parse(&config.remote).is_ok() {
+            return Err(CrabError::Configuration {
+                key: "object-store read layout unavailable for daemon repo".into(),
+                origin: "crab daemon".into(),
+            });
+        }
+
         // Step 3: Open snapshot store and build initial generation.
         info!(step = "snapshot", "building snapshot from HEAD");
         let snapshot = Arc::new(SnapshotStore::open_or_create(&paths.meta_db_path).map_err(
@@ -926,13 +945,6 @@ impl DaemonService {
 
         // Step 7: Create hydration service with shared cache.
         info!(step = "hydration", "preparing hydration service");
-        let read_context = self.read_resolver.resolve(&config.remote).await?;
-        if crab_git::CrabUrl::parse(&config.remote).is_ok() && read_context.is_none() {
-            return Err(CrabError::Configuration {
-                key: "object-store read layout unavailable for daemon repo".into(),
-                origin: "crab daemon".into(),
-            });
-        }
         let store_layout = read_context
             .as_ref()
             .map(|context| context.store_layout.clone());

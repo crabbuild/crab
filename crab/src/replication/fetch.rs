@@ -46,6 +46,7 @@ pub(crate) async fn primary_store_for_batch(
         }
     };
     Ok(ReadStoreSelection {
+        view_retention: None,
         store: primary_store.clone(),
         router,
         source: ReadSource::Primary,

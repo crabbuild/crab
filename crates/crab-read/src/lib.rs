@@ -47,7 +47,9 @@ pub use integrity::{verify_catalog_file_recipe, verify_origin_recipe};
 #[cfg(feature = "local-staging")]
 pub use pointer_reader::{PointerRead, PointerReader};
 #[cfg(feature = "hydration")]
-pub use read_retention::{acquire_pointer_retention, retain_pointer_catalog};
+pub use read_retention::{
+    acquire_pointer_retention, load_retained_pointer_catalog, retain_pointer_catalog,
+};
 #[cfg(feature = "hydration")]
 pub use ref_advertisement::{
     ManifestRefAdvertisement, ManifestRefEntry, capsule_ref_advertisement,

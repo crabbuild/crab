@@ -14,6 +14,7 @@ pub struct RepositoryStore {
     pub store: Store,
     pub repository_prefix: String,
     pub capsule_root: crab_metadata::capsule_protocol::RootSnapshot,
+    pub view_retention: Option<crab_auth::crab_auth_client::ViewRetention>,
 }
 
 /// Resolves a direct or managed repository into the canonical store abstraction.
@@ -28,20 +29,21 @@ pub async fn build_repository_store(
         crab_git::RepositoryLocator::Direct(repository) => {
             let repository_prefix = repository.repo_prefix.clone();
             let canonical_url = format!("crab://{}/{}", repository.bucket, repository_prefix);
-            let store = build_store_for_consumer(
+            let resolved = build_store_for_consumer(
                 config,
                 crab_git::url::CrabUrl::from(repository),
-                transfer_operation_name(operation),
+                transfer_operation_name(operation, consumer),
                 consumer,
                 cancel,
             )
             .await?;
             let capsule_root =
-                open_repository_root(&store, &repository_prefix, &canonical_url).await?;
+                open_repository_root(&resolved.store, &repository_prefix, &canonical_url).await?;
             Ok(RepositoryStore {
-                store,
+                store: resolved.store,
                 repository_prefix,
                 capsule_root,
+                view_retention: resolved.view_retention,
             })
         }
         crab_git::RepositoryLocator::Managed(repository) => {
@@ -59,12 +61,19 @@ pub async fn build_repository_store(
                 store,
                 repository_prefix: managed.repository_prefix,
                 capsule_root,
+                view_retention: None,
             })
         }
     }
 }
 
-pub(super) fn transfer_operation_name(operation: TransferOperation) -> &'static str {
+pub(super) fn transfer_operation_name(
+    operation: TransferOperation,
+    consumer: CdnConsumer,
+) -> &'static str {
+    if consumer == CdnConsumer::Mount {
+        return "mount";
+    }
     match operation {
         TransferOperation::Clone => "clone",
         TransferOperation::Fetch => "fetch",

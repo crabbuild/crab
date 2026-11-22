@@ -713,6 +713,7 @@ def retention_client(monkeypatch):
         "repo_url": "crab://bucket/restricted/repo",
         "view_prefix": f"restricted/repo/acl-views/v2/{scope}/7-{'b' * 64}",
         "reader_nonce": "a" * 64,
+        "target": "d" * 64,
     }
     calls = []
     incarnation = "0" * 8 + "-0000-7000-8000-" + "0" * 12
@@ -760,6 +761,7 @@ def test_retention_keeps_one_reader_for_the_same_verified_issuer_and_subject(ret
     assert post("release", renewed.json()["revision"]).json() == {"action": "released"}
     assert len({call["reader"] for call in calls}) == 1
     assert all(call["source_generation"] == 7 and call["source_digest"] == "b" * 64 for call in calls)
+    assert all(call["target"] == "d" * 64 for call in calls)
     assert all({"id_token", "reader_nonce"}.isdisjoint(call) for call in calls)
     assert helper.calls == []  # Retention uses native view proofs without rebuilding a projection.
 

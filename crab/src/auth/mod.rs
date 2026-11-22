@@ -91,8 +91,11 @@ fn crab_error_provider(
 }
 
 #[async_trait]
-impl CredentialProvider
-    for CrabErrorProvider<Box<dyn CredentialProvider<Error = ::crab_auth::error::AuthError>>>
+impl<P> CredentialProvider for CrabErrorProvider<P>
+where
+    P: std::ops::Deref<Target: CredentialProvider<Error = ::crab_auth::error::AuthError>>
+        + Send
+        + Sync,
 {
     type Error = CrabError;
 
@@ -292,6 +295,7 @@ pub async fn build_store(
         cancel,
     )
     .await
+    .map(|resolved| resolved.store)
 }
 
 pub(crate) fn cdn_consumer(operation: &str) -> CdnConsumer {
@@ -302,13 +306,18 @@ pub(crate) fn cdn_consumer(operation: &str) -> CdnConsumer {
     }
 }
 
+struct DirectStore {
+    store: Store,
+    view_retention: Option<crab_auth::crab_auth_client::ViewRetention>,
+}
+
 async fn build_store_for_consumer(
     config: &Config,
     url: crab_git::url::CrabUrl,
     operation: &str,
     consumer: CdnConsumer,
     cancel: &CancellationToken,
-) -> Result<Store> {
+) -> Result<DirectStore> {
     if cancel.is_cancelled() {
         return Err(CrabError::Cancelled);
     }
@@ -363,13 +372,14 @@ pub(crate) async fn authorize_replica_cdn(
     let authorized = build_store_for_url(
         config,
         url,
-        managed::transfer_operation_name(operation),
+        managed::transfer_operation_name(operation, consumer),
         true,
         Some((vec![deployment], issuer)),
         consumer,
         cancel,
     )
-    .await?;
+    .await?
+    .store;
     // Replica readiness was proved for this physical target and its unfiltered
     // layout. The issuer's credentials must authorize that same layout.
     validate_replica_cdn_authority(selected.as_storage(), authorized.as_storage())?;
@@ -401,7 +411,7 @@ async fn build_store_for_url(
     cdn: Option<(Vec<CdnViewerDeployment>, &AuthConfig)>,
     consumer: CdnConsumer,
     cancel: &CancellationToken,
-) -> Result<Store> {
+) -> Result<DirectStore> {
     if cdn.is_some() && config.auth.provider != AuthProvider::CrabAuth {
         return Err(CrabError::Configuration {
             key: "cdn".into(),
@@ -413,45 +423,55 @@ async fn build_store_for_url(
         (None, None, built)
     } else {
         let bound_issuer = cdn.is_some();
-        let provider: Arc<dyn CredentialProvider<Error = CrabError>> =
-            Arc::from(if let Some((deployments, issuer)) = cdn {
-                // The capability header does not select a provider. The
-                // issuer can choose any bound deployment for this locator.
-                let allow_viewer_grants = deployments.iter().all(|deployment| {
-                    deployment.storage_provider().is_some_and(|provider| {
-                        CdnPolicy {
-                            provider,
-                            consumer,
-                            profile: CdnProfile::Direct,
-                            visibility: CdnVisibility::Private,
-                        }
-                        .enabled()
-                    })
-                });
-                let provider =
-                    crab_auth::create_crab_auth_provider(crab_auth_client_config(issuer)?)?
-                        .with_cdn_deployments(deployments)?
-                        .with_viewer_grants(allow_viewer_grants);
-                crab_error_provider(Box::new(provider))
-            } else {
-                create_provider(config)?
+        let issuer = if let Some((deployments, issuer)) = cdn {
+            // The capability header does not select a provider. The
+            // issuer can choose any bound deployment for this locator.
+            let allow_viewer_grants = deployments.iter().all(|deployment| {
+                deployment.storage_provider().is_some_and(|provider| {
+                    CdnPolicy {
+                        provider,
+                        consumer,
+                        profile: CdnProfile::Direct,
+                        visibility: CdnVisibility::Private,
+                    }
+                    .enabled()
+                })
             });
+            Some(Arc::new(
+                crab_auth::create_crab_auth_provider(crab_auth_client_config(issuer)?)?
+                    .with_cdn_deployments(deployments)?
+                    .with_viewer_grants(allow_viewer_grants),
+            ))
+        } else if operation == "mount" && config.auth.provider == AuthProvider::CrabAuth {
+            Some(Arc::new(crab_auth::create_crab_auth_provider(
+                crab_auth_client_config(&config.auth)?,
+            )?))
+        } else {
+            None
+        };
+        let provider: Arc<dyn CredentialProvider<Error = CrabError>> = match &issuer {
+            Some(issuer) => Arc::new(CrabErrorProvider {
+                inner: Arc::clone(issuer),
+            }),
+            None => Arc::from(create_provider(config)?),
+        };
+        let mount_issuer = issuer.filter(|_| operation == "mount");
         let resolution = tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(CrabError::Cancelled),
             result = provider.resolve(&url.bucket, &url.repo_path, operation) => result?,
         };
-        if bound_issuer {
+        if bound_issuer || (mount_issuer.is_some() && resolution.storage_scope.is_some()) {
             let store = crab_auth_store::cdn::build_direct_cdn_store(
                 provider,
-                url.bucket,
-                url.repo_path,
+                url.bucket.clone(),
+                url.repo_path.clone(),
                 operation.to_owned(),
                 resolution,
                 config.operation_timeout,
                 consumer,
             )?;
-            return Ok(Store::from_storage(store));
+            return direct_store(Store::from_storage(store), mount_issuer, &url);
         }
         let storage_scope = resolution.storage_scope.clone();
         let credential_provider: Option<Arc<dyn CredentialProvider<Error = CrabError>>> =
@@ -545,7 +565,38 @@ async fn build_store_for_url(
         )
         .await?;
     }
-    Ok(Store::from_storage(store))
+    Ok(DirectStore {
+        store: Store::from_storage(store),
+        view_retention: None,
+    })
+}
+
+fn direct_store(
+    store: Store,
+    mount_issuer: Option<Arc<crab_auth::CrabAuthProvider>>,
+    url: &crab_git::CrabUrl,
+) -> Result<DirectStore> {
+    let view_retention = if let (Some(issuer), Some(scope)) = (mount_issuer, store.storage_scope())
+    {
+        let target = store
+            .as_storage()
+            .target_identity()
+            .ok_or_else(|| CrabError::AuthFailed {
+                path: "projected mount has no native storage target".into(),
+            })?;
+        Some(crab_auth::crab_auth_client::ViewRetention::new(
+            issuer,
+            format!("crab://{}/{}", url.bucket, url.repo_path),
+            scope.repo_prefix.clone(),
+            blake3::Hash::from_bytes(*target).to_hex().to_string(),
+        )?)
+    } else {
+        None
+    };
+    Ok(DirectStore {
+        store,
+        view_retention,
+    })
 }
 
 #[cfg(feature = "tier-s3")]

@@ -4534,6 +4534,7 @@ mod tests {
                     );
                     let capsule_root = crab_metadata::capsule_protocol::load_root(&layout).await?;
                     Ok(crate::replication::ReadStoreSelection {
+                        view_retention: None,
                         capsule_root,
                         store: replica_store,
                         router: replica_router,
@@ -4722,6 +4723,7 @@ mod tests {
                     );
                     let capsule_root = crab_metadata::capsule_protocol::load_root(&layout).await?;
                     Ok(crate::replication::ReadStoreSelection {
+                        view_retention: None,
                         capsule_root,
                         store: replica_store,
                         router: replica_router,
@@ -4777,6 +4779,7 @@ mod tests {
             .expect("replica root");
         let mut context = test_context(primary, "org/repo");
         context.cache.read_repository = Some(crate::replication::ReadStoreSelection {
+            view_retention: None,
             store: replica,
             router,
             capsule_root,
@@ -4880,6 +4883,7 @@ mod tests {
                     );
                     let capsule_root = crab_metadata::capsule_protocol::load_root(&layout).await?;
                     Ok(crate::replication::ReadStoreSelection {
+                        view_retention: None,
                         capsule_root,
                         store: replica_store,
                         router: replica_router,

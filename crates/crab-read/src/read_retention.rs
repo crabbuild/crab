@@ -37,6 +37,27 @@ pub async fn retain_pointer_catalog(
     Ok((catalog, retention))
 }
 
+/// Read the exact pointer catalog acknowledged by an issuer-owned GC claim.
+pub async fn load_retained_pointer_catalog(
+    layout: &StoreLayout<Store>,
+    maximum: u64,
+    retention: &RetainedRead,
+    expected_digest: &str,
+) -> Result<(PointerCatalogLookup, CapsuleRepositoryView)> {
+    let ready = retention.pin()?;
+    let view = open_pointer_view(layout, maximum).await?;
+    let digest = view.state_digest();
+    if digest != expected_digest {
+        return Err(ReadError::CorruptObject {
+            path: layout.repo_prefix().to_owned(),
+            reason: "pointer catalog differs from the issuer's retained view".into(),
+        });
+    }
+    let catalog = view.pointer_catalog_lookup(layout, maximum)?;
+    ready.ensure_valid()?;
+    Ok((catalog, view))
+}
+
 /// Register a capture on behalf of an authorized remote reader.
 /// Returns the exact view digest and a confirmed native claim. The service
 /// owns renewal and release across requests and must authenticate the reader.
@@ -79,16 +100,7 @@ async fn create_catalog_claim(
     let store = layout.store().inner();
     let repository = GcReadBarrier::observe(Arc::clone(store), layout.repo_prefix()).await?;
     let global = GcReadBarrier::observe(Arc::clone(store), layout.global_prefix()).await?;
-    let root = load_root(layout).await?;
-    let view = open_git_view_from_root(
-        layout,
-        root,
-        CapsuleReadLimits {
-            max_capsule_bytes: maximum,
-            max_frontier_bytes: maximum,
-        },
-    )
-    .await?;
+    let view = open_pointer_view(layout, maximum).await?;
     let catalog = view.pointer_catalog_lookup(layout, maximum)?;
     let (hash, size) = store_read_capture(
         layout,
@@ -110,6 +122,22 @@ async fn create_catalog_claim(
         barriers: [repository, global],
         view,
     })
+}
+
+async fn open_pointer_view(
+    layout: &StoreLayout<Store>,
+    maximum: u64,
+) -> Result<CapsuleRepositoryView> {
+    let root = load_root(layout).await?;
+    open_git_view_from_root(
+        layout,
+        root,
+        CapsuleReadLimits {
+            max_capsule_bytes: maximum,
+            max_frontier_bytes: maximum,
+        },
+    )
+    .await
 }
 
 async fn validate_barriers(barriers: &[GcReadBarrier; 2]) -> Result<()> {

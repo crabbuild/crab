@@ -1826,6 +1826,7 @@ mod tests {
                 let replica = replica.clone();
                 async move {
                     Ok(crate::replication::ReadStoreSelection {
+                        view_retention: None,
                         capsule_root,
                         store: replica.clone(),
                         router: crate::storage::StoreLayout::new(replica, prefix.to_owned()),

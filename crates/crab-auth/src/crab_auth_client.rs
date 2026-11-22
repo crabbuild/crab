@@ -24,6 +24,9 @@ use crate::protected_push::{
 };
 use crate::token_cache::{CachedTokens, TokenCache};
 
+mod view_retention;
+pub use view_retention::{ViewRetention, ViewRetentionLease};
+
 /// Refresh window: credentials within 5 minutes of expiry trigger a refresh.
 const REFRESH_WINDOW: Duration = Duration::from_secs(300);
 const CDN_REFRESH_WINDOW: Duration = Duration::from_secs(15);
@@ -271,7 +274,7 @@ impl CrabAuthProvider {
         let provider = self.with_cdn(deployment)?;
         let pinned = provider.cdn_principal.get_or_init(|| principal);
         if *pinned != principal {
-            return Err(cdn_principal_changed());
+            return Err(bound_principal_changed());
         }
         Ok(provider)
     }
@@ -674,7 +677,7 @@ impl CrabAuthProvider {
         Ok(new_tokens.id_token)
     }
 
-    fn load_cdn_login(&self) -> Result<CachedTokens> {
+    fn load_bound_login(&self) -> Result<CachedTokens> {
         let tokens = self
             .token_cache
             .load(CRAB_AUTH_CACHE_KEY)?
@@ -689,13 +692,13 @@ impl CrabAuthProvider {
         digest.update(subject.as_bytes());
         let principal = digest.finalize().into();
         if *self.cdn_principal.get_or_init(|| principal) != principal {
-            return Err(cdn_principal_changed());
+            return Err(bound_principal_changed());
         }
         Ok(tokens)
     }
 
-    async fn refresh_cdn_id_token(&self, rejected_token: &str) -> Result<String> {
-        let current = self.load_cdn_login()?;
+    async fn refresh_bound_id_token(&self, rejected_token: &str) -> Result<String> {
+        let current = self.load_bound_login()?;
         if current.id_token != rejected_token {
             return Ok(current.id_token);
         }
@@ -704,7 +707,7 @@ impl CrabAuthProvider {
         })?;
         let discovery = crate::oidc::discover_with_client(&self.issuer_url, &self.http)
             .await
-            .map_err(redact_cdn_oidc_error)?;
+            .map_err(redact_bound_oidc_error)?;
         discovery.validate_for_issuer(&self.issuer_url)?;
         let replacement = crate::oidc::refresh_tokens_with_client(
             &discovery.token_endpoint,
@@ -713,7 +716,7 @@ impl CrabAuthProvider {
             &self.http,
         )
         .await
-        .map_err(redact_cdn_oidc_error)?;
+        .map_err(redact_bound_oidc_error)?;
         self.token_cache.store_refreshed_id_token(
             CRAB_AUTH_CACHE_KEY,
             &self.issuer_url,
@@ -759,7 +762,10 @@ impl CredentialProvider for CrabAuthProvider {
         } else {
             None
         };
-        let cdn_login = bound_read.then(|| self.load_cdn_login()).transpose()?;
+        let principal_bound = bound_read || operation == "mount";
+        let login = principal_bound
+            .then(|| self.load_bound_login())
+            .transpose()?;
 
         {
             let guard = self.cached.read().await;
@@ -775,7 +781,7 @@ impl CredentialProvider for CrabAuthProvider {
             }
         }
 
-        let id_token = match cdn_login {
+        let id_token = match login {
             Some(login) => login.id_token,
             None => self.cached_id_token()?,
         };
@@ -785,7 +791,7 @@ impl CredentialProvider for CrabAuthProvider {
                 &id_token,
                 &repo_url,
                 operation,
-                bound_read,
+                principal_bound,
                 approval_pins.as_deref(),
             )
             .await
@@ -793,8 +799,8 @@ impl CredentialProvider for CrabAuthProvider {
             Ok(resp) => resp,
             Err(error) if should_refresh_after_auth_error(&error) => {
                 debug!("crab-auth returned auth error, attempting ID token refresh");
-                let refreshed = if bound_read {
-                    self.refresh_cdn_id_token(&id_token).await?
+                let refreshed = if principal_bound {
+                    self.refresh_bound_id_token(&id_token).await?
                 } else {
                     self.refresh_id_token().await?
                 };
@@ -802,7 +808,7 @@ impl CredentialProvider for CrabAuthProvider {
                     &refreshed,
                     &repo_url,
                     operation,
-                    bound_read,
+                    principal_bound,
                     approval_pins.as_deref(),
                 )
                 .await?
@@ -811,12 +817,12 @@ impl CredentialProvider for CrabAuthProvider {
         };
 
         let expiry = parse_iso8601(&auth_resp.expires_at);
-        if bound_read && expiry.is_none() {
+        if principal_bound && expiry.is_none() {
             return Err(invalid_negotiated_response());
         }
-        if bound_read && auth_resp.permissions.as_slice() != ["read"] {
+        if principal_bound && auth_resp.permissions.as_slice() != ["read"] {
             return Err(AuthError::InvalidCredentialResponse(
-                "negotiated CDN credentials require a read-only authorization".into(),
+                "bound Crab Auth reads require a read-only authorization".into(),
             ));
         }
         if let Some(grant) = &auth_resp.cdn {
@@ -857,7 +863,7 @@ impl CredentialProvider for CrabAuthProvider {
         });
 
         let creds = auth_resp.cloud_credentials(expires_at).map_err(|error| {
-            if bound_read {
+            if principal_bound {
                 invalid_negotiated_response()
             } else {
                 error
@@ -925,11 +931,11 @@ fn invalid_negotiated_response() -> AuthError {
     AuthError::InvalidCredentialResponse("invalid negotiated credential response".into())
 }
 
-fn cdn_principal_changed() -> AuthError {
-    AuthError::CredentialsExpired("Crab Auth login changed; resolve a new CDN read".into())
+fn bound_principal_changed() -> AuthError {
+    AuthError::CredentialsExpired("Crab Auth login changed; reopen the read operation".into())
 }
 
-fn redact_cdn_oidc_error(error: AuthError) -> AuthError {
+fn redact_bound_oidc_error(error: AuthError) -> AuthError {
     let body = || "OIDC response omitted".to_owned();
     match error {
         AuthError::OidcRefreshExpired {
@@ -950,9 +956,9 @@ fn redact_cdn_oidc_error(error: AuthError) -> AuthError {
             status,
             body: body(),
         },
-        AuthError::ParseOidcResponse { .. } => {
-            AuthError::InvalidCredentialResponse("invalid CDN OIDC response".into())
-        }
+        AuthError::ParseOidcResponse { .. } => AuthError::InvalidCredentialResponse(
+            "invalid OIDC response for a bound Crab Auth read".into(),
+        ),
         other => other,
     }
 }

@@ -373,7 +373,9 @@ not readable with view credentials.
 `POST /v1/views/retention` takes the same `id_token` and source `repo_url` as
 the credentials endpoint. The request also includes `view_prefix` from
 `storage_scope.repo_prefix`, a fresh `reader_nonce` of 32 random bytes encoded
-as lowercase hexadecimal, and an `operation` object.
+as lowercase hexadecimal, the `target` digest of the selected native storage
+transport (also 32 bytes encoded as lowercase hexadecimal), and an `operation`
+object.
 
 | `operation.action` | Additional operation field | Successful response |
 | --- | --- | --- |
@@ -381,11 +383,12 @@ as lowercase hexadecimal, and an `operation` object.
 | `renew` | `revision` from the preceding response | `renewed`, `revision`, `remaining_ms` |
 | `release` | `revision` from the last acknowledged response | `released` |
 
-The caller keeps the same nonce and exact projected view for the life of the
-claim. Crab Auth checks the verified issuer, subject, and `mount` policy on
-every operation. The native helper confirms that the source still matches the
-view on acquisition. Renewal keeps the exact admitted view while the same
-scope remains authorized, even if the source advances.
+The caller keeps the same nonce, native target, and projected view for the
+life of the claim. Crab Auth checks the verified issuer, subject, and `mount`
+policy on every operation. The native helper compares the target against its
+resolved transport before accessing the claim and confirms that the source
+still matches the view on acquisition. Renewal keeps the exact admitted view
+while the same scope remains authorized, even if the source advances.
 
 Use the request's monotonic start time plus the returned `remaining_ms` as
 the local deadline. Stop serving new reads after denial, loss of the acknowledged

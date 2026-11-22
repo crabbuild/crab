@@ -1,0 +1,285 @@
+use std::sync::Arc;
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+use tokio::time::Instant;
+
+use super::{CrabAuthProvider, REQUEST_TIMEOUT};
+use crate::error::{AuthError, Result};
+
+const PATH: &str = "/v1/views/retention";
+const MAX_REPLY_BYTES: usize = 4096;
+const MAX_LIFETIME_MS: u64 = 150_000;
+
+/// Retention authority bound to the login and native target of a projected mount grant.
+#[derive(Clone)]
+pub struct ViewRetention {
+    provider: Arc<CrabAuthProvider>,
+    repo_url: String,
+    view_prefix: String,
+    target: String,
+}
+
+impl ViewRetention {
+    /// Bind a projected mount to the same issuer client that resolved its grant.
+    pub fn new(
+        provider: Arc<CrabAuthProvider>,
+        repo_url: String,
+        view_prefix: String,
+        target: String,
+    ) -> Result<Self> {
+        if provider.cdn_principal().is_none() {
+            return Err(AuthError::InvalidCrabAuthRequest(
+                "view retention requires a principal-bound mount grant".into(),
+            ));
+        }
+        Ok(Self {
+            provider,
+            repo_url,
+            view_prefix,
+            target,
+        })
+    }
+
+    /// Acquire a new claim and return the exact catalog digest it retains.
+    pub async fn acquire(&self) -> Result<(String, ViewRetentionLease)> {
+        let mut nonce = String::with_capacity(64);
+        for byte in rand::random::<[u8; 32]>() {
+            use std::fmt::Write;
+            let _ = write!(nonce, "{byte:02x}");
+        }
+        let (reply, started) = self.request(&nonce, Action::Acquire).await?;
+        let Reply::Acquired {
+            repo_prefix,
+            view_state_digest,
+            revision,
+            remaining_ms,
+        } = reply
+        else {
+            return Err(invalid_reply());
+        };
+        if repo_prefix != self.view_prefix || revision.sequence != 0 || !revision.is_valid() {
+            return Err(invalid_reply());
+        }
+        let mut lease = ViewRetentionLease {
+            authority: self.clone(),
+            nonce,
+            revision,
+            started,
+            lifetime: Duration::ZERO,
+        };
+        match lifetime(remaining_ms) {
+            Ok(lifetime) => lease.lifetime = lifetime,
+            Err(error) => {
+                // This exact acquisition can be released even if its timing is invalid.
+                if let Err(cleanup) = lease.release().await {
+                    tracing::warn!(%cleanup, "failed to release rejected view retention");
+                }
+                return Err(error);
+            }
+        }
+        Ok((view_state_digest, lease))
+    }
+
+    async fn request(&self, nonce: &str, action: Action<'_>) -> Result<(Reply, Instant)> {
+        let login = self.provider.load_bound_login()?;
+        match self.send(&login.id_token, nonce, action).await {
+            Err(AuthError::CrabAuthRejected { status: 401, .. }) => {
+                // An authentication rejection occurs before native mutation.
+                // Do not replay transport errors or uncertain issuer results.
+                let token = self
+                    .provider
+                    .refresh_bound_id_token(&login.id_token)
+                    .await?;
+                self.send(&token, nonce, action).await
+            }
+            result => result,
+        }
+    }
+
+    async fn send(
+        &self,
+        id_token: &str,
+        nonce: &str,
+        operation: Action<'_>,
+    ) -> Result<(Reply, Instant)> {
+        let endpoint = self.provider.endpoint_for(PATH);
+        let body = Request {
+            id_token,
+            repo_url: &self.repo_url,
+            view_prefix: &self.view_prefix,
+            target: &self.target,
+            reader_nonce: nonce,
+            operation,
+        };
+        let request_error = |source: reqwest::Error| AuthError::CrabAuthRequest {
+            endpoint: endpoint.clone(),
+            operation: "view retention",
+            source: source.without_url(),
+        };
+        // Anchor the server's remaining time before sending. Network and
+        // response processing can only shorten local ownership.
+        let started = Instant::now();
+        let mut response = self
+            .provider
+            .http
+            .post(&endpoint)
+            .bearer_auth(id_token)
+            .header(reqwest::header::CACHE_CONTROL, "no-store")
+            .json(&body)
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await
+            .map_err(&request_error)?;
+        if response.status() != reqwest::StatusCode::OK {
+            return Err(AuthError::CrabAuthRejected {
+                status: response.status().as_u16(),
+                endpoint,
+                operation: "view retention",
+                body: "response body withheld".into(),
+            });
+        }
+        let mut reply = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(&request_error)? {
+            if reply.len().saturating_add(chunk.len()) > MAX_REPLY_BYTES {
+                return Err(invalid_reply());
+            }
+            reply.extend_from_slice(&chunk);
+        }
+        let reply = serde_json::from_slice(&reply).map_err(|_| invalid_reply())?;
+        Ok((reply, started))
+    }
+}
+
+/// Owns the last acknowledged issuer revision for one catalog until readers drain.
+pub struct ViewRetentionLease {
+    authority: ViewRetention,
+    nonce: String,
+    revision: Revision,
+    started: Instant,
+    lifetime: Duration,
+}
+
+impl ViewRetentionLease {
+    /// Return the physical projected prefix for local diagnostics.
+    pub fn view_prefix(&self) -> &str {
+        &self.authority.view_prefix
+    }
+
+    /// Return the first renewal time and conservative local deadline.
+    pub fn schedule(&self) -> (Instant, Instant) {
+        (
+            self.started + self.lifetime * 2 / 3,
+            self.started + self.lifetime,
+        )
+    }
+
+    /// Renew one revision without retrying an uncertain native transition.
+    pub async fn renew(&mut self) -> Result<()> {
+        let (reply, started) = self
+            .authority
+            .request(
+                &self.nonce,
+                Action::Renew {
+                    revision: &self.revision,
+                },
+            )
+            .await?;
+        let Reply::Renewed {
+            revision,
+            remaining_ms,
+        } = reply
+        else {
+            return Err(invalid_reply());
+        };
+        if revision.incarnation != self.revision.incarnation
+            || self.revision.sequence.checked_add(1) != Some(revision.sequence)
+        {
+            return Err(invalid_reply());
+        }
+        let lifetime = lifetime(remaining_ms)?;
+        self.revision = revision;
+        self.started = started;
+        self.lifetime = lifetime;
+        Ok(())
+    }
+
+    /// Release only the last acknowledged revision after all readers drain.
+    pub async fn release(self) -> Result<()> {
+        let (reply, _) = self
+            .authority
+            .request(
+                &self.nonce,
+                Action::Release {
+                    revision: &self.revision,
+                },
+            )
+            .await?;
+        if !matches!(reply, Reply::Released) {
+            return Err(invalid_reply());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Serialize)]
+struct Request<'a> {
+    id_token: &'a str,
+    repo_url: &'a str,
+    view_prefix: &'a str,
+    target: &'a str,
+    reader_nonce: &'a str,
+    operation: Action<'a>,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+enum Action<'a> {
+    Acquire,
+    Renew { revision: &'a Revision },
+    Release { revision: &'a Revision },
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+enum Reply {
+    Acquired {
+        repo_prefix: String,
+        view_state_digest: String,
+        revision: Revision,
+        remaining_ms: u64,
+    },
+    Renewed {
+        revision: Revision,
+        remaining_ms: u64,
+    },
+    Released,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Revision {
+    incarnation: String,
+    sequence: u64,
+}
+
+impl Revision {
+    fn is_valid(&self) -> bool {
+        uuid::Uuid::try_parse(&self.incarnation).is_ok_and(|id| {
+            id.get_version_num() == 7
+                && id.get_variant() == uuid::Variant::RFC4122
+                && id.to_string() == self.incarnation
+        })
+    }
+}
+
+fn lifetime(remaining_ms: u64) -> Result<Duration> {
+    if !(1..=MAX_LIFETIME_MS).contains(&remaining_ms) {
+        return Err(invalid_reply());
+    }
+    Ok(Duration::from_millis(remaining_ms))
+}
+
+fn invalid_reply() -> AuthError {
+    AuthError::InvalidCredentialResponse("invalid view retention acknowledgement".into())
+}

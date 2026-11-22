@@ -165,6 +165,7 @@ impl Checkout {
             );
         }
         Ok(RepositoryStore {
+            view_retention: None,
             store,
             repository_prefix,
             capsule_root,

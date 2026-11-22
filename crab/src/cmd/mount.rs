@@ -619,6 +619,7 @@ pub async fn run_mount_with_new_cli(mut opts: NewMountOpts) -> Result<()> {
 
     // Build and execute the pipeline.
     let mut builder = MountPipelineBuilder::new(pipeline_config.clone());
+    let catalog = read_context.as_ref().map(|context| context.catalog.clone());
     if let Some(context) = read_context {
         builder = builder.with_read_context(context);
     }
@@ -626,7 +627,17 @@ pub async fn run_mount_with_new_cli(mut opts: NewMountOpts) -> Result<()> {
         builder = builder.with_no_refresh(true);
     }
 
-    let output = builder.execute()?;
+    let output = match builder.execute() {
+        Ok(output) => output,
+        Err(error) => {
+            if let Some(catalog) = catalog
+                && let Err(cleanup) = catalog.shutdown().await
+            {
+                warn!(%cleanup, "failed to release rejected mount capture");
+            }
+            return Err(error.into());
+        }
+    };
 
     info!(
         generation = output.generation,
@@ -2186,7 +2197,7 @@ async fn resolve_mount_read_context_from_remote_url(
     let cache_dir = crab_auth::token_cache::expand_token_cache_path(&config.auth.token_cache_path);
     let resolver = crab_auth_store::ManagedRepositoryResolver::new(cache_dir);
     let locator = resolver.classify(url)?;
-    let layout = match locator {
+    let (layout, view_retention) = match locator {
         crab_git::RepositoryLocator::Direct(repository) => {
             let parsed = crate::git::url::CrabUrl {
                 bucket: repository.bucket,
@@ -2203,7 +2214,10 @@ async fn resolve_mount_read_context_from_remote_url(
                 &cancel,
             )
             .await?;
-            crate::storage::StoreLayout::new(resolved.store, resolved.repository_prefix)
+            (
+                crate::storage::StoreLayout::new(resolved.store, resolved.repository_prefix),
+                resolved.view_retention,
+            )
         }
     };
     crate::core::cdn::verify_qualification_mount(&layout)?;
@@ -2214,7 +2228,7 @@ async fn resolve_mount_read_context_from_remote_url(
         config.hydrate.auto_restore,
     )
     .await?;
-    build_mount_read_context(&config, layout, restore_availability).await
+    build_mount_read_context(&config, layout, restore_availability, view_retention).await
 }
 
 #[cfg(any(feature = "fuse", feature = "nfs"))]
@@ -2222,7 +2236,10 @@ async fn select_mount_read_layout(
     config: &crate::core::config::Config,
     parsed: &crate::git::url::CrabUrl,
     cancel: &tokio_util::sync::CancellationToken,
-) -> Result<crate::storage::StoreLayout> {
+) -> Result<(
+    crate::storage::StoreLayout,
+    Option<crab_auth::crab_auth_client::ViewRetention>,
+)> {
     select_mount_read_layout_with_selector(
         config,
         parsed,
@@ -2240,7 +2257,10 @@ async fn select_mount_read_layout_with_selector<F, Fut>(
     parsed: &crate::git::url::CrabUrl,
     cancel: &tokio_util::sync::CancellationToken,
     select_read: F,
-) -> Result<crate::storage::StoreLayout>
+) -> Result<(
+    crate::storage::StoreLayout,
+    Option<crab_auth::crab_auth_client::ViewRetention>,
+)>
 where
     F: FnOnce(
         crate::core::config::Config,
@@ -2253,7 +2273,7 @@ where
     if let crate::replication::ReadSource::Replica { name } = &selection.source {
         tracing::debug!(replica = %name, "selected read replica for mount");
     }
-    Ok(selection.router)
+    Ok((selection.router, selection.view_retention))
 }
 
 #[cfg(any(feature = "fuse", feature = "nfs"))]
@@ -2261,6 +2281,7 @@ async fn build_mount_read_context(
     config: &crate::core::config::Config,
     layout: crate::storage::StoreLayout,
     restore_availability: Option<std::sync::Arc<dyn crab_read::XorbAvailability>>,
+    view_retention: Option<crab_auth::crab_auth_client::ViewRetention>,
 ) -> Result<crate::vfs::MountReadContext> {
     let origin = layout.store().as_storage().clone();
     let store_layout = crab_storage::StoreLayout::with_global_prefix(
@@ -2277,6 +2298,8 @@ async fn build_mount_read_context(
 
     let catalog = std::sync::Arc::new(CrabMountCatalogCapture {
         retention: crab_coordination::read_retention_runtime::ReadRetentionSession::default(),
+        view_retention,
+        projected_git: std::sync::OnceLock::new(),
         base: hydrator,
         layout: store_layout.clone(),
         maximum: if config.uploadpack_max_egress_bytes == 0 {
@@ -2307,21 +2330,69 @@ async fn build_mount_read_context(
 #[cfg(any(feature = "fuse", feature = "nfs"))]
 struct CrabMountCatalogCapture {
     retention: crab_coordination::read_retention_runtime::ReadRetentionSession,
+    view_retention: Option<crab_auth::crab_auth_client::ViewRetention>,
+    projected_git: std::sync::OnceLock<ProjectedMountGit>,
     base: crab_read::ShardHydrator,
     layout: crab_storage::StoreLayout<crab_storage::Store>,
     maximum: u64,
 }
 
 #[cfg(any(feature = "fuse", feature = "nfs"))]
+struct ProjectedMountGit {
+    digest: String,
+    commits: std::collections::BTreeMap<String, String>,
+}
+
+#[cfg(any(feature = "fuse", feature = "nfs"))]
 #[async_trait::async_trait]
 impl crate::vfs::MountCatalogCapture for CrabMountCatalogCapture {
     async fn capture(&self) -> crate::vfs::Result<std::sync::Arc<crab_read::ShardHydrator>> {
-        let owner = blake3::hash(uuid::Uuid::now_v7().as_bytes())
-            .to_hex()
-            .to_string();
-        let (catalog, retention) =
-            crab_read::retain_pointer_catalog(&self.layout, &owner, self.maximum, &self.retention)
-                .await?;
+        let (catalog, retention) = if let Some(issuer) = &self.view_retention {
+            let admission = self
+                .retention
+                .capture()
+                .map_err(crab_read::ReadError::from)?;
+            let (digest, lease) = issuer
+                .acquire()
+                .await
+                .map_err(|error| crab_read::ReadError::from(issuer_retention_error(error)))?;
+            let retention = admission
+                .retain(IssuerRetention(lease))
+                .map_err(crab_read::ReadError::from)?;
+            let (catalog, view) = crab_read::load_retained_pointer_catalog(
+                &self.layout,
+                self.maximum,
+                &retention,
+                &digest,
+            )
+            .await?;
+            // The Git subprocess may reuse a clone or have a different operation
+            // grant. Bind exposed Git heads to the same capture as Xet reads.
+            let git = self.projected_git.get_or_init(|| ProjectedMountGit {
+                digest: digest.clone(),
+                commits: view
+                    .refs()
+                    .clone()
+                    .into_iter()
+                    .chain(view.peeled_refs().clone())
+                    .collect(),
+            });
+            if git.digest != digest {
+                return Err(crate::vfs::VfsError::AuthFailed {
+                    path: "projected mount catalog changed; reopen the mount".into(),
+                });
+            }
+            (catalog, retention)
+        } else {
+            let owner = blake3::hash(uuid::Uuid::now_v7().as_bytes()).to_hex();
+            crab_read::retain_pointer_catalog(
+                &self.layout,
+                owner.as_str(),
+                self.maximum,
+                &self.retention,
+            )
+            .await?
+        };
         let lookup = crab_metadata::file_index_lookup::SharedFileIndexLookup::for_pointer_catalog(
             self.layout.clone(),
             catalog,
@@ -2334,6 +2405,34 @@ impl crate::vfs::MountCatalogCapture for CrabMountCatalogCapture {
         ))
     }
 
+    fn validate_git_head(
+        &self,
+        reference: &str,
+        oid: &str,
+        read_only: bool,
+    ) -> crate::vfs::Result<()> {
+        let Some(projected) = self.projected_git.get() else {
+            return Ok(());
+        };
+        // Mount-owned overlay caches are keyed by the logical URL and may
+        // contain edits from a different grant. Serve only the captured tree.
+        if !read_only {
+            return Err(crate::vfs::VfsError::AuthFailed {
+                path: "projected remote mounts require --read-only".into(),
+            });
+        }
+        if projected
+            .commits
+            .get(reference)
+            .is_none_or(|tip| tip != oid)
+        {
+            return Err(crate::vfs::VfsError::AuthFailed {
+                path: "mount Git revision is outside the issuer's retained view".into(),
+            });
+        }
+        Ok(())
+    }
+
     async fn shutdown(&self) -> crate::vfs::Result<()> {
         self.retention
             .shutdown()
@@ -2341,6 +2440,36 @@ impl crate::vfs::MountCatalogCapture for CrabMountCatalogCapture {
             .map_err(crab_read::ReadError::from)?;
         Ok(())
     }
+}
+
+#[cfg(any(feature = "fuse", feature = "nfs"))]
+struct IssuerRetention(crab_auth::crab_auth_client::ViewRetentionLease);
+
+#[cfg(any(feature = "fuse", feature = "nfs"))]
+#[async_trait::async_trait]
+impl crab_coordination::read_retention_runtime::RetentionOwner for IssuerRetention {
+    fn path(&self) -> &str {
+        self.0.view_prefix()
+    }
+
+    fn schedule(&self) -> crab_coordination::Result<(tokio::time::Instant, tokio::time::Instant)> {
+        Ok(self.0.schedule())
+    }
+
+    async fn renew(&mut self) -> crab_coordination::Result<()> {
+        self.0.renew().await.map_err(issuer_retention_error)
+    }
+
+    async fn release(self) -> crab_coordination::Result<()> {
+        self.0.release().await.map_err(issuer_retention_error)
+    }
+}
+
+#[cfg(any(feature = "fuse", feature = "nfs"))]
+fn issuer_retention_error(
+    error: crab_auth::error::AuthError,
+) -> crab_coordination::CoordinationError {
+    crab_coordination::CoordinationError::ReadRetentionIssuer(Box::new(error))
 }
 
 #[cfg(any(feature = "fuse", feature = "nfs"))]
@@ -6177,11 +6306,12 @@ mod tests {
         let config = crate::core::config::Config::default();
         let parsed = crate::git::url::CrabUrl::parse("crab://primary/org/repo").unwrap();
         let cancel = tokio_util::sync::CancellationToken::new();
-        let selected_layout =
+        let (selected_layout, _) =
             select_mount_read_layout_with_selector(&config, &parsed, &cancel, move |_, _, _| {
                 let replica = replica.clone();
                 async move {
                     Ok(crate::replication::ReadStoreSelection {
+                        view_retention: None,
                         capsule_root,
                         store: replica.clone(),
                         router: crate::storage::StoreLayout::new(replica, prefix.to_owned()),
