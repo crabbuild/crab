@@ -16,6 +16,7 @@ const GCS_VIEWER_LOG_TARGET: &str = "crab_storage::cdn::gcs_viewer_log";
 const PUBLIC_TRANSITION_TARGET: &str = "crab_storage::cdn::public_transition";
 const READ_TARGET: &str = "crab_storage::cdn::read_target";
 const SERVICE_BUILD_TARGET: &str = "crab_storage::cdn::service_build";
+const SERVICE_LFS_CACHE_TARGET: &str = "crab_storage::cdn::service_lfs_cache";
 static SERVICE_INSTANCE: OnceLock<String> = OnceLock::new();
 
 /// Identify the storage targets used for redacted CDN qualification evidence.
@@ -28,12 +29,30 @@ pub fn is_read_evidence_target(target: &str) -> bool {
             | GCS_VIEWER_LOG_TARGET
             | READ_TARGET
             | SERVICE_BUILD_TARGET
+            | SERVICE_LFS_CACHE_TARGET
             | crate::native_read_telemetry::TARGET
     )
 }
 
 fn service_instance() -> &'static str {
     SERVICE_INSTANCE.get_or_init(|| format!("{:x}", Sha256::digest(rand::random::<[u8; 32]>())))
+}
+
+/// Record the cache root captured by an ordinary LFS cache operation.
+pub fn observe_service_lfs_cache(
+    path: &object_store::path::Path,
+    root: impl FnOnce() -> Option<[u8; 32]>,
+) {
+    if tracing::enabled!(target: SERVICE_LFS_CACHE_TARGET, tracing::Level::DEBUG)
+        && let Some(root) = root()
+    {
+        tracing::debug!(target: SERVICE_LFS_CACHE_TARGET, parent: None,
+            service_instance_sha256 = service_instance(),
+            lfs_key_sha256 = %format_args!("{:x}", Sha256::digest(path.as_ref().as_bytes())),
+            cache_root_sha256 = %format_args!("{:x}", Output::<Sha256>::from(root)),
+            "CDN service LFS cache"
+        );
+    }
 }
 
 /// Record the running service binary and its compiled CDN policy for qualification.
@@ -450,6 +469,7 @@ mod tests {
             GCS_VIEWER_LOG_TARGET,
             READ_TARGET,
             SERVICE_BUILD_TARGET,
+            SERVICE_LFS_CACHE_TARGET,
             crate::native_read_telemetry::TARGET,
         ] {
             assert!(is_read_evidence_target(target), "{target}");

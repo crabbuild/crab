@@ -88,6 +88,11 @@ pub(crate) struct ReservedFile {
 }
 
 impl ReservedFile {
+    #[cfg(feature = "local-cache")]
+    pub(crate) fn root_fingerprint(&self) -> Result<[u8; 32]> {
+        self.reservation.root.fingerprint()
+    }
+
     pub(crate) fn file(&self) -> Result<tokio::fs::File> {
         self.pending.file()
     }

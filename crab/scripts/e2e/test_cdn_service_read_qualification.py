@@ -151,6 +151,13 @@ class CdnServiceReadTests(unittest.TestCase):
             if args.arm == "warm_local" and fault != "no-local":
                 local = edge[1] | {"source": "local"}
                 lines.append({"target": "crab_storage::cdn::transfer", "fields": local})
+            if family == "lfs" and args.arm in ("edge", "warm_local") and fault != "no-cache-root":
+                lines.append({"target": SERVICE.LFS_CACHE_TARGET, "fields": {
+                    "message": "CDN service LFS cache",
+                    "service_instance_sha256": "b" * 64 if fault == "wrong-cache-process" else instance,
+                    "lfs_key_sha256": hashlib.sha256(SERVICE.fixture_object_key(config, access, family).encode()).hexdigest(),
+                    "cache_root_sha256": "5" * 64 if fault == "different-cache-root" else "4" * 64,
+                }})
             if args.transition_object is not None and fault != "no-transition":
                 before = args.arm == "prior_export"
                 key = hashlib.sha256(f"{config['fixture_prefix']}/{args.transition_object}".encode()).hexdigest()
@@ -199,7 +206,9 @@ class CdnServiceReadTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             args = self.prepare(Path(directory), "cloudfront", "server", "lfs")
             for fault, reason in (("wrong-lfs-event", "requires verified edge delivery"),
-                                  ("unkeyed-lfs-event", "CDN verified LFS event")):
+                                  ("unkeyed-lfs-event", "CDN verified LFS event"),
+                                  ("no-cache-root", "prove its selected disk cache"),
+                                  ("wrong-cache-process", "selected process and object")):
                 with self.subTest(fault=fault), self.assertRaisesRegex(ValueError, reason):
                     self.request(args, "cloudfront", "server", "lfs", fault)
 
@@ -276,6 +285,8 @@ class CdnServiceReadTests(unittest.TestCase):
                     with self.subTest(fault=fault), self.assertRaisesRegex(ValueError, error):
                         self.request(args, "cloudfront", consumer, family, fault)
                 if family == "lfs":
+                    with self.assertRaisesRegex(ValueError, "reuse its own edge primer's cache root"):
+                        self.request(args, "cloudfront", consumer, family, "different-cache-root")
                     json_file(args.primer, edge | {"lfs_key_sha256": "e" * 64})
                     with self.assertRaisesRegex(ValueError, "same process"):
                         self.request(args, "cloudfront", consumer, family)

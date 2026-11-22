@@ -34,6 +34,11 @@ pub(crate) struct PayloadRead {
 }
 
 impl PayloadRead {
+    #[cfg(feature = "local-cache")]
+    pub(crate) fn root_fingerprint(&self) -> Result<[u8; 32]> {
+        self.root.fingerprint()
+    }
+
     pub(crate) async fn open(root: &Path, path: &Path) -> Result<(Self, tokio::fs::File)> {
         let relative = PathBuf::from(relative_path(root, path)?);
         let display_root = root.to_owned();

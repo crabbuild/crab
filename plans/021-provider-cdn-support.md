@@ -761,13 +761,14 @@ lifecycle verifier binds the edge and rollback records, provider viewer logs,
 distinct native retirement tombstone, and final storage inventories. Assembly
 and bundle verification derive the service product result from the retained
 records and the preregistered payload size, ETag, and storage fingerprints.
-Service Git fixture assembly rebuilds each benchmark pair from a native
+Service fixture assembly rebuilds each benchmark pair from a native
 control, distinct cold and warm edge processes, and an exact re-read using
-the warm edge process's verified in-memory blob. The verifier joins provider
+the warm edge process's verified in-memory Git blob or disk-cached LFS
+object. The verifier joins provider
 requests and proves each arm used the same published fixture before
 retirement. Both service images embed the checked-out commit and compile the
 ordinary CDN feature. Each read pins the executable hash, target, build
-features, and embedded policy reported by its own process. Service Git
+features, and embedded policy reported by its own process. Service
 promotion requires the registered release binary and per-run evidence. For
 public service Git and LFS, assembly derives the transition from ordinary
 reads in fresh processes with the prior and current receipt. It checks the
@@ -779,9 +780,11 @@ when counting those observations.
 For eligible full service LFS reads, the gateway uses its existing disk cache
 budget and Crab Server reserves a capped share of local disk capacity.
 Namespaces bind the physical target, repository, and active CDN approval.
-The service worker can measure the repeat in the primer's process and prove
-the exact verified local LFS key and zero edge requests. Service LFS regional
-assembly, release verification, and live measurements remain open.
+The service worker measures the repeat in the primer's process and proves
+the exact verified local LFS key, its opened cache root, and zero edge
+requests. The regional verifier rejects cache-root reuse by fresh arms
+and requires the local repeat to match its own edge primer's root. Live
+regional measurements remain open.
 
 The protected workflow or its dedicated workers own producing these raw
 observations. The assembly and release jobs own rejecting missing, mismatched

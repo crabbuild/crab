@@ -159,6 +159,11 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, sdk_
                         client["reader"] = service["reader"] | {"binding_sha256": "", "public_export_sha256": ""}
                     instance_arm = "warm_edge" if arm == "warm_local" else arm
                     client["service_instance_sha256"] = hashlib.sha256(f"{location}/{index}/{instance_arm}/process".encode()).hexdigest()
+                    if service["lfs_key_sha256"] is not None:
+                        client["cache_root_sha256"] = ("" if arm == "origin" else hashlib.sha256(
+                            f"{location}/{index}/{instance_arm}/disk".encode()).hexdigest())
+                        for record in (*proof.values(), *origin_requests.values()):
+                            record["key_sha256"] = service["lfs_key_sha256"]
                     if arm == "warm_local":
                         client["primer_sha256"] = hashlib.sha256((directory.parent / "warm_edge/client.json").read_bytes()).hexdigest()
                     if provider == "gcs" and arm == "cold_edge":
@@ -485,6 +490,8 @@ class CdnQualificationTests(unittest.TestCase):
             "reader": reader | {"binding_sha256": "", "public_export_sha256": ""},
             "native_traffic": {"get_responses": 1, "head_responses": 0, "body_bytes": 8},
         }
+        if lfs_key is not None:
+            common["cache_root_sha256"] = ""
         self.rollback_trace(common | {"started_at_unix_ms": edge_at + 20, "finished_at_unix_ms": edge_at + 30})
         transition = {}
         if access == "public":
@@ -498,7 +505,8 @@ class CdnQualificationTests(unittest.TestCase):
             })
         request = "d" * 64
         response = {"status": 206, "cache": "hit", "bytes": 8, "complete": True}
-        client = json_file(records / "edge.json", common | transition | {
+        cache = {"cache_root_sha256": "5" * 64} if lfs_key is not None else {}
+        client = json_file(records / "edge.json", common | transition | cache | {
             "arm": "edge", "started_at_unix_ms": edge_at, "finished_at_unix_ms": edge_at + 10,
             "service_instance_sha256": "2" * 64,
             "all_edge_attempts": 1, "edge_attempts": 1, "observed_edge_gets": 1, "verified_edge_payloads": 1,
@@ -515,9 +523,8 @@ class CdnQualificationTests(unittest.TestCase):
         else:
             proof["origin_requests"] = {}
         json_file(records / "viewer-requests.json", proof)
-        if family == "git":
-            edge_read = json.loads((records / "edge.json").read_bytes())
-            write_git_measurements(self.directory / CDN.GIT_BENCHMARK_DIR, self.registration, platform, service=edge_read)
+        edge_read = json.loads((records / "edge.json").read_bytes())
+        write_git_measurements(self.directory / CDN.GIT_BENCHMARK_DIR, self.registration, platform, service=edge_read)
 
     def record_sdk_product(self) -> None:
         records = self.directory / CDN.GIT_PRODUCT_DIR

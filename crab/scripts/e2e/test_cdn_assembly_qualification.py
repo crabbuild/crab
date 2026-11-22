@@ -51,11 +51,8 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
                 (self.root / name).rename(row / name)
         if fixture.CDN.is_direct_service_scope(self.example.scope):
             observations.pop("product_action")
-            name = fixture.CDN.SERVICE_PRODUCT_DIR
-            (self.root / name).rename(row / name)
-            if family == "git":
-                observations.pop("performance")
-                name = fixture.CDN.GIT_BENCHMARK_DIR
+            observations.pop("performance")
+            for name in (fixture.CDN.SERVICE_PRODUCT_DIR, fixture.CDN.GIT_BENCHMARK_DIR):
                 (self.root / name).rename(row / name)
         if access == "public":
             name = fixture.CDN.PUBLIC_EXPORT_DIR
@@ -164,9 +161,8 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
         self.assertEqual({file.name for file in product.iterdir()}, set(fixture.CDN.SERVICE_PRODUCT_FILES.values()))
         policy = self.root / "qualified-scopes.txt"
         policy.write_text(self.example.scope + "\n", encoding="utf-8")
-        with self.assertRaises(subprocess.CalledProcessError):
-            fixture.CDN.verify_bundle_row(self.output, self.row, self.example.registration, fixture.COMMIT, "123", "2",
-                                          policy=policy)
+        fixture.CDN.verify_bundle_row(self.output, self.row, self.example.registration, fixture.COMMIT, "123", "2",
+                                      policy=policy)
         edge = product / "edge.json"
         candidate = json.loads(edge.read_bytes())
         fixture.json_file(edge, candidate | {"etag_sha256": "0" * 64})
@@ -218,6 +214,30 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
             self.assemble(digest)
         self.assertFalse(self.output.exists())
         fixture.json_file(prior, original)
+        self.assertEqual(self.assemble(digest), 1)
+
+    def test_regional_service_lfs_rejects_reused_disks_and_an_unpaired_local_repeat(self) -> None:
+        digest = self.inputs("azure", consumer="s3-gateway", family="lfs")
+        row = self.root / self.row
+        edge = json.loads((row / fixture.CDN.SERVICE_PRODUCT_DIR / "edge.json").read_bytes())
+        pair = row / fixture.CDN.GIT_BENCHMARK_DIR / "near/0001"
+        local = pair / "warm_local/client.json"
+        local_record = json.loads(local.read_bytes())
+        fixture.json_file(local, local_record | {"cache_root_sha256": edge["cache_root_sha256"]})
+        with self.assertRaisesRegex(ValueError, "reuse its own edge primer's cache root"):
+            self.assemble(digest)
+        fixture.json_file(local, local_record)
+
+        cold = pair / "cold_edge/client.json"
+        cold_record = json.loads(cold.read_bytes())
+        for slot, root in ((cold, edge["cache_root_sha256"]),
+                           (pair / "warm_edge/client.json", cold_record["cache_root_sha256"])):
+            record = json.loads(slot.read_bytes())
+            fixture.json_file(slot, record | {"cache_root_sha256": root})
+            with self.assertRaisesRegex(ValueError, "reused a service LFS cache root"):
+                self.assemble(digest)
+            fixture.json_file(slot, record)
+        self.assertFalse(self.output.exists())
         self.assertEqual(self.assemble(digest), 1)
 
     def test_regional_service_git_rejects_cross_process_primers_and_reused_workers(self) -> None:

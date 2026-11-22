@@ -8,6 +8,7 @@ use crab_cache::{
     local_cache::{LfsCacheFile, LfsCacheFill},
 };
 use crab_lfs::{LfsByteStream, LfsError, LfsObjectStore, LfsReadCache, LfsReadSession, Result};
+use crab_storage::cdn::observe_service_lfs_cache;
 use futures_util::{StreamExt as _, stream};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -53,6 +54,7 @@ impl LfsPayloadCache {
                 let (ready, selected) = oneshot::channel();
                 let (send, receive) = mpsc::channel(1);
                 let store = store.clone();
+                let hit_path = path.clone();
                 tokio::spawn(deliver_cached(
                     source,
                     self.proofs.clone(),
@@ -60,7 +62,10 @@ impl LfsPayloadCache {
                     size,
                     send,
                     ready,
-                    move || store.observe_verified_lfs_cache_hit(&path, size),
+                    move |source| {
+                        observe_service_lfs_cache(&hit_path, || source.root_fingerprint().ok());
+                        store.observe_verified_lfs_cache_hit(&hit_path, size);
+                    },
                 ));
                 if selected.await.is_ok() {
                     return Ok((0..size, receiver_stream(receive)));
@@ -72,6 +77,7 @@ impl LfsPayloadCache {
         let (range, body) = lfs.stream_content(oid, size, range, None).await?;
         let body = match cache.begin_lfs_fill(oid, size).await {
             Ok(Some(fill)) => {
+                observe_service_lfs_cache(&path, || fill.root_fingerprint().ok());
                 let (send, receive) = mpsc::channel(1);
                 tokio::spawn(retain(body, fill, size, send));
                 receiver_stream(receive)
@@ -100,7 +106,7 @@ async fn deliver_cached(
     size: u64,
     send: mpsc::Sender<Result<Bytes>>,
     ready: oneshot::Sender<()>,
-    observe: impl FnOnce(),
+    observe: impl FnOnce(&LfsCacheFile),
 ) {
     let session = LfsReadSession::new(proofs);
     let cancel = CancellationToken::new();
@@ -137,8 +143,8 @@ async fn deliver_cached(
     session.close().await;
     match result {
         Ok(Some(tail)) => {
+            observe(&source);
             let _ = source.finish::<LfsError>(Ok(())).await;
-            observe();
             let _ = send.send(Ok(tail)).await;
         }
         Ok(None) => {}

@@ -795,6 +795,8 @@ origin-fill evidence. [Front Door caching documentation](https://learn.microsoft
 
 For Crab Server and the S3 gateway, start the candidate in a dedicated process with
 `RUST_LOG=crab_storage::cdn::transfer=debug,crab_storage::cdn::read_target=debug,crab_storage::cdn::service_build=debug,crab_storage::native_read=debug`.
+For LFS, append `,crab_storage::cdn::service_lfs_cache=debug` to capture the
+actual disk cache root selected for each CDN-enabled read.
 On Cloud CDN, append `,crab_storage::cdn::gcs_viewer_log=trace` to correlate
 each request with Cloud Logging. Redirect stderr to a protected append-only
 file from startup. The worker matches the authenticated read's process to its
@@ -898,14 +900,12 @@ as assembly inputs for the service fixture row.
   the `GIT_SHA` build argument and compile the regular `provider-cdn` feature.
   For source builds, set `GIT_SHA` to the full checked-out revision when
   invoking Cargo. Use `provider-cdn-qualification` for fixture tests.
-  Service Git release verification requires the release profile and rejects
+  Service release verification requires the release profile and rejects
   the qualification feature.
-- Provide the fixture performance summary for service LFS in
-  `observations.json`. Assembly and bundle verification derive
-  `product_action` from the retained records. For service Git, they also
-  derive performance from the regional records described below.
+- Assembly and bundle verification derive `product_action` from the
+  retained lifecycle records and performance from the regional records.
 
-For each service Git pair, run the same commit between the observed
+For each service Git or LFS pair, run the same commit between the observed
 publication and retirement. Use separate fresh service processes for the
 `origin`, `cold_edge`, and `warm_edge` arms. Wait for expiry or invalidate
 only the fixture objects before each cold edge sample. Keep the warm-edge service
@@ -914,15 +914,15 @@ and the same workload and service log. Retain each `client.json`, runner
 `measurement.json`, and provider viewer log proof for the edge arms under
 `git-benchmarks/<location>/<pair>/<arm>/`. The reducer requires a distinct
 service instance for each fresh arm and checks the exact verified Git blob
-and zero edge requests in the local repeat. To validate a service Git
+or LFS object and zero edge requests in the local repeat. To validate a service
 benchmark separately, pass `--service-row` to `collect_cdn_git_performance.py`
 with the row directory holding `service-product/` and `traces/`.
 
-The LFS service worker also accepts `warm_local --primer "$warm_edge_record"`.
-Use the same process, workload and service log for the repeat. It verifies the
-same bytes, ETag, and exact local LFS object key with zero CDN requests. Use
-isolated service cache roots for fresh arms, since the LFS cache is on disk.
-Service LFS still requires regional assembly and release verification.
+For LFS, use a separate disk cache root for the lifecycle edge read and each
+fresh edge arm. Set the gateway's cache directory separately or give Crab
+Server a separate data directory for each process. The cached read and its
+primer must report the same fingerprint of the opened directory. The native
+rollback and prior-export read bypass the LFS cache and report no cache root.
 
 ### Verify native publication and CDN Git fetch
 

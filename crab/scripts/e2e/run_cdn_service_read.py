@@ -31,6 +31,7 @@ from cdn_qualification import (
 
 READ_TARGET = "crab_storage::cdn::read_target"
 SERVICE_BUILD_TARGET = "crab_storage::cdn::service_build"
+LFS_CACHE_TARGET = "crab_storage::cdn::service_lfs_cache"
 SERVICE_WORKLOAD_FIELDS = {
     "schema", "configuration_sha256", "publication_sha256", "endpoint", "repository", "commit",
     "payload_sha256", "payload_bytes", "etag_sha256", "public_export_sha256",
@@ -158,6 +159,25 @@ def service_candidate(startup: list[bytes], consumer: str, instance: str, proven
                                     provenance["source_sha"], provenance["platform"])
 
 
+def service_cache_root(lines: list[bytes], instance: str, lfs_key: str | None, arm: str) -> str:
+    roots = []
+    for line in lines:
+        if LFS_CACHE_TARGET.encode() not in line:
+            continue
+        event = decode(line)
+        if not isinstance(event, dict) or event.get("target") != LFS_CACHE_TARGET:
+            continue
+        observed = fields(event.get("fields"), {"message", "service_instance_sha256", "lfs_key_sha256", "cache_root_sha256"},
+                          "service LFS cache observation")
+        require(observed["message"] == "CDN service LFS cache" and observed["service_instance_sha256"] == instance
+                and observed["lfs_key_sha256"] == lfs_key and matches(SHA256, observed["cache_root_sha256"]),
+                "service LFS cache observation does not match the selected process and object")
+        roots.append(observed["cache_root_sha256"])
+    active = lfs_key is not None and arm in ("edge", "warm_local")
+    require(len(roots) == int(active), "service LFS read must prove its selected disk cache only for CDN-enabled arms")
+    return roots[0] if active else ""
+
+
 def service_publication(path: Path, provenance: dict, approved: dict) -> tuple[bytes, dict, str]:
     raw = read_git_record(path)
     digest = hashlib.sha256(raw).hexdigest()
@@ -265,6 +285,9 @@ def probe(args: argparse.Namespace) -> dict:
         "started_at_unix_ms": start, "finished_at_unix_ms": finish, "elapsed_ms": elapsed,
         "native_traffic": native, "edge_responses": responses,
     }
+    cache_root = service_cache_root(lines, instance, lfs_key, args.arm)
+    if lfs_key is not None:
+        record["cache_root_sha256"] = cache_root
     if primer is not None:
         record["primer_sha256"] = hashlib.sha256(primer_raw).hexdigest()
         verify_service_repeat(record, primer, record["primer_sha256"])

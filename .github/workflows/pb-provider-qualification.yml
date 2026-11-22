@@ -63,6 +63,9 @@ on:
       - "crates/crab-lfs/tests/cdn_observation.rs"
       - "crates/crab-cache-store/Cargo.toml"
       - "crates/crab-cache-store/src/lfs.rs"
+      - "crates/crab-cache/src/local_cache/lfs_file.rs"
+      - "crates/crab-cache/src/private_fs.rs"
+      - "crates/crab-cache/src/private_fs/windows.rs"
       - "crates/crab-auth/src/crab_auth_client.rs"
       - "crates/crab-auth-store/src/managed_repository.rs"
       - "crates/crab-sdk/Cargo.toml"
@@ -147,6 +150,9 @@ on:
       - "crates/crab-lfs/tests/cdn_observation.rs"
       - "crates/crab-cache-store/Cargo.toml"
       - "crates/crab-cache-store/src/lfs.rs"
+      - "crates/crab-cache/src/local_cache/lfs_file.rs"
+      - "crates/crab-cache/src/private_fs.rs"
+      - "crates/crab-cache/src/private_fs/windows.rs"
       - "crates/crab-auth/src/crab_auth_client.rs"
       - "crates/crab-auth-store/src/managed_repository.rs"
       - "crates/crab-sdk/Cargo.toml"
@@ -252,6 +258,8 @@ jobs:
           cargo test --locked -p crab-sdk --features local,service --example cdn-sdk-read
           cargo test --locked -p crab-lfs --test cdn_observation
           cargo test --locked -p crab-lfs --test cdn_observation --features crab-storage/provider-cdn-qualification
+          cargo test --locked -p crab-cache --lib --features local-cache \
+            lfs_read_and_reservation_report_the_same_physical_root
 
       - name: Set up repository frontend toolchain
         uses: actions/setup-node@v4

@@ -29,7 +29,9 @@ pub use policy::{
 #[cfg(any(test, feature = "test-support"))]
 pub use publication::write_publication_fixture;
 pub(crate) use telemetry::PublicTransitionObservation;
-pub use telemetry::{PayloadObservation, is_read_evidence_target, observe_service_build};
+pub use telemetry::{
+    PayloadObservation, is_read_evidence_target, observe_service_build, observe_service_lfs_cache,
+};
 
 use crate::{
     Result, StorageError, StorageProviderKind, Store,
