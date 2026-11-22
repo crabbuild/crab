@@ -3640,6 +3640,22 @@ result for the matching Crab head.
 [GitHub webhook signatures](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries)
 · [GitHub workflow triggers](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request)
 
+#### Inspect accepted workflow deliveries
+
+In **Settings → Integrations**, select **Recent deliveries** for a connected
+workflow. Repository administrators can see its latest 50 accepted reports,
+newest first. Each entry shows the receipt ID, Crab commit, GitHub run and
+attempt, and whether the report changed the check. A report that already
+matches the stored check or arrives after a newer result is marked **Check
+unchanged**. Sending the same receipt again leaves one entry.
+
+`GET /api/repos/{owner}/{name}/settings/integrations/{connection}/deliveries`
+returns the same summaries. History starts with reports accepted after all
+serving peers receive this update. It omits unrelated workflow events and
+rejected requests. Use the GitHub App's delivery log to diagnose or retry a
+failed request. Secret rotation retains history, and disconnecting deletes the
+connection's history. [GitHub App delivery log](https://docs.github.com/en/webhooks/testing-and-troubleshooting-webhooks/viewing-webhook-deliveries#viewing-webhook-deliveries-for-github-apps)
+
 #### Start GitHub Actions for a merge queue candidate
 
 An operator configures a GitHub App with **Actions: Read and write**, installs it

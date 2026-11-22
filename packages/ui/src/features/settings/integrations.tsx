@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Field, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { endpoint, useRequest, type Repository } from "@/lib/api";
+import { IntegrationDeliveries } from "./integration-deliveries";
 
 export interface Connection {
   id: string;
@@ -233,6 +234,10 @@ export function IntegrationSettings({
                         )}
                       </div>
                       <div className="flex flex-wrap gap-2">
+                        <IntegrationDeliveries
+                          repo={repo}
+                          connection={connection}
+                        />
                         {(dispatch_available || connection.dispatch) &&
                           !repo.archived && (
                             <Button

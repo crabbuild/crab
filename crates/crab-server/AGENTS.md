@@ -84,8 +84,9 @@ versioned opt-in, and transactional email queue. `server/email.rs` rechecks
 current delivery authority and sends generic inbox links with durable
 provider idempotency keys.
 `cells/repository/integrations.rs` owns GitHub Actions connections, delivery
-receipts and workflow attempt ordering. It reads active providers and their
-exact-commit results from one snapshot for merge admission. `api/integrations/`
+receipts, bounded accepted-delivery history, and workflow attempt ordering. It
+reads active providers and their exact-commit results from one snapshot for merge
+admission. `api/integrations/`
 owns signed GitHub deliveries, operator-bound workflow dispatch, and scoped Git
 checkout. Dispatch reservations and run binding live in
 `cells/repository/integrations/dispatches.rs`.

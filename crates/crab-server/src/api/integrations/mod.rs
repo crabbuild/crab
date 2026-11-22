@@ -9,13 +9,15 @@ use axum::{
     routing::{get, post},
 };
 use hmac::{Hmac, Mac};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::Sha256;
 use uuid::Uuid;
 
 use super::{
-    checks::{CheckConclusion, CheckStatus, conclusion_code, status_code},
+    checks::{
+        CheckConclusion, CheckStatus, check_conclusion, check_status, conclusion_code, status_code,
+    },
     pulls, statuses,
 };
 use crate::{
@@ -39,6 +41,10 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .route(
             "/api/repos/{owner}/{name}/settings/integrations",
             get(settings).post(edit).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/api/repos/{owner}/{name}/settings/integrations/{connection}/deliveries",
+            get(delivery_history),
         )
         .route(
             "/webhooks/github-actions/{repository}/{connection}",
@@ -186,6 +192,58 @@ async fn settings(
     Ok(Json(
         json!({"available": shared_key(&server).is_some(), "dispatch_available": dispatch_available, "items":items}),
     ))
+}
+
+#[derive(Serialize)]
+struct DeliveryView {
+    id: Uuid,
+    received_at_ms: u64,
+    oid: String,
+    run_number: u64,
+    attempt: u64,
+    status: CheckStatus,
+    conclusion: Option<CheckConclusion>,
+    details_url: Option<String>,
+    updated_check: bool,
+}
+
+async fn delivery_history(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((owner, name, connection)): Path<(String, String, Uuid)>,
+) -> Result<Json<Vec<DeliveryView>>> {
+    let repo = admin(&server, &principal, &(owner, name))?;
+    let cell = app::repository_cell(&server, &repo)?;
+    let recent = app::query_output(
+        cell.client
+            .query::<stored::DeliveryHistory>(cell.target, None, connection)
+            .await,
+    )?
+    .ok_or(Error::NotFound)?;
+    if !app::membership(&server, &principal, &repo)
+        .await?
+        .principal
+        .can_admin(repo.id)
+    {
+        return Err(Error::NotFound);
+    }
+    let items = recent
+        .into_iter()
+        .map(|row| {
+            Ok(DeliveryView {
+                id: row.id,
+                received_at_ms: row.received_at_ms,
+                oid: row.oid,
+                run_number: row.run_number,
+                attempt: row.attempt,
+                status: check_status(row.status)?,
+                conclusion: row.conclusion.map(check_conclusion).transpose()?,
+                details_url: row.details_url,
+                updated_check: row.updated_check,
+            })
+        })
+        .collect::<Result<_>>()?;
+    Ok(Json(items))
 }
 
 fn shared_key(server: &Server) -> Option<&[u8; 32]> {
@@ -369,13 +427,10 @@ fn run_url(repo: &GitHubRepository, id: u64) -> Result<String> {
         .full_name
         .split_once('/')
         .ok_or(Error::Invalid("Invalid GitHub repository name"))?;
-    if [owner, name].iter().any(|part| {
-        part.is_empty()
-            || matches!(*part, "." | "..")
-            || !part
-                .bytes()
-                .all(|ch| ch.is_ascii_alphanumeric() || b"_.-".contains(&ch))
-    }) {
+    if ![owner, name]
+        .into_iter()
+        .all(crate::config::valid_repository_component)
+    {
         return Err(Error::Invalid("Invalid GitHub repository name"));
     }
     Ok(format!(

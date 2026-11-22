@@ -27,7 +27,34 @@ test("a workflow can be connected, required by a branch, rotated, and disconnect
     | undefined;
   let loseSetupReply = true;
   let reported = false;
+  let delivered = false;
   const actionsUrl = "https://github.com/example/mirror/actions/runs/789";
+  await page.route(
+    (url) => url.pathname.endsWith("/deliveries"),
+    (route) => {
+      expect(route.request().headers()["x-crab-repository-id"]).toBe(
+        lifecycle.repositoryId,
+      );
+      expect(route.request().url()).toContain(`/${connection?.id}/deliveries`);
+      return route.fulfill({
+        json: delivered
+          ? [
+              {
+                id: "01900000-0000-7000-8000-000000000101",
+                received_at_ms: 1770000000000,
+                oid: pull().head_oid,
+                run_number: 10,
+                attempt: 2,
+                status: "completed",
+                conclusion: "success",
+                details_url: actionsUrl,
+                updated_check: true,
+              },
+            ]
+          : [],
+      });
+    },
+  );
   await page.route("**/api/session", (route) =>
     route.fulfill({
       json: {
@@ -233,6 +260,28 @@ test("a workflow can be connected, required by a branch, rotated, and disconnect
   await expect(page.getByLabel("Webhook secret", { exact: true })).toHaveCount(
     0,
   );
+  const deliveries = page.getByRole("button", {
+    name: "Recent deliveries for ci/test",
+  });
+  await deliveries.click();
+  const history = page.getByRole("dialog", { name: "Recent deliveries" });
+  await expect(history.getByText("No accepted deliveries yet.")).toBeVisible();
+  delivered = true;
+  await history.getByRole("button", { name: "Refresh deliveries" }).click();
+  await expect(history.getByText("Run #10 · Attempt 2")).toBeVisible();
+  await expect(history.getByText("Check updated")).toBeVisible();
+  await expect(
+    history.getByRole("link", { name: pull().head_oid }),
+  ).toHaveAttribute(
+    "href",
+    `/team/project/commit/${pull().head_oid}?repository_id=${lifecycle.repositoryId}`,
+  );
+  await expect(
+    history.getByRole("link", { name: "Open GitHub Actions run" }),
+  ).toHaveAttribute("href", actionsUrl);
+  await expectNoAccessibilityViolations(page);
+  await page.keyboard.press("Escape");
+  await expect(deliveries).toBeFocused();
   await page.getByRole("button", { name: "Set up queue dispatch" }).click();
   const dispatch = page.getByRole("form", { name: "Automatic queue dispatch" });
   await dispatch

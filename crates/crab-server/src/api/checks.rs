@@ -761,7 +761,7 @@ pub(super) fn status_code(status: CheckStatus) -> u8 {
     }
 }
 
-fn check_status(status: u8) -> Result<CheckStatus> {
+pub(super) fn check_status(status: u8) -> Result<CheckStatus> {
     match status {
         0 => Ok(CheckStatus::Queued),
         1 => Ok(CheckStatus::InProgress),
@@ -782,7 +782,7 @@ pub(super) fn conclusion_code(conclusion: CheckConclusion) -> u8 {
     }
 }
 
-fn check_conclusion(conclusion: u8) -> Result<CheckConclusion> {
+pub(super) fn check_conclusion(conclusion: u8) -> Result<CheckConclusion> {
     match conclusion {
         0 => Ok(CheckConclusion::ActionRequired),
         1 => Ok(CheckConclusion::Cancelled),

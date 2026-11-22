@@ -7,6 +7,7 @@ pub(crate) mod dispatches;
 const ISSUER: &str = "urn:crab:integration:github-actions";
 const ACTIVE: &str = "ci/v1/connections";
 const MAX_CONNECTIONS: usize = 16;
+const DELIVERY_HISTORY_LIMIT: usize = 50;
 
 pub(crate) fn github_connection(issuer: &str, subject: &str) -> Option<Uuid> {
     (issuer == ISSUER)
@@ -214,6 +215,7 @@ impl Mutation for Edit {
                     return Ok(Rejected(Changed::Conflict));
                 }
                 context.put_document(&revoked(id), &true)?;
+                context.delete_document(&history_key(id))?;
                 rows.remove(index);
                 Changed::Disconnected
             }
@@ -259,6 +261,41 @@ impl Read for Receipt {
         Ok(context
             .document::<[u8; 32]>(&input.key())?
             .map(|digest| digest == input.digest))
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DeliverySummary {
+    pub id: Uuid,
+    pub received_at_ms: u64,
+    pub oid: String,
+    pub run_number: u64,
+    pub attempt: u64,
+    pub status: u8,
+    pub conclusion: Option<u8>,
+    pub details_url: Option<String>,
+    pub updated_check: bool,
+}
+
+fn history_key(connection: Uuid) -> String {
+    format!("ci/v1/delivery-history/{connection}")
+}
+
+pub(crate) struct DeliveryHistory;
+impl Read for DeliveryHistory {
+    const CLASS: &'static str = CLASS;
+    const ID: u32 = 429;
+    type Input = Uuid;
+    type Output = Option<Vec<DeliverySummary>>;
+
+    fn execute(context: &mut Transaction<'_>, id: Uuid) -> crate::cells::Result<Self::Output> {
+        if !connections(context)?.iter().any(|row| row.id == id) {
+            return Ok(None);
+        }
+        Ok(Some(
+            context.document(&history_key(id))?.unwrap_or_default(),
+        ))
     }
 }
 
@@ -465,6 +502,17 @@ impl Mutation for Record {
         // an older attempt to replace the result used by branch protection.
         let stale = current.as_ref().is_some_and(|row| row.order > order)
             || same_run.is_some_and(|row| row.status >= input.report.status);
+        let summary = DeliverySummary {
+            id: input.delivery.id,
+            received_at_ms: timestamp(context.now_ms())?,
+            oid: input.oid.clone(),
+            run_number: input.run_number,
+            attempt: input.attempt,
+            status: input.report.status,
+            conclusion: input.report.conclusion,
+            details_url: input.report.details_url.clone(),
+            updated_check: !stale,
+        };
         if !stale {
             let cursor = Cursor {
                 run_id: input.run_id,
@@ -530,6 +578,13 @@ impl Mutation for Record {
                 },
             )?;
         }
+        // History, the check and the deduplication receipt commit together.
+        // Trimming history does not drop an old delivery's receipt.
+        let history = history_key(id);
+        let mut recent: Vec<DeliverySummary> = context.document(&history)?.unwrap_or_default();
+        recent.truncate(DELIVERY_HISTORY_LIMIT - 1);
+        recent.insert(0, summary);
+        context.put_document(&history, &recent)?;
         context.put_document(&receipt, &input.delivery.digest)?;
         Ok(Success(Reported::Recorded))
     }

@@ -417,6 +417,9 @@ pub(in crate::cells) fn dispatch_read(
             invoke_read::<integrations::dispatches::Get>(context, input)
         }
         integrations::Receipt::ID => invoke_read::<integrations::Receipt>(context, input),
+        integrations::DeliveryHistory::ID => {
+            invoke_read::<integrations::DeliveryHistory>(context, input)
+        }
         integrations::ReadRequirements::ID => {
             invoke_read::<integrations::ReadRequirements>(context, input)
         }
