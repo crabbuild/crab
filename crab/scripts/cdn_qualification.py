@@ -134,7 +134,8 @@ SERVICE_READ_ACTION = "service-http-read"
 SERVICE_PUBLIC_PRIOR_RECORD = "before-export.json"
 SERVICE_PAYLOAD_LIMIT = 512 * 1024 * 1024
 SERVICE_WORKLOAD_REGISTRATION_FIELDS = {"sha256", "origin_sha256", "prefix_sha256", "etag_sha256", "payload_bytes"}
-SDK_PRIOR_EXPORT_RECORD = "before-export.json"
+GIT_PRIOR_EXPORT_RECORD = "before-export.json"
+DESKTOP_READ_RECORD = "read.json"
 SDK_CLONE_FILES = {"edge": "clone-edge.json", "origin": "clone-origin.json"}
 SDK_FETCH_FILES = {"edge": "fetch-edge.json", "origin": "fetch-origin.json"}
 SDK_WORKTREE_VIEWER_FILES = {"clone": "clone-viewer-requests.json", "fetch": "fetch-viewer-requests.json"}
@@ -529,6 +530,7 @@ def verify_public_transition(
             and all(trace[key] == report[key] for key in CDN_PROVENANCE_FIELDS | {"platform"}),
             "public export transition does not match the release row and workflow attempt")
     sdk = is_direct_sdk_git_scope(report["scope"])
+    desktop = requires_desktop_workload(report["scope"], registration.get("workload"))
     service = is_direct_service_scope(report["scope"])
     previous_approval = registration["previous_publication_sha256"]
     previous, previous_entries, previous_seal = verified_publication(directory / PUBLIC_EXPORT_DIR / PUBLIC_EXPORT_BEFORE,
@@ -563,7 +565,7 @@ def verify_public_transition(
     records = {"action", "receipt_sha256", "key_sha256", "reference_sha256", "result_sha256", "result_bytes",
                "started_at_unix_ms", "finished_at_unix_ms", "edge_attempts", "verified_edge_key_sha256", "binding_active"}
     cli_workload = requires_cli_workload(report["scope"])
-    if cli_workload or sdk or service:
+    if cli_workload or sdk or desktop or service:
         records.add("reader")
     product = report["product_action"]
     if family == "lfs":
@@ -607,9 +609,9 @@ def verify_public_transition(
                 "the public transition changed the selected native target")
         require(before["reader"]["cache_root_sha256"] != after["reader"]["cache_root_sha256"],
                 "the public transition reused the native-only fetch cache")
-    elif sdk:
-        measured = derive_sdk_public_transition(directory / GIT_PRODUCT_DIR, report, registration)
-        require(trace == measured, "public transition differs from the retained SDK snapshot reads")
+    elif sdk or desktop:
+        measured = derive_git_blob_public_transition(directory / GIT_PRODUCT_DIR, report, registration)
+        require(trace == measured, f"public transition differs from the retained {'desktop' if desktop else 'SDK snapshot'} reads")
     elif service:
         measured = derive_service_public_transition(directory / SERVICE_PRODUCT_DIR, report, registration)
         require(trace == measured, "public transition differs from the retained service reads")
@@ -751,6 +753,7 @@ def verify_check_evidence(
         )
         if name == "rollback" and (requires_cli_workload(report["scope"]) or is_direct_sdk_git_scope(report["scope"])
                                    or is_direct_sdk_hydration_scope(report["scope"])
+                                   or requires_desktop_workload(report["scope"], registration.get("workload"))
                                    or is_direct_service_scope(report["scope"])):
             rollback = raw
             continue
@@ -1144,7 +1147,7 @@ def benchmark_registration(registration: Any) -> dict[str, Any]:
                     "private SDK benchmark needs the approved issuer binding")
     # A transport canary can report a fixture summary. Only the desktop
     # product workload can feed the regional raw evidence collector.
-    if is_direct_desktop_git_scope(registration["scope"]) and registration.get("workload") == DESKTOP_GIT_ACTION:
+    if requires_desktop_workload(registration["scope"], registration.get("workload")):
         expected.update(("candidate", "desktop_candidate", "desktop_native_target", "viewer_binding_sha256"))
         verify_read_candidate(registration.get("candidate"), registration.get("source_sha"))
         verify_read_candidate(registration.get("desktop_candidate"), registration.get("source_sha"), consumer="desktop sidecar")
@@ -1271,6 +1274,10 @@ def is_direct_sdk_git_scope(scope: str) -> bool:
 
 def is_direct_desktop_git_scope(scope: str) -> bool:
     return scope_parts(scope)[2:] == ("desktop", "git", "direct")
+
+
+def requires_desktop_workload(scope: str, workload: Any) -> bool:
+    return workload == DESKTOP_GIT_ACTION and is_direct_desktop_git_scope(scope)
 
 
 def is_direct_sdk_hydration_scope(scope: str) -> bool:
@@ -1432,12 +1439,19 @@ def verify_git_traffic(client: dict[str, Any], edge: str, label: str) -> None:
 def validate_desktop_git_read(value: Any, scope: str, arm: str) -> dict[str, Any]:
     edge, access, _, _, _ = scope_parts(scope)
     expected = DESKTOP_GIT_READ_FIELDS | ({"primer_sha256"} if arm == "warm_local" else set())
+    transition = isinstance(value, dict) and "transition_key_sha256" in value
+    if transition:
+        expected.add("transition_key_sha256")
     client = fields(value, expected, "desktop Git read")
-    require(is_direct_desktop_git_scope(scope) and client["scope"] == scope and arm in ("edge", "origin", "warm_local")
+    require(is_direct_desktop_git_scope(scope) and client["scope"] == scope
+            and (arm in ("edge", "origin", "warm_local") or (arm == "prior_export" and transition))
             and client["schema"] == "crab.cdn-desktop-git-read/v1" and client["arm"] == arm
             and matches(COMMIT, client["source_sha"]) and matches(LABEL, client["platform"])
             and all(matches(RUN_NUMBER, client[key]) for key in ("workflow_run_id", "workflow_run_attempt")),
             "desktop Git read has mismatched product or workflow provenance")
+    if transition:
+        require(access == "public" and arm in ("edge", "prior_export") and matches(SHA256, client["transition_key_sha256"]),
+                "desktop transition needs the exact public pack-layer fingerprint")
     verify_read_candidate(client["candidate"], client["source_sha"], client["platform"], consumer="desktop sidecar")
     require(matches(GIT_OID, client["commit"]) and type(client["bytes"]) is int and client["bytes"] == GIT_PAYLOAD_SIZE
             and all(matches(SHA256, client[key]) for key in (
@@ -1464,24 +1478,27 @@ def validate_desktop_git_read(value: Any, scope: str, arm: str) -> dict[str, Any
                 "desktop edge read requires verified Git delivery and a fingerprint for every viewer attempt")
     else:
         native = client["native_traffic"]
-        require(reader["binding_sha256"] == reader["public_export_sha256"] == client["approval_sha256"] == ""
-                and all(client[key] == 0 for key in PRODUCT_COUNTERS)
+        require(arm == "prior_export"
+                or reader["binding_sha256"] == reader["public_export_sha256"] == client["approval_sha256"] == "",
+                "desktop origin control requires the withdrawn binding")
+        require(all(client[key] == 0 for key in PRODUCT_COUNTERS)
                 and positive(native["get_responses"]) and positive(native["body_bytes"]),
-                "desktop origin control requires native payload reads without edge or cached payload activity")
+                "desktop native control requires native payload reads without edge or cached payload activity")
     return client
 
 
-def verify_desktop_benchmark_read(raw: bytes, provenance: dict[str, Any], spec: dict[str, Any], arm: str) -> dict[str, Any]:
+def verify_desktop_git_read(raw: bytes, provenance: dict[str, Any], spec: dict[str, Any], arm: str) -> dict[str, Any]:
     client = validate_desktop_git_read(decode(raw), spec["scope"], arm)
     require(all(client[key] == provenance[key] for key in CDN_PROVENANCE_FIELDS | {"platform"})
             and client["candidate"] == spec["desktop_candidate"],
-            "desktop benchmark did not run the registered desktop build for this workflow")
+            "desktop read did not run the registered desktop build for this workflow")
     binding = "" if arm == "origin" else spec["viewer_binding_sha256"]
-    export = "" if arm == "origin" else spec.get("publication_sha256", "")
+    export_key = "previous_publication_sha256" if arm == "prior_export" else "publication_sha256"
+    export = "" if arm == "origin" else spec.get(export_key, "")
     approval = "" if arm == "origin" else spec.get("viewer_approval_sha256", export)
     reader = spec["desktop_native_target"] | {"binding_sha256": binding, "public_export_sha256": export}
     require(client["reader"] == reader
-            and client["approval_sha256"] == approval, "desktop benchmark changed its registered target or viewer approval")
+            and client["approval_sha256"] == approval, "desktop read changed its registered target or viewer approval")
     return client
 
 
@@ -2153,8 +2170,8 @@ def collect_sdk_product_action(
     earliest = edge
     retained["retirement.json"] = retirement_raw
     if access == "public":
-        prior_raw = read_git_record(inputs / SDK_PRIOR_EXPORT_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
-        retained[SDK_PRIOR_EXPORT_RECORD] = prior_raw
+        prior_raw = read_git_record(inputs / GIT_PRIOR_EXPORT_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
+        retained[GIT_PRIOR_EXPORT_RECORD] = prior_raw
         earliest = verify_sdk_git_read(prior_raw, row, spec, "prior_export")
     verify_git_lifecycle(native_records, row, publication, receipt, earliest["started_at_unix_ms"], earliest["reader"],
                          retired_at, cleanup_at, native_origin_sha256)
@@ -2171,25 +2188,90 @@ def collect_sdk_product_action(
     }, viewer_ids
 
 
-def derive_sdk_public_transition(inputs: Path, row: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
+class DesktopProductEvidence(NamedTuple):
+    action: dict[str, Any]
+    viewer_ids: set[str]
+    cache_roots: set[str]
+    commit: str
+    cleanup_at: int
+    export_ready_at: int
+
+
+def collect_desktop_product_action(
+    inputs: Path, row: dict[str, Any], spec: dict[str, Any], rollback_raw: bytes,
+    *, cleanup_at: int, native_origin_sha256: str, retain: Path | None = None,
+) -> DesktopProductEvidence:
+    provider_edge, access, _, _, _ = scope_parts(row["scope"])
+    files = ("publication.json", "retirement.json", *GIT_NATIVE_REF_FILES.values())
+    retained = {name: read_git_record(inputs / name) for name in files}
+    publication_raw = retained["publication.json"]
+    publication = validate_git_publication(publication_raw, row)
+    require(publication["published"] and publication["candidate"] == spec["candidate"],
+            "desktop product read requires a ref confirmed by the registered native writer")
+    receipt = hashlib.sha256(publication_raw).hexdigest()
+    for name in (DESKTOP_READ_RECORD, PRODUCT_VIEWER_RECORD):
+        retained[name] = read_git_record(inputs / name, limit=GIT_FETCH_RECORD_LIMIT)
+    edge_raw = retained[DESKTOP_READ_RECORD]
+    edge = verify_desktop_git_read(edge_raw, row, spec, "edge")
+    native = verify_desktop_git_read(rollback_raw, row, spec, "origin")
+    reads = [edge, native]
+    earliest = edge
+    export_ready_at = 0
+    if access == "public":
+        _, _, export_ready_at = verified_publication(inputs.parent / PUBLIC_EXPORT_DIR, spec["publication_sha256"])
+        prior_raw = read_git_record(inputs / GIT_PRIOR_EXPORT_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
+        retained[GIT_PRIOR_EXPORT_RECORD] = prior_raw
+        earliest = verify_desktop_git_read(prior_raw, row, spec, "prior_export")
+        reads.insert(0, earliest)
+    require(all(read["publication_sha256"] == receipt and read["commit"] == publication["oid"]
+                and read["sha256"] == publication["sha256"] and read["git_blob_oid_sha256"] == edge["git_blob_oid_sha256"]
+                for read in reads), "desktop product reads must verify the same published Git blob")
+    roots = {read["cache_root_sha256"] for read in reads}
+    require(len(roots) == len(reads) and all(left["finished_at_unix_ms"] <= right["started_at_unix_ms"]
+                                           for left, right in zip(reads, reads[1:])),
+            "desktop product reads must run in order with fresh caches")
+    viewers = verify_product_viewer_requests(retained[PRODUCT_VIEWER_RECORD], edge, edge_raw, provider_edge)
+    retired_at = verify_git_retirement(retained["retirement.json"], row, receipt, spec["candidate"], native["finished_at_unix_ms"])
+    native_records = {phase: retained[name] for phase, name in GIT_NATIVE_REF_FILES.items()}
+    verify_git_lifecycle(native_records, row, publication, receipt, earliest["started_at_unix_ms"], earliest["reader"],
+                         retired_at, cleanup_at, native_origin_sha256)
+    if retain is not None:
+        retain.mkdir()
+        for name, raw in retained.items():
+            (retain / name).write_bytes(raw)
+    action = {
+        "name": DESKTOP_GIT_ACTION, "expected_sha256": publication["sha256"], "observed_sha256": edge["sha256"],
+        "expected_bytes": GIT_PAYLOAD_SIZE, "observed_bytes": edge["bytes"],
+        "native_writes": 1, "visible_new_ref": True, "fixture_cleanup_verified": True,
+        "observed_edge_gets": edge["observed_edge_gets"], "verified_edge_payloads": edge["verified_edge_payloads"],
+    }
+    return DesktopProductEvidence(action, viewers, roots, publication["oid"], cleanup_at, export_ready_at)
+
+
+def derive_git_blob_public_transition(inputs: Path, row: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
+    desktop = is_direct_desktop_git_scope(row["scope"])
+    read_record = DESKTOP_READ_RECORD if desktop else "snapshot.json"
+    verify_read = verify_desktop_git_read if desktop else verify_sdk_git_read
+    consumer = "desktop" if desktop else "SDK"
+    action = DESKTOP_GIT_ACTION if desktop else SDK_GIT_ACTION
     publication_raw = read_git_record(inputs / "publication.json")
     publication = validate_git_publication(publication_raw, row)
     digest = hashlib.sha256(publication_raw).hexdigest()
-    prior_raw = read_git_record(inputs / SDK_PRIOR_EXPORT_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
-    edge_raw = read_git_record(inputs / "snapshot.json", limit=GIT_FETCH_RECORD_LIMIT)
-    prior = verify_sdk_git_read(prior_raw, row, spec, "prior_export")
-    edge = verify_sdk_git_read(edge_raw, row, spec, "edge")
+    prior_raw = read_git_record(inputs / GIT_PRIOR_EXPORT_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
+    edge_raw = read_git_record(inputs / read_record, limit=GIT_FETCH_RECORD_LIMIT)
+    prior = verify_read(prior_raw, row, spec, "prior_export")
+    edge = verify_read(edge_raw, row, spec, "edge")
     key = prior["transition_key_sha256"]
-    require(key == edge.get("transition_key_sha256"), "SDK export transition did not verify the same pack-layer key")
+    require(key == edge.get("transition_key_sha256"), f"{consumer} export transition did not verify the same pack-layer key")
     viewer_raw = read_git_record(inputs / PRODUCT_VIEWER_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
     verify_viewer_requests(decode(viewer_raw), edge, hashlib.sha256(edge_raw).hexdigest(), scope_parts(row["scope"])[0])
     require(publication["published"] and
             all(read["publication_sha256"] == digest and read["commit"] == publication["oid"]
                 and read["sha256"] == publication["sha256"] for read in (prior, edge))
             and prior["git_blob_oid_sha256"] == edge["git_blob_oid_sha256"],
-            "SDK export transition did not verify the same published Git blob")
+            f"{consumer} export transition did not verify the same published Git blob")
     require(all(prior["reader"][field] == edge["reader"][field] for field in CLI_NATIVE_FIELDS),
-            "SDK export transition changed the selected native target")
+            f"{consumer} export transition changed the selected native target")
     reference = deployment_component_digest({"ref": publication["ref"], "oid": publication["oid"]})
     trace = {field: row[field] for field in CDN_PROVENANCE_FIELDS | {"platform"}} | {
         "schema": "crab.cdn-public-transition/v1", "key_sha256": key,
@@ -2197,7 +2279,7 @@ def derive_sdk_public_transition(inputs: Path, row: dict[str, Any], spec: dict[s
     }
     for phase, read in (("before", prior), ("after", edge)):
         trace[phase] = {
-            "action": SDK_GIT_ACTION, "receipt_sha256": read["approval_sha256"], "key_sha256": key,
+            "action": action, "receipt_sha256": read["approval_sha256"], "key_sha256": key,
             "reference_sha256": reference, "result_sha256": read["sha256"], "result_bytes": read["bytes"],
             "started_at_unix_ms": read["started_at_unix_ms"], "finished_at_unix_ms": read["finished_at_unix_ms"],
             "edge_attempts": read["all_edge_attempts"], "binding_active": True, "reader": read["reader"],
@@ -2257,13 +2339,14 @@ def collect_git_performance(
     *, retain: Path | None = None, native_target: dict[str, str] | None = None,
     verify_hydration: Callable[[bytes, str], dict[str, Any]] | None = None,
     service_row: Path | None = None, product_request_ids: set[str] | None = None,
+    desktop_product: DesktopProductEvidence | None = None,
 ) -> dict[str, Any]:
     spec = benchmark_registration(registration)
     scope = spec["scope"]
     hydration = is_direct_sdk_hydration_scope(scope)
     require(hydration == (verify_hydration is not None), "SDK hydration benchmarks require verified publication and placement")
     sdk = is_direct_sdk_git_scope(scope)
-    desktop = is_direct_desktop_git_scope(scope) and spec["workload"] == DESKTOP_GIT_ACTION
+    desktop = requires_desktop_workload(scope, spec["workload"])
     service = is_direct_service_scope(scope)
     cli_workload = requires_cli_workload(scope)
     require(service == (service_row is not None), "service benchmarks require the retained lifecycle row")
@@ -2291,6 +2374,11 @@ def collect_git_performance(
     provider_request_ids = set(product_request_ids or ())
     cache_roots = set()
     desktop_commits = set()
+    if desktop_product is not None:
+        require(desktop, "desktop product evidence requires a desktop benchmark")
+        provider_request_ids.update(desktop_product.viewer_ids)
+        cache_roots.update(desktop_product.cache_roots)
+        desktop_commits.add(desktop_product.commit)
     published_at, retired_at, export_ready_at = 0, 0, 0
     if service_row is not None:
         require(inputs.is_dir(), "direct service reads require retained regional benchmark records")
@@ -2382,7 +2470,12 @@ def collect_git_performance(
                     payload = (client["commit"], client["sha256"], client["git_blob_oid_sha256"])
                     receipt = client["publication_sha256"]
                 elif desktop:
-                    client = verify_desktop_benchmark_read(client_raw, provenance, spec, GIT_MODES[arm])
+                    client = verify_desktop_git_read(client_raw, provenance, spec, GIT_MODES[arm])
+                    require("transition_key_sha256" not in client, f"{label} reused a desktop public transition read")
+                    if desktop_product is not None:
+                        require(client["finished_at_unix_ms"] <= desktop_product.cleanup_at
+                                and (arm == "origin" or desktop_product.export_ready_at <= client["started_at_unix_ms"]),
+                                f"{label} ran outside the desktop fixture lifetime")
                     reader = client["reader"]
                     cache_root = client["cache_root_sha256"]
                     if arm == "warm_local":
@@ -2569,11 +2662,15 @@ def verify_cdn_report(
     cli_workload = requires_cli_workload(scope)
     sdk_git = is_direct_sdk_git_scope(scope)
     sdk_hydration = is_direct_sdk_hydration_scope(scope)
+    desktop = requires_desktop_workload(scope, registration.get("workload"))
     service = is_direct_service_scope(scope)
-    require(policy is None or cli_workload or sdk_git or sdk_hydration or service,
+    require(policy is None or cli_workload or sdk_git or sdk_hydration or desktop or service,
             "CDN promotion requires a product-specific workload and per-run regional evidence verifier")
-    if cli_workload:
+    if cli_workload or desktop:
         verify_read_candidate(registration.get("candidate"), source_sha, platform, policy=policy)
+    if desktop:
+        verify_read_candidate(registration.get("desktop_candidate"), source_sha, platform,
+                              policy=policy, consumer="desktop sidecar")
     if sdk_git or sdk_hydration:
         verify_sdk_candidate(registration.get("sdk_candidate"), source_sha, platform, policy=policy)
     if service:
@@ -2585,7 +2682,7 @@ def verify_cdn_report(
     checks, cleanup_at, native_origin_sha256, rollback = verify_check_evidence(
         row, edge, access, profile, directory, registration=registration,
     )
-    if cli_workload or sdk_git:
+    if cli_workload or sdk_git or desktop:
         native_target = {"origin_sha256": native_origin_sha256,
                          "prefix_sha256": hashlib.sha256(f"{row['fixture_prefix']}/".encode()).hexdigest()}
     if cli_workload:
@@ -2617,6 +2714,14 @@ def verify_cdn_report(
         )
         require(row["product_action"] == product, "product action differs from the retained SDK hydration evidence")
         require(row["performance"] == measured, "SDK hydration performance summary differs from the retained measurements")
+    if desktop:
+        require(rollback is not None, "direct desktop qualification requires an ordinary desktop rollback read")
+        product = collect_desktop_product_action(directory / GIT_PRODUCT_DIR, row, registration, rollback,
+                                                 cleanup_at=cleanup_at, native_origin_sha256=native_origin_sha256)
+        require(row["product_action"] == product.action, "product action differs from the retained desktop read evidence")
+        measured = collect_git_performance(directory / GIT_BENCHMARK_DIR, registration, platform, run_id, run_attempt,
+                                          native_target=native_target, desktop_product=product)
+        require(measured == row["performance"], "desktop performance summary differs from the retained measurements")
     if service:
         require(rollback is not None, "direct service qualification requires an ordinary HTTP rollback read")
         product = collect_service_product_action(directory / SERVICE_PRODUCT_DIR, row, registration, rollback,

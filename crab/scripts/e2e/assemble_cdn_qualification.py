@@ -17,12 +17,12 @@ from cdn_qualification import (  # noqa: E402
     CDN_PROVENANCE_FIELDS, COMMIT, EXPIRY_RANGE_CHECK, GIT_BENCHMARK_DIR, GIT_PRODUCT_DIR, LABEL, PROVIDERS,
     PROVIDER_FOR_EDGE, PUBLIC_EXPORT_BEFORE, PUBLIC_EXPORT_CHECK, PUBLIC_EXPORT_DIR, PUBLIC_EXPORT_FILES,
     PUBLIC_TRANSITION_CHECK, RUN_NUMBER, SCHEMA, SCOPED_VIEW_CHECK, SERVICE_PRODUCT_DIR, SHA256,
-    benchmark_registration, collect_git_performance, collect_git_product_action, collect_sdk_hydration_evidence,
-    collect_sdk_product_action, collect_service_product_action, decode, derive_sdk_public_transition,
-    derive_service_public_transition, fields,
+    benchmark_registration, collect_desktop_product_action, collect_git_performance, collect_git_product_action,
+    collect_sdk_hydration_evidence, collect_sdk_product_action, collect_service_product_action, decode,
+    derive_git_blob_public_transition, derive_service_public_transition, fields,
     is_direct_sdk_git_scope, is_direct_sdk_hydration_scope, is_direct_service_scope,
     matches, read_trace, release_scopes, require,
-    required_check_names, required_platform_rows, requires_cli_workload, scope_parts, verify_bundle_row,
+    required_check_names, required_platform_rows, requires_cli_workload, requires_desktop_workload, scope_parts, verify_bundle_row,
     verify_cleanup_trace, verify_deployment_policy_trace,
 )
 from public_inventory import ExportError, read_document
@@ -122,9 +122,12 @@ def assemble_bundle(
             cli_workload = requires_cli_workload(scope)
             sdk_workload = is_direct_sdk_git_scope(scope)
             sdk_hydration = is_direct_sdk_hydration_scope(scope)
+            require(isinstance(registration, dict) and matches(SHA256, registration.get("configuration_sha256")),
+                    f"invalid CDN configuration digest for {row}")
+            desktop = requires_desktop_workload(scope, registration.get("workload"))
             service = is_direct_service_scope(scope)
             expected = OBSERVATION_FIELDS.copy()
-            if cli_workload or sdk_workload or sdk_hydration or service:
+            if cli_workload or sdk_workload or sdk_hydration or desktop or service:
                 expected.difference_update({"product_action", "performance"})
             measured = fields(
                 decode((inputs / row / "observations.json").read_bytes()),
@@ -132,9 +135,7 @@ def assemble_bundle(
             )
             require(measured["schema"] == "crab.cdn-observations/v1", "invalid CDN observations schema")
             names = required_check_names(access, profile)
-            require(isinstance(registration, dict) and matches(SHA256, registration.get("configuration_sha256")),
-                    f"invalid CDN configuration digest for {row}")
-            spec = benchmark_registration(registration) if sdk_workload or sdk_hydration or service else registration
+            spec = benchmark_registration(registration) if sdk_workload or sdk_hydration or desktop or service else registration
             canary = canaries.get((scope, registration["configuration_sha256"]), {})
             outcomes = measured.pop("check_results")
             require(isinstance(outcomes, dict) and names - canary.keys() <= outcomes.keys() <= names,
@@ -158,11 +159,11 @@ def assemble_bundle(
                 filename = f"{check}.json"
                 trace_path = inputs / row / "traces" / filename
                 require(outcomes.get(check, True) is True, f"{row} failed measured check: {check}")
-                if check == PUBLIC_TRANSITION_CHECK and (sdk_workload or service):
+                if check == PUBLIC_TRANSITION_CHECK and (sdk_workload or desktop or service):
                     if service:
                         transition = derive_service_public_transition(inputs / row / SERVICE_PRODUCT_DIR, measured, spec)
                     else:
-                        transition = derive_sdk_public_transition(inputs / row / GIT_PRODUCT_DIR, measured, spec)
+                        transition = derive_git_blob_public_transition(inputs / row / GIT_PRODUCT_DIR, measured, spec)
                     if trace_path.exists():
                         require(decode(read_trace(trace_path, check)) == transition,
                                 "measured public transition differs from the retained product reads")
@@ -177,12 +178,13 @@ def assemble_bundle(
                 checks[check] = {"passed": True, "trace_sha256": hashlib.sha256(trace).hexdigest()}
             native_target = None
             product_request_ids = None
-            if cli_workload or sdk_workload or sdk_hydration or service:
+            desktop_product = None
+            if cli_workload or sdk_workload or sdk_hydration or desktop or service:
                 cleanup = decode(read_trace(destination / "traces/cleanup.json", "cleanup"))
                 cleanup_at = verify_cleanup_trace(cleanup, measured, edge, access)
                 origin = cleanup["targets"]["native"]["origin_sha256"]
                 rollback = read_trace(destination / "traces/rollback.json", "rollback")
-            if cli_workload or sdk_workload:
+            if cli_workload or sdk_workload or desktop:
                 native_target = {"origin_sha256": origin, "prefix_sha256": cleanup["prefix_sha256"]}
             if cli_workload:
                 registered_read = {key: registration.get(key) for key in ("candidate", "viewer_binding_sha256")}
@@ -206,17 +208,24 @@ def assemble_bundle(
                     cleanup_at=cleanup_at, native_origin_sha256=origin,
                     retain=destination,
                 )
+            elif desktop:
+                desktop_product = collect_desktop_product_action(
+                    inputs / row / GIT_PRODUCT_DIR, measured, spec, rollback,
+                    cleanup_at=cleanup_at, native_origin_sha256=origin, retain=destination / GIT_PRODUCT_DIR,
+                )
+                measured["product_action"] = desktop_product.action
             elif service:
                 measured["product_action"] = collect_service_product_action(
                     inputs / row / SERVICE_PRODUCT_DIR, measured, spec, rollback,
                     cleanup_at=cleanup_at, native_origin_sha256=origin,
                     retain=destination / SERVICE_PRODUCT_DIR,
                 )
-            if cli_workload or sdk_workload or service:
+            if cli_workload or sdk_workload or desktop or service:
                 measured["performance"] = collect_git_performance(
                     inputs / row / GIT_BENCHMARK_DIR, registration, platform, run_id, attempt,
                     retain=destination / GIT_BENCHMARK_DIR, native_target=native_target,
                     service_row=destination if service else None, product_request_ids=product_request_ids,
+                    desktop_product=desktop_product,
                 )
             report = measured | {
                 "schema": SCHEMA,

@@ -10,10 +10,12 @@ from contextlib import redirect_stderr
 from io import BytesIO, StringIO, TextIOWrapper
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import run_cdn_desktop_workload as desktop
 import collect_cdn_viewer_requests as viewer
+import run_cdn_sdk_workload as sdk_workload
 from cdn_qualification import CLI_BUILD_FIELDS, PROVIDER_FOR_EDGE, validate_desktop_git_read
 from run_cdn_git_workload import read_target_fingerprints
 from test_cdn_qualification import COMMIT, cli_candidate, json_file
@@ -37,7 +39,8 @@ class DesktopQualificationTests(unittest.TestCase):
         sidecar.write_bytes(b"registered executable")
         self.args = argparse.Namespace(arm="edge", fixture=self.root / "fixture.json", receipt=self.root / "receipt.json",
             sidecar=sidecar, sidecar_sha256=hashlib.sha256(sidecar.read_bytes()).hexdigest(), scratch=self.root,
-            source_sha=COMMIT, run_id="123", run_attempt="2", private_reader=reader, export_approval=None, warm_local_output=None)
+            source_sha=COMMIT, run_id="123", run_attempt="2", private_reader=reader, export_approval=None,
+            warm_local_output=None, transition_object=None)
         self.oid = "a" * 40
         self.stamp = {key: value for key, value in cli_candidate("cloudfront/private/desktop/git/direct",
                       desktop.runner_platform()).items() if key in CLI_BUILD_FIELDS}
@@ -76,10 +79,12 @@ base_url = "{config['base_url']}"
         return config
 
     def emulate(self, config: dict, edge: str, arm: str, *, reported_bytes: bytes | None = None,
-                transfer: bool = True, capsule: bool = False, repeat_source: str | None = None):
-        route = {"provider": PROVIDER_FOR_EDGE[edge], "access": "private", "consumer": "desktop",
+                transfer: bool = True, capsule: bool = False, repeat_source: str | None = None,
+                transition_approval: str = "", transition_key: str | None = None):
+        route = {"provider": PROVIDER_FOR_EDGE[edge], "access": config["scope"].split("/")[1], "consumer": "desktop",
                  "family": "git", "profile": "direct"}
-        events = [{"target": desktop.READ_TARGET, "fields": read_target_fingerprints(config, edge=arm == "edge", export_sha256="")
+        events = [{"target": desktop.READ_TARGET, "fields": read_target_fingerprints(config, edge=arm != "origin",
+                                                                                     export_sha256=transition_approval)
                    | {"message": "SDK captured CDN read target"}},
                   {"target": desktop.NATIVE_TARGET, "fields": {"message": "Native object store read", "provider": route["provider"],
                    "method": "get", "status": 200, "bytes": 8}}]
@@ -92,6 +97,13 @@ base_url = "{config['base_url']}"
                 events.append({"target": desktop.TARGET, "fields": response | {"family": "capsule", "request_sha256": "c" * 64}})
             events += [{"target": desktop.TARGET, "fields": response},
                        {"target": desktop.TARGET, "fields": verified | {"source": "edge"}}]
+        if transition_key is not None:
+            fields = route | {"message": "CDN public export observation", "key_sha256": transition_key,
+                              "approval_sha256": transition_approval}
+            listed, source = ("listed", "edge") if arm == "edge" else ("unlisted", "native")
+            events += [{"target": desktop.PUBLIC_TRANSITION_TARGET, "fields": fields | {"observation": listed}},
+                       {"target": desktop.PUBLIC_TRANSITION_TARGET, "fields": fields | {"observation": f"verified_{source}",
+                                                                                       "git_blob_oid_sha256": verified["git_blob_oid_sha256"]}}]
         repeat_events = []
         if repeat_source:
             repeat_events.append({"target": desktop.TARGET, "fields": verified | {"source": repeat_source}})
@@ -240,6 +252,39 @@ sha256 = "{self.approval}"
         desktop.read_configuration(config, origin_binding)
         with self.assertRaisesRegex(ValueError, "differs from the approved CDN binding"):
             desktop.read_configuration(config, edge_binding)
+
+    def test_public_transition_observes_the_same_pack_layer_with_both_receipts(self) -> None:
+        self.configure("cloudfront", "edge")
+        config = fixture("cloudfront", "public") | {"scope": "cloudfront/public/desktop/git/direct"}
+        self.args.configuration_sha256 = json_file(self.args.fixture, config)
+        publication = json.loads(self.args.receipt.read_bytes())
+        json_file(self.args.receipt, publication | {"scope": config["scope"], "configuration_sha256": self.args.configuration_sha256})
+        self.args.private_reader = None
+        self.args.export_approval = self.root
+        self.args.transition_object = config["object_path"]
+        key = hashlib.sha256(f"{config['fixture_prefix']}/{config['object_path']}".encode()).hexdigest()
+        for arm, approval in (("prior_export", "6" * 64), ("edge", "7" * 64)):
+            with self.subTest(arm=arm):
+                self.args.arm = arm
+                self.config.write_text(f'''[[cdn]]
+origin = "{config['native_origin']}"
+repo_prefix = "{config['fixture_prefix']}"
+base_url = "{config['base_url']}"
+access = "public"
+export_origin = "{config['export_origin']}"
+[cdn.publication]
+path = {json.dumps(str(self.root / "publication.json"))}
+sha256 = "{approval}"
+''', encoding="utf-8")
+                objects = [SimpleNamespace(path=config["object_path"])] if arm == "edge" else []
+                with patch.object(sdk_workload, "approved_public_export", return_value=(approval, objects, 1)):
+                    with self.emulate(config, "cloudfront", arm, transition_approval=approval, transition_key=key):
+                        read, _ = desktop.fetch(self.args)
+                    self.assertEqual((read["transition_key_sha256"], read["approval_sha256"], read["all_edge_attempts"]),
+                                     (key, approval, int(arm == "edge")))
+                    with self.emulate(config, "cloudfront", arm, transition_approval=approval, transition_key="0" * 64):
+                        with self.assertRaisesRegex(ValueError, "did not prove the selected object's public export transition"):
+                            desktop.fetch(self.args)
 
     def test_joins_an_edge_read_to_the_matching_cloudfront_request(self) -> None:
         config = self.configure("cloudfront", "edge")

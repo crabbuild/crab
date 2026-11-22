@@ -24,6 +24,8 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
 
     def inputs(self, provider: str = "s3", consumer: str = "sdk", access: str = "private", *, family: str = "git") -> str:
         self.example.configure(provider, access, "direct", consumer=consumer, family=family)
+        if fixture.CDN.is_direct_desktop_git_scope(self.example.scope):
+            self.example.record_desktop_product()
         report = self.example.report
         self.row = f"{report['scope']}/{report['platform']}"
         row = self.root / self.row
@@ -39,7 +41,8 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
             observations.pop("product_action")
             for name in (fixture.CDN.GIT_PRODUCT_DIR, fixture.CDN.GIT_BENCHMARK_DIR):
                 (self.root / name).rename(row / name)
-        if fixture.CDN.is_direct_sdk_git_scope(self.example.scope):
+        if (fixture.CDN.is_direct_sdk_git_scope(self.example.scope)
+                or fixture.CDN.requires_desktop_workload(self.example.scope, self.example.registration["workload"])):
             observations.pop("product_action")
             observations.pop("performance")
             for name in (fixture.CDN.GIT_PRODUCT_DIR, fixture.CDN.GIT_BENCHMARK_DIR):
@@ -159,6 +162,78 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "invalid fields in CDN observations"):
             self.assemble(digest)
         self.assertFalse(self.output.exists())
+
+    def test_private_desktop_assembly_requires_fresh_rollback_and_retains_regional_evidence(self) -> None:
+        digest = self.inputs("s3", consumer="desktop")
+        inputs = self.root / self.row
+        cdn = fixture.CDN
+        read = json.loads((inputs / cdn.GIT_PRODUCT_DIR / cdn.DESKTOP_READ_RECORD).read_bytes())
+        rollback = inputs / "traces/rollback.json"
+        original = rollback.read_bytes()
+        fixture.json_file(rollback, json.loads(original) | {"cache_root_sha256": read["cache_root_sha256"]})
+        with self.assertRaisesRegex(ValueError, "desktop product reads must run in order with fresh caches"):
+            self.assemble(digest)
+        self.assertFalse(self.output.exists())
+        rollback.write_bytes(original)
+        with self.assertRaisesRegex(ValueError, "missing required CDN platform registrations"):
+            self.assemble(digest, {self.example.scope})
+        self.assertFalse(self.output.exists())
+
+        self.assertEqual(self.assemble(digest), 1)
+        row = self.output / self.row
+        measured = json.loads((row / "cdn-report.json").read_bytes())
+        self.assertEqual(measured["product_action"], self.example.report["product_action"])
+        files = {"publication.json", "retirement.json", cdn.DESKTOP_READ_RECORD,
+                 cdn.PRODUCT_VIEWER_RECORD, *cdn.GIT_NATIVE_REF_FILES.values()}
+        self.assertEqual({path.name for path in (row / cdn.GIT_PRODUCT_DIR).iterdir()}, files)
+        policy = self.root / "qualified-scopes.txt"
+        policy.write_text(self.example.scope + "\n", encoding="utf-8")
+        spec = self.example.registration
+        cdn.verify_bundle_row(self.output, self.row, spec, fixture.COMMIT, "123", "2", policy=policy)
+        qualification_build = spec["desktop_candidate"] | {"qualification_feature": True}
+        with self.assertRaises(subprocess.CalledProcessError):
+            cdn.verify_bundle_row(self.output, self.row, spec | {"desktop_candidate": qualification_build},
+                                  fixture.COMMIT, "123", "2", policy=policy)
+        (row / cdn.GIT_BENCHMARK_DIR / "near/0001/provider-published.json").unlink()
+        with self.assertRaises(subprocess.CalledProcessError):
+            cdn.verify_bundle_row(self.output, self.row, spec, fixture.COMMIT, "123", "2", policy=policy)
+
+    def test_public_desktop_assembly_derives_the_inventory_transition_from_viewer_logs(self) -> None:
+        digest = self.inputs("gcs", consumer="desktop", access="public")
+        cdn = fixture.CDN
+        product = self.root / self.row / cdn.GIT_PRODUCT_DIR
+        viewer = product / cdn.PRODUCT_VIEWER_RECORD
+        raw_viewer = viewer.read_bytes()
+        wrong = json.loads(raw_viewer)
+        next(iter(wrong["records"].values()))["key_sha256"] = "0" * 64
+        fixture.json_file(viewer, wrong)
+        with self.assertRaisesRegex(ValueError, "CDN logs did not confirm the new export object"):
+            self.assemble(digest)
+        self.assertFalse(self.output.exists())
+        viewer.write_bytes(raw_viewer)
+        (self.root / self.row / "traces" / f"{cdn.PUBLIC_TRANSITION_CHECK}.json").unlink()
+        self.assertEqual(self.assemble(digest), 1)
+        row = self.output / self.row
+        trace = json.loads((row / "traces" / f"{cdn.PUBLIC_TRANSITION_CHECK}.json").read_bytes())
+        self.assertEqual(trace["after"]["verified_edge_key_sha256"], self.example.object_key)
+        self.assertTrue((row / cdn.GIT_PRODUCT_DIR / cdn.GIT_PRIOR_EXPORT_RECORD).is_file())
+        policy = self.root / "qualified-scopes.txt"
+        policy.write_text(self.example.scope + "\n", encoding="utf-8")
+        cdn.verify_bundle_row(self.output, self.row, self.example.registration, fixture.COMMIT, "123", "2", policy=policy)
+
+    def test_front_door_desktop_bundle_bounds_regional_reads_by_cleanup(self) -> None:
+        digest = self.inputs("azure", consumer="desktop")
+        row = self.root / self.row
+        cleanup = row / "traces/cleanup.json"
+        trace = json.loads(cleanup.read_bytes())
+        retired_path = row / fixture.CDN.GIT_PRODUCT_DIR / "provider-retired.json"
+        retired = json.loads(retired_path.read_bytes())
+        fixture.json_file(cleanup, trace | {"observed_at_unix_ms": retired["observed_at_unix_ms"]})
+        with self.assertRaisesRegex(ValueError, "ran outside the desktop fixture lifetime"):
+            self.assemble(digest)
+        self.assertFalse(self.output.exists())
+        fixture.json_file(cleanup, trace)
+        self.assertEqual(self.assemble(digest), 1)
 
     def test_public_sdk_assembly_requires_and_retains_the_transition_viewer_proof(self) -> None:
         digest = self.inputs("azure", access="public")
@@ -326,7 +401,7 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
         self.assertEqual(self.assemble(digest, transport=transport), 1)
         retained = json.loads((self.output / transition).read_bytes())
         sdk_product = self.output / self.row / fixture.CDN.GIT_PRODUCT_DIR
-        self.assertTrue((sdk_product / fixture.CDN.SDK_PRIOR_EXPORT_RECORD).is_file())
+        self.assertTrue((sdk_product / fixture.CDN.GIT_PRIOR_EXPORT_RECORD).is_file())
         self.assertEqual(retained["before"]["edge_attempts"], 0)
         self.assertEqual(retained["after"]["key_sha256"], self.example.object_key)
         public = Path(self.row) / fixture.CDN.PUBLIC_EXPORT_DIR

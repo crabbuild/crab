@@ -18,13 +18,15 @@ from pathlib import Path
 from tempfile import TemporaryDirectory, TemporaryFile
 
 from collect_cdn_product_metrics import NATIVE_TARGET, TARGET, measure, measure_native
-from run_cdn_git_workload import GCS_VIEWER_LOG_TARGET, PAYLOAD, runner_platform
+from run_cdn_git_workload import (
+    GCS_VIEWER_LOG_TARGET, PAYLOAD, PUBLIC_TRANSITION_TARGET, runner_platform, verify_transition_events,
+)
 from run_cdn_sdk_workload import READ_TARGET, binding_for, json_record, verified_target
 from run_cdn_transport_checks import approved_fixture
 
 from cdn_qualification import (
     CLI_BUILD_FIELDS, COMMIT, GIT_PAYLOAD_SIZE, RUN_NUMBER, decode, fields, is_direct_desktop_git_scope, matches,
-    read_git_record, require, validate_desktop_git_read, validate_git_publication, verify_read_candidate,
+    read_git_record, require, scope_parts, validate_desktop_git_read, validate_git_publication, verify_read_candidate,
 )
 from public_inventory import ExportError
 
@@ -182,6 +184,11 @@ def fetch(args: argparse.Namespace) -> tuple[dict, dict | None]:
             "desktop Git qualification uses a direct fixture on the repository prefix")
     repeat = args.warm_local_output is not None
     require(not repeat or args.arm == "edge", "desktop warm-local reads must repeat an edge primer")
+    access = scope_parts(scope)[1]
+    require(args.arm != "prior_export" or args.transition_object is not None,
+            "desktop prior export needs the exact transition object")
+    require(args.transition_object is None or (access == "public" and args.arm != "origin" and not repeat),
+            "desktop transition requires a separate public read with an active receipt")
     provenance = {"scope": scope, "configuration_sha256": args.configuration_sha256, "source_sha": args.source_sha,
                   "workflow_run_id": args.run_id, "workflow_run_attempt": args.run_attempt}
     raw = read_git_record(args.receipt)
@@ -191,7 +198,10 @@ def fetch(args: argparse.Namespace) -> tuple[dict, dict | None]:
     sidecar = args.sidecar.resolve(strict=True)
     platform = runner_platform()
     candidate = sidecar_candidate(sidecar, args.sidecar_sha256, args.source_sha, platform)
-    binding, approval, _ = binding_for(args, fixture)
+    binding, approval, transition = binding_for(args, fixture, args.transition_object)
+    if args.arm == "prior_export":
+        require(transition is not None and transition["sealed_at_unix_ms"] <= publication["visible_at_unix_ms"],
+                "desktop prior public export must be sealed before the native publication")
     read_configuration(fixture, binding)
     identity = {"repo_id": "cdn-qualification"}
     with TemporaryDirectory(prefix="crab-cdn-desktop-", dir=args.scratch) as temporary:
@@ -201,6 +211,7 @@ def fetch(args: argparse.Namespace) -> tuple[dict, dict | None]:
         env |= {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0",
                 "CRAB_CACHE_DIR": str(cache), "CRAB_DESKTOP_LOG": (
                     f"{READ_TARGET}=debug,{TARGET}=debug,{NATIVE_TARGET}=debug,{GCS_VIEWER_LOG_TARGET}=trace"
+                    + (f",{PUBLIC_TRANSITION_TARGET}=debug" if transition is not None else "")
                 )}
         samples = asyncio.run(run_sidecar(
             [str(sidecar), "--log-json"], scratch, env,
@@ -217,6 +228,9 @@ def fetch(args: argparse.Namespace) -> tuple[dict, dict | None]:
         "publication_sha256": hashlib.sha256(raw).hexdigest(), "commit": publication["oid"], "candidate": candidate,
         "cache_root_sha256": hashlib.sha256(os.fsencode(cache)).hexdigest(), "reader": reader, "approval_sha256": approval,
     }
+    if transition is not None:
+        verify_transition_events(lines, scope, transition, git_blob=payload["git_blob_oid_sha256"])
+        context["transition_key_sha256"] = transition["key_sha256"]
     primary = measured_read(context, timing, lines, args.arm)
     local = None
     if repeat:
@@ -231,7 +245,7 @@ def fetch(args: argparse.Namespace) -> tuple[dict, dict | None]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("arm", choices=("edge", "origin"))
+    parser.add_argument("arm", choices=("edge", "origin", "prior_export"))
     parser.add_argument("--fixture", type=Path, required=True)
     parser.add_argument("--configuration-sha256", required=True)
     parser.add_argument("--receipt", type=Path, required=True)
@@ -243,6 +257,7 @@ def main() -> int:
     parser.add_argument("--run-attempt", required=True)
     parser.add_argument("--private-reader", type=Path)
     parser.add_argument("--export-approval", type=Path)
+    parser.add_argument("--transition-object", help="exact repository-relative pack-layer key selected by the desktop read")
     parser.add_argument("--warm-local-output", type=Path, help="write the timed repeat in the same open sidecar repository")
     try:
         args = parser.parse_args()

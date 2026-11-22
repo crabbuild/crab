@@ -118,6 +118,8 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, nati
             pair = inputs / location / f"{index:04d}"
             pair.mkdir(parents=True, exist_ok=True)
             start = 1_000_000 * (ordinal + 1) + index * 10_000
+            if desktop and "publication_sha256" in registration:
+                start += PUBLIC_SEAL
             publication_digest = hashlib.sha256(f"{location}/{index}/receipt".encode()).hexdigest()
             if cli or desktop:
                 publication = {
@@ -372,7 +374,7 @@ class CdnQualificationTests(unittest.TestCase):
             native = {"origin_sha256": cleanup["targets"]["native"]["origin_sha256"], "prefix_sha256": cleanup["prefix_sha256"]}
             write_git_measurements(self.directory / CDN.GIT_BENCHMARK_DIR, self.registration, platform, native_target=native)
             if sdk:
-                self.record_sdk_product()
+                self.record_git_blob_product()
             else:
                 self.record_git_product()
         elif hydration:
@@ -582,7 +584,23 @@ class CdnQualificationTests(unittest.TestCase):
         edge_read = json.loads((records / "edge.json").read_bytes())
         write_git_measurements(self.directory / CDN.GIT_BENCHMARK_DIR, self.registration, platform, service=edge_read)
 
-    def record_sdk_product(self) -> None:
+    def record_desktop_product(self) -> None:
+        platform = self.report["platform"]
+        writer = cli_candidate(self.scope, platform)
+        cleanup = json.loads((self.directory / "traces/cleanup.json").read_bytes())
+        self.registration.update(workload=CDN.DESKTOP_GIT_ACTION, candidate=writer,
+            desktop_candidate=writer | {"cargo_features": "", "binary_sha256": "a" * 64}, viewer_binding_sha256="e" * 64,
+            desktop_native_target={"origin_sha256": cleanup["targets"]["native"]["origin_sha256"],
+                                   "prefix_sha256": cleanup["prefix_sha256"]})
+        if "publication_sha256" not in self.registration:
+            self.registration["viewer_approval_sha256"] = "d" * 64
+        self.report["product_action"]["name"] = CDN.DESKTOP_GIT_ACTION
+        write_git_measurements(self.directory / CDN.GIT_BENCHMARK_DIR, self.registration, platform)
+        self.record_git_blob_product(desktop=True)
+        if "publication_sha256" in self.registration:
+            self.public_transition_trace()
+
+    def record_git_blob_product(self, *, desktop: bool = False) -> None:
         records = self.directory / CDN.GIT_PRODUCT_DIR
         records.mkdir(exist_ok=True)
         provenance = {key: self.report[key] for key in CDN.CDN_PROVENANCE_FIELDS}
@@ -597,7 +615,8 @@ class CdnQualificationTests(unittest.TestCase):
             "visible_at_unix_ms": PUBLIC_SEAL - 40, "candidate": writer,
         })
         base = provenance | dict.fromkeys(CDN.PRODUCT_COUNTERS, 0) | {
-            "schema": "crab.cdn-sdk-git-read/v1", "platform": platform, "candidate": self.registration["sdk_candidate"],
+            "schema": f"crab.cdn-{'desktop' if desktop else 'sdk'}-git-read/v1", "platform": platform,
+            "candidate": self.registration["desktop_candidate" if desktop else "sdk_candidate"],
             "commit": oid, "sha256": payload, "bytes": CDN.GIT_PAYLOAD_SIZE, "git_blob_oid_sha256": "4" * 64,
             "publication_sha256": receipt, "elapsed_ms": 10, "edge_responses": {},
             "native_traffic": {"get_responses": 1, "head_responses": 0, "body_bytes": 5},
@@ -605,9 +624,11 @@ class CdnQualificationTests(unittest.TestCase):
         export = self.registration.get("publication_sha256", "")
         transition = {"transition_key_sha256": self.object_key} if export else {}
         binding = reader | {"binding_sha256": self.registration["viewer_binding_sha256"]}
-        request = hashlib.sha256(b"sdk-snapshot-viewer").hexdigest()
+        request = hashlib.sha256(b"product-git-blob-viewer").hexdigest()
         response = {"status": 206, "cache": "hit", "bytes": 1, "complete": True}
-        snapshot = records / "snapshot.json"
+        snapshot = records / (CDN.DESKTOP_READ_RECORD if desktop else "snapshot.json")
+        if desktop:
+            base["cache_root_sha256"] = "1" * 64
         json_file(snapshot, base | dict.fromkeys(
             ("edge_attempts", "observed_edge_gets", "edge_hits", "edge_bytes", "verified_edge_payloads", "all_edge_attempts"), 1,
         ) | {
@@ -619,16 +640,17 @@ class CdnQualificationTests(unittest.TestCase):
         write_product_viewer_proof(snapshot, transition.get("transition_key_sha256"))
         if export:
             prior = self.registration["previous_publication_sha256"]
-            json_file(records / CDN.SDK_PRIOR_EXPORT_RECORD, base | transition | {
+            json_file(records / CDN.GIT_PRIOR_EXPORT_RECORD, base | transition | {
                 "arm": "prior_export", "started_at_unix_ms": PUBLIC_SEAL - 20, "finished_at_unix_ms": PUBLIC_SEAL - 10,
                 "approval_sha256": prior, "reader": binding | {"public_export_sha256": prior},
-            })
+            } | ({"cache_root_sha256": "2" * 64} if desktop else {}))
         self.rollback_trace(base | {
             "arm": "origin", "started_at_unix_ms": PUBLIC_SEAL + 25, "finished_at_unix_ms": PUBLIC_SEAL + 35,
             "reader": reader | {"binding_sha256": "", "public_export_sha256": ""}, "approval_sha256": "",
-        })
+        } | ({"cache_root_sha256": "3" * 64} if desktop else {}))
         pack = "8" * 64
-        for arm, filename, start in (("edge", "snapshot.json", 36), ("origin", "traces/rollback.json", 42)):
+        worktrees = () if desktop else (("edge", "snapshot.json", 36), ("origin", "traces/rollback.json", 42))
+        for arm, filename, start in worktrees:
             path = records / filename if arm == "edge" else self.directory / filename
             read = json.loads(path.read_bytes())
             read.pop("transition_key_sha256", None)
@@ -667,7 +689,7 @@ class CdnQualificationTests(unittest.TestCase):
         self.report["product_action"].update(expected_bytes=CDN.GIT_PAYLOAD_SIZE, observed_bytes=CDN.GIT_PAYLOAD_SIZE)
 
     def record_sdk_hydration(self) -> None:
-        self.record_sdk_product()
+        self.record_git_blob_product()
         records, traces = self.directory / CDN.SDK_HYDRATION_DIR, self.directory / "traces"
         source = self.directory / CDN.GIT_PRODUCT_DIR
         records.mkdir()
@@ -855,8 +877,8 @@ class CdnQualificationTests(unittest.TestCase):
             trace["after"]["reader"] = fetch["reader"]
             trace["before"]["reader"] = fetch["reader"] | {"cache_root_sha256": "9" * 64,
                                                          "public_export_sha256": self.registration["previous_publication_sha256"]}
-        elif CDN.is_direct_sdk_git_scope(self.scope):
-            trace = CDN.derive_sdk_public_transition(self.directory / CDN.GIT_PRODUCT_DIR, self.report, self.registration)
+        elif CDN.is_direct_sdk_git_scope(self.scope) or CDN.requires_desktop_workload(self.scope, action["name"]):
+            trace = CDN.derive_git_blob_public_transition(self.directory / CDN.GIT_PRODUCT_DIR, self.report, self.registration)
         elif CDN.is_direct_service_scope(self.scope):
             trace = CDN.derive_service_public_transition(self.directory / CDN.SERVICE_PRODUCT_DIR, self.report, self.registration)
         check = CDN.PUBLIC_TRANSITION_CHECK
@@ -1572,7 +1594,7 @@ class CdnQualificationTests(unittest.TestCase):
         args = ("--cdn-release-policy", str(policy))
         result = self.command(*args)
         self.assertEqual(result.returncode, 0, result.stderr)
-        path = self.directory / CDN.GIT_PRODUCT_DIR / CDN.SDK_PRIOR_EXPORT_RECORD
+        path = self.directory / CDN.GIT_PRODUCT_DIR / CDN.GIT_PRIOR_EXPORT_RECORD
         original = json.loads(path.read_bytes())
         for changes, reason in (
             ({"git_blob_oid_sha256": "9" * 64}, "did not verify the same published Git blob"),
@@ -1584,7 +1606,7 @@ class CdnQualificationTests(unittest.TestCase):
                 json_file(path, original | changes)
                 self.rejected(reason, *args)
         path.unlink()
-        self.rejected(CDN.SDK_PRIOR_EXPORT_RECORD, *args)
+        self.rejected(CDN.GIT_PRIOR_EXPORT_RECORD, *args)
 
     def test_public_sdk_release_requires_provider_delivery_of_the_transition_key(self) -> None:
         self.configure("gcs", "public", "direct", consumer="sdk")

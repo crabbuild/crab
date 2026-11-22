@@ -1216,8 +1216,30 @@ worker repeats the read in the same open sidecar and records its verified
 local Git blob and zero edge requests. The local record pins that exact warm
 edge record. Collect provider logs for the edge arms and runner measurements
 for all four arms. `collect_cdn_git_performance.py` recomputes the regional
-pairs and checks the registered latency and cost budgets. Live samples and
-desktop release assembly remain open.
+pairs and checks the registered latency and cost budgets.
+
+For a release row, retain a separate product publication and run the edge
+and origin arms in that order. Keep the edge result as `git-product/read.json`
+and the origin result as `traces/rollback.json`. Retain `publication.json`,
+`provider-published.json`, `viewer-requests.json`, `retirement.json`, and
+`provider-retired.json` in `git-product/`. Observe the ref before the product
+read, retire the same ref after rollback, and observe the tombstone before
+fixture cleanup. The regional reads must use their own commits, cache roots,
+and viewer requests, and finish before cleanup.
+
+For a public row, seal the prior export before publishing the product ref.
+Run `prior_export` with that export's approval and `--transition-object`
+set to the repository-relative pack-layer key. Retain the result as
+`git-product/before-export.json`. Seal the current export after that read.
+Use the current export's approval and the same `--transition-object` on the
+product edge read. The verifier derives the transition from these two reads,
+the retained inventory receipts, and the matching viewer logs. Run the usual
+origin rollback with the approval withdrawn and omit `--transition-object`.
+
+The assembler recomputes the product and regional summaries from the retained
+records. Promotion requires the ordinary writer and sidecar builds and the
+matching compiled CDN policy for every published desktop platform. Execute
+the live provider qualification before adding a desktop scope to release policy.
 
 ### Capture protected SDK hydration evidence
 
