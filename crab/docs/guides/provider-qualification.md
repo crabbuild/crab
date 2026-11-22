@@ -1025,10 +1025,22 @@ Use a private direct SDK xorb fixture with an independently materialized view.
 Keep the ordinary Crab pointer for a file that requires the approved xorb.
 The workload JSON has schema `crab.cdn-sdk-hydration-workload/v1` and the
 fields `configuration_sha256`, `pointer_sha256`, `payload_sha256`,
-`payload_bytes`, and `crab_sha256`. Compute the payload digest and length
-from the original file. Preregister the workload document digest and the
-exact Crab executable. Use the same SDK probe build and issuer settings as
-the Git workload.
+`payload_bytes`, `crab_sha256`, `publication_sha256`, and
+`global_prefix_sha256`. Compute the
+payload digest and length from the original file. Hash the physical shared
+prefix of the projected view, ending in `/.crab` with no trailing slash.
+Preregister `sdk-xorb-hydration` as the workload and the document digest
+as `hydration_workload_sha256`. Also register the SDK probe build and the
+approved viewer and issuer binding digests.
+
+Use a repository-prefix private direct SDK Git fixture for the native
+publication. Run the native Git worker's `publish` action with
+`--hydration-pointer` and `--hydration-pointer-sha256`. Materialize and
+approve the xorb view after that publication so its generation covers the
+published pointer. Set `publication_sha256` to the digest of the native
+publication receipt. Observe the source ref with the independent native ref
+probe using the approved xorb fixture before either hydration arm. Use the
+same Crab executable for publication and hydration.
 
 ```bash
 python3 -B crab/scripts/e2e/run_cdn_sdk_hydration.py edge \
@@ -1044,8 +1056,15 @@ a fresh worktree and cache for each arm and calls `Local::hydrate` on the
 tracked pointer. It verifies the file written to disk, the child's captured
 origin and physical view, and the xorb chunk verification event. The origin
 arm withdraws viewer approval, keeps native issuer authorization, and
-requires zero edge attempts. Retain both reduced records. The SDK xorb
-release gate still needs to consume the paired records and provider measurements.
+requires zero edge attempts. Keep the edge record at
+`xorb-product/hydration.json` and the native record at `traces/rollback.json`.
+Retire the same ref after rollback with the native source fixture. Observe
+its tombstone with the xorb fixture before cleanup. Keep `workload.json`, `publication.json`,
+`retirement.json`, `provider-published.json`, and `provider-retired.json` in
+`xorb-product`. Assembly derives the product result from these records,
+the transport and scoped view observations, and the cleanup trace. Release
+promotion still requires regional metrics derived from individual SDK
+hydration runs.
 
 ### Verify fixture cleanup
 

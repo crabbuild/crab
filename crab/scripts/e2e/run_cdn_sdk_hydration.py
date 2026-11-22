@@ -15,15 +15,14 @@ from pathlib import Path
 
 from collect_cdn_product_metrics import PRODUCT_COUNTERS, measure, measure_native
 from cdn_qualification import (
-    COMMIT, RUN_NUMBER, SDK_TIMING_FIELDS, SHA256, decode, fields, matches, positive,
-    read_git_record, require, scope_parts, verify_sdk_candidate,
+    COMMIT, RUN_NUMBER, SDK_TIMING_FIELDS, decode, fields, matches,
+    read_git_record, require, scope_parts, validate_sdk_hydration_workload, verify_sdk_candidate,
 )
 from run_cdn_git_workload import runner_platform, viewer_binding_sha256
 from run_cdn_sdk_workload import binding_for, observed_interval, split_observations
 from run_cdn_transport_checks import approved_fixture, fixture_object_key, native_remote
 
 
-WORKLOAD_FIELDS = {"schema", "configuration_sha256", "pointer_sha256", "payload_sha256", "payload_bytes", "crab_sha256"}
 CHILD = "crab_sdk::cdn::child"
 TARGET = "crab::cdn::checkout_target"
 
@@ -41,7 +40,7 @@ def child_evidence(lines: list[bytes], fixture: dict, key: str, cache: Path, app
     expected = {
         "message": "CDN child captured read target",
         "origin_sha256": digest(fixture["native_origin"].encode()),
-        "prefix_sha256": digest(f"{fixture['fixture_prefix']}{fixture['view_suffix']}".encode()),
+        "prefix_sha256": digest(f"{fixture['fixture_prefix']}{fixture['view_suffix']}/".encode()),
         "global_prefix_sha256": digest(key.rsplit("/xorbs/", 1)[0].encode()),
         "binding_sha256": viewer_binding_sha256(fixture) if approval else "",
         "approval_sha256": approval,
@@ -88,15 +87,9 @@ def hydrate(args: argparse.Namespace) -> dict:
     require((access, consumer, family, profile) == ("private", "sdk", "xorb", "direct"),
             "SDK hydration requires a private direct SDK xorb fixture")
     key = fixture_object_key(fixture, access, family)
-    raw = read_git_record(args.workload)
-    require(matches(SHA256, args.workload_sha256) and digest(raw) == args.workload_sha256,
-            "hydration workload differs from the approved digest")
-    spec = fields(decode(raw), WORKLOAD_FIELDS, "SDK hydration workload")
-    require(spec["schema"] == "crab.cdn-sdk-hydration-workload/v1"
-            and spec["configuration_sha256"] == args.configuration_sha256
-            and all(matches(SHA256, spec[name]) for name in ("pointer_sha256", "payload_sha256", "crab_sha256"))
-            and positive(spec["payload_bytes"]) and spec["payload_bytes"] <= 512 * 1024 * 1024,
-            "invalid approved SDK hydration workload")
+    spec = validate_sdk_hydration_workload(read_git_record(args.workload), args.workload_sha256, args.configuration_sha256)
+    require(spec["global_prefix_sha256"] == digest(key.rsplit("/xorbs/", 1)[0].encode()),
+            "hydration workload has a different projected global prefix")
     pointer = read_git_record(args.pointer, limit=4096)
     require(digest(pointer) == spec["pointer_sha256"], "fixture pointer differs from the approved workload")
     git, crab, probe = (path.resolve(strict=True) for path in (args.git, args.crab, args.probe))

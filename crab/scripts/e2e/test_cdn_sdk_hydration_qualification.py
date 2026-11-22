@@ -39,6 +39,8 @@ class SdkHydrationQualificationTests(unittest.TestCase):
             workload = json_file(root / "workload.json", {
                 "schema": "crab.cdn-sdk-hydration-workload/v1", "configuration_sha256": config_sha,
                 "pointer_sha256": HYDRATE.digest(pointer), "crab_sha256": HYDRATE.digest(crab),
+                "global_prefix_sha256": HYDRATE.digest(key.rsplit("/xorbs/", 1)[0].encode()),
+                "publication_sha256": "7" * 64,
                 "payload_sha256": payload["sha256"], "payload_bytes": payload["bytes"],
             })
             args = argparse.Namespace(fixture=root / "fixture.json", configuration_sha256=config_sha,
@@ -68,7 +70,7 @@ class SdkHydrationQualificationTests(unittest.TestCase):
                 view = config["fixture_prefix"] + config["view_suffix"]
                 observations.append((HYDRATE.TARGET, {
                     "message": "CDN child captured read target", "origin_sha256": HYDRATE.digest(config["native_origin"].encode()),
-                    "prefix_sha256": HYDRATE.digest(view.encode()), "global_prefix_sha256": HYDRATE.digest((view + "/.crab").encode()),
+                    "prefix_sha256": HYDRATE.digest((view + "/").encode()), "global_prefix_sha256": HYDRATE.digest((view + "/.crab").encode()),
                     "cache_root_sha256": "f" * 64 if fault == "wrong-cache" else HYDRATE.digest(env["CRAB_CACHE_DIR"].encode()),
                     "binding_sha256": HYDRATE.viewer_binding_sha256(config) if edge else "",
                     "approval_sha256": approval if edge else "", "local_cache_only": True,

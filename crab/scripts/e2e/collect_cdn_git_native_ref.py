@@ -15,8 +15,9 @@ from run_cdn_git_workload import runner_platform
 from run_cdn_transport_checks import approved_fixture
 
 from cdn_qualification import (
-    COMMIT, GIT_NATIVE_REF_FILES, RUN_NUMBER, decode, is_direct_sdk_git_scope, matches, read_git_record,
-    require, requires_cli_workload, validate_git_publication, verify_git_native_ref,
+    COMMIT, GIT_NATIVE_REF_FILES, RUN_NUMBER, decode, is_direct_sdk_git_scope,
+    is_direct_sdk_hydration_scope, matches, read_git_record,
+    require, requires_cli_workload, validate_git_publication, validate_sdk_hydration_publication, verify_git_native_ref,
 )
 
 
@@ -38,14 +39,16 @@ def main() -> int:
         require(not args.output.exists() and not args.output.is_symlink(), "native ref observation output must be new")
         fixture = approved_fixture(args.fixture, args.configuration_sha256)
         scope = fixture["scope"]
-        require(requires_cli_workload(scope) or (is_direct_sdk_git_scope(scope) and fixture["view_suffix"] == ""),
-                "native ref observation needs a direct CLI workload or an SDK Git repository-prefix workload")
+        require(requires_cli_workload(scope) or (is_direct_sdk_git_scope(scope) and fixture["view_suffix"] == "")
+                or is_direct_sdk_hydration_scope(scope),
+                "native ref observation needs a supported direct CLI or SDK publication workload")
         provenance = {
             "scope": fixture["scope"], "configuration_sha256": args.configuration_sha256, "source_sha": args.source_sha,
             "workflow_run_id": args.run_id, "workflow_run_attempt": args.run_attempt, "platform": runner_platform(),
         }
         raw = read_git_record(args.publication)
-        publication = validate_git_publication(raw, provenance)
+        publication = (validate_sdk_hydration_publication(raw, provenance) if is_direct_sdk_hydration_scope(scope)
+                       else validate_git_publication(raw, provenance))
         require(publication["published"], "native observation requires a confirmed test publication")
         digest = hashlib.sha256(raw).hexdigest()
         started = time.time_ns() // 1_000_000

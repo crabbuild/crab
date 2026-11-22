@@ -721,8 +721,15 @@ The SDK hydration worker captures allowlisted child observations and checks
 the file written by the ordinary hydration API. It binds the projected
 view, exact xorb, local cache and file digest to the approved fixture.
 The native control keeps the same issuer and withdraws viewer approval.
-Release assembly and verification still need to consume these SDK xorb
-records and their paired provider measurements.
+Assembly derives the SDK xorb product result from the independently
+observed native pointer publication and retirement, both SDK hydration
+records, and the scope and cleanup observations. Release verification
+recomputes that result and requires both arms to use the same approved
+view and separate caches. The source pointer is published before the
+projected view is materialized, then the xorb workload pins that publication
+receipt. Promotion stays closed until regional SDK
+hydration summaries can be rebuilt from individual runs and independent
+provider measurements.
 
 The protected workflow or its dedicated workers own producing these raw
 observations. The assembly and release jobs own rejecting missing, mismatched

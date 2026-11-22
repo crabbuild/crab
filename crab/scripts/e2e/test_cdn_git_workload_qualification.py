@@ -204,6 +204,27 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         self.assertIn("differs from the approved source", rejected.stderr)
         self.assertFalse(self.receipt.exists())
 
+    def test_sdk_hydration_publishes_the_exact_approved_pointer(self) -> None:
+        config = json.loads(self.fixture.read_bytes())
+        config.update(scope="cloudfront/private/sdk/git/direct")
+        raw = json.dumps(config).encode()
+        self.fixture.write_bytes(raw)
+        self.digest = hashlib.sha256(raw).hexdigest()
+        pointer = self.root / "pointer"
+        content = f"version https://crab.build/spec/v1\nfile-hash {'a' * 64}\nsize 1024\n".encode()
+        pointer.write_bytes(content)
+        args = ("--hydration-pointer", str(pointer), "--hydration-pointer-sha256", hashlib.sha256(content).hexdigest())
+        pointer.write_bytes(content + b"changed")
+        self.assertIn("pointer differs", self.call("publish", *args).stderr)
+        self.assertFalse(self.receipt.exists())
+        pointer.write_bytes(content)
+        self.assertTrue(self.run_phase("publish", *args)["visible_new_ref"])
+        published = json.loads(self.receipt.read_bytes())
+        observed = subprocess.check_output(["git", "--git-dir", str(self.origin), "cat-file", "blob",
+                                            published["oid"] + ":cdn-qualification.bin"])
+        self.assertEqual(observed, content)
+        self.assertTrue(self.run_phase("retire")["ref_retired"])
+
     def test_rejects_the_same_origin_with_a_neighbor_prefix_before_writing(self) -> None:
         event = json.loads(self.build_event.read_bytes())
         event["fields"]["prefix_sha256"] = hashlib.sha256(b"crab-cdn-qualification/neighbor/").hexdigest()

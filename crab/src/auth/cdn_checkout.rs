@@ -150,7 +150,7 @@ impl Checkout {
                 target: "crab::cdn::checkout_target",
                 parent: None,
                 origin_sha256 = %qualification_digest(&deployment.origin),
-                prefix_sha256 = %qualification_digest(&repository_prefix),
+                prefix_sha256 = %qualification_digest(format!("{repository_prefix}/")),
                 global_prefix_sha256 = %qualification_digest(global_prefix),
                 cache_root_sha256 = %qualification_digest(cache_root.as_os_str().as_encoded_bytes()),
                 binding_sha256 = store.as_storage().cdn_binding_sha256().as_deref().unwrap_or_default(),

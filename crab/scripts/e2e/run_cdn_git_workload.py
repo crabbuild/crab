@@ -22,7 +22,8 @@ from run_cdn_transport_checks import approved_fixture, fixture_base, fixture_obj
 from cdn_qualification import (
     CLI_BUILD_FIELDS, CLI_NATIVE_FIELDS, COMMIT, GIT_OID, GIT_PAYLOAD_SIZE, PROVIDER_FOR_EDGE, RUN_NUMBER, SHA256,
     cli_action_name, decode, deployment_component_digest,
-    fields, is_direct_sdk_git_scope, lfs_object_path, matches, read_git_record, require, requires_cli_lfs_workload,
+    fields, is_direct_sdk_git_scope, lfs_object_path, matches, read_git_record,
+    require, requires_cli_lfs_workload,
     requires_cli_workload, scope_parts,
     validate_git_publication, verified_publication, verify_read_candidate,
 )
@@ -172,10 +173,12 @@ def ref_tip(remote: str, ref: str, root: Path, env: dict[str, str], guard: Nativ
 
 def publish(
     remote: str, provenance: dict[str, str], receipt: Path, root: Path, env: dict[str, str],
-    crab: Path | None, guard: NativeTargetGuard,
+    crab: Path | None, guard: NativeTargetGuard, *, hydration_pointer: bytes | None = None,
 ) -> dict:
     ref = f"refs/heads/crab-cdn-qualification-{provenance['workflow_run_id']}-{provenance['workflow_run_attempt']}-{uuid4().hex[:12]}"
-    content = hashlib.shake_256(f"{provenance['configuration_sha256']}/{ref}".encode()).digest(GIT_PAYLOAD_SIZE)
+    content = hydration_pointer
+    if content is None:
+        content = hashlib.shake_256(f"{provenance['configuration_sha256']}/{ref}".encode()).digest(GIT_PAYLOAD_SIZE)
     sha256 = hashlib.sha256(content).hexdigest()
     run_git("init", "--template=", "--object-format=sha1", root=root, env=env)
     if crab is not None:
@@ -440,16 +443,27 @@ def main() -> int:
     parser.add_argument("--export-approval", type=Path, help="directory with the active public inventory and receipt")
     parser.add_argument("--transition-output", type=Path, help="retain an observed public transition phase")
     parser.add_argument("--before-transition", type=Path, help="native-only observation to pair with this edge fetch")
+    parser.add_argument("--hydration-pointer", type=Path)
+    parser.add_argument("--hydration-pointer-sha256")
     args = parser.parse_args()
     try:
         require(matches(COMMIT, args.source_sha) and matches(RUN_NUMBER, args.run_id)
                 and matches(RUN_NUMBER, args.run_attempt), "exact workflow run provenance is required")
         require(args.action == "inspect" or args.receipt is not None, "this action requires a publication receipt path")
         fixture = approved_fixture(args.fixture, args.configuration_sha256)
-        edge, _, _, _, _ = scope_parts(fixture["scope"])
+        edge, access, _, _, _ = scope_parts(fixture["scope"])
         require(requires_cli_workload(fixture["scope"])
                 or (args.action in ("publish", "retire") and is_direct_sdk_git_scope(fixture["scope"])),
                 "workload needs a direct CLI scope or native publication for a direct SDK Git scope")
+        pointer = None
+        if args.hydration_pointer is not None or args.hydration_pointer_sha256 is not None:
+            require(is_direct_sdk_git_scope(fixture["scope"]) and access == "private" and args.action == "publish"
+                    and fixture["view_suffix"] == "" and args.hydration_pointer is not None
+                    and matches(SHA256, args.hydration_pointer_sha256),
+                    "SDK hydration pointer publication requires the approved native source fixture and pointer digest")
+            pointer = read_git_record(args.hydration_pointer, limit=4096)
+            require(pointer and hashlib.sha256(pointer).hexdigest() == args.hydration_pointer_sha256,
+                    "hydration pointer differs from the approved workload")
         crab = companion_crab(args.helper) if requires_cli_lfs_workload(fixture["scope"]) else None
         remote = native_remote(fixture, edge)
         approved_binding = viewer_binding_sha256(fixture)
@@ -470,7 +484,8 @@ def main() -> int:
                     result = {"candidate": guard.candidate, "platform": guard.platform,
                               "viewer_binding_sha256": approved_binding}
                 else:
-                    result = publish(remote, provenance, args.receipt, root, env, crab, guard) | {"candidate": guard.candidate}
+                    result = publish(remote, provenance, args.receipt, root, env, crab, guard,
+                                     hydration_pointer=pointer) | {"candidate": guard.candidate}
             else:
                 raw = read_git_record(args.receipt)
                 record = validate_git_publication(raw, provenance)

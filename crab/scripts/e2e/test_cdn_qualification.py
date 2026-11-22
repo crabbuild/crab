@@ -194,8 +194,10 @@ class CdnQualificationTests(unittest.TestCase):
             self.registration["candidate"] = cli_candidate(self.scope, platform)
             self.registration["viewer_binding_sha256"] = "e" * 64
         sdk = CDN.is_direct_sdk_git_scope(self.scope)
-        if sdk:
-            self.registration.update(workload=CDN.SDK_GIT_ACTION, sdk_candidate=sdk_candidate(self.scope, platform),
+        hydration = CDN.is_direct_sdk_hydration_scope(self.scope)
+        if sdk or hydration:
+            self.registration.update(workload=CDN.SDK_HYDRATION_ACTION if hydration else CDN.SDK_GIT_ACTION,
+                                     sdk_candidate=sdk_candidate(self.scope, platform),
                                      viewer_binding_sha256="e" * 64)
             if access == "private":
                 self.registration["viewer_approval_sha256"] = "d" * 64
@@ -262,7 +264,7 @@ class CdnQualificationTests(unittest.TestCase):
                 self.historical_origin_trace(edge)
             elif check == CDN.PUBLIC_TRANSITION_CHECK:
                 continue
-            elif check == "rollback" and (CDN.requires_cli_workload(self.scope) or sdk):
+            elif check == "rollback" and (CDN.requires_cli_workload(self.scope) or sdk or hydration):
                 continue
             else:
                 self.trace(check, observations.get(check, [edge_hit]))
@@ -274,6 +276,8 @@ class CdnQualificationTests(unittest.TestCase):
             cleanup = json.loads((self.directory / "traces/cleanup.json").read_bytes())
             native = {"origin_sha256": cleanup["targets"]["native"]["origin_sha256"], "prefix_sha256": cleanup["prefix_sha256"]}
             write_git_measurements(self.directory / CDN.GIT_BENCHMARK_DIR, self.registration, platform, sdk_native=native)
+        elif hydration:
+            self.record_sdk_hydration()
         if access == "public":
             self.public_transition_trace()
 
@@ -447,6 +451,66 @@ class CdnQualificationTests(unittest.TestCase):
                 },
             })
         self.report["product_action"].update(expected_bytes=CDN.GIT_PAYLOAD_SIZE, observed_bytes=CDN.GIT_PAYLOAD_SIZE)
+
+    def record_sdk_hydration(self) -> None:
+        self.record_sdk_product()
+        records, traces = self.directory / CDN.SDK_HYDRATION_DIR, self.directory / "traces"
+        source = self.directory / CDN.GIT_PRODUCT_DIR
+        records.mkdir()
+        for name in ("publication.json", "retirement.json", *CDN.GIT_NATIVE_REF_FILES.values()):
+            (source / name).rename(records / name)
+        publication_path, retirement_path = (records / name for name in ("publication.json", "retirement.json"))
+        seed = {"scope": self.scope.replace("/xorb/", "/git/"), "configuration_sha256": "9" * 64}
+        publication = json.loads(publication_path.read_bytes()) | seed
+        receipt = json_file(publication_path, publication)
+        json_file(retirement_path, json.loads(retirement_path.read_bytes()) | seed | {"publication_sha256": receipt})
+        for filename in CDN.GIT_NATIVE_REF_FILES.values():
+            path = records / filename
+            json_file(path, json.loads(path.read_bytes()) | {"publication_sha256": receipt})
+        self.registration["hydration_workload_sha256"] = json_file(records / "workload.json", {
+            "schema": "crab.cdn-sdk-hydration-workload/v1", "configuration_sha256": CONFIGURATION,
+            "pointer_sha256": publication["sha256"], "payload_sha256": "c" * 64,
+            "payload_bytes": 1024, "crab_sha256": publication["candidate"]["binary_sha256"],
+            "global_prefix_sha256": "5" * 64,
+            "publication_sha256": receipt,
+        })
+        control = json.loads((traces / f"{CDN.SCOPED_VIEW_CHECK}.json").read_bytes())
+        cleanup = json.loads((traces / "cleanup.json").read_bytes())
+        origin = cleanup["targets"]["native"]["origin_sha256"]
+        placement = control["placement"]
+        target = placement["views"]["target"]
+        placement.update(origin_sha256=origin, source_prefix_sha256=cleanup["prefix_sha256"],
+                         deployment_policy_sha256=self.registration["deployment_policy_sha256"])
+        target.update(key_sha256=self.object_key)
+        for request in control["requests"]:
+            if request["probe"].startswith("target_"):
+                request["key_sha256"] = self.object_key
+        self.registration["scoped_view_sha256"] = CDN.deployment_component_digest(placement)
+        self.scoped_view_trace(control)
+        for arm, raw_path, destination, marker in (
+            ("edge", source / "snapshot.json", records / "hydration.json", "1"),
+            ("origin", traces / "rollback.json", traces / "rollback.json", "2"),
+        ):
+            raw = json.loads(raw_path.read_bytes())
+            reader = {
+                "origin_sha256": origin, "prefix_sha256": target["physical_prefix_sha256"],
+                "global_prefix_sha256": "5" * 64, "cache_root_sha256": marker * 64, "local_cache_only": True,
+                "binding_sha256": raw["reader"]["binding_sha256"], "approval_sha256": raw["approval_sha256"],
+            }
+            evidence = {
+                name: raw[name] for name in CDN.CDN_PROVENANCE_FIELDS | CDN.PRODUCT_COUNTERS | CDN.SDK_TIMING_FIELDS
+                | {"platform", "arm", "candidate", "native_traffic", "edge_responses"}
+            } | {
+                "schema": "crab.cdn-sdk-hydration/v1", "workload_sha256": self.registration["hydration_workload_sha256"],
+                "crab_sha256": publication["candidate"]["binary_sha256"], "pointer_sha256": publication["sha256"],
+                "payload": {"sha256": "c" * 64, "bytes": 1024}, "xorb_key_sha256": self.object_key, "reader": reader,
+            }
+            if arm == "edge":
+                json_file(destination, evidence)
+            else:
+                self.rollback_trace(evidence)
+        self.report["product_action"].update(expected_sha256="c" * 64, observed_sha256="c" * 64,
+                                             expected_bytes=1024, observed_bytes=1024)
 
     def rollback_trace(self, evidence: dict[str, Any]) -> None:
         path = self.directory / "traces/rollback.json"
@@ -1092,6 +1156,36 @@ class CdnQualificationTests(unittest.TestCase):
                 policy.write_text(self.scope + "\n", encoding="utf-8")
                 result = self.command("--cdn-release-policy", str(policy))
                 self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_sdk_hydration_requires_the_exact_lifecycle_and_rejects_generic_promotion(self) -> None:
+        self.configure("s3", "private", "direct", consumer="sdk", family="xorb")
+        self.assertEqual(self.command().returncode, 0)
+        policy = self.directory / "policy.txt"
+        policy.write_text(self.scope + "\n", encoding="utf-8")
+        self.rejected("promotion requires regional hydration evidence", "--cdn-release-policy", str(policy))
+        records = self.directory / CDN.SDK_HYDRATION_DIR
+        edge = records / "hydration.json"
+        native = self.directory / "traces/rollback.json"
+        original = json.loads(native.read_bytes())
+        edge_read = json.loads(edge.read_bytes())
+        for changes, reason in (
+            ({"reader": original["reader"] | {"cache_root_sha256": edge_read["reader"]["cache_root_sha256"]}}, "fresh cache"),
+            ({"reader": original["reader"] | {"binding_sha256": "5" * 64}}, "required viewer approval"),
+            ({"reader": original["reader"] | {"global_prefix_sha256": "6" * 64}}, "different projected view"),
+            ({"observed_edge_gets": 1, "edge_hits": 1, "edge_attempts": 1, "all_edge_attempts": 1}, "without edge or cache activity"),
+            ({"finished_at_unix_ms": PUBLIC_SEAL + 65}, "same published ref after rollback"),
+        ):
+            with self.subTest(changes=changes):
+                self.rollback_trace(original | changes)
+                self.rejected(reason)
+        self.rollback_trace(original)
+        publication = records / "publication.json"
+        approved_publication = publication.read_bytes()
+        json_file(publication, json.loads(approved_publication) | {"sha256": "7" * 64})
+        self.rejected("native publication of the approved pointer")
+        publication.write_bytes(approved_publication)
+        (records / CDN.GIT_NATIVE_REF_FILES["published"]).unlink()
+        self.rejected(CDN.GIT_NATIVE_REF_FILES["published"])
 
     def test_public_sdk_release_requires_ordinary_export_transition_calls(self) -> None:
         self.configure("gcs", "public", "direct", consumer="sdk")

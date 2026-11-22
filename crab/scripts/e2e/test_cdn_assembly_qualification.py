@@ -44,6 +44,10 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
             observations.pop("performance")
             for name in (fixture.CDN.GIT_PRODUCT_DIR, fixture.CDN.GIT_BENCHMARK_DIR):
                 (self.root / name).rename(row / name)
+        if fixture.CDN.is_direct_sdk_hydration_scope(self.example.scope):
+            observations.pop("product_action")
+            name = fixture.CDN.SDK_HYDRATION_DIR
+            (self.root / name).rename(row / name)
         if access == "public":
             name = fixture.CDN.PUBLIC_EXPORT_DIR
             (self.root / name).rename(row / name)
@@ -108,6 +112,24 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
         fixture.json_file(retained, unknown)
         with self.assertRaises(subprocess.CalledProcessError):
             release.RELEASE.verify_bundle(self.output, policy, {self.example.scope}, fixture.COMMIT, "123", "2", digest)
+
+    def test_sdk_hydration_assembly_derives_product_from_the_native_lifecycle_and_pair(self) -> None:
+        digest = self.inputs("s3", family="xorb")
+        self.assertEqual(self.assemble(digest), 1)
+        row = self.output / self.row
+        report = json.loads((row / "cdn-report.json").read_bytes())
+        self.assertEqual(report["product_action"], self.example.report["product_action"])
+        product = row / fixture.CDN.SDK_HYDRATION_DIR
+        self.assertEqual({entry.name for entry in product.iterdir()},
+                         {"hydration.json", "workload.json", "publication.json", "retirement.json",
+                          *fixture.CDN.GIT_NATIVE_REF_FILES.values()})
+        # Recheck retained files using the same verifier that consumes the release bundle.
+        fixture.CDN.verify_bundle_row(self.output, self.row, self.example.registration, fixture.COMMIT, "123", "2")
+        edge = product / "hydration.json"
+        original = json.loads(edge.read_bytes())
+        fixture.json_file(edge, original | {"xorb_key_sha256": "0" * 64})
+        with self.assertRaises(subprocess.CalledProcessError):
+            fixture.CDN.verify_bundle_row(self.output, self.row, self.example.registration, fixture.COMMIT, "123", "2")
 
     def test_sdk_requires_measured_snapshot_and_rejects_operator_supplied_product_summary(self) -> None:
         digest = self.inputs("gcs")
