@@ -109,10 +109,12 @@ impl Mutation for CreatePullReviewThread {
             pull: record.pull,
             number: record.number,
         };
-        crate::cells::repository::collaboration::attachments::claim(
+        crate::cells::repository::collaboration::body_written(
             context,
             target,
             &record.author,
+            record.version,
+            None,
             &record.body,
         )?;
         crate::cells::repository::search::contributions::project(
@@ -197,9 +199,9 @@ impl Mutation for UpdatePullReviewThread {
                 .as_ref()
                 .is_some_and(|value| value != &record.suggested_text);
         let now = timestamp(context.now_ms())?;
-        if let Some(body) = input.body {
-            record.body = body;
-        }
+        let previous_body = input
+            .body
+            .map(|body| std::mem::replace(&mut record.body, body));
         if let Some(suggested_text) = input.suggested_text {
             record.suggested_text = suggested_text;
         }
@@ -225,12 +227,16 @@ impl Mutation for UpdatePullReviewThread {
             number: record.number,
         };
         if edited {
-            crate::cells::repository::collaboration::attachments::claim(
-                context,
-                target,
-                &input.actor,
-                &record.body,
-            )?;
+            if let Some(previous) = previous_body.as_deref() {
+                crate::cells::repository::collaboration::body_written(
+                    context,
+                    target,
+                    &input.actor,
+                    record.version,
+                    Some(previous),
+                    &record.body,
+                )?;
+            }
             crate::cells::repository::search::contributions::edit(context, target, &record.body)?;
             activity::append(context, target, &input.actor, Action::Updated)?;
         }
@@ -347,10 +353,12 @@ impl Mutation for CreatePullReviewReply {
             thread: record.thread,
             number: record.number,
         };
-        crate::cells::repository::collaboration::attachments::claim(
+        crate::cells::repository::collaboration::body_written(
             context,
             target,
             &record.author,
+            record.version,
+            None,
             &record.body,
         )?;
         crate::cells::repository::search::contributions::project(
@@ -405,7 +413,7 @@ impl Mutation for UpdatePullReviewReply {
             ));
         }
         let edited = record.body != input.body;
-        record.body = input.body;
+        let previous_comment = std::mem::replace(&mut record.body, input.body);
         record.version = next_version(record.version)?;
         record.updated_at_ms = timestamp(context.now_ms())?;
         context.sql(&SqlBatch {
@@ -429,10 +437,12 @@ impl Mutation for UpdatePullReviewReply {
                 thread: record.thread,
                 number: record.number,
             };
-            crate::cells::repository::collaboration::attachments::claim(
+            crate::cells::repository::collaboration::body_written(
                 context,
                 target,
                 &input.actor,
+                record.version,
+                Some(&previous_comment),
                 &record.body,
             )?;
             crate::cells::repository::search::contributions::edit(context, target, &record.body)?;

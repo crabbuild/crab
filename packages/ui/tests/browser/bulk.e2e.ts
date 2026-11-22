@@ -197,6 +197,63 @@ const issue = (page: Page, number = 1) =>
 const pull = (page: Page) =>
   page.getByRole("checkbox", { name: /^Select pull request #1:/ });
 
+test("checking and clearing selection keeps the checkbox positions and focus", async ({
+  page,
+}) => {
+  await fixture(page);
+  let finishSelection!: () => void;
+  const preparation = new Promise<void>((resolve) => {
+    finishSelection = resolve;
+  });
+  await page.route("**/discussions/selection?**", async (route) => {
+    await preparation;
+    await route.fallback();
+  });
+  await page.goto("/team/project/issues");
+  const row = issue(page);
+  const all = page.getByRole("checkbox", {
+    name: "Select all items on this page",
+  });
+  try {
+    await expect(row).toBeVisible();
+    const rowPosition = await row.boundingBox();
+    const allPosition = await all.boundingBox();
+    await all.focus();
+    await all.press("Space");
+    await expect(row).toBeChecked();
+    await expect(
+      page.getByRole("region", { name: "Bulk discussion actions" }),
+    ).toBeVisible();
+    expect(await row.boundingBox()).toEqual(rowPosition);
+    expect(await all.boundingBox()).toEqual(allPosition);
+    await expect(all).toBeFocused();
+    await all.press("Space");
+    await expect(row).not.toBeChecked();
+    expect(await row.boundingBox()).toEqual(rowPosition);
+    await expect(all).toBeFocused();
+    await row.click();
+    await expect(row).toBeChecked();
+    expect(await row.boundingBox()).toEqual(rowPosition);
+    finishSelection();
+    await expect(page.getByRole("button", { name: "Mark as" })).toBeEnabled();
+    expect(await row.boundingBox()).toEqual(rowPosition);
+    await row.click();
+    await expect(row).not.toBeChecked();
+    await expect(row).toBeFocused();
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    const mobilePosition = await row.boundingBox();
+    await row.click();
+    await expect(row).toBeChecked();
+    expect(await row.boundingBox()).toEqual(mobilePosition);
+    await row.click();
+    await expect(row).not.toBeChecked();
+    expect(await row.boundingBox()).toEqual(mobilePosition);
+  } finally {
+    finishSelection();
+  }
+});
+
 test("mixed selection supports individual, range, page and keyboard selection without writes", async ({
   page,
 }) => {

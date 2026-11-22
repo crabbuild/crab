@@ -1,6 +1,6 @@
 use super::{
-    AuthError, Authentication, FLOW_LIFETIME, Flow, Identity, Principal, SESSION_LIFETIME, Session,
-    cookie_value, key, now_epoch,
+    AuthError, Authentication, FLOW_LIFETIME, Flow, GROUP_SESSION_LIFETIME, Identity, Principal,
+    SESSION_LIFETIME, Session, cookie_value, key, now_epoch,
     transport::{bounded_http, discover},
 };
 use crate::{AuthProvider, config::validate_identity_url, server::Server};
@@ -249,7 +249,7 @@ async fn finish_login(
     let maximum = if groups.is_empty() {
         SESSION_LIFETIME
     } else {
-        Duration::from_secs(15 * 60)
+        GROUP_SESSION_LIFETIME
     };
     let lifetime = Duration::from_secs(seconds).min(maximum);
     let subject = claims.subject().as_str().to_owned();

@@ -2415,32 +2415,74 @@ main {
   font-size: var(--text-sm);
   font-weight: 500;
 }
-.discussion-density {
+.discussion-segments {
+  overflow: hidden;
+  border: 1px solid var(--input);
+  border-radius: var(--radius-md);
   background: var(--background);
 }
-.discussion-density > span:not(:first-child) [data-slot="toggle-group-item"] {
-  border-left: 0;
-  border-top-left-radius: 0;
-  border-bottom-left-radius: 0;
+.discussion-segments
+  :where([data-slot="button"], [data-slot="toggle-group-item"]) {
+  height: calc(--spacing(7) - 2px);
+  border: 0;
+  border-radius: 0;
+  /* The group owns the frame. Press feedback must stay inside it. */
+  translate: none;
+  transition-property: background-color;
 }
-.discussion-density > span:not(:last-child) [data-slot="toggle-group-item"] {
-  border-top-right-radius: 0;
-  border-bottom-right-radius: 0;
+.discussion-segments > :not(:first-child) {
+  border-inline-start: 1px solid var(--border);
 }
-.discussion-state-controls a[aria-current="page"] {
-  color: var(--foreground);
+.discussion-segments :is([aria-current="page"], [data-state="on"]) {
   background: var(--secondary);
   font-weight: 600;
 }
+@media (hover: hover) {
+  .discussion-segments
+    :is([data-slot="button"], [data-slot="toggle-group-item"]):hover:not(
+      :disabled
+    ) {
+    background: var(--accent);
+  }
+}
+.discussion-segments
+  :is([data-slot="button"], [data-slot="toggle-group-item"]):focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+  box-shadow: none;
+}
 .issue-list-panel {
   overflow: hidden;
+}
+.discussion-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  background: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+.discussion-toolbar > * {
+  grid-area: 1 / 1;
+}
+.discussion-toolbar-selection {
+  display: flex;
+  align-items: center;
+  justify-self: start;
+  min-height: --spacing(10);
+  margin-block-start: --spacing(2);
+  margin-inline-start: --spacing(4);
+  z-index: 1;
+}
+.discussion-toolbar:has(> .discussion-toolbar-selection) .discussion-counts {
+  padding-inline-start: --spacing(9);
 }
 .issue-list-panel .issues-filters {
   min-height: 48px;
   margin: 0;
   padding: --spacing(2) --spacing(4);
-  background: var(--muted);
-  border-bottom: 1px solid var(--border);
+}
+.discussion-toolbar > .issues-filters[inert] {
+  visibility: hidden;
 }
 .issue-list {
   padding: 0;
@@ -2448,6 +2490,7 @@ main {
   margin: 0;
 }
 .issue-list li {
+  --discussion-title-line: 1.5rem;
   display: flex;
   gap: --spacing(3);
   padding: --spacing(4.5) --spacing(5);
@@ -2456,6 +2499,43 @@ main {
 .discussion-row-content {
   flex: 1;
   min-width: 0;
+}
+.discussion-row-title {
+  font-size: var(--text-base);
+  line-height: var(--discussion-title-line);
+}
+.discussion-row-checkbox {
+  /* The comfortable row needs a small optical lift from the line center. */
+  margin-block-start: min(
+    0.2rem,
+    calc((var(--discussion-title-line) - 1rem) / 2)
+  );
+}
+:where(
+  .discussion-toolbar-selection [data-slot="checkbox"],
+  .discussion-row-checkbox
+) {
+  transition-property: border-color;
+}
+@media (hover: hover) {
+  :where(
+      .discussion-toolbar-selection [data-slot="checkbox"],
+      .discussion-row-checkbox
+    ):enabled[data-state="unchecked"]:hover {
+    border-color: var(--input-hover);
+  }
+}
+.issue-list .discussion-row-status {
+  /* Align with the first title line even when the title wraps. */
+  margin-block-start: calc((var(--discussion-title-line) - 1rem) / 2);
+  width: 1rem;
+  height: 1rem;
+  padding: 0;
+}
+.discussion-row-status svg {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 .discussion-author {
   overflow-wrap: anywhere;
@@ -2466,13 +2546,14 @@ main {
   overflow-wrap: anywhere;
 }
 .issue-list[data-density="compact"] li {
+  --discussion-title-line: 1.25rem;
   padding-block: --spacing(2);
   gap: --spacing(2);
 }
 .issue-list[data-density="compact"] p {
   margin-top: --spacing(0.5);
 }
-.issue-list[data-density="compact"] .issue-link {
+.issue-list[data-density="compact"] .discussion-row-title {
   font-size: var(--text-sm);
 }
 .issue-list li:last-child {
@@ -2488,7 +2569,6 @@ main {
 .issue-link {
   color: var(--foreground);
   font-weight: 600;
-  font-size: var(--text-base);
   overflow-wrap: anywhere;
 }
 .discussion-labels {

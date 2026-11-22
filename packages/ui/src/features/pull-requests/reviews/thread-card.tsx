@@ -28,6 +28,7 @@ export function ReviewThreadCard({
   pull,
   thread,
   csrf,
+  linked,
   onJumpToDiff,
   refresh,
 }: {
@@ -35,6 +36,7 @@ export function ReviewThreadCard({
   pull: PullRequest;
   thread: PullReviewThread;
   csrf: string;
+  linked: boolean;
   onJumpToDiff?: (thread: PullReviewThread) => void;
   refresh: () => void;
 }) {
@@ -68,11 +70,12 @@ export function ReviewThreadCard({
   return (
     <article
       id={`review-thread-${thread.number}`}
+      tabIndex={-1}
       className={`panel review-thread-card${thread.outdated ? " outdated" : ""}${thread.resolved ? " resolved" : ""}`}
     >
       <details
         className="review-thread-details"
-        open={!thread.resolved || undefined}
+        open={linked || !thread.resolved || undefined}
       >
         <summary className="review-thread-summary">
           <span className="review-thread-summary-main">

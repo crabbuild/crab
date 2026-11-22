@@ -123,10 +123,12 @@ impl Mutation for CreateIssue {
         let target = Target::Issue {
             number: record.number,
         };
-        crate::cells::repository::collaboration::attachments::claim(
+        crate::cells::repository::collaboration::body_written(
             context,
             target,
             &record.author,
+            record.version,
+            None,
             &record.body,
         )?;
         activity::append(context, target, &record.author, Action::Created)?;
@@ -262,10 +264,12 @@ pub(in crate::cells::repository) fn append_comment(
         issue: record.issue,
         number: record.number,
     };
-    crate::cells::repository::collaboration::attachments::claim(
+    crate::cells::repository::collaboration::body_written(
         context,
         target,
         &record.author,
+        record.version,
+        None,
         &record.body,
     )?;
     search::contributions::project(context, target, &record.author, &record.body)?;
@@ -385,9 +389,9 @@ impl Mutation for UpdateIssue {
         if let Some(value) = input.title {
             issue.title = value;
         }
-        if let Some(value) = input.body {
-            issue.body = value;
-        }
+        let previous_body = input
+            .body
+            .map(|body| std::mem::replace(&mut issue.body, body));
         if let Some(value) = input.state {
             issue.state = value;
         }
@@ -448,12 +452,16 @@ impl Mutation for UpdateIssue {
             number: issue.number,
         };
         if edited {
-            crate::cells::repository::collaboration::attachments::claim(
-                context,
-                target,
-                &input.actor,
-                &issue.body,
-            )?;
+            if let Some(previous) = previous_body.as_deref() {
+                crate::cells::repository::collaboration::body_written(
+                    context,
+                    target,
+                    &input.actor,
+                    issue.version,
+                    Some(previous),
+                    &issue.body,
+                )?;
+            }
             activity::append(context, target, &input.actor, Action::Updated)?;
         }
         if was_closed != (issue.state != 0) {
@@ -527,7 +535,7 @@ impl Mutation for UpdateComment {
             return Ok(MutationResult::Rejected(UpdateCommentOutcome::Conflict));
         }
         let edited = comment.body != input.body;
-        comment.body = input.body;
+        let previous_comment = std::mem::replace(&mut comment.body, input.body);
         comment.version = comment
             .version
             .checked_add(1)
@@ -558,10 +566,12 @@ impl Mutation for UpdateComment {
                 issue: comment.issue,
                 number: comment.number,
             };
-            crate::cells::repository::collaboration::attachments::claim(
+            crate::cells::repository::collaboration::body_written(
                 context,
                 target,
                 &input.actor,
+                comment.version,
+                Some(&previous_comment),
                 &comment.body,
             )?;
             search::contributions::edit(context, target, &comment.body)?;

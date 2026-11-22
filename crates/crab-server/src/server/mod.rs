@@ -21,6 +21,7 @@ mod background;
 pub(crate) mod capacity;
 pub(crate) mod http;
 pub(crate) mod management;
+pub(crate) mod mentions;
 pub(crate) mod storage;
 
 pub(crate) const MAX_RELEASE_ASSET_BYTES: u64 = 512 * 1024 * 1024;
@@ -363,6 +364,8 @@ pub async fn serve(config: Config) -> Result<()> {
                   background.spawn(async move { background::sweep_projections(projection).await });
                   let attachments = server.clone();
                   background.spawn(async move { crate::api::discussion_attachments::sweep(attachments).await; Ok(()) });
+                  let mentions = server.clone();
+                  background.spawn(async move { self::mentions::sweep(mentions).await; Ok(()) });
                   let integrity = server.clone();
                   background.spawn(async move { crate::integrity::run(integrity).await; Ok(()) });
               },

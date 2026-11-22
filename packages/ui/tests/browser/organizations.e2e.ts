@@ -51,6 +51,8 @@ async function fixture(page: Page) {
     const url = new URL(request.url());
     const path = url.pathname;
     const method = request.method();
+    if (path === "/api/notifications/unread")
+      return route.fulfill({ json: { unread: false } });
     if (path === "/api/session")
       return route.fulfill({
         json: {

@@ -290,11 +290,23 @@ rejection releases it. Reload/closing warns while an intent is uncertain. A
 conflicted settings draft survives refresh until saved metadata is reviewed.
 The UI uses shadcn components and existing Geist/Vercel tokens.
 
-These teams do not yet own repository/project grants, nested membership, review
-requests or mention notifications. Catalog repository grants are unchanged, and
-there is still no atomic cross-Cell authority cutover.
+Repository administrators and organization owners can bind explicit aliases
+for closed teams. The private Organization mention read checks sender access,
+team visibility, and current membership epochs. Team review requests, nested
+membership, and team-owned repository or project grants remain separate work.
 
 ## Repository collaboration
+
+Discussion writes store newly added mentions in a durable Repository outbox
+alongside the source body. The server drains each bounded page after commit.
+It resolves addressed Directory accounts and pages current closed-team members.
+Deduplicated delivery writes to private, bounded Directory inboxes before
+acknowledging the Repository event. Separate bounded retention protects
+explicit grants from being displaced by pending SSO group notices. Retries
+preserve read state. The inbox rechecks the current signed-in account and
+repository access before disclosing unread state, titles, or links. Team
+bindings, queued mentions, and inbox entries use native document records and
+require no SQL preparation.
 
 Discussion author enrichment uses the bounded native `LookupActors` read (Directory
 operation 6). It resolves qualified private keys into public UUID/handle/name
@@ -375,7 +387,7 @@ Native list output adds `review_requested_from_me`. Author, reviewer and comment
 names now share one ordered `people` binding collection, one Directory snapshot,
 digest encoding and validation. Public HTTP cannot supply bindings.
 Update peers together; there is no old list-shape reader or source-scan fallback.
-Team requests, mention relationships and native grant authority remain separate
+Team requests, mention search relationships and native grant authority remain separate
 delivery work. Review-status predicates are described below.
 
 ## Reviewer status preparation

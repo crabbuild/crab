@@ -19,6 +19,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { GitAccess } from "@/features/git-access";
 import { GitImport } from "@/features/imports";
+import { NotificationLink, Notifications } from "@/features/notifications";
 import { gitOwnerSuggestion } from "@/features/imports/source";
 import {
   OrganizationPage,
@@ -120,6 +121,7 @@ export function App() {
     };
   }, [codeTheme, resolved]);
   const url = new URL(location, window.location.origin);
+  const notifications = url.pathname === "/-/notifications";
   const savedReplies = url.pathname === "/-/settings/saved-replies";
   const profileSettings = url.pathname === "/-/profile" || savedReplies;
   const actorId =
@@ -131,7 +133,7 @@ export function App() {
       url.pathname,
     );
   const route =
-    profileSettings || actorId || organizationRoute
+    profileSettings || actorId || organizationRoute || notifications
       ? undefined
       : repositoryRoute(url);
   const projectWorkspace = organizationRoute?.[2]?.startsWith("/projects")
@@ -273,6 +275,9 @@ export function App() {
                 codeTheme={codeTheme}
                 setCodeTheme={selectCodeTheme}
               />
+              {session.data?.user && (
+                <NotificationLink current={notifications} />
+              )}
               {session.data?.authenticated && (
                 <DropdownMenu modal={false}>
                   <DropdownMenuTrigger asChild>
@@ -395,6 +400,8 @@ export function App() {
                     : "Continue to sign in"}
                 </Button>
               </div>
+            ) : notifications ? (
+              <Notifications csrf={session.data.csrf ?? ""} />
             ) : organizationRoute ? (
               organizationRoute[2]?.startsWith("/projects") ? (
                 <OrganizationProjects

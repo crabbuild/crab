@@ -95,6 +95,8 @@ and owns the bulk HTTP contract.
 `auth/oidc/` owns verified signed group claims and their bounds; group-backed
 sessions have a fifteen-minute ceiling. `auth/principal/` resolves individual/group
 role union against current repository ACLs and intersects Git token scope.
+Mention autocomplete probes durable sessions for qualified profile candidates
+and applies the same group grant rule against the latest repository ACL.
 `catalog/` owns atomic complete ACL edits and the audit outbox; `api/members/`
 and `packages/ui/src/features/settings/groups.tsx` compose access administration. SSO groups do
 not grant native Organization or team authority. Tests stay with these owners.
@@ -114,6 +116,10 @@ shared discussion-index lifecycle. `api/conversation/` enriches these native
 windows with public authors, reactions and selected-head review freshness.
 `links/` owns versioned issue/PR relationships and both subject indexes; its
 single activity event is indexed into both timelines.
+`collaboration/mentions.rs` records Markdown mentions with the source body.
+`collaboration/mention_settings.rs` owns versioned aliases. `server/mentions.rs`
+delivers the durable outbox to `cells/directory/notifications.rs`.
+`api/notifications/` rechecks repository access when reading inbox entries.
 
 The native runtime lives in `src/cells/runtime.rs`; `src/cells/client.rs` owns
 the authority-checked `CellClient` and target-bound read receipts.

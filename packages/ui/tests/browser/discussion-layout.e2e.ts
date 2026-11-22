@@ -7,7 +7,10 @@ import {
   contrastRatio,
 } from "./accessibility";
 
-async function fixture(page: Page) {
+async function fixture(
+  page: Page,
+  options?: { selectable: boolean; issueTitle: string },
+) {
   await mockPullRequest(page);
   const reads: string[] = [];
   const shared = {
@@ -30,7 +33,12 @@ async function fixture(page: Page) {
   for (const kind of ["issues", "pulls"]) {
     await page.route(`**/api/repos/team/project/${kind}?**`, (route) => {
       reads.push(route.request().url());
-      const issue = { ...shared, kind: "issue" };
+      const issue = {
+        ...shared,
+        kind: "issue",
+        title: options?.issueTitle ?? shared.title,
+        version: 1,
+      };
       const pull = {
         ...shared,
         kind: "pull",
@@ -42,6 +50,8 @@ async function fixture(page: Page) {
       };
       return route.fulfill({
         json: {
+          repository_id: "00000000-0000-4000-8000-000000000099",
+          can_bulk_edit: options?.selectable ?? false,
           items: kind === "issues" ? [issue, pull] : [pull],
           next: null,
           authored_by_me: false,
@@ -61,6 +71,69 @@ async function fixture(page: Page) {
   }
   return reads;
 }
+
+test("discussion groups keep one frame on hover and row controls align with the first title line", async ({
+  page,
+}) => {
+  const issueTitle =
+    "Keep the issue title aligned when it wraps onto the next line";
+  await fixture(page, { selectable: true, issueTitle });
+  await page.goto("/team/project/issues");
+  const state = page.getByRole("navigation", { name: "Issue state" });
+  const density = page.getByRole("radiogroup", { name: "List density" });
+  const comfortable = density.getByRole("radio", { name: "Comfortable" });
+  const compact = density.getByRole("radio", { name: "Compact" });
+  const title = page.getByRole("link", { name: issueTitle, exact: true });
+  const row = page.getByRole("listitem").filter({ has: title });
+  const checkbox = row.getByRole("checkbox");
+  const icon = row.getByRole("img", { name: "open", exact: true });
+
+  async function expectAlignment() {
+    const titleCenter = await title.evaluate((element) => {
+      const firstLine = element.getClientRects()[0];
+      return firstLine.y + firstLine.height / 2;
+    });
+    for (const control of [checkbox, icon]) {
+      const bounds = (await control.boundingBox())!;
+      expect(
+        Math.abs(bounds.y + bounds.height / 2 - titleCenter),
+      ).toBeLessThanOrEqual(1);
+    }
+  }
+
+  for (const theme of ["Light", "Dark"]) {
+    await page.getByRole("button", { name: theme, exact: true }).click();
+    const stateGroup = state.getByRole("group");
+    const closed = stateGroup.getByRole("link", { name: "Closed 0" });
+    for (const { group, segment } of [
+      { group: stateGroup, segment: closed },
+      { group: density, segment: compact },
+    ]) {
+      await expect(group).toHaveCSS("height", "28px");
+      await expect(group).toHaveCSS("border-top-width", "1px");
+      const idle = await segment.evaluate(
+        (element) => getComputedStyle(element).backgroundColor,
+      );
+      const frame = await group.evaluate(
+        (element) => getComputedStyle(element).borderColor,
+      );
+      await segment.hover();
+      await expect(segment).not.toHaveCSS("background-color", idle);
+      await expect(segment).toHaveCSS("border-top-width", "0px");
+      await expect(group).toHaveCSS("border-color", frame);
+    }
+    await comfortable.click();
+    await expect(checkbox).toHaveCSS("margin-top", "3.2px");
+    await expectAlignment();
+    await compact.click();
+    await expectAlignment();
+  }
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(
+    await title.evaluate((element) => element.getClientRects().length),
+  ).toBeGreaterThan(1);
+  await expectAlignment();
+});
 
 test("link buttons retain the same readable control colors and geometry as native buttons", async ({
   page,

@@ -79,7 +79,7 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .merge(projects::routes())
         .route_layer(middleware::from_fn_with_state(server, app::admit))
 }
-async fn actor(server: &Server, principal: &Principal) -> Result<Uuid> {
+pub(in crate::api) async fn actor(server: &Server, principal: &Principal) -> Result<Uuid> {
     let identity = app::account(principal)?;
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
     let ids = app::query_output(

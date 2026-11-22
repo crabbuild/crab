@@ -346,6 +346,7 @@ pub(in crate::cells) fn dispatch_read(
         teams::GetMembership::ID => invoke_read::<teams::GetMembership>(context, input),
         teams::Candidates::ID => invoke_read::<teams::Candidates>(context, input),
         teams::GetPolicy::ID => invoke_read::<teams::GetPolicy>(context, input),
+        teams::MentionMembers::ID => invoke_read::<teams::MentionMembers>(context, input),
         GetOrganization::ID => invoke_read::<GetOrganization>(context, input),
         ListMembers::ID => invoke_read::<ListMembers>(context, input),
         GetMember::ID => invoke_read::<GetMember>(context, input),

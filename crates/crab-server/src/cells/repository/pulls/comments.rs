@@ -91,10 +91,12 @@ pub(in crate::cells::repository) fn append_comment(
         pull: record.pull,
         number: record.number,
     };
-    crate::cells::repository::collaboration::attachments::claim(
+    crate::cells::repository::collaboration::body_written(
         context,
         target,
         &record.author,
+        record.version,
+        None,
         &record.body,
     )?;
     super::super::search::contributions::project(context, target, &record.author, &record.body)?;
@@ -134,7 +136,7 @@ impl Mutation for UpdatePullComment {
             return Ok(MutationResult::Rejected(UpdatePullCommentOutcome::Conflict));
         }
         let edited = record.body != input.body;
-        record.body = input.body;
+        let previous_comment = std::mem::replace(&mut record.body, input.body);
         record.version = next_version(record.version)?;
         record.updated_at_ms = timestamp(context.now_ms())?;
         context.sql(&SqlBatch { statements: vec![statement("UPDATE repository_pull_comments SET body = ?, version = ?, updated_at_ms = ? WHERE pull_number = ? AND number = ? AND version = ?", vec![SqlValue::Text(record.body.clone()), integer(record.version)?, integer(record.updated_at_ms)?, integer(record.pull)?, integer(record.number)?, integer(input.version)?])] })?;
@@ -144,10 +146,12 @@ impl Mutation for UpdatePullComment {
                 pull: record.pull,
                 number: record.number,
             };
-            crate::cells::repository::collaboration::attachments::claim(
+            crate::cells::repository::collaboration::body_written(
                 context,
                 target,
                 &input.actor,
+                record.version,
+                Some(&previous_comment),
                 &record.body,
             )?;
             crate::cells::repository::search::contributions::edit(context, target, &record.body)?;

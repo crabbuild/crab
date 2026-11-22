@@ -76,7 +76,7 @@ const MARKDOWN_TOOLS = [
       label: "Insert a Markdown command",
       icon: TerminalIcon,
     },
-    { format: "mention", label: "Mention a user", icon: AtSignIcon },
+    { format: "mention", label: "Mention a person or team", icon: AtSignIcon },
     {
       format: "reference",
       label: "Reference an issue or pull request",
@@ -475,7 +475,11 @@ export function Editor({
                   />
                   <EditorMenu
                     id={menuId}
-                    label={menuTitles[command ?? trigger.kind]}
+                    label={
+                      trigger.kind === "mention" && trigger.query.includes("/")
+                        ? "Mention a team"
+                        : menuTitles[command ?? trigger.kind]
+                    }
                     items={items}
                     active={selected}
                     loading={loading}

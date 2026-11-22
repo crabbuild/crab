@@ -6,6 +6,7 @@ use super::collaboration::reactions::{GetReactions, SetReaction};
 use super::collaboration::{
     attachments,
     links::{GetLink, ListLinks, SetLink},
+    mention_settings, mentions,
 };
 use super::*;
 use crate::cells::application::{invoke_mutation, invoke_read};
@@ -47,6 +48,8 @@ pub(in crate::cells) fn dispatch_mutation(
         attachments::Finish::ID => invoke_mutation::<attachments::Finish>(context, input),
         attachments::Expire::ID => invoke_mutation::<attachments::Expire>(context, input),
         attachments::Collect::ID => invoke_mutation::<attachments::Collect>(context, input),
+        mentions::Acknowledge::ID => invoke_mutation::<mentions::Acknowledge>(context, input),
+        mention_settings::Set::ID => invoke_mutation::<mention_settings::Set>(context, input),
         #[cfg(test)]
         projection::tests::Historical::ID => {
             invoke_mutation::<projection::tests::Historical>(context, input)
@@ -229,6 +232,8 @@ pub(in crate::cells) fn dispatch_read(
     match id {
         attachments::Get::ID => invoke_read::<attachments::Get>(context, input),
         attachments::Due::ID => invoke_read::<attachments::Due>(context, input),
+        mentions::Pending::ID => invoke_read::<mentions::Pending>(context, input),
+        mention_settings::Get::ID => invoke_read::<mention_settings::Get>(context, input),
         #[cfg(test)]
         projection::tests::Inspect::ID => invoke_read::<projection::tests::Inspect>(context, input),
         #[cfg(test)]

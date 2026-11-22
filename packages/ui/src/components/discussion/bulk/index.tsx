@@ -1,10 +1,4 @@
-import {
-  useEffect,
-  useLayoutEffect,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ChevronDownIcon } from "lucide-react";
 import { endpoint, useRequest, type Repository } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -235,11 +229,9 @@ export function BulkCheckbox({
 export function BulkActions({
   repo,
   bulk,
-  selection,
 }: {
   repo: Repository;
   bulk: Controller;
-  selection: ReactNode;
 }) {
   const recovery = useReturnFocus<HTMLButtonElement>(bulk.pending);
   if (!bulk.selected.length && !bulk.recovering)
@@ -261,15 +253,24 @@ export function BulkActions({
   return (
     <RequestWidget timing={bulk.prepared.timing} label="Bulk selection">
       <div
-        className="flex min-w-0 flex-col gap-2 border-b bg-muted px-4 py-3"
+        className="flex min-w-0 flex-col gap-2 px-4 py-2"
         aria-label="Bulk discussion actions"
         role="region"
       >
         <div className="flex flex-wrap items-center gap-2">
-          {selection}
-          <strong className="text-sm" aria-live="polite">
-            {bulk.selected.length} selected
-          </strong>
+          <div className="discussion-counts gap-2">
+            <strong className="text-sm" aria-live="polite">
+              {bulk.selected.length} selected
+            </strong>
+            <span role="status" className="inline-flex size-4 shrink-0">
+              {bulk.prepared.loading && !bulk.locked && (
+                <>
+                  <Spinner aria-hidden="true" />
+                  <span className="sr-only">Checking selected versions…</span>
+                </>
+              )}
+            </span>
+          </div>
           <div className="ml-auto flex flex-wrap items-center gap-1">
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -342,11 +343,6 @@ export function BulkActions({
             </Button>
           </div>
         </div>
-        {bulk.prepared.loading && !bulk.locked && (
-          <p role="status" className="text-sm text-muted-foreground">
-            Checking selected versions…
-          </p>
-        )}
         {bulk.pending && (
           <p
             role="status"

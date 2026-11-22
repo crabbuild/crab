@@ -4,7 +4,7 @@ use crate::{
 };
 use axum::http::{StatusCode, header};
 use reqwest::Method;
-use serde_json::json;
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 const ROOT: &str = "/api/repos/team/private";
@@ -55,6 +55,136 @@ async fn mentions_return_current_collaborator_profiles_and_recheck_access() {
         .unwrap();
     assert_eq!(denied.status(), StatusCode::NOT_FOUND);
     h.close().await;
+}
+
+#[tokio::test]
+async fn mentions_include_group_only_profiles_with_live_signed_grants() {
+    let h = Harness::new(false).await;
+    let alice = h.login().await;
+    let repository = &h.server.repositories.values()[0];
+    replace_groups(
+        &h,
+        &alice,
+        json!([{"group":"reviewers","access":"read"}]),
+        false,
+    )
+    .await;
+
+    *h.provider.mode.lock().await = "member".into();
+    let bob_without_claim = h.login().await;
+    let bob = enroll(&h, &bob_without_claim, "bob", "Robert Example").await;
+    *h.provider.mode.lock().await = "outsider".into();
+    h.provider
+        .claims
+        .lock()
+        .await
+        .insert("groups".into(), json!(["other"]));
+    let outsider = h.login().await;
+    enroll(&h, &outsider, "bobby", "Robert Other").await;
+    let base = format!(
+        "{ROOT}/discussion-search/mentions?repository_id={}",
+        repository.id
+    );
+    let by_handle = format!("{base}&search=bo");
+    let by_name = format!("{base}&search=Robert");
+    assert_eq!(h.json(&by_handle, &alice).await, json!({"items":[]}));
+
+    *h.provider.mode.lock().await = "member".into();
+    h.provider
+        .claims
+        .lock()
+        .await
+        .insert("groups".into(), json!(["reviewers"]));
+    let bob_signed_in = h.login().await;
+    let expected = json!({"items":[{"id":bob["id"],"handle":"bob","name":"Robert Example"}]});
+    for path in [&base, &by_handle, &by_name] {
+        assert_eq!(h.json(path, &alice).await, expected);
+    }
+    assert_eq!(h.json(&by_handle, &bob_signed_in).await, expected);
+    for denied in [&bob_without_claim, &outsider] {
+        assert_eq!(
+            h.http
+                .get(format!("{}{by_handle}", h.origin))
+                .header(header::COOKIE, denied)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND,
+        );
+    }
+
+    replace_groups(
+        &h,
+        &alice,
+        json!([{"group":"reviewers","access":"read"}]),
+        true,
+    )
+    .await;
+    assert_eq!(h.json(&by_handle, &alice).await, expected);
+    replace_groups(
+        &h,
+        &alice,
+        json!([{"group":"different","access":"read"}]),
+        false,
+    )
+    .await;
+    assert_eq!(h.json(&by_handle, &alice).await, json!({"items":[]}));
+    replace_groups(
+        &h,
+        &alice,
+        json!([{"group":"reviewers","access":"read"}]),
+        false,
+    )
+    .await;
+    assert_eq!(h.json(&by_handle, &alice).await, expected);
+    h.server
+        .auth
+        .as_ref()
+        .unwrap()
+        .revoke_identity(&h.provider.issuer, "bob-id")
+        .await
+        .unwrap();
+    assert_eq!(h.json(&by_handle, &alice).await, json!({"items":[]}));
+    h.close().await;
+}
+
+async fn enroll(h: &Harness, cookie: &str, handle: &str, name: &str) -> Value {
+    h.write(
+        Method::POST,
+        "/api/profile",
+        cookie,
+        json!({"request_id":Uuid::now_v7(),"handle":handle,"name":name}),
+    )
+    .await
+    .error_for_status()
+    .unwrap()
+    .json()
+    .await
+    .unwrap()
+}
+
+async fn replace_groups(h: &Harness, admin: &str, groups: Value, include_bob: bool) {
+    let path = format!("{ROOT}/members");
+    let acl = h.json(&path, admin).await;
+    let members: Vec<_> = h.server.repositories.values()[0]
+        .config
+        .members
+        .iter()
+        .filter(|member| include_bob || member.subject != "bob-id")
+        .cloned()
+        .collect();
+    h.write(
+        Method::PUT,
+        &path,
+        admin,
+        json!({
+            "expected_revision":acl["revision"], "members":members, "groups":groups
+        }),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
 }
 
 #[tokio::test]

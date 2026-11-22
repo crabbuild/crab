@@ -7,6 +7,7 @@ import {
   CircleDotIcon,
   CircleCheckIcon,
   TerminalIcon,
+  UsersIcon,
 } from "lucide-react";
 import { useLayoutEffect, type RefObject } from "react";
 import { PopoverContent } from "@/components/ui/popover";
@@ -78,19 +79,21 @@ export function EditorMenu({
       >
         {items.map((item, index) => {
           const Icon =
-            item.kind === "mention"
-              ? AtSignIcon
-              : item.kind === "pull"
-                ? item.state === "merged"
-                  ? GitMergeIcon
-                  : GitPullRequestIcon
-                : item.kind === "issue"
-                  ? item.state === "closed"
-                    ? CircleCheckIcon
-                    : CircleDotIcon
-                  : item.id === "code"
-                    ? CodeIcon
-                    : TerminalIcon;
+            item.kind === "team"
+              ? UsersIcon
+              : item.kind === "mention"
+                ? AtSignIcon
+                : item.kind === "pull"
+                  ? item.state === "merged"
+                    ? GitMergeIcon
+                    : GitPullRequestIcon
+                  : item.kind === "issue"
+                    ? item.state === "closed"
+                      ? CircleCheckIcon
+                      : CircleDotIcon
+                    : item.id === "code"
+                      ? CodeIcon
+                      : TerminalIcon;
           return (
             <li
               key={item.id}
