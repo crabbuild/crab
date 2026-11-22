@@ -24,8 +24,10 @@ carry its discovered region into independent administration processes.
 global keys eligible for this transport. The composing reader must establish
 whole-object access and verify the returned bytes against authenticated
 metadata. Conditional operations and origin receipts use the provider store.
-CloudFront and Front Door transfer diagnostics emit a SHA-256 request ID
-fingerprint for joining qualification fetches to viewer access logs.
+CDN transfer diagnostics retain SHA-256 request fingerprints for joining
+qualification fetches to provider logs. CloudFront and Front Door use
+response request IDs. The Cloud CDN measurement worker opts into a
+per-request User-Agent tag, which the backend bucket excludes from its cache key.
 
 ## Why it exists
 

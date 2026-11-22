@@ -421,6 +421,10 @@ impl CdnTransport {
             let transfer = async {
                 let mut observation = context
                     .and_then(|context| telemetry::Transfer::start(context, size, range.is_some()));
+                let request = match &mut observation {
+                    Some(observation) => observation.prepare_request(request),
+                    None => request,
+                };
                 let response = request.send().await.map_err(|source| {
                     // reqwest exposes both DNS and certificate failures as
                     // connect errors. Keep unclassified connect failures terminal.

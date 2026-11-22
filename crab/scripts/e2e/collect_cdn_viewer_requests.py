@@ -25,8 +25,9 @@ LOG_FIELDS = {b"x-edge-request-id", b"x-host-header", b"cs-method", b"cs-uri-ste
               b"sc-status", b"sc-bytes", b"x-edge-response-result-type"}
 CF_CACHE_STATUS = {b"Hit": "hit", b"Miss": "miss"}
 AZURE_CACHE_STATUS = {"HIT": "hit", "REMOTE_HIT": "hit", "MISS": "miss"}
+GCS_VIEWER_AGENT = re.compile(r"crab-cdn-qualification/[0-9a-f]{32}")
 MAX_LINE = 64 * 1024
-AZURE_ARCHIVE_LIMIT = 32 * 1024 * 1024
+JSON_LOG_LIMIT = 32 * 1024 * 1024
 
 
 def cloudfront_logs(paths: list[Path], expected: dict, fixture: dict) -> dict:
@@ -77,10 +78,7 @@ def front_door_logs(paths: list[Path], expected: dict, fixture: dict) -> dict:
     prefix = f"/{fixture['fixture_prefix']}{fixture['view_suffix']}/"
     records = {}
     for path in paths:
-        with path.open("rb") as source:
-            raw = source.read(AZURE_ARCHIVE_LIMIT + 1)
-        require(len(raw) <= AZURE_ARCHIVE_LIMIT, "Front Door archive exceeds the size limit")
-        archive = decode(raw)
+        archive = read_json_log(path)
         require(isinstance(archive, dict) and isinstance(archive.get("records"), list),
                 "expected an Azure Monitor resource log archive with records")
         for row in archive["records"]:
@@ -120,13 +118,78 @@ def front_door_logs(paths: list[Path], expected: dict, fixture: dict) -> dict:
     return records
 
 
+def read_json_log(path: Path):
+    with path.open("rb") as source:
+        raw = source.read(JSON_LOG_LIMIT + 1)
+    require(len(raw) <= JSON_LOG_LIMIT, "provider log export exceeds the JSON size limit")
+    return decode(raw)
+
+
+def cloud_cdn_cache_status(request: dict, details: str) -> str:
+    hit, lookup, revalidated = (request.get(key, False) for key in ("cacheHit", "cacheLookup", "cacheValidatedWithOriginServer"))
+    require(all(type(value) is bool for value in (hit, lookup, revalidated)), "invalid Cloud CDN cache flags")
+    if revalidated or details == "response_from_cache_validated":
+        return "unknown"
+    if hit or details in ("response_from_cache", "byte_range_caching"):
+        return "hit"
+    if lookup or details == "response_sent_by_backend":
+        return "miss"
+    return "unknown"
+
+
+def cloud_cdn_logs(paths: list[Path], expected: dict, fixture: dict) -> dict:
+    deployment = deployment_target(fixture, "cloud-cdn")
+    project, rule = deployment["project"], deployment["forwarding_rule"]
+    base = fixture_base(fixture["base_url"])
+    prefix = f"{base.path.rstrip('/')}/{fixture['fixture_prefix']}{fixture['view_suffix']}/"
+    records, inserts = {}, {}
+    for path in paths:
+        entries = read_json_log(path)
+        require(isinstance(entries, list), "expected a JSON array exported from Cloud Logging")
+        for entry in entries:
+            require(isinstance(entry, dict), "invalid Cloud Logging record")
+            request = entry.get("httpRequest")
+            agent = request.get("userAgent") if isinstance(request, dict) else None
+            if not matches(GCS_VIEWER_AGENT, agent):
+                continue
+            fingerprint = hashlib.sha256(agent.encode()).hexdigest()
+            if fingerprint not in expected:
+                continue
+            payload = entry.get("jsonPayload")
+            require(isinstance(payload, dict), "missing Cloud CDN log payload")
+            if "parentInsertId" in payload:
+                continue  # Cache-fill requests have separate origin-side log records.
+            resource = entry.get("resource")
+            labels = resource.get("labels") if isinstance(resource, dict) else None
+            uri = request.get("requestUrl")
+            require(isinstance(labels, dict) and isinstance(uri, str), "Cloud CDN log needs a load-balancer resource and request URL")
+            url = urlsplit(uri)
+            require(resource.get("type") == "http_load_balancer" and entry.get("logName") == f"projects/{project}/logs/requests"
+                    and labels.get("project_id") == project and labels.get("forwarding_rule_name") == rule
+                    and url.scheme == "https" and url.netloc in (base.netloc, f"{base.netloc}:443") and not url.query and not url.fragment
+                    and request.get("requestMethod") == "GET" and url.path.startswith(prefix),
+                    "Cloud CDN request was logged outside the approved forwarding rule, viewer host or repository prefix")
+            status = request.get("status")
+            size, fill = str(request.get("responseSize")), str(request.get("cacheFillBytes", 0))
+            insert_id = entry.get("insertId")
+            require(type(status) is int and 100 <= status <= 599 and re.fullmatch(r"[0-9]{1,19}", size)
+                    and re.fullmatch(r"[0-9]{1,19}", fill) and isinstance(insert_id, str) and bool(insert_id),
+                    "Cloud CDN log has invalid status, byte counts or log entry ID")
+            record = {"status": status, "response_bytes": int(size), "cache_fill_bytes": int(fill),
+                      "cache": cloud_cdn_cache_status(request, payload.get("statusDetails"))}
+            require(fingerprint not in records or (records[fingerprint] == record and inserts[fingerprint] == insert_id),
+                    "Cloud CDN exports disagree about one viewer request")
+            records[fingerprint], inserts[fingerprint] = record, insert_id
+    return records
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixture", required=True, type=Path)
     parser.add_argument("--configuration-sha256", required=True)
     parser.add_argument("--client", required=True, type=Path, help="exact timed client.json")
     parser.add_argument("--log", required=True, action="append", type=Path,
-                        help="CloudFront W3C access log or Azure Monitor Front Door archive")
+                        help="CloudFront W3C access log, Cloud Logging JSON export or Azure Monitor Front Door archive")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     try:
@@ -143,8 +206,8 @@ def main() -> int:
         client = validate_git_fetch(raw, provenance, candidate["arm"], "CDN benchmark fetch")
         require(client["all_edge_attempts"] > 0 and len(client["edge_responses"]) == client["all_edge_attempts"],
                 "the timed fetch lacks a CDN request fingerprint for each viewer attempt")
-        load = cloudfront_logs if edge == "cloudfront" else front_door_logs
-        records = load(args.log, client["edge_responses"], fixture)
+        loaders = {"cloudfront": cloudfront_logs, "cloud-cdn": cloud_cdn_logs, "front-door": front_door_logs}
+        records = loaders[edge](args.log, client["edge_responses"], fixture)
         digest = hashlib.sha256(raw).hexdigest()
         proof = {"schema": f"crab.{edge}-viewer-requests/v1", "client_report_sha256": digest, "records": records}
         verify_viewer_requests(proof, client, digest, edge)

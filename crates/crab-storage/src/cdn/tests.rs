@@ -1,9 +1,19 @@
-use std::sync::Arc;
+use std::{
+    collections::BTreeMap,
+    fmt::Debug,
+    sync::{Arc, Mutex},
+};
 
 use object_store::{ObjectStoreExt, memory::InMemory};
+use sha2::{Digest as _, Sha256};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::TcpListener,
+};
+use tracing::{
+    Event, Metadata, Subscriber,
+    field::{Field, Visit},
+    span::{Attributes, Id, Record},
 };
 
 use super::*;
@@ -409,53 +419,111 @@ async fn endpoint(response: &'static str) -> (CdnTransport, tokio::task::JoinHan
     (CdnTransport { base, client }, received)
 }
 
+#[derive(Default)]
+struct Fields(BTreeMap<String, String>);
+
+impl Visit for Fields {
+    fn record_debug(&mut self, field: &Field, value: &dyn Debug) {
+        self.0.insert(field.name().to_owned(), format!("{value:?}"));
+    }
+}
+
+#[derive(Clone, Default)]
+struct Capture {
+    events: Arc<Mutex<Vec<Fields>>>,
+    gcs_viewer_log: bool,
+}
+
+impl Subscriber for Capture {
+    fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+        match metadata.target() {
+            "crab_storage::cdn::transfer" | "crab_storage::cdn::public_transition" => true,
+            "crab_storage::cdn::gcs_viewer_log" => self.gcs_viewer_log,
+            _ => false,
+        }
+    }
+
+    fn new_span(&self, _: &Attributes<'_>) -> Id {
+        Id::from_u64(1)
+    }
+    fn record(&self, _: &Id, _: &Record<'_>) {}
+    fn record_follows_from(&self, _: &Id, _: &Id) {}
+    fn enter(&self, _: &Id) {}
+    fn exit(&self, _: &Id) {}
+
+    fn event(&self, event: &Event<'_>) {
+        assert!(event.is_root());
+        let mut fields = Fields::default();
+        event.record(&mut fields);
+        self.events.lock().unwrap().push(fields);
+    }
+}
+
+#[tokio::test]
+async fn gcs_viewer_log_qualification_tags_each_request_and_retains_only_its_hash() {
+    let mut previous = None;
+    for enabled in [false, true, true] {
+        let capture = Capture {
+            gcs_viewer_log: enabled,
+            ..Capture::default()
+        };
+        let dispatcher = tracing::Dispatch::new(capture.clone());
+        let _guard = tracing::dispatcher::set_default(&dispatcher);
+        let (transport, received) =
+            endpoint("HTTP/1.1 200 OK\r\nContent-Length: 6\r\nX-Crab-CDN-Cache: hit\r\n\r\nserved")
+                .await;
+        let context = (
+            CdnPolicy {
+                provider: StorageProviderKind::Gcs,
+                visibility: CdnVisibility::Public,
+                consumer: CdnConsumer::Cli,
+                profile: CdnProfile::Direct,
+            },
+            CdnReadFamily::Git,
+        );
+        let key = Path::from("test/repo/immutable");
+        transport
+            .get(
+                CdnGet {
+                    path: &key,
+                    size: 6,
+                    range: None,
+                    context: Some(context),
+                },
+                CdnViewer::Public,
+                Duration::from_secs(5),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let request = received.await.unwrap();
+        let tag = request
+            .lines()
+            .find_map(|line| line.strip_prefix("user-agent: "));
+        let events = capture.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        let fields = &events[0].0;
+        if enabled {
+            let tag = tag.unwrap();
+            let nonce = tag.strip_prefix("crab-cdn-qualification/").unwrap();
+            assert_eq!(nonce.len(), 32);
+            assert!(nonce.bytes().all(|byte| byte.is_ascii_hexdigit()));
+            assert_ne!(previous.as_deref(), Some(tag));
+            assert_eq!(
+                fields["request_sha256"],
+                format!("\"{:x}\"", Sha256::digest(tag))
+            );
+            assert!(fields.values().all(|value| !value.contains(tag)));
+            previous = Some(tag.to_owned());
+        } else {
+            assert!(tag.is_none());
+            assert_eq!(fields["request_sha256"], "\"\"");
+        }
+    }
+}
+
 #[tokio::test]
 async fn product_read_records_one_redacted_transfer_for_its_actual_scope() {
-    use std::{collections::BTreeMap, fmt::Debug, sync::Mutex};
-
-    use sha2::{Digest as _, Sha256};
-    use tracing::{
-        Event, Metadata, Subscriber,
-        field::{Field, Visit},
-        span::{Attributes, Id, Record},
-    };
-
-    #[derive(Default)]
-    struct Fields(BTreeMap<String, String>);
-
-    impl Visit for Fields {
-        fn record_debug(&mut self, field: &Field, value: &dyn Debug) {
-            self.0.insert(field.name().to_owned(), format!("{value:?}"));
-        }
-    }
-
-    #[derive(Clone, Default)]
-    struct Capture(Arc<Mutex<Vec<Fields>>>);
-
-    impl Subscriber for Capture {
-        fn enabled(&self, metadata: &Metadata<'_>) -> bool {
-            matches!(
-                metadata.target(),
-                "crab_storage::cdn::transfer" | "crab_storage::cdn::public_transition"
-            )
-        }
-
-        fn new_span(&self, _: &Attributes<'_>) -> Id {
-            Id::from_u64(1)
-        }
-        fn record(&self, _: &Id, _: &Record<'_>) {}
-        fn record_follows_from(&self, _: &Id, _: &Id) {}
-        fn enter(&self, _: &Id) {}
-        fn exit(&self, _: &Id) {}
-
-        fn event(&self, event: &Event<'_>) {
-            assert!(event.is_root());
-            let mut fields = Fields::default();
-            event.record(&mut fields);
-            self.0.lock().unwrap().push(fields);
-        }
-    }
-
     let capture = Capture::default();
     let dispatcher = tracing::Dispatch::new(capture.clone());
     let _guard = tracing::dispatcher::set_default(&dispatcher);
@@ -504,7 +572,7 @@ async fn product_read_records_one_redacted_transfer_for_its_actual_scope() {
     attempt.payload_observation().unwrap().record_verified();
     request.await.unwrap();
 
-    let events = capture.0.lock().unwrap();
+    let events = capture.events.lock().unwrap();
     let transfers: Vec<_> = events
         .iter()
         .filter(|event| event.0.contains_key("status"))

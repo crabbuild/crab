@@ -62,6 +62,63 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
                         for private in (viewer_id, "fixture.example.com", prefix, "192.0.2.1"):
                             self.assertNotIn(private, retained)
 
+    def test_cloud_cdn_matches_the_tagged_viewer_and_retains_reported_fill_bytes(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            host = "fixture.example.com"
+            project, rule = "fixture-project", "crab-https"
+            config = fixture("cloud-cdn", "private") | {
+                "base_url": f"https://{host}", "deployment": {"project": project, "forwarding_rule": rule},
+            }
+            fixture_path = root / "fixture.json"
+            configuration = examples.json_file(fixture_path, config)
+            registration = {"scope": config["scope"], "source_sha": examples.COMMIT, "configuration_sha256": configuration,
+                            "regions": {"near": "near"}, "samples": 1, "viewer_binding_sha256": "e" * 64,
+                            "candidate": examples.cli_candidate(config["scope"], "linux-x86_64")}
+            examples.write_git_measurements(root, registration, "linux-x86_64")
+            client = root / "near/0001/cold_edge/client.json"
+            report = json.loads(client.read_bytes())
+            tag = f"crab-cdn-qualification/{'0a' * 16}"
+            fingerprint = hashlib.sha256(tag.encode()).hexdigest()
+            response = next(iter(report["edge_responses"].values()))
+            digest = examples.json_file(client, report | {"edge_responses": {fingerprint: response}})
+            request = {"requestMethod": "GET", "requestUrl": f"https://{host}/{config['fixture_prefix']}/{PACK}",
+                       "responseSize": "620", "status": 206, "userAgent": tag, "remoteIp": "192.0.2.1",
+                       "cacheFillBytes": "4096", "cacheLookup": True}
+            resource = {"type": "http_load_balancer", "labels": {"project_id": project, "forwarding_rule_name": rule}}
+            viewer = {"httpRequest": request, "jsonPayload": {"statusDetails": "response_sent_by_backend"},
+                      "logName": f"projects/{project}/logs/requests", "insertId": "viewer", "resource": resource}
+            origin = viewer | {"jsonPayload": {"parentInsertId": "viewer"}, "insertId": "range-fill"}
+            log, output = root / "gcloud.json", root / "cloud-cdn-requests.json"
+            command = [sys.executable, "-B", str(Path(COLLECT.__file__)), "--fixture", str(fixture_path), "--log", str(log),
+                       "--client", str(client), "--configuration-sha256", configuration, "--output", str(output)]
+            for entries, error in (
+                ([origin], "must cover each measured viewer attempt"),
+                ([viewer | {"resource": resource | {"labels": {"project_id": project, "forwarding_rule_name": "wrong"}}}],
+                 "outside the approved forwarding rule"),
+                ([viewer, viewer | {"insertId": "a-different-viewer"}], "exports disagree about one viewer request"),
+                ([viewer | {"httpRequest": request | {"cacheHit": True, "cacheValidatedWithOriginServer": True}}],
+                 "cache result disagrees"),
+                ([origin, viewer, viewer], None),
+            ):
+                with self.subTest(error=error):
+                    examples.json_file(log, entries)
+                    result = subprocess.run(command, capture_output=True, text=True, check=False)
+                    if error is not None:
+                        self.assertEqual(result.returncode, 1)
+                        self.assertIn(error, result.stderr)
+                        self.assertFalse(output.exists())
+                    else:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        retained = output.read_text(encoding="utf-8")
+                        self.assertEqual(json.loads(retained), {
+                            "schema": "crab.cloud-cdn-viewer-requests/v1", "client_report_sha256": digest,
+                            "records": {fingerprint: {"status": 206, "response_bytes": 620, "cache": "miss",
+                                                     "cache_fill_bytes": 4096}},
+                        })
+                        for private in (tag, host, project, rule, "192.0.2.1"):
+                            self.assertNotIn(private, retained)
+
     def test_front_door_matches_the_viewer_row_and_excludes_its_origin_shield_row(self):
         for access in ("private", "public"):
             with self.subTest(access=access), TemporaryDirectory() as temporary:

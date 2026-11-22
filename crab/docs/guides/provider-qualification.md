@@ -965,8 +965,8 @@ attribute request and fill counts and runner measurements for client and
 resource totals. The transport counter includes incomplete response bodies;
 the rejected total also needs any bytes discarded by higher-level verification.
 
-For each timed CloudFront or Front Door fetch that made edge attempts, collect
-provider viewer evidence beside `client.json`. For CloudFront, write
+For each timed fetch that made edge attempts, collect provider viewer
+evidence beside `client.json`. For CloudFront, write
 `cloudfront-requests.json` from the approved distribution's standard
 access logs in W3C format. Keep the `#Fields`
 header and the request ID, viewer host, URI stem, method, protocol, response
@@ -981,7 +981,26 @@ python3 -B crab/scripts/e2e/collect_cdn_viewer_requests.py \
   --output "$arm_directory/cloudfront-requests.json"
 ```
 
-For Front Door, use the same command with the approved Azure fixture, the
+For Cloud CDN, export a JSON array from Cloud Logging and write
+`cloud-cdn-requests.json` with the same collector. Query the approved GCP
+project and forwarding rule for the measurement window. The workload sends
+a random per-request User-Agent tag for qualification. The attested backend
+bucket keeps that header out of the cache key. The collector joins viewer
+records by the tag and retains Google's `cacheFillBytes` from each matched
+viewer record. Separate range-fill and validation requests need their own
+native measurements. [Cloud CDN logging](https://docs.cloud.google.com/cdn/docs/logging) · [Backend bucket cache keys](https://docs.cloud.google.com/cdn/docs/caching#cache_keys)
+
+```bash
+gcloud logging read \
+  "resource.type=\"http_load_balancer\" AND resource.labels.forwarding_rule_name=\"$forwarding_rule\" AND httpRequest.userAgent:\"crab-cdn-qualification/\" AND timestamp>=\"$window_start\" AND timestamp<=\"$window_end\"" \
+  --project "$project_id" --format=json > "$cloud_cdn_log"
+```
+
+Use `--log "$cloud_cdn_log" --output "$arm_directory/cloud-cdn-requests.json"`
+with the collector above. Keep raw Cloud Logging exports on the protected
+worker.
+
+For Front Door, use the same collector with the approved Azure fixture, the
 Azure Monitor `PT1H.json` access log archive for that Front Door profile, and
 `front-door-requests.json` as the output. The private path forwards through
 APIM before Front Door and removes the `/crab` prefix. The collector matches
@@ -989,7 +1008,7 @@ the Front Door tracking reference and resource profile and excludes duplicate
 traffic from origin-shield logs. [Front Door access logs](https://learn.microsoft.com/en-us/azure/frontdoor/front-door-diagnostics) · [Azure Monitor resource logs](https://learn.microsoft.com/en-us/azure/azure-monitor/essentials/resource-logs)
 
 Repeat `--log` for additional files. Every viewer attempt needs a matching
-access log record for its hashed response request ID. Missing logs,
+access log record for its hashed request ID. Missing logs,
 conflicting records, or disagreements with the client's status or cache
 classification fail the check. Viewer response bytes include HTTP overhead
 and must cover the observed payload bytes. Collect native request counts and

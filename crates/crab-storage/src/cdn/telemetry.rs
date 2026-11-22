@@ -1,12 +1,13 @@
 use std::time::Instant;
 
-use reqwest::Response;
+use reqwest::{RequestBuilder, Response, header};
 use sha2::{Digest as _, Sha256, digest::Output};
 
 use super::{CdnPolicy, CdnReadFamily};
 use crate::StorageProviderKind;
 
 const TARGET: &str = "crab_storage::cdn::transfer";
+const GCS_VIEWER_LOG_TARGET: &str = "crab_storage::cdn::gcs_viewer_log";
 const PUBLIC_TRANSITION_TARGET: &str = "crab_storage::cdn::public_transition";
 
 #[derive(Clone, Copy)]
@@ -137,9 +138,24 @@ impl Transfer {
         })
     }
 
+    pub(super) fn prepare_request(&mut self, request: RequestBuilder) -> RequestBuilder {
+        if self.policy.provider != StorageProviderKind::Gcs
+            || !tracing::enabled!(target: GCS_VIEWER_LOG_TARGET, tracing::Level::TRACE)
+        {
+            return request;
+        }
+        // Backend buckets log the viewer User-Agent and the qualified cache
+        // policy keeps it out of the cache key. Persist only its fingerprint.
+        let user_agent = format!("crab-cdn-qualification/{:032x}", rand::random::<u128>());
+        self.request_id = Some(Sha256::digest(user_agent.as_bytes()));
+        request.header(header::USER_AGENT, user_agent)
+    }
+
     pub(super) fn response(&mut self, response: &Response) {
         self.status = response.status().as_u16();
-        self.request_id = viewer_request_id(self.policy.provider, response.headers());
+        if self.policy.provider != StorageProviderKind::Gcs {
+            self.request_id = viewer_request_id(self.policy.provider, response.headers());
+        }
         let header = if self.policy.provider == StorageProviderKind::Gcs {
             "x-crab-cdn-cache"
         } else {
@@ -164,6 +180,7 @@ impl Drop for Transfer {
     fn drop(&mut self) {
         let request_sha256 = self
             .request_id
+            .filter(|_| self.status != 0)
             .map(|digest| format!("{digest:x}"))
             .unwrap_or_default();
         // This event can be retained independently of the command's spans.

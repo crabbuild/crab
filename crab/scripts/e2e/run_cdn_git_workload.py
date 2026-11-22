@@ -35,6 +35,7 @@ QUALIFICATION_TARGET_ENV = "CRAB_INTERNAL_CDN_QUALIFICATION_TARGET"
 READ_LOG = "crab::cdn::qualification_read"
 READ_MESSAGE = "CDN qualification verified read configuration"
 PUBLIC_TRANSITION_TARGET = "crab_storage::cdn::public_transition"
+GCS_VIEWER_LOG_TARGET = "crab_storage::cdn::gcs_viewer_log"
 
 
 def run_command(
@@ -147,7 +148,8 @@ def git_environment(helper: Path, root: Path, native_target: dict[str, str]) -> 
         "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_EXEC_PATH": str(helper.absolute().parent),
         "GIT_TERMINAL_PROMPT": "0", "CRAB_CACHE_DIR": str(root / "cache"),
-        "CRAB_LOG": f"{TARGET}=debug,{QUALIFICATION_LOG}=debug,{READ_LOG}=debug,{PUBLIC_TRANSITION_TARGET}=debug",
+        "CRAB_LOG": (f"{TARGET}=debug,{QUALIFICATION_LOG}=debug,{READ_LOG}=debug,{PUBLIC_TRANSITION_TARGET}=debug,"
+                     f"{GCS_VIEWER_LOG_TARGET}=trace"),
         QUALIFICATION_TARGET_ENV: json.dumps(native_target),
     }
 

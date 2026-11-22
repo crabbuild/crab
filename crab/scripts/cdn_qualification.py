@@ -122,7 +122,7 @@ METRICS = {
 }
 GIT_BENCHMARK_DIR = "git-benchmarks"
 GIT_PRODUCT_DIR = "git-product"
-VIEWER_REQUEST_FILES = {"s3": "cloudfront-requests.json", "azure": "front-door-requests.json"}
+VIEWER_REQUEST_FILES = {"s3": "cloudfront-requests.json", "gcs": "cloud-cdn-requests.json", "azure": "front-door-requests.json"}
 GIT_FETCH_RECORD_LIMIT = 256 * 1024
 GIT_NATIVE_REF_FILES = {"published": "provider-published.json", "retired": "provider-retired.json"}
 GIT_NATIVE_REF_FIELDS = {
@@ -1275,8 +1275,11 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
     require(isinstance(records, dict) and records.keys() == expected.keys()
             and len(records) == client["all_edge_attempts"],
             "CDN logs must cover each measured viewer attempt exactly once")
+    record_fields = {"status", "cache", "response_bytes"}
+    if edge == "cloud-cdn":
+        record_fields.add("cache_fill_bytes")
     for request_id, record in records.items():
-        row = fields(record, {"status", "cache", "response_bytes"}, "CDN viewer log record")
+        row = fields(record, record_fields, "CDN viewer log record")
         response = expected[request_id]
         require(type(row["status"]) is int and row["status"] == response["status"]
                 and row["cache"] in ("hit", "miss", "unknown")
@@ -1284,6 +1287,9 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
                 "CDN log status or response bytes disagree with the client")
         if response["complete"] and response["cache"] != "unknown":
             require(row["cache"] == response["cache"], "CDN log cache result disagrees with the completed response")
+        if edge == "cloud-cdn":
+            require(type(row["cache_fill_bytes"]) is int and row["cache_fill_bytes"] >= 0,
+                    "Cloud CDN log has invalid reported cache fill bytes")
     return set(records)
 
 
