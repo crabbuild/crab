@@ -1137,6 +1137,18 @@ class CdnQualificationTests(unittest.TestCase):
         (self.directory / CDN.GIT_BENCHMARK_DIR).rename(self.directory / "benchmark-backup")
         self.rejected("requires retained regional SDK benchmark records", "--cdn-release-policy", str(policy))
 
+    def test_generic_fixture_summary_cannot_promote_a_release_scope(self) -> None:
+        for provider, consumer, profile in (("gcs", "server", "direct"), ("azure", "cli", "managed")):
+            with self.subTest(provider=provider, consumer=consumer, profile=profile), TemporaryDirectory() as directory:
+                self.directory = Path(directory)
+                (self.directory / "traces").mkdir()
+                self.configure(provider, "private", profile, consumer=consumer)
+                fixture = self.command()
+                self.assertEqual(fixture.returncode, 0, fixture.stderr)
+                policy = self.directory / "qualified-scopes.txt"
+                policy.write_text(self.scope + "\n")
+                self.rejected("CDN promotion requires a product-specific workload", "--cdn-release-policy", str(policy))
+
     def test_sdk_release_requires_clone_of_the_same_publication_before_retirement(self) -> None:
         self.configure("s3", "private", "direct", consumer="sdk")
         policy = self.directory / "qualified-scopes.txt"

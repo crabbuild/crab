@@ -733,6 +733,9 @@ primer's cache. It verifies the exact reconstructed file and local xorb key
 with zero edge requests. Assembly and release verification rebuild the
 regional summary from the retained samples, require isolated cache roots for
 the other arms, and match viewer requests to the exact approved xorb.
+Scopes with generic workload summaries can produce fixture reports. Release
+verification requires a product-specific verifier that rebuilds the summary
+from individual runs.
 
 The protected workflow or its dedicated workers own producing these raw
 observations. The assembly and release jobs own rejecting missing, mismatched

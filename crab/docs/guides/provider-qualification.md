@@ -1296,7 +1296,8 @@ Git and private xorb scopes, assembly derives `product_action` from the
 product records in `git-product/` or `xorb-product/` and the rollback and
 cleanup traces. It derives `performance` from `git-benchmarks/`. Supply the
 measured `product_action` and `performance` fields in `observations.json`
-for other scopes. Git and capsule scopes require
+for other scopes' fixture reports. Release verification requires a
+product-specific verifier for each enabled row. Git and capsule scopes require
 `product_action.verified_edge_payloads` alongside the completed GET count.
 Each benchmark arm records `local_payload_hits`. The warm-local comparison
 requires a positive local payload hit and zero edge payload bytes.

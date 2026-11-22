@@ -273,7 +273,7 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
         self.assertFalse(self.output.exists())
 
     def test_cli_imports_same_attempt_canary_bytes_without_redundant_measurements(self) -> None:
-        digest = self.inputs("gcs", consumer="server")
+        digest = self.inputs("gcs")
         transport = self.canary_inputs("gcs")
         result = subprocess.run([
             sys.executable, str(Path(ASSEMBLE.__file__)), "--inputs", str(self.root), "--transport-traces", str(transport),

@@ -2048,10 +2048,14 @@ def verify_cdn_report(
         registration.get(name) == row[name] for name in ("source_sha", "scope", "configuration_sha256")
     ), "benchmark registration does not match the release row")
 
-    if requires_cli_workload(scope):
-        verify_read_candidate(registration.get("candidate"), source_sha, platform, policy=policy)
+    cli_workload = requires_cli_workload(scope)
+    sdk_git = is_direct_sdk_git_scope(scope)
     sdk_hydration = is_direct_sdk_hydration_scope(scope)
-    if is_direct_sdk_git_scope(scope) or sdk_hydration:
+    require(policy is None or cli_workload or sdk_git or sdk_hydration,
+            "CDN promotion requires a product-specific workload and per-run regional evidence verifier")
+    if cli_workload:
+        verify_read_candidate(registration.get("candidate"), source_sha, platform, policy=policy)
+    if sdk_git or sdk_hydration:
         verify_sdk_candidate(registration.get("sdk_candidate"), source_sha, platform, policy=policy)
     lower = verify_performance(row["performance"], registration)
     verify_product_action(row["product_action"], family, sdk_hydration=sdk_hydration)
@@ -2060,7 +2064,7 @@ def verify_cdn_report(
     checks, cleanup_at, native_origin_sha256, rollback = verify_check_evidence(
         row, edge, access, profile, directory, registration=registration,
     )
-    if requires_cli_workload(scope):
+    if cli_workload:
         measured = collect_git_performance(directory / GIT_BENCHMARK_DIR, registration, platform, run_id, run_attempt)
         require(measured == row["performance"], "CLI performance summary differs from the retained measurements")
         require(rollback is not None, "direct CLI qualification requires a product rollback fetch")
@@ -2071,7 +2075,7 @@ def verify_cdn_report(
         )
         require(row["product_action"] == product | {"fixture_cleanup_verified": True},
                 "product action differs from the retained publication, fetch, and retirement evidence")
-    if is_direct_sdk_git_scope(scope):
+    if sdk_git:
         require(rollback is not None, "direct SDK qualification requires an ordinary SDK rollback read")
         product = collect_sdk_product_action(directory / GIT_PRODUCT_DIR, row, registration, rollback,
                                              cleanup_at=cleanup_at, native_origin_sha256=native_origin_sha256)
