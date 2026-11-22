@@ -73,7 +73,7 @@ class CdnReleaseQualificationTests(unittest.TestCase):
     def test_cloud_cdn_and_front_door_use_their_matching_native_reports(self) -> None:
         for provider in ("gcs", "azure"):
             with self.subTest(provider=provider):
-                digest = self.bundle("sdk", "linux-x86_64", provider=provider)
+                digest = self.bundle("server", "linux-x86_64", provider=provider)
                 count = RELEASE.verify_bundle(
                     self.directory, self.policy, RELEASE.release_scopes(self.policy),
                     fixture.COMMIT, RUN_ID, ATTEMPT, digest,
@@ -124,7 +124,7 @@ class CdnReleaseQualificationTests(unittest.TestCase):
         self.assertIn("no enabled routes", output.getvalue())
 
     def test_enabled_release_checks_run_download_and_report_together(self) -> None:
-        digest = self.bundle("sdk", "linux-x86_64")
+        digest = self.bundle("server", "linux-x86_64")
         approval = {"run_id": RUN_ID, "run_attempt": ATTEMPT, "benchmarks_sha256": digest}
         run = subprocess.run
 
@@ -150,7 +150,7 @@ class CdnReleaseQualificationTests(unittest.TestCase):
         self.assertIn("Verified 1 CDN reports for 1 enabled release scopes", output.getvalue())
 
     def test_enabled_release_requires_approval(self) -> None:
-        self.bundle("sdk", "linux-x86_64")
+        self.bundle("server", "linux-x86_64")
         with (
             patch.object(RELEASE, "POLICY", self.policy),
             patch.object(sys, "argv", [str(SCRIPT), "--source-sha", fixture.COMMIT]),

@@ -16,9 +16,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from cdn_qualification import (  # noqa: E402
     CDN_PROVENANCE_FIELDS, COMMIT, EXPIRY_RANGE_CHECK, GIT_BENCHMARK_DIR, GIT_PRODUCT_DIR, LABEL, PROVIDERS,
     PROVIDER_FOR_EDGE, PUBLIC_EXPORT_BEFORE, PUBLIC_EXPORT_CHECK, PUBLIC_EXPORT_DIR, PUBLIC_EXPORT_FILES, RUN_NUMBER, SCHEMA, SHA256,
-    collect_cli_performance, collect_git_product_action, decode, fields, matches, read_trace, release_scopes, require,
+    benchmark_registration, collect_cli_performance, collect_git_product_action, collect_sdk_product_action,
+    decode, fields, is_direct_sdk_git_scope, matches, read_trace, release_scopes, require,
     required_check_names, required_platform_rows, requires_cli_workload, scope_parts, verify_bundle_row,
-    verify_deployment_policy_trace,
+    verify_cleanup_trace, verify_deployment_policy_trace,
 )
 from public_inventory import ExportError, read_document
 
@@ -115,7 +116,12 @@ def assemble_bundle(
                 native_report.write_bytes((origin_inputs / provider / "report.json").read_bytes())
 
             cli_workload = requires_cli_workload(scope)
-            expected = OBSERVATION_FIELDS - ({"product_action", "performance"} if cli_workload else set())
+            sdk_workload = is_direct_sdk_git_scope(scope)
+            expected = OBSERVATION_FIELDS.copy()
+            if cli_workload or sdk_workload:
+                expected.remove("product_action")
+            if cli_workload:
+                expected.remove("performance")
             measured = fields(
                 decode((inputs / row / "observations.json").read_bytes()),
                 expected, "CDN observations",
@@ -165,6 +171,16 @@ def assemble_bundle(
                 measured["performance"] = collect_cli_performance(
                     inputs / row / GIT_BENCHMARK_DIR, registration, platform, run_id, attempt,
                     retain=destination / GIT_BENCHMARK_DIR,
+                )
+            if sdk_workload:
+                spec = benchmark_registration(registration)
+                cleanup = decode(read_trace(destination / "traces/cleanup.json", "cleanup"))
+                cleanup_at = verify_cleanup_trace(cleanup, measured, edge, access)
+                rollback = read_trace(destination / "traces/rollback.json", "rollback")
+                measured["product_action"] = collect_sdk_product_action(
+                    inputs / row / GIT_PRODUCT_DIR, measured, spec, rollback,
+                    cleanup_at=cleanup_at, native_origin_sha256=cleanup["targets"]["native"]["origin_sha256"],
+                    retain=destination / GIT_PRODUCT_DIR,
                 )
             report = measured | {
                 "schema": SCHEMA,

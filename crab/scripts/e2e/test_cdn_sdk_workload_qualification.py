@@ -10,7 +10,8 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import run_cdn_sdk_workload as SDK
-from test_cdn_qualification import COMMIT, cli_candidate, json_file
+from cdn_qualification import CLI_BUILD_FIELDS
+from test_cdn_qualification import COMMIT, cli_candidate, json_file, sdk_candidate
 from test_cdn_transport_qualification import fixture
 
 
@@ -45,11 +46,12 @@ class CdnSdkWorkloadQualificationTests(unittest.TestCase):
         self.args = argparse.Namespace(arm="edge", fixture=config_path, configuration_sha256=configuration,
                                        receipt=receipt, probe=probe, source_sha=COMMIT, run_id="123", run_attempt="2",
                                        private_reader=reader, export_approval=None)
+        self.build = {key: value for key, value in sdk_candidate(scope, SDK.runner_platform()).items() if key in CLI_BUILD_FIELDS}
 
     def observe(self, *, edge: bool, observed_blob: str = "e" * 64, reader: dict | None = None,
                 **result: object) -> subprocess.CompletedProcess[bytes]:
         report = {"commit": self.oid, "sha256": self.sha, "bytes": SDK.GIT_PAYLOAD_SIZE,
-                  "source_sha": COMMIT, "qualification_feature": True, "git_blob_oid_sha256": "e" * 64} | result
+                  "build": self.build, "git_blob_oid_sha256": "e" * 64} | result
         native = {"target": "crab_storage::native_read", "fields": {
             "message": "Native object store read", "provider": "s3", "method": "get", "status": 200, "bytes": 8,
         }}
@@ -82,7 +84,9 @@ class CdnSdkWorkloadQualificationTests(unittest.TestCase):
                 self.assertEqual(request["binding"]["endpoint"], self.issuer)
                 self.assertEqual(request["binding"]["approval_sha256"], self.approval if arm == "edge" else None)
                 self.assertEqual(report["publication_sha256"], self.receipt_digest)
-                self.assertEqual(report["probe_sha256"], hashlib.sha256(b"fixture probe").hexdigest())
+                self.assertEqual(report["candidate"], self.build | {
+                    "binary_sha256": hashlib.sha256(b"fixture probe").hexdigest(),
+                })
                 self.assertEqual(report["verified_edge_payloads"], int(arm == "edge"))
                 self.assertEqual(report["reader"]["binding_sha256"],
                                  SDK.viewer_binding_sha256(self.config) if arm == "edge" else "")
@@ -94,7 +98,7 @@ class CdnSdkWorkloadQualificationTests(unittest.TestCase):
              "did not accept verified Git bytes"),
             (self.observe(edge=True, observed_blob="f" * 64), "did not accept verified Git bytes"),
             (self.observe(edge=True, commit="c" * 40), "did not verify the published Git payload"),
-            (self.observe(edge=True, source_sha="f" * 40), "did not use the requested source build"),
+            (self.observe(edge=True, build=self.build | {"source_sha": "f" * 40}), "differs from the approved source"),
         ):
             with self.subTest(reason=reason), patch.object(SDK.subprocess, "run", return_value=response):
                 with self.assertRaisesRegex(ValueError, reason):

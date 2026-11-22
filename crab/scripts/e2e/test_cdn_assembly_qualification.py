@@ -39,6 +39,10 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
             observations.pop("product_action")
             for name in (fixture.CDN.GIT_PRODUCT_DIR, fixture.CDN.GIT_BENCHMARK_DIR):
                 (self.root / name).rename(row / name)
+        if fixture.CDN.is_direct_sdk_git_scope(self.example.scope):
+            observations.pop("product_action")
+            name = fixture.CDN.GIT_PRODUCT_DIR
+            (self.root / name).rename(row / name)
         if access == "public":
             name = fixture.CDN.PUBLIC_EXPORT_DIR
             (self.root / name).rename(row / name)
@@ -77,7 +81,7 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
         ], capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         row = self.output / self.row
-        expected = {"cdn-report.json", "traces"}
+        expected = {"cdn-report.json", "traces", fixture.CDN.GIT_PRODUCT_DIR}
         self.assertEqual({path.name for path in row.iterdir()}, expected)
         self.assertEqual({path.name for path in self.output.iterdir()}, {"benchmarks.json", "gcs", "cloud-cdn"})
         self.assertEqual((self.root / "benchmarks.json").read_bytes(), (self.output / "benchmarks.json").read_bytes())
@@ -88,12 +92,27 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
 
         policy = self.root / "qualified-scopes.txt"
         policy.write_text(self.example.scope + "\n", encoding="utf-8")
-        self.assertEqual(
+        sdk_product = row / fixture.CDN.GIT_PRODUCT_DIR
+        self.assertEqual({path.name for path in sdk_product.iterdir()},
+                         {"publication.json", "snapshot.json", "retirement.json", *fixture.CDN.GIT_NATIVE_REF_FILES.values()})
+        self.assertEqual(report["product_action"], self.example.report["product_action"])
+        with self.assertRaises(subprocess.CalledProcessError):
             release.RELEASE.verify_bundle(
                 self.output, policy, {self.example.scope}, fixture.COMMIT, "123", "2", digest,
-            ),
-            1,
-        )
+            )
+
+    def test_sdk_requires_measured_snapshot_and_rejects_operator_supplied_product_summary(self) -> None:
+        digest = self.inputs("gcs")
+        product = self.root / self.row / fixture.CDN.GIT_PRODUCT_DIR
+        (product / "snapshot.json").unlink()
+        with self.assertRaises(FileNotFoundError):
+            self.assemble(digest)
+        self.assertFalse(self.output.exists())
+        observations = json.loads(self.observations.read_bytes())
+        fixture.json_file(self.observations, observations | {"product_action": self.example.report["product_action"]})
+        with self.assertRaisesRegex(ValueError, "invalid fields in CDN observations"):
+            self.assemble(digest)
+        self.assertFalse(self.output.exists())
 
     def test_failed_operational_check_leaves_no_artifact(self) -> None:
         self.inputs("gcs")
@@ -215,7 +234,7 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
         self.assertFalse(self.output.exists())
 
     def test_cli_imports_same_attempt_canary_bytes_without_redundant_measurements(self) -> None:
-        digest = self.inputs("gcs")
+        digest = self.inputs("gcs", consumer="server")
         transport = self.canary_inputs("gcs")
         result = subprocess.run([
             sys.executable, str(Path(ASSEMBLE.__file__)), "--inputs", str(self.root), "--transport-traces", str(transport),

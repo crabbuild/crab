@@ -687,8 +687,13 @@ build. Each arm confirms the native origin and effective repository prefix
 captured after SDK authorization. The edge arm confirms the active viewer,
 the public receipt where applicable, and the Git object ID fingerprint for the
 verified blob delivered to the caller. The independent native ref collector
-also accepts the SDK fixture. The protected worker still needs live runs,
-regional pairing, and release assembly and verification of the SDK records.
+also accepts the SDK fixture. Assembly and verification derive the product
+result from the registered SDK build, verified edge snapshot, ordinary
+native rollback, independently observed publication and tombstone, and
+fixture cleanup. The release policy gate rejects SDK Git rows until it can
+recompute the performance summary from regional SDK records. The protected
+worker still needs live runs, regional pairing and the SDK action records
+for public export transitions.
 
 The protected workflow or its dedicated workers own producing these raw
 observations. The assembly and release jobs own rejecting missing, mismatched

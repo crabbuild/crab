@@ -71,6 +71,13 @@ def cli_candidate(scope: str, platform: str) -> dict:
     }
 
 
+def sdk_candidate(scope: str, platform: str) -> dict:
+    return cli_candidate(scope, platform) | {
+        "cargo_features": "default,remote,service",
+        "binary_sha256": hashlib.sha256(f"sdk/{platform}".encode()).hexdigest(),
+    }
+
+
 def write_git_measurements(inputs: Path, registration: dict, platform: str) -> None:
     provider = CDN.PROVIDER_FOR_EDGE[registration["scope"].split("/", 1)[0]]
     action = CDN.cli_action_name(registration["scope"])
@@ -173,6 +180,12 @@ class CdnQualificationTests(unittest.TestCase):
         if CDN.requires_cli_workload(self.scope):
             self.registration["candidate"] = cli_candidate(self.scope, platform)
             self.registration["viewer_binding_sha256"] = "e" * 64
+        sdk = CDN.is_direct_sdk_git_scope(self.scope)
+        if sdk:
+            self.registration.update(workload=CDN.SDK_GIT_ACTION, sdk_candidate=sdk_candidate(self.scope, platform),
+                                     viewer_binding_sha256="e" * 64)
+            if access == "private":
+                self.registration["viewer_approval_sha256"] = "d" * 64
         if profile == "managed":
             self.registration["managed_issuer"] = {
                 "identity_sha256": "1" * 64, "version": "2026.11.22", "approval_sha256": "2" * 64,
@@ -236,13 +249,15 @@ class CdnQualificationTests(unittest.TestCase):
                 self.historical_origin_trace(edge)
             elif check == CDN.PUBLIC_TRANSITION_CHECK:
                 continue
-            elif check == "rollback" and CDN.requires_cli_workload(self.scope):
+            elif check == "rollback" and (CDN.requires_cli_workload(self.scope) or sdk):
                 continue
             else:
                 self.trace(check, observations.get(check, [edge_hit]))
         if CDN.requires_cli_workload(self.scope):
             write_git_measurements(self.directory / CDN.GIT_BENCHMARK_DIR, self.registration, platform)
             self.record_git_product()
+        elif sdk:
+            self.record_sdk_product()
         if access == "public":
             self.public_transition_trace()
 
@@ -343,6 +358,55 @@ class CdnQualificationTests(unittest.TestCase):
                 },
             })
         self.report["product_action"].update({key: fetch[key] for key in self.report["product_action"] if key in fetch})
+
+    def record_sdk_product(self) -> None:
+        records = self.directory / CDN.GIT_PRODUCT_DIR
+        records.mkdir(exist_ok=True)
+        provenance = {key: self.report[key] for key in CDN.CDN_PROVENANCE_FIELDS}
+        platform = self.report["platform"]
+        ref = "refs/heads/crab-cdn-qualification-123-2-abcdefabcdef"
+        cleanup = json.loads((self.directory / "traces/cleanup.json").read_bytes())
+        reader = {"origin_sha256": cleanup["targets"]["native"]["origin_sha256"], "prefix_sha256": cleanup["prefix_sha256"]}
+        writer = cli_candidate(self.scope, platform)
+        oid, payload = "a" * 40, "b" * 64
+        receipt = json_file(records / "publication.json", provenance | {
+            "schema": "crab.cdn-git-publication/v1", "ref": ref, "oid": oid, "sha256": payload, "published": True,
+            "visible_at_unix_ms": PUBLIC_SEAL - 40, "candidate": writer,
+        })
+        base = provenance | dict.fromkeys(CDN.PRODUCT_COUNTERS, 0) | {
+            "schema": "crab.cdn-sdk-git-read/v1", "platform": platform, "candidate": self.registration["sdk_candidate"],
+            "commit": oid, "sha256": payload, "bytes": CDN.GIT_PAYLOAD_SIZE, "git_blob_oid_sha256": "4" * 64,
+            "publication_sha256": receipt, "elapsed_ms": 10, "edge_responses": {},
+            "native_traffic": {"get_responses": 1, "head_responses": 0, "body_bytes": 5},
+        }
+        export = self.registration.get("publication_sha256", "")
+        json_file(records / "snapshot.json", base | dict.fromkeys(
+            ("edge_attempts", "observed_edge_gets", "edge_hits", "edge_bytes", "verified_edge_payloads", "all_edge_attempts"), 1,
+        ) | {
+            "arm": "edge", "started_at_unix_ms": PUBLIC_SEAL + 10, "finished_at_unix_ms": PUBLIC_SEAL + 20,
+            "approval_sha256": self.registration.get("viewer_approval_sha256", export),
+            "reader": reader | {"binding_sha256": self.registration["viewer_binding_sha256"], "public_export_sha256": export},
+        })
+        self.rollback_trace(base | {
+            "arm": "origin", "started_at_unix_ms": PUBLIC_SEAL + 25, "finished_at_unix_ms": PUBLIC_SEAL + 35,
+            "reader": reader | {"binding_sha256": "", "public_export_sha256": ""}, "approval_sha256": "",
+        })
+        json_file(records / "retirement.json", provenance | {
+            "schema": "crab.cdn-git-retirement/v1", "publication_sha256": receipt, "ref_retired": True,
+            "retired_at_unix_ms": PUBLIC_SEAL + 50, "candidate": writer,
+        })
+        for phase, delta, marker in (("published", -30, "5"), ("retired", 60, "6")):
+            json_file(records / CDN.GIT_NATIVE_REF_FILES[phase], provenance | {
+                "schema": "crab.cdn-native-ref/v1", "phase": phase, "platform": platform, "publication_sha256": receipt,
+                "started_at_unix_ms": PUBLIC_SEAL + delta, "observed_at_unix_ms": PUBLIC_SEAL + delta + 5,
+                "native_ref": reader | {
+                    "probe_source_sha": COMMIT, "ref_sha256": hashlib.sha256(ref.encode()).hexdigest(),
+                    "repository_sha256": "3" * 64, "epoch_sha256": "4" * 64, "root_digest": "b" * 64,
+                    "head_sha256": marker * 64, "revision_sha256": marker * 64, "transaction_id": marker * 64,
+                    "oid": oid if phase == "published" else None,
+                },
+            })
+        self.report["product_action"].update(expected_bytes=CDN.GIT_PAYLOAD_SIZE, observed_bytes=CDN.GIT_PAYLOAD_SIZE)
 
     def rollback_trace(self, evidence: dict[str, Any]) -> None:
         path = self.directory / "traces/rollback.json"
@@ -927,9 +991,36 @@ class CdnQualificationTests(unittest.TestCase):
         self.rejected("cold edge sample must prove a miss, origin fill and delivered bytes")
 
     def test_rollback_rejects_native_read_for_a_different_key(self) -> None:
-        self.configure("azure", "private", "direct", consumer="sdk")
+        self.configure("azure", "private", "direct", consumer="server")
         self.trace("rollback", [self.request("edge", 200), self.request("origin", 200) | {"key_sha256": "c" * 64}])
         self.rejected("rollback requires an edge read followed by a native read of the same complete object")
+
+    def test_sdk_release_rejects_product_summary_without_regional_sdk_benchmark_records(self) -> None:
+        self.configure("s3", "private", "direct", consumer="sdk")
+        self.assertEqual(self.command().returncode, 0)
+        policy = self.directory / "qualified-scopes.txt"
+        policy.write_text(self.scope + "\n", encoding="utf-8")
+        self.rejected("requires retained regional SDK benchmarks", "--cdn-release-policy", str(policy))
+
+    def test_sdk_rollback_requires_same_approved_build_and_blob_at_origin(self) -> None:
+        self.configure("azure", "private", "direct", consumer="sdk")
+        origin = json.loads((self.directory / "traces/rollback.json").read_bytes())
+        edge = json.loads((self.directory / CDN.GIT_PRODUCT_DIR / "snapshot.json").read_bytes())
+        for changes, reason in (
+            ({"candidate": origin["candidate"] | {"binary_sha256": "9" * 64}}, "registered SDK build"),
+            ({"git_blob_oid_sha256": "9" * 64}, "same published Git blob"),
+            ({"reader": origin["reader"] | {"origin_sha256": "9" * 64}}, "changed the selected native target"),
+            ({"all_edge_attempts": 1}, "without edge or cached payload activity"),
+            ({"started_at_unix_ms": edge["started_at_unix_ms"]}, "must follow the verified edge snapshot"),
+        ):
+            with self.subTest(changes=changes):
+                self.rollback_trace(origin | changes)
+                self.rejected(reason)
+
+    def test_sdk_product_summary_must_match_the_retained_read(self) -> None:
+        self.configure("gcs", "public", "direct", consumer="sdk")
+        self.report["product_action"]["observed_edge_gets"] += 1
+        self.rejected("product action differs from the retained SDK snapshot evidence")
 
     def test_cli_rollback_requires_an_ordered_native_fetch_of_the_same_publication(self) -> None:
         self.configure("azure", "private", "direct")
@@ -1085,7 +1176,7 @@ class CdnQualificationTests(unittest.TestCase):
         self.rejected("edge route policy requires same-object cache hits before and after denials")
 
     def test_rejects_trace_with_no_observations(self) -> None:
-        self.configure("s3", "private", "direct", consumer="sdk")
+        self.configure("s3", "private", "direct", consumer="server")
         self.trace("rollback", [])
         self.rejected("trace has no observations: rollback")
 

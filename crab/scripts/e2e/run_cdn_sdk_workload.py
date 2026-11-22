@@ -17,14 +17,13 @@ from run_cdn_git_workload import approved_public_export, runner_platform, viewer
 from run_cdn_transport_checks import approved_fixture
 
 from cdn_qualification import (
-    COMMIT, GIT_PAYLOAD_SIZE, RUN_NUMBER, SHA256, decode, fields, is_direct_sdk_git_scope, matches,
-    read_git_record, require, scope_parts, validate_git_publication,
+    COMMIT, GIT_PAYLOAD_SIZE, RUN_NUMBER, SDK_PROBE_FIELDS, SHA256, decode, fields, is_direct_sdk_git_scope, matches,
+    read_git_record, require, scope_parts, validate_git_publication, verify_sdk_candidate,
 )
 from public_inventory import ExportError
 
 
 PRIVATE_READER_FIELDS = {"oidc_issuer", "oidc_client_id", "token_cache_directory"}
-PROBE_FIELDS = {"commit", "sha256", "bytes", "source_sha", "qualification_feature", "git_blob_oid_sha256"}
 READ_TARGET = "crab_sdk::cdn::read_target"
 
 
@@ -98,9 +97,11 @@ def fetch(args: argparse.Namespace) -> dict:
     elapsed = max(1, (time.monotonic_ns() - started) // 1_000_000)
     finished_at = time.time_ns() // 1_000_000
     require(result.returncode == 0, f"SDK snapshot read failed with exit {result.returncode}")
-    observed = fields(decode(result.stdout), PROBE_FIELDS, "SDK snapshot result")
-    require(observed["source_sha"] == args.source_sha and type(observed["qualification_feature"]) is bool,
-            "SDK snapshot did not use the requested source build")
+    observed = fields(decode(result.stdout), SDK_PROBE_FIELDS, "SDK snapshot result")
+    platform = runner_platform()
+    build = observed.pop("build")
+    require(isinstance(build, dict) and "binary_sha256" not in build, "invalid SDK snapshot build")
+    candidate = verify_sdk_candidate(build | {"binary_sha256": probe_digest}, args.source_sha, platform)
     require(observed["commit"] == publication["oid"] and observed["sha256"] == publication["sha256"]
             and type(observed["bytes"]) is int and observed["bytes"] == GIT_PAYLOAD_SIZE
             and matches(SHA256, observed["git_blob_oid_sha256"]),
@@ -117,8 +118,8 @@ def fetch(args: argparse.Namespace) -> dict:
         require(counters["all_edge_attempts"] == 0 and native["get_responses"] > 0 and native["body_bytes"] > 0,
                 "SDK origin control requires native payload reads without edge activity")
     return provenance | observed | counters | {
-        "schema": "crab.cdn-sdk-git-read/v1", "arm": args.arm, "platform": runner_platform(),
-        "probe_sha256": probe_digest, "approval_sha256": approval,
+        "schema": "crab.cdn-sdk-git-read/v1", "arm": args.arm, "platform": platform,
+        "candidate": candidate, "approval_sha256": approval,
         "publication_sha256": hashlib.sha256(raw).hexdigest(), "started_at_unix_ms": started_at,
         "finished_at_unix_ms": finished_at, "elapsed_ms": elapsed, "edge_responses": responses, "native_traffic": native,
         "reader": reader,

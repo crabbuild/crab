@@ -153,6 +153,13 @@ GIT_FETCH_FIELDS = PRODUCT_COUNTERS | CDN_PROVENANCE_FIELDS | {
     "native_writes", "visible_new_ref", "elapsed_ms", "publication_oid", "started_at_unix_ms", "finished_at_unix_ms",
     "platform", "publication_sha256", "candidate", "reader", "edge_responses", "native_traffic",
 }
+SDK_GIT_ACTION = "sdk-git-snapshot"
+SDK_READ_FIELDS = CLI_NATIVE_FIELDS | {"binding_sha256", "public_export_sha256"}
+SDK_PROBE_FIELDS = {"commit", "sha256", "bytes", "git_blob_oid_sha256", "build"}
+SDK_GIT_READ_FIELDS = PRODUCT_COUNTERS | CDN_PROVENANCE_FIELDS | (SDK_PROBE_FIELDS - {"build"}) | {
+    "schema", "arm", "platform", "candidate", "approval_sha256", "publication_sha256", "started_at_unix_ms",
+    "finished_at_unix_ms", "elapsed_ms", "edge_responses", "native_traffic", "reader",
+}
 GIT_MODES = {"origin": "origin", "cold_edge": "edge", "warm_edge": "edge", "warm_local": "warm_local"}
 SHA256 = re.compile(r"[0-9a-f]{64}")
 COMMIT = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
@@ -699,7 +706,7 @@ def verify_check_evidence(
             and check["trace_sha256"] == hashlib.sha256(raw).hexdigest(),
             f"trace digest mismatch: {name}",
         )
-        if name == "rollback" and requires_cli_workload(report["scope"]):
+        if name == "rollback" and (requires_cli_workload(report["scope"]) or is_direct_sdk_git_scope(report["scope"])):
             rollback = raw
             continue
         decoded = decode(raw)
@@ -1071,9 +1078,18 @@ def benchmark_registration(registration: Any) -> dict[str, Any]:
     _, access, _, _, profile = scope_parts(registration["scope"])
     if requires_cli_workload(registration["scope"]):
         expected.update(("candidate", "viewer_binding_sha256"))
-        verify_cli_candidate(registration.get("candidate"), registration.get("source_sha"))
+        verify_read_candidate(registration.get("candidate"), registration.get("source_sha"))
         require(matches(SHA256, registration.get("viewer_binding_sha256")),
                 "CLI benchmark needs the approved viewer binding digest")
+    if is_direct_sdk_git_scope(registration["scope"]):
+        expected.update(("sdk_candidate", "viewer_binding_sha256"))
+        verify_sdk_candidate(registration.get("sdk_candidate"), registration.get("source_sha"))
+        require(registration.get("workload") == SDK_GIT_ACTION and matches(SHA256, registration.get("viewer_binding_sha256")),
+                "SDK benchmark needs the snapshot workload and the approved viewer binding")
+        if access == "private":
+            expected.add("viewer_approval_sha256")
+            require(matches(SHA256, registration.get("viewer_approval_sha256")),
+                    "private SDK benchmark needs the approved issuer binding")
     if access == "public":
         expected |= {"publication_sha256", "previous_publication_sha256", "historical_origin_sha256"}
         require(matches(SHA256, registration.get("publication_sha256")),
@@ -1172,13 +1188,13 @@ def lfs_object_path(digest: str) -> str:
     return f"lfs/objects/{digest[:2]}/{digest[2:4]}/{digest}"
 
 
-def verify_cli_candidate(
-    value: Any, source: str, platform: str | None = None, *, policy: Path | None = None,
+def verify_read_candidate(
+    value: Any, source: str, platform: str | None = None, *, policy: Path | None = None, consumer: str = "CLI",
 ) -> dict[str, Any]:
-    candidate = fields(value, CLI_CANDIDATE_FIELDS, "CLI build identity")
+    candidate = fields(value, CLI_CANDIDATE_FIELDS, f"{consumer} build identity")
     triple = candidate["target_triple"]
     raw_features = candidate["cargo_features"]
-    require(isinstance(raw_features, str), "CLI build features must be recorded")
+    require(isinstance(raw_features, str), f"{consumer} build features must be recorded")
     features = raw_features.split(",") if raw_features else []
     require(matches(COMMIT, source) and candidate["source_sha"] == source
             and matches(SHA256, candidate["binary_sha256"]) and matches(SHA256, candidate["release_policy_sha256"])
@@ -1186,19 +1202,27 @@ def verify_cli_candidate(
             and type(candidate["qualification_feature"]) is bool
             and all(matches(LABEL, feature) for feature in features) and features == sorted(set(features))
             and ("provider-cdn-qualification" not in features or candidate["qualification_feature"]),
-            "CLI build identity is invalid or differs from the approved source")
+            f"{consumer} build identity is invalid or differs from the approved source")
     arch, system = triple.split("-", 1)
     os_label = {"apple": "darwin", "unknown": "linux", "pc": "windows"}[system.split("-", 1)[0]]
     if platform is not None:
-        require(platform == f"{os_label}-{arch}", "CLI build target differs from the approved platform")
+        require(platform == f"{os_label}-{arch}", f"{consumer} build target differs from the approved platform")
     if policy is not None:
         require(candidate["qualification_feature"] is False and candidate["cargo_profile"] == "release",
                 "CDN promotion requires the ordinary release build")
         require(system in {"apple-darwin", "unknown-linux-gnu", "pc-windows-msvc"},
-                "CDN promotion requires the packaged CLI target triple")
+                f"CDN promotion requires the packaged {consumer} target triple")
         compiled_policy = hashlib.sha256(policy.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
         require(candidate["release_policy_sha256"] == compiled_policy,
-                "CLI build did not embed the release checkout's CDN policy")
+                f"{consumer} build did not embed the release checkout's CDN policy")
+    return candidate
+
+
+def verify_sdk_candidate(
+    value: Any, source: str, platform: str | None = None, *, policy: Path | None = None,
+) -> dict[str, Any]:
+    candidate = verify_read_candidate(value, source, platform, policy=policy, consumer="SDK")
+    require("service" in candidate["cargo_features"].split(","), "SDK snapshot probe needs the service feature")
     return candidate
 
 
@@ -1219,7 +1243,7 @@ def validate_git_publication(raw: bytes, provenance: dict[str, Any]) -> dict[str
             and type(record["published"]) is bool
             and (positive(record["visible_at_unix_ms"]) if record["published"] else record["visible_at_unix_ms"] is None),
             "Git publication receipt does not match this qualification run")
-    verify_cli_candidate(record["candidate"], provenance["source_sha"], provenance.get("platform"))
+    verify_read_candidate(record["candidate"], provenance["source_sha"], provenance.get("platform"))
     return record
 
 
@@ -1229,7 +1253,7 @@ def validate_git_fetch(raw: bytes, provenance: dict[str, Any], mode: str, label:
     require(client["schema"] == f"crab.cdn-{action}/v1" and client["name"] == action
             and client["arm"] == mode and all(client[key] == value for key, value in provenance.items() if key != "candidate"),
             f"{label} has mismatched Git fetch provenance")
-    verify_cli_candidate(client["candidate"], provenance["source_sha"], client["platform"])
+    verify_read_candidate(client["candidate"], provenance["source_sha"], client["platform"])
     reader = fields(client["reader"], CLI_READ_FIELDS, "verified CLI read configuration")
     require(all(matches(SHA256, reader[key]) for key in CLI_NATIVE_FIELDS | {"cache_root_sha256"})
             and (matches(SHA256, reader["binding_sha256"])
@@ -1246,6 +1270,24 @@ def validate_git_fetch(raw: bytes, provenance: dict[str, Any], mode: str, label:
             and client["expected_bytes"] == client["observed_bytes"] == GIT_PAYLOAD_SIZE
             and positive(client["native_writes"]) and client["visible_new_ref"] is True,
             f"{label} did not verify the published payload")
+    verify_git_traffic(client, edge, label)
+    native = client["native_traffic"]
+    if mode == "origin":
+        require(reader["binding_sha256"] == "" and all(client[key] == 0 for key in PRODUCT_COUNTERS),
+                f"{label} requires an inactive viewer binding and zero edge or local payload reads")
+        require(positive(native["get_responses"]) and positive(native["body_bytes"]),
+                f"{label} observed no native payload transfer")
+    if mode == "edge":
+        require(positive(client["observed_edge_gets"]) and positive(client["verified_edge_payloads"]),
+                f"{label} accepted no verified edge payload")
+    if mode == "warm_local":
+        require(positive(client["local_payload_hits"]) and client["edge_attempts"] == client["verified_edge_payloads"] == 0
+                and (action != "lfs-fetch" or client["all_edge_attempts"] == 0),
+                f"{label} requires a verified local payload without an edge read for this scope")
+    return client
+
+
+def verify_git_traffic(client: dict[str, Any], edge: str, label: str) -> None:
     start, finish = client["started_at_unix_ms"], client["finished_at_unix_ms"]
     require(positive(start) and positive(finish) and finish >= start and positive(client["elapsed_ms"]),
             f"{label} has an invalid measurement interval")
@@ -1268,18 +1310,38 @@ def validate_git_fetch(raw: bytes, provenance: dict[str, Any], mode: str, label:
                 f"{label} has an invalid CDN viewer response")
     require(client["edge_hits"] + client["edge_misses"] + client["edge_unknown"] == client["observed_edge_gets"]
             <= client["edge_attempts"] <= client["all_edge_attempts"], f"{label} has inconsistent edge counts")
+
+
+def verify_sdk_git_read(raw: bytes, row: dict[str, Any], spec: dict[str, Any], mode: str) -> dict[str, Any]:
+    client = fields(decode(raw), SDK_GIT_READ_FIELDS, "redacted SDK Git snapshot")
+    edge, access, _, _, _ = scope_parts(row["scope"])
+    require(client["schema"] == "crab.cdn-sdk-git-read/v1" and client["arm"] == mode
+            and all(client[key] == row[key] for key in CDN_PROVENANCE_FIELDS | {"platform"}),
+            "SDK snapshot has mismatched product or workflow provenance")
+    verify_sdk_candidate(client["candidate"], row["source_sha"], row["platform"])
+    require(client["candidate"] == spec["sdk_candidate"], "SDK snapshot did not run the registered SDK build")
+    require(matches(GIT_OID, client["commit"]) and all(matches(SHA256, client[key])
+            for key in ("sha256", "publication_sha256", "git_blob_oid_sha256"))
+            and type(client["bytes"]) is int and client["bytes"] == GIT_PAYLOAD_SIZE,
+            "SDK snapshot did not verify the published payload")
+    reader = fields(client["reader"], SDK_READ_FIELDS, "verified SDK read target")
+    require(all(matches(SHA256, reader[key]) for key in CLI_NATIVE_FIELDS),
+            "SDK snapshot has invalid native origin or prefix fingerprints")
+    expected_binding = spec["viewer_binding_sha256"] if mode == "edge" else ""
+    expected_export = spec["publication_sha256"] if mode == "edge" and access == "public" else ""
+    expected_approval = spec["viewer_approval_sha256"] if mode == "edge" and access == "private" else expected_export
+    require(reader["binding_sha256"] == expected_binding and reader["public_export_sha256"] == expected_export
+            and client["approval_sha256"] == expected_approval,
+            "SDK snapshot did not use the required viewer binding and approval")
+    verify_git_traffic(client, edge, "SDK snapshot")
     if mode == "origin":
-        require(reader["binding_sha256"] == "" and all(client[key] == 0 for key in PRODUCT_COUNTERS),
-                f"{label} requires an inactive viewer binding and zero edge or local payload reads")
-        require(positive(native["get_responses"]) and positive(native["body_bytes"]),
-                f"{label} observed no native payload transfer")
-    if mode == "edge":
-        require(positive(client["observed_edge_gets"]) and positive(client["verified_edge_payloads"]),
-                f"{label} accepted no verified edge payload")
-    if mode == "warm_local":
-        require(positive(client["local_payload_hits"]) and client["edge_attempts"] == client["verified_edge_payloads"] == 0
-                and (action != "lfs-fetch" or client["all_edge_attempts"] == 0),
-                f"{label} requires a verified local payload without an edge read for this scope")
+        native = client["native_traffic"]
+        require(all(client[key] == 0 for key in PRODUCT_COUNTERS)
+                and positive(native["get_responses"]) and positive(native["body_bytes"]),
+                "SDK rollback requires native payload reads without edge or cached payload activity")
+    else:
+        require(positive(client["observed_edge_gets"]) and positive(client["verified_edge_payloads"])
+                and positive(client["edge_bytes"]), "SDK snapshot accepted no verified edge Git payload")
     return client
 
 
@@ -1383,6 +1445,39 @@ def verify_git_native_ref(
     return trace
 
 
+def verify_git_lifecycle(
+    observations: dict[str, bytes], row: dict[str, Any], publication: dict[str, Any], publication_sha256: str,
+    read: dict[str, Any], retired_at: int, cleanup_at: int, origin_sha256: str,
+) -> None:
+    published, retired = (
+        verify_git_native_ref(decode(observations[phase]), row, publication, publication_sha256, phase, origin_sha256)
+        for phase in GIT_NATIVE_REF_FILES
+    )
+    require(publication["visible_at_unix_ms"] <= published["started_at_unix_ms"]
+            <= published["observed_at_unix_ms"] <= read["started_at_unix_ms"]
+            <= retired_at <= retired["started_at_unix_ms"] <= retired["observed_at_unix_ms"] <= cleanup_at,
+            "native ref observations must bracket the fetch and precede fixture cleanup")
+    before, after = published["native_ref"], retired["native_ref"]
+    require(all(read["reader"][key] == before[key] for key in CLI_NATIVE_FIELDS),
+            "Git product fetch and rollback must use the independently observed native target")
+    require(all(before[key] == after[key] for key in ("repository_sha256", "epoch_sha256"))
+            and all(before[key] != after[key] for key in ("transaction_id", "head_sha256", "revision_sha256")),
+            "native ref retirement must commit a distinct tombstone in the same repository epoch")
+
+
+def verify_git_retirement(raw: bytes, row: dict[str, Any], publication_digest: str,
+                          writer: dict[str, Any], rollback_finished: int) -> int:
+    retirement = fields(decode(raw), GIT_RETIREMENT_FIELDS, "Git retirement report")
+    require(retirement["schema"] == "crab.cdn-git-retirement/v1"
+            and all(retirement[key] == row[key] for key in CDN_PROVENANCE_FIELDS)
+            and retirement["publication_sha256"] == publication_digest and retirement["ref_retired"] is True
+            and retirement["candidate"] == writer
+            and positive(retirement["retired_at_unix_ms"])
+            and retirement["retired_at_unix_ms"] >= rollback_finished,
+            "Git product action requires retirement of the same published ref after rollback")
+    return retirement["retired_at_unix_ms"]
+
+
 def collect_git_product_action(
     inputs: Path, row: dict[str, Any], rollback_raw: bytes, *, retain: Path | None = None, cleanup_at: int | None = None,
     native_origin_sha256: str | None = None, public_export_sha256: str = "",
@@ -1414,35 +1509,15 @@ def collect_git_product_action(
     require(fetch["finished_at_unix_ms"] <= rollback["started_at_unix_ms"],
             "CDN rollback must follow the verified edge fetch")
     retirement_raw = read_git_record(inputs / "retirement.json")
-    retirement = fields(decode(retirement_raw), GIT_RETIREMENT_FIELDS, "Git retirement report")
-    require(retirement["schema"] == "crab.cdn-git-retirement/v1"
-            and all(retirement[key] == value for key, value in provenance.items())
-            and retirement["publication_sha256"] == digest and retirement["ref_retired"] is True
-            and retirement["candidate"] == row["candidate"]
-            and positive(retirement["retired_at_unix_ms"])
-            and retirement["retired_at_unix_ms"] >= rollback["finished_at_unix_ms"],
-            "Git product action requires retirement of the same published ref after rollback")
+    retired_at = verify_git_retirement(retirement_raw, row, digest, row["candidate"], rollback["finished_at_unix_ms"])
     if cleanup_at is not None:
-        require(cleanup_at >= retirement["retired_at_unix_ms"], "fixture cleanup must be verified after Git ref retirement")
+        require(cleanup_at >= retired_at, "fixture cleanup must be verified after Git ref retirement")
     observations = {}
     if retain is not None or native_origin_sha256 is not None:
         observations = {phase: read_git_record(inputs / filename) for phase, filename in GIT_NATIVE_REF_FILES.items()}
     if native_origin_sha256 is not None:
-        published, retired = (
-            verify_git_native_ref(decode(observations[phase]), row, publication, digest, phase, native_origin_sha256)
-            for phase in GIT_NATIVE_REF_FILES
-        )
-        require(cleanup_at is not None and publication["visible_at_unix_ms"] <= published["started_at_unix_ms"]
-                <= published["observed_at_unix_ms"] <= fetch["started_at_unix_ms"]
-                and retirement["retired_at_unix_ms"] <= retired["started_at_unix_ms"]
-                <= retired["observed_at_unix_ms"] <= cleanup_at,
-                "native ref observations must bracket the fetch and precede fixture cleanup")
-        before, after = published["native_ref"], retired["native_ref"]
-        require(all(fetch["reader"][key] == before[key] for key in CLI_NATIVE_FIELDS),
-                "Git product fetch and rollback must use the independently observed native target")
-        require(all(before[key] == after[key] for key in ("repository_sha256", "epoch_sha256"))
-                and all(before[key] != after[key] for key in ("transaction_id", "head_sha256", "revision_sha256")),
-                "native ref retirement must commit a distinct tombstone in the same repository epoch")
+        require(cleanup_at is not None, "native ref observations require a verified cleanup")
+        verify_git_lifecycle(observations, row, publication, digest, fetch, retired_at, cleanup_at, native_origin_sha256)
     if retain is not None:
         retain.mkdir()
         for filename, raw in (("publication.json", publication_raw), ("fetch.json", fetch_raw),
@@ -1454,6 +1529,43 @@ def collect_git_product_action(
         "name", "expected_sha256", "observed_sha256", "expected_bytes", "observed_bytes",
         "native_writes", "observed_edge_gets", "visible_new_ref", "verified_edge_payloads",
     )}
+
+
+def collect_sdk_product_action(
+    inputs: Path, row: dict[str, Any], spec: dict[str, Any], rollback_raw: bytes,
+    *, cleanup_at: int, native_origin_sha256: str, retain: Path | None = None,
+) -> dict[str, Any]:
+    native_records = {phase: read_git_record(inputs / name) for phase, name in GIT_NATIVE_REF_FILES.items()}
+    publication_raw = read_git_record(inputs / "publication.json")
+    publication = validate_git_publication(publication_raw, row)
+    require(publication["published"], "SDK snapshot requires a ref confirmed after native push")
+    receipt = hashlib.sha256(publication_raw).hexdigest()
+    edge_raw = read_git_record(inputs / "snapshot.json", limit=GIT_FETCH_RECORD_LIMIT)
+    edge = verify_sdk_git_read(edge_raw, row, spec, "edge")
+    origin = verify_sdk_git_read(rollback_raw, row, spec, "origin")
+    require(all(read["publication_sha256"] == receipt and read["commit"] == publication["oid"]
+                and read["sha256"] == publication["sha256"] for read in (edge, origin))
+            and edge["git_blob_oid_sha256"] == origin["git_blob_oid_sha256"],
+            "SDK snapshot and rollback must verify the same published Git blob")
+    require(all(edge["reader"][key] == origin["reader"][key] for key in CLI_NATIVE_FIELDS),
+            "SDK rollback changed the selected native target")
+    require(edge["finished_at_unix_ms"] <= origin["started_at_unix_ms"],
+            "SDK rollback must follow the verified edge snapshot")
+    retirement_raw = read_git_record(inputs / "retirement.json")
+    retired_at = verify_git_retirement(retirement_raw, row, receipt, publication["candidate"], origin["finished_at_unix_ms"])
+    verify_git_lifecycle(native_records, row, publication, receipt, edge, retired_at, cleanup_at, native_origin_sha256)
+    if retain is not None:
+        retain.mkdir()
+        retained = {"publication.json": publication_raw, "snapshot.json": edge_raw, "retirement.json": retirement_raw}
+        retained.update({name: native_records[phase] for phase, name in GIT_NATIVE_REF_FILES.items()})
+        for name, raw in retained.items():
+            (retain / name).write_bytes(raw)
+    return {
+        "name": SDK_GIT_ACTION, "expected_sha256": publication["sha256"], "observed_sha256": edge["sha256"],
+        "expected_bytes": GIT_PAYLOAD_SIZE, "observed_bytes": edge["bytes"],
+        "native_writes": 1, "visible_new_ref": True, "fixture_cleanup_verified": True,
+        "observed_edge_gets": edge["observed_edge_gets"], "verified_edge_payloads": edge["verified_edge_payloads"],
+    }
 
 
 def collect_cli_performance(
@@ -1596,7 +1708,9 @@ def verify_cdn_report(
     ), "benchmark registration does not match the release row")
 
     if requires_cli_workload(scope):
-        verify_cli_candidate(registration.get("candidate"), source_sha, platform, policy=policy)
+        verify_read_candidate(registration.get("candidate"), source_sha, platform, policy=policy)
+    if is_direct_sdk_git_scope(scope):
+        verify_sdk_candidate(registration.get("sdk_candidate"), source_sha, platform, policy=policy)
     lower = verify_performance(row["performance"], registration)
     verify_product_action(row["product_action"], family)
     require(row["product_action"]["name"] == registration["workload"],
@@ -1615,5 +1729,11 @@ def verify_cdn_report(
         )
         require(row["product_action"] == product | {"fixture_cleanup_verified": True},
                 "product action differs from the retained publication, fetch, and retirement evidence")
+    if is_direct_sdk_git_scope(scope):
+        require(rollback is not None, "direct SDK qualification requires an ordinary SDK rollback read")
+        product = collect_sdk_product_action(directory / GIT_PRODUCT_DIR, row, registration, rollback,
+                                             cleanup_at=cleanup_at, native_origin_sha256=native_origin_sha256)
+        require(row["product_action"] == product, "product action differs from the retained SDK snapshot evidence")
+        require(policy is None, "direct SDK Git promotion requires retained regional SDK benchmarks")
     return {"status": "verified", "scope": scope, "platform": platform, "deployment": row["deployment"],
             "checks": checks, "distant_median_savings_lower_bound_ms": lower}

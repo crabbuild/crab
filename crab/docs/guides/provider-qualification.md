@@ -921,6 +921,8 @@ from the checkout used for the native publication.
 CRAB_CDN_PROBE_SOURCE_SHA="$GITHUB_SHA" CARGO_TARGET_DIR="$measurement_cargo_target" \
   cargo build --locked -p crab-sdk --features service --example cdn-sdk-read
 
+"$sdk_read_probe" --build-info
+
 python3 -B crab/scripts/e2e/run_cdn_sdk_workload.py edge \
   --fixture "$approved_fixture_json" --configuration-sha256 "$approved_configuration_sha256" \
   --receipt "$publication_receipt" --probe "$sdk_read_probe" \
@@ -943,10 +945,24 @@ loaded publication receipt. Edge delivery requires the verified Git object
 ID fingerprint for the exact blob returned by the SDK. The origin control
 requires native body bytes, an inactive viewer and zero edge attempts.
 Use the independent native ref probe described above for both publication and
-retirement on the same SDK fixture. Fixture builds can add
-`provider-cdn-qualification` to exercise unqualified HTTPS rows. The report
-records whether that feature was enabled. These SDK action records still
-need to be incorporated into release assembly and measured regional pairs.
+retirement on the same SDK fixture. The record order is native publication,
+independent ref observation, edge read, origin read, native retirement,
+independent tombstone observation, and cleanup.
+
+Preregister `sdk-git-snapshot` as the workload. Set `sdk_candidate` to the
+build info plus the SHA-256 of the probe executable as `binary_sha256`.
+Register `viewer_binding_sha256` for the selected URL and access mode. A
+private row also registers the issuer's `viewer_approval_sha256`. A public
+row uses the registered `publication_sha256`. Fixture builds can add
+`provider-cdn-qualification` to exercise unqualified HTTPS rows. The build
+record captures the actual feature configuration.
+
+Keep the edge record at `git-product/snapshot.json` and the origin record at
+`traces/rollback.json`. Retain `publication.json`, `retirement.json`,
+`provider-published.json` and `provider-retired.json` in `git-product`. The
+assembler derives `product_action` from these records, and the release
+verifier recomputes it. Release activation still requires measured regional
+SDK pairs and an SDK public export transition where applicable.
 
 ### Verify fixture cleanup
 

@@ -24,7 +24,7 @@ from cdn_qualification import (
     cli_action_name, decode, deployment_component_digest,
     fields, is_direct_sdk_git_scope, lfs_object_path, matches, read_git_record, require, requires_cli_lfs_workload,
     requires_cli_workload, scope_parts,
-    validate_git_publication, verified_publication, verify_cli_candidate,
+    validate_git_publication, verified_publication, verify_read_candidate,
 )
 from public_inventory import ExportError, read_document
 
@@ -114,7 +114,7 @@ class NativeTargetGuard:
                     and all(record[key] == value for key, value in self.fingerprints.items()),
                     f"{label} did not confirm the approved native origin and repository prefix")
             candidate = {key: record[key] for key in CLI_BUILD_FIELDS} | {"binary_sha256": self.binary_sha256}
-            verify_cli_candidate(candidate, self.source, self.platform)
+            verify_read_candidate(candidate, self.source, self.platform)
             require(self.candidate is None or candidate == self.candidate, f"{label} ran a different CLI build")
             self.candidate = candidate
             found = True

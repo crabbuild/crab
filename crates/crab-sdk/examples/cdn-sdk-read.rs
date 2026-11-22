@@ -123,10 +123,30 @@ impl Request {
     }
 }
 
-async fn run() -> Result<(), Failure> {
+fn build_info() -> Result<serde_json::Value, Failure> {
     let source = option_env!("CRAB_CDN_PROBE_SOURCE_SHA")
         .filter(|value| value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .ok_or("SDK probe requires its source commit at build time")?;
+    Ok(serde_json::json!({
+        "source_sha": source,
+        "target_triple": env!("CRAB_SDK_BUILD_TARGET"),
+        "cargo_profile": env!("CRAB_SDK_BUILD_PROFILE"),
+        "cargo_features": env!("CRAB_SDK_BUILD_FEATURES"),
+        "qualification_feature": crab_storage::cdn::qualification_enabled(),
+        "release_policy_sha256": crab_storage::cdn::release_policy_sha256(),
+    }))
+}
+
+async fn run() -> Result<(), Failure> {
+    let build = build_info()?;
+    let mut args = std::env::args_os().skip(1);
+    if let Some(argument) = args.next() {
+        if argument == "--build-info" && args.next().is_none() {
+            writeln!(std::io::stdout(), "{build}")?;
+            return Ok(());
+        }
+        return Err("SDK probe only accepts --build-info".into());
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             "off,crab_sdk::cdn::read_target=debug,crab_storage::cdn::transfer=debug,crab_storage::native_read=debug,crab_storage::cdn::gcs_viewer_log=trace",
@@ -153,8 +173,7 @@ async fn run() -> Result<(), Failure> {
     let close = client.close().await;
     let mut report = read?;
     close?;
-    report["source_sha"] = serde_json::json!(source);
-    report["qualification_feature"] = serde_json::json!(crab_storage::cdn::qualification_enabled());
+    report["build"] = build;
     writeln!(std::io::stdout(), "{report}")?;
     Ok(())
 }
