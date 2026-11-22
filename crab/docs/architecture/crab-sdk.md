@@ -288,9 +288,9 @@ observe successful EOF to claim full-file integrity. Explicit close reports
 unobserved finalization failures and drains cleanup; closing early does not verify
 unread content. Partial range reads use the reconstruction owner's verified range
 contract and do not claim a whole-file hash was recomputed.
-If a projected view loses its retention claim, file and archive streams
-discard queued output and drain the producing operation before returning the
-error.
+File and archive streams recheck bound read grants before delivering buffered
+output. A rejected grant or lost projected-view claim discards queued output
+and drains the producing operation before returning the error.
 
 `Error` preserves sources and exposes a stable `ErrorKind`: invalid input,
 unsupported capability, authentication, authorization, not found, conflict,

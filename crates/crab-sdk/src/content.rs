@@ -57,9 +57,13 @@ pub(crate) async fn open(
     repository: Arc<RemoteGitRepository>,
     snapshot: RemoteGitSnapshot,
     path: GitPath,
-    options: ReadOptions,
+    mut options: ReadOptions,
+    read_authority: Option<crab_storage::Store>,
     #[cfg(feature = "files")] runtime: Arc<crab::ContentRuntime>,
 ) -> Result<ContentStream> {
+    if read_authority.is_some() {
+        options.operation = options.operation.with_owner_deadline()?;
+    }
     let (send, entries) = mpsc::channel(1);
     let (ready, started) = oneshot::channel();
     #[cfg(all(feature = "files", feature = "service"))]
@@ -144,16 +148,13 @@ pub(crate) async fn open(
             }
         }
     }
-    Ok(ContentStream(StreamReceiver {
-        progress: task.progress(),
-        delivered_bytes: 0,
-        delivered_items: 0,
-        id,
+    Ok(ContentStream(StreamReceiver::new(
         entries,
-        task: Some(task),
+        task,
+        read_authority,
         #[cfg(all(feature = "files", feature = "service"))]
         retention,
-    }))
+    )))
 }
 
 async fn deliver_bytes(

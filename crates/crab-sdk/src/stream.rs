@@ -11,17 +11,39 @@ pub(crate) enum End {
 }
 
 pub(crate) struct StreamReceiver<T> {
-    pub(crate) progress: Option<crate::Progress>,
-    pub(crate) delivered_bytes: u64,
-    pub(crate) delivered_items: u64,
+    progress: Option<crate::Progress>,
+    delivered_bytes: u64,
+    delivered_items: u64,
     pub(crate) id: crate::OperationId,
-    pub(crate) entries: mpsc::Receiver<T>,
-    pub(crate) task: Option<OperationTask<End>>,
+    entries: mpsc::Receiver<T>,
+    pending: Option<T>,
+    task: Option<OperationTask<End>>,
+    read_authority: Option<crab_storage::Store>,
     #[cfg(all(feature = "files", feature = "service"))]
-    pub(crate) retention: Option<RetainedRead>,
+    retention: Option<RetainedRead>,
 }
 
 impl<T> StreamReceiver<T> {
+    pub(crate) fn new(
+        entries: mpsc::Receiver<T>,
+        task: OperationTask<End>,
+        read_authority: Option<crab_storage::Store>,
+        #[cfg(all(feature = "files", feature = "service"))] retention: Option<RetainedRead>,
+    ) -> Self {
+        Self {
+            progress: task.progress(),
+            delivered_bytes: 0,
+            delivered_items: 0,
+            id: task.id(),
+            entries,
+            pending: None,
+            task: Some(task),
+            read_authority,
+            #[cfg(all(feature = "files", feature = "service"))]
+            retention,
+        }
+    }
+
     pub(crate) fn delivered(&mut self, bytes: usize) {
         if let Some(progress) = &self.progress {
             self.delivered_bytes = self.delivered_bytes.saturating_add(bytes as u64);
@@ -38,33 +60,42 @@ impl<T> StreamReceiver<T> {
 
     /// Receive the next entry; EOF is returned only after operation finalization.
     pub async fn next(&mut self) -> Result<Option<T>> {
-        if self.task.is_none() {
+        let Some(task) = self.task.as_ref() else {
             return Ok(None);
-        }
-        if self
-            .task
-            .as_ref()
-            .is_some_and(OperationTask::caller_is_cancelled)
-        {
+        };
+        if task.caller_is_cancelled() {
             return self.finish_cancellation().await;
         }
-        #[cfg(all(feature = "files", feature = "service"))]
-        let entry = match &self.retention {
-            Some(retention) => match receive_retained(&mut self.entries, retention).await {
-                Ok(entry) => entry,
-                Err(source) => {
-                    let error =
-                        crate::remote_error::read_error(source.into()).with_operation(self.id);
-                    return Err(match self.close().await {
-                        Ok(()) => error,
-                        Err(cleanup) => error.with_cleanup(cleanup),
-                    });
+        let receive = async {
+            if self.pending.is_none() {
+                self.pending = self.entries.recv().await;
+            }
+            if let (Some(_), Some(store)) = (&self.pending, &self.read_authority) {
+                // Keep the frame if the caller drops this wait during refresh.
+                tokio::select! {
+                    biased;
+                    error = task.delivery_interruption() => return Err(error),
+                    result = store.check_read_authority() => {
+                        result.map_err(|source| crate::remote_error::read_error(source.into()))?;
+                    }
                 }
-            },
-            None => self.entries.recv().await,
+            }
+            Ok(())
+        };
+        #[cfg(all(feature = "files", feature = "service"))]
+        let result = match &self.retention {
+            Some(retention) => receive_retained(receive, retention).await,
+            None => receive.await,
         };
         #[cfg(not(all(feature = "files", feature = "service")))]
-        let entry = self.entries.recv().await;
+        let result = receive.await;
+        if let Err(error) = result {
+            let error = error.with_operation(self.id);
+            return Err(match self.close().await {
+                Ok(()) => error,
+                Err(cleanup) => error.with_cleanup(cleanup),
+            });
+        }
         if self
             .task
             .as_ref()
@@ -72,7 +103,7 @@ impl<T> StreamReceiver<T> {
         {
             return self.finish_cancellation().await;
         }
-        if let Some(entry) = entry {
+        if let Some(entry) = self.pending.take() {
             return Ok(Some(entry));
         }
         let Some(task) = self.task.as_mut() else {
@@ -102,6 +133,8 @@ impl<T> StreamReceiver<T> {
 
     fn clear(&mut self) {
         self.task = None;
+        self.pending = None;
+        self.read_authority = None;
         #[cfg(all(feature = "files", feature = "service"))]
         {
             self.retention = None;
@@ -124,20 +157,23 @@ impl<T> StreamReceiver<T> {
 }
 
 #[cfg(all(feature = "files", feature = "service"))]
-async fn receive_retained<T>(
-    entries: &mut mpsc::Receiver<T>,
+async fn receive_retained(
+    receive: impl Future<Output = Result<()>>,
     retention: &RetainedRead,
-) -> crab_coordination::Result<Option<T>> {
-    let pin = retention.pin()?;
-    let entry = tokio::select! {
+) -> Result<()> {
+    let retention_error = |source: crab_coordination::CoordinationError| {
+        crate::remote_error::read_error(source.into())
+    };
+    let pin = retention.pin().map_err(retention_error)?;
+    let result = tokio::select! {
         biased;
-        () = pin.cancellation().cancelled() => None,
-        entry = entries.recv() => entry,
+        () = pin.cancellation().cancelled() => Ok(()),
+        result = receive => result,
     };
     // A queued frame may have been verified before the consumer stalled.
     // Check the claim at delivery and drop the pin before draining on failure.
-    pin.ensure_valid()?;
-    Ok(entry)
+    pin.ensure_valid().map_err(retention_error)?;
+    result
 }
 
 #[cfg(test)]
@@ -162,16 +198,13 @@ mod tests {
             )
             .unwrap();
         let id = task.id();
-        let mut stream = StreamReceiver::<()> {
-            progress: None,
-            delivered_bytes: 0,
-            delivered_items: 0,
-            id,
+        let mut stream = StreamReceiver::<()>::new(
             entries,
-            task: Some(task),
+            task,
+            None,
             #[cfg(all(feature = "files", feature = "service"))]
-            retention: None,
-        };
+            None,
+        );
 
         let error = stream.next().await.unwrap_err();
         assert_eq!(
@@ -222,15 +255,7 @@ mod tests {
             })
             .unwrap();
         let id = task.id();
-        let mut stream = StreamReceiver {
-            progress: None,
-            delivered_bytes: 0,
-            delivered_items: 0,
-            id,
-            entries,
-            task: Some(task),
-            retention: Some(retention),
-        };
+        let mut stream = StreamReceiver::new(entries, task, None, Some(retention));
 
         // Retire the native claim and let renewal race its last acknowledged version.
         let expired = store.head(&path).await.unwrap().last_modified.timestamp()
@@ -251,5 +276,131 @@ mod tests {
         assert_eq!(stream.next().await.unwrap(), None);
         assert!(stream.entries.is_empty());
         assert!(session.shutdown().await.is_err());
+    }
+
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    use tokio::sync::Notify;
+
+    struct DeliveryGrant {
+        allowed: AtomicBool,
+        pending: AtomicBool,
+        checking: Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl crab_storage::ReadAuthorization for DeliveryGrant {
+        async fn check(&self) -> crab_storage::Result<()> {
+            if self.pending.load(Ordering::Relaxed) {
+                self.checking.notify_one();
+                std::future::pending::<()>().await;
+            }
+            if !self.allowed.load(Ordering::Relaxed) {
+                return Err(crab_storage::StorageError::Forbidden {
+                    path: "fixture".into(),
+                });
+            }
+            Ok(())
+        }
+    }
+
+    async fn buffered_read(
+        operations: &crate::runtime::Operations,
+        grant: Arc<DeliveryGrant>,
+        options: OperationOptions,
+    ) -> StreamReceiver<&'static str> {
+        let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()))
+            .with_target_identity([1; 32])
+            .with_read_authorization(grant, "repo")
+            .unwrap();
+        let worker_store = store.clone();
+        let (send, entries) = mpsc::channel(1);
+        let (queued, ready) = tokio::sync::oneshot::channel();
+        let task = operations
+            .start(options, move |cancel| async move {
+                worker_store
+                    .check_read_authority()
+                    .await
+                    .map_err(|source| crate::remote_error::read_error(source.into()))?;
+                send.send("queued while authorized").await.unwrap();
+                queued.send(()).unwrap();
+                cancel.cancelled().await;
+                Ok(End::Cancelled)
+            })
+            .unwrap();
+        ready.await.unwrap();
+        StreamReceiver::new(
+            entries,
+            task,
+            Some(store),
+            #[cfg(all(feature = "files", feature = "service"))]
+            None,
+        )
+    }
+
+    impl Default for DeliveryGrant {
+        fn default() -> Self {
+            Self {
+                allowed: AtomicBool::new(true),
+                pending: AtomicBool::new(false),
+                checking: Notify::new(),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_grant_discards_buffered_data() {
+        let operations = crate::runtime::Operations::default();
+        let grant = Arc::new(DeliveryGrant::default());
+        let mut stream =
+            buffered_read(&operations, grant.clone(), OperationOptions::default()).await;
+        grant.allowed.store(false, Ordering::Relaxed);
+
+        assert_eq!(
+            stream.next().await.unwrap_err().kind(),
+            ErrorKind::Authorization
+        );
+        assert_eq!(stream.next().await.unwrap(), None);
+        assert!(stream.pending.is_none());
+        assert!(stream.entries.is_empty());
+        operations.drain().await;
+        operations.take_failure().unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropping_a_pending_grant_check_preserves_the_frame() {
+        let operations = crate::runtime::Operations::default();
+        let grant = Arc::new(DeliveryGrant::default());
+        let mut stream =
+            buffered_read(&operations, grant.clone(), OperationOptions::default()).await;
+        grant.pending.store(true, Ordering::Relaxed);
+        let mut next = Box::pin(stream.next());
+        tokio::select! {
+            () = grant.checking.notified() => {}
+            result = &mut next => panic!("unexpected delivery result: {result:?}"),
+        }
+        drop(next);
+        grant.pending.store(false, Ordering::Relaxed);
+
+        assert_eq!(
+            stream.next().await.unwrap(),
+            Some("queued while authorized")
+        );
+        stream.close().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_grant_check_respects_the_stream_deadline() {
+        let operations = crate::runtime::Operations::default();
+        let grant = Arc::new(DeliveryGrant::default());
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        let options = OperationOptions::default().with_deadline(deadline.into_std());
+        let mut stream = buffered_read(&operations, grant.clone(), options).await;
+        grant.pending.store(true, Ordering::Relaxed);
+
+        assert_eq!(stream.next().await.unwrap_err().kind(), ErrorKind::Timeout);
+        assert_eq!(stream.next().await.unwrap(), None);
     }
 }

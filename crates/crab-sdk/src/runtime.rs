@@ -94,6 +94,7 @@ impl Operations {
         })?;
         let cancellation = self.cancellation.child_token();
         let caller_cancellation = options.cancellation.token().clone();
+        let deadline = options.deadline;
         let (send, receive) = oneshot::channel();
         let progress = options.progress.clone();
         let worker_cancellation = cancellation.clone();
@@ -125,6 +126,7 @@ impl Operations {
             receive,
             cancellation,
             caller_cancellation,
+            deadline,
             unobserved: self.unobserved.clone(),
         })
     }
@@ -177,19 +179,13 @@ where
     if let Some(progress) = &options.progress {
         progress.emit(id, crate::ProgressUpdate::Started);
     }
-    let deadline = async {
-        match options.deadline {
-            Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
-            None => std::future::pending().await,
-        }
-    };
     let worker = operation(cancellation.clone());
     tokio::pin!(worker);
     let expired = tokio::select! {
         biased;
         () = caller.cancelled() => false,
         () = cancellation.cancelled() => false,
-        () = deadline => true,
+        () = wait_deadline(options.deadline) => true,
         result = &mut worker => return result,
     };
     if let Some(progress) = &options.progress {
@@ -222,6 +218,13 @@ where
             Err(error.with_deadline_kind())
         }
         Err(error) => Err(error),
+    }
+}
+
+async fn wait_deadline(deadline: Option<std::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+        None => std::future::pending().await,
     }
 }
 
@@ -260,6 +263,7 @@ pub(crate) struct OperationTask<T> {
     unobserved: Arc<UnobservedFailure>,
     cancellation: CancellationToken,
     caller_cancellation: CancellationToken,
+    deadline: Option<std::time::Instant>,
 }
 
 impl<T> OperationTask<T> {
@@ -277,6 +281,15 @@ impl<T> OperationTask<T> {
 
     pub(crate) fn caller_is_cancelled(&self) -> bool {
         self.caller_cancellation.is_cancelled()
+    }
+
+    pub(crate) async fn delivery_interruption(&self) -> Error {
+        tokio::select! {
+            biased;
+            () = wait_deadline(self.deadline) => Error::new(ErrorKind::Timeout, "stream deadline expired"),
+            () = self.caller_cancellation.cancelled() => Error::new(ErrorKind::Cancelled, "stream was cancelled"),
+            () = self.cancellation.cancelled() => Error::new(ErrorKind::Cancelled, "stream was cancelled"),
+        }
     }
 
     pub(crate) async fn wait(&mut self) -> Result<T> {

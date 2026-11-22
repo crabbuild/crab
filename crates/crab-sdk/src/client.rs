@@ -524,6 +524,10 @@ impl Client {
             locator,
             owner: Arc::new(owner),
             managed: resolved.managed,
+            read_authority: resolved
+                .store
+                .has_bound_read_authority()
+                .then(|| resolved.store.clone()),
             #[cfg(feature = "results")]
             results_store: resolved.store,
             #[cfg(feature = "results")]
@@ -566,7 +570,7 @@ pub struct ReadOptions {
 }
 
 impl ReadOptions {
-    fn limits(&self) -> Result<crab_remote_git::OperationLimits> {
+    pub(crate) fn limits(&self) -> Result<crab_remote_git::OperationLimits> {
         if self.range.is_some() {
             return Err(Error::new(
                 ErrorKind::InvalidInput,
@@ -641,6 +645,7 @@ pub struct RemoteRepository {
     locator: RepositoryLocator,
     owner: Arc<RemoteGitRepository>,
     managed: bool,
+    read_authority: Option<Store>,
     #[cfg(feature = "results")]
     results_store: Store,
     #[cfg(feature = "results")]
@@ -1020,6 +1025,7 @@ impl Snapshot {
             self.owner.clone(),
             path,
             options,
+            self.repository.read_authority.clone(),
             #[cfg(feature = "files")]
             self.repository.content.clone(),
         )
@@ -1049,9 +1055,9 @@ impl Snapshot {
             &self.repository.client.0.operations,
             self.repository.owner.clone(),
             self.owner.clone(),
-            options.clone(),
-            options.limits()?,
+            options,
             mode,
+            self.repository.read_authority.clone(),
             #[cfg(feature = "files")]
             self.repository.content.clone(),
         )

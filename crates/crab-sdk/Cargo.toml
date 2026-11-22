@@ -62,6 +62,7 @@ crab-auth-store = { workspace = true, optional = true, features = ["managed-serv
 toml = { workspace = true, optional = true }
 
 [dev-dependencies]
+async-trait = { workspace = true }
 crab-storage = { workspace = true, features = ["test-support"] }
 sha2 = "0.10"
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "test-util", "time", "macros"] }
